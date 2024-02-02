@@ -1,0 +1,29 @@
+[package]
+name = "cli-tools"
+version = "0.1.0"
+edition = "2021"
+authors = ["Esgrove <esgrove@outlook.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Esgrove/cli-tools"
+keywords = ["cli", "rename"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.79"
+clap = { version = "4.4.18", features = ["derive"] }
+colored = "2.1.0"
+regex = "1.10.3"
+walkdir = "2.4.0"
+
+[[bin]]
+name = "dots"
+path = "src/bin/dots.rs"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+lto = true
+# https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
+codegen-units = 1
