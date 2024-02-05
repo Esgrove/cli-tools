@@ -1,15 +1,15 @@
 extern crate colored;
 
-use anyhow::{Result};
+use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(author, about, version)]
 struct Args {
     /// Optional input directory or file
@@ -30,10 +30,7 @@ struct Args {
 
 fn replace_whitespaces<P: Into<PathBuf>>(path: P) -> Result<()> {
     let path = path.into();
-    for entry in WalkDir::new(path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -42,7 +39,9 @@ fn replace_whitespaces<P: Into<PathBuf>>(path: P) -> Result<()> {
                     let new_path = path.with_file_name(new_file_name);
                     match fs::rename(&path, &new_path) {
                         Ok(_) => println!("Renamed {} to {}", path.display(), new_path.display()),
-                        Err(e) => eprintln!("{}", format!("Error renaming {:?}: {}", path, e).red()),
+                        Err(e) => {
+                            eprintln!("{}", format!("Error renaming {:?}: {}", path, e).red())
+                        }
                     }
                 }
             }
