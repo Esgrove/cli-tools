@@ -104,7 +104,7 @@ impl Serialize for VisaItem {
 
         state.serialize_field("Name", &self.name)?;
 
-        let formatted_sum = format!("{:.2}", self.sum);
+        let formatted_sum = format!("{:.2}", self.sum).replace('.', ",");
         state.serialize_field("Sum", &formatted_sum)?;
 
         state.end()
