@@ -8,14 +8,11 @@ repos:
     # https://github.com/pre-commit/pre-commit-hooks
     hooks:
       - id: check-added-large-files
-      - id: check-ast
       - id: check-case-conflict
-      - id: check-docstring-first
       - id: check-json
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
-      - id: debug-statements
       - id: end-of-file-fixer
       - id: mixed-line-ending
       - id: trailing-whitespace
@@ -23,7 +20,7 @@ repos:
   - repo: local
     hooks:
       - id: rust-fmt
-        name: rust fmt format
+        name: cargo fmt format
         description: Run cargo fmt on files included in the commit. rustfmt should be installed before-hand.
         entry: cargo fmt
         pass_filenames: false
@@ -31,9 +28,9 @@ repos:
         language: system
 
       - id: rust-clippy
-        name: rust clippy lint
+        name: cargo clippy lint
         description: Run cargo clippy on files included in the commit. clippy should be installed before-hand.
-        entry: cargo clippy
+        entry: cargo clippy -- -Dwarnings
         pass_filenames: false
         types: [file, rust]
         language: system
