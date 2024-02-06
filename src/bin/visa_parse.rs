@@ -6,7 +6,7 @@ use clap::Parser;
 use colored::Colorize;
 use lazy_static::lazy_static;
 use regex::Regex;
-use rust_xlsxwriter::{Format, FormatBorder, Workbook};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, RowNum, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use walkdir::WalkDir;
 
@@ -428,6 +428,67 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     worksheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
     worksheet.serialize(&items)?;
     worksheet.autofit();
+
+    let dj = workbook.add_worksheet().set_name("DJ")?;
+    let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
+    dj.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    let mut row: usize = 1;
+    // Filter out common non-DJ items
+    let prefixes = [
+        "1BAR",
+        "45 SPECIAL",
+        "ALEPA",
+        "ALKO",
+        "ALLAS SEA POOL",
+        "AVECRA",
+        "BAR ",
+        "CLAS OHLSON",
+        "CLASSIC TROIJA",
+        "EPASSI",
+        "F1.COM",
+        "FAZER RAVINTOLAT",
+        "FINNAIR",
+        "FINNKINO",
+        "FLOW FESTIVAL ",
+        "HENRY'S PUB",
+        "HOTEL ",
+        "IPA GROUP",
+        "K-MARKET",
+        "K-RAUTA",
+        "KAIKU HELSINKI",
+        "KAMPIN ",
+        "KUUDESLINJA",
+        "LUNDIA",
+        "MCD ",
+        "PAYPAL LEVISTRAUSS",
+        "PAYPAL MCOMPANY",
+        "PAYPAL MISTERB",
+        "PAYPAL NIKE",
+        "PAYPAL STEAM GAMES",
+        "PISTE SKI LODGE",
+        "RAVINTOLA",
+        "RIVIERA",
+        "RUKASTORE",
+        "S-MARKET",
+        "SMARTUM",
+        "SOOSIKAUPPA",
+        "SP TOPPED",
+        "STADIUM",
+        "STOCKMANN",
+        "TEERENPELI",
+        "TIKETTI.FI",
+        "WOLT",
+    ];
+    for item in items.iter() {
+        if prefixes.iter().any(|&prefix| item.name.starts_with(prefix)) {
+            continue;
+        }
+        dj.write_string(row as RowNum, 0, item.finnish_date())?;
+        dj.write_string(row as RowNum, 1, item.name.clone())?;
+        dj.write_string_with_format(row as RowNum, 2, item.finnish_sum(), &sum_format)?;
+        row += 1;
+    }
+    dj.autofit();
 
     if output_file.exists() {
         if let Err(e) = std::fs::remove_file(&output_file) {
