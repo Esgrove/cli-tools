@@ -37,7 +37,7 @@ fn replace_whitespaces<P: Into<PathBuf>>(path: P) -> Result<()> {
                 if file_name.contains(' ') {
                     let new_file_name = file_name.replace(' ', ".");
                     let new_path = path.with_file_name(new_file_name);
-                    match fs::rename(&path, &new_path) {
+                    match fs::rename(path, &new_path) {
                         Ok(_) => println!("Renamed {} to {}", path.display(), new_path.display()),
                         Err(e) => {
                             eprintln!("{}", format!("Error renaming {:?}: {}", path, e).red())
