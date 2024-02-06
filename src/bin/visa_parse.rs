@@ -6,6 +6,7 @@ use clap::Parser;
 use colored::Colorize;
 use lazy_static::lazy_static;
 use regex::Regex;
+use rust_xlsxwriter::{Format, FormatBorder, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use walkdir::WalkDir;
 
@@ -91,12 +92,12 @@ impl Serialize for VisaItem {
         let mut state = serializer.serialize_struct("VisaItem", 3)?;
 
         let formatted_date = self.date.format("%Y.%m.%d").to_string();
-        state.serialize_field("date", &formatted_date)?;
+        state.serialize_field("Date", &formatted_date)?;
+
+        state.serialize_field("Name", &self.name)?;
 
         let formatted_sum = format!("{:.2}€", self.sum);
-        state.serialize_field("sum", &formatted_sum)?;
-
-        state.serialize_field("name", &self.name)?;
+        state.serialize_field("Sum", &formatted_sum)?;
 
         state.end()
     }
@@ -132,7 +133,9 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
     let items = parse_files(files, verbose)?;
     println!("Found {} items in total", items.len());
     print_totals(&items);
+
     write_to_csv(&items, &output)?;
+    write_to_excel(&items, &output)?;
 
     Ok(())
 }
@@ -230,11 +233,11 @@ fn extract_items(rows: Vec<String>) -> Vec<VisaItem> {
             current_year
         };
 
-        let new_date_str = format!("{:02}.{:02}.{}", day, month, year);
-        if let Ok(date) = NaiveDate::parse_from_str(&new_date_str, "%d.%m.%Y") {
+        let date_str = format!("{:02}.{:02}.{}", day, month, year);
+        if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%d.%m.%Y") {
             result.push(VisaItem { date, name, sum });
         } else {
-            eprintln!("{}", format!("Failed to parse date: {}", new_date_str).red())
+            eprintln!("{}", format!("Failed to parse date: {}", date_str).red())
         }
     }
 
@@ -251,14 +254,17 @@ fn format_name(text: &str) -> String {
     let mut name = text.replace("Osto ", "").replace(['*', '/', '_'], " ");
 
     if RE_FINNAIR.is_match(&name) {
-        name = "Finnair".to_string();
+        name = "FINNAIR".to_string();
     }
     if RE_WOLT.is_match(&name) {
-        name = "Wolt".to_string();
+        name = "WOLT".to_string();
     }
 
     name = name.to_uppercase();
     name = name.replace("VFI*", "").replace(" DRI ", "").replace(" . ", " ");
+    name = name.replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
+    name = name.trim().to_string();
+    name = RE_WHITESPACE.replace_all(&name, " ").to_string();
 
     if name.starts_with("CHF ") {
         name = name.replacen("CHF ", "", 1);
@@ -275,8 +281,6 @@ fn format_name(text: &str) -> String {
     if name.starts_with("PAYPAL DJCITY") {
         name = "PAYPAL DJCITY".to_string();
     }
-
-    name = name.replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
 
     name = name.trim().to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").to_string();
@@ -340,6 +344,37 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     for item in items {
         writeln!(file, "{},{:.2}€,{}", item.date.format("%Y.%m.%d"), item.sum, item.name)?;
     }
+    Ok(())
+}
+
+fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
+    let output_file = if output_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map_or(false, |ext| {
+            ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("xlsx")
+        }) {
+        output_path.with_extension("xlsx")
+    } else {
+        output_path.join("visa.xlsx")
+    };
+    println!(
+        "{}",
+        format!("Writing data to {}", output_file.display()).green().bold()
+    );
+    let mut workbook = Workbook::new();
+    let worksheet = workbook.add_worksheet().set_name("VISA")?;
+    let header_format = Format::new()
+        .set_bold()
+        .set_border(FormatBorder::Thin)
+        .set_background_color("C6E0B4");
+
+    worksheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    worksheet.serialize(&items)?;
+    worksheet.autofit();
+
+    let output_file = output_path.join("visa.xlsx");
+    workbook.save(output_file)?;
     Ok(())
 }
 
