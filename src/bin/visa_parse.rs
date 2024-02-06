@@ -4,15 +4,13 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Parser;
 use colored::Colorize;
-
 use lazy_static::lazy_static;
 use regex::Regex;
+use serde::ser::{Serialize, SerializeStruct, Serializer};
 use walkdir::{DirEntry, WalkDir};
 
-use serde::ser::{Serialize, SerializeStruct, Serializer};
-use std::ffi::OsStr;
-
 use std::cmp::Ordering;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Write;
 use std::io::{BufRead, BufReader};
@@ -37,7 +35,12 @@ lazy_static! {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, about, version)]
+#[command(
+    author,
+    version,
+    name = "visa-parse",
+    about = "Parse credit card Finvoice XML files"
+)]
 struct Args {
     /// Input directory or XML file path
     path: String,

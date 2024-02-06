@@ -10,7 +10,12 @@ use std::path::PathBuf;
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
-#[command(author, about, version)]
+#[command(
+    author,
+    version,
+    name = "dots",
+    about = "Replace whitespaces with dots in filenames"
+)]
 struct Args {
     /// Optional input directory or file
     input_dir: String,
