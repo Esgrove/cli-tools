@@ -384,6 +384,11 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
         "{}",
         format!("Writing data to {}", output_file.display()).green().bold()
     );
+    if output_file.exists() {
+        if let Err(e) = std::fs::remove_file(&output_file) {
+            eprintln!("{}", format!("Failed to remove existing csv file: {e}").red())
+        }
+    }
     let mut file = File::create(output_file)?;
     writeln!(file, "Date,Sum,Name")?;
     for item in items {
@@ -418,6 +423,11 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     worksheet.serialize(&items)?;
     worksheet.autofit();
 
+    if output_file.exists() {
+        if let Err(e) = std::fs::remove_file(&output_file) {
+            eprintln!("{}", format!("Failed to remove existing xlsx file: {e}").red())
+        }
+    }
     workbook.save(output_file)?;
     Ok(())
 }
