@@ -40,47 +40,60 @@ fn replace_whitespaces<P: Into<PathBuf>>(
     verbose: bool,
 ) -> Result<()> {
     let path = path.into();
-    let mut num_renamed: usize = 0;
     if verbose {
         println!(
             "{}",
             format!("Formatting files under {}", path.display()).bold()
         )
     }
+
+    // Collect all files that need renaming
+    let mut files_to_rename: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
+        let path = entry.path().to_path_buf();
         if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                 if file_name.contains(' ') {
                     let new_file_name = file_name.replace(' ', ".");
                     let new_path = path.with_file_name(new_file_name);
-                    if dryrun {
-                        println!("Dryrun: {} to {}", path.display(), new_path.display());
-                        num_renamed += 1;
-                    } else if new_path.exists() && !overwrite {
-                        println!(
-                            "{}",
-                            format!(
-                                "Skipping rename to already existing file: {}",
-                                new_path.display()
-                            )
-                            .yellow()
-                        )
-                    } else {
-                        match fs::rename(path, &new_path) {
-                            Ok(_) => {
-                                println!("Renamed {} to {}", path.display(), new_path.display());
-                                num_renamed += 1;
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format!("Error renaming {:?}: {}", path, e).red());
-                            }
-                        }
-                    }
+                    files_to_rename.push((path, new_path));
                 }
             }
         }
     }
+
+    files_to_rename.sort_by_key(|k| k.0.clone());
+    if verbose {
+        println!("Found {} files to rename", files_to_rename.len())
+    }
+
+    let mut num_renamed: usize = 0;
+    for (path, new_path) in files_to_rename {
+        if dryrun {
+            println!("Dryrun: {} to {}", path.display(), new_path.display());
+            num_renamed += 1;
+        } else if new_path.exists() && !overwrite {
+            println!(
+                "{}",
+                format!(
+                    "Skipping rename to already existing file: {}",
+                    new_path.display()
+                )
+                .yellow()
+            )
+        } else {
+            match fs::rename(&path, &new_path) {
+                Ok(_) => {
+                    println!("Renamed {} to {}", path.display(), new_path.display());
+                    num_renamed += 1;
+                }
+                Err(e) => {
+                    eprintln!("{}", format!("Error renaming {:?}: {}", path, e).red());
+                }
+            }
+        }
+    }
+
     if dryrun {
         println!("Dryrun: would have renamed {} files", num_renamed);
     } else {
