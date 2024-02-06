@@ -29,6 +29,7 @@ lazy_static! {
             .expect("Failed to create regex pattern for SpecificationFreeText");
     static ref RE_ITEM_DATE: Regex =
         Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date");
+    static ref RE_HTML_AND: Regex = Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html");
 }
 
 #[derive(Parser, Debug)]
@@ -269,21 +270,24 @@ fn format_name(text: &str) -> String {
         name = "WOLT".to_string();
     }
 
+    name = RE_HTML_AND.replace_all(&name, "&").to_string();
     name = name.to_uppercase();
-    name = name.replace("VFI*", "").replace(" DRI ", "").replace(" . ", " ");
-    name = name.replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
+    name = name
+        .replace("VFI*", "")
+        .replace("VFI ", "")
+        .replace(" DRI ", "")
+        .replace(" . ", " ")
+        .replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
+
     name = name.trim().to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").to_string();
 
-    if name.starts_with("CHF ") {
-        name = name.replacen("CHF ", "", 1);
-    }
-    if name.starts_with("CHF") {
-        name = name.replacen("CHF", "", 1);
-    }
-    if name.starts_with("WWW.") {
-        name = name.replacen("WWW.", "", 1);
-    }
+    name = replace_from_start(&name, "CHF ", "");
+    name = replace_from_start(&name, "CHF", "");
+    name = replace_from_start(&name, "WWW.", "");
+    name = replace_from_start(&name, "CHF", "");
+    name = replace_from_start(&name, "CHF", "");
+
     if name.starts_with("PAYPAL PATREON") {
         name = "PAYPAL PATREON".to_string();
     }
@@ -294,6 +298,14 @@ fn format_name(text: &str) -> String {
     name = name.trim().to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").to_string();
     name
+}
+
+fn replace_from_start(name: &str, pattern: &str, replacement: &str) -> String {
+    if name.starts_with(pattern) {
+        name.replacen(pattern, replacement, 1)
+    } else {
+        name.to_string()
+    }
 }
 
 /// Convert Finnish currency value string to float
