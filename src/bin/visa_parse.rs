@@ -141,13 +141,20 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
 }
 
 fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
-    WalkDir::new(root)
+    let mut files: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| !cli_tools::is_hidden(e))
         .filter_map(|e| e.ok())
         .map(|e| e.path().to_owned())
         .filter(|path| path.is_file() && path.extension() == Some(OsStr::new("xml")))
-        .collect()
+        .collect();
+
+    files.sort_by(|a, b| {
+        let a_str = a.to_string_lossy().to_lowercase();
+        let b_str = b.to_string_lossy().to_lowercase();
+        a_str.cmp(&b_str)
+    });
+    files
 }
 
 fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
@@ -158,9 +165,7 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
         ((files.len() as f64).log10() as usize) + 1
     };
     for (number, file) in files.iter().enumerate() {
-        if verbose {
-            println!("{:>0width$}: {}", number + 1, file.display(), width = digits);
-        }
+        println!("{:>0width$}: {}", number + 1, file.display(), width = digits);
         let raw_lines = read_xml_file(file);
         let items = extract_items(raw_lines);
         if verbose {
@@ -168,7 +173,11 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
                 println!("{}", item);
             }
         }
-        result.extend(items);
+        if items.is_empty() {
+            println!("{}", "No items found...".yellow())
+        } else {
+            result.extend(items);
+        }
     }
     result.sort();
     Ok(result)
