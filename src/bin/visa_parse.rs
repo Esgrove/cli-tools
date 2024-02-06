@@ -16,20 +16,23 @@ use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::io::{BufRead, BufReader};
+
 use std::path::{Path, PathBuf};
 
 // Static variables that are initialized at runtime the first time they are accessed.
 lazy_static! {
+    static ref RE_FINNAIR: Regex = Regex::new(r"(?i)finnair").expect("Failed to create regex pattern for Finnair");
+    static ref RE_HTML_AND: Regex = Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html");
     static ref RE_SEPARATORS: Regex = Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators");
     static ref RE_WHITESPACE: Regex = Regex::new(r"\s{2,}").expect("Failed to create regex pattern for whitespace");
-    static ref RE_FINNAIR: Regex = Regex::new(r"(?i)finnair").expect("Failed to create regex pattern for Finnair");
     static ref RE_WOLT: Regex = Regex::new(r"(?i)wolt ").expect("Failed to create regex pattern for Wolt");
+    static ref RE_ITEM_DATE: Regex =
+        Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date");
+    static ref RE_START_DATE: Regex = Regex::new(r#"<StartDate Format="CCYYMMDD">(\d{4})\d{4}</StartDate>"#)
+        .expect("Failed to create regex pattern for start date");
     static ref RE_SPECIFICATION_FREE_TEXT: Regex =
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
-    static ref RE_ITEM_DATE: Regex =
-        Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date");
-    static ref RE_HTML_AND: Regex = Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html");
 }
 
 #[derive(Parser, Debug)]
@@ -41,6 +44,10 @@ struct Args {
     /// Optional output path (default is same as input dir)
     #[arg(short, long, name = "OUTPUT_PATH")]
     output: Option<String>,
+
+    /// Only print items, don't write to file
+    #[arg(short, long)]
+    print: bool,
 
     /// Verbose output
     #[arg(short, long)]
@@ -108,10 +115,10 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let input_path = cli_tools::resolve_input_path(&args.path)?;
     let output_path = cli_tools::resolve_output_path(args.output, &input_path)?;
-    visa_parse(input_path, output_path, args.verbose)
+    visa_parse(input_path, output_path, args.verbose, args.print)
 }
 
-fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
+fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> Result<()> {
     let files = if input.is_file() {
         println!("{}", format!("Parsing file: {}", input.display()).bold().magenta());
         if input.extension() == Some(OsStr::new("xml")) {
@@ -135,8 +142,10 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
     println!("Found {} items in total", items.len());
     print_totals(&items);
 
-    write_to_csv(&items, &output)?;
-    write_to_excel(&items, &output)?;
+    if !dryrun {
+        write_to_csv(&items, &output)?;
+        write_to_excel(&items, &output)?;
+    }
 
     Ok(())
 }
@@ -167,8 +176,8 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     };
     for (number, file) in files.iter().enumerate() {
         println!("{:>0width$}: {}", number + 1, file.display(), width = digits);
-        let raw_lines = read_xml_file(file);
-        let items = extract_items(raw_lines);
+        let (raw_lines, year) = read_xml_file(file);
+        let items = extract_items(&raw_lines, year);
         if verbose {
             for item in &items {
                 println!("{}", item);
@@ -185,18 +194,31 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
 }
 
 /// Read transaction lines from an XML file.
-fn read_xml_file(file: &Path) -> Vec<String> {
+fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
     let mut lines: Vec<String> = Vec::new();
+    let mut year = Local::now().year();
     let xml_file = match File::open(file) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("{}", format!("Failed to open file: {}\n{}", file.display(), e).red());
-            return lines;
+            return (lines, year);
         }
     };
 
     let reader = BufReader::new(xml_file);
     for line in reader.lines().flatten() {
+        if let Some(caps) = RE_START_DATE.captures(&line) {
+            if let Some(matched) = caps.get(1) {
+                match matched.as_str().parse::<i32>() {
+                    Ok(y) => {
+                        year = y;
+                    }
+                    Err(e) => {
+                        eprintln!("{}", format!("Failed to parse year from start date: {e}").red())
+                    }
+                }
+            }
+        }
         if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(&line) {
             if let Some(matched) = caps.get(1) {
                 let text = matched.as_str();
@@ -206,17 +228,17 @@ fn read_xml_file(file: &Path) -> Vec<String> {
             }
         }
     }
-    lines
+    (lines, year)
 }
 
 /// Convert text lines to visa items.
-fn extract_items(rows: Vec<String>) -> Vec<VisaItem> {
-    let mut formatted_data: Vec<(u32, u32, String, f64)> = Vec::new();
+fn extract_items(rows: &[String], year: i32) -> Vec<VisaItem> {
+    let mut formatted_data: Vec<(i32, i32, String, f64)> = Vec::new();
     for line in rows.iter() {
         let (date, name, sum) = split_item_text(line);
         let (day, month) = date.split_once('.').unwrap();
-        let month: u32 = month.replace('.', "").parse().unwrap();
-        let day: u32 = day.parse().unwrap();
+        let month: i32 = month.replace('.', "").parse().unwrap();
+        let day: i32 = day.parse().unwrap();
         let name = format_name(&name);
         let sum = format_sum(&sum).unwrap();
         formatted_data.push((day, month, name, sum));
@@ -224,23 +246,22 @@ fn extract_items(rows: Vec<String>) -> Vec<VisaItem> {
 
     // Determine if there's a transition from December to January.
     let mut year_transition_detected = false;
-    let mut last_month: u32 = 0;
+    let mut last_month: i32 = 0;
     for (_, month, _, _) in formatted_data.iter() {
-        if *month == 1u32 && last_month == 12u32 {
+        if *month == 1 && last_month == 12 {
             year_transition_detected = true;
             break;
         }
         last_month = *month;
     }
 
-    let current_year = Local::now().year();
-    let previous_year = current_year - 1;
+    let previous_year = year - 1;
     let mut result: Vec<VisaItem> = Vec::new();
     for (day, month, name, sum) in formatted_data.into_iter() {
         let year = if month == 12 && year_transition_detected {
             previous_year
         } else {
-            current_year
+            year
         };
 
         let date_str = format!("{:02}.{:02}.{}", day, month, year);
