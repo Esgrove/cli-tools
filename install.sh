@@ -12,7 +12,9 @@ if [ -z "$(command -v cargo)" ]; then
     print_error_and_exit "Cargo not found in path. Maybe install rustup?"
 fi
 
+print_magenta "Installing binaries..."
 cargo install --path "$REPO_ROOT"
+echo ""
 
 executables=$(get_rust_executable_names)
 for executable in $executables; do

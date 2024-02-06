@@ -36,11 +36,12 @@ fi
 
 cd "$REPO_ROOT"
 
+print_magenta "Building binaries..."
 cargo build --release --bins
 
 executables=$(get_rust_executable_names)
 for executable in $executables; do
-    print_magenta "${executable%.exe}"
+    print_green "${executable%.exe}"
     rm -f "$executable"
     mv ./target/release/"$executable" "$executable"
     ./"$executable" --version
