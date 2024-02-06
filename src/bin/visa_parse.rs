@@ -315,6 +315,9 @@ fn format_name(text: &str) -> String {
     if name.starts_with("PAYPAL DJCITY") {
         name = "PAYPAL DJCITY".to_string();
     }
+    if name.starts_with("PAYPAL BANDCAMP") {
+        name = "PAYPAL BANDCAMP".to_string();
+    }
 
     name = name.trim().to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").to_string();
