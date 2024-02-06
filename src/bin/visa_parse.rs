@@ -1,5 +1,7 @@
 extern crate colored;
 
+use cli_tools::is_hidden;
+
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Parser;
@@ -7,7 +9,7 @@ use colored::Colorize;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::ser::{Serialize, SerializeStruct, Serializer};
-use walkdir::{DirEntry, WalkDir};
+use walkdir::WalkDir;
 
 use std::cmp::Ordering;
 use std::ffi::OsStr;
@@ -288,14 +290,6 @@ fn split_from_last_whitespace(s: &str) -> (String, String) {
     let before = parts.next().unwrap_or("").to_string();
 
     (before, after)
-}
-
-fn is_hidden(entry: &DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
 }
 
 fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {

@@ -1,5 +1,7 @@
 extern crate colored;
 
+use cli_tools::is_hidden;
+
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
@@ -49,11 +51,15 @@ fn replace_whitespaces<P: Into<PathBuf>>(
 
     // Collect all files that need renaming
     let mut files_to_rename: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(path)
+        .into_iter()
+        .filter_entry(|e| !is_hidden(e))
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path().to_path_buf();
         if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name.contains(' ') {
+                if file_name.contains(' ') && !file_name.contains(" - ") {
                     let new_file_name = file_name.replace(' ', ".");
                     let new_path = path.with_file_name(new_file_name);
                     files_to_rename.push((path, new_path));
@@ -62,7 +68,7 @@ fn replace_whitespaces<P: Into<PathBuf>>(
         }
     }
 
-    files_to_rename.sort_by_key(|k| k.0.clone());
+    files_to_rename.sort_by_key(|k| k.0.clone().to_string_lossy().to_lowercase());
     if verbose {
         println!("Found {} files to rename", files_to_rename.len())
     }
@@ -70,7 +76,8 @@ fn replace_whitespaces<P: Into<PathBuf>>(
     let mut num_renamed: usize = 0;
     for (path, new_path) in files_to_rename {
         if dryrun {
-            println!("Dryrun: {} to {}", path.display(), new_path.display());
+            println!("{}", "Dryrun:".bold());
+            println!("{}\n{}", path.display(), new_path.display());
             num_renamed += 1;
         } else if new_path.exists() && !overwrite {
             println!(
@@ -84,7 +91,8 @@ fn replace_whitespaces<P: Into<PathBuf>>(
         } else {
             match fs::rename(&path, &new_path) {
                 Ok(_) => {
-                    println!("Renamed {} to {}", path.display(), new_path.display());
+                    println!("{}", "Rename:".bold().magenta());
+                    println!("{}\n{}", path.display(), new_path.display());
                     num_renamed += 1;
                 }
                 Err(e) => {

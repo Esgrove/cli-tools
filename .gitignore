@@ -1,7 +1,11 @@
 /target
 
-/*.xml
+# Extra files
 /*.csv
 /*.exe
+/*.txt
+/*.xml
+
+# Binaries
 /dots
 /visaparse
