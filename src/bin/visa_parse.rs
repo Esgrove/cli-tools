@@ -411,3 +411,53 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod test_format_sum {
+    use super::*;
+
+    #[test]
+    fn test_normal_value() {
+        assert_eq!(format_sum("123,45").unwrap(), 123.45);
+    }
+
+    #[test]
+    fn test_value_with_whitespace() {
+        assert_eq!(format_sum("  678,90  ").unwrap(), 678.90);
+    }
+
+    #[test]
+    fn test_invalid_format() {
+        assert!(format_sum("invalid").is_err());
+    }
+
+    #[test]
+    fn test_large_number() {
+        assert_eq!(format_sum("1234567,89").unwrap(), 1234567.89);
+    }
+
+    #[test]
+    fn test_small_number() {
+        assert_eq!(format_sum("0,01").unwrap(), 0.01);
+    }
+
+    #[test]
+    fn test_number_with_many_decimal_places() {
+        assert_eq!(format_sum("1,234567").unwrap(), 1.234567);
+    }
+
+    #[test]
+    fn test_negative_number() {
+        assert_eq!(format_sum("-123,45").unwrap(), -123.45);
+    }
+
+    #[test]
+    fn test_zero_value() {
+        assert_eq!(format_sum("0").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_number_without_decimal() {
+        assert_eq!(format_sum("1234").unwrap(), 1234.0);
+    }
+}
