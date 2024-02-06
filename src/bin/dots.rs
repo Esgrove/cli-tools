@@ -9,12 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    name = "dots",
-    about = "Replace whitespaces with dots in filenames"
-)]
+#[command(author, version, name = "dots", about = "Replace whitespaces with dots in filenames")]
 struct Args {
     /// Optional input directory or file
     input_dir: String,
@@ -40,10 +35,7 @@ fn main() -> Result<()> {
 
 fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bool) -> Result<()> {
     if verbose {
-        println!(
-            "{}",
-            format!("Formatting files under {}", root.display()).bold()
-        )
+        println!("{}", format!("Formatting files under {}", root.display()).bold())
     }
 
     // Collect all files that need renaming

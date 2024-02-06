@@ -6,11 +6,7 @@ use std::path::{Path, PathBuf};
 
 /// Check if entry is a hidden file or directory (starts with '.')
 pub fn is_hidden(entry: &DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
+    entry.file_name().to_str().map(|s| s.starts_with('.')).unwrap_or(false)
 }
 
 pub fn resolve_input_path(path: &str) -> anyhow::Result<PathBuf> {
@@ -29,10 +25,7 @@ pub fn resolve_input_path(path: &str) -> anyhow::Result<PathBuf> {
     Ok(absolute_input_path)
 }
 
-pub fn resolve_output_path(
-    path: Option<String>,
-    absolute_input_path: &Path,
-) -> anyhow::Result<PathBuf> {
+pub fn resolve_output_path(path: Option<String>, absolute_input_path: &Path) -> anyhow::Result<PathBuf> {
     let output_path = {
         let path = path.unwrap_or_default().trim().to_string();
         if path.is_empty() {

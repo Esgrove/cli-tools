@@ -19,14 +19,10 @@ use std::path::{Path, PathBuf};
 
 // Static variables that are initialized at runtime the first time they are accessed.
 lazy_static! {
-    static ref RE_SEPARATORS: Regex =
-        Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators");
-    static ref RE_WHITESPACE: Regex =
-        Regex::new(r"\s{2,}").expect("Failed to create regex pattern for whitespace");
-    static ref RE_FINNAIR: Regex =
-        Regex::new(r"(?i)finnair").expect("Failed to create regex pattern for Finnair");
-    static ref RE_WOLT: Regex =
-        Regex::new(r"(?i)wolt ").expect("Failed to create regex pattern for Wolt");
+    static ref RE_SEPARATORS: Regex = Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators");
+    static ref RE_WHITESPACE: Regex = Regex::new(r"\s{2,}").expect("Failed to create regex pattern for whitespace");
+    static ref RE_FINNAIR: Regex = Regex::new(r"(?i)finnair").expect("Failed to create regex pattern for Finnair");
+    static ref RE_WOLT: Regex = Regex::new(r"(?i)wolt ").expect("Failed to create regex pattern for Wolt");
     static ref RE_SPECIFICATION_FREE_TEXT: Regex =
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
@@ -35,12 +31,7 @@ lazy_static! {
 }
 
 #[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    name = "visa-parse",
-    about = "Parse credit card Finvoice XML files"
-)]
+#[command(author, version, name = "visa-parse", about = "Parse credit card Finvoice XML files")]
 struct Args {
     /// Input directory or XML file path
     path: String,
@@ -120,12 +111,7 @@ fn main() -> Result<()> {
 
 fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
     let files = if input.is_file() {
-        println!(
-            "{}",
-            format!("Parsing file: {}", input.display())
-                .bold()
-                .magenta()
-        );
+        println!("{}", format!("Parsing file: {}", input.display()).bold().magenta());
         if input.extension() == Some(OsStr::new("xml")) {
             vec![input.clone()]
         } else {
@@ -134,9 +120,7 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
     } else {
         println!(
             "{}",
-            format!("Parsing files from: {}", input.display())
-                .bold()
-                .magenta()
+            format!("Parsing files from: {}", input.display()).bold().magenta()
         );
         get_xml_files(&input)
     };
@@ -172,12 +156,7 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     };
     for (number, file) in files.iter().enumerate() {
         if verbose {
-            println!(
-                "{:>0width$}: {}",
-                number + 1,
-                file.display(),
-                width = digits
-            );
+            println!("{:>0width$}: {}", number + 1, file.display(), width = digits);
         }
         let raw_lines = read_xml_file(file);
         let items = extract_items(raw_lines);
@@ -198,10 +177,7 @@ fn read_xml_file(file: &Path) -> Vec<String> {
     let xml_file = match File::open(file) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!(
-                "{}",
-                format!("Failed to open file: {}\n{}", file.display(), e).red()
-            );
+            eprintln!("{}", format!("Failed to open file: {}\n{}", file.display(), e).red());
             return lines;
         }
     };
@@ -258,10 +234,7 @@ fn extract_items(rows: Vec<String>) -> Vec<VisaItem> {
         if let Ok(date) = NaiveDate::parse_from_str(&new_date_str, "%d.%m.%Y") {
             result.push(VisaItem { date, name, sum });
         } else {
-            eprintln!(
-                "{}",
-                format!("Failed to parse date: {}", new_date_str).red()
-            )
+            eprintln!("{}", format!("Failed to parse date: {}", new_date_str).red())
         }
     }
 
@@ -285,10 +258,7 @@ fn format_name(text: &str) -> String {
     }
 
     name = name.to_uppercase();
-    name = name
-        .replace("VFI*", "")
-        .replace(" DRI ", "")
-        .replace(" . ", " ");
+    name = name.replace("VFI*", "").replace(" DRI ", "").replace(" . ", " ");
 
     if name.starts_with("CHF ") {
         name = name.replacen("CHF ", "", 1);
@@ -306,10 +276,7 @@ fn format_name(text: &str) -> String {
         name = "PAYPAL DJCITY".to_string();
     }
 
-    name = name.replace(
-        "CHATGPT SUBSCRIPTION HTTPSOPENAI.C",
-        "CHATGPT SUBSCRIPTION OPENAI.COM",
-    );
+    name = name.replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
 
     name = name.trim().to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").to_string();
@@ -366,20 +333,12 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     };
     println!(
         "{}",
-        format!("Writing data to {}", output_file.display())
-            .green()
-            .bold()
+        format!("Writing data to {}", output_file.display()).green().bold()
     );
     let mut file = File::create(output_file)?;
     writeln!(file, "Date,Sum,Name")?;
     for item in items {
-        writeln!(
-            file,
-            "{},{:.2}€,{}",
-            item.date.format("%Y.%m.%d"),
-            item.sum,
-            item.name
-        )?;
+        writeln!(file, "{},{:.2}€,{}", item.date.format("%Y.%m.%d"), item.sum, item.name)?;
     }
     Ok(())
 }
