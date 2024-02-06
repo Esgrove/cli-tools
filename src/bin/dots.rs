@@ -6,7 +6,6 @@ use colored::Colorize;
 use walkdir::WalkDir;
 
 use std::fs;
-use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -31,6 +30,12 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let input_path = cli_tools::resolve_input_path(&args.input_dir)?;
+    replace_whitespaces(input_path, args.print, args.force, args.verbose)
 }
 
 fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bool) -> Result<()> {
@@ -98,21 +103,4 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
         println!("{}", format!("Renamed {} files", num_renamed).green());
     }
     Ok(())
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let input_path = args.input_dir.trim();
-    if input_path.is_empty() {
-        anyhow::bail!("empty input path");
-    }
-    let filepath = Path::new(input_path);
-    if !filepath.is_dir() {
-        anyhow::bail!(
-            "Input directory does not exist or is not accessible: '{}'",
-            filepath.display()
-        );
-    }
-    let absolute_input_path = fs::canonicalize(filepath)?;
-    replace_whitespaces(absolute_input_path, args.print, args.force, args.verbose)
 }

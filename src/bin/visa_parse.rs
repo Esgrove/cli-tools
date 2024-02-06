@@ -1,7 +1,5 @@
 extern crate colored;
 
-use cli_tools::is_hidden;
-
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Parser;
@@ -13,11 +11,11 @@ use walkdir::WalkDir;
 
 use std::cmp::Ordering;
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::{fmt, fs};
 
 // Static variables that are initialized at runtime the first time they are accessed.
 lazy_static! {
@@ -56,6 +54,7 @@ struct Args {
     verbose: bool,
 }
 
+/// One credit card purchase.
 #[derive(Debug, Clone, PartialEq)]
 struct VisaItem {
     date: NaiveDate,
@@ -114,44 +113,9 @@ impl Serialize for VisaItem {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let path = args.path.trim();
-    let input_path = get_absolute_input_path(path)?;
-    let output_path = get_output_path(args.output, &input_path)?;
+    let input_path = cli_tools::resolve_input_path(&args.path)?;
+    let output_path = cli_tools::resolve_output_path(args.output, &input_path)?;
     visa_parse(input_path, output_path, args.verbose)
-}
-
-fn get_absolute_input_path(input_path: &str) -> Result<PathBuf> {
-    if input_path.is_empty() {
-        anyhow::bail!("empty input path");
-    }
-    let filepath = Path::new(input_path);
-    if !filepath.exists() {
-        anyhow::bail!(
-            "Input path does not exist or is not accessible: '{}'",
-            filepath.display()
-        );
-    }
-    let absolute_input_path = fs::canonicalize(filepath)?;
-    Ok(absolute_input_path)
-}
-
-fn get_output_path(output: Option<String>, absolute_input_path: &Path) -> Result<PathBuf> {
-    let output_path = {
-        let path = output.unwrap_or_default().trim().to_string();
-        if path.is_empty() {
-            if absolute_input_path.is_file() {
-                absolute_input_path
-                    .parent()
-                    .context("Failed to get parent directory")?
-                    .to_path_buf()
-            } else {
-                absolute_input_path.to_path_buf()
-            }
-        } else {
-            Path::new(&path).to_path_buf()
-        }
-    };
-    Ok(output_path)
 }
 
 fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
@@ -189,6 +153,16 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
     Ok(())
 }
 
+fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| !cli_tools::is_hidden(e))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path().to_owned())
+        .filter(|path| path.is_file() && path.extension() == Some(OsStr::new("xml")))
+        .collect()
+}
+
 fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     let mut result: Vec<VisaItem> = Vec::new();
     let digits = if files.len() < 10 {
@@ -218,13 +192,86 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     Ok(result)
 }
 
-/// Convert Finnish currency value string to float
-fn format_sum(value: &str) -> Result<f64> {
-    value
-        .trim()
-        .replace(',', ".")
-        .parse::<f64>()
-        .context(format!("Failed to parse sum as float: {}", value))
+/// Read transaction lines from an XML file.
+fn read_xml_file(file: &Path) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let xml_file = match File::open(file) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                format!("Failed to open file: {}\n{}", file.display(), e).red()
+            );
+            return lines;
+        }
+    };
+
+    let reader = BufReader::new(xml_file);
+    for line in reader.lines().flatten() {
+        if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(&line) {
+            if let Some(matched) = caps.get(1) {
+                let text = matched.as_str();
+                if RE_ITEM_DATE.is_match(text) {
+                    lines.push(text.to_string());
+                }
+            }
+        }
+    }
+    lines
+}
+
+/// Convert text lines to visa items.
+fn extract_items(rows: Vec<String>) -> Vec<VisaItem> {
+    let mut formatted_data: Vec<(u32, u32, String, f64)> = Vec::new();
+    for line in rows.iter() {
+        let (date, name, sum) = split_item_text(line);
+        let (day, month) = date.split_once('.').unwrap();
+        let month: u32 = month.replace('.', "").parse().unwrap();
+        let day: u32 = day.parse().unwrap();
+        let name = format_name(&name);
+        let sum = format_sum(&sum).unwrap();
+        formatted_data.push((day, month, name, sum));
+    }
+
+    // Determine if there's a transition from December to January.
+    let mut year_transition_detected = false;
+    let mut last_month: u32 = 0;
+    for (_, month, _, _) in formatted_data.iter() {
+        if *month == 1u32 && last_month == 12u32 {
+            year_transition_detected = true;
+            break;
+        }
+        last_month = *month;
+    }
+
+    let current_year = Local::now().year();
+    let previous_year = current_year - 1;
+    let mut result: Vec<VisaItem> = Vec::new();
+    for (day, month, name, sum) in formatted_data.into_iter() {
+        let year = if month == 12 && year_transition_detected {
+            previous_year
+        } else {
+            current_year
+        };
+
+        let new_date_str = format!("{:02}.{:02}.{}", day, month, year);
+        if let Ok(date) = NaiveDate::parse_from_str(&new_date_str, "%d.%m.%Y") {
+            result.push(VisaItem { date, name, sum });
+        } else {
+            eprintln!(
+                "{}",
+                format!("Failed to parse date: {}", new_date_str).red()
+            )
+        }
+    }
+
+    result
+}
+
+fn clean_whitespaces(text: &str) -> String {
+    RE_WHITESPACE
+        .replace_all(RE_SEPARATORS.replace_all(text, " ").as_ref(), " ")
+        .to_string()
 }
 
 fn format_name(text: &str) -> String {
@@ -269,6 +316,15 @@ fn format_name(text: &str) -> String {
     name
 }
 
+/// Convert Finnish currency value string to float
+fn format_sum(value: &str) -> Result<f64> {
+    value
+        .trim()
+        .replace(',', ".")
+        .parse::<f64>()
+        .context(format!("Failed to parse sum as float: {}", value))
+}
+
 fn print_totals(items: &[VisaItem]) {
     let total_sum: f64 = items.iter().map(|item| item.sum).sum();
     let count = items.len() as f64;
@@ -278,59 +334,7 @@ fn print_totals(items: &[VisaItem]) {
     println!("Average: {:.2}€", average);
 }
 
-fn clean_whitespaces(text: &str) -> String {
-    RE_WHITESPACE
-        .replace_all(RE_SEPARATORS.replace_all(text, " ").as_ref(), " ")
-        .to_string()
-}
-
-fn split_from_last_whitespace(s: &str) -> (String, String) {
-    let mut parts = s.rsplitn(2, char::is_whitespace);
-    let after = parts.next().unwrap_or("").to_string();
-    let before = parts.next().unwrap_or("").to_string();
-
-    (before, after)
-}
-
-fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
-    WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| !is_hidden(e))
-        .filter_map(|e| e.ok())
-        .map(|e| e.path().to_owned())
-        .filter(|path| path.is_file() && path.extension() == Some(OsStr::new("xml")))
-        .collect()
-}
-
-/// Read transaction lines from an XML file.
-fn read_xml_file(file: &Path) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let xml_file = match File::open(file) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                format!("Failed to open file: {}\n{}", file.display(), e).red()
-            );
-            return lines;
-        }
-    };
-
-    let reader = BufReader::new(xml_file);
-    for line in reader.lines().flatten() {
-        if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(&line) {
-            if let Some(matched) = caps.get(1) {
-                let text = matched.as_str();
-                if RE_ITEM_DATE.is_match(text) {
-                    lines.push(text.to_string());
-                }
-            }
-        }
-    }
-    lines
-}
-
-fn split_item_row(input: &str) -> (String, String, String) {
+fn split_item_text(input: &str) -> (String, String, String) {
     // Split the string at the first whitespace
     let mut parts = input.splitn(2, ' ');
     let first_part = parts.next().unwrap_or("").trim().to_string();
@@ -341,54 +345,15 @@ fn split_item_row(input: &str) -> (String, String, String) {
     (first_part, second_part, third_part)
 }
 
-/// Convert text lines to visa items.
-fn extract_items(rows: Vec<String>) -> Vec<VisaItem> {
-    let mut formatted_data: Vec<(u32, u32, String, f64)> = Vec::new();
-    for line in rows.iter() {
-        let (date, name, sum) = split_item_row(line);
-        let (day, month) = date.split_once('.').unwrap();
-        let month: u32 = month.replace('.', "").parse().unwrap();
-        let day: u32 = day.parse().unwrap();
-        let name = format_name(&name);
-        let sum = format_sum(&sum).unwrap();
-        formatted_data.push((day, month, name, sum));
-    }
+fn split_from_last_whitespace(s: &str) -> (String, String) {
+    let mut parts = s.rsplitn(2, char::is_whitespace);
+    let after = parts.next().unwrap_or("").to_string();
+    let before = parts.next().unwrap_or("").to_string();
 
-    // Determine if there's a transition from December to January.
-    let mut year_transition_detected = false;
-    let mut last_month: u32 = 0;
-    for (_, month, _, _) in formatted_data.iter() {
-        if *month == 1u32 && last_month == 12u32 {
-            year_transition_detected = true;
-            break;
-        }
-        last_month = *month;
-    }
-
-    let current_year = Local::now().year();
-    let previous_year = current_year - 1;
-    let mut result: Vec<VisaItem> = Vec::new();
-    for (day, month, name, sum) in formatted_data.into_iter() {
-        let year = if month == 12 && year_transition_detected {
-            previous_year
-        } else {
-            current_year
-        };
-
-        let new_date_str = format!("{:02}.{:02}.{}", day, month, year);
-        if let Ok(date) = NaiveDate::parse_from_str(&new_date_str, "%d.%m.%Y") {
-            result.push(VisaItem { date, name, sum });
-        } else {
-            eprintln!(
-                "{}",
-                format!("Failed to parse date: {}", new_date_str).red()
-            )
-        }
-    }
-
-    result
+    (before, after)
 }
 
+/// Save parsed data to a CSV file
 fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let output_file = if output_path
         .extension()
