@@ -378,7 +378,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     {
         output_path.to_path_buf()
     } else {
-        output_path.join("visa.csv")
+        output_path.join("VISA.csv")
     };
     println!(
         "{}",
@@ -401,7 +401,7 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
         }) {
         output_path.with_extension("xlsx")
     } else {
-        output_path.join("visa.xlsx")
+        output_path.join("VISA.xlsx")
     };
     println!(
         "{}",
@@ -418,7 +418,6 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     worksheet.serialize(&items)?;
     worksheet.autofit();
 
-    let output_file = output_path.join("visa.xlsx");
     workbook.save(output_file)?;
     Ok(())
 }
