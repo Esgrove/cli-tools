@@ -178,9 +178,39 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
 
     let items = parse_files(files, verbose)?;
     println!("Found {} items in total", items.len());
+    print_totals(&items);
     write_to_csv(&items, &output)?;
 
     Ok(())
+}
+
+fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
+    let mut result: Vec<VisaItem> = Vec::new();
+    let digits = if files.len() < 10 {
+        1
+    } else {
+        ((files.len() as f64).log10() as usize) + 1
+    };
+    for (number, file) in files.iter().enumerate() {
+        if verbose {
+            println!(
+                "{:>0width$}: {}",
+                number + 1,
+                file.display(),
+                width = digits
+            );
+        }
+        let raw_lines = read_xml_file(file);
+        let items = extract_items(raw_lines);
+        if verbose {
+            for item in &items {
+                println!("{}", item);
+            }
+        }
+        result.extend(items);
+    }
+    result.sort();
+    Ok(result)
 }
 
 /// Convert Finnish currency value string to float
@@ -232,6 +262,15 @@ fn format_name(text: &str) -> String {
     name = name.trim().to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").to_string();
     name
+}
+
+fn print_totals(items: &[VisaItem]) {
+    let total_sum: f64 = items.iter().map(|item| item.sum).sum();
+    let count = items.len() as f64;
+    let average = if count > 0.0 { total_sum / count } else { 0.0 };
+
+    println!("Sum: {:.2}€", total_sum);
+    println!("Average: {:.2}€", average);
 }
 
 fn clean_whitespaces(text: &str) -> String {
@@ -353,35 +392,6 @@ fn extract_items(rows: Vec<String>) -> Vec<VisaItem> {
     result
 }
 
-fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
-    let mut result: Vec<VisaItem> = Vec::new();
-    let digits = if files.len() < 10 {
-        1
-    } else {
-        ((files.len() as f64).log10() as usize) + 1
-    };
-    for (number, file) in files.iter().enumerate() {
-        if verbose {
-            println!(
-                "{:>0width$}: {}",
-                number + 1,
-                file.display(),
-                width = digits
-            );
-        }
-        let raw_lines = read_xml_file(file);
-        let items = extract_items(raw_lines);
-        if verbose {
-            for item in &items {
-                println!("{}", item);
-            }
-        }
-        result.extend(items);
-    }
-    result.sort();
-    Ok(result)
-}
-
 fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let output_file = if output_path
         .extension()
@@ -395,7 +405,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     println!(
         "{}",
         format!("Writing data to {}", output_file.display())
-            .magenta()
+            .green()
             .bold()
     );
     let mut file = File::create(output_file)?;
