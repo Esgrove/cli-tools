@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Esgrove <esgrove@outlook.com>"]
 license = "MIT"
@@ -14,16 +14,18 @@ anyhow = "1.0.79"
 chrono = "0.4.33"
 clap = { version = "4.4.18", features = ["derive"] }
 colored = "2.1.0"
-csv = "1.3.0"
 lazy_static = "1.4.0"
 regex = "1.10.3"
-rust_xlsxwriter = { version = "0.62.0", features = ["chrono"] }
 serde = { version = "1.0.196", features = ["derive"] }
 walkdir = "2.4.0"
 
 [[bin]]
 name = "dots"
 path = "src/bin/dots.rs"
+
+[[bin]]
+name = "visaparse"
+path = "src/bin/visa_parse.rs"
 
 [profile.dev]
 incremental = true
