@@ -1,7 +1,5 @@
 extern crate colored;
 
-use cli_tools::is_hidden;
-
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
@@ -35,25 +33,19 @@ struct Args {
     verbose: bool,
 }
 
-fn replace_whitespaces<P: Into<PathBuf>>(
-    path: P,
-    dryrun: bool,
-    overwrite: bool,
-    verbose: bool,
-) -> Result<()> {
-    let path = path.into();
+fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bool) -> Result<()> {
     if verbose {
         println!(
             "{}",
-            format!("Formatting files under {}", path.display()).bold()
+            format!("Formatting files under {}", root.display()).bold()
         )
     }
 
     // Collect all files that need renaming
     let mut files_to_rename: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for entry in WalkDir::new(path)
+    for entry in WalkDir::new(&root)
         .into_iter()
-        .filter_entry(|e| !is_hidden(e))
+        .filter_entry(|e| !cli_tools::is_hidden(e))
         .filter_map(|e| e.ok())
     {
         let path = entry.path().to_path_buf();
@@ -75,28 +67,26 @@ fn replace_whitespaces<P: Into<PathBuf>>(
 
     let mut num_renamed: usize = 0;
     for (path, new_path) in files_to_rename {
+        let old_str = cli_tools::get_relative_path_or_filename(&path, &root);
+        let new_str = cli_tools::get_relative_path_or_filename(&new_path, &root);
         if dryrun {
             println!("{}", "Dryrun:".bold());
-            println!("{}\n{}", path.display(), new_path.display());
+            println!("{old_str}\n{new_str}");
             num_renamed += 1;
         } else if new_path.exists() && !overwrite {
             println!(
                 "{}",
-                format!(
-                    "Skipping rename to already existing file: {}",
-                    new_path.display()
-                )
-                .yellow()
+                format!("Skipping rename to already existing file: {new_str}").yellow()
             )
         } else {
             match fs::rename(&path, &new_path) {
                 Ok(_) => {
                     println!("{}", "Rename:".bold().magenta());
-                    println!("{}\n{}", path.display(), new_path.display());
+                    println!("{old_str}\n{new_str}");
                     num_renamed += 1;
                 }
                 Err(e) => {
-                    eprintln!("{}", format!("Error renaming {:?}: {}", path, e).red());
+                    eprintln!("{}", format!("Error renaming {old_str}: {e}").red());
                 }
             }
         }
