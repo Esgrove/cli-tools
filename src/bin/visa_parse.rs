@@ -62,13 +62,23 @@ struct VisaItem {
     sum: f64,
 }
 
+impl VisaItem {
+    pub fn finnish_sum(&self) -> String {
+        format!("{:.2}", self.sum).replace('.', ",")
+    }
+
+    pub fn finnish_date(&self) -> String {
+        self.date.format("%Y.%m.%d").to_string()
+    }
+}
+
 impl fmt::Display for VisaItem {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{}   {:>7.2}€   {}",
-            self.date.format("%Y.%m.%d"),
-            self.sum,
+            "{}   {:>7}€   {}",
+            self.finnish_date(),
+            self.finnish_sum(),
             self.name
         )
     }
@@ -99,13 +109,9 @@ impl Serialize for VisaItem {
     {
         let mut state = serializer.serialize_struct("VisaItem", 3)?;
 
-        let formatted_date = self.date.format("%Y.%m.%d").to_string();
-        state.serialize_field("Date", &formatted_date)?;
-
+        state.serialize_field("Date", &self.finnish_date())?;
         state.serialize_field("Name", &self.name)?;
-
-        let formatted_sum = format!("{:.2}", self.sum).replace('.', ",");
-        state.serialize_field("Sum", &formatted_sum)?;
+        state.serialize_field("Sum", &self.finnish_sum())?;
 
         state.end()
     }
@@ -392,7 +398,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let mut file = File::create(output_file)?;
     writeln!(file, "Date,Sum,Name")?;
     for item in items {
-        writeln!(file, "{},{:.2}€,{}", item.date.format("%Y.%m.%d"), item.sum, item.name)?;
+        writeln!(file, "{},{:.2},{}", item.finnish_date(), item.sum, item.name)?;
     }
     Ok(())
 }
