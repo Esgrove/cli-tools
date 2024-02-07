@@ -13,7 +13,7 @@ if [ -z "$(command -v cargo)" ]; then
 fi
 
 print_magenta "Installing binaries..."
-cargo install --path "$REPO_ROOT"
+cargo install --force --path "$REPO_ROOT"
 echo ""
 
 executables=$(get_rust_executable_names)

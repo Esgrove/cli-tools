@@ -23,7 +23,13 @@ lazy_static! {
 }
 
 #[derive(Parser)]
-#[command(author, version, about, long_about, arg_required_else_help = true)]
+#[command(
+    author,
+    version,
+    arg_required_else_help = true,
+    name = "flip-date",
+    about = "Flip dates in file and directory names to start with year"
+)]
 struct Args {
     /// Input directory or file
     path: String,
