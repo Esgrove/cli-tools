@@ -98,7 +98,7 @@ struct Args {
     #[arg(short, long, name = "OUTPUT_PATH")]
     output: Option<String>,
 
-    /// Only print items, don't write to file
+    /// Only print info without writing to file
     #[arg(short, long)]
     print: bool,
 
