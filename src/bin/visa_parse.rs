@@ -486,8 +486,8 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
     dj.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
     let mut row: usize = 1;
-    // Filter out common non-DJ items
     for item in items.iter() {
+        // Filter out common non-DJ items
         if FILTER_PREFIXES.iter().any(|&prefix| item.name.starts_with(prefix)) {
             continue;
         }
