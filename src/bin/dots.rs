@@ -9,10 +9,10 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(author, version, name = "dots", about = "Replace whitespaces with dots in filenames")]
+#[command(author, version, name = "dots", about = "Replace whitespaces in filenames with dots")]
 struct Args {
-    /// Optional input directory or file
-    input_dir: String,
+    /// Input directory or file
+    path: String,
 
     /// Overwrite existing files
     #[arg(short, long)]
@@ -29,7 +29,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let input_path = cli_tools::resolve_input_path(&args.input_dir)?;
+    let input_path = cli_tools::resolve_input_path(&args.path)?;
     replace_whitespaces(input_path, args.print, args.force, args.verbose)
 }
 

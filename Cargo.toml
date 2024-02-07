@@ -26,12 +26,12 @@ name = "dots"
 path = "src/bin/dots.rs"
 
 [[bin]]
-name = "visaparse"
-path = "src/bin/visa_parse.rs"
-
-[[bin]]
 name = "flipdate"
 path = "src/bin/flip_date.rs"
+
+[[bin]]
+name = "visaparse"
+path = "src/bin/visa_parse.rs"
 
 [profile.dev]
 incremental = true
