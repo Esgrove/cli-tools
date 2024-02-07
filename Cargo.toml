@@ -1,8 +1,9 @@
 [package]
 name = "cli-tools"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Esgrove <esgrove@outlook.com>"]
+description = "A collection of CLI utilities."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Esgrove/cli-tools"
@@ -27,6 +28,10 @@ path = "src/bin/dots.rs"
 [[bin]]
 name = "visaparse"
 path = "src/bin/visa_parse.rs"
+
+[[bin]]
+name = "flipdate"
+path = "src/bin/flip_date.rs"
 
 [profile.dev]
 incremental = true

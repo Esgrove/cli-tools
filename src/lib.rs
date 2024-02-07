@@ -12,7 +12,7 @@ pub fn is_hidden(entry: &DirEntry) -> bool {
 pub fn resolve_input_path(path: &str) -> anyhow::Result<PathBuf> {
     let input_path = path.trim();
     if input_path.is_empty() {
-        anyhow::bail!("empty input path");
+        anyhow::bail!("Empty input path");
     }
     let filepath = Path::new(input_path);
     if !filepath.exists() {
