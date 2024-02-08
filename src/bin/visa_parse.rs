@@ -265,7 +265,7 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
     };
 
     let reader = BufReader::new(xml_file);
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if let Some(caps) = RE_START_DATE.captures(&line) {
             if let Some(matched) = caps.get(1) {
                 match matched.as_str().parse::<i32>() {
