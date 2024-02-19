@@ -10,15 +10,16 @@ export REPO_ROOT
 # have some differences for example in the available command line options.
 case "$(uname -s)" in
     "Darwin")
-        export PLATFORM="mac"
+        export BASH_PLATFORM="mac"
         ;;
     "MINGW"*)
-        export PLATFORM="windows"
+        export BASH_PLATFORM="windows"
         ;;
     *)
-        export PLATFORM="linux"
+        export BASH_PLATFORM="linux"
         ;;
 esac
+export BASH_PLATFORM
 
 # Print a message with green color
 print_green() {
@@ -65,8 +66,18 @@ print_usage_and_exit() {
 get_rust_executable_names() {
     local executables
     executables=$(awk -F'=' '/\[\[bin\]\]/,/name/ {if($1 ~ /name/) print $2}' Cargo.toml | tr -d ' "')
-    if [ "$PLATFORM" = "windows" ]; then
+    if [ "$BASH_PLATFORM" = "windows" ]; then
         executables=$(echo "$executables" | sed 's/$/.exe/')
     fi
     echo "$executables"
+}
+
+# if DRYRUN or DRY_RUN has been set, only print commands instead of running them
+run_command() {
+    if [ "$DRY_RUN" = true ] || [ "$DRYRUN" = true ]; then
+        echo "DRYRUN: $*"
+    else
+        echo "Running: $*"
+        "$@"
+    fi
 }
