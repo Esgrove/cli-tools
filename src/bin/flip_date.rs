@@ -26,13 +26,12 @@ lazy_static! {
 #[command(
     author,
     version,
-    arg_required_else_help = true,
     name = "flip-date",
     about = "Flip dates in file and directory names to start with year"
 )]
 struct Args {
-    /// Input directory or file
-    path: String,
+    /// Optional input directory or file
+    path: Option<String>,
 
     /// Use directory rename mode
     #[arg(short, long)]
@@ -56,7 +55,7 @@ struct RenameItem {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let path = cli_tools::resolve_input_path(&args.path)?;
+    let path = cli_tools::resolve_input_path(args.path)?;
     if args.dir {
         date_flip_directories(path, args.recursive, args.print)
     } else {

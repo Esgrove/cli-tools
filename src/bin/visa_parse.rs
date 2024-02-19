@@ -16,7 +16,6 @@ use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::io::{BufRead, BufReader};
-
 use std::path::{Path, PathBuf};
 
 // Static variables that are initialized at runtime the first time they are accessed.
@@ -91,8 +90,8 @@ lazy_static! {
 #[derive(Parser, Debug)]
 #[command(author, version, name = "visa-parse", about = "Parse credit card Finvoice XML files")]
 struct Args {
-    /// Input directory or XML file path
-    path: String,
+    /// Optional input directory or XML file path
+    path: Option<String>,
 
     /// Optional output path (default is same as input dir)
     #[arg(short, long, name = "OUTPUT_PATH")]
@@ -172,7 +171,7 @@ impl Serialize for VisaItem {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let input_path = cli_tools::resolve_input_path(&args.path)?;
+    let input_path = cli_tools::resolve_input_path(args.path)?;
     let output_path = cli_tools::resolve_output_path(args.output, &input_path)?;
     visa_parse(input_path, output_path, args.verbose, args.print)
 }

@@ -11,8 +11,8 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(author, version, name = "dots", about = "Replace whitespaces in filenames with dots")]
 struct Args {
-    /// Input directory or file
-    path: String,
+    /// Optional input directory or file
+    path: Option<String>,
 
     /// Overwrite existing files
     #[arg(short, long)]
@@ -29,7 +29,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let input_path = cli_tools::resolve_input_path(&args.path)?;
+    let input_path = cli_tools::resolve_input_path(args.path)?;
     replace_whitespaces(input_path, args.print, args.force, args.verbose)
 }
 
