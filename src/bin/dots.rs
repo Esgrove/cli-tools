@@ -3,9 +3,9 @@ extern crate colored;
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
-use walkdir::WalkDir;
 use lazy_static::lazy_static;
 use regex::Regex;
+use walkdir::WalkDir;
 
 use std::fs;
 use std::path::PathBuf;
@@ -104,8 +104,8 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
 }
 
 fn format_name(file_name: &str) -> String {
-    let new_file_name = file_name.replace(" - ", " ").replace(' ', ".").replace("_", ".");
-    let new_file_name = RE_BRACKETS.replace_all(&*new_file_name, "").trim().to_string();
+    let new_file_name = file_name.replace(" - ", " ").replace([' ', '_'], ".");
+    let new_file_name = RE_BRACKETS.replace_all(&new_file_name, "").trim().to_string();
     new_file_name
 }
 
@@ -125,7 +125,10 @@ mod tests {
 
     #[test]
     fn test_format_name_with_brackets() {
-        assert_eq!(format_name("Project Report - [Final Version]"), "Project.Report.Final.Version");
+        assert_eq!(
+            format_name("Project Report - [Final Version]"),
+            "Project.Report.Final.Version"
+        );
     }
 
     #[test]
