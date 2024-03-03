@@ -4,9 +4,15 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use walkdir::WalkDir;
+use lazy_static::lazy_static;
+use regex::Regex;
 
 use std::fs;
 use std::path::PathBuf;
+
+lazy_static! {
+    static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").unwrap();
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, name = "dots", about = "Replace whitespaces in filenames with dots")]
@@ -48,9 +54,9 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
         let path = entry.path().to_path_buf();
         if path.is_file() {
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name.contains(' ') && !file_name.contains(" - ") {
-                    let new_file_name = file_name.replace(' ', ".");
-                    let new_path = path.with_file_name(new_file_name);
+                let new_file_name = format_name(file_name);
+                let new_path = path.with_file_name(new_file_name);
+                if path != new_path {
                     files_to_rename.push((path, new_path));
                 }
             }
@@ -68,7 +74,7 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
         let new_str = cli_tools::get_relative_path_or_filename(&new_path, &root);
         if dryrun {
             println!("{}", "Dryrun:".bold());
-            println!("{old_str}\n{new_str}");
+            cli_tools::show_diff(&old_str, &new_str);
             num_renamed += 1;
         } else if new_path.exists() && !overwrite {
             println!(
@@ -79,11 +85,11 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
             match fs::rename(&path, &new_path) {
                 Ok(_) => {
                     println!("{}", "Rename:".bold().magenta());
-                    println!("{old_str}\n{new_str}");
+                    cli_tools::show_diff(&old_str, &new_str);
                     num_renamed += 1;
                 }
                 Err(e) => {
-                    eprintln!("{}", format!("Error renaming {old_str}: {e}").red());
+                    eprintln!("{}", format!("Error renaming: {old_str}\n{e}").red());
                 }
             }
         }
@@ -95,4 +101,45 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
         println!("{}", format!("Renamed {} files", num_renamed).green());
     }
     Ok(())
+}
+
+fn format_name(file_name: &str) -> String {
+    let new_file_name = file_name.replace(" - ", " ").replace(' ', ".").replace("_", ".");
+    let new_file_name = RE_BRACKETS.replace_all(&*new_file_name, "").trim().to_string();
+    new_file_name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_basic() {
+        assert_eq!(format_name("Some file.txt"), "Some.file.txt");
+    }
+
+    #[test]
+    fn test_format_name_no_brackets() {
+        assert_eq!(format_name("John Doe - Document"), "John.Doe.Document");
+    }
+
+    #[test]
+    fn test_format_name_with_brackets() {
+        assert_eq!(format_name("Project Report - [Final Version]"), "Project.Report.Final.Version");
+    }
+
+    #[test]
+    fn test_format_name_with_parentheses() {
+        assert_eq!(format_name("Meeting Notes (2023) - Draft"), "Meeting.Notes.2023.Draft");
+    }
+
+    #[test]
+    fn test_format_name_empty_string() {
+        assert_eq!(format_name(""), "");
+    }
+
+    #[test]
+    fn test_format_name_no_changes() {
+        assert_eq!(format_name("SingleWord"), "SingleWord");
+    }
 }

@@ -1,8 +1,10 @@
 use anyhow::Context;
 use walkdir::DirEntry;
+use difference::{Changeset, Difference};
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
+use colored::Colorize;
 
 /// Check if entry is a hidden file or directory (starts with '.')
 pub fn is_hidden(entry: &DirEntry) -> bool {
@@ -54,3 +56,36 @@ pub fn get_relative_path_or_filename(full_path: &Path, root: &Path) -> String {
         },
     }
 }
+
+/// Print a stacked diff of the changes.
+pub fn show_diff(old: &str, new: &str) {
+        let changeset = Changeset::new(old, new, "");
+        let mut old_diff = String::new();
+        let mut new_diff = String::new();
+
+        for diff in changeset.diffs {
+            match diff {
+                Difference::Same(ref x) => {
+                    old_diff.push_str(x);
+                    new_diff.push_str(x);
+                }
+                Difference::Add(ref x) => {
+                    if x.chars().all(char::is_whitespace) {
+                        new_diff.push_str(&x.to_string().on_green().to_string());
+                    } else {
+                        new_diff.push_str(&x.to_string().green().to_string());
+                    }
+                }
+                Difference::Rem(ref x) => {
+                    if x.chars().all(char::is_whitespace) {
+                        old_diff.push_str(&x.to_string().on_red().to_string());
+                    } else {
+                        old_diff.push_str(&x.to_string().red().to_string());
+                    }
+                }
+            }
+        }
+
+        println!("{}", old_diff);
+        println!("{}", new_diff);
+    }
