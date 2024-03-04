@@ -142,13 +142,12 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> R
     }
 
     let items = parse_files(files, verbose)?;
-    println!("Found {} items in total", items.len());
     let totals = calculate_totals_for_each_name(&items);
-    print_totals(&items, &totals, verbose);
+    print_statistics(&items, &totals, verbose);
 
     if !dryrun {
         write_to_csv(&items, &output)?;
-        write_to_excel(&items, &output)?;
+        write_to_excel(&items, &totals, &output)?;
     }
 
     Ok(())
@@ -214,6 +213,7 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
         }
     }
     result.sort();
+    println!("Found {} items in total", result.len());
     Ok(result)
 }
 
@@ -378,8 +378,8 @@ fn format_sum(value: &str) -> Result<f64> {
         .context(format!("Failed to parse sum as float: {}", value))
 }
 
-/// Print item totals.
-fn print_totals(items: &[VisaItem], totals: &[(String, f64)], verbose: bool) {
+/// Print item totals and some statistics.
+fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], verbose: bool) {
     let total_sum: f64 = items.iter().map(|item| item.sum).sum();
     let count = items.len() as f64;
     let average = if count > 0.0 { total_sum / count } else { 0.0 };
@@ -455,7 +455,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
 }
 
 /// Save parsed data to an Excel file.
-fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
+fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Path) -> Result<()> {
     let output_file = if output_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -502,9 +502,8 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let totals_sheet = workbook.add_worksheet().set_name("TOTALS")?;
     totals_sheet.write_string_with_format(0, 0, "Name", &header_format)?;
     totals_sheet.write_string_with_format(0, 1, "Total sum", &header_format)?;
-    let totals = calculate_totals_for_each_name(items);
     row = 1;
-    for (name, sum) in totals.into_iter() {
+    for (name, sum) in totals.iter() {
         totals_sheet.write_string(row as RowNum, 0, name)?;
         totals_sheet.write_string_with_format(
             row as RowNum,
