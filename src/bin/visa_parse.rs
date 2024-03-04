@@ -335,7 +335,7 @@ fn clean_whitespaces(text: &str) -> String {
         .to_string()
 }
 
-/// Format item names.
+/// Format item names to consistent style.
 fn format_name(text: &str) -> String {
     let mut name = text.replace("Osto ", "").replace(['*', '/', '_'], " ");
 
@@ -350,19 +350,17 @@ fn format_name(text: &str) -> String {
     name = RE_BRACKETS.replace_all(&name, "").to_string();
     name = name.to_uppercase();
     name = name
-        .replace("VFI*", "")
         .replace("VFI ", "")
         .replace(" DRI ", "")
         .replace(" . ", " ")
         .replace(" - ", " ")
         .replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
 
-    name = name.trim().to_string();
-    name = RE_WHITESPACE.replace_all(&name, " ").to_string();
-
+    name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
     name = replace_from_start(&name, "CHF ", "");
     name = replace_from_start(&name, "CHF", "");
     name = replace_from_start(&name, "WWW.", "");
+    name = replace_from_start(&name, "MOB.PAY ", "MOBILEPAY");
 
     if name.starts_with("PAYPAL PATREON") {
         name = "PAYPAL PATREON".to_string();
