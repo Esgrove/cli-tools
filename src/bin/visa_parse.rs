@@ -31,10 +31,11 @@ lazy_static! {
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
     // Replace each pattern with given substitute
-    static ref REPLACE_PAIRS: [(&'static str, &'static str); 10] = [
+    static ref REPLACE_PAIRS: [(&'static str, &'static str); 11] = [
         ( "4029357733", ""),
         (" - ", " "),
         (" . ", " "),
+        (", ", " "),
         (" 35314369001", ""),
         (" 402-935-7733", ""),
         (" DRI ", ""),
@@ -51,7 +52,7 @@ lazy_static! {
         "PAYPAL MISTERB",
         "PAYPAL PATREON",
     ];
-    static ref FILTER_PREFIXES: [&'static str; 71] = [
+    static ref FILTER_PREFIXES: [&'static str; 72] = [
         "1BAR",
         "45 SPECIAL",
         "ALEPA",
@@ -94,6 +95,7 @@ lazy_static! {
         "MAKIA CLOTHING",
         "MCD ",
         "MCDONALD",
+        "MOBILEPAY HELSINGIN SEUDUN",
         "MONOMESTA",
         "MUJI",
         "PAYPAL EPIC GAMES",
@@ -356,7 +358,6 @@ fn calculate_totals_for_each_name(items: &[VisaItem]) -> Vec<(String, f64)> {
         *totals.entry(item.name.clone()).or_insert(0.0) += item.sum;
     }
     let mut totals_vec: Vec<(String, f64)> = totals.into_iter().collect();
-
     // Sort the vector in descending order based on the sum
     totals_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
     totals_vec
