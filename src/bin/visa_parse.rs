@@ -540,7 +540,7 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
         totals_sheet.write_string(row as RowNum, 0, name)?;
         totals_sheet.write_string_with_format(
             row as RowNum,
-            2,
+            1,
             format!("{:.2}", sum).replace('.', ","),
             &sum_format,
         )?;
