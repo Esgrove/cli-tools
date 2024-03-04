@@ -7,7 +7,7 @@ use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Parser;
 use colored::Colorize;
@@ -138,13 +138,13 @@ fn main() -> Result<()> {
 
 /// Parse data from files and write formatted items to CSV and Excel.
 fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> Result<()> {
-    let files = get_file_list(&input);
+    let (root, files) = get_file_list(&input)?;
     if files.is_empty() {
         anyhow::bail!("No XML files to parse".red());
     }
 
     let num_files = files.len();
-    let items = parse_files(files, verbose)?;
+    let items = parse_files(&root, files, verbose)?;
     let totals = calculate_totals_for_each_name(&items);
     print_statistics(&items, &totals, num_files, verbose);
 
@@ -156,21 +156,22 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> R
     Ok(())
 }
 
-/// Return list of files from the input path that can be either a directory or single file.
-fn get_file_list(input: &PathBuf) -> Vec<PathBuf> {
+/// Return file root and list of files from the input path that can be either a directory or single file.
+fn get_file_list(input: &PathBuf) -> Result<(PathBuf, Vec<PathBuf>)> {
     if input.is_file() {
         println!("{}", format!("Parsing file: {}", input.display()).bold().magenta());
         if input.extension() == Some(OsStr::new("xml")) {
-            vec![input.clone()]
+            let parent = input.parent().context("Failed to get parent directory")?.to_path_buf();
+            Ok((parent, vec![input.clone()]))
         } else {
-            Vec::new()
+            Err(anyhow!("Input path is not an XML file: {}", input.display()))
         }
     } else {
         println!(
             "{}",
             format!("Parsing files from: {}", input.display()).bold().magenta()
         );
-        get_xml_files(input)
+        Ok((input.to_path_buf(), get_xml_files(input)))
     }
 }
 
@@ -193,7 +194,7 @@ fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
 }
 
 /// Parse raw XML files.
-fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
+fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     let mut result: Vec<VisaItem> = Vec::new();
     let digits = if files.len() < 10 {
         1
@@ -201,7 +202,12 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
         ((files.len() as f64).log10() as usize) + 1
     };
     for (number, file) in files.iter().enumerate() {
-        println!("{:>0width$}: {}", number + 1, file.display(), width = digits);
+        println!(
+            "{:>0width$}: {}",
+            number + 1,
+            cli_tools::get_relative_path_or_filename(file, root),
+            width = digits
+        );
         let (raw_lines, year) = read_xml_file(file);
         let items = extract_items(&raw_lines, year);
         if verbose {
@@ -217,7 +223,7 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     }
     result.sort();
     println!(
-        "Found {} items in total from {}",
+        "Found {} items from {}",
         result.len(),
         if files.len() > 1 {
             format!("{} files", files.len())
@@ -456,7 +462,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     };
     println!(
         "{}",
-        format!("Writing data to CSV: {}", output_file.display()).green().bold()
+        format!("Writing data to CSV:   {}", output_file.display()).green()
     );
     if output_file.exists() {
         if let Err(e) = std::fs::remove_file(&output_file) {
@@ -485,9 +491,7 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     };
     println!(
         "{}",
-        format!("Writing data to Excel: {}", output_file.display())
-            .green()
-            .bold()
+        format!("Writing data to Excel: {}", output_file.display()).green()
     );
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet().set_name("VISA")?;
