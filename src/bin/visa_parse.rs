@@ -1,4 +1,10 @@
-extern crate colored;
+use std::cmp::Ordering;
+use std::ffi::OsStr;
+use std::fmt;
+use std::fs::File;
+use std::io::Write;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
@@ -9,14 +15,6 @@ use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, RowNum, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use walkdir::WalkDir;
-
-use std::cmp::Ordering;
-use std::ffi::OsStr;
-use std::fmt;
-use std::fs::File;
-use std::io::Write;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
 
 // Static variables that are initialized at runtime the first time they are accessed.
 lazy_static! {
@@ -32,7 +30,7 @@ lazy_static! {
     static ref RE_SPECIFICATION_FREE_TEXT: Regex =
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
-    static ref FILTER_PREFIXES: [&'static str; 51] = [
+    static ref FILTER_PREFIXES: [&'static str; 60] = [
         "1BAR",
         "45 SPECIAL",
         "ALEPA",
@@ -50,19 +48,24 @@ lazy_static! {
         "FAZER RAVINTOLAT",
         "FINNAIR",
         "FINNKINO",
+        "FISKARS FINLAND",
         "FLOW FESTIVAL ",
+        "HANKI BAARI",
         "HENRY'S PUB",
+        "HESBURGER",
         "HOTEL ",
         "IPA GROUP",
         "K-MARKET",
         "K-RAUTA",
         "KAIKU HELSINKI",
         "KAMPIN ",
+        "KULTTUURITALO",
         "KUUDESLINJA",
         "LA TORREFAZIONE",
         "LUNDIA",
         "MCD ",
         "MCDONALD",
+        "MONOMESTA",
         "MUJI",
         "PAYPAL EPIC GAMES",
         "PAYPAL LEVISTRAUSS",
@@ -72,10 +75,14 @@ lazy_static! {
         "PAYPAL STEAM GAMES",
         "PISTE SKI LODGE",
         "RAVINTOLA",
+        "RIIPISEN RIISTA",
         "RIVIERA",
+        "RUKAHUOLTO",
+        "RUKAN CAMP",
         "RUKASTORE",
         "S-MARKET",
         "SEISKATUUMA",
+        "SKI BISTRO",
         "SMARTUM",
         "SOOSIKAUPPA",
         "SP TOPPED",
@@ -88,16 +95,21 @@ lazy_static! {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, name = "visa-parse", about = "Parse credit card Finvoice XML files")]
+#[command(
+    author,
+    version,
+    name = "visa-parse",
+    about = "Parse Finvoice XML credit card statement files"
+)]
 struct Args {
     /// Optional input directory or XML file path
     path: Option<String>,
 
-    /// Optional output path (default is same as input dir)
+    /// Optional output path (default is the input directory)
     #[arg(short, long, name = "OUTPUT_PATH")]
     output: Option<String>,
 
-    /// Only print info without writing to file
+    /// Only print information without writing to file
     #[arg(short, long)]
     print: bool,
 
@@ -106,67 +118,12 @@ struct Args {
     verbose: bool,
 }
 
-/// One credit card purchase.
+/// Represents one credit card purchase.
 #[derive(Debug, Clone, PartialEq)]
 struct VisaItem {
     date: NaiveDate,
     name: String,
     sum: f64,
-}
-
-impl VisaItem {
-    pub fn finnish_sum(&self) -> String {
-        format!("{:.2}", self.sum).replace('.', ",")
-    }
-
-    pub fn finnish_date(&self) -> String {
-        self.date.format("%Y.%m.%d").to_string()
-    }
-}
-
-impl fmt::Display for VisaItem {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}   {:>7}€   {}",
-            self.finnish_date(),
-            self.finnish_sum(),
-            self.name
-        )
-    }
-}
-
-// f64 does not have Eq so this way it uses PartialEq
-impl Eq for VisaItem {}
-
-impl PartialOrd for VisaItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for VisaItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.date
-            .cmp(&other.date)
-            .then_with(|| self.name.cmp(&other.name))
-            .then_with(|| self.sum.partial_cmp(&other.sum).unwrap_or(Ordering::Equal))
-    }
-}
-
-impl Serialize for VisaItem {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("VisaItem", 3)?;
-
-        state.serialize_field("Date", &self.finnish_date())?;
-        state.serialize_field("Name", &self.name)?;
-        state.serialize_field("Sum", &self.finnish_sum())?;
-
-        state.end()
-    }
 }
 
 fn main() -> Result<()> {
@@ -176,22 +133,9 @@ fn main() -> Result<()> {
     visa_parse(input_path, output_path, args.verbose, args.print)
 }
 
+/// Parse data from files and write formatted items to CSV and Excel.
 fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> Result<()> {
-    let files = if input.is_file() {
-        println!("{}", format!("Parsing file: {}", input.display()).bold().magenta());
-        if input.extension() == Some(OsStr::new("xml")) {
-            vec![input.clone()]
-        } else {
-            Vec::new()
-        }
-    } else {
-        println!(
-            "{}",
-            format!("Parsing files from: {}", input.display()).bold().magenta()
-        );
-        get_xml_files(&input)
-    };
-
+    let files = get_file_list(&input);
     if files.is_empty() {
         anyhow::bail!("No XML files to parse".red());
     }
@@ -208,6 +152,25 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> R
     Ok(())
 }
 
+/// Return list of files from the input path that can be either a directory or single file.
+fn get_file_list(input: &PathBuf) -> Vec<PathBuf> {
+    if input.is_file() {
+        println!("{}", format!("Parsing file: {}", input.display()).bold().magenta());
+        if input.extension() == Some(OsStr::new("xml")) {
+            vec![input.clone()]
+        } else {
+            Vec::new()
+        }
+    } else {
+        println!(
+            "{}",
+            format!("Parsing files from: {}", input.display()).bold().magenta()
+        );
+        get_xml_files(input)
+    }
+}
+
+/// Collect all XML files recursively from the given root path.
 fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
@@ -225,6 +188,7 @@ fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
     files
 }
 
+/// Parse raw XML files.
 fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     let mut result: Vec<VisaItem> = Vec::new();
     let digits = if files.len() < 10 {
@@ -329,16 +293,17 @@ fn extract_items(rows: &[String], year: i32) -> Vec<VisaItem> {
             eprintln!("{}", format!("Failed to parse date: {}", date_str).red())
         }
     }
-
     result
 }
 
+/// Remove extra whitespaces and separators.
 fn clean_whitespaces(text: &str) -> String {
     RE_WHITESPACE
         .replace_all(RE_SEPARATORS.replace_all(text, " ").as_ref(), " ")
         .to_string()
 }
 
+/// Format item names.
 fn format_name(text: &str) -> String {
     let mut name = text.replace("Osto ", "").replace(['*', '/', '_'], " ");
 
@@ -364,8 +329,6 @@ fn format_name(text: &str) -> String {
     name = replace_from_start(&name, "CHF ", "");
     name = replace_from_start(&name, "CHF", "");
     name = replace_from_start(&name, "WWW.", "");
-    name = replace_from_start(&name, "CHF", "");
-    name = replace_from_start(&name, "CHF", "");
 
     if name.starts_with("PAYPAL PATREON") {
         name = "PAYPAL PATREON".to_string();
@@ -382,6 +345,7 @@ fn format_name(text: &str) -> String {
     name
 }
 
+/// Helper method to remove a given pattern from the start of a string.
 fn replace_from_start(name: &str, pattern: &str, replacement: &str) -> String {
     if name.starts_with(pattern) {
         name.replacen(pattern, replacement, 1)
@@ -390,7 +354,7 @@ fn replace_from_start(name: &str, pattern: &str, replacement: &str) -> String {
     }
 }
 
-/// Convert Finnish currency value string to float
+/// Convert Finnish currency value strings using a comma as the decimal separator to float.
 fn format_sum(value: &str) -> Result<f64> {
     value
         .trim()
@@ -399,6 +363,7 @@ fn format_sum(value: &str) -> Result<f64> {
         .context(format!("Failed to parse sum as float: {}", value))
 }
 
+/// Print item totals.
 fn print_totals(items: &[VisaItem]) {
     let total_sum: f64 = items.iter().map(|item| item.sum).sum();
     let count = items.len() as f64;
@@ -408,6 +373,7 @@ fn print_totals(items: &[VisaItem]) {
     println!("Average: {:.2}€", average);
 }
 
+/// Split item line to separate parts.
 fn split_item_text(input: &str) -> (String, String, String) {
     // Split the string at the first whitespace
     let mut parts = input.splitn(2, ' ');
@@ -419,6 +385,7 @@ fn split_item_text(input: &str) -> (String, String, String) {
     (first_part, second_part, third_part)
 }
 
+/// Split to two parts from the last whitespace character.
 fn split_from_last_whitespace(s: &str) -> (String, String) {
     let mut parts = s.rsplitn(2, char::is_whitespace);
     let after = parts.next().unwrap_or("").to_string();
@@ -455,6 +422,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Save parsed data to an Excel file.
 fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let output_file = if output_path
         .extension()
@@ -471,31 +439,31 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
         format!("Writing data to {}", output_file.display()).green().bold()
     );
     let mut workbook = Workbook::new();
-    let worksheet = workbook.add_worksheet().set_name("VISA")?;
+    let sheet = workbook.add_worksheet().set_name("VISA")?;
     let header_format = Format::new()
         .set_bold()
         .set_border(FormatBorder::Thin)
         .set_background_color("C6E0B4");
 
-    worksheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
-    worksheet.serialize(&items)?;
-    worksheet.autofit();
+    sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    sheet.serialize(&items)?;
+    sheet.autofit();
 
-    let dj = workbook.add_worksheet().set_name("DJ")?;
+    let dj_sheet = workbook.add_worksheet().set_name("DJ")?;
     let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
-    dj.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
     let mut row: usize = 1;
     for item in items.iter() {
         // Filter out common non-DJ items
         if FILTER_PREFIXES.iter().any(|&prefix| item.name.starts_with(prefix)) {
             continue;
         }
-        dj.write_string(row as RowNum, 0, item.finnish_date())?;
-        dj.write_string(row as RowNum, 1, item.name.clone())?;
-        dj.write_string_with_format(row as RowNum, 2, item.finnish_sum(), &sum_format)?;
+        dj_sheet.write_string(row as RowNum, 0, item.finnish_date())?;
+        dj_sheet.write_string(row as RowNum, 1, item.name.clone())?;
+        dj_sheet.write_string_with_format(row as RowNum, 2, item.finnish_sum(), &sum_format)?;
         row += 1;
     }
-    dj.autofit();
+    dj_sheet.autofit();
 
     if output_file.exists() {
         if let Err(e) = std::fs::remove_file(&output_file) {
@@ -504,6 +472,63 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     }
     workbook.save(output_file)?;
     Ok(())
+}
+
+impl VisaItem {
+    /// Float value formatted with a comma as the decimal separator.
+    pub fn finnish_sum(&self) -> String {
+        format!("{:.2}", self.sum).replace('.', ",")
+    }
+
+    /// Date in format "yyyy.mm.dd"
+    pub fn finnish_date(&self) -> String {
+        self.date.format("%Y.%m.%d").to_string()
+    }
+}
+
+impl fmt::Display for VisaItem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}   {:>7}€   {}",
+            self.finnish_date(),
+            self.finnish_sum(),
+            self.name
+        )
+    }
+}
+
+// f64 does not have Eq so this way it uses PartialEq
+impl Eq for VisaItem {}
+
+impl PartialOrd for VisaItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VisaItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.date
+            .cmp(&other.date)
+            .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| self.sum.partial_cmp(&other.sum).unwrap_or(Ordering::Equal))
+    }
+}
+
+impl Serialize for VisaItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("VisaItem", 3)?;
+
+        state.serialize_field("Date", &self.finnish_date())?;
+        state.serialize_field("Name", &self.name)?;
+        state.serialize_field("Sum", &self.finnish_sum())?;
+
+        state.end()
+    }
 }
 
 #[cfg(test)]
