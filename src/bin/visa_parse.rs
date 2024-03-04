@@ -20,11 +20,9 @@ use walkdir::WalkDir;
 // Static variables that are initialized at runtime the first time they are accessed.
 lazy_static! {
     static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets");
-    static ref RE_FINNAIR: Regex = Regex::new(r"(?i)finnair").expect("Failed to create regex pattern for Finnair");
     static ref RE_HTML_AND: Regex = Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html");
     static ref RE_SEPARATORS: Regex = Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators");
     static ref RE_WHITESPACE: Regex = Regex::new(r"\s{2,}").expect("Failed to create regex pattern for whitespace");
-    static ref RE_WOLT: Regex = Regex::new(r"(?i)wolt ").expect("Failed to create regex pattern for Wolt");
     static ref RE_ITEM_DATE: Regex =
         Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date");
     static ref RE_START_DATE: Regex = Regex::new(r#"<StartDate Format="CCYYMMDD">(\d{4})\d{4}</StartDate>"#)
@@ -32,7 +30,19 @@ lazy_static! {
     static ref RE_SPECIFICATION_FREE_TEXT: Regex =
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
-    // Replace names starting with these with just the prefix
+    // Replace each pattern with given substitute
+    static ref REPLACE_PAIRS: [(&'static str, &'static str); 9] = [
+        ("VFI ", ""),
+        (" - ", " "),
+        (" . ", " "),
+        (" 35314369001", ""),
+        (" 402-935-7733", ""),
+        (" DRI ", ""),
+        (" LEVISTRAUSS ", " LEVIS "),
+        (".COMFI", ".COM"),
+        ("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM"),
+    ];
+    // Replace names starting with these with just the prefix given here
     static ref REPLACE_WITH_START: [&'static str; 5] = [
         "PAYPAL BANDCAMP",
         "PAYPAL BEATPORT",
@@ -351,42 +361,34 @@ fn clean_whitespaces(text: &str) -> String {
 /// Format item names to consistent style.
 fn format_name(text: &str) -> String {
     let mut name = text.replace("Osto ", "").replace(['*', '/', '_'], " ");
-
-    if RE_FINNAIR.is_match(&name) {
-        name = "FINNAIR".to_string();
-    }
-    if RE_WOLT.is_match(&name) {
-        name = "WOLT".to_string();
-    }
-
     name = RE_HTML_AND.replace_all(&name, "&").to_string();
     name = RE_BRACKETS.replace_all(&name, "").to_string();
-    name = name.to_uppercase();
-    name = name
-        .replace("VFI ", "")
-        .replace(" DRI ", "")
-        .replace(" . ", " ")
-        .replace(" - ", " ")
-        .replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM")
-        .replace(" LEVISTRAUSS ", " LEVIS ")
-        .replace(".COMFI", ".COM")
-        .replace(" 35314369001", "")
-        .replace(" 402-935-7733", "");
-
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
-    name = replace_from_start(&name, "CHF ", "");
-    name = replace_from_start(&name, "CHF", "");
-    name = replace_from_start(&name, "WWW.", "");
-    name = replace_from_start(&name, "MOB.PAY ", "MOBILEPAY");
+    name = name.to_uppercase();
 
-    for prefix in REPLACE_WITH_START {
+    if name.contains("FINNAIR") {
+        name = "FINNAIR".to_string();
+    }
+    if name.contains("WOLT") {
+        name = "WOLT".to_string();
+    }
+    if name.contains("ITUNES.COM") {
+        name = "APPLE ITUNES".to_string();
+    }
+
+    for (pattern, replacement) in REPLACE_PAIRS.iter() {
+        name = name.replace(pattern, replacement);
+    }
+
+    replace_from_start(&mut name, "CHF ", "");
+    replace_from_start(&mut name, "CHF", "");
+    replace_from_start(&mut name, "WWW.", "");
+    replace_from_start(&mut name, "MOB.PAY", "MOBILEPAY");
+
+    for prefix in REPLACE_WITH_START.iter() {
         if name.starts_with(prefix) {
             name = prefix.to_string();
         }
-    }
-
-    if name.contains("ITUNES.COM") {
-        name = "APPLE ITUNES".to_string();
     }
 
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
@@ -394,11 +396,9 @@ fn format_name(text: &str) -> String {
 }
 
 /// Helper method to remove a given pattern from the start of a string.
-fn replace_from_start(name: &str, pattern: &str, replacement: &str) -> String {
+fn replace_from_start(name: &mut String, pattern: &str, replacement: &str) {
     if name.starts_with(pattern) {
-        name.replacen(pattern, replacement, 1)
-    } else {
-        name.to_string()
+        *name = name.replacen(pattern, replacement, 1)
     }
 }
 
