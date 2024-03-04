@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
@@ -142,7 +143,8 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> R
 
     let items = parse_files(files, verbose)?;
     println!("Found {} items in total", items.len());
-    print_totals(&items);
+    let totals = calculate_totals_for_each_name(&items);
+    print_totals(&items, &totals, verbose);
 
     if !dryrun {
         write_to_csv(&items, &output)?;
@@ -296,6 +298,19 @@ fn extract_items(rows: &[String], year: i32) -> Vec<VisaItem> {
     result
 }
 
+/// Calculate the total sum for each unique name and return sorted in descending order.
+fn calculate_totals_for_each_name(items: &[VisaItem]) -> Vec<(String, f64)> {
+    let mut totals: HashMap<String, f64> = HashMap::new();
+    for item in items {
+        *totals.entry(item.name.clone()).or_insert(0.0) += item.sum;
+    }
+    let mut totals_vec: Vec<(String, f64)> = totals.into_iter().collect();
+
+    // Sort the vector in descending order based on the sum
+    totals_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    totals_vec
+}
+
 /// Remove extra whitespaces and separators.
 fn clean_whitespaces(text: &str) -> String {
     RE_WHITESPACE
@@ -364,13 +379,30 @@ fn format_sum(value: &str) -> Result<f64> {
 }
 
 /// Print item totals.
-fn print_totals(items: &[VisaItem]) {
+fn print_totals(items: &[VisaItem], totals: &[(String, f64)], verbose: bool) {
     let total_sum: f64 = items.iter().map(|item| item.sum).sum();
     let count = items.len() as f64;
     let average = if count > 0.0 { total_sum / count } else { 0.0 };
 
+    println!("{}", "Statistics:".bold().magenta());
+    println!("Unique names: {}", totals.len());
     println!("Sum: {:.2}€", total_sum);
     println!("Average: {:.2}€", average);
+
+    if verbose {
+        let num_to_print: usize = 10;
+        let max_name_length = totals[..num_to_print]
+            .iter()
+            .map(|(name, _)| name.chars().count())
+            .max()
+            .unwrap_or(20);
+
+        println!("\n{}", format!("Top {num_to_print} totals:").bold());
+        for (name, sum) in totals[..num_to_print].iter() {
+            println!("{:width$} {:.2}", format!("{name}:"), sum, width = max_name_length);
+        }
+    }
+    println!();
 }
 
 /// Split item line to separate parts.
@@ -407,7 +439,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     };
     println!(
         "{}",
-        format!("Writing data to {}", output_file.display()).green().bold()
+        format!("Writing data to CSV: {}", output_file.display()).green().bold()
     );
     if output_file.exists() {
         if let Err(e) = std::fs::remove_file(&output_file) {
@@ -436,7 +468,9 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
     };
     println!(
         "{}",
-        format!("Writing data to {}", output_file.display()).green().bold()
+        format!("Writing data to Excel: {}", output_file.display())
+            .green()
+            .bold()
     );
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet().set_name("VISA")?;
@@ -464,6 +498,23 @@ fn write_to_excel(items: &[VisaItem], output_path: &Path) -> Result<()> {
         row += 1;
     }
     dj_sheet.autofit();
+
+    let totals_sheet = workbook.add_worksheet().set_name("TOTALS")?;
+    totals_sheet.write_string_with_format(0, 0, "Name", &header_format)?;
+    totals_sheet.write_string_with_format(0, 1, "Total sum", &header_format)?;
+    let totals = calculate_totals_for_each_name(items);
+    row = 1;
+    for (name, sum) in totals.into_iter() {
+        totals_sheet.write_string(row as RowNum, 0, name)?;
+        totals_sheet.write_string_with_format(
+            row as RowNum,
+            2,
+            format!("{:.2}", sum).replace('.', ","),
+            &sum_format,
+        )?;
+        row += 1;
+    }
+    totals_sheet.autofit();
 
     if output_file.exists() {
         if let Err(e) = std::fs::remove_file(&output_file) {
