@@ -1,4 +1,5 @@
-extern crate colored;
+use std::fs;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
@@ -6,9 +7,6 @@ use colored::Colorize;
 use lazy_static::lazy_static;
 use regex::Regex;
 use walkdir::WalkDir;
-
-use std::fs;
-use std::path::PathBuf;
 
 lazy_static! {
     static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").unwrap();

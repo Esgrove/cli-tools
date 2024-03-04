@@ -1,10 +1,10 @@
-use anyhow::Context;
-use difference::{Changeset, Difference};
-use walkdir::DirEntry;
-
-use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
+
+use anyhow::Context;
+use colored::Colorize;
+use difference::{Changeset, Difference};
+use walkdir::DirEntry;
 
 /// Check if entry is a hidden file or directory (starts with '.')
 pub fn is_hidden(entry: &DirEntry) -> bool {

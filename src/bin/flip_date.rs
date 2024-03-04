@@ -1,12 +1,12 @@
+use std::fs;
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use lazy_static::lazy_static;
 use regex::{Captures, Regex};
 use walkdir::WalkDir;
-
-use std::fs;
-use std::path::PathBuf;
 
 // Static variables that are initialized at runtime the first time they are accessed.
 lazy_static! {
