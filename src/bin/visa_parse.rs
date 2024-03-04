@@ -141,9 +141,10 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> R
         anyhow::bail!("No XML files to parse".red());
     }
 
+    let num_files = files.len();
     let items = parse_files(files, verbose)?;
     let totals = calculate_totals_for_each_name(&items);
-    print_statistics(&items, &totals, verbose);
+    print_statistics(&items, &totals, num_files, verbose);
 
     if !dryrun {
         write_to_csv(&items, &output)?;
@@ -213,7 +214,15 @@ fn parse_files(files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
         }
     }
     result.sort();
-    println!("Found {} items in total", result.len());
+    println!(
+        "Found {} items in total from {}",
+        result.len(),
+        if files.len() > 1 {
+            format!("{} files", files.len())
+        } else {
+            "1 file".to_string()
+        }
+    );
     Ok(result)
 }
 
@@ -379,15 +388,15 @@ fn format_sum(value: &str) -> Result<f64> {
 }
 
 /// Print item totals and some statistics.
-fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], verbose: bool) {
+fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usize, verbose: bool) {
     let total_sum: f64 = items.iter().map(|item| item.sum).sum();
     let count = items.len() as f64;
     let average = if count > 0.0 { total_sum / count } else { 0.0 };
 
-    println!("{}", "Statistics:".bold().magenta());
+    println!("Average items per file: {:.1}", items.len() / num_files);
+    println!("Total sum: {:.2}€", total_sum);
+    println!("Average sum: {:.2}€", average);
     println!("Unique names: {}", totals.len());
-    println!("Sum: {:.2}€", total_sum);
-    println!("Average: {:.2}€", average);
 
     if verbose {
         let num_to_print: usize = 10;
