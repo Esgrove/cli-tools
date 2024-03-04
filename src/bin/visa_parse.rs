@@ -31,8 +31,8 @@ lazy_static! {
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
     // Replace each pattern with given substitute
-    static ref REPLACE_PAIRS: [(&'static str, &'static str); 9] = [
-        ("VFI ", ""),
+    static ref REPLACE_PAIRS: [(&'static str, &'static str); 10] = [
+        ( "4029357733", ""),
         (" - ", " "),
         (" . ", " "),
         (" 35314369001", ""),
@@ -41,6 +41,7 @@ lazy_static! {
         (" LEVISTRAUSS ", " LEVIS "),
         (".COMFI", ".COM"),
         ("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM"),
+        ("VFI ", ""),
     ];
     // Replace names starting with these with just the prefix given here
     static ref REPLACE_WITH_START: [&'static str; 5] = [
