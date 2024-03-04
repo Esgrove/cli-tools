@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "1.5.3"
+version = "1.5.4"
 edition = "2021"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
