@@ -32,6 +32,14 @@ lazy_static! {
     static ref RE_SPECIFICATION_FREE_TEXT: Regex =
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
+    // Replace names starting with these with just the prefix
+    static ref REPLACE_WITH_START: [&'static str; 5] = [
+        "PAYPAL BANDCAMP",
+        "PAYPAL BEATPORT",
+        "PAYPAL DJCITY",
+        "PAYPAL MISTERB",
+        "PAYPAL PATREON",
+    ];
     static ref FILTER_PREFIXES: [&'static str; 61] = [
         "1BAR",
         "45 SPECIAL",
@@ -359,7 +367,11 @@ fn format_name(text: &str) -> String {
         .replace(" DRI ", "")
         .replace(" . ", " ")
         .replace(" - ", " ")
-        .replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
+        .replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM")
+        .replace(" LEVISTRAUSS ", " LEVIS ")
+        .replace(".COMFI", ".COM")
+        .replace(" 35314369001", "")
+        .replace(" 402-935-7733", "");
 
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
     name = replace_from_start(&name, "CHF ", "");
@@ -367,14 +379,10 @@ fn format_name(text: &str) -> String {
     name = replace_from_start(&name, "WWW.", "");
     name = replace_from_start(&name, "MOB.PAY ", "MOBILEPAY");
 
-    if name.starts_with("PAYPAL PATREON") {
-        name = "PAYPAL PATREON".to_string();
-    }
-    if name.starts_with("PAYPAL DJCITY") {
-        name = "PAYPAL DJCITY".to_string();
-    }
-    if name.starts_with("PAYPAL BANDCAMP") {
-        name = "PAYPAL BANDCAMP".to_string();
+    for prefix in REPLACE_WITH_START {
+        if name.starts_with(prefix) {
+            name = prefix.to_string();
+        }
     }
 
     if name.contains("ITUNES.COM") {
