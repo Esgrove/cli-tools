@@ -202,22 +202,27 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
         ((files.len() as f64).log10() as usize) + 1
     };
     for (number, file) in files.iter().enumerate() {
-        println!(
-            "{:>0width$}: {}",
-            number + 1,
-            cli_tools::get_relative_path_or_filename(file, root),
-            width = digits
+        print!(
+            "{}",
+            format!(
+                "{:>0width$}: {}",
+                number + 1,
+                cli_tools::get_relative_path_or_filename(file, root),
+                width = digits
+            )
+            .bold()
         );
         let (raw_lines, year) = read_xml_file(file);
         let items = extract_items(&raw_lines, year);
-        if verbose {
-            for item in &items {
-                println!("{}", item);
-            }
-        }
         if items.is_empty() {
-            println!("{}", "No items found...".yellow())
+            println!(" ({})", "0".yellow());
         } else {
+            println!(" ({})", format!("{}", items.len()).cyan());
+            if verbose {
+                for item in &items {
+                    println!("  {}", item);
+                }
+            }
             result.extend(items);
         }
     }
