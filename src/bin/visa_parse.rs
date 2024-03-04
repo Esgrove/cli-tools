@@ -19,6 +19,7 @@ use walkdir::WalkDir;
 
 // Static variables that are initialized at runtime the first time they are accessed.
 lazy_static! {
+    static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets");
     static ref RE_FINNAIR: Regex = Regex::new(r"(?i)finnair").expect("Failed to create regex pattern for Finnair");
     static ref RE_HTML_AND: Regex = Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html");
     static ref RE_SEPARATORS: Regex = Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators");
@@ -31,7 +32,7 @@ lazy_static! {
     static ref RE_SPECIFICATION_FREE_TEXT: Regex =
         Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
             .expect("Failed to create regex pattern for SpecificationFreeText");
-    static ref FILTER_PREFIXES: [&'static str; 60] = [
+    static ref FILTER_PREFIXES: [&'static str; 61] = [
         "1BAR",
         "45 SPECIAL",
         "ALEPA",
@@ -75,6 +76,7 @@ lazy_static! {
         "PAYPAL NIKE",
         "PAYPAL STEAM GAMES",
         "PISTE SKI LODGE",
+        "PIZZALA",
         "RAVINTOLA",
         "RIIPISEN RIISTA",
         "RIVIERA",
@@ -339,12 +341,14 @@ fn format_name(text: &str) -> String {
     }
 
     name = RE_HTML_AND.replace_all(&name, "&").to_string();
+    name = RE_BRACKETS.replace_all(&name, "").to_string();
     name = name.to_uppercase();
     name = name
         .replace("VFI*", "")
         .replace("VFI ", "")
         .replace(" DRI ", "")
         .replace(" . ", " ")
+        .replace(" - ", " ")
         .replace("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM");
 
     name = name.trim().to_string();
@@ -364,8 +368,11 @@ fn format_name(text: &str) -> String {
         name = "PAYPAL BANDCAMP".to_string();
     }
 
-    name = name.trim().to_string();
-    name = RE_WHITESPACE.replace_all(&name, " ").to_string();
+    if name.contains("ITUNES.COM") {
+        name = "APPLE ITUNES".to_string();
+    }
+
+    name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
     name
 }
 

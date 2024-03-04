@@ -9,7 +9,7 @@ use regex::Regex;
 use walkdir::WalkDir;
 
 lazy_static! {
-    static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").unwrap();
+    static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets");
 }
 
 #[derive(Parser, Debug)]
