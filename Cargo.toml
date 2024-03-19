@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "1.5.5"
+version = "1.6.0"
 edition = "2021"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -23,6 +23,10 @@ rust_xlsxwriter = { version = "0.64.0", features = ["chrono", "serde"] }
 serde = { version = "1.0.197", features = ["derive"] }
 tempfile = "3.10.1"
 walkdir = "2.5.0"
+
+[[bin]]
+name = "div"
+path = "src/bin/divider.rs"
 
 [[bin]]
 name = "dots"

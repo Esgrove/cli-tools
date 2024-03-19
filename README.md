@@ -8,6 +8,24 @@ Produces separate binaries for each tool.
 ./install.sh
 ```
 
+## Div
+
+```console
+Print divider comment with centered text
+
+Usage: div [OPTIONS] [TEXT]...
+
+Arguments:
+  [TEXT]...  Optional divider text(s)
+
+Options:
+  -l, --length <LENGTH>   Divider length in number of characters [default: 120]
+  -c, --char <CHARACTER>  Divider length in number of characters [default: %]
+  -a, --align             Align multiple divider texts to same start position
+  -h, --help              Print help
+  -V, --version           Print version
+```
+
 ## Dots
 
 ```console
