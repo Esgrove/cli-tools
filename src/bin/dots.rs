@@ -108,7 +108,7 @@ fn format_name(file_name: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod dots_tests {
     use super::*;
 
     #[test]
