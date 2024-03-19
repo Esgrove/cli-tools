@@ -26,7 +26,9 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if args.text.len() > 1 && args.align {
+    if args.text.is_empty() {
+        println!("{}", format_centered_divider("", args.length, args.character));
+    } else if args.text.len() > 1 && args.align {
         let longest: usize = args
             .text
             .iter()
