@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 
 lazy_static! {
     static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets");
+    static ref RE_WHITESPACE: Regex = Regex::new(r"\s+").unwrap();
 }
 
 #[derive(Parser, Debug)]
@@ -103,8 +104,9 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
 
 fn format_name(file_name: &str) -> String {
     let new_file_name = file_name.replace(" - ", " ").replace([' ', '_'], ".");
-    let new_file_name = RE_BRACKETS.replace_all(&new_file_name, "").trim().to_string();
-    new_file_name
+    let new_file_name = RE_WHITESPACE.replace_all(&new_file_name, "").to_string();
+    let new_file_name = RE_BRACKETS.replace_all(&new_file_name, "").to_string();
+    new_file_name.trim().to_string()
 }
 
 #[cfg(test)]
@@ -132,6 +134,14 @@ mod dots_tests {
     #[test]
     fn test_format_name_with_parentheses() {
         assert_eq!(format_name("Meeting Notes (2023) - Draft"), "Meeting.Notes.2023.Draft");
+    }
+
+    #[test]
+    fn test_format_name_with_newlines() {
+        assert_eq!(
+            format_name("Meeting \tNotes \n(2023) - Draft\r\n"),
+            "Meeting.Notes.2023.Draft"
+        );
     }
 
     #[test]
