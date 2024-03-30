@@ -52,7 +52,7 @@ lazy_static! {
         "PAYPAL MISTERB",
         "PAYPAL PATREON",
     ];
-    static ref FILTER_PREFIXES: [&'static str; 72] = [
+    static ref FILTER_PREFIXES: [&'static str; 73] = [
         "1BAR",
         "45 SPECIAL",
         "ALEPA",
@@ -90,6 +90,7 @@ lazy_static! {
         "KUUDESLINJA",
         "LA TORREFAZIONE",
         "LAMINA SKATE SH",
+        "LEVIN ALPPITALOT",
         "LOPEZ KALLIO",
         "LUNDIA",
         "MAKIA CLOTHING",
