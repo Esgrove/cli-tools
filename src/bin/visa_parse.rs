@@ -169,7 +169,7 @@ fn main() -> Result<()> {
 
 /// Parse data from files and write formatted items to CSV and Excel.
 fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> Result<()> {
-    let (root, files) = get_file_list(&input)?;
+    let (root, files) = get_xml_file_list(&input)?;
     if files.is_empty() {
         anyhow::bail!("No XML files to parse".red());
     }
@@ -188,7 +188,7 @@ fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> R
 }
 
 /// Return file root and list of files from the input path that can be either a directory or single file.
-fn get_file_list(input: &PathBuf) -> Result<(PathBuf, Vec<PathBuf>)> {
+fn get_xml_file_list(input: &PathBuf) -> Result<(PathBuf, Vec<PathBuf>)> {
     if input.is_file() {
         println!("{}", format!("Parsing file: {}", input.display()).bold().magenta());
         if input.extension() == Some(OsStr::new("xml")) {
