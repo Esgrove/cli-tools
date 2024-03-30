@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 lazy_static! {
     static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets");
     static ref RE_WHITESPACE: Regex = Regex::new(r"\s+").unwrap();
+    static ref RE_DOTS: Regex = Regex::new(r"\.{2,}").unwrap();
 }
 
 #[derive(Parser, Debug)]
@@ -103,9 +104,19 @@ fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bo
 }
 
 fn format_name(file_name: &str) -> String {
-    let new_file_name = file_name.replace(" - ", " ").replace([' ', '_'], ".");
-    let new_file_name = RE_WHITESPACE.replace_all(&new_file_name, "").to_string();
-    let new_file_name = RE_BRACKETS.replace_all(&new_file_name, "").to_string();
+    let mut new_file_name = file_name
+        .replace("-=-", ".")
+        .replace("WEBDL", ".")
+        .replace(" - ", " ")
+        .replace([' ', '_', '='], ".")
+        .replace(".-.", ".")
+        .replace(".&.", ".")
+        .replace(",.", ".");
+
+    new_file_name = RE_WHITESPACE.replace_all(&new_file_name, "").to_string();
+    new_file_name = RE_BRACKETS.replace_all(&new_file_name, "").to_string();
+    new_file_name = RE_DOTS.replace_all(&new_file_name, ".").to_string();
+
     new_file_name.trim().to_string()
 }
 
