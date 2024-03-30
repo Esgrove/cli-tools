@@ -95,6 +95,28 @@ pub fn get_relative_path_or_filename(full_path: &Path, root: &Path) -> String {
     }
 }
 
+/// Convert the given path to be relative to the current working directory.
+/// Returns the original path if the relative path cannot be created.
+pub fn get_relative_path_from_current_working_directory(path: &Path) -> PathBuf {
+    env::current_dir()
+        .map(|current_dir| path.strip_prefix(&current_dir).unwrap_or(path).to_path_buf())
+        .unwrap_or(path.to_path_buf())
+}
+
+/// Convert path to string with invalid unicode handling.
+pub fn path_to_string(path: &Path) -> String {
+    if let Some(string) = path.to_str() {
+        string.to_string()
+    } else {
+        path.to_string_lossy().to_string().replace('\u{FFFD}', "")
+    }
+}
+
+/// Get relative path and convert to string with invalid unicode handling.
+pub fn path_to_string_relative(path: &Path) -> String {
+    path_to_string(&get_relative_path_from_current_working_directory(path))
+}
+
 /// Print a stacked diff of the changes.
 pub fn show_diff(old: &str, new: &str) {
     let changeset = Changeset::new(old, new, "");
