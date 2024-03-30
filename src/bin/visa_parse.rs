@@ -52,7 +52,7 @@ lazy_static! {
         "PAYPAL MISTERB",
         "PAYPAL PATREON",
     ];
-    static ref FILTER_PREFIXES: [&'static str; 73] = [
+    static ref FILTER_PREFIXES: [&'static str; 76] = [
         "1BAR",
         "45 SPECIAL",
         "ALEPA",
@@ -106,8 +106,11 @@ lazy_static! {
         "PAYPAL NIKE",
         "PAYPAL STEAM GAMES",
         "PISTE SKI LODGE",
+        "PISTEVUOKRAAMO RUKATUNTURI",
         "PIZZALA",
+        "RAGS FASHION",
         "RAVINTOLA",
+        "RAVINTOTALOT OY",
         "RIIPINEN RESTAURANTS",
         "RIIPISEN RIISTA",
         "RIVIERA",
