@@ -423,6 +423,7 @@ fn format_sum(value: &str) -> Result<f64> {
     value
         .trim()
         .replace(',', ".")
+        .replace(' ', "")
         .parse::<f64>()
         .context(format!("Failed to parse sum as float: {}", value))
 }
@@ -459,19 +460,22 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
 fn split_item_text(input: &str) -> (String, String, String) {
     // Split the string at the first whitespace
     let mut parts = input.splitn(2, ' ');
-    let first_part = parts.next().unwrap_or("").trim().to_string();
+    let first_part = parts.next().unwrap_or("").trim();
     let remainder = parts.next().unwrap_or("");
-    let cleaned_remainder = clean_whitespaces(remainder);
-    let (second_part, third_part) = split_from_last_whitespace(&cleaned_remainder);
+    let (second_part, third_part) = split_from_last_whitespace(remainder);
 
-    (first_part, second_part, third_part)
+    (
+        clean_whitespaces(first_part),
+        clean_whitespaces(second_part),
+        clean_whitespaces(third_part),
+    )
 }
 
 /// Split to two parts from the last whitespace character.
-fn split_from_last_whitespace(s: &str) -> (String, String) {
-    let mut parts = s.rsplitn(2, char::is_whitespace);
-    let after = parts.next().unwrap_or("").to_string();
-    let before = parts.next().unwrap_or("").to_string();
+fn split_from_last_whitespace(s: &str) -> (&str, &str) {
+    let mut parts = s.rsplitn(2, "  ");
+    let after = parts.next().unwrap_or("").trim();
+    let before = parts.next().unwrap_or("").trim();
 
     (before, after)
 }
@@ -676,5 +680,24 @@ mod test_format_sum {
     #[test]
     fn test_number_without_decimal() {
         assert_eq!(format_sum("1234").unwrap(), 1234.0);
+    }
+
+    #[test]
+    fn test_number_with_thousand_space() {
+        assert_eq!(format_sum("1 488,90").unwrap(), 1488.90);
+    }
+}
+
+#[cfg(test)]
+mod test_item_parse {
+    use super::*;
+
+    #[test]
+    fn test_split_item_text() {
+        let input = "25.05. Osto PAYPAL *THOMANN 35314369001                                 1 488,90";
+        let (one, two, three) = split_item_text(input);
+        assert_eq!(one, "25.05.");
+        assert_eq!(two, "Osto PAYPAL *THOMANN 35314369001");
+        assert_eq!(three, "1 488,90");
     }
 }
