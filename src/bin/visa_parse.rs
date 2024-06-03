@@ -443,7 +443,7 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
     println!("Unique names: {}", totals.len());
 
     if verbose {
-        let num_to_print: usize = 10;
+        let num_to_print: usize = 20;
         let max_name_length = totals[..num_to_print]
             .iter()
             .map(|(name, _)| name.chars().count())
