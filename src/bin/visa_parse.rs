@@ -391,6 +391,9 @@ fn format_name(text: &str) -> String {
     if name.contains("ITUNES.COM") {
         name = "APPLE ITUNES".to_string();
     }
+    if name.contains("VERKKOKAUPPA.COM") {
+        name = "VERKKOKAUPPA.COM".to_string();
+    }
 
     for (pattern, replacement) in REPLACE_PAIRS.iter() {
         name = name.replace(pattern, replacement);
@@ -450,7 +453,7 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
 
         println!("\n{}", format!("Top {num_to_print} totals:").bold());
         for (name, sum) in totals[..num_to_print].iter() {
-            println!("{:width$}   {:.2}€", format!("{name}:"), sum, width = max_name_length);
+            println!("{:width$}   {:>7.2}€", format!("{name}:"), sum, width = max_name_length);
         }
     }
     println!();
