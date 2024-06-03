@@ -462,7 +462,7 @@ fn split_item_text(input: &str) -> (String, String, String) {
     let mut parts = input.splitn(2, ' ');
     let first_part = parts.next().unwrap_or("").trim();
     let remainder = parts.next().unwrap_or("");
-    let (second_part, third_part) = split_from_last_whitespace(remainder);
+    let (second_part, third_part) = split_from_last_whitespaces(remainder);
 
     (
         clean_whitespaces(first_part),
@@ -472,7 +472,7 @@ fn split_item_text(input: &str) -> (String, String, String) {
 }
 
 /// Split to two parts from the last whitespace character.
-fn split_from_last_whitespace(s: &str) -> (&str, &str) {
+fn split_from_last_whitespaces(s: &str) -> (&str, &str) {
     let mut parts = s.rsplitn(2, "  ");
     let after = parts.next().unwrap_or("").trim();
     let before = parts.next().unwrap_or("").trim();
