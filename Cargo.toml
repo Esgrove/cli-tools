@@ -19,7 +19,7 @@ difference = "2.0.0"
 dunce = "1.0.4"
 lazy_static = "1.5.0"
 regex = "1.10.5"
-rust_xlsxwriter = { version = "0.68.0", features = ["chrono", "serde"] }
+rust_xlsxwriter = { version = "0.69.0", features = ["chrono", "serde"] }
 serde = { version = "1.0.203", features = ["derive"] }
 tempfile = "3.10.1"
 walkdir = "2.5.0"
