@@ -45,20 +45,22 @@ lazy_static! {
         ("VFI ", ""),
     ];
     // Replace names starting with these with just the prefix given here
-    static ref REPLACE_WITH_START: [&'static str; 5] = [
+    static ref REPLACE_WITH_START: [&'static str; 6] = [
         "PAYPAL BANDCAMP",
         "PAYPAL BEATPORT",
         "PAYPAL DJCITY",
+        "PAYPAL DROPBOX",
         "PAYPAL MISTERB",
         "PAYPAL PATREON",
     ];
-    static ref FILTER_PREFIXES: [&'static str; 76] = [
+    static ref FILTER_PREFIXES: [&'static str; 79] = [
         "1BAR",
         "45 SPECIAL",
         "ALEPA",
         "ALKO",
         "ALLAS SEA POOL",
         "AVECRA",
+        "BAMILAMI",
         "BAR ",
         "BASTARD BURGERS",
         "CHATGPT SUBSCRIPTION",
@@ -66,6 +68,7 @@ lazy_static! {
         "CLASSIC TROIJA",
         "COCKTAIL TRADING COMPA",
         "CRAFT BEER HELSINKI",
+        "DICK JOHNSON",
         "DIF DONER",
         "EPASSI",
         "EVENTUAL",
@@ -96,6 +99,7 @@ lazy_static! {
         "MAKIA CLOTHING",
         "MCD ",
         "MCDONALD",
+        "MESTARITALLI",
         "MOBILEPAY HELSINGIN SEUDUN",
         "MONOMESTA",
         "MUJI",
@@ -393,6 +397,9 @@ fn format_name(text: &str) -> String {
     }
     if name.contains("VERKKOKAUPPA.COM") {
         name = "VERKKOKAUPPA.COM".to_string();
+    }
+    if name.contains("IDA RADIO RY") {
+        name = "IDA RADIO RY".to_string();
     }
 
     for (pattern, replacement) in REPLACE_PAIRS.iter() {
@@ -702,5 +709,17 @@ mod test_item_parse {
         assert_eq!(one, "25.05.");
         assert_eq!(two, "Osto PAYPAL *THOMANN 35314369001");
         assert_eq!(three, "1 488,90");
+
+        let input = "14.06. Osto PAYPAL *BANDCAMP 4029357733                                     6,20";
+        let (one, two, three) = split_item_text(input);
+        assert_eq!(one, "14.06.");
+        assert_eq!(two, "Osto PAYPAL *BANDCAMP 4029357733");
+        assert_eq!(three, "6,20");
+
+        let input = "30.05. Osto PAYPAL *NIKE COM 35314369001                                  443,44";
+        let (one, two, three) = split_item_text(input);
+        assert_eq!(one, "30.05.");
+        assert_eq!(two, "Osto PAYPAL *NIKE COM 35314369001");
+        assert_eq!(three, "443,44");
     }
 }
