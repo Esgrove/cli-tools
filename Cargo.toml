@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -13,13 +13,13 @@ categories = ["command-line-utilities"]
 [dependencies]
 anyhow = "1.0.86"
 chrono = "0.4.38"
-clap = { version = "4.5.7", features = ["derive"] }
+clap = { version = "4.5.8", features = ["derive"] }
 colored = "2.1.0"
 difference = "2.0.0"
 dunce = "1.0.4"
 lazy_static = "1.5.0"
 regex = "1.10.5"
-rust_xlsxwriter = { version = "0.68.0", features = ["chrono", "serde"] }
+rust_xlsxwriter = { version = "0.69.0", features = ["chrono", "serde"] }
 serde = { version = "1.0.203", features = ["derive"] }
 tempfile = "3.10.1"
 walkdir = "2.5.0"
