@@ -1,26 +1,32 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use lazy_static::lazy_static;
 use regex::{Captures, Regex};
 use walkdir::WalkDir;
 
-// Static variables that are initialized at runtime the first time they are accessed.
-lazy_static! {
-    static ref RE_DD_MM_YYYY: Regex = Regex::new(r"(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?P<year>\d{4})")
-        .expect("Failed to create regex pattern for dd.mm.yyyy");
-    static ref RE_YYYY_MM_DD: Regex = Regex::new(r"(?P<year>\d{4})\.(?P<month>\d{1,2})\.(?P<day>\d{1,2})")
-        .expect("Failed to create regex pattern for yyyy.mm.dd");
-    static ref RE_CORRECT_DATE_FORMAT: Regex =
-        Regex::new(r"\d{4}\.\d{1,2}\.\d{1,2}").expect("Failed to create regex pattern for correct date");
-    static ref RE_FULL_DATE: Regex =
-        Regex::new(r"\d{1,2}\.\d{1,2}\.\d{4}").expect("Failed to create regex pattern for full date");
-    static ref RE_SHORT_DATE: Regex =
-        Regex::new(r"\d{1,2}\.\d{1,2}\.\d{2}").expect("Failed to create regex pattern for short date");
-}
+// Static variables that are initialised at runtime the first time they are accessed.
+static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?P<year>\d{4})")
+        .expect("Failed to create regex pattern for dd.mm.yyyy")
+});
+
+static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?P<year>\d{4})\.(?P<month>\d{1,2})\.(?P<day>\d{1,2})")
+        .expect("Failed to create regex pattern for yyyy.mm.dd")
+});
+
+static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d{4}\.\d{1,2}\.\d{1,2}").expect("Failed to create regex pattern for correct date"));
+
+static RE_FULL_DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d{1,2}\.\d{1,2}\.\d{4}").expect("Failed to create regex pattern for full date"));
+
+static RE_SHORT_DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d{1,2}\.\d{1,2}\.\d{2}").expect("Failed to create regex pattern for short date"));
 
 #[derive(Parser)]
 #[command(

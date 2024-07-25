@@ -1,18 +1,19 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
-use lazy_static::lazy_static;
 use regex::Regex;
 use walkdir::WalkDir;
 
-lazy_static! {
-    static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets");
-    static ref RE_WHITESPACE: Regex = Regex::new(r"\s+").unwrap();
-    static ref RE_DOTS: Regex = Regex::new(r"\.{2,}").unwrap();
-}
+static RE_BRACKETS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets"));
+
+static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+
+static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").unwrap());
 
 #[derive(Parser, Debug)]
 #[command(author, version, name = "dots", about = "Replace whitespaces in filenames with dots")]

@@ -6,135 +6,148 @@ use std::fs::File;
 use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Parser;
 use colored::Colorize;
-use lazy_static::lazy_static;
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, RowNum, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
+
 use walkdir::WalkDir;
 
-// Static variables that are initialized at runtime the first time they are accessed.
-lazy_static! {
-    static ref RE_BRACKETS: Regex = Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets");
-    static ref RE_HTML_AND: Regex = Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html");
-    static ref RE_SEPARATORS: Regex = Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators");
-    static ref RE_WHITESPACE: Regex = Regex::new(r"\s{2,}").expect("Failed to create regex pattern for whitespace");
-    static ref RE_ITEM_DATE: Regex =
-        Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date");
-    static ref RE_START_DATE: Regex = Regex::new(r#"<StartDate Format="CCYYMMDD">(\d{4})\d{4}</StartDate>"#)
-        .expect("Failed to create regex pattern for start date");
-    static ref RE_SPECIFICATION_FREE_TEXT: Regex =
-        Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
-            .expect("Failed to create regex pattern for SpecificationFreeText");
-    // Replace each pattern with given substitute
-    static ref REPLACE_PAIRS: [(&'static str, &'static str); 11] = [
-        ( "4029357733", ""),
-        (" - ", " "),
-        (" . ", " "),
-        (", ", " "),
-        (" 35314369001", ""),
-        (" 402-935-7733", ""),
-        (" DRI ", ""),
-        (" LEVISTRAUSS ", " LEVIS "),
-        (".COMFI", ".COM"),
-        ("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM"),
-        ("VFI ", ""),
-    ];
-    // Replace names starting with these with just the prefix given here
-    static ref REPLACE_WITH_START: [&'static str; 6] = [
-        "PAYPAL BANDCAMP",
-        "PAYPAL BEATPORT",
-        "PAYPAL DJCITY",
-        "PAYPAL DROPBOX",
-        "PAYPAL MISTERB",
-        "PAYPAL PATREON",
-    ];
-    static ref FILTER_PREFIXES: [&'static str; 79] = [
-        "1BAR",
-        "45 SPECIAL",
-        "ALEPA",
-        "ALKO",
-        "ALLAS SEA POOL",
-        "AVECRA",
-        "BAMILAMI",
-        "BAR ",
-        "BASTARD BURGERS",
-        "CHATGPT SUBSCRIPTION",
-        "CLAS OHLSON",
-        "CLASSIC TROIJA",
-        "COCKTAIL TRADING COMPA",
-        "CRAFT BEER HELSINKI",
-        "DICK JOHNSON",
-        "DIF DONER",
-        "EPASSI",
-        "EVENTUAL",
-        "F1.COM",
-        "FAZER RAVINTOLAT",
-        "FINNAIR",
-        "FINNKINO",
-        "FISKARS FINLAND",
-        "FLOW FESTIVAL ",
-        "HANKI BAARI",
-        "HENRY'S PUB",
-        "HESBURGER",
-        "HOTEL ",
-        "IPA GROUP",
-        "K-MARKET",
-        "K-RAUTA",
-        "KAIKU HELSINKI",
-        "KAMPIN ",
-        "KELTAINEN RUUSU",
-        "KULTTUURITALO",
-        "KULUTTAJA.FI",
-        "KUUDESLINJA",
-        "LA TORREFAZIONE",
-        "LAMINA SKATE SH",
-        "LEVIN ALPPITALOT",
-        "LOPEZ KALLIO",
-        "LUNDIA",
-        "MAKIA CLOTHING",
-        "MCD ",
-        "MCDONALD",
-        "MESTARITALLI",
-        "MOBILEPAY HELSINGIN SEUDUN",
-        "MONOMESTA",
-        "MUJI",
-        "PAYPAL EPIC GAMES",
-        "PAYPAL LEVISTRAUSS",
-        "PAYPAL MCOMPANY",
-        "PAYPAL MISTERB",
-        "PAYPAL NIKE",
-        "PAYPAL STEAM GAMES",
-        "PISTE SKI LODGE",
-        "PISTEVUOKRAAMO RUKATUNTURI",
-        "PIZZALA",
-        "RAGS FASHION",
-        "RAVINTOLA",
-        "RAVINTOTALOT OY",
-        "RIIPINEN RESTAURANTS",
-        "RIIPISEN RIISTA",
-        "RIVIERA",
-        "RUKAHUOLTO",
-        "RUKAN CAMP",
-        "RUKASTORE",
-        "S-MARKET",
-        "SEISKATUUMA",
-        "SMARTUM",
-        "SOOSIKAUPPA",
-        "SOUP&MORE",
-        "SP TOPPED",
-        "STADIUM",
-        "STOCKMANN",
-        "TEERENPELI",
-        "TIKETTI.FI",
-        "TUNTUR.MAX OY SKI BISTRO",
-        "WOLT",
-    ];
-}
+// Static variables that are initialised at runtime the first time they are accessed.
+static RE_BRACKETS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets"));
+
+static RE_HTML_AND: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html"));
+
+static RE_SEPARATORS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators"));
+
+static RE_WHITESPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s{2,}").expect("Failed to create regex pattern for whitespace"));
+
+static RE_ITEM_DATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date"));
+
+static RE_START_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<StartDate Format="CCYYMMDD">(\d{4})\d{4}</StartDate>"#)
+        .expect("Failed to create regex pattern for start date")
+});
+
+static RE_SPECIFICATION_FREE_TEXT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
+        .expect("Failed to create regex pattern for SpecificationFreeText")
+});
+
+static REPLACE_PAIRS: [(&str, &str); 11] = [
+    ("4029357733", ""),
+    (" - ", " "),
+    (" . ", " "),
+    (", ", " "),
+    (" 35314369001", ""),
+    (" 402-935-7733", ""),
+    (" DRI ", ""),
+    (" LEVISTRAUSS ", " LEVIS "),
+    (".COMFI", ".COM"),
+    ("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM"),
+    ("VFI ", ""),
+];
+
+static REPLACE_WITH_START: [&str; 6] = [
+    "PAYPAL BANDCAMP",
+    "PAYPAL BEATPORT",
+    "PAYPAL DJCITY",
+    "PAYPAL DROPBOX",
+    "PAYPAL MISTERB",
+    "PAYPAL PATREON",
+];
+
+static FILTER_PREFIXES: [&str; 79] = [
+    "1BAR",
+    "45 SPECIAL",
+    "ALEPA",
+    "ALKO",
+    "ALLAS SEA POOL",
+    "AVECRA",
+    "BAMILAMI",
+    "BAR ",
+    "BASTARD BURGERS",
+    "CHATGPT SUBSCRIPTION",
+    "CLAS OHLSON",
+    "CLASSIC TROIJA",
+    "COCKTAIL TRADING COMPA",
+    "CRAFT BEER HELSINKI",
+    "DICK JOHNSON",
+    "DIF DONER",
+    "EPASSI",
+    "EVENTUAL",
+    "F1.COM",
+    "FAZER RAVINTOLAT",
+    "FINNAIR",
+    "FINNKINO",
+    "FISKARS FINLAND",
+    "FLOW FESTIVAL ",
+    "HANKI BAARI",
+    "HENRY'S PUB",
+    "HESBURGER",
+    "HOTEL ",
+    "IPA GROUP",
+    "K-MARKET",
+    "K-RAUTA",
+    "KAIKU HELSINKI",
+    "KAMPIN ",
+    "KELTAINEN RUUSU",
+    "KULTTUURITALO",
+    "KULUTTAJA.FI",
+    "KUUDESLINJA",
+    "LA TORREFAZIONE",
+    "LAMINA SKATE SH",
+    "LEVIN ALPPITALOT",
+    "LOPEZ KALLIO",
+    "LUNDIA",
+    "MAKIA CLOTHING",
+    "MCD ",
+    "MCDONALD",
+    "MESTARITALLI",
+    "MOBILEPAY HELSINGIN SEUDUN",
+    "MONOMESTA",
+    "MUJI",
+    "PAYPAL EPIC GAMES",
+    "PAYPAL LEVISTRAUSS",
+    "PAYPAL MCOMPANY",
+    "PAYPAL MISTERB",
+    "PAYPAL NIKE",
+    "PAYPAL STEAM GAMES",
+    "PISTE SKI LODGE",
+    "PISTEVUOKRAAMO RUKATUNTURI",
+    "PIZZALA",
+    "RAGS FASHION",
+    "RAVINTOLA",
+    "RAVINTOTALOT OY",
+    "RIIPINEN RESTAURANTS",
+    "RIIPISEN RIISTA",
+    "RIVIERA",
+    "RUKAHUOLTO",
+    "RUKAN CAMP",
+    "RUKASTORE",
+    "S-MARKET",
+    "SEISKATUUMA",
+    "SMARTUM",
+    "SOOSIKAUPPA",
+    "SOUP&MORE",
+    "SP TOPPED",
+    "STADIUM",
+    "STOCKMANN",
+    "TEERENPELI",
+    "TIKETTI.FI",
+    "TUNTUR.MAX OY SKI BISTRO",
+    "WOLT",
+];
 
 #[derive(Parser, Debug)]
 #[command(
