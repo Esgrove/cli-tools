@@ -18,7 +18,7 @@ colored = "2.1.0"
 difference = "2.0.0"
 dunce = "1.0.4"
 regex = "1.10.5"
-rust_xlsxwriter = { version = "0.71.0", features = ["chrono", "serde"] }
+rust_xlsxwriter = { version = "0.72.0", features = ["chrono", "serde"] }
 serde = { version = "1.0.204", features = ["derive"] }
 tempfile = "3.10.1"
 walkdir = "2.5.0"
