@@ -16,7 +16,7 @@ chrono = "0.4.38"
 clap = { version = "4.5.11", features = ["derive"] }
 colored = "2.1.0"
 difference = "2.0.0"
-dunce = "1.0.4"
+dunce = "1.0.5"
 regex = "1.10.5"
 rust_xlsxwriter = { version = "0.73.0", features = ["chrono", "serde"] }
 serde = { version = "1.0.204", features = ["derive"] }
