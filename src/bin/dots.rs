@@ -29,6 +29,10 @@ struct Args {
     #[arg(short, long)]
     print: bool,
 
+    /// Recursive directory iteration
+    #[arg(short, long)]
+    recursive: bool,
+
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -37,17 +41,20 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let input_path = cli_tools::resolve_input_path(args.path)?;
-    replace_whitespaces(input_path, args.print, args.force, args.verbose)
+    replace_whitespaces(input_path, args.print, args.recursive, args.force, args.verbose)
 }
 
-fn replace_whitespaces(root: PathBuf, dryrun: bool, overwrite: bool, verbose: bool) -> Result<()> {
+fn replace_whitespaces(root: PathBuf, dryrun: bool, recursive: bool, overwrite: bool, verbose: bool) -> Result<()> {
     if verbose {
         println!("{}", format!("Formatting files under {}", root.display()).bold())
     }
 
+    let max_depth = if recursive { 100 } else { 1 };
+
     // Collect all files that need renaming
     let mut files_to_rename: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in WalkDir::new(&root)
+        .max_depth(max_depth)
         .into_iter()
         .filter_entry(|e| !cli_tools::is_hidden(e))
         .filter_map(|e| e.ok())
@@ -112,7 +119,9 @@ fn format_name(file_name: &str) -> String {
         .replace([' ', '_', '='], ".")
         .replace(".-.", ".")
         .replace(".&.", ".")
-        .replace(",.", ".");
+        .replace(",.", ".")
+        .replace(".rq", "")
+        .replace(".HEVC", "");
 
     new_file_name = RE_WHITESPACE.replace_all(&new_file_name, "").to_string();
     new_file_name = RE_BRACKETS.replace_all(&new_file_name, "").to_string();
