@@ -8,6 +8,8 @@ use colored::Colorize;
 use regex::{Captures, Regex};
 use walkdir::WalkDir;
 
+static FILE_EXTENSIONS: [&str; 7] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "mkv"];
+
 // Static variables that are initialised at runtime the first time they are accessed.
 static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?P<year>\d{4})")
@@ -149,7 +151,6 @@ fn date_flip_directories(path: PathBuf, recursive: bool, dryrun: bool) -> Result
 
 /// Get list of files to process
 fn files_to_rename(path: &PathBuf, recursive: bool) -> Result<(Vec<PathBuf>, PathBuf)> {
-    let extensions = ["m4a", "mp3", "txt", "rtf", "csv"];
     let (mut files, root) = if path.is_file() {
         (
             vec![path.clone()],
@@ -166,7 +167,7 @@ fn files_to_rename(path: &PathBuf, recursive: bool) -> Result<(Vec<PathBuf>, Pat
                 path.is_file()
                     && path
                         .extension()
-                        .map_or(false, |ext| extensions.contains(&ext.to_str().unwrap()))
+                        .map_or(false, |ext| FILE_EXTENSIONS.contains(&ext.to_str().unwrap()))
             })
             .collect();
         (list, path.clone())
