@@ -45,6 +45,10 @@ struct Args {
     #[arg(short, long)]
     dir: bool,
 
+    /// Assume year is first
+    #[arg(short, long)]
+    year: bool,
+
     /// Only print changes without renaming
     #[arg(short, long)]
     print: bool,
@@ -67,12 +71,12 @@ fn main() -> Result<()> {
     if args.dir {
         date_flip_directories(path, args.recursive, args.print)
     } else {
-        date_flip_files(path, args.recursive, args.print)
+        date_flip_files(path, args.recursive, args.print, args.year)
     }
 }
 
-/// Flip date to start with year for all matching files from given path.
-fn date_flip_files(path: PathBuf, recursive: bool, dryrun: bool) -> Result<()> {
+/// Flip date to start with year for all matching files from the given path.
+fn date_flip_files(path: PathBuf, recursive: bool, dryrun: bool, starts_with_year: bool) -> Result<()> {
     let (files, root) = files_to_rename(&path, recursive)?;
     if files.is_empty() {
         anyhow::bail!("No files to process");
@@ -86,7 +90,7 @@ fn date_flip_files(path: PathBuf, recursive: bool, dryrun: bool) -> Result<()> {
             .to_string_lossy()
             .into_owned();
 
-        if let Some(new_name) = reorder_filename_date(&filename) {
+        if let Some(new_name) = reorder_filename_date(&filename, starts_with_year) {
             files_to_rename.push(RenameItem {
                 path: file,
                 filename,
@@ -98,14 +102,16 @@ fn date_flip_files(path: PathBuf, recursive: bool, dryrun: bool) -> Result<()> {
     // Case-insensitive sort by filename
     files_to_rename.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
 
-    let max_chars: usize = files_to_rename
-        .iter()
-        .map(|r| r.filename.chars().count())
-        .max()
-        .context("Failed to get max path length")?;
+    let heading = if dryrun {
+        "Dryrun:".cyan().bold()
+    } else {
+        "Rename:".magenta().bold()
+    };
 
     for item in files_to_rename {
-        println!("{:<width$}  ==>  {}", item.filename, item.new_name, width = max_chars);
+        println!("{heading}");
+        println!("{}", item.filename);
+        println!("{}", item.new_name);
         if !dryrun {
             fs::rename(item.path, root.join(item.new_name)).context("Failed to rename file")?;
         }
@@ -205,13 +211,13 @@ fn directories_to_rename(path: PathBuf, recursive: bool) -> Result<Vec<RenameIte
 }
 
 /// Check if filename contains a matching date and reorder it.
-fn reorder_filename_date(filename: &str) -> Option<String> {
+fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<String> {
     if RE_CORRECT_DATE_FORMAT.is_match(filename) {
         println!("Skipping: {}", filename.yellow());
         return None;
     }
 
-    if let Some(date_match) = RE_FULL_DATE.find(filename).or_else(|| RE_SHORT_DATE.find(filename)) {
+    if let Some(date_match) = RE_FULL_DATE.find(filename) {
         let date = date_match.as_str();
         let numbers: Vec<&str> = date.split('.').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
 
@@ -233,6 +239,36 @@ fn reorder_filename_date(filename: &str) -> Option<String> {
 
         return Some(new_name);
     }
+
+    if let Some(date_match) = RE_SHORT_DATE.find(filename) {
+        let date = date_match.as_str();
+        let numbers: Vec<&str> = date.split('.').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+        let mut fixed_numbers: Vec<String> = vec![];
+        for number in numbers {
+            if number.chars().count() == 1 {
+                fixed_numbers.push(format!("0{}", number));
+            } else {
+                fixed_numbers.push(number.to_string());
+            }
+        }
+
+        if starts_with_year && fixed_numbers[0].len() == 2 {
+            fixed_numbers[0] = format!("20{}", fixed_numbers[0]);
+        } else if fixed_numbers[2].len() == 2 {
+            fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+        }
+
+        let flip_date = if starts_with_year {
+            fixed_numbers.to_vec().join(".")
+        } else {
+            fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".")
+        };
+        let new_name = filename.replace(date, &flip_date);
+
+        return Some(new_name);
+    }
+
     None
 }
 
@@ -320,40 +356,53 @@ mod filename_tests {
     fn test_full_date() {
         let filename = "report_20.12.2023.txt";
         let correct = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename), Some(correct.to_string()));
+        assert_eq!(reorder_filename_date(filename, false), Some(correct.to_string()));
     }
 
     #[test]
     fn test_short_date() {
         let filename = "report_20.12.23.txt";
         let correct = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename), Some(correct.to_string()));
+        assert_eq!(reorder_filename_date(filename, false), Some(correct.to_string()));
     }
 
     #[test]
     fn test_single_digit_date() {
         let filename = "report_1.2.23.txt";
         let correct = "report_2023.02.01.txt";
-        assert_eq!(reorder_filename_date(filename), Some(correct.to_string()));
+        assert_eq!(reorder_filename_date(filename, false), Some(correct.to_string()));
     }
 
     #[test]
     fn test_single_digit_date_with_full_year() {
         let filename = "report_8.7.2023.txt";
         let correct = "report_2023.07.08.txt";
-        assert_eq!(reorder_filename_date(filename), Some(correct.to_string()));
+        assert_eq!(reorder_filename_date(filename, false), Some(correct.to_string()));
     }
 
     #[test]
     fn test_no_date() {
         let filename = "report.txt";
-        assert_eq!(reorder_filename_date(filename), None);
+        assert_eq!(reorder_filename_date(filename, false), None);
     }
 
     #[test]
     fn test_correct_date_format() {
         let filename = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename), None);
+        assert_eq!(reorder_filename_date(filename, false), None);
+    }
+
+    #[test]
+    fn test_correct_date_format_year_first() {
+        let filename = "report_2023.12.20.txt";
+        assert_eq!(reorder_filename_date(filename, true), None);
+    }
+
+    #[test]
+    fn test_full_date_year_first() {
+        let filename = "report_23.12.20.txt";
+        let correct = "report_2023.12.20.txt";
+        assert_eq!(reorder_filename_date(filename, true), Some(correct.to_string()));
     }
 }
 
