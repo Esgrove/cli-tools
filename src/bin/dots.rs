@@ -236,6 +236,8 @@ impl Dots {
         new_name = RE_BRACKETS.replace_all(&new_name, "").to_string();
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
 
+        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
+
         // Temporarily convert dots back to whitespace so titlecase works
         new_name = new_name.replace(".", " ");
         new_name = titlecase::titlecase(&new_name);
@@ -324,6 +326,7 @@ mod dots_tests {
         assert_eq!(DOTS.format_name("Some file"), "Some.File");
         assert_eq!(DOTS.format_name("some file"), "Some.File");
         assert_eq!(DOTS.format_name("word"), "Word");
+        assert_eq!(DOTS.format_name("__word__"), "Word");
     }
 
     #[test]
