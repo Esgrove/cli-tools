@@ -42,7 +42,7 @@ struct Args {
     #[arg(short, long)]
     force: bool,
 
-    /// Only print changes without renaming
+    /// Only print changes without renaming files
     #[arg(short, long)]
     print: bool,
 
@@ -112,28 +112,43 @@ impl Dots {
     }
 
     pub fn process_files(&self) -> Result<()> {
-        if self.config.verbose {
-            println!("{}", format!("Formatting files under {}", self.root.display()).bold());
-        }
-
         let files_to_rename = self.gather_files_to_rename();
 
-        if self.config.verbose {
-            println!("Found {} files to rename", files_to_rename.len())
+        if files_to_rename.is_empty() {
+            println!("No files to rename");
+            return Ok(());
         }
 
         let num_renamed = self.rename_files(files_to_rename);
+        let message = format!("{num_renamed} file{}", if num_renamed == 1 { "" } else { "s" });
 
         if self.config.dryrun {
-            println!("Dryrun: would have renamed {} files", num_renamed);
+            println!("Dryrun: would have renamed {message}");
         } else {
-            println!("{}", format!("Renamed {} files", num_renamed).green());
+            println!("{}", format!("Renamed {message}").green());
         }
+
         Ok(())
     }
 
     fn gather_files_to_rename(&self) -> Vec<(PathBuf, PathBuf)> {
+        if self.root.is_file() {
+            if self.config.verbose {
+                println!("{}", format!("Formatting file {}", self.root.display()).bold());
+            }
+            return self
+                .format_filename(&self.root)
+                .ok()
+                .filter(|new_path| &self.root != new_path)
+                .map(|new_path| vec![(self.root.to_path_buf(), new_path)])
+                .unwrap_or_default();
+        }
+
         let max_depth = if self.config.recursive { 100 } else { 1 };
+
+        if self.config.verbose {
+            println!("{}", format!("Formatting files under {}", self.root.display()).bold());
+        }
 
         // Collect and sort all files that need renaming
         WalkDir::new(&self.root)
