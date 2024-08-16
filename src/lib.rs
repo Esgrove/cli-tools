@@ -5,10 +5,19 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use colored::Colorize;
+use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::DirEntry;
+
+/// Format bool value as a coloured string.
+pub fn colorize_bool(value: bool) -> ColoredString {
+    if value {
+        "true".green()
+    } else {
+        "false".red()
+    }
+}
 
 /// Get filename from Path with special characters retained instead of decomposed.
 pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, String)> {

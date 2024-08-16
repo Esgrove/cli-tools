@@ -1,6 +1,6 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::{fmt, fs};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -17,8 +17,6 @@ static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwr
 
 static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").unwrap());
 
-// ["WEBDL", "."],
-// [".HEVC", ""],
 static REPLACE: [(&str, &str); 10] = [
     (" ", "."),
     (" - ", " "),
@@ -37,6 +35,10 @@ static REPLACE: [(&str, &str); 10] = [
 struct Args {
     /// Optional input directory or file
     path: Option<String>,
+
+    /// Enable debug prints
+    #[arg(short, long)]
+    debug: bool,
 
     /// Overwrite existing files
     #[arg(short, long)]
@@ -60,9 +62,11 @@ struct Args {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct UserConfig {
+struct DotsConfig {
     #[serde(default)]
     replace: Vec<(String, String)>,
+    #[serde(default)]
+    debug: bool,
     #[serde(default)]
     dryrun: bool,
     #[serde(default)]
@@ -73,9 +77,16 @@ struct UserConfig {
     verbose: bool,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct UserConfig {
+    #[serde(default)]
+    dots: DotsConfig,
+}
+
 #[derive(Debug, Default)]
 struct Config {
     replace: Vec<(String, String)>,
+    debug: bool,
     dryrun: bool,
     overwrite: bool,
     recursive: bool,
@@ -112,6 +123,10 @@ impl Dots {
     }
 
     pub fn process_files(&self) -> Result<()> {
+        if self.config.debug {
+            println!("{}", self);
+        }
+
         let files_to_rename = self.gather_files_to_rename();
 
         if files_to_rename.is_empty() {
@@ -212,15 +227,21 @@ impl Dots {
     }
 
     fn format_name(&self, file_name: &str) -> String {
-        let mut new_name = file_name.to_string();
+        // Apply static replacements
+        let mut new_name = REPLACE
+            .iter()
+            .fold(file_name.to_string(), |acc, &(pattern, replacement)| {
+                acc.replace(pattern, replacement)
+            });
 
-        for (pattern, replacement) in REPLACE {
-            new_name = new_name.replace(pattern, replacement);
-        }
-
-        for (pattern, replacement) in self.config.replace.iter() {
-            new_name = new_name.replace(pattern, replacement);
-        }
+        // Apply dynamic replacements from config
+        new_name = self
+            .config
+            .replace
+            .iter()
+            .fold(new_name, |acc, (pattern, replacement)| {
+                acc.replace(pattern, replacement)
+            });
 
         new_name = RE_WHITESPACE.replace_all(&new_name, "").to_string();
         new_name = RE_BRACKETS.replace_all(&new_name, "").to_string();
@@ -228,7 +249,7 @@ impl Dots {
 
         // Temporarily convert dots back to whitespace so titlecase works
         new_name = new_name.replace(".", " ");
-        new_name = titlecase::titlecase(new_name.trim());
+        new_name = titlecase::titlecase(&new_name);
         new_name.replace(" ", ".")
     }
 }
@@ -236,28 +257,54 @@ impl Dots {
 impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Self {
-        let user_config = UserConfig::get_user_config();
+        let user_config = DotsConfig::get_user_config();
         let mut replace = args.parse_substitutes();
         replace.extend(user_config.replace);
         Config {
             replace,
-            recursive: args.recursive || user_config.recursive,
-            overwrite: args.force || user_config.overwrite,
+            debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
+            overwrite: args.force || user_config.overwrite,
+            recursive: args.recursive || user_config.recursive,
             verbose: args.verbose || user_config.verbose,
         }
     }
 }
 
-impl UserConfig {
+impl DotsConfig {
     /// Try to read user config from file if it exists.
     /// Otherwise, fall back to default config.
-    fn get_user_config() -> UserConfig {
+    fn get_user_config() -> DotsConfig {
         cli_tools::config::CONFIG_PATH
             .as_deref()
             .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|config_string| toml::from_str(&config_string).ok())
+            .and_then(|config_string| toml::from_str::<UserConfig>(&config_string).ok())
+            .map(|config| config.dots)
             .unwrap_or_default()
+    }
+}
+
+impl fmt::Display for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let replace = if self.replace.is_empty() {
+            "replace: []".to_string()
+        } else {
+            "replace:\n".to_string() + &*self.replace.iter().map(|pair| format!("    {:?}", pair)).join("\n")
+        };
+        writeln!(f, "Config:")?;
+        writeln!(f, "  debug:     {}", cli_tools::colorize_bool(self.debug))?;
+        writeln!(f, "  dryrun:    {}", cli_tools::colorize_bool(self.dryrun))?;
+        writeln!(f, "  overwrite: {}", cli_tools::colorize_bool(self.overwrite))?;
+        writeln!(f, "  recursive: {}", cli_tools::colorize_bool(self.recursive))?;
+        writeln!(f, "  verbose:   {}", cli_tools::colorize_bool(self.verbose))?;
+        writeln!(f, "  {}", replace)
+    }
+}
+
+impl fmt::Display for Dots {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Root: {}", self.root.display())?;
+        write!(f, "{}", self.config)
     }
 }
 

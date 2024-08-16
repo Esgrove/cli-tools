@@ -1,0 +1,7 @@
+# Copy config to ~/.config/cli-tools.toml
+
+[dots]
+replace = [
+    [".WEBDL", ""],
+    [".HEVC", ""],
+]
