@@ -1,7 +1,13 @@
 # Copy config to ~/.config/cli-tools.toml
 
+[divider]
+
 [dots]
 replace = [
     [".WEBDL", ""],
     [".HEVC", ""],
 ]
+
+[flip_date]
+
+[visa_parse]

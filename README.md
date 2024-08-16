@@ -8,6 +8,14 @@ Produces separate binaries for each tool.
 ./install.sh
 ```
 
+## Configuration
+
+The CLI binaries can be configured with a user config file in addition to the CLI arguments.
+The config file goes to `~/.config/cli-tools.toml`,
+and has separate sections for each binary.
+
+An example config [cli-tools.toml](./cli-tools.toml) is provided in the repo root.
+
 ## Div
 
 ```console
