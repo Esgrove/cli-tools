@@ -30,7 +30,7 @@ static REPLACE: [(&str, &str); 10] = [
     ("_", "."),
 ];
 
-#[derive(Parser, Debug)]
+#[derive(Debug, Parser)]
 #[command(author, version, name = "dots", about = "Rename files to use dots")]
 struct Args {
     /// Optional input directory or file
@@ -99,20 +99,9 @@ struct Dots {
     config: Config,
 }
 
-impl Args {
-    /// Collect substitutes to replace pairs.
-    fn parse_substitutes(&self) -> Vec<(String, String)> {
-        self.substitute
-            .chunks(2)
-            .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    Some((chunk[0].clone(), chunk[1].clone()))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
+fn main() -> Result<()> {
+    let args = Args::parse();
+    Dots::new(args)?.process_files()
 }
 
 impl Dots {
@@ -254,6 +243,22 @@ impl Dots {
     }
 }
 
+impl Args {
+    /// Collect substitutes to replace pairs.
+    fn parse_substitutes(&self) -> Vec<(String, String)> {
+        self.substitute
+            .chunks(2)
+            .filter_map(|chunk| {
+                if chunk.len() == 2 {
+                    Some((chunk[0].clone(), chunk[1].clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
 impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Self {
@@ -306,11 +311,6 @@ impl fmt::Display for Dots {
         writeln!(f, "Root: {}", self.root.display())?;
         write!(f, "{}", self.config)
     }
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
-    Dots::new(args)?.process_files()
 }
 
 #[cfg(test)]
