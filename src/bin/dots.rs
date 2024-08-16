@@ -52,6 +52,14 @@ struct Args {
     #[arg(short, long)]
     recursive: bool,
 
+    /// Append prefix to the start
+    #[arg(long)]
+    prefix: Option<String>,
+
+    /// Append suffix to the end
+    #[arg(long)]
+    suffix: Option<String>,
+
     /// Substitute patterns with replacements in filenames
     #[arg(short, long, num_args = 2, action = clap::ArgAction::Append)]
     substitute: Vec<String>,
@@ -86,6 +94,8 @@ struct UserConfig {
 #[derive(Debug, Default)]
 struct Config {
     replace: Vec<(String, String)>,
+    prefix: Option<String>,
+    suffix: Option<String>,
     debug: bool,
     dryrun: bool,
     overwrite: bool,
@@ -173,11 +183,14 @@ impl Dots {
 
     fn rename_files(&self, files_to_rename: Vec<(PathBuf, PathBuf)>) -> usize {
         let mut num_renamed: usize = 0;
-        for (path, new_path) in files_to_rename {
+        let max_items = files_to_rename.len();
+        let max_chars = files_to_rename.len().to_string().chars().count();
+        for (index, (path, new_path)) in files_to_rename.into_iter().enumerate() {
             let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
             let new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
+            let number = format!("{index:>width$} / {max_items}", width = max_chars);
             if self.config.dryrun {
-                println!("{}", "Dryrun:".bold());
+                println!("{}", format!("Dryrun {number}:").bold().cyan());
                 cli_tools::show_diff(&old_str, &new_str);
                 num_renamed += 1;
             } else if new_path.exists() && !self.config.overwrite {
@@ -188,7 +201,7 @@ impl Dots {
             } else {
                 match fs::rename(&path, &new_path) {
                     Ok(_) => {
-                        println!("{}", "Rename:".bold().magenta());
+                        println!("{}", format!("Rename {number}:").bold().magenta());
                         cli_tools::show_diff(&old_str, &new_str);
                         num_renamed += 1;
                     }
@@ -241,7 +254,16 @@ impl Dots {
         // Temporarily convert dots back to whitespace so titlecase works
         new_name = new_name.replace(".", " ");
         new_name = titlecase::titlecase(&new_name);
-        new_name.replace(" ", ".")
+        new_name = new_name.replace(" ", ".");
+
+        if let Some(ref prefix) = self.config.prefix {
+            new_name = format!("{prefix}.{new_name}");
+        }
+        if let Some(ref suffix) = self.config.suffix {
+            new_name = format!("{new_name}.{suffix}");
+        }
+
+        new_name
     }
 }
 
@@ -269,6 +291,8 @@ impl Config {
         replace.extend(user_config.replace);
         Config {
             replace,
+            prefix: args.prefix,
+            suffix: args.suffix,
             debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
             overwrite: args.force || user_config.overwrite,
@@ -279,7 +303,7 @@ impl Config {
 }
 
 impl DotsConfig {
-    /// Try to read user config from file if it exists.
+    /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
     fn get_user_config() -> DotsConfig {
         cli_tools::config::CONFIG_PATH
@@ -294,7 +318,7 @@ impl DotsConfig {
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let replace = if self.replace.is_empty() {
-            "replace: []".to_string()
+            "replace:   []".to_string()
         } else {
             "replace:\n".to_string() + &*self.replace.iter().map(|pair| format!("    {:?}", pair)).join("\n")
         };
@@ -304,6 +328,8 @@ impl fmt::Display for Config {
         writeln!(f, "  overwrite: {}", cli_tools::colorize_bool(self.overwrite))?;
         writeln!(f, "  recursive: {}", cli_tools::colorize_bool(self.recursive))?;
         writeln!(f, "  verbose:   {}", cli_tools::colorize_bool(self.verbose))?;
+        writeln!(f, "  prefix:    \"{}\"", self.prefix.as_ref().unwrap_or(&String::new()))?;
+        writeln!(f, "  suffix:    \"{}\"", self.suffix.as_ref().unwrap_or(&String::new()))?;
         writeln!(f, "  {}", replace)
     }
 }
