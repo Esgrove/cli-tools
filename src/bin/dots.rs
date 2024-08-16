@@ -19,10 +19,11 @@ static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").unwrap(
 
 // ["WEBDL", "."],
 // [".HEVC", ""],
-static REPLACE: [(&str, &str); 9] = [
+static REPLACE: [(&str, &str); 10] = [
     (" ", "."),
     (" - ", " "),
     (",.", "."),
+    ("-", "."),
     ("-=-", "."),
     (".&.", "."),
     (".-.", "."),
@@ -48,6 +49,10 @@ struct Args {
     /// Recursive directory iteration
     #[arg(short, long)]
     recursive: bool,
+
+    /// Substitute patterns with replacements in filenames
+    #[arg(short, long, num_args = 2, action = clap::ArgAction::Append)]
+    substitute: Vec<String>,
 
     /// Verbose output
     #[arg(short, long)]
@@ -83,6 +88,22 @@ struct Dots {
     config: Config,
 }
 
+impl Args {
+    /// Collect substitutes to replace pairs.
+    fn parse_substitutes(&self) -> Vec<(String, String)> {
+        self.substitute
+            .chunks(2)
+            .filter_map(|chunk| {
+                if chunk.len() == 2 {
+                    Some((chunk[0].clone(), chunk[1].clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
 impl Dots {
     pub fn new(args: Args) -> Result<Dots> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
@@ -92,7 +113,7 @@ impl Dots {
 
     pub fn process_files(&self) -> Result<()> {
         if self.config.verbose {
-            println!("{}", format!("Formatting files under {}", self.root.display()).bold())
+            println!("{}", format!("Formatting files under {}", self.root.display()).bold());
         }
 
         let files_to_rename = self.gather_files_to_rename();
@@ -176,24 +197,24 @@ impl Dots {
     }
 
     fn format_name(&self, file_name: &str) -> String {
-        let mut new_file_name = file_name.to_string();
+        let mut new_name = file_name.to_string();
 
         for (pattern, replacement) in REPLACE {
-            new_file_name = new_file_name.replace(pattern, replacement);
+            new_name = new_name.replace(pattern, replacement);
         }
 
         for (pattern, replacement) in self.config.replace.iter() {
-            new_file_name = new_file_name.replace(pattern, replacement);
+            new_name = new_name.replace(pattern, replacement);
         }
 
-        new_file_name = RE_WHITESPACE.replace_all(&new_file_name, "").to_string();
-        new_file_name = RE_BRACKETS.replace_all(&new_file_name, "").to_string();
-        new_file_name = RE_DOTS.replace_all(&new_file_name, ".").to_string();
+        new_name = RE_WHITESPACE.replace_all(&new_name, "").to_string();
+        new_name = RE_BRACKETS.replace_all(&new_name, "").to_string();
+        new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
 
         // Temporarily convert dots back to whitespace so titlecase works
-        new_file_name = new_file_name.replace(".", " ");
-        new_file_name = titlecase::titlecase(new_file_name.trim());
-        new_file_name.replace(" ", ".")
+        new_name = new_name.replace(".", " ");
+        new_name = titlecase::titlecase(new_name.trim());
+        new_name.replace(" ", ".")
     }
 }
 
@@ -201,8 +222,10 @@ impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Self {
         let user_config = UserConfig::get_user_config();
+        let mut replace = args.parse_substitutes();
+        replace.extend(user_config.replace);
         Config {
-            replace: user_config.replace,
+            replace,
             recursive: args.recursive || user_config.recursive,
             overwrite: args.force || user_config.overwrite,
             dryrun: args.print || user_config.dryrun,
