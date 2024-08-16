@@ -67,7 +67,7 @@ struct RenameItem {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let path = cli_tools::resolve_input_path(args.path)?;
+    let path = cli_tools::resolve_input_path(args.path.as_deref())?;
     if args.dir {
         date_flip_directories(path, args.recursive, args.print)
     } else {

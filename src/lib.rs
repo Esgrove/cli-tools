@@ -1,10 +1,32 @@
+pub mod config;
+
 use std::env;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use colored::Colorize;
 use difference::{Changeset, Difference};
+use unicode_normalization::UnicodeNormalization;
 use walkdir::DirEntry;
+
+/// Get filename from Path with special characters retained instead of decomposed.
+pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, String)> {
+    let file_stem = os_str_to_string(path.file_stem().context("Failed to get file stem")?);
+    let file_extension = os_str_to_string(path.extension().unwrap_or_default());
+
+    // Rust uses Unicode NFD (Normalization Form Decomposed) by default,
+    // which converts special chars like "å" to "a\u{30a}",
+    // which then get printed as a regular "a".
+    // Use NFC (Normalization Form Composed) from unicode_normalization crate
+    // to retain the correct format and not cause issues later on.
+    // https://github.com/unicode-rs/unicode-normalization
+
+    Ok((
+        file_stem.nfc().collect::<String>(),
+        file_extension.nfc().collect::<String>(),
+    ))
+}
 
 /// Check if entry is a hidden file or directory (starts with '.')
 pub fn is_hidden(entry: &DirEntry) -> bool {
@@ -21,10 +43,10 @@ pub fn is_hidden(entry: &DirEntry) -> bool {
 /// use std::path::PathBuf;
 /// use cli_tools::resolve_input_path;
 ///
-/// let path = Some("src".to_string());
+/// let path = Some("src");
 /// let absolute_path = resolve_input_path(path).unwrap();
 /// ```
-pub fn resolve_input_path(path: Option<String>) -> anyhow::Result<PathBuf> {
+pub fn resolve_input_path(path: Option<&str>) -> Result<PathBuf> {
     let input_path = path.unwrap_or_default().trim().to_string();
     let filepath = if input_path.is_empty() {
         env::current_dir().context("Failed to get current working directory")?
@@ -47,7 +69,7 @@ pub fn resolve_input_path(path: Option<String>) -> anyhow::Result<PathBuf> {
 /// If `path` is `None` or an empty string, and the absolute input path is a file,
 /// the parent directory of the input path is used.
 /// Otherwise, the input directory is used as the output path.
-pub fn resolve_output_path(path: Option<String>, absolute_input_path: &Path) -> anyhow::Result<PathBuf> {
+pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Result<PathBuf> {
     let output_path = {
         let path = path.unwrap_or_default().trim().to_string();
         if path.is_empty() {
@@ -103,7 +125,14 @@ pub fn get_relative_path_from_current_working_directory(path: &Path) -> PathBuf 
         .unwrap_or(path.to_path_buf())
 }
 
-/// Convert path to string with invalid unicode handling.
+/// Convert OsStr to String with invalid Unicode handling.
+pub fn os_str_to_string(name: &OsStr) -> String {
+    name.to_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| name.to_string_lossy().replace('\u{FFFD}', ""))
+}
+
+/// Convert given path to string with invalid Unicode handling.
 pub fn path_to_string(path: &Path) -> String {
     if let Some(string) = path.to_str() {
         string.to_string()
@@ -189,19 +218,19 @@ mod lib_tests {
     fn test_resolve_input_path_valid() {
         let dir = tempdir().unwrap();
         let dir_string = dir.path().to_str().unwrap().to_string();
-        let resolved = resolve_input_path(Some(dir_string));
+        let resolved = resolve_input_path(Some(dir_string.as_str()));
         assert!(resolved.is_ok());
     }
 
     #[test]
     fn test_resolve_input_path_nonexistent() {
-        let resolved = resolve_input_path(Some("nonexistent_path".to_string()));
+        let resolved = resolve_input_path(Some("nonexistent_path"));
         assert!(resolved.is_err());
     }
 
     #[test]
     fn test_resolve_input_path_empty() {
-        let resolved = resolve_input_path(Some(" ".to_string()));
+        let resolved = resolve_input_path(Some(" "));
         assert!(resolved.is_ok());
         assert_eq!(resolved.unwrap(), env::current_dir().unwrap());
     }
@@ -222,7 +251,7 @@ mod lib_tests {
         let input_file = input_dir.path().join("input.txt");
         File::create(&input_file).unwrap();
 
-        let output_path = resolve_output_path(Some(output_string), &input_file);
+        let output_path = resolve_output_path(Some(output_string.as_str()), &input_file);
         assert!(output_path.is_ok());
         assert_eq!(output_path.unwrap(), dunce::simplified(output_dir.path()));
     }

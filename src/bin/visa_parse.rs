@@ -183,8 +183,8 @@ struct VisaItem {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let input_path = cli_tools::resolve_input_path(args.path)?;
-    let output_path = cli_tools::resolve_output_path(args.output, &input_path)?;
+    let input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
+    let output_path = cli_tools::resolve_output_path(args.output.as_deref(), &input_path)?;
     visa_parse(input_path, output_path, args.verbose, args.print)
 }
 
