@@ -256,6 +256,9 @@ impl Dots {
         new_name = titlecase::titlecase(&new_name);
         new_name = new_name.replace(" ", ".");
 
+        // Fix encoding capitalization
+        new_name = new_name.replace("X265", "x265").replace("X264", "x264");
+
         if let Some(ref prefix) = self.config.prefix {
             new_name = format!("{prefix}.{new_name}");
         }
