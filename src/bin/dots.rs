@@ -259,11 +259,23 @@ impl Dots {
         // Fix encoding capitalization
         new_name = new_name.replace("X265", "x265").replace("X264", "x264");
 
+        let lower_name = new_name.to_lowercase();
         if let Some(ref prefix) = self.config.prefix {
-            new_name = format!("{prefix}.{new_name}");
+            if lower_name.starts_with(&prefix.to_lowercase()) {
+                new_name = format!("{}{}", prefix, &new_name[prefix.len()..]);
+            } else {
+                new_name = format!("{}.{}", prefix, new_name);
+            }
         }
         if let Some(ref suffix) = self.config.suffix {
-            new_name = format!("{new_name}.{suffix}");
+            let lower_suffix = suffix.to_lowercase();
+
+            if lower_name.ends_with(&lower_suffix) {
+                new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
+            } else {
+                // If it doesn't end with the suffix, append it
+                new_name = format!("{}.{}", new_name, suffix);
+            }
         }
 
         new_name
