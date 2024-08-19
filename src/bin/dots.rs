@@ -17,9 +17,10 @@ static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwr
 
 static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").unwrap());
 
-static REPLACE: [(&str, &str); 10] = [
+static REPLACE: [(&str, &str); 11] = [
     (" ", "."),
     (" - ", " "),
+    (", ", " "),
     (",.", "."),
     ("-", "."),
     ("-=-", "."),
