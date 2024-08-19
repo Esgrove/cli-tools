@@ -69,6 +69,7 @@ struct Args {
     verbose: bool,
 }
 
+/// Config from config file
 #[derive(Debug, Default, Deserialize)]
 struct DotsConfig {
     #[serde(default)]
@@ -85,12 +86,14 @@ struct DotsConfig {
     verbose: bool,
 }
 
+/// Wrapper needed to parse config section.
 #[derive(Debug, Default, Deserialize)]
 struct UserConfig {
     #[serde(default)]
     dots: DotsConfig,
 }
 
+/// Final config created from CLI arguments and user config file.
 #[derive(Debug, Default)]
 struct Config {
     replace: Vec<(String, String)>,
@@ -115,12 +118,14 @@ fn main() -> Result<()> {
 }
 
 impl Dots {
+    /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Dots> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args);
         Ok(Dots { root, config })
     }
 
+    /// Run processing.
     pub fn process_files(&self) -> Result<()> {
         if self.config.debug {
             println!("{}", self);
@@ -145,6 +150,7 @@ impl Dots {
         Ok(())
     }
 
+    /// Get all files that need to be renamed.
     fn gather_files_to_rename(&self) -> Vec<(PathBuf, PathBuf)> {
         if self.root.is_file() {
             if self.config.verbose {
@@ -158,16 +164,17 @@ impl Dots {
                 .unwrap_or_default();
         }
 
-        let max_depth = if self.config.recursive { 100 } else { 1 };
-
         if self.config.verbose {
             println!("{}", format!("Formatting files under {}", self.root.display()).bold());
         }
+
+        let max_depth = if self.config.recursive { 100 } else { 1 };
 
         // Collect and sort all files that need renaming
         WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
+            // ignore hidden files (name starting with ".")
             .filter_entry(|e| !cli_tools::is_hidden(e))
             .filter_map(|e| e.ok())
             .filter_map(|entry| {
@@ -181,6 +188,7 @@ impl Dots {
             .collect()
     }
 
+    /// Rename all files or just print changes if dryrun is enabled.
     fn rename_files(&self, files_to_rename: Vec<(PathBuf, PathBuf)>) -> usize {
         let mut num_renamed: usize = 0;
         let max_items = files_to_rename.len();
@@ -214,6 +222,7 @@ impl Dots {
         num_renamed
     }
 
+    /// Get full path with formatted filename and extension.
     fn format_filename(&self, path: &Path) -> Result<PathBuf> {
         if !path.is_file() {
             anyhow::bail!("Path is not a file")
@@ -228,6 +237,7 @@ impl Dots {
         }
     }
 
+    /// Format the file name stem without the file extension
     fn format_name(&self, file_name: &str) -> String {
         // Apply static replacements
         let mut new_name = REPLACE
