@@ -17,7 +17,7 @@ static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwr
 
 static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").unwrap());
 
-static REPLACE: [(&str, &str); 16] = [
+static REPLACE: [(&str, &str); 17] = [
     (" ", "."),
     (" - ", " "),
     (", ", " "),
@@ -28,6 +28,7 @@ static REPLACE: [(&str, &str); 16] = [
     ("~", "."),
     ("¡", "."),
     ("#", "."),
+    ("@", "."),
     ("=", "."),
     (",.", "."),
     ("-=-", "."),
@@ -300,22 +301,24 @@ impl Dots {
         // Fix encoding capitalization
         new_name = new_name.replace("X265", "x265").replace("X264", "x264");
 
-        let lower_name = new_name.to_lowercase();
         if let Some(ref prefix) = self.config.prefix {
             if new_name.contains(prefix) {
                 new_name = new_name.replace(prefix, "");
             }
-            if lower_name.starts_with(&prefix.to_lowercase()) {
+            let lower_name = new_name.to_lowercase();
+            let lower_prefix = prefix.to_lowercase();
+            if lower_name.starts_with(&lower_prefix) {
                 new_name = format!("{}{}", prefix, &new_name[prefix.len()..]);
             } else {
                 new_name = format!("{}.{}", prefix, new_name);
             }
         }
         if let Some(ref suffix) = self.config.suffix {
-            let lower_suffix = suffix.to_lowercase();
             if new_name.contains(suffix) {
                 new_name = new_name.replace(suffix, "");
             }
+            let lower_name = new_name.to_lowercase();
+            let lower_suffix = suffix.to_lowercase();
             if lower_name.ends_with(&lower_suffix) {
                 new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
             } else {
