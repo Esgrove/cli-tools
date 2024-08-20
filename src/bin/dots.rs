@@ -297,6 +297,9 @@ impl Dots {
 
         let lower_name = new_name.to_lowercase();
         if let Some(ref prefix) = self.config.prefix {
+            if new_name.contains(prefix) {
+                new_name = new_name.replace(prefix, "");
+            }
             if lower_name.starts_with(&prefix.to_lowercase()) {
                 new_name = format!("{}{}", prefix, &new_name[prefix.len()..]);
             } else {
@@ -305,7 +308,9 @@ impl Dots {
         }
         if let Some(ref suffix) = self.config.suffix {
             let lower_suffix = suffix.to_lowercase();
-
+            if new_name.contains(suffix) {
+                new_name = new_name.replace(suffix, "");
+            }
             if lower_name.ends_with(&lower_suffix) {
                 new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
             } else {
