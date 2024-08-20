@@ -197,21 +197,39 @@ impl Dots {
         for (index, (path, new_path)) in files_to_rename.into_iter().enumerate() {
             let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
             let new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
+
+            let capitalization_change_only = if new_str.to_lowercase() == old_str.to_lowercase() {
+                // File path contains only capitalisation changes:
+                // Need to use a temp file to workaround case-insensitive file systems.
+                true
+            } else {
+                false
+            };
             let number = format!("{index:>width$} / {max_items}", width = max_chars);
+            if !capitalization_change_only && new_path.exists() && !self.config.overwrite {
+                println!(
+                    "{}",
+                    format!("Skipping rename to already existing file: {new_str}").yellow()
+                );
+                continue;
+            }
+
             if self.config.dryrun {
                 println!("{}", format!("Dryrun {number}:").bold().cyan());
                 cli_tools::show_diff(&old_str, &new_str);
                 num_renamed += 1;
-            } else if new_path.exists() && !self.config.overwrite {
-                println!(
-                    "{}",
-                    format!("Skipping rename to already existing file: {new_str}").yellow()
-                )
             } else {
-                match fs::rename(&path, &new_path) {
+                println!("{}", format!("Rename {number}:").bold().magenta());
+                cli_tools::show_diff(&old_str, &new_str);
+
+                let rename_result = if capitalization_change_only {
+                    self.rename_with_temp_file(&path, &new_path)
+                } else {
+                    fs::rename(&path, &new_path)
+                };
+
+                match rename_result {
                     Ok(_) => {
-                        println!("{}", format!("Rename {number}:").bold().magenta());
-                        cli_tools::show_diff(&old_str, &new_str);
                         num_renamed += 1;
                     }
                     Err(e) => {
@@ -223,7 +241,14 @@ impl Dots {
         num_renamed
     }
 
-    /// Get full path with formatted filename and extension.
+    /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
+    fn rename_with_temp_file(&self, path: &PathBuf, new_path: &PathBuf) -> std::io::Result<()> {
+        let temp_file = cli_tools::append_extension_to_path(new_path.clone(), ".tmp");
+        fs::rename(path, &temp_file)?;
+        fs::rename(&temp_file, new_path)
+    }
+
+    /// Get the full path with formatted filename and extension.
     fn format_filename(&self, path: &Path) -> Result<PathBuf> {
         if !path.is_file() {
             anyhow::bail!("Path is not a file")

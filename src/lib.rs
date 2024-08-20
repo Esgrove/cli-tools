@@ -1,7 +1,7 @@
 pub mod config;
 
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -9,6 +9,14 @@ use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::DirEntry;
+
+/// Append an extension to `PathBuf`, which is missing from the standard lib :(
+pub fn append_extension_to_path(path: PathBuf, extension: impl AsRef<OsStr>) -> PathBuf {
+    let mut os_string: OsString = path.into();
+    os_string.push(".");
+    os_string.push(extension);
+    os_string.into()
+}
 
 /// Format bool value as a coloured string.
 pub fn colorize_bool(value: bool) -> ColoredString {
