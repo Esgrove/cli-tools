@@ -319,6 +319,8 @@ impl Dots {
             }
         }
 
+        new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
+        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
         new_name
     }
 }
