@@ -22,7 +22,7 @@ static RE_EXCLAMATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!+").expect("Failed to compile exclamation regex"));
 
 static RE_DOTCOM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\.com|\.net)\b").expect("Failed to compile .com replace regex"));
+    LazyLock::new(|| Regex::new(r"(?i)(\.com|\.net)\b").expect("Failed to compile .com regex"));
 
 static REPLACE: [(&str, &str); 18] = [
     (" ", "."),
