@@ -13,9 +13,10 @@ use walkdir::WalkDir;
 static RE_BRACKETS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[({\]})]+").expect("Failed to create regex pattern for brackets"));
 
-static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+static RE_WHITESPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+").expect("Failed to compile whitespace regex"));
 
-static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").unwrap());
+static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Failed to compile dots regex"));
 
 static REPLACE: [(&str, &str); 17] = [
     (" ", "."),
@@ -126,16 +127,16 @@ fn main() -> Result<()> {
 
 impl Dots {
     /// Init new instance with CLI args.
-    pub fn new(args: Args) -> Result<Dots> {
+    pub fn new(args: Args) -> Result<Self> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args);
-        Ok(Dots { root, config })
+        Ok(Self { root, config })
     }
 
     /// Run processing.
     pub fn process_files(&self) -> Result<()> {
         if self.config.debug {
-            println!("{}", self);
+            println!("{self}");
         }
 
         let files_to_rename = self.gather_files_to_rename();
@@ -167,7 +168,7 @@ impl Dots {
                 .format_filename(&self.root)
                 .ok()
                 .filter(|new_path| &self.root != new_path)
-                .map(|new_path| vec![(self.root.to_path_buf(), new_path)])
+                .map(|new_path| vec![(self.root.clone(), new_path)])
                 .unwrap_or_default();
         }
 
@@ -183,7 +184,7 @@ impl Dots {
             .into_iter()
             // ignore hidden files (name starting with ".")
             .filter_entry(|e| !cli_tools::is_hidden(e))
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter_map(|entry| {
                 let path = entry.path();
                 self.format_filename(path)
@@ -211,7 +212,7 @@ impl Dots {
             } else {
                 false
             };
-            let number = format!("{index:>width$} / {max_items}", width = max_chars);
+            let number = format!("{index:>max_chars$} / {max_items}");
             if !capitalization_change_only && new_path.exists() && !self.config.overwrite {
                 println!(
                     "{}",
@@ -229,13 +230,13 @@ impl Dots {
                 cli_tools::show_diff(&old_str, &new_str);
 
                 let rename_result = if capitalization_change_only {
-                    self.rename_with_temp_file(&path, &new_path)
+                    Self::rename_with_temp_file(&path, &new_path)
                 } else {
                     fs::rename(&path, &new_path)
                 };
 
                 match rename_result {
-                    Ok(_) => {
+                    Ok(()) => {
                         num_renamed += 1;
                     }
                     Err(e) => {
@@ -245,13 +246,6 @@ impl Dots {
             }
         }
         num_renamed
-    }
-
-    /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
-    fn rename_with_temp_file(&self, path: &PathBuf, new_path: &PathBuf) -> std::io::Result<()> {
-        let temp_file = cli_tools::append_extension_to_path(new_path.clone(), ".tmp");
-        fs::rename(path, &temp_file)?;
-        fs::rename(&temp_file, new_path)
     }
 
     /// Get the full path with formatted filename and extension.
@@ -294,9 +288,9 @@ impl Dots {
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
 
         // Temporarily convert dots back to whitespace so titlecase works
-        new_name = new_name.replace(".", " ");
+        new_name = new_name.replace('.', " ");
         new_name = titlecase::titlecase(&new_name);
-        new_name = new_name.replace(" ", ".");
+        new_name = new_name.replace(' ', ".");
 
         // Fix encoding capitalization
         new_name = new_name.replace("X265", "x265").replace("X264", "x264");
@@ -310,7 +304,7 @@ impl Dots {
             if lower_name.starts_with(&lower_prefix) {
                 new_name = format!("{}{}", prefix, &new_name[prefix.len()..]);
             } else {
-                new_name = format!("{}.{}", prefix, new_name);
+                new_name = format!("{prefix}.{new_name}");
             }
         }
         if let Some(ref suffix) = self.config.suffix {
@@ -323,13 +317,20 @@ impl Dots {
                 new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
             } else {
                 // If it doesn't end with the suffix, append it
-                new_name = format!("{}.{}", new_name, suffix);
+                new_name = format!("{new_name}.{suffix}");
             }
         }
 
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
         new_name
+    }
+
+    /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
+    fn rename_with_temp_file(path: &PathBuf, new_path: &PathBuf) -> std::io::Result<()> {
+        let temp_file = cli_tools::append_extension_to_path(new_path.clone(), ".tmp");
+        fs::rename(path, &temp_file)?;
+        fs::rename(&temp_file, new_path)
     }
 }
 
@@ -355,7 +356,7 @@ impl Config {
         let user_config = DotsConfig::get_user_config();
         let mut replace = args.parse_substitutes();
         replace.extend(user_config.replace);
-        Config {
+        Self {
             replace,
             prefix: args.prefix,
             suffix: args.suffix,
@@ -371,7 +372,7 @@ impl Config {
 impl DotsConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    fn get_user_config() -> DotsConfig {
+    fn get_user_config() -> Self {
         cli_tools::config::CONFIG_PATH
             .as_deref()
             .and_then(|path| fs::read_to_string(path).ok())
@@ -386,7 +387,7 @@ impl fmt::Display for Config {
         let replace = if self.replace.is_empty() {
             "replace:   []".to_string()
         } else {
-            "replace:\n".to_string() + &*self.replace.iter().map(|pair| format!("    {:?}", pair)).join("\n")
+            "replace:\n".to_string() + &*self.replace.iter().map(|pair| format!("    {pair:?}")).join("\n")
         };
         writeln!(f, "Config:")?;
         writeln!(f, "  debug:     {}", cli_tools::colorize_bool(self.debug))?;
@@ -396,7 +397,7 @@ impl fmt::Display for Config {
         writeln!(f, "  verbose:   {}", cli_tools::colorize_bool(self.verbose))?;
         writeln!(f, "  prefix:    \"{}\"", self.prefix.as_ref().unwrap_or(&String::new()))?;
         writeln!(f, "  suffix:    \"{}\"", self.suffix.as_ref().unwrap_or(&String::new()))?;
-        writeln!(f, "  {}", replace)
+        writeln!(f, "  {replace}")
     }
 }
 

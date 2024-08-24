@@ -24,7 +24,7 @@ struct Args {
     align: bool,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let args = Args::parse();
     if args.text.is_empty() {
         println!("{}", format_centered_divider("", args.length, args.character));
@@ -47,8 +47,6 @@ fn main() -> anyhow::Result<()> {
             println!("{}", format_centered_divider(text, args.length, args.character));
         }
     }
-
-    Ok(())
 }
 
 fn format_centered_divider(text: &str, count: usize, character: char) -> String {
@@ -60,7 +58,7 @@ fn format_centered_divider(text: &str, count: usize, character: char) -> String 
 
     let message_length: usize = text.chars().count() + 2;
     if message_length > count {
-        text.to_string()
+        text
     } else {
         let total_padding: usize = count - message_length;
         let padding_side: usize = total_padding / 2;
@@ -77,7 +75,7 @@ fn format_aligned_divider(text: &str, count: usize, character: char, padding_lef
 
     let message_length: usize = text.chars().count() + 2;
     if message_length > count {
-        text.to_string()
+        text
     } else {
         let total_padding: usize = count - message_length;
         let padding_right: usize = total_padding - padding_left;

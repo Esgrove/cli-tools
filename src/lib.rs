@@ -47,7 +47,7 @@ pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, St
 
 /// Check if entry is a hidden file or directory (starts with '.')
 pub fn is_hidden(entry: &DirEntry) -> bool {
-    entry.file_name().to_str().map(|s| s.starts_with('.')).unwrap_or(false)
+    entry.file_name().to_str().is_some_and(|s| s.starts_with('.'))
 }
 
 /// Resolves the provided input path to a directory or file to an absolute path.
@@ -128,37 +128,40 @@ pub fn get_relative_path_or_filename(full_path: &Path, root: &Path) -> String {
     if full_path == root {
         return full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
     }
-    match full_path.strip_prefix(root) {
-        Ok(relative_path) => relative_path.display().to_string(),
-        Err(_) => match full_path.file_name() {
-            None => full_path.display().to_string(),
-            Some(name) => name.to_string_lossy().to_string(),
+    full_path.strip_prefix(root).map_or_else(
+        |_| {
+            full_path.file_name().map_or_else(
+                || full_path.display().to_string(),
+                |name| name.to_string_lossy().to_string(),
+            )
         },
-    }
+        |relative_path| relative_path.display().to_string(),
+    )
 }
 
 /// Convert the given path to be relative to the current working directory.
 /// Returns the original path if the relative path cannot be created.
 pub fn get_relative_path_from_current_working_directory(path: &Path) -> PathBuf {
-    env::current_dir()
-        .map(|current_dir| path.strip_prefix(&current_dir).unwrap_or(path).to_path_buf())
-        .unwrap_or(path.to_path_buf())
+    env::current_dir().map_or_else(
+        |_| path.to_path_buf(),
+        |current_dir| path.strip_prefix(&current_dir).unwrap_or(path).to_path_buf(),
+    )
 }
 
-/// Convert OsStr to String with invalid Unicode handling.
+/// Convert `OsStr` to String with invalid Unicode handling.
 pub fn os_str_to_string(name: &OsStr) -> String {
-    name.to_str()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| name.to_string_lossy().replace('\u{FFFD}', ""))
+    name.to_str().map_or_else(
+        || name.to_string_lossy().replace('\u{FFFD}', ""),
+        std::string::ToString::to_string,
+    )
 }
 
 /// Convert given path to string with invalid Unicode handling.
 pub fn path_to_string(path: &Path) -> String {
-    if let Some(string) = path.to_str() {
-        string.to_string()
-    } else {
-        path.to_string_lossy().to_string().replace('\u{FFFD}', "")
-    }
+    path.to_str().map_or_else(
+        || path.to_string_lossy().to_string().replace('\u{FFFD}', ""),
+        std::string::ToString::to_string,
+    )
 }
 
 /// Get relative path and convert to string with invalid unicode handling.
@@ -195,8 +198,8 @@ pub fn show_diff(old: &str, new: &str) {
         }
     }
 
-    println!("{}", old_diff);
-    println!("{}", new_diff);
+    println!("{old_diff}");
+    println!("{new_diff}");
 }
 
 #[cfg(test)]

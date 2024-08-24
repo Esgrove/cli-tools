@@ -185,11 +185,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
     let output_path = cli_tools::resolve_output_path(args.output.as_deref(), &input_path)?;
-    visa_parse(input_path, output_path, args.verbose, args.print)
+    visa_parse(&input_path, &output_path, args.verbose, args.print)
 }
 
 /// Parse data from files and write formatted items to CSV and Excel.
-fn visa_parse(input: PathBuf, output: PathBuf, verbose: bool, dryrun: bool) -> Result<()> {
+fn visa_parse(input: &PathBuf, output: &PathBuf, verbose: bool, dryrun: bool) -> Result<()> {
     let (root, files) = get_xml_file_list(&input)?;
     if files.is_empty() {
         anyhow::bail!("No XML files to parse".red());
@@ -223,7 +223,7 @@ fn get_xml_file_list(input: &PathBuf) -> Result<(PathBuf, Vec<PathBuf>)> {
             "{}",
             format!("Parsing files from: {}", input.display()).bold().magenta()
         );
-        Ok((input.to_path_buf(), get_xml_files(input)))
+        Ok((input.clone(), get_xml_files(input)))
     }
 }
 
@@ -232,7 +232,7 @@ fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| !cli_tools::is_hidden(e))
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path().to_owned())
         .filter(|path| path.is_file() && path.extension() == Some(OsStr::new("xml")))
         .collect();
@@ -248,46 +248,50 @@ fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
 /// Parse raw XML files.
 fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     let mut result: Vec<VisaItem> = Vec::new();
-    let digits = if files.len() < 10 {
+    let num_files = files.len();
+    let digits = if num_files < 10 {
         1
     } else {
-        ((files.len() as f64).log10() as usize) + 1
+        ((num_files as f64).log10() as usize) + 1
     };
-    for (number, file) in files.iter().enumerate() {
+
+    for (number, file) in files.into_iter().enumerate() {
         print!(
             "{}",
             format!(
                 "{:>0width$}: {}",
                 number + 1,
-                cli_tools::get_relative_path_or_filename(file, root),
+                cli_tools::get_relative_path_or_filename(&file, root),
                 width = digits
             )
             .bold()
         );
-        let (raw_lines, year) = read_xml_file(file);
-        let items = extract_items(&raw_lines, year);
+        let (raw_lines, year) = read_xml_file(&file);
+        let items = extract_items(&raw_lines, year)?;
         if items.is_empty() {
             println!(" ({})", "0".yellow());
         } else {
             println!(" ({})", format!("{}", items.len()).cyan());
             if verbose {
                 for item in &items {
-                    println!("  {}", item);
+                    println!("  {item}");
                 }
             }
             result.extend(items);
         }
     }
+
     result.sort();
     println!(
         "Found {} items from {}",
         result.len(),
-        if files.len() > 1 {
-            format!("{} files", files.len())
+        if num_files > 1 {
+            format!("{num_files} files")
         } else {
             "1 file".to_string()
         }
     );
+
     Ok(result)
 }
 
@@ -312,7 +316,7 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
                         year = y;
                     }
                     Err(e) => {
-                        eprintln!("{}", format!("Failed to parse year from start date: {e}").red())
+                        eprintln!("{}", format!("Failed to parse year from start date: {e}").red());
                     }
                 }
             }
@@ -330,22 +334,24 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
 }
 
 /// Convert text lines to visa items.
-fn extract_items(rows: &[String], year: i32) -> Vec<VisaItem> {
+fn extract_items(rows: &[String], year: i32) -> Result<Vec<VisaItem>> {
     let mut formatted_data: Vec<(i32, i32, String, f64)> = Vec::new();
-    for line in rows.iter() {
+    for line in rows {
         let (date, name, sum) = split_item_text(line);
-        let (day, month) = date.split_once('.').unwrap();
-        let month: i32 = month.replace('.', "").parse().unwrap();
-        let day: i32 = day.parse().unwrap();
+        let (day, month) = date
+            .split_once('.')
+            .with_context(|| format!("Failed to separate day and month: {date}"))?;
+        let month: i32 = month.replace('.', "").parse()?;
+        let day: i32 = day.parse()?;
         let name = format_name(&name);
-        let sum = format_sum(&sum).unwrap();
+        let sum = format_sum(&sum).with_context(|| format!("Failed format sum: {sum}"))?;
         formatted_data.push((day, month, name, sum));
     }
 
     // Determine if there's a transition from December to January.
     let mut year_transition_detected = false;
     let mut last_month: i32 = 0;
-    for (_, month, _, _) in formatted_data.iter() {
+    for (_, month, _, _) in &formatted_data {
         if *month == 1 && last_month == 12 {
             year_transition_detected = true;
             break;
@@ -355,21 +361,22 @@ fn extract_items(rows: &[String], year: i32) -> Vec<VisaItem> {
 
     let previous_year = year - 1;
     let mut result: Vec<VisaItem> = Vec::new();
-    for (day, month, name, sum) in formatted_data.into_iter() {
+    for (day, month, name, sum) in formatted_data {
         let year = if month == 12 && year_transition_detected {
             previous_year
         } else {
             year
         };
 
-        let date_str = format!("{:02}.{:02}.{}", day, month, year);
+        let date_str = format!("{day:02}.{month:02}.{year}");
         if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%d.%m.%Y") {
             result.push(VisaItem { date, name, sum });
         } else {
-            eprintln!("{}", format!("Failed to parse date: {}", date_str).red())
+            eprintln!("{}", format!("Failed to parse date: {date_str}").red());
         }
     }
-    result
+
+    Ok(result)
 }
 
 /// Calculate the total sum for each unique name and return sorted in descending order.
@@ -415,7 +422,7 @@ fn format_name(text: &str) -> String {
         name = "IDA RADIO RY".to_string();
     }
 
-    for (pattern, replacement) in REPLACE_PAIRS.iter() {
+    for (pattern, replacement) in &REPLACE_PAIRS {
         name = name.replace(pattern, replacement);
     }
 
@@ -424,9 +431,9 @@ fn format_name(text: &str) -> String {
     replace_from_start(&mut name, "WWW.", "");
     replace_from_start(&mut name, "MOB.PAY", "MOBILEPAY");
 
-    for prefix in REPLACE_WITH_START.iter() {
+    for prefix in &REPLACE_WITH_START {
         if name.starts_with(prefix) {
-            name = prefix.to_string();
+            name = (*prefix).to_string();
         }
     }
 
@@ -437,7 +444,7 @@ fn format_name(text: &str) -> String {
 /// Helper method to remove a given pattern from the start of a string.
 fn replace_from_start(name: &mut String, pattern: &str, replacement: &str) {
     if name.starts_with(pattern) {
-        *name = name.replacen(pattern, replacement, 1)
+        *name = name.replacen(pattern, replacement, 1);
     }
 }
 
@@ -448,7 +455,7 @@ fn format_sum(value: &str) -> Result<f64> {
         .replace(',', ".")
         .replace(' ', "")
         .parse::<f64>()
-        .context(format!("Failed to parse sum as float: {}", value))
+        .context(format!("Failed to parse sum as float: {value}"))
 }
 
 /// Print item totals and some statistics.
@@ -458,8 +465,8 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
     let average = if count > 0.0 { total_sum / count } else { 0.0 };
 
     println!("Average items per file: {:.1}", items.len() / num_files);
-    println!("Total sum: {:.2}€", total_sum);
-    println!("Average sum: {:.2}€", average);
+    println!("Total sum: {total_sum:.2}€");
+    println!("Average sum: {average:.2}€");
     println!("Unique names: {}", totals.len());
 
     if verbose {
@@ -472,7 +479,7 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
             + 1;
 
         println!("\n{}", format!("Top {num_to_print} totals:").bold());
-        for (name, sum) in totals[..num_to_print].iter() {
+        for (name, sum) in &totals[..num_to_print] {
             println!("{:width$}    {:>7.2}€", format!("{name}"), sum, width = max_name_length);
         }
     }
@@ -520,7 +527,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     );
     if output_file.exists() {
         if let Err(e) = std::fs::remove_file(&output_file) {
-            eprintln!("{}", format!("Failed to remove existing csv file: {e}").red())
+            eprintln!("{}", format!("Failed to remove existing csv file: {e}").red());
         }
     }
     let mut file = File::create(output_file)?;
@@ -562,7 +569,7 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
     dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
     let mut row: usize = 1;
-    for item in items.iter() {
+    for item in items {
         // Filter out common non-DJ items
         if FILTER_PREFIXES.iter().any(|&prefix| item.name.starts_with(prefix)) {
             continue;
@@ -578,21 +585,16 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     totals_sheet.write_string_with_format(0, 0, "Name", &header_format)?;
     totals_sheet.write_string_with_format(0, 1, "Total sum", &header_format)?;
     row = 1;
-    for (name, sum) in totals.iter() {
+    for (name, sum) in totals {
         totals_sheet.write_string(row as RowNum, 0, name)?;
-        totals_sheet.write_string_with_format(
-            row as RowNum,
-            1,
-            format!("{:.2}", sum).replace('.', ","),
-            &sum_format,
-        )?;
+        totals_sheet.write_string_with_format(row as RowNum, 1, format!("{sum:.2}").replace('.', ","), &sum_format)?;
         row += 1;
     }
     totals_sheet.autofit();
 
     if output_file.exists() {
         if let Err(e) = std::fs::remove_file(&output_file) {
-            eprintln!("{}", format!("Failed to remove existing xlsx file: {e}").red())
+            eprintln!("{}", format!("Failed to remove existing xlsx file: {e}").red());
         }
     }
     workbook.save(output_file)?;

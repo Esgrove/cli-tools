@@ -71,13 +71,13 @@ fn main() -> Result<()> {
     if args.dir {
         date_flip_directories(path, args.recursive, args.print)
     } else {
-        date_flip_files(path, args.recursive, args.print, args.year)
+        date_flip_files(&path, args.recursive, args.print, args.year)
     }
 }
 
 /// Flip date to start with year for all matching files from the given path.
-fn date_flip_files(path: PathBuf, recursive: bool, dryrun: bool, starts_with_year: bool) -> Result<()> {
-    let (files, root) = files_to_rename(&path, recursive)?;
+fn date_flip_files(path: &PathBuf, recursive: bool, dryrun: bool, starts_with_year: bool) -> Result<()> {
+    let (files, root) = files_to_rename(path, recursive)?;
     if files.is_empty() {
         anyhow::bail!("No files to process");
     }
@@ -123,33 +123,33 @@ fn date_flip_files(path: PathBuf, recursive: bool, dryrun: bool, starts_with_yea
 /// Flip date to start with year for all matching directories from given path.
 fn date_flip_directories(path: PathBuf, recursive: bool, dryrun: bool) -> Result<()> {
     let directories = directories_to_rename(path, recursive)?;
-    if !directories.is_empty() {
-        let max_chars: usize = directories
-            .iter()
-            .map(|r| r.filename.chars().count())
-            .max()
-            .context("Failed to get max path length")?;
-
-        for directory in directories {
-            let new_path = directory.path.with_file_name(directory.new_name.clone());
-            println!(
-                "{:<width$}  ==>  {}",
-                directory.filename,
-                directory.new_name,
-                width = max_chars
-            );
-            if !dryrun {
-                fs::rename(&directory.path, &new_path).with_context(|| {
-                    format!(
-                        "Failed to rename {} to {}",
-                        directory.path.display(),
-                        new_path.display()
-                    )
-                })?;
-            }
-        }
-    } else {
+    if directories.is_empty() {
         anyhow::bail!("No directories to rename")
+    }
+
+    let max_chars: usize = directories
+        .iter()
+        .map(|r| r.filename.chars().count())
+        .max()
+        .context("Failed to get max path length")?;
+
+    for directory in directories {
+        let new_path = directory.path.with_file_name(directory.new_name.clone());
+        println!(
+            "{:<width$}  ==>  {}",
+            directory.filename,
+            directory.new_name,
+            width = max_chars
+        );
+        if !dryrun {
+            fs::rename(&directory.path, &new_path).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    directory.path.display(),
+                    new_path.display()
+                )
+            })?;
+        }
     }
 
     Ok(())
@@ -167,17 +167,18 @@ fn files_to_rename(path: &PathBuf, recursive: bool) -> Result<(Vec<PathBuf>, Pat
             .min_depth(1)
             .max_depth(if recursive { usize::MAX } else { 1 })
             .into_iter()
-            .filter_map(|e| e.ok())
-            .map(|e| e.into_path())
+            .filter_map(std::result::Result::ok)
+            .map(walkdir::DirEntry::into_path)
             .filter(|path| {
                 path.is_file()
-                    && path
-                        .extension()
-                        .map_or(false, |ext| FILE_EXTENSIONS.contains(&ext.to_str().unwrap()))
+                    && path.extension().map_or(false, |ext| {
+                        FILE_EXTENSIONS.contains(&ext.to_str().unwrap_or_else(|| panic!("Invalid file extension: {ext:#?}")))
+                    })
             })
             .collect();
         (list, path.clone())
     };
+
     files.sort();
     Ok((files, root))
 }
@@ -219,12 +220,12 @@ fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<Strin
 
     if let Some(date_match) = RE_FULL_DATE.find(filename) {
         let date = date_match.as_str();
-        let numbers: Vec<&str> = date.split('.').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
 
         let mut fixed_numbers: Vec<String> = vec![];
         for number in numbers {
             if number.chars().count() == 1 {
-                fixed_numbers.push(format!("0{}", number));
+                fixed_numbers.push(format!("0{number}"));
             } else {
                 fixed_numbers.push(number.to_string());
             }
@@ -242,12 +243,12 @@ fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<Strin
 
     if let Some(date_match) = RE_SHORT_DATE.find(filename) {
         let date = date_match.as_str();
-        let numbers: Vec<&str> = date.split('.').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
 
         let mut fixed_numbers: Vec<String> = vec![];
         for number in numbers {
             if number.chars().count() == 1 {
-                fixed_numbers.push(format!("0{}", number));
+                fixed_numbers.push(format!("0{number}"));
             } else {
                 fixed_numbers.push(number.to_string());
             }
@@ -260,7 +261,7 @@ fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<Strin
         }
 
         let flip_date = if starts_with_year {
-            fixed_numbers.to_vec().join(".")
+            fixed_numbers.clone().join(".")
         } else {
             fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".")
         };
@@ -276,61 +277,46 @@ fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<Strin
 fn reorder_directory_date(filename: &str) -> Option<String> {
     if let Some(caps) = RE_DD_MM_YYYY.captures(filename) {
         // Handle dd.mm.yyyy format
-        let (year, month, day) = match parse_date_from_match(filename, caps) {
-            Some(value) => value,
-            _ => return None,
-        };
+        let (year, month, day) = parse_date_from_match(filename, &caps)?;
         let name_part = RE_DD_MM_YYYY.replace(filename, "").to_string();
         let name = get_directory_separator(&name_part);
-        return Some(format!("{year}-{:02}-{:02}{}", month, day, name));
+        return Some(format!("{year}-{month:02}-{day:02}{name}"));
     } else if let Some(caps) = RE_YYYY_MM_DD.captures(filename) {
         // Handle yyyy.mm.dd format
-        let (year, month, day) = match parse_date_from_match(filename, caps) {
-            Some(value) => value,
-            _ => return None,
-        };
+        let (year, month, day) = parse_date_from_match(filename, &caps)?;
         let name_part = RE_YYYY_MM_DD.replace(filename, "").to_string();
         let name = get_directory_separator(&name_part);
-        return Some(format!("{year}-{:02}-{:02}{}", month, day, name));
+        return Some(format!("{year}-{month:02}-{day:02}{name}"));
     }
     None
 }
 
-fn parse_date_from_match(filename: &str, caps: Captures) -> Option<(String, u32, u32)> {
-    let year = match caps.name("year") {
-        Some(y) => y.as_str().to_string(),
-        None => {
-            eprintln!("{}", format!("Failed to extract 'year' from '{}'", filename).red());
-            return None;
-        }
+fn parse_date_from_match(filename: &str, caps: &Captures) -> Option<(String, u32, u32)> {
+    let year = if let Some(y) = caps.name("year") {
+        y.as_str().to_string()
+    } else {
+        eprintln!("{}", format!("Failed to extract 'year' from '{filename}'").red());
+        return None;
     };
-    let month_str = match caps.name("month") {
-        Some(m) => m.as_str(),
-        None => {
-            eprintln!("{}", format!("Failed to extract 'month' from '{}'", filename).red());
-            return None;
-        }
+    let month_str = if let Some(m) = caps.name("month") {
+        m.as_str()
+    } else {
+        eprintln!("{}", format!("Failed to extract 'month' from '{filename}'").red());
+        return None;
     };
-    let day_str = match caps.name("day") {
-        Some(d) => d.as_str(),
-        None => {
-            eprintln!("{}", format!("Failed to extract 'day' from '{}'", filename).red());
-            return None;
-        }
+    let day_str = if let Some(d) = caps.name("day") {
+        d.as_str()
+    } else {
+        eprintln!("{}", format!("Failed to extract 'day' from '{filename}'").red());
+        return None;
     };
-    let month = match month_str.parse::<u32>() {
-        Ok(m) => m,
-        Err(_) => {
-            eprintln!("{}", format!("Failed to parse 'month' in '{}'", filename).red());
-            return None;
-        }
+    let Ok(month) = month_str.parse::<u32>() else {
+        eprintln!("{}", format!("Failed to parse 'month' in '{filename}'").red());
+        return None;
     };
-    let day = match day_str.parse::<u32>() {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("{}", format!("Failed to parse 'day' in '{}'", filename).red());
-            return None;
-        }
+    let Ok(day) = day_str.parse::<u32>() else {
+        eprintln!("{}", format!("Failed to parse 'day' in '{filename}'").red());
+        return None;
     };
     Some((year, month, day))
 }
@@ -340,9 +326,9 @@ fn get_directory_separator(input: &str) -> String {
     if input.starts_with(|c: char| separators.contains(c)) {
         input.trim().to_string()
     } else if input.ends_with(|c: char| separators.contains(c)) {
-        let separator = input.chars().last().unwrap();
+        let separator = input.chars().last().expect("Failed to get last element");
         let rest = &input[..input.len() - 1];
-        format!("{}{}", separator, rest)
+        format!("{separator}{rest}")
     } else {
         format!(" {}", input.trim())
     }
