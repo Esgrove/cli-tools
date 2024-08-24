@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::{fmt, fs};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use itertools::Itertools;
@@ -75,9 +75,13 @@ struct Args {
     #[arg(long)]
     suffix: Option<String>,
 
-    /// Substitute patterns with replacements in filenames
+    /// Substitute pattern with replacement in filenames
     #[arg(short, long, num_args = 2, action = clap::ArgAction::Append)]
     substitute: Vec<String>,
+
+    /// Substitute regex pattern with replacement in filenames
+    #[arg(long, num_args = 2, action = clap::ArgAction::Append)]
+    regex: Vec<String>,
 
     /// Verbose output
     #[arg(short, long)]
@@ -89,6 +93,8 @@ struct Args {
 struct DotsConfig {
     #[serde(default)]
     replace: Vec<(String, String)>,
+    #[serde(default)]
+    regex_replace: Vec<(String, String)>,
     #[serde(default)]
     debug: bool,
     #[serde(default)]
@@ -112,6 +118,7 @@ struct UserConfig {
 #[derive(Debug, Default)]
 struct Config {
     replace: Vec<(String, String)>,
+    regex_replace: Vec<(Regex, String)>,
     prefix: Option<String>,
     suffix: Option<String>,
     debug: bool,
@@ -136,7 +143,7 @@ impl Dots {
     /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Self> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
-        let config = Config::from_args(args);
+        let config = Config::from_args(args)?;
         Ok(Self { root, config })
     }
 
@@ -280,7 +287,7 @@ impl Dots {
                 acc.replace(pattern, replacement)
             });
 
-        // Apply dynamic replacements from config
+        // Apply extra replacements from args and user config
         new_name = self
             .config
             .replace
@@ -288,6 +295,13 @@ impl Dots {
             .fold(new_name, |acc, (pattern, replacement)| {
                 acc.replace(pattern, replacement)
             });
+
+        // Apply regex replacements from args and user config
+        if !self.config.regex_replace.is_empty() {
+            for (regex, replacement) in self.config.regex_replace.iter() {
+                new_name = regex.replace_all(&new_name, replacement).to_string();
+            }
+        }
 
         new_name = RE_BRACKETS.replace_all(&new_name, ".").to_string();
         new_name = RE_DOTCOM.replace_all(&new_name, ".").to_string();
@@ -358,16 +372,40 @@ impl Args {
             })
             .collect()
     }
+
+    /// Collect and compile regex substitutes to replace pairs.
+    fn parse_regex_substitutes(&self) -> Result<Vec<(Regex, String)>> {
+        self.regex
+            .chunks(2)
+            .filter_map(|chunk| {
+                if chunk.len() == 2 {
+                    let regex_result = Regex::new(&chunk[0]).with_context(|| format!("Invalid regex: '{}'", chunk[0]));
+
+                    // If regex compilation fails, return None to propagate the error with `Result`
+                    match regex_result {
+                        Ok(regex) => Some(Ok((regex, chunk[1].clone()))),
+                        Err(e) => Some(Err(e)),
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 impl Config {
     /// Create config from given command line args and user config file.
-    pub fn from_args(args: Args) -> Self {
+    pub fn from_args(args: Args) -> Result<Self> {
         let user_config = DotsConfig::get_user_config();
         let mut replace = args.parse_substitutes();
         replace.extend(user_config.replace);
-        Self {
+        let mut regex_replace = args.parse_regex_substitutes()?;
+        let config_regex = Self::compile_regex_patterns(&user_config.regex_replace)?;
+        regex_replace.extend(config_regex);
+        Ok(Self {
             replace,
+            regex_replace,
             prefix: args.prefix,
             suffix: args.suffix,
             debug: args.debug || user_config.debug,
@@ -375,7 +413,18 @@ impl Config {
             overwrite: args.force || user_config.overwrite,
             recursive: args.recursive || user_config.recursive,
             verbose: args.verbose || user_config.verbose,
+        })
+    }
+
+    fn compile_regex_patterns(regex_pairs: &[(String, String)]) -> Result<Vec<(Regex, String)>> {
+        let mut compiled_pairs = Vec::new();
+
+        for (pattern, replacement) in regex_pairs {
+            let regex = Regex::new(pattern).with_context(|| format!("Invalid regex: '{pattern}'"))?;
+            compiled_pairs.push((regex, replacement.clone()));
         }
+
+        Ok(compiled_pairs)
     }
 }
 
@@ -399,6 +448,11 @@ impl fmt::Display for Config {
         } else {
             "replace:\n".to_string() + &*self.replace.iter().map(|pair| format!("    {pair:?}")).join("\n")
         };
+        let regex_replace = if self.regex_replace.is_empty() {
+            "regex_replace: []".to_string()
+        } else {
+            "regex_replace:\n".to_string() + &*self.regex_replace.iter().map(|pair| format!("    {pair:?}")).join("\n")
+        };
         writeln!(f, "Config:")?;
         writeln!(f, "  debug:     {}", cli_tools::colorize_bool(self.debug))?;
         writeln!(f, "  dryrun:    {}", cli_tools::colorize_bool(self.dryrun))?;
@@ -407,7 +461,8 @@ impl fmt::Display for Config {
         writeln!(f, "  verbose:   {}", cli_tools::colorize_bool(self.verbose))?;
         writeln!(f, "  prefix:    \"{}\"", self.prefix.as_ref().unwrap_or(&String::new()))?;
         writeln!(f, "  suffix:    \"{}\"", self.suffix.as_ref().unwrap_or(&String::new()))?;
-        writeln!(f, "  {replace}")
+        writeln!(f, "  {replace}")?;
+        writeln!(f, "  {regex_replace}")
     }
 }
 
