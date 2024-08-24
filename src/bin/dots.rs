@@ -211,6 +211,14 @@ impl Dots {
         for (index, (path, new_path)) in files_to_rename.into_iter().enumerate() {
             let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
             let new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
+            let number = format!("{index:>max_chars$} / {max_items}");
+
+            if self.config.dryrun {
+                println!("{}", format!("Dryrun {number}:").bold().cyan());
+                cli_tools::show_diff(&old_str, &new_str);
+                num_renamed += 1;
+                continue;
+            }
 
             let capitalization_change_only = if new_str.to_lowercase() == old_str.to_lowercase() {
                 // File path contains only capitalisation changes:
@@ -219,7 +227,6 @@ impl Dots {
             } else {
                 false
             };
-            let number = format!("{index:>max_chars$} / {max_items}");
             if !capitalization_change_only && new_path.exists() && !self.config.overwrite {
                 println!(
                     "{}",
@@ -228,27 +235,21 @@ impl Dots {
                 continue;
             }
 
-            if self.config.dryrun {
-                println!("{}", format!("Dryrun {number}:").bold().cyan());
-                cli_tools::show_diff(&old_str, &new_str);
-                num_renamed += 1;
+            println!("{}", format!("Rename {number}:").bold().magenta());
+            cli_tools::show_diff(&old_str, &new_str);
+
+            let rename_result = if capitalization_change_only {
+                Self::rename_with_temp_file(&path, &new_path)
             } else {
-                println!("{}", format!("Rename {number}:").bold().magenta());
-                cli_tools::show_diff(&old_str, &new_str);
+                fs::rename(&path, &new_path)
+            };
 
-                let rename_result = if capitalization_change_only {
-                    Self::rename_with_temp_file(&path, &new_path)
-                } else {
-                    fs::rename(&path, &new_path)
-                };
-
-                match rename_result {
-                    Ok(()) => {
-                        num_renamed += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("{}", format!("Error renaming: {old_str}\n{e}").red());
-                    }
+            match rename_result {
+                Ok(()) => {
+                    num_renamed += 1;
+                }
+                Err(e) => {
+                    eprintln!("{}", format!("Error renaming: {old_str}\n{e}").red());
                 }
             }
         }
