@@ -202,6 +202,16 @@ pub fn show_diff(old: &str, new: &str) {
     println!("{new_diff}");
 }
 
+#[inline]
+/// Helper method to assert floating point equality in test cases.
+pub fn assert_f64_eq(a: f64, b: f64) {
+    let epsilon = f64::EPSILON;
+    assert!(
+        (a - b).abs() <= epsilon,
+        "Values are not equal: {a} and {b} (epsilon = {epsilon})"
+    );
+}
+
 #[cfg(test)]
 mod lib_tests {
     use super::*;

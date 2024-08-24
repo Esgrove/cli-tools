@@ -189,8 +189,8 @@ fn main() -> Result<()> {
 }
 
 /// Parse data from files and write formatted items to CSV and Excel.
-fn visa_parse(input: &PathBuf, output: &PathBuf, verbose: bool, dryrun: bool) -> Result<()> {
-    let (root, files) = get_xml_file_list(&input)?;
+fn visa_parse(input: &PathBuf, output: &Path, verbose: bool, dryrun: bool) -> Result<()> {
+    let (root, files) = get_xml_file_list(input)?;
     if files.is_empty() {
         anyhow::bail!("No XML files to parse".red());
     }
@@ -201,8 +201,8 @@ fn visa_parse(input: &PathBuf, output: &PathBuf, verbose: bool, dryrun: bool) ->
     print_statistics(&items, &totals, num_files, verbose);
 
     if !dryrun {
-        write_to_csv(&items, &output)?;
-        write_to_excel(&items, &totals, &output)?;
+        write_to_csv(&items, output)?;
+        write_to_excel(&items, &totals, output)?;
     }
 
     Ok(())
@@ -662,14 +662,16 @@ impl Serialize for VisaItem {
 mod test_format_sum {
     use super::*;
 
+    use cli_tools::assert_f64_eq;
+
     #[test]
     fn test_normal_value() {
-        assert_eq!(format_sum("123,45").unwrap(), 123.45);
+        assert_f64_eq(format_sum("123,45").unwrap(), 123.45);
     }
 
     #[test]
     fn test_value_with_whitespace() {
-        assert_eq!(format_sum("  678,90  ").unwrap(), 678.90);
+        assert_f64_eq(format_sum("  678,90  ").unwrap(), 678.90);
     }
 
     #[test]
@@ -679,37 +681,37 @@ mod test_format_sum {
 
     #[test]
     fn test_large_number() {
-        assert_eq!(format_sum("1234567,89").unwrap(), 1234567.89);
+        assert_f64_eq(format_sum("1234567,89").unwrap(), 1234567.89);
     }
 
     #[test]
     fn test_small_number() {
-        assert_eq!(format_sum("0,01").unwrap(), 0.01);
+        assert_f64_eq(format_sum("0,01").unwrap(), 0.01);
     }
 
     #[test]
     fn test_number_with_many_decimal_places() {
-        assert_eq!(format_sum("1,234567").unwrap(), 1.234567);
+        assert_f64_eq(format_sum("1,234567").unwrap(), 1.234567);
     }
 
     #[test]
     fn test_negative_number() {
-        assert_eq!(format_sum("-123,45").unwrap(), -123.45);
+        assert_f64_eq(format_sum("-123,45").unwrap(), -123.45);
     }
 
     #[test]
     fn test_zero_value() {
-        assert_eq!(format_sum("0").unwrap(), 0.0);
+        assert_f64_eq(format_sum("0").unwrap(), 0.0);
     }
 
     #[test]
     fn test_number_without_decimal() {
-        assert_eq!(format_sum("1234").unwrap(), 1234.0);
+        assert_f64_eq(format_sum("1234").unwrap(), 1234.0);
     }
 
     #[test]
     fn test_number_with_thousand_space() {
-        assert_eq!(format_sum("1 488,90").unwrap(), 1488.90);
+        assert_f64_eq(format_sum("1 488,90").unwrap(), 1488.90);
     }
 }
 

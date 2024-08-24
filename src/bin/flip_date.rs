@@ -172,7 +172,10 @@ fn files_to_rename(path: &PathBuf, recursive: bool) -> Result<(Vec<PathBuf>, Pat
             .filter(|path| {
                 path.is_file()
                     && path.extension().map_or(false, |ext| {
-                        FILE_EXTENSIONS.contains(&ext.to_str().unwrap_or_else(|| panic!("Invalid file extension: {ext:#?}")))
+                        FILE_EXTENSIONS.contains(
+                            &ext.to_str()
+                                .unwrap_or_else(|| panic!("Invalid file extension: {ext:#?}")),
+                        )
                     })
             })
             .collect();
