@@ -18,7 +18,13 @@ static RE_WHITESPACE: LazyLock<Regex> =
 
 static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Failed to compile dots regex"));
 
-static REPLACE: [(&str, &str); 17] = [
+static RE_EXCLAMATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"!+").expect("Failed to compile exclamation regex"));
+
+static RE_DOTCOM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\.com|\.net)\b").expect("Failed to compile .com replace regex"));
+
+static REPLACE: [(&str, &str); 18] = [
     (" ", "."),
     (" - ", " "),
     (", ", " "),
@@ -36,6 +42,7 @@ static REPLACE: [(&str, &str); 17] = [
     (".&.", "."),
     (".-.", "."),
     (".rq", ""),
+    ("www.", ""),
 ];
 
 #[derive(Debug, Parser)]
@@ -281,8 +288,10 @@ impl Dots {
                 acc.replace(pattern, replacement)
             });
 
-        new_name = RE_WHITESPACE.replace_all(&new_name, ".").to_string();
         new_name = RE_BRACKETS.replace_all(&new_name, ".").to_string();
+        new_name = RE_DOTCOM.replace_all(&new_name, ".").to_string();
+        new_name = RE_EXCLAMATION.replace_all(&new_name, ".").to_string();
+        new_name = RE_WHITESPACE.replace_all(&new_name, ".").to_string();
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
 
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
@@ -423,6 +432,14 @@ mod dots_tests {
     }
 
     #[test]
+    fn test_format_name_with_newlines() {
+        assert_eq!(
+            DOTS.format_name("Meeting \tNotes \n(2023) - Draft\r\n"),
+            "Meeting.Notes.2023.Draft"
+        );
+    }
+
+    #[test]
     fn test_format_name_no_brackets() {
         assert_eq!(DOTS.format_name("John Doe - Document"), "John.Doe.Document");
     }
@@ -433,6 +450,7 @@ mod dots_tests {
             DOTS.format_name("Project Report - [Final Version]"),
             "Project.Report.Final.Version"
         );
+        assert_eq!(DOTS.format_name("Code {Snippet} (example)"), "Code.Snippet.Example");
     }
 
     #[test]
@@ -444,10 +462,46 @@ mod dots_tests {
     }
 
     #[test]
-    fn test_format_name_with_newlines() {
+    fn test_format_name_with_extra_dots() {
+        assert_eq!(DOTS.format_name("file..with...dots"), "File.With.Dots");
         assert_eq!(
-            DOTS.format_name("Meeting \tNotes \n(2023) - Draft\r\n"),
-            "Meeting.Notes.2023.Draft"
+            DOTS.format_name("...leading.and.trailing.dots..."),
+            "Leading.and.Trailing.Dots"
+        );
+    }
+
+    #[test]
+    fn test_format_name_with_exclamations() {
+        assert_eq!(DOTS.format_name("Exciting!Document!!"), "Exciting.Document");
+        assert_eq!(DOTS.format_name("Hello!!!World!!"), "Hello.World");
+    }
+
+    #[test]
+    fn test_format_name_with_dotcom() {
+        assert_eq!(
+            DOTS.format_name("visit.website.com.for.details"),
+            "Visit.Website.for.Details"
+        );
+        assert_eq!(
+            DOTS.format_name("Contact us at email@domain.net"),
+            "Contact.Us.at.Email.Domain"
+        );
+        assert_eq!(DOTS.format_name("Contact.company.test"), "Contact.Company.Test");
+    }
+
+    #[test]
+    fn test_format_name_with_combined_cases() {
+        assert_eq!(
+            DOTS.format_name("Amazing [Stuff]!! Visit my.site.com..now"),
+            "Amazing.Stuff.Visit.My.Site.Now"
+        );
+    }
+
+    #[test]
+    fn test_format_name_with_weird_characters() {
+        assert_eq!(
+            DOTS.format_name("Weird-Text-~File-Name-@Example#"),
+            "Weird.Text.File.Name.Example"
         );
     }
 
