@@ -129,7 +129,7 @@ fn version_tag(
     Ok(())
 }
 
-/// Create version tag.
+/// Create version tag with the given version for the given object identifier (commit).
 fn create_version_tag(repo: &Repository, tag_name: &str, version_number: &str, oid: Oid, dryrun: bool) -> Result<()> {
     let message = format!("Version {version_number}");
     if dryrun {
@@ -177,11 +177,9 @@ fn push_tag(repo: &Repository, tag_name: &str, dryrun: bool) -> Result<()> {
         true
     });
 
-    // Create push options and apply the callbacks
     let mut push_options = git2::PushOptions::new();
     push_options.remote_callbacks(callbacks);
 
-    // Format the refspec for the tag and push it
     let refspec = format!("refs/tags/{tag_name}");
     match remote.push(&[&refspec], Some(&mut push_options)) {
         Ok(()) => {
