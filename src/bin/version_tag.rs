@@ -40,6 +40,7 @@ fn main() -> Result<()> {
     version_tag(&repo_path, args.push, args.dryrun, args.verbose, args.single)
 }
 
+/// Create version tags for each unique package version from Cargo.toml git history.
 fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool, combined_push: bool) -> Result<()> {
     if verbose {
         let name = get_package_name(repo_path).unwrap_or_else(|| cli_tools::path_to_string_relative(repo_path));
@@ -86,7 +87,7 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool, com
                             if tag_name_exists(&repo, &version_tag)? {
                                 println!("{}", format!("Tag {version_tag} already exists, skipping...").yellow());
                             } else {
-                                tag_version(&repo, &version_tag, version_number, commit.id(), dryrun)?;
+                                create_version_tag(&repo, &version_tag, version_number, commit.id(), dryrun)?;
                             }
                             if push {
                                 if combined_push {
@@ -116,7 +117,8 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool, com
     Ok(())
 }
 
-fn tag_version(repo: &Repository, tag_name: &str, version_number: &str, oid: Oid, dryrun: bool) -> Result<()> {
+/// Create version tag.
+fn create_version_tag(repo: &Repository, tag_name: &str, version_number: &str, oid: Oid, dryrun: bool) -> Result<()> {
     let message = format!("Version {version_number}");
     if dryrun {
         println!("Dry-run: Tag {tag_name} with message '{message}'");
