@@ -19,6 +19,10 @@ struct Args {
     #[arg(short, long)]
     push: bool,
 
+    /// Only push new tags that did not exist locally
+    #[arg(short, long)]
+    new: bool,
+
     /// Use a single push to push all tags
     #[arg(short, long)]
     single: bool,
@@ -37,11 +41,18 @@ fn main() -> Result<()> {
     if !directory_has_cargo_toml(&repo_path) {
         anyhow::bail!("No Cargo.toml found in the input path")
     }
-    version_tag(&repo_path, args.push, args.dryrun, args.verbose, args.single)
+    version_tag(&repo_path, args.push, args.dryrun, args.verbose, args.single, args.new)
 }
 
 /// Create version tags for each unique package version from Cargo.toml git history.
-fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool, combined_push: bool) -> Result<()> {
+fn version_tag(
+    repo_path: &PathBuf,
+    push: bool,
+    dryrun: bool,
+    verbose: bool,
+    combined_push: bool,
+    new_tags_only: bool,
+) -> Result<()> {
     if verbose {
         let name = get_package_name(repo_path).unwrap_or_else(|| cli_tools::path_to_string_relative(repo_path));
         println!("{}", format!("Creating version tags for {name}").magenta().bold());
@@ -84,12 +95,13 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool, com
                             println!("{}", version_number.to_string().bold());
 
                             let version_tag = format!("v{version_number}");
-                            if tag_name_exists(&repo, &version_tag)? {
+                            let tag_exists = tag_name_exists(&repo, &version_tag)?;
+                            if tag_exists {
                                 println!("{}", format!("Tag {version_tag} already exists, skipping...").yellow());
                             } else {
                                 create_version_tag(&repo, &version_tag, version_number, commit.id(), dryrun)?;
                             }
-                            if push {
+                            if push && !(new_tags_only && tag_exists) {
                                 if combined_push {
                                     tags_to_push.push(version_tag);
                                 } else {

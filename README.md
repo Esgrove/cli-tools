@@ -106,6 +106,8 @@ Arguments:
 Options:
   -d, --dryrun   Only print information without creating or pushing tags
   -p, --push     Push tags to remote
+  -n, --new      Only push new tags that did not exist locally
+  -s, --single   Use a single push to push all tags
   -v, --verbose  Verbose output
   -h, --help     Print help
   -V, --version  Print version
