@@ -48,6 +48,7 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool) -> 
     reverse_walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
 
     let mut current_tag = String::new();
+    let mut tags_to_push = Vec::new();
 
     // Walk through each commit that modified Cargo.toml
     for oid in reverse_walk {
@@ -82,9 +83,9 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool) -> 
                                 println!("{}", format!("Tag {version_tag} already exists, skipping...").yellow());
                             } else {
                                 tag_version(&repo, &version_tag, version_number, commit.id(), dryrun)?;
-                                if push {
-                                    push_tag(&repo, &version_tag, dryrun)?;
-                                }
+                            }
+                            if push {
+                                tags_to_push.push(version_tag);
                             }
                         }
                     }
@@ -95,6 +96,15 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool) -> 
             }
         };
     }
+
+    // Push all the collected tags at once
+    if push && !tags_to_push.is_empty() {
+        if verbose {
+            println!("Pushing {} tags to remote", tags_to_push.len());
+        }
+        push_all_tags(&repo, &tags_to_push, dryrun)?;
+    }
+
     Ok(())
 }
 
@@ -117,6 +127,8 @@ fn tag_version(repo: &Repository, tag_name: &str, version_number: &str, oid: Oid
     Ok(())
 }
 
+#[allow(unused)]
+/// Push a single tag to remote.
 fn push_tag(repo: &Repository, tag_name: &str, dryrun: bool) -> Result<()> {
     if dryrun {
         println!("Dry-run: Push tag {tag_name}");
@@ -130,8 +142,25 @@ fn push_tag(repo: &Repository, tag_name: &str, dryrun: bool) -> Result<()> {
     Ok(())
 }
 
+/// Push multiple tags to remote.
+fn push_all_tags(repo: &Repository, tags: &[String], dryrun: bool) -> Result<()> {
+    if dryrun {
+        println!("Dry-run: Push tags {tags:?}");
+        return Ok(());
+    }
+
+    let mut remote = repo.find_remote("origin")?;
+    let refspecs: Vec<String> = tags.iter().map(|tag| format!("refs/tags/{tag}")).collect();
+    let refspec_refs: Vec<&str> = refspecs.iter().map(std::string::String::as_str).collect();
+
+    remote.push(&refspec_refs, None)?;
+    println!("Pushed tags: {tags:?}");
+    Ok(())
+}
+
+/// Check if the tag already exists locally.
 fn tag_name_exists(repo: &Repository, tag_name: &str) -> Result<bool> {
-    for tag in repo.tag_names(None)?.iter().flatten() {
+    for tag in repo.tag_names(Some("v*"))?.iter().flatten() {
         if tag == tag_name {
             return Ok(true);
         }
@@ -139,10 +168,13 @@ fn tag_name_exists(repo: &Repository, tag_name: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// Check that the given directory path contains a Cargo.toml file,
+/// meaning that the directory contains a Rust project.
 fn directory_has_cargo_toml(path: &Path) -> bool {
     path.join("Cargo.toml").exists()
 }
 
+/// Read Rust package name from Cargo.toml package config.
 fn get_package_name(path: &Path) -> Option<String> {
     let cargo_toml_path = path.join("Cargo.toml");
     let cargo_toml_content = std::fs::read_to_string(cargo_toml_path).ok()?;
