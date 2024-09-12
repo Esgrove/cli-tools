@@ -681,7 +681,7 @@ mod test_format_sum {
 
     #[test]
     fn test_large_number() {
-        assert_f64_eq(format_sum("1234567,89").unwrap(), 1234567.89);
+        assert_f64_eq(format_sum("1234567,89").unwrap(), 1_234_567.89);
     }
 
     #[test]
@@ -691,7 +691,7 @@ mod test_format_sum {
 
     #[test]
     fn test_number_with_many_decimal_places() {
-        assert_f64_eq(format_sum("1,234567").unwrap(), 1.234567);
+        assert_f64_eq(format_sum("1,234567").unwrap(), 1.234_567);
     }
 
     #[test]

@@ -92,3 +92,21 @@ Options:
   -h, --help                  Print help
   -V, --version               Print version
 ```
+
+## Version tag
+
+```console
+Create git version tags for a Rust project
+
+Usage: vtag [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Optional git repository path. Defaults to current directory
+
+Options:
+  -d, --dryrun   Only print information without creating or pushing tags
+  -p, --push     Push tags to remote
+  -v, --verbose  Verbose output
+  -h, --help     Print help
+  -V, --version  Print version
+```

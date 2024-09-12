@@ -136,7 +136,8 @@ struct Dots {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    Dots::new(args)?.process_files()
+    Dots::new(args)?.process_files();
+    Ok(())
 }
 
 impl Dots {
@@ -147,8 +148,8 @@ impl Dots {
         Ok(Self { root, config })
     }
 
-    /// Run processing.
-    pub fn process_files(&self) -> Result<()> {
+    /// Run renaming.
+    pub fn process_files(&self) {
         if self.config.debug {
             println!("{self}");
         }
@@ -157,7 +158,7 @@ impl Dots {
 
         if files_to_rename.is_empty() {
             println!("No files to rename");
-            return Ok(());
+            return;
         }
 
         let num_renamed = self.rename_files(files_to_rename);
@@ -168,8 +169,6 @@ impl Dots {
         } else {
             println!("{}", format!("Renamed {message}").green());
         }
-
-        Ok(())
     }
 
     /// Get all files that need to be renamed.
@@ -298,7 +297,7 @@ impl Dots {
 
         // Apply regex replacements from args and user config
         if !self.config.regex_replace.is_empty() {
-            for (regex, replacement) in self.config.regex_replace.iter() {
+            for (regex, replacement) in &self.config.regex_replace {
                 new_name = regex.replace_all(&new_name, replacement).to_string();
             }
         }

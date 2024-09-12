@@ -19,6 +19,7 @@ pub fn append_extension_to_path(path: PathBuf, extension: impl AsRef<OsStr>) -> 
 }
 
 /// Format bool value as a coloured string.
+#[must_use]
 pub fn colorize_bool(value: bool) -> ColoredString {
     if value {
         "true".green()
@@ -46,6 +47,7 @@ pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, St
 }
 
 /// Check if entry is a hidden file or directory (starts with '.')
+#[must_use]
 pub fn is_hidden(entry: &DirEntry) -> bool {
     entry.file_name().to_str().is_some_and(|s| s.starts_with('.'))
 }
@@ -124,6 +126,7 @@ pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Re
 /// let relative_or_filename = get_relative_path_or_filename(&outside_path, root);
 /// assert_eq!(relative_or_filename, "another.txt");
 /// ```
+#[must_use]
 pub fn get_relative_path_or_filename(full_path: &Path, root: &Path) -> String {
     if full_path == root {
         return full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -141,6 +144,7 @@ pub fn get_relative_path_or_filename(full_path: &Path, root: &Path) -> String {
 
 /// Convert the given path to be relative to the current working directory.
 /// Returns the original path if the relative path cannot be created.
+#[must_use]
 pub fn get_relative_path_from_current_working_directory(path: &Path) -> PathBuf {
     env::current_dir().map_or_else(
         |_| path.to_path_buf(),
@@ -165,6 +169,7 @@ pub fn path_to_string(path: &Path) -> String {
 }
 
 /// Get relative path and convert to string with invalid unicode handling.
+#[must_use]
 pub fn path_to_string_relative(path: &Path) -> String {
     path_to_string(&get_relative_path_from_current_working_directory(path))
 }
