@@ -19,6 +19,10 @@ struct Args {
     #[arg(short, long)]
     push: bool,
 
+    /// Use a single push to push all tags
+    #[arg(short, long)]
+    single: bool,
+
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -33,10 +37,10 @@ fn main() -> Result<()> {
     if !directory_has_cargo_toml(&repo_path) {
         anyhow::bail!("No Cargo.toml found in the input path")
     }
-    version_tag(&repo_path, args.push, args.dryrun, args.verbose)
+    version_tag(&repo_path, args.push, args.dryrun, args.verbose, args.single)
 }
 
-fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool) -> Result<()> {
+fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool, combined_push: bool) -> Result<()> {
     if verbose {
         let name = get_package_name(repo_path).unwrap_or_else(|| cli_tools::path_to_string_relative(repo_path));
         println!("{}", format!("Creating version tags for {name}").magenta().bold());
@@ -85,7 +89,11 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool) -> 
                                 tag_version(&repo, &version_tag, version_number, commit.id(), dryrun)?;
                             }
                             if push {
-                                tags_to_push.push(version_tag);
+                                if combined_push {
+                                    tags_to_push.push(version_tag);
+                                } else {
+                                    push_tag(&repo, &version_tag, dryrun)?;
+                                }
                             }
                         }
                     }
@@ -127,7 +135,6 @@ fn tag_version(repo: &Repository, tag_name: &str, version_number: &str, oid: Oid
     Ok(())
 }
 
-#[allow(unused)]
 /// Push a single tag to remote.
 fn push_tag(repo: &Repository, tag_name: &str, dryrun: bool) -> Result<()> {
     if dryrun {
@@ -136,10 +143,42 @@ fn push_tag(repo: &Repository, tag_name: &str, dryrun: bool) -> Result<()> {
     }
 
     let mut remote = repo.find_remote("origin")?;
+
+    // Set up callbacks for authentication
+    let mut callbacks = git2::RemoteCallbacks::new();
+
+    // Use Git's credential helper or SSH key from agent
+    callbacks.credentials(|_url, username_from_url, allowed_types| {
+        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+            return git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"));
+        }
+        git2::Cred::default()
+    });
+
+    // Set up a sideband progress callback to see what is happening
+    callbacks.sideband_progress(|data| {
+        if let Ok(text) = std::str::from_utf8(data) {
+            print!("remote: {text}");
+        }
+        true
+    });
+
+    // Create push options and apply the callbacks
+    let mut push_options = git2::PushOptions::new();
+    push_options.remote_callbacks(callbacks);
+
+    // Format the refspec for the tag and push it
     let refspec = format!("refs/tags/{tag_name}");
-    remote.push(&[&refspec], None)?;
-    println!("{}", format!("Pushed tag: {tag_name}").green());
-    Ok(())
+    match remote.push(&[&refspec], Some(&mut push_options)) {
+        Ok(()) => {
+            println!("Pushed tag: {tag_name}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to push tag {tag_name}:\n{e}");
+            Err(e.into())
+        }
+    }
 }
 
 /// Push multiple tags to remote.
@@ -155,33 +194,37 @@ fn push_all_tags(repo: &Repository, tags: &[String], dryrun: bool) -> Result<()>
     let mut callbacks = git2::RemoteCallbacks::new();
 
     // Use Git's credential helper or SSH key from agent
-    callbacks.credentials(|url, username_from_url, allowed_types| {
-        // Try SSH key-based authentication
+    callbacks.credentials(|_url, username_from_url, allowed_types| {
         if allowed_types.contains(git2::CredentialType::SSH_KEY) {
             return git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"));
         }
-
-        // Try to use HTTPS credentials from credential helper (like macOS Keychain)
-        git2::Cred::credential_helper(&repo.config()?, url, username_from_url)
+        git2::Cred::default()
     });
 
-    // Optional: Set up a sideband progress callback to see what's happening
     callbacks.sideband_progress(|data| {
-        print!("remote: {}", std::str::from_utf8(data).unwrap());
+        if let Ok(text) = std::str::from_utf8(data) {
+            print!("remote: {text}");
+        }
         true
     });
 
     let refspecs: Vec<String> = tags.iter().map(|tag| format!("refs/tags/{tag}")).collect();
-    let refspec_refs: Vec<&str> = refspecs.iter().map(std::string::String::as_str).collect();
+    let refspec_refs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
 
     let mut push_options = git2::PushOptions::new();
     push_options.remote_callbacks(callbacks);
 
     // Push the tags with the configured options
-    remote.push(&refspec_refs, Some(&mut push_options))?;
-
-    println!("Pushed tags: {tags:?}");
-    Ok(())
+    match remote.push(&refspec_refs, Some(&mut push_options)) {
+        Ok(()) => {
+            println!("Pushed tags successfully: {tags:?}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to push tags:\n{e}");
+            Err(e.into())
+        }
+    }
 }
 
 /// Check if the tag already exists locally.
