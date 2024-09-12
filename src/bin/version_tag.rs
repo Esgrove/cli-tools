@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
-use git2::{Error, Oid, Repository};
+use git2::{Oid, Repository};
 
 #[derive(Parser, Debug)]
 #[command(author, version, name = "vtag", about = "Create git version tags for a Rust project")]
@@ -58,7 +58,7 @@ fn version_tag(repo_path: &PathBuf, push: bool, dryrun: bool, verbose: bool) -> 
         if let Some(entry) = tree.get_name("Cargo.toml") {
             if let Ok(blob) = entry
                 .to_object(&repo)
-                .and_then(|obj| obj.into_blob().map_err(|_| Error::from_str("Not a blob")))
+                .and_then(|obj| obj.into_blob().map_err(|_| git2::Error::from_str("Not a blob")))
             {
                 let content = std::str::from_utf8(blob.content()).unwrap_or_default();
                 match content.parse::<toml::Value>() {
@@ -150,10 +150,36 @@ fn push_all_tags(repo: &Repository, tags: &[String], dryrun: bool) -> Result<()>
     }
 
     let mut remote = repo.find_remote("origin")?;
+
+    // Set up callbacks for authentication
+    let mut callbacks = git2::RemoteCallbacks::new();
+
+    // Use Git's credential helper or SSH key from agent
+    callbacks.credentials(|url, username_from_url, allowed_types| {
+        // Try SSH key-based authentication
+        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+            return git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"));
+        }
+
+        // Try to use HTTPS credentials from credential helper (like macOS Keychain)
+        git2::Cred::credential_helper(&repo.config()?, url, username_from_url)
+    });
+
+    // Optional: Set up a sideband progress callback to see what's happening
+    callbacks.sideband_progress(|data| {
+        print!("remote: {}", std::str::from_utf8(data).unwrap());
+        true
+    });
+
     let refspecs: Vec<String> = tags.iter().map(|tag| format!("refs/tags/{tag}")).collect();
     let refspec_refs: Vec<&str> = refspecs.iter().map(std::string::String::as_str).collect();
 
-    remote.push(&refspec_refs, None)?;
+    let mut push_options = git2::PushOptions::new();
+    push_options.remote_callbacks(callbacks);
+
+    // Push the tags with the configured options
+    remote.push(&refspec_refs, Some(&mut push_options))?;
+
     println!("Pushed tags: {tags:?}");
     Ok(())
 }
@@ -183,5 +209,5 @@ fn get_package_name(path: &Path) -> Option<String> {
         .get("package")?
         .get("name")?
         .as_str()
-        .map(std::string::ToString::to_string)
+        .map(ToString::to_string)
 }
