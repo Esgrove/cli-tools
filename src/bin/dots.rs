@@ -217,7 +217,7 @@ impl Dots {
         for (index, (path, new_path)) in files_to_rename.into_iter().enumerate() {
             let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
             let new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
-            let number = format!("{index:>max_chars$} / {max_items}");
+            let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
             if self.config.dryrun {
                 println!("{}", format!("Dryrun {number}:").bold().cyan());
