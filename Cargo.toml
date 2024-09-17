@@ -26,7 +26,7 @@ serde = { version = "1.0.210", features = ["derive"] }
 tempfile = "3.12.0"
 titlecase = "3.3.0"
 toml = "0.8.19"
-unicode-normalization = "0.1.23"
+unicode-normalization = "0.1.24"
 walkdir = "2.5.0"
 
 [[bin]]
