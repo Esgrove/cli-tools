@@ -96,6 +96,10 @@ struct DotsConfig {
     #[serde(default)]
     regex_replace: Vec<(String, String)>,
     #[serde(default)]
+    move_to_start: Vec<String>,
+    #[serde(default)]
+    move_to_end: Vec<String>,
+    #[serde(default)]
     debug: bool,
     #[serde(default)]
     dryrun: bool,
@@ -119,6 +123,8 @@ struct UserConfig {
 struct Config {
     replace: Vec<(String, String)>,
     regex_replace: Vec<(Regex, String)>,
+    move_to_start: Vec<String>,
+    move_to_end: Vec<String>,
     prefix: Option<String>,
     suffix: Option<String>,
     debug: bool,
@@ -344,9 +350,32 @@ impl Dots {
             }
         }
 
+        if !self.config.move_to_start.is_empty() {
+            self.move_to_start(&mut new_name);
+        }
+        if !self.config.move_to_end.is_empty() {
+            self.move_to_end(&mut new_name);
+        }
+
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
         new_name
+    }
+
+    fn move_to_start(&self, name: &mut String) {
+        for sub in &self.config.move_to_start {
+            if name.contains(sub) {
+                *name = format!("{}.{}", sub, name.replace(sub, ""));
+            }
+        }
+    }
+
+    fn move_to_end(&self, name: &mut String) {
+        for sub in &self.config.move_to_end {
+            if name.contains(sub) {
+                *name = format!("{}.{}", name.replace(sub, ""), sub);
+            }
+        }
     }
 
     /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
@@ -405,6 +434,8 @@ impl Config {
         Ok(Self {
             replace,
             regex_replace,
+            move_to_start: user_config.move_to_start,
+            move_to_end: user_config.move_to_end,
             prefix: args.prefix,
             suffix: args.suffix,
             debug: args.debug || user_config.debug,
@@ -568,5 +599,31 @@ mod dots_tests {
     #[test]
     fn test_format_name_no_changes() {
         assert_eq!(DOTS.format_name("SingleWord"), "SingleWord");
+    }
+
+    #[test]
+    fn test_move_to_start() {
+        let mut dots = Dots::default();
+        dots.config.move_to_start = vec!["Test".to_string()];
+        assert_eq!(dots.format_name("This is a test string test"), "Test.This.Is.a.String");
+        assert_eq!(
+            dots.format_name("Test.This.Is.a.test.string.test"),
+            "Test.This.Is.a.String"
+        );
+        assert_eq!(dots.format_name("test"), "Test");
+        assert_eq!(dots.format_name("Test"), "Test");
+    }
+
+    #[test]
+    fn test_move_to_end() {
+        let mut dots = Dots::default();
+        dots.config.move_to_end = vec!["Test".to_string()];
+        assert_eq!(dots.format_name("This is a test string test"), "This.Is.a.String.Test");
+        assert_eq!(
+            dots.format_name("Test.This.Is.a.test.string.test"),
+            "This.Is.a.String.Test"
+        );
+        assert_eq!(dots.format_name("test"), "Test");
+        assert_eq!(dots.format_name("Test"), "Test");
     }
 }
