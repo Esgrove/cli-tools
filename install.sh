@@ -16,8 +16,7 @@ print_magenta "Installing binaries..."
 cargo install --force --path "$REPO_ROOT"
 echo ""
 
-executables=$(get_rust_executable_names)
-for executable in $executables; do
+for executable in $(get_rust_executable_names); do
     if [ -z "$(command -v "$executable")" ]; then
         print_error_and_exit "Binary not found. Is the Cargo install directory in path?"
     fi
