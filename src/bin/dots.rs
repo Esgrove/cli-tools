@@ -28,7 +28,7 @@ static RE_DOTCOM: LazyLock<Regex> =
 static RE_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{8,16}").expect("Failed to compile id regex"));
 
-static REPLACE: [(&str, &str); 25] = [
+static REPLACE: [(&str, &str); 26] = [
     (" ", "."),
     (" - ", " "),
     (", ", " "),
@@ -44,6 +44,7 @@ static REPLACE: [(&str, &str); 25] = [
     ("@", "."),
     ("=", "."),
     (",.", "."),
+    (",", "."),
     ("-=-", "."),
     (".&.", "."),
     (".-.", "."),
@@ -407,8 +408,7 @@ impl Dots {
             // Split the string into graphemes (for handling emojis and complex characters)
             .graphemes(true)
             .filter(|g| {
-                // Retain only alphanumeric characters, hyphens, underscores, and dots
-                g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '\'')
+                g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '\'' || c == '&')
             })
             .collect();
 
@@ -419,9 +419,11 @@ impl Dots {
         let result = RE_IDENTIFIER.replace_all(name, |caps: &regex::Captures| {
             let matched_str = &caps[0];
             if Self::has_at_least_six_digits(matched_str)
-                && !matched_str.contains("1920")
-                && !matched_str.contains("1080")
                 && !matched_str.contains("720")
+                && !matched_str.contains("1080")
+                && !matched_str.contains("1920")
+                && !matched_str.contains("2160")
+                && !matched_str.contains("3840")
             {
                 String::new()
             } else {
