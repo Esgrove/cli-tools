@@ -24,6 +24,9 @@ static RE_EXCLAMATION: LazyLock<Regex> =
 static RE_DOTCOM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(\.com|\.net)\b").expect("Failed to compile .com regex"));
 
+static RE_IDENTIFIER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{8,16}").expect("Failed to compile id regex"));
+
 static REPLACE: [(&str, &str); 20] = [
     (" ", "."),
     (" - ", " "),
@@ -321,6 +324,8 @@ impl Dots {
         new_name = RE_WHITESPACE.replace_all(&new_name, ".").to_string();
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
 
+        Self::remove_random_identifiers(&mut new_name);
+
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
 
         if self.config.convert_case {
@@ -387,6 +392,23 @@ impl Dots {
                 *name = format!("{}.{}", name.replace(sub, ""), sub);
             }
         }
+    }
+
+    fn remove_random_identifiers(name: &mut String) {
+        let result = RE_IDENTIFIER.replace_all(name, |caps: &regex::Captures| {
+            let matched_str = &caps[0];
+            if Self::has_at_least_six_digits(matched_str) {
+                String::new()
+            } else {
+                matched_str.to_string()
+            }
+        });
+
+        *name = result.trim().to_string();
+    }
+
+    fn has_at_least_six_digits(s: &str) -> bool {
+        s.chars().filter(char::is_ascii_digit).count() >= 6
     }
 
     /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
@@ -636,6 +658,21 @@ mod dots_tests {
             "This.Is.a.String.Test"
         );
         assert_eq!(dots.format_name("test"), "Test");
+        assert_eq!(dots.format_name("Test"), "Test");
+    }
+
+    #[test]
+    fn test_remove_identifier() {
+        let dots = Dots::default();
+        assert_eq!(
+            dots.format_name("This is a string test ^[640e54a564228]"),
+            "This.Is.a.String.Test"
+        );
+        assert_eq!(
+            dots.format_name("This.Is.a.test.string.65f09e4248e03..."),
+            "This.Is.a.Test.String"
+        );
+        assert_eq!(dots.format_name("test Ph5d9473a841fe9"), "Test");
         assert_eq!(dots.format_name("Test"), "Test");
     }
 }
