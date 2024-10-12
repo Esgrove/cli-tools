@@ -53,6 +53,10 @@ struct Args {
     /// Optional input directory or file
     path: Option<String>,
 
+    /// Convert casing
+    #[arg(short, long)]
+    case: bool,
+
     /// Enable debug prints
     #[arg(short, long)]
     debug: bool,
@@ -129,6 +133,7 @@ struct Config {
     move_to_end: Vec<String>,
     prefix: Option<String>,
     suffix: Option<String>,
+    convert_case: bool,
     debug: bool,
     dryrun: bool,
     overwrite: bool,
@@ -318,6 +323,10 @@ impl Dots {
 
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
 
+        if self.config.convert_case {
+            new_name = new_name.to_lowercase();
+        }
+
         // Temporarily convert dots back to whitespace so titlecase works
         new_name = new_name.replace('.', " ");
         new_name = titlecase::titlecase(&new_name);
@@ -440,6 +449,7 @@ impl Config {
             move_to_end: user_config.move_to_end,
             prefix: args.prefix,
             suffix: args.suffix,
+            convert_case: args.case,
             debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
             overwrite: args.force || user_config.overwrite,
