@@ -28,7 +28,7 @@ static RE_DOTCOM: LazyLock<Regex> =
 static RE_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{8,16}").expect("Failed to compile id regex"));
 
-static REPLACE: [(&str, &str); 23] = [
+static REPLACE: [(&str, &str); 25] = [
     (" ", "."),
     (" - ", " "),
     (", ", " "),
@@ -52,6 +52,8 @@ static REPLACE: [(&str, &str); 23] = [
     ("^", ""),
     ("｜", ""),
     ("`", "'"),
+    ("’", "'"),
+    ("\"", "'"),
 ];
 
 #[derive(Debug, Parser)]
@@ -406,7 +408,7 @@ impl Dots {
             .graphemes(true)
             .filter(|g| {
                 // Retain only alphanumeric characters, hyphens, underscores, and dots
-                g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+                g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '\'')
             })
             .collect();
 
