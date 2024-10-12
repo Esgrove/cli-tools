@@ -24,7 +24,7 @@ static RE_EXCLAMATION: LazyLock<Regex> =
 static RE_DOTCOM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(\.com|\.net)\b").expect("Failed to compile .com regex"));
 
-static REPLACE: [(&str, &str); 18] = [
+static REPLACE: [(&str, &str); 20] = [
     (" ", "."),
     (" - ", " "),
     (", ", " "),
@@ -43,6 +43,8 @@ static REPLACE: [(&str, &str); 18] = [
     (".-.", "."),
     (".rq", ""),
     ("www.", ""),
+    ("^", ""),
+    ("｜", ""),
 ];
 
 #[derive(Debug, Parser)]
