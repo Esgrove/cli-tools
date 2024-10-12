@@ -8,6 +8,7 @@ use colored::Colorize;
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
+use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 
 static RE_BRACKETS: LazyLock<Regex> =
@@ -27,7 +28,7 @@ static RE_DOTCOM: LazyLock<Regex> =
 static RE_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{8,16}").expect("Failed to compile id regex"));
 
-static REPLACE: [(&str, &str); 20] = [
+static REPLACE: [(&str, &str); 23] = [
     (" ", "."),
     (" - ", " "),
     (", ", " "),
@@ -38,6 +39,8 @@ static REPLACE: [(&str, &str); 20] = [
     ("~", "."),
     ("¡", "."),
     ("#", "."),
+    ("$", "."),
+    (";", "."),
     ("@", "."),
     ("=", "."),
     (",.", "."),
@@ -48,6 +51,7 @@ static REPLACE: [(&str, &str); 20] = [
     ("www.", ""),
     ("^", ""),
     ("｜", ""),
+    ("`", "'"),
 ];
 
 #[derive(Debug, Parser)]
@@ -324,6 +328,7 @@ impl Dots {
         new_name = RE_WHITESPACE.replace_all(&new_name, ".").to_string();
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
 
+        Self::remove_special_characters(&mut new_name);
         Self::remove_random_identifiers(&mut new_name);
 
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
@@ -392,6 +397,20 @@ impl Dots {
                 *name = format!("{}.{}", name.replace(sub, ""), sub);
             }
         }
+    }
+
+    /// Only retain alphanumeric characters and a few common filename characters
+    fn remove_special_characters(name: &mut String) {
+        let cleaned: String = name
+            // Split the string into graphemes (for handling emojis and complex characters)
+            .graphemes(true)
+            .filter(|g| {
+                // Retain only alphanumeric characters, hyphens, underscores, and dots
+                g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+            })
+            .collect();
+
+        *name = cleaned;
     }
 
     fn remove_random_identifiers(name: &mut String) {
