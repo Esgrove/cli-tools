@@ -57,6 +57,8 @@ static REPLACE: [(&str, &str); 26] = [
     ("\"", "'"),
 ];
 
+const RESOLUTIONS: [&str; 6] = ["540", "720", "1080", "1920", "2160", "3840"];
+
 #[derive(Debug, Parser)]
 #[command(author, version, name = "dots", about = "Rename files to use dots")]
 struct Args {
@@ -419,11 +421,7 @@ impl Dots {
         let result = RE_IDENTIFIER.replace_all(name, |caps: &regex::Captures| {
             let matched_str = &caps[0];
             if Self::has_at_least_six_digits(matched_str)
-                && !matched_str.contains("720")
-                && !matched_str.contains("1080")
-                && !matched_str.contains("1920")
-                && !matched_str.contains("2160")
-                && !matched_str.contains("3840")
+                && !RESOLUTIONS.iter().any(|&number| matched_str.contains(number))
             {
                 String::new()
             } else {
