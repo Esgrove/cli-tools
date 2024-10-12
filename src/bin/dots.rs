@@ -159,12 +159,6 @@ struct Dots {
     config: Config,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    Dots::new(args)?.process_files();
-    Ok(())
-}
-
 impl Dots {
     /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Self> {
@@ -560,6 +554,12 @@ impl fmt::Display for Dots {
         writeln!(f, "Root: {}", self.root.display())?;
         write!(f, "{}", self.config)
     }
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    Dots::new(args)?.process_files();
+    Ok(())
 }
 
 #[cfg(test)]

@@ -35,6 +35,7 @@ fn main() {
             .map(|s| s.trim().chars().count())
             .max()
             .unwrap_or_default();
+
         let aligned_length: usize = args.length.saturating_sub(longest + 2) / 2;
         for text in &args.text {
             println!(
