@@ -397,7 +397,11 @@ impl Dots {
     fn remove_random_identifiers(name: &mut String) {
         let result = RE_IDENTIFIER.replace_all(name, |caps: &regex::Captures| {
             let matched_str = &caps[0];
-            if Self::has_at_least_six_digits(matched_str) {
+            if Self::has_at_least_six_digits(matched_str)
+                && !matched_str.contains("1920")
+                && !matched_str.contains("1080")
+                && !matched_str.contains("720")
+            {
                 String::new()
             } else {
                 matched_str.to_string()
@@ -673,6 +677,6 @@ mod dots_tests {
             "This.Is.a.Test.String"
         );
         assert_eq!(dots.format_name("test Ph5d9473a841fe9"), "Test");
-        assert_eq!(dots.format_name("Test"), "Test");
+        assert_eq!(dots.format_name("Test-355989849"), "Test");
     }
 }
