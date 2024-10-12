@@ -110,8 +110,7 @@ fn date_flip_files(path: &PathBuf, recursive: bool, dryrun: bool, starts_with_ye
 
     for item in files_to_rename {
         println!("{heading}");
-        println!("{}", item.filename);
-        println!("{}", item.new_name);
+        cli_tools::show_diff(&item.filename, &item.new_name);
         if !dryrun {
             fs::rename(item.path, root.join(item.new_name)).context("Failed to rename file")?;
         }
