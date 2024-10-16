@@ -26,7 +26,7 @@ static RE_DOTCOM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(\.com|\.net)\b").expect("Failed to compile .com regex"));
 
 static RE_IDENTIFIER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{9,16}").expect("Failed to compile id regex"));
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{9,20}").expect("Failed to compile id regex"));
 
 static REPLACE: [(&str, &str); 26] = [
     (" ", "."),
