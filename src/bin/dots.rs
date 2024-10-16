@@ -94,11 +94,11 @@ struct Args {
     suffix: Option<String>,
 
     /// Substitute pattern with replacement in filenames
-    #[arg(short, long, num_args = 2, action = clap::ArgAction::Append)]
+    #[arg(short, long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     substitute: Vec<String>,
 
     /// Substitute regex pattern with replacement in filenames
-    #[arg(long, num_args = 2, action = clap::ArgAction::Append)]
+    #[arg(long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     regex: Vec<String>,
 
     /// Verbose output
