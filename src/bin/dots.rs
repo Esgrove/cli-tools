@@ -445,7 +445,14 @@ impl Args {
             .chunks(2)
             .filter_map(|chunk| {
                 if chunk.len() == 2 {
-                    Some((chunk[0].clone(), chunk[1].clone()))
+                    let pattern = chunk[0].trim().to_string();
+                    let replace = chunk[1].trim().to_string();
+                    if pattern.is_empty() {
+                        eprintln!("Empty replace pattern: '{pattern}' -> '{replace}'");
+                        None
+                    } else {
+                        Some((pattern, replace))
+                    }
                 } else {
                     None
                 }
