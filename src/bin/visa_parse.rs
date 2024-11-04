@@ -18,7 +18,6 @@ use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 use walkdir::WalkDir;
 
-// Static variables that are initialised at runtime the first time they are accessed.
 static RE_BRACKETS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets"));
 
@@ -74,14 +73,18 @@ static REPLACE_CONTAINS: [(&str, &str); 7] = [
 ];
 
 // If the name starts with this string, set name to just the string.
-static REPLACE_START: [&str; 7] = [
+static REPLACE_START: [&str; 11] = [
+    "ALEPA",
+    "BEAMHILL",
+    "HERTZ",
+    "K-MARKET",
     "PAYPAL BANDCAMP",
     "PAYPAL BEATPORT",
     "PAYPAL DJCITY",
     "PAYPAL DROPBOX",
     "PAYPAL MISTERB",
     "PAYPAL PATREON",
-    "K-MARKET",
+    "STOCKMANN",
 ];
 
 static FILTER_PREFIXES: [&str; 79] = [
@@ -184,6 +187,10 @@ struct Args {
     /// Only print information without writing to file
     #[arg(short, long)]
     print: bool,
+
+    /// How many total sums to print with verbose output
+    #[arg(short, long, default_value_t = 20)]
+    number: usize,
 
     /// Verbose output
     #[arg(short, long)]
@@ -417,7 +424,11 @@ fn clean_whitespaces(text: &str) -> String {
 
 /// Format item names to consistent style.
 fn format_name(text: &str) -> String {
-    let mut name = text.replace("Osto ", "").replace(['*', '/', '_'], " ");
+    let mut name = text
+        .replace("Osto ", "")
+        .replace("TC*", "")
+        .replace(['*', '/', '_'], " ");
+
     name = RE_HTML_AND.replace_all(&name, "&").to_string();
     name = RE_BRACKETS.replace_all(&name, "").to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
