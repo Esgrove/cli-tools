@@ -209,11 +209,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
     let output_path = cli_tools::resolve_output_path(args.output.as_deref(), &input_path)?;
-    visa_parse(&input_path, &output_path, args.verbose, args.print)
+    visa_parse(&input_path, &output_path, args.verbose, args.print, args.number)
 }
 
 /// Parse data from files and write formatted items to CSV and Excel.
-fn visa_parse(input: &PathBuf, output: &Path, verbose: bool, dryrun: bool) -> Result<()> {
+fn visa_parse(input: &PathBuf, output: &Path, verbose: bool, dryrun: bool, num_totals: usize) -> Result<()> {
     let (root, files) = get_xml_file_list(input)?;
     if files.is_empty() {
         anyhow::bail!("No XML files to parse".red());
@@ -222,7 +222,7 @@ fn visa_parse(input: &PathBuf, output: &Path, verbose: bool, dryrun: bool) -> Re
     let num_files = files.len();
     let items = parse_files(&root, files, verbose)?;
     let totals = calculate_totals_for_each_name(&items);
-    print_statistics(&items, &totals, num_files, verbose);
+    print_statistics(&items, &totals, num_files, verbose, num_totals);
 
     if !dryrun {
         write_to_csv(&items, output)?;
@@ -471,7 +471,7 @@ fn format_sum(value: &str) -> Result<f64> {
 }
 
 /// Print item totals and some statistics.
-fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usize, verbose: bool) {
+fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usize, verbose: bool, num_totals: usize) {
     let total_sum: f64 = items.iter().map(|item| item.sum).sum();
     let count = items.len() as f64;
     let average = if count > 0.0 { total_sum / count } else { 0.0 };
@@ -482,16 +482,15 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
     println!("Unique names: {}", totals.len());
 
     if verbose {
-        let num_to_print: usize = 20;
-        let max_name_length = totals[..num_to_print]
+        let max_name_length = totals[..num_totals]
             .iter()
             .map(|(name, _)| name.chars().count())
             .max()
             .unwrap_or(20)
             + 1;
 
-        println!("\n{}", format!("Top {num_to_print} totals:").bold());
-        for (name, sum) in &totals[..num_to_print] {
+        println!("\n{}", format!("Top {num_totals} totals:").bold());
+        for (name, sum) in &totals[..num_totals] {
             println!("{:width$}    {:>7.2}€", format!("{name}"), sum, width = max_name_length);
         }
     }
