@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "2.3.2"
+version = "2.4.0"
 edition = "2021"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -11,7 +11,7 @@ keywords = ["cli", "rename"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-anyhow = "1.0.91"
+anyhow = "1.0.92"
 chrono = "0.4.38"
 clap = { version = "4.5.20", features = ["derive"] }
 colored = "2.1.0"
