@@ -44,6 +44,7 @@ static RE_SPECIFICATION_FREE_TEXT: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Failed to create regex pattern for SpecificationFreeText")
 });
 
+// Replace a pattern with replacement
 static REPLACE_PAIRS: [(&str, &str); 11] = [
     ("4029357733", ""),
     (" - ", " "),
@@ -58,13 +59,29 @@ static REPLACE_PAIRS: [(&str, &str); 11] = [
     ("VFI ", ""),
 ];
 
-static REPLACE_WITH_START: [&str; 6] = [
+// If the name starts with this string, set name to replacement.
+static REPLACE_START_PAIRS: [(&str, &str); 4] = [("CHF ", ""), ("CHF", ""), ("WWW.", ""), ("MOB.PAY", "MOBILEPAY")];
+
+// Replace whole string with replacement if it contains a pattern.
+static REPLACE_CONTAINS: [(&str, &str); 7] = [
+    ("EPASSI", "EPASSI"),
+    ("FINNAIR", "FINNAIR"),
+    ("IDA RADIO RY", "IDA RADIO RY"),
+    ("ITUNES.COM", "APPLE ITUNES"),
+    ("K-CITYMARKET", "K-MARKET"),
+    ("VERKKOKAUPPA.COM", "VERKKOKAUPPA.COM"),
+    ("WOLT", "WOLT"),
+];
+
+// If the name starts with this string, set name to just the string.
+static REPLACE_START: [&str; 7] = [
     "PAYPAL BANDCAMP",
     "PAYPAL BEATPORT",
     "PAYPAL DJCITY",
     "PAYPAL DROPBOX",
     "PAYPAL MISTERB",
     "PAYPAL PATREON",
+    "K-MARKET",
 ];
 
 static FILTER_PREFIXES: [&str; 79] = [
@@ -406,32 +423,23 @@ fn format_name(text: &str) -> String {
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
     name = name.to_uppercase();
 
-    if name.contains("FINNAIR") {
-        name = "FINNAIR".to_string();
-    }
-    if name.contains("WOLT") {
-        name = "WOLT".to_string();
-    }
-    if name.contains("ITUNES.COM") {
-        name = "APPLE ITUNES".to_string();
-    }
-    if name.contains("VERKKOKAUPPA.COM") {
-        name = "VERKKOKAUPPA.COM".to_string();
-    }
-    if name.contains("IDA RADIO RY") {
-        name = "IDA RADIO RY".to_string();
+    for (pattern, replacement) in &REPLACE_CONTAINS {
+        if name.contains(pattern) {
+            name = (*replacement).to_string();
+        }
     }
 
     for (pattern, replacement) in &REPLACE_PAIRS {
         name = name.replace(pattern, replacement);
     }
 
-    replace_from_start(&mut name, "CHF ", "");
-    replace_from_start(&mut name, "CHF", "");
-    replace_from_start(&mut name, "WWW.", "");
-    replace_from_start(&mut name, "MOB.PAY", "MOBILEPAY");
+    for (pattern, replacement) in &REPLACE_START_PAIRS {
+        if name.starts_with(pattern) {
+            name = name.replacen(pattern, replacement, 1);
+        }
+    }
 
-    for prefix in &REPLACE_WITH_START {
+    for prefix in &REPLACE_START {
         if name.starts_with(prefix) {
             name = (*prefix).to_string();
         }
@@ -439,13 +447,6 @@ fn format_name(text: &str) -> String {
 
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
     name
-}
-
-/// Helper method to remove a given pattern from the start of a string.
-fn replace_from_start(name: &mut String, pattern: &str, replacement: &str) {
-    if name.starts_with(pattern) {
-        *name = name.replacen(pattern, replacement, 1);
-    }
 }
 
 /// Convert Finnish currency value strings using a comma as the decimal separator to float.
