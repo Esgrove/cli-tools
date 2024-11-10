@@ -73,6 +73,10 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
 
+    /// Rename directories
+    #[arg(short, long)]
+    directory: bool,
+
     /// Overwrite existing files
     #[arg(short, long)]
     force: bool,
@@ -124,6 +128,8 @@ struct DotsConfig {
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
+    directory: bool,
+    #[serde(default)]
     recursive: bool,
     #[serde(default)]
     verbose: bool,
@@ -147,6 +153,7 @@ struct Config {
     suffix: Option<String>,
     convert_case: bool,
     debug: bool,
+    directory: bool,
     dryrun: bool,
     overwrite: bool,
     recursive: bool,
@@ -168,20 +175,32 @@ impl Dots {
     }
 
     /// Run renaming.
-    pub fn process_files(&self) {
+    pub fn run(&self) {
         if self.config.debug {
             println!("{self}");
         }
 
-        let files_to_rename = self.gather_files_to_rename();
+        let (paths_to_rename, name) = if self.config.directory {
+            (self.gather_directories_to_rename(), "directories")
+        } else {
+            (self.gather_files_to_rename(), "files")
+        };
 
-        if files_to_rename.is_empty() {
-            println!("No files to rename");
+        if paths_to_rename.is_empty() {
+            println!("No {name} to rename");
             return;
         }
 
-        let num_renamed = self.rename_files(files_to_rename);
-        let message = format!("{num_renamed} file{}", if num_renamed == 1 { "" } else { "s" });
+        let num_renamed = self.rename_paths(paths_to_rename);
+        let message = format!(
+            "{num_renamed} {}",
+            match (self.config.directory, num_renamed > 1) {
+                (true, true) => "directories",
+                (true, false) => "directory",
+                (false, true) => "files",
+                (false, false) => "file",
+            }
+        );
 
         if self.config.dryrun {
             println!("Dryrun: would have renamed {message}");
@@ -197,7 +216,7 @@ impl Dots {
                 println!("{}", format!("Formatting file {}", self.root.display()).bold());
             }
             return self
-                .format_filename(&self.root)
+                .formatted_filepath(&self.root)
                 .ok()
                 .filter(|new_path| &self.root != new_path)
                 .map(|new_path| vec![(self.root.clone(), new_path)])
@@ -219,7 +238,7 @@ impl Dots {
             .filter_map(std::result::Result::ok)
             .filter_map(|entry| {
                 let path = entry.path();
-                self.format_filename(path)
+                self.formatted_filepath(path)
                     .ok()
                     .filter(|new_path| path != new_path)
                     .map(|new_path| (path.to_path_buf(), new_path))
@@ -228,12 +247,32 @@ impl Dots {
             .collect()
     }
 
-    /// Rename all files or just print changes if dryrun is enabled.
-    fn rename_files(&self, files_to_rename: Vec<(PathBuf, PathBuf)>) -> usize {
+    /// Get all directories that need to be renamed.
+    fn gather_directories_to_rename(&self) -> Vec<(PathBuf, PathBuf)> {
+        let max_depth = if self.config.recursive { 100 } else { 1 };
+        WalkDir::new(&self.root)
+            .max_depth(max_depth)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| {
+                let path = entry.path();
+                    self.formatted_directory_path(path)
+                        .ok()
+                        .filter(|new_path| path != new_path)
+                        .map(|new_path| (path.to_path_buf(), new_path))
+            })
+            // Sort by depth to rename children before parents, avoiding renaming conflicts
+            .sorted_by_key(|(path, _)| std::cmp::Reverse(path.components().count()))
+            .collect()
+    }
+
+    /// Rename all given path pairs or just print changes if dryrun is enabled.
+    fn rename_paths(&self, paths: Vec<(PathBuf, PathBuf)>) -> usize {
         let mut num_renamed: usize = 0;
-        let max_items = files_to_rename.len();
-        let max_chars = files_to_rename.len().to_string().chars().count();
-        for (index, (path, new_path)) in files_to_rename.into_iter().enumerate() {
+        let max_items = paths.len();
+        let max_chars = paths.len().to_string().chars().count();
+        for (index, (path, new_path)) in paths.into_iter().enumerate() {
             let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
             let new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
@@ -282,7 +321,7 @@ impl Dots {
     }
 
     /// Get the full path with formatted filename and extension.
-    fn format_filename(&self, path: &Path) -> Result<PathBuf> {
+    fn formatted_filepath(&self, path: &Path) -> Result<PathBuf> {
         if !path.is_file() {
             anyhow::bail!("Path is not a file")
         }
@@ -294,6 +333,19 @@ impl Dots {
         } else {
             Err(anyhow!("Failed to get filename"))
         }
+    }
+
+    /// Get the full path with formatted filename and extension.
+    fn formatted_directory_path(&self, path: &Path) -> Result<PathBuf> {
+        if !path.is_dir() {
+            anyhow::bail!("Path is not a directory")
+        }
+
+        let directory_name = cli_tools::os_str_to_string(path.file_name().context("Failed to get directory name")?);
+
+        let formatted_name = self.format_name(&directory_name).replace('.', " ");
+
+        Ok(path.with_file_name(formatted_name))
     }
 
     /// Format the file name stem without the file extension
@@ -466,10 +518,7 @@ impl Args {
             .chunks(2)
             .filter_map(|chunk| {
                 if chunk.len() == 2 {
-                    let regex_result = Regex::new(&chunk[0]).with_context(|| format!("Invalid regex: '{}'", chunk[0]));
-
-                    // If regex compilation fails, return None to propagate the error with `Result`
-                    match regex_result {
+                    match Regex::new(&chunk[0]).with_context(|| format!("Invalid regex: '{}'", chunk[0])) {
                         Ok(regex) => Some(Ok((regex, chunk[1].clone()))),
                         Err(e) => Some(Err(e)),
                     }
@@ -499,6 +548,7 @@ impl Config {
             suffix: args.suffix,
             convert_case: args.case,
             debug: args.debug || user_config.debug,
+            directory: args.directory || user_config.directory,
             dryrun: args.print || user_config.dryrun,
             overwrite: args.force || user_config.overwrite,
             recursive: args.recursive || user_config.recursive,
@@ -565,7 +615,7 @@ impl fmt::Display for Dots {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    Dots::new(args)?.process_files();
+    Dots::new(args)?.run();
     Ok(())
 }
 
