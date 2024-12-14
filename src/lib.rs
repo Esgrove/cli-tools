@@ -46,6 +46,13 @@ pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, St
     ))
 }
 
+/// Get the normalized directory name from a Path with special characters retained.
+pub fn get_normalized_dir_name(path: &Path) -> Result<String> {
+    let dir_name = os_str_to_string(path.file_name().context("Failed to get directory name")?);
+
+    Ok(dir_name.nfc().collect::<String>())
+}
+
 /// Check if entry is a hidden file or directory (starts with '.')
 #[must_use]
 pub fn is_hidden(entry: &DirEntry) -> bool {

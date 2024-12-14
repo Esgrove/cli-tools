@@ -70,7 +70,7 @@ struct Args {
     case: bool,
 
     /// Enable debug prints
-    #[arg(short, long)]
+    #[arg(long)]
     debug: bool,
 
     /// Rename directories
@@ -90,8 +90,12 @@ struct Args {
     recursive: bool,
 
     /// Append prefix to the start
-    #[arg(long)]
+    #[arg(short = 'x', long)]
     prefix: Option<String>,
+
+    /// Prefix files with directory name
+    #[arg(short = 'b', long, conflicts_with = "prefix")]
+    prefix_dir: bool,
 
     /// Append suffix to the end
     #[arg(long)]
@@ -122,6 +126,8 @@ struct DotsConfig {
     #[serde(default)]
     move_to_end: Vec<String>,
     #[serde(default)]
+    prefix_dir: bool,
+    #[serde(default)]
     debug: bool,
     #[serde(default)]
     dryrun: bool,
@@ -151,6 +157,7 @@ struct Config {
     move_to_end: Vec<String>,
     prefix: Option<String>,
     suffix: Option<String>,
+    prefix_dir: bool,
     convert_case: bool,
     debug: bool,
     directory: bool,
@@ -174,8 +181,12 @@ impl Dots {
         Ok(Self { root, config })
     }
 
+    pub fn run_with_args(args: Args) -> Result<()> {
+        Self::new(args)?.run()
+    }
+
     /// Run renaming.
-    pub fn run(&self) {
+    pub fn run(&mut self) -> Result<()> {
         if self.config.debug {
             println!("{self}");
         }
@@ -183,12 +194,12 @@ impl Dots {
         let (paths_to_rename, name) = if self.config.directory {
             (self.gather_directories_to_rename(), "directories")
         } else {
-            (self.gather_files_to_rename(), "files")
+            (self.gather_files_to_rename()?, "files")
         };
 
         if paths_to_rename.is_empty() {
             println!("No {name} to rename");
-            return;
+            return Ok(());
         }
 
         let num_renamed = self.rename_paths(paths_to_rename);
@@ -207,20 +218,35 @@ impl Dots {
         } else {
             println!("{}", format!("Renamed {message}").green());
         }
+        Ok(())
     }
 
     /// Get all files that need to be renamed.
-    fn gather_files_to_rename(&self) -> Vec<(PathBuf, PathBuf)> {
+    fn gather_files_to_rename(&mut self) -> Result<Vec<(PathBuf, PathBuf)>> {
+        if self.config.prefix_dir {
+            let formatted_dir = if self.root.is_dir() {
+                cli_tools::get_normalized_dir_name(&self.root)?
+            } else {
+                let parent_dir = self.root.parent().context("Failed to get parent dir")?;
+                cli_tools::get_normalized_dir_name(parent_dir)?
+            };
+            let prefix = self.format_name(&formatted_dir);
+            if self.config.verbose {
+                println!("Using directory prefix: {prefix}");
+            }
+            self.config.prefix = Option::from(prefix);
+        }
+
         if self.root.is_file() {
             if self.config.verbose {
                 println!("{}", format!("Formatting file {}", self.root.display()).bold());
             }
-            return self
+            return Ok(self
                 .formatted_filepath(&self.root)
                 .ok()
                 .filter(|new_path| &self.root != new_path)
                 .map(|new_path| vec![(self.root.clone(), new_path)])
-                .unwrap_or_default();
+                .unwrap_or_default());
         }
 
         if self.config.verbose {
@@ -230,12 +256,12 @@ impl Dots {
         let max_depth = if self.config.recursive { 100 } else { 1 };
 
         // Collect and sort all files that need renaming
-        WalkDir::new(&self.root)
+        Ok(WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
             // ignore hidden files (name starting with ".")
             .filter_entry(|e| !cli_tools::is_hidden(e))
-            .filter_map(std::result::Result::ok)
+            .filter_map(Result::ok)
             .filter_map(|entry| {
                 let path = entry.path();
                 self.formatted_filepath(path)
@@ -244,7 +270,7 @@ impl Dots {
                     .map(|new_path| (path.to_path_buf(), new_path))
             })
             .sorted_by_key(|(path, _)| path.to_string_lossy().to_lowercase())
-            .collect()
+            .collect())
     }
 
     /// Get all directories that need to be renamed.
@@ -547,6 +573,7 @@ impl Config {
             prefix: args.prefix,
             suffix: args.suffix,
             convert_case: args.case,
+            prefix_dir: args.prefix_dir || user_config.prefix_dir,
             debug: args.debug || user_config.debug,
             directory: args.directory || user_config.directory,
             dryrun: args.print || user_config.dryrun,
@@ -594,13 +621,22 @@ impl fmt::Display for Config {
             "regex_replace:\n".to_string() + &*self.regex_replace.iter().map(|pair| format!("    {pair:?}")).join("\n")
         };
         writeln!(f, "Config:")?;
-        writeln!(f, "  debug:     {}", cli_tools::colorize_bool(self.debug))?;
-        writeln!(f, "  dryrun:    {}", cli_tools::colorize_bool(self.dryrun))?;
-        writeln!(f, "  overwrite: {}", cli_tools::colorize_bool(self.overwrite))?;
-        writeln!(f, "  recursive: {}", cli_tools::colorize_bool(self.recursive))?;
-        writeln!(f, "  verbose:   {}", cli_tools::colorize_bool(self.verbose))?;
-        writeln!(f, "  prefix:    \"{}\"", self.prefix.as_ref().unwrap_or(&String::new()))?;
-        writeln!(f, "  suffix:    \"{}\"", self.suffix.as_ref().unwrap_or(&String::new()))?;
+        writeln!(f, "  debug:      {}", cli_tools::colorize_bool(self.debug))?;
+        writeln!(f, "  dryrun:     {}", cli_tools::colorize_bool(self.dryrun))?;
+        writeln!(f, "  prefix dir: {}", cli_tools::colorize_bool(self.prefix_dir))?;
+        writeln!(f, "  overwrite:  {}", cli_tools::colorize_bool(self.overwrite))?;
+        writeln!(f, "  recursive:  {}", cli_tools::colorize_bool(self.recursive))?;
+        writeln!(f, "  verbose:    {}", cli_tools::colorize_bool(self.verbose))?;
+        writeln!(
+            f,
+            "  prefix:     \"{}\"",
+            self.prefix.as_ref().unwrap_or(&String::new())
+        )?;
+        writeln!(
+            f,
+            "  suffix:     \"{}\"",
+            self.suffix.as_ref().unwrap_or(&String::new())
+        )?;
         writeln!(f, "  {replace}")?;
         writeln!(f, "  {regex_replace}")
     }
@@ -615,8 +651,7 @@ impl fmt::Display for Dots {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    Dots::new(args)?.run();
-    Ok(())
+    Dots::run_with_args(args)
 }
 
 #[cfg(test)]
