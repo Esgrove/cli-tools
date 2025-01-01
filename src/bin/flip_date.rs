@@ -225,24 +225,26 @@ fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<Strin
         let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
 
         let mut fixed_numbers: Vec<String> = vec![];
-        for number in numbers {
-            if number.chars().count() == 1 {
-                fixed_numbers.push(format!("0{number}"));
+        for part in numbers {
+            if part.chars().count() == 1 {
+                fixed_numbers.push(format!("0{part}"));
             } else {
-                fixed_numbers.push(number.to_string());
+                fixed_numbers.push(part.to_string());
             }
         }
+        
+        if !fixed_numbers.iter().any(|part| part.chars().all(|c| c == '0')) {
+            if fixed_numbers[2].len() == 2 {
+                fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+            }
 
-        if fixed_numbers[2].len() == 2 {
-            fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+            let flip_date = fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".");
+            let new_name = filename.replace(date, &flip_date);
+
+            return Some(new_name);
         }
-
-        let flip_date = fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".");
-        let new_name = filename.replace(date, &flip_date);
-
-        return Some(new_name);
     }
-
+    
     if let Some(date_match) = RE_SHORT_DATE.find(filename) {
         let date = date_match.as_str();
         let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
@@ -255,21 +257,23 @@ fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<Strin
                 fixed_numbers.push(number.to_string());
             }
         }
+        
+        if !fixed_numbers.iter().any(|part| part.chars().all(|c| c == '0')) {
+            if starts_with_year && fixed_numbers[0].len() == 2 {
+                fixed_numbers[0] = format!("20{}", fixed_numbers[0]);
+            } else if fixed_numbers[2].len() == 2 {
+                fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+            }
 
-        if starts_with_year && fixed_numbers[0].len() == 2 {
-            fixed_numbers[0] = format!("20{}", fixed_numbers[0]);
-        } else if fixed_numbers[2].len() == 2 {
-            fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+            let flip_date = if starts_with_year {
+                fixed_numbers.clone().join(".")
+            } else {
+                fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".")
+            };
+            let new_name = filename.replace(date, &flip_date);
+
+            return Some(new_name);
         }
-
-        let flip_date = if starts_with_year {
-            fixed_numbers.clone().join(".")
-        } else {
-            fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".")
-        };
-        let new_name = filename.replace(date, &flip_date);
-
-        return Some(new_name);
     }
 
     None
@@ -341,6 +345,13 @@ mod filename_tests {
     use super::*;
 
     #[test]
+    fn test_date() {
+        let filename = "20.12.2023.txt";
+        let correct = "2023.12.20.txt";
+        assert_eq!(reorder_filename_date(filename, false), Some(correct.to_string()));
+    }
+    
+    #[test]
     fn test_full_date() {
         let filename = "report_20.12.2023.txt";
         let correct = "report_2023.12.20.txt";
@@ -391,6 +402,16 @@ mod filename_tests {
         let filename = "report_23.12.20.txt";
         let correct = "report_2023.12.20.txt";
         assert_eq!(reorder_filename_date(filename, true), Some(correct.to_string()));
+    }
+    
+        #[test]
+    fn test_extra_numbers() {
+        let name = "meeting.500.2023.02.03";
+        assert_eq!(reorder_filename_date(name, true), None);
+        let name = "something.500.24.07.12";
+        assert_eq!(reorder_filename_date(name, true), None);
+        let name = "99 meeting 20 2019-11-17";
+        assert_eq!(reorder_filename_date(name, true), None);
     }
 }
 
