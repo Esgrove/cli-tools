@@ -12,23 +12,26 @@ static FILE_EXTENSIONS: [&str; 7] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "
 
 // Static variables that are initialised at runtime the first time they are accessed.
 static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?P<year>\d{4})")
+    Regex::new(r"(?P<day>0*[1-9]\d?)\.(?P<month>0*[1-9]\d?)\.(?P<year>0*[1-9]\d{3})")
         .expect("Failed to create regex pattern for dd.mm.yyyy")
 });
 
 static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?P<year>\d{4})\.(?P<month>\d{1,2})\.(?P<day>\d{1,2})")
+    Regex::new(r"(?P<year>0*[1-9]\d{3})\.(?P<month>0*[1-9]\d?)\.(?P<day>0*[1-9]\d?)")
         .expect("Failed to create regex pattern for yyyy.mm.dd")
 });
 
-static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\d{4}\.\d{1,2}\.\d{1,2}").expect("Failed to create regex pattern for correct date"));
+static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"0*[1-9]\d{3}\.0*[1-9]\d?\.(0*[1-9]\d?)").expect("Failed to create regex pattern for correct date")
+});
 
-static RE_FULL_DATE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\d{1,2}\.\d{1,2}\.\d{4}").expect("Failed to create regex pattern for full date"));
+static RE_FULL_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"0*[1-9]\d?\.(0*[1-9]\d?)\.(0*[1-9]\d{3})").expect("Failed to create regex pattern for full date")
+});
 
-static RE_SHORT_DATE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\d{1,2}\.\d{1,2}\.\d{2}").expect("Failed to create regex pattern for short date"));
+static RE_SHORT_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"0*[1-9]\d?\.(0*[1-9]\d?)\.(0*[1-9]\d{1})").expect("Failed to create regex pattern for short date")
+});
 
 #[derive(Parser)]
 #[command(
@@ -220,60 +223,75 @@ fn reorder_filename_date(filename: &str, starts_with_year: bool) -> Option<Strin
         return None;
     }
 
-    if let Some(date_match) = RE_FULL_DATE.find(filename) {
-        let date = date_match.as_str();
-        let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
+    // Check for full dates
+    let mut best_match = None;
+    for cap in RE_FULL_DATE.captures_iter(filename) {
+        if let Some(date_match) = cap.get(0) {
+            let date = date_match.as_str();
 
-        let mut fixed_numbers: Vec<String> = vec![];
-        for part in numbers {
-            if part.chars().count() == 1 {
-                fixed_numbers.push(format!("0{part}"));
-            } else {
-                fixed_numbers.push(part.to_string());
+            let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
+
+            let mut fixed_numbers: Vec<String> = vec![];
+            for part in numbers {
+                if part.chars().count() == 1 {
+                    fixed_numbers.push(format!("0{part}"));
+                } else {
+                    fixed_numbers.push(part.to_string());
+                }
             }
-        }
-        
-        if !fixed_numbers.iter().any(|part| part.chars().all(|c| c == '0')) {
-            if fixed_numbers[2].len() == 2 {
-                fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+
+            if !fixed_numbers.iter().any(|part| part.chars().all(|c| c == '0')) {
+                if fixed_numbers[2].len() == 2 {
+                    fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+                }
+
+                let flip_date = fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".");
+                best_match = Some((date.to_string(), flip_date));
             }
-
-            let flip_date = fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".");
-            let new_name = filename.replace(date, &flip_date);
-
-            return Some(new_name);
         }
     }
-    
-    if let Some(date_match) = RE_SHORT_DATE.find(filename) {
-        let date = date_match.as_str();
-        let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
 
-        let mut fixed_numbers: Vec<String> = vec![];
-        for number in numbers {
-            if number.chars().count() == 1 {
-                fixed_numbers.push(format!("0{number}"));
-            } else {
-                fixed_numbers.push(number.to_string());
+    if let Some((original_date, flip_date)) = best_match {
+        let new_name = filename.replace(&original_date, &flip_date);
+        return Some(new_name);
+    }
+
+    // Check for short dates
+    let mut best_match = None;
+    for cap in RE_SHORT_DATE.captures_iter(filename) {
+        if let Some(date_match) = cap.get(0) {
+            let date = date_match.as_str();
+            let numbers: Vec<&str> = date.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
+
+            let mut fixed_numbers: Vec<String> = vec![];
+            for number in numbers {
+                if number.chars().count() == 1 {
+                    fixed_numbers.push(format!("0{number}"));
+                } else {
+                    fixed_numbers.push(number.to_string());
+                }
+            }
+
+            if !fixed_numbers.iter().any(|part| part.chars().all(|c| c == '0')) {
+                if starts_with_year && fixed_numbers[0].len() == 2 {
+                    fixed_numbers[0] = format!("20{}", fixed_numbers[0]);
+                } else if fixed_numbers[2].len() == 2 {
+                    fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
+                }
+
+                let flip_date = if starts_with_year {
+                    fixed_numbers.clone().join(".")
+                } else {
+                    fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".")
+                };
+                best_match = Some((date.to_string(), flip_date));
             }
         }
-        
-        if !fixed_numbers.iter().any(|part| part.chars().all(|c| c == '0')) {
-            if starts_with_year && fixed_numbers[0].len() == 2 {
-                fixed_numbers[0] = format!("20{}", fixed_numbers[0]);
-            } else if fixed_numbers[2].len() == 2 {
-                fixed_numbers[2] = format!("20{}", fixed_numbers[2]);
-            }
+    }
 
-            let flip_date = if starts_with_year {
-                fixed_numbers.clone().join(".")
-            } else {
-                fixed_numbers.iter().rev().cloned().collect::<Vec<_>>().join(".")
-            };
-            let new_name = filename.replace(date, &flip_date);
-
-            return Some(new_name);
-        }
+    if let Some((original_date, flip_date)) = best_match {
+        let new_name = filename.replace(&original_date, &flip_date);
+        return Some(new_name);
     }
 
     None
@@ -350,7 +368,7 @@ mod filename_tests {
         let correct = "2023.12.20.txt";
         assert_eq!(reorder_filename_date(filename, false), Some(correct.to_string()));
     }
-    
+
     #[test]
     fn test_full_date() {
         let filename = "report_20.12.2023.txt";
@@ -403,13 +421,17 @@ mod filename_tests {
         let correct = "report_2023.12.20.txt";
         assert_eq!(reorder_filename_date(filename, true), Some(correct.to_string()));
     }
-    
-        #[test]
+
+    #[test]
     fn test_extra_numbers() {
         let name = "meeting.500.2023.02.03";
         assert_eq!(reorder_filename_date(name, true), None);
         let name = "something.500.24.07.12";
-        assert_eq!(reorder_filename_date(name, true), None);
+        let correct = "something.500.2012.07.24";
+        assert_eq!(reorder_filename_date(name, false), Some(correct.to_string()));
+        let name = "something.500.24.07.12";
+        let correct = "something.500.2024.07.12";
+        assert_eq!(reorder_filename_date(name, true), Some(correct.to_string()));
         let name = "99 meeting 20 2019-11-17";
         assert_eq!(reorder_filename_date(name, true), None);
     }
