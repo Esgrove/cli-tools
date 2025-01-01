@@ -432,6 +432,20 @@ mod filename_tests {
         let name = "something.500.24.07.12";
         let correct = "something.500.2024.07.12";
         assert_eq!(reorder_filename_date(name, true), Some(correct.to_string()));
+        let name = "meeting 0000.2019-11-17";
+        assert_eq!(reorder_filename_date(name, true), None);
+        let name = "meeting 0000.11.22.pdf";
+        assert_eq!(reorder_filename_date(name, true), None);
+        let name = "meeting 00.11.2022.pdf";
+        assert_eq!(reorder_filename_date(name, false), None);
+        let name = "2000.11.2022.pdf";
+        assert_eq!(reorder_filename_date(name, false), None);
+        let name = "2000.11.200.pdf";
+        assert_eq!(reorder_filename_date(name, false), None);
+        let name = "1080.11.200.pdf";
+        assert_eq!(reorder_filename_date(name, false), None);
+        let name = "600.00.11.2222.pdf";
+        assert_eq!(reorder_filename_date(name, false), None);
         let name = "99 meeting 20 2019-11-17";
         assert_eq!(reorder_filename_date(name, true), None);
     }
