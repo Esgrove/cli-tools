@@ -198,7 +198,9 @@ impl Dots {
         };
 
         if paths_to_rename.is_empty() {
-            println!("No {name} to rename");
+            if self.config.verbose {
+                println!("No {name} to rename");
+            }
             return Ok(());
         }
 
