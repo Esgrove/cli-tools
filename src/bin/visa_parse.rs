@@ -526,7 +526,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let output_file = if output_path
         .extension()
         .and_then(|ext| ext.to_str())
-        .map_or(false, |ext| ext.eq_ignore_ascii_case("csv"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
     {
         output_path.to_path_buf()
     } else {
@@ -554,9 +554,8 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     let output_file = if output_path
         .extension()
         .and_then(|ext| ext.to_str())
-        .map_or(false, |ext| {
-            ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("xlsx")
-        }) {
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("xlsx"))
+    {
         output_path.with_extension("xlsx")
     } else {
         output_path.join("VISA.xlsx")
