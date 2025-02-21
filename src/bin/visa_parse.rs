@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Parser;
 use colored::Colorize;

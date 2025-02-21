@@ -21,11 +21,7 @@ pub fn append_extension_to_path(path: PathBuf, extension: impl AsRef<OsStr>) -> 
 /// Format bool value as a coloured string.
 #[must_use]
 pub fn colorize_bool(value: bool) -> ColoredString {
-    if value {
-        "true".green()
-    } else {
-        "false".red()
-    }
+    if value { "true".green() } else { "false".red() }
 }
 
 /// Get filename from Path with special characters retained instead of decomposed.
