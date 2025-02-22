@@ -14,7 +14,7 @@ use walkdir::WalkDir;
 const FILE_EXTENSIONS: [&str; 4] = ["mp4", "mkv", "wmv", "avi"];
 
 static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(480p|540p|544p|720p|1080p|1440p|2160p)")
+    Regex::new(r"(?i)(480p|540p|544p|576p|600p|720p|1080p|1440p|2160p)")
         .expect("Failed to create regex pattern for valid resolutions")
 });
 
@@ -81,7 +81,7 @@ impl FFProbeResult {
 impl Resolution {
     fn label(&self) -> Option<String> {
         match self.height {
-            480 | 540 | 544 | 720 | 1080 | 1440 | 2160 => Some(format!("{}p", self.height)),
+            480 | 540 | 544 | 576 | 600 | 720 | 1080 | 1440 | 2160 => Some(format!("{}p", self.height)),
             1920 if self.width == 1080 => Some("1080p".to_string()),
             _ => None,
         }
@@ -98,7 +98,7 @@ impl fmt::Display for FFProbeResult {
             );
             write!(
                 f,
-                "{:>4}x{:<4} {:>5} {}",
+                "{:>4}x{:<4} {:>5}  {}",
                 self.resolution.width,
                 self.resolution.height,
                 self.resolution.label().as_ref().map_or("None", |label| label),
