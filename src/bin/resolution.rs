@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Error, anyhow};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use serde::Deserialize;
 use tokio::process::Command;
@@ -17,6 +18,9 @@ static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(480p|540p|544p|576p|600p|720p|1080p|1440p|2160p)")
         .expect("Failed to create regex pattern for valid resolutions")
 });
+
+const PROGRESS_BAR_CHARS: &str = "=>-";
+const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
 #[derive(Parser, Debug)]
 #[command(author, version, name = "resolution", about = "Add video resolution to filenames")]
@@ -98,7 +102,7 @@ impl fmt::Display for FFProbeResult {
             );
             write!(
                 f,
-                "{:>4}x{:<4} {:>5}  {}",
+                "{:>4}x{:<4}  {:>5}  {}",
                 self.resolution.width,
                 self.resolution.height,
                 self.resolution.label().as_ref().map_or("None", |label| label),
@@ -175,14 +179,24 @@ async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> 
 
 async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFProbeResult, Error>>> {
     let semaphore = create_semaphore_for_num_physical_cpus();
+
+    let progress_bar = Arc::new(ProgressBar::new(files.len() as u64));
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template(PROGRESS_BAR_TEMPLATE)?
+            .progress_chars(PROGRESS_BAR_CHARS),
+    );
+
     let tasks: Vec<_> = files
         .into_iter()
         .map(|path| {
             let sem = Arc::clone(&semaphore);
+            let progress = Arc::clone(&progress_bar);
             tokio::spawn(async move {
                 let permit: SemaphorePermit = sem.acquire().await.expect("Failed to acquire semaphore");
                 let result = run_ffprobe(path).await;
                 drop(permit);
+                progress.inc(1);
                 result
             })
         })
@@ -193,6 +207,8 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFPro
         .into_iter()
         .map(|res| res.expect("Download future failed"))
         .collect();
+
+    progress_bar.finish();
 
     Ok(results)
 }
