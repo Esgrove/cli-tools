@@ -11,7 +11,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
 
-const FILE_EXTENSIONS: [&str; 2] = ["mp4", "mkv"];
+const FILE_EXTENSIONS: [&str; 4] = ["mp4", "mkv", "wmv", "avi"];
 
 static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(480p|540p|544p|720p|1080p|1440p|2160p)")
