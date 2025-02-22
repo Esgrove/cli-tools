@@ -1,5 +1,6 @@
 pub mod config;
 
+use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -184,11 +185,45 @@ pub fn path_to_string_relative(path: &Path) -> String {
     path_to_string(&get_relative_path_from_current_working_directory(path))
 }
 
-/// Print a stacked diff of the changes.
-pub fn show_diff(old: &str, new: &str) {
+/// Create a coloured diff for the given strings.
+pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
     let changeset = Changeset::new(old, new, "");
     let mut old_diff = String::new();
     let mut new_diff = String::new();
+
+    if stacked {
+        // Find the starting index of the first matching sequence for a nicer visual alignment.
+        // For example:
+        //   Constantine - Onde As Satisfaction (Club Tool).aif
+        //        Darude - Onde As Satisfaction (Constantine Club Tool).aif
+        // Instead of:
+        //   Constantine - Onde As Satisfaction (Club Tool).aif
+        //   Darude - Onde As Satisfaction (Constantine Club Tool).aif
+        for diff in &changeset.diffs {
+            if let Difference::Same(x) = diff {
+                if x.chars().all(char::is_whitespace) || x.chars().count() < 2 {
+                    continue;
+                }
+
+                let old_first_match_index = old.find(x);
+                let new_first_match_index = new.find(x);
+
+                // Add leading whitespace so that the first matching sequence lines up.
+                if let (Some(old_index), Some(new_index)) = (old_first_match_index, new_first_match_index) {
+                    match old_index.cmp(&new_index) {
+                        Ordering::Greater => {
+                            new_diff = " ".repeat(old_index.saturating_sub(new_index));
+                        }
+                        Ordering::Less => {
+                            old_diff = " ".repeat(new_index.saturating_sub(old_index));
+                        }
+                        Ordering::Equal => {}
+                    }
+                    break;
+                }
+            }
+        }
+    }
 
     for diff in changeset.diffs {
         match diff {
@@ -198,21 +233,27 @@ pub fn show_diff(old: &str, new: &str) {
             }
             Difference::Add(ref x) => {
                 if x.chars().all(char::is_whitespace) {
-                    new_diff.push_str(&x.to_string().on_green().to_string());
+                    new_diff.push_str(&x.on_green().to_string());
                 } else {
-                    new_diff.push_str(&x.to_string().green().to_string());
+                    new_diff.push_str(&x.green().to_string());
                 }
             }
             Difference::Rem(ref x) => {
                 if x.chars().all(char::is_whitespace) {
-                    old_diff.push_str(&x.to_string().on_red().to_string());
+                    old_diff.push_str(&x.on_red().to_string());
                 } else {
-                    old_diff.push_str(&x.to_string().red().to_string());
+                    old_diff.push_str(&x.red().to_string());
                 }
             }
         }
     }
 
+    (old_diff, new_diff)
+}
+
+/// Print a stacked diff of the changes.
+pub fn show_diff(old: &str, new: &str) {
+    let (old_diff, new_diff) = color_diff(old, new, true);
     println!("{old_diff}");
     println!("{new_diff}");
 }

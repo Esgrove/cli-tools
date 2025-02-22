@@ -55,10 +55,8 @@ struct FFProbeResult {
 
 impl FFProbeResult {
     fn rename(&self, overwrite: bool) -> anyhow::Result<()> {
-        if let Some(label) = self.resolution.label() {
-            let (name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
-            let new_file_name = format!("{name}.{label}.{extension}");
-            let new_path = self.file.with_file_name(&new_file_name);
+        if self.resolution.label().is_some() {
+            let new_path = self.path_with_label()?;
             if !new_path.exists() || overwrite {
                 std::fs::rename(&self.file, new_path)?;
                 return Ok(());
@@ -66,6 +64,17 @@ impl FFProbeResult {
             return Err(anyhow!("File already exists: {}", cli_tools::path_to_string(&new_path)));
         }
         Ok(())
+    }
+
+    fn path_with_label(&self) -> anyhow::Result<PathBuf> {
+        if let Some(label) = self.resolution.label() {
+            let (name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
+            let new_file_name = format!("{name}.{label}.{extension}");
+            let new_path = self.file.with_file_name(&new_file_name);
+            Ok(new_path)
+        } else {
+            Ok(self.file.clone())
+        }
     }
 }
 
@@ -81,14 +90,21 @@ impl Resolution {
 
 impl fmt::Display for FFProbeResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:>4}x{:<4}   {} {}",
-            self.resolution.width,
-            self.resolution.height,
-            self.resolution.label().as_ref().map_or("None", |label| label),
-            cli_tools::path_to_string(&self.file)
-        )
+        self.path_with_label().as_ref().map_or(Err(fmt::Error), |path| {
+            let (_, new_path) = cli_tools::color_diff(
+                &cli_tools::path_to_string(&self.file),
+                &cli_tools::path_to_string(path),
+                false,
+            );
+            write!(
+                f,
+                "{:>4}x{:<4} {:>5} {}",
+                self.resolution.width,
+                self.resolution.height,
+                self.resolution.label().as_ref().map_or("None", |label| label),
+                new_path
+            )
+        })
     }
 }
 
