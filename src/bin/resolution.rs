@@ -127,7 +127,8 @@ async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
     match output {
         Ok(output) => {
             if output.status.success() {
-                let resolution: Resolution = serde_json::from_slice(&output.stdout)?;
+                let resolution: Resolution = serde_json::from_slice(&output.stdout)
+                    .map_err(|error| anyhow!("Failed to parse output for {path}: {error}"))?;
                 Ok(FFProbeResult { file, resolution })
             } else {
                 Err(anyhow!("{path}: {}", std::str::from_utf8(&output.stderr)?))
