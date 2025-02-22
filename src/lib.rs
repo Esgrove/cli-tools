@@ -81,8 +81,15 @@ pub fn resolve_input_path(path: Option<&str>) -> Result<PathBuf> {
             filepath.display()
         );
     }
-    let absolute_input_path = dunce::canonicalize(filepath)?;
-    Ok(absolute_input_path)
+
+    let absolute_input_path = dunce::canonicalize(&filepath)?;
+
+    // Canonicalize fails for network drives on Windows :(
+    if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
+        Ok(filepath)
+    } else {
+        Ok(absolute_input_path)
+    }
 }
 
 /// Resolves the provided output path relative to an absolute input path.
