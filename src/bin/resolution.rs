@@ -86,7 +86,9 @@ impl Resolution {
     fn label(&self) -> Option<String> {
         match self.height {
             480 | 540 | 544 | 576 | 600 | 720 | 1080 | 1440 | 2160 => Some(format!("{}p", self.height)),
+            // Vertical video
             1920 if self.width == 1080 => Some("1080p".to_string()),
+            1280 if self.width == 720 => Some("720p".to_string()),
             _ => None,
         }
     }
