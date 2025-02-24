@@ -219,7 +219,7 @@ checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 
 [[package]]
 name = "cli-tools"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "anyhow",
  "chrono",

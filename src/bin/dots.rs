@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::{fmt, fs};
@@ -27,6 +28,30 @@ static RE_DOTCOM: LazyLock<Regex> =
 
 static RE_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{9,20}").expect("Failed to compile id regex"));
+
+static RE_WRITTEN_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.(\d{1,2})\.(\d{4})\b")
+        .expect("Failed to compile written date regex")
+});
+
+static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
+    [
+        ("Jan", "01"),
+        ("Feb", "02"),
+        ("Mar", "03"),
+        ("Apr", "04"),
+        ("May", "05"),
+        ("Jun", "06"),
+        ("Jul", "07"),
+        ("Aug", "08"),
+        ("Sep", "09"),
+        ("Oct", "10"),
+        ("Nov", "11"),
+        ("Dec", "12"),
+    ]
+    .into_iter()
+    .collect()
+});
 
 static REPLACE: [(&str, &str); 26] = [
     (" ", "."),
@@ -424,6 +449,8 @@ impl Dots {
         // Fix encoding capitalization
         new_name = new_name.replace("X265", "x265").replace("X264", "x264");
 
+        Self::convert_written_date_format(&mut new_name);
+
         if let Some(ref prefix) = self.config.prefix {
             if new_name.contains(prefix) {
                 new_name = new_name.replace(prefix, "");
@@ -515,6 +542,19 @@ impl Dots {
         let temp_file = cli_tools::append_extension_to_path(new_path.clone(), ".tmp");
         fs::rename(path, &temp_file)?;
         fs::rename(&temp_file, new_path)
+    }
+
+    /// Convert date with written month name to numeral date.
+    ///
+    /// For example "Jan.3.2020" -> "2020.01.03"
+    fn convert_written_date_format(name: &mut String) {
+        *name = RE_WRITTEN_DATE
+            .replace_all(name, |caps: &regex::Captures| {
+                let month = WRITTEN_MONTHS_MAP.get(&caps[1][..3]).expect("Failed to map month");
+                let day = format!("{:02}", caps[2].parse::<u8>().expect("Failed to parse day"));
+                format!("{}.{}.{}", &caps[3], month, day)
+            })
+            .to_string();
     }
 }
 
@@ -793,5 +833,52 @@ mod dots_tests {
         );
         assert_eq!(dots.format_name("test Ph5d9473a841fe9"), "Test");
         assert_eq!(dots.format_name("Test-355989849"), "Test");
+    }
+}
+
+#[cfg(test)]
+mod written_date_tests {
+    use super::*;
+
+    #[test]
+    fn test_single_date() {
+        let mut input = "Mar.23.2016".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2016.03.23");
+    }
+
+    #[test]
+    fn test_multiple_dates() {
+        let mut input = "Mar.23.2016 Jun.17.2015".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2016.03.23 2015.06.17");
+    }
+
+    #[test]
+    fn test_mixed_text() {
+        let mut input = "Event on Apr.5.2021 at noon".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "Event on 2021.04.05 at noon");
+    }
+
+    #[test]
+    fn test_edge_case_single_digit_day() {
+        let mut input = "Jan.03.2020".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2020.01.03");
+    }
+
+    #[test]
+    fn test_no_date_in_text() {
+        let mut input = "This text has no date".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "This text has no date");
+    }
+
+    #[test]
+    fn test_leading_and_trailing_spaces() {
+        let mut input = "Something.Feb.Jun.09.2022".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "Something.Feb.2022.06.09");
     }
 }
