@@ -201,15 +201,12 @@ pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
         //   Darude - Onde As Satisfaction (Constantine Club Tool).aif
         for diff in &changeset.diffs {
             if let Difference::Same(x) = diff {
-                if x.chars().all(char::is_whitespace) || x.chars().count() < 2 {
+                if x.chars().all(char::is_whitespace) || x.chars().count() < 3 {
                     continue;
                 }
 
-                let old_first_match_index = old.find(x);
-                let new_first_match_index = new.find(x);
-
                 // Add leading whitespace so that the first matching sequence lines up.
-                if let (Some(old_index), Some(new_index)) = (old_first_match_index, new_first_match_index) {
+                if let (Some(old_index), Some(new_index)) = (old.find(x), new.find(x)) {
                     match old_index.cmp(&new_index) {
                         Ordering::Greater => {
                             new_diff = " ".repeat(old_index.saturating_sub(new_index));
