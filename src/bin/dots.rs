@@ -130,6 +130,10 @@ struct Args {
     #[arg(short, long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     substitute: Vec<String>,
 
+    /// Remove pattern from filenames
+    #[arg(short = 'z', long, action = clap::ArgAction::Append, name = "PATTERN")]
+    remove: Vec<String>,
+
     /// Substitute regex pattern with replacement in filenames
     #[arg(long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     regex: Vec<String>,
@@ -310,10 +314,10 @@ impl Dots {
             .filter(|entry| entry.path().is_dir())
             .filter_map(|entry| {
                 let path = entry.path();
-                    self.formatted_directory_path(path)
-                        .ok()
-                        .filter(|new_path| path != new_path)
-                        .map(|new_path| (path.to_path_buf(), new_path))
+                self.formatted_directory_path(path)
+                    .ok()
+                    .filter(|new_path| path != new_path)
+                    .map(|new_path| (path.to_path_buf(), new_path))
             })
             // Sort by depth to rename children before parents, avoiding renaming conflicts
             .sorted_by_key(|(path, _)| std::cmp::Reverse(path.components().count()))
@@ -580,6 +584,23 @@ impl Args {
             .collect()
     }
 
+    /// Collect removes to replace pairs.
+    fn parse_removes(&self) -> Vec<(String, String)> {
+        self.remove
+            .iter()
+            .filter_map(|remove| {
+                let pattern = remove.trim().to_string();
+                let replace = String::new();
+                if pattern.is_empty() {
+                    eprintln!("Empty remove pattern: '{pattern}'");
+                    None
+                } else {
+                    Some((pattern, replace))
+                }
+            })
+            .collect()
+    }
+
     /// Collect and compile regex substitutes to replace pairs.
     fn parse_regex_substitutes(&self) -> Result<Vec<(Regex, String)>> {
         self.regex
@@ -603,6 +624,7 @@ impl Config {
     pub fn from_args(args: Args) -> Result<Self> {
         let user_config = DotsConfig::get_user_config();
         let mut replace = args.parse_substitutes();
+        replace.extend(args.parse_removes());
         replace.extend(user_config.replace);
         let mut regex_replace = args.parse_regex_substitutes()?;
         let config_regex = Self::compile_regex_patterns(&user_config.regex_replace)?;
