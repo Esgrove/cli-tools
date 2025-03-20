@@ -252,7 +252,9 @@ pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
 pub fn show_diff(old: &str, new: &str) {
     let (old_diff, new_diff) = color_diff(old, new, true);
     println!("{old_diff}");
-    println!("{new_diff}");
+    if old_diff != new_diff {
+        println!("{new_diff}");
+    }
 }
 
 #[inline]
