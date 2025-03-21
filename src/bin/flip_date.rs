@@ -321,15 +321,11 @@ fn reorder_filename_date(filename: &str, year_first: bool, verbose: bool) -> Opt
         return None;
     }
 
-    println!("filename: {filename}");
-
     // Check for full dates
     let mut best_match = None;
     for caps in RE_FULL_DATE.captures_iter(filename) {
-        println!("{caps:?}");
         if let Some(date_match) = caps.name("date") {
             let date_str = date_match.as_str();
-            println!("date_str: {date_str}");
 
             let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
             if numbers.len() != 3 {
@@ -350,10 +346,8 @@ fn reorder_filename_date(filename: &str, year_first: bool, verbose: bool) -> Opt
     // Check for short dates
     let mut best_match = None;
     for caps in RE_SHORT_DATE_DAY_FIRST.captures_iter(filename) {
-        println!("{caps:?}");
         if let Some(date_match) = caps.name("date") {
             let date_str = date_match.as_str();
-            println!("date_str: {date_str}");
 
             let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
             if numbers.len() != 3 {
@@ -378,10 +372,8 @@ fn reorder_filename_date(filename: &str, year_first: bool, verbose: bool) -> Opt
     // Check for short dates
     let mut best_match = None;
     for caps in RE_SHORT_DATE_YEAR_FIRST.captures_iter(filename) {
-        println!("{caps:?}");
         if let Some(date_match) = caps.name("date") {
             let date_str = date_match.as_str();
-            println!("date_str: {date_str}");
 
             let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
             if numbers.len() != 3 {
@@ -405,26 +397,18 @@ fn reorder_filename_date(filename: &str, year_first: bool, verbose: bool) -> Opt
 /// Check if directory name contains a matching date and reorder it.
 fn reorder_directory_date(name: &str) -> Option<String> {
     // Handle dd.mm.yyyy format
-    println!("dir name: {name}");
     if let Some(caps) = RE_DD_MM_YYYY.captures(name) {
         if let Some(date) = parse_date_from_match(name, &caps) {
-            println!("RE_DD_MM_YYYY: {date}");
             let name_part = RE_DD_MM_YYYY.replace(name, "").to_string();
-            println!("name_part: {name_part}");
             let name = get_directory_separator(&name_part);
-            println!("name: {name}");
             return Some(format!("{}{name}", date.dash_format()));
         }
     }
     // Handle yyyy.mm.dd format
     if let Some(caps) = RE_YYYY_MM_DD.captures(name) {
-        println!("caps: {caps:#?}");
         if let Some(date) = parse_date_from_match(name, &caps) {
-            println!("RE_YYYY_MM_DD: {date}");
             let name_part = RE_YYYY_MM_DD.replace(name, "").to_string();
-            println!("name_part: {name_part}");
             let name = get_directory_separator(&name_part);
-            println!("name: {name}");
             return Some(format!("{}{name}", date.dash_format()));
         }
     }
