@@ -112,7 +112,7 @@ impl fmt::Display for FFProbeResult {
             );
             write!(
                 f,
-                "{:>4}x{:<4}  {:>5}  {}",
+                "{:>4}x{:<4}   {:>9}   {}",
                 self.resolution.width,
                 self.resolution.height,
                 self.resolution.label(),
