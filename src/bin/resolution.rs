@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 const FILE_EXTENSIONS: [&str; 4] = ["mp4", "mkv", "wmv", "avi"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
-const RESOLUTION_TOLERANCE: f32 = 0.02;
+const RESOLUTION_TOLERANCE: f32 = 0.025;
 const KNOWN_RESOLUTIONS: &[(u32, u32)] = &[
     (640, 480),
     (720, 480),
@@ -41,6 +41,10 @@ static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
 struct Args {
     /// Optional input directory or file path
     path: Option<String>,
+
+    /// Enable debug prints
+    #[arg(short, long)]
+    debug: bool,
 
     /// Overwrite existing files
     #[arg(short, long)]
@@ -72,16 +76,26 @@ struct ResolutionMatch {
     height_range: (u32, u32),
 }
 
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct FFProbeResult {
+    file: PathBuf,
+    resolution: Resolution,
+}
+
 impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}x{}", self.width, self.height)
     }
 }
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
-struct FFProbeResult {
-    file: PathBuf,
-    resolution: Resolution,
+impl fmt::Display for ResolutionMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}p: width {:#?}, height {:#?}",
+            self.label_height, self.width_range, self.height_range
+        )
+    }
 }
 
 impl FFProbeResult {
@@ -301,6 +315,13 @@ async fn main() -> anyhow::Result<()> {
 
     let absolute_input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
 
+    if args.debug {
+        println!("Fuzzy resolution ranges:");
+        for res in &FUZZY_RESOLUTIONS {
+            println!("  {res}");
+        }
+    }
+
     let files = gather_files_without_resolution_label(&absolute_input_path, args.recursive).await?;
 
     if files.is_empty() {
@@ -310,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if args.verbose {
+    if args.verbose || args.debug {
         println!("Processing {} files...", files.len());
     }
 
