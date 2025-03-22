@@ -14,14 +14,27 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
 
 const FILE_EXTENSIONS: [&str; 4] = ["mp4", "mkv", "wmv", "avi"];
+const PROGRESS_BAR_CHARS: &str = "=>-";
+const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
+const RESOLUTION_TOLERANCE: f32 = 0.02;
+const KNOWN_RESOLUTIONS: &[(u32, u32)] = &[
+    (640, 480),
+    (720, 480),
+    (720, 540),
+    (720, 544),
+    (720, 576),
+    (800, 600),
+    (1280, 720),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+];
+const FUZZY_RESOLUTIONS: [ResolutionMatch; KNOWN_RESOLUTIONS.len()] = precalculate_fuzzy_resolutions();
 
 static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(480p|540p|544p|576p|600p|720p|1080p|1440p|2160p)")
         .expect("Failed to create regex pattern for valid resolutions")
 });
-
-const PROGRESS_BAR_CHARS: &str = "=>-";
-const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
 #[derive(Parser, Debug)]
 #[command(author, version, name = "resolution", about = "Add video resolution to filenames")]
@@ -50,6 +63,13 @@ struct Args {
 struct Resolution {
     width: u32,
     height: u32,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct ResolutionMatch {
+    label_height: u32,
+    width_range: (u32, u32),
+    height_range: (u32, u32),
 }
 
 impl fmt::Display for Resolution {
@@ -106,34 +126,18 @@ impl Resolution {
     }
 
     fn label_fuzzy(&self) -> String {
-        let known_resolutions = [
-            (640, 480),
-            (720, 480),
-            (720, 540),
-            (720, 544),
-            (720, 576),
-            (800, 600),
-            (1280, 720),
-            (1920, 1080),
-            (2560, 1440),
-            (3840, 2160),
-        ];
-
-        for &(w, h) in &known_resolutions {
-            if Self::approximately(self.width, w) && Self::approximately(self.height, h) {
-                return format!("{h}p");
+        for res in &FUZZY_RESOLUTIONS {
+            if self.width >= res.width_range.0
+                && self.width <= res.width_range.1
+                && self.height >= res.height_range.0
+                && self.height <= res.height_range.1
+            {
+                return format!("{}p", res.label_height);
             }
         }
 
         // fall back to full resolution label
         self.to_string()
-    }
-
-    fn approximately(actual: u32, expected: u32) -> bool {
-        let tolerance = (expected as f32 * 0.01).round() as u32;
-        let lower = expected.saturating_sub(tolerance);
-        let upper = expected.saturating_add(tolerance);
-        actual >= lower && actual <= upper
     }
 }
 
@@ -155,6 +159,32 @@ impl fmt::Display for FFProbeResult {
             )
         })
     }
+}
+
+const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
+    let mut out = [ResolutionMatch {
+        label_height: 0,
+        width_range: (0, 0),
+        height_range: (0, 0),
+    }; KNOWN_RESOLUTIONS.len()];
+    let mut i = 0;
+    while i < KNOWN_RESOLUTIONS.len() {
+        let (w, h) = KNOWN_RESOLUTIONS[i];
+        out[i] = ResolutionMatch {
+            label_height: h,
+            width_range: compute_bounds(w),
+            height_range: compute_bounds(h),
+        };
+        i += 1;
+    }
+    out
+}
+
+const fn compute_bounds(res: u32) -> (u32, u32) {
+    let tolerance = (res as f32 * RESOLUTION_TOLERANCE) as u32;
+    let min = res.saturating_sub(tolerance);
+    let max = res.saturating_add(tolerance);
+    (min, max)
 }
 
 async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
@@ -385,6 +415,14 @@ mod tests {
             .label(),
             "2160p"
         );
+        assert_eq!(
+            Resolution {
+                width: 1260,
+                height: 710
+            }
+            .label(),
+            "720p"
+        );
     }
 
     #[test]
@@ -436,10 +474,10 @@ mod tests {
         assert_eq!(
             Resolution {
                 width: 1250,
-                height: 700
+                height: 790
             }
             .label(),
-            "1250x700"
+            "1250x790"
         );
     }
 }
