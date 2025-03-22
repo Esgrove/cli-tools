@@ -77,11 +77,15 @@ impl FFProbeResult {
 
     fn path_with_label(&self) -> anyhow::Result<PathBuf> {
         let label = self.resolution.label();
-        let (name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
+        let (mut name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
         if name.contains(&label) {
             Ok(self.file.clone())
         } else {
-            let new_file_name = format!("{name}.{label}.{extension}");
+            let full_resolution = self.resolution.to_string();
+            if name.contains(&full_resolution) {
+                name = name.replace(&full_resolution, "");
+            }
+            let new_file_name = format!("{name}.{label}.{extension}").replace("..", ".");
             let new_path = self.file.with_file_name(&new_file_name);
             Ok(new_path)
         }
@@ -97,8 +101,39 @@ impl Resolution {
             1920 if self.width == 1080 => "1080p".to_string(),
             2560 if self.width == 1440 => "1440p".to_string(),
             3840 if self.width == 2160 => "2160p".to_string(),
-            _ => self.to_string(),
+            _ => self.label_fuzzy(),
         }
+    }
+
+    fn label_fuzzy(&self) -> String {
+        let known_resolutions = [
+            (640, 480),
+            (720, 480),
+            (720, 540),
+            (720, 544),
+            (720, 576),
+            (800, 600),
+            (1280, 720),
+            (1920, 1080),
+            (2560, 1440),
+            (3840, 2160),
+        ];
+
+        for &(w, h) in &known_resolutions {
+            if Self::approximately(self.width, w) && Self::approximately(self.height, h) {
+                return format!("{h}p");
+            }
+        }
+
+        // fall back to full resolution label
+        self.to_string()
+    }
+
+    fn approximately(actual: u32, expected: u32) -> bool {
+        let tolerance = (expected as f32 * 0.01).round() as u32;
+        let lower = expected.saturating_sub(tolerance);
+        let upper = expected.saturating_add(tolerance);
+        actual >= lower && actual <= upper
     }
 }
 
@@ -274,4 +309,137 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_matches() {
+        assert_eq!(
+            Resolution {
+                width: 1280,
+                height: 720
+            }
+            .label(),
+            "720p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 1920,
+                height: 1080
+            }
+            .label(),
+            "1080p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 2560,
+                height: 1440
+            }
+            .label(),
+            "1440p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 3840,
+                height: 2160
+            }
+            .label(),
+            "2160p"
+        );
+    }
+
+    #[test]
+    fn approximate_matches() {
+        assert_eq!(
+            Resolution {
+                width: 1920,
+                height: 1078
+            }
+            .label(),
+            "1080p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 1278,
+                height: 716
+            }
+            .label(),
+            "720p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 2540,
+                height: 1442
+            }
+            .label(),
+            "1440p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 3820,
+                height: 2162
+            }
+            .label(),
+            "2160p"
+        );
+    }
+
+    #[test]
+    fn out_of_range() {
+        assert_eq!(
+            Resolution {
+                width: 1024,
+                height: 768
+            }
+            .label(),
+            "1024x768"
+        );
+        assert_eq!(
+            Resolution {
+                width: 3000,
+                height: 2000
+            }
+            .label(),
+            "3000x2000"
+        );
+    }
+
+    #[test]
+    fn lower_bound_tolerance() {
+        assert_eq!(
+            Resolution {
+                width: 1267,
+                height: 713
+            }
+            .label(),
+            "720p"
+        );
+    }
+
+    #[test]
+    fn upper_bound_tolerance() {
+        assert_eq!(
+            Resolution {
+                width: 1292,
+                height: 727
+            }
+            .label(),
+            "720p"
+        );
+    }
+
+    #[test]
+    fn beyond_tolerance() {
+        assert_eq!(
+            Resolution {
+                width: 1250,
+                height: 700
+            }
+            .label(),
+            "1250x700"
+        );
+    }
 }
