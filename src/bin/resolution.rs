@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 
 use anyhow::{Error, anyhow};
 use clap::Parser;
+use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use serde::Deserialize;
@@ -51,6 +52,12 @@ struct Resolution {
     height: u32,
 }
 
+impl fmt::Display for Resolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 struct FFProbeResult {
     file: PathBuf,
@@ -59,37 +66,38 @@ struct FFProbeResult {
 
 impl FFProbeResult {
     fn rename(&self, overwrite: bool) -> anyhow::Result<()> {
-        if self.resolution.label().is_some() {
-            let new_path = self.path_with_label()?;
-            if !new_path.exists() || overwrite {
-                std::fs::rename(&self.file, new_path)?;
-                return Ok(());
-            }
-            return Err(anyhow!("File already exists: {}", cli_tools::path_to_string(&new_path)));
+        let new_path = self.path_with_label()?;
+        if !new_path.exists() || overwrite {
+            std::fs::rename(&self.file, new_path)?;
+            Ok(())
+        } else {
+            Err(anyhow!("File already exists: {}", cli_tools::path_to_string(&new_path)))
         }
-        Ok(())
     }
 
     fn path_with_label(&self) -> anyhow::Result<PathBuf> {
-        if let Some(label) = self.resolution.label() {
-            let (name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
+        let label = self.resolution.label();
+        let (name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
+        if name.contains(&label) {
+            Ok(self.file.clone())
+        } else {
             let new_file_name = format!("{name}.{label}.{extension}");
             let new_path = self.file.with_file_name(&new_file_name);
             Ok(new_path)
-        } else {
-            Ok(self.file.clone())
         }
     }
 }
 
 impl Resolution {
-    fn label(&self) -> Option<String> {
+    fn label(&self) -> String {
         match self.height {
-            480 | 540 | 544 | 576 | 600 | 720 | 1080 | 1440 | 2160 => Some(format!("{}p", self.height)),
+            480 | 540 | 544 | 576 | 600 | 720 | 1080 | 1440 | 2160 => format!("{}p", self.height),
             // Vertical video
-            1920 if self.width == 1080 => Some("1080p".to_string()),
-            1280 if self.width == 720 => Some("720p".to_string()),
-            _ => None,
+            1280 if self.width == 720 => "720p".to_string(),
+            1920 if self.width == 1080 => "1080p".to_string(),
+            2560 if self.width == 1440 => "1440p".to_string(),
+            3840 if self.width == 2160 => "2160p".to_string(),
+            _ => self.to_string(),
         }
     }
 }
@@ -107,7 +115,7 @@ impl fmt::Display for FFProbeResult {
                 "{:>4}x{:<4}  {:>5}  {}",
                 self.resolution.width,
                 self.resolution.height,
-                self.resolution.label().as_ref().map_or("None", |label| label),
+                self.resolution.label(),
                 new_path
             )
         })
@@ -260,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
         println!("{result}");
         if !args.print {
             if let Err(error) = result.rename(args.force) {
-                println!("{error}");
+                println!("{}", format!("{error}").red());
             }
         }
     }
