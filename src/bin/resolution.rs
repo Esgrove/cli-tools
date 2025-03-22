@@ -82,6 +82,11 @@ struct FFProbeResult {
     resolution: Resolution,
 }
 
+enum RenameStatus {
+    NeedsRename(PathBuf),
+    UpToDate(PathBuf),
+}
+
 impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}x{}", self.width, self.height)
@@ -100,20 +105,21 @@ impl fmt::Display for ResolutionMatch {
 
 impl FFProbeResult {
     fn rename(&self, overwrite: bool) -> anyhow::Result<()> {
-        let new_path = self.path_with_label()?;
-        if !new_path.exists() || overwrite {
+        if let RenameStatus::NeedsRename(new_path) = self.path_with_label()? {
+            println!("{self}");
+            if new_path.exists() && !overwrite {
+                anyhow::bail!("File already exists: {}", cli_tools::path_to_string(&new_path));
+            }
             std::fs::rename(&self.file, new_path)?;
-            Ok(())
-        } else {
-            Err(anyhow!("File already exists: {}", cli_tools::path_to_string(&new_path)))
         }
+        Ok(())
     }
 
-    fn path_with_label(&self) -> anyhow::Result<PathBuf> {
+    fn path_with_label(&self) -> anyhow::Result<RenameStatus> {
         let label = self.resolution.label();
         let (mut name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
         if name.contains(&label) {
-            Ok(self.file.clone())
+            Ok(RenameStatus::UpToDate(self.file.clone()))
         } else {
             let full_resolution = self.resolution.to_string();
             if name.contains(&full_resolution) {
@@ -121,7 +127,7 @@ impl FFProbeResult {
             }
             let new_file_name = format!("{name}.{label}.{extension}").replace("..", ".");
             let new_path = self.file.with_file_name(&new_file_name);
-            Ok(new_path)
+            Ok(RenameStatus::NeedsRename(new_path))
         }
     }
 }
@@ -158,6 +164,9 @@ impl Resolution {
 impl fmt::Display for FFProbeResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.path_with_label().as_ref().map_or(Err(fmt::Error), |path| {
+            let path = match path {
+                RenameStatus::UpToDate(p) | RenameStatus::NeedsRename(p) => p.as_path(),
+            };
             let (_, new_path) = cli_tools::color_diff(
                 &cli_tools::path_to_string(&self.file),
                 &cli_tools::path_to_string(path),
@@ -351,7 +360,6 @@ async fn main() -> anyhow::Result<()> {
     files_to_process.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
 
     for result in files_to_process {
-        println!("{result}");
         if !args.print {
             if let Err(error) = result.rename(args.force) {
                 println!("{}", format!("{error}").red());
