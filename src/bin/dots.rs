@@ -29,49 +29,38 @@ static RE_DOTCOM: LazyLock<Regex> =
 static RE_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{9,20}").expect("Failed to compile id regex"));
 
-static RE_WRITTEN_DATE_SHORTENED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.(\d{1,2})\.(\d{4})\b")
-        .expect("Failed to compile written date regex")
-});
-
 static RE_WRITTEN_DATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(January|February|March|April|May|June|July|August|September|October|November|December)\.(\d{1,2})\.(\d{4})\b")
+    Regex::new(
+        r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>\d{1,2})\.(?P<year>\d{4})\b",
+    )
         .expect("Failed to compile written date regex")
 });
 
-static WRITTEN_MONTHS_SHORTENED_MAP: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
+static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     [
-        ("Jan", "01"),
-        ("Feb", "02"),
-        ("Mar", "03"),
-        ("Apr", "04"),
-        ("May", "05"),
-        ("Jun", "06"),
-        ("Jul", "07"),
-        ("Aug", "08"),
-        ("Sep", "09"),
-        ("Oct", "10"),
-        ("Nov", "11"),
-        ("Dec", "12"),
-    ]
-    .into_iter()
-    .collect()
-});
-
-static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
-    [
-        ("January", "01"),
-        ("February", "02"),
-        ("March", "03"),
-        ("April", "04"),
-        ("May", "05"),
-        ("June", "06"),
-        ("July", "07"),
-        ("August", "08"),
-        ("September", "09"),
-        ("October", "10"),
-        ("November", "11"),
-        ("December", "12"),
+        ("jan", "01"),
+        ("january", "01"),
+        ("feb", "02"),
+        ("february", "02"),
+        ("mar", "03"),
+        ("march", "03"),
+        ("apr", "04"),
+        ("april", "04"),
+        ("may", "05"),
+        ("jun", "06"),
+        ("june", "06"),
+        ("jul", "07"),
+        ("july", "07"),
+        ("aug", "08"),
+        ("august", "08"),
+        ("sep", "09"),
+        ("september", "09"),
+        ("oct", "10"),
+        ("october", "10"),
+        ("nov", "11"),
+        ("november", "11"),
+        ("dec", "12"),
+        ("december", "12"),
     ]
     .into_iter()
     .collect()
@@ -579,18 +568,11 @@ impl Dots {
     fn convert_written_date_format(name: &mut String) {
         *name = RE_WRITTEN_DATE
             .replace_all(name, |caps: &regex::Captures| {
-                let month = WRITTEN_MONTHS_MAP.get(&caps[1][..3]).expect("Failed to map month");
-                let day = format!("{:02}", caps[2].parse::<u8>().expect("Failed to parse day"));
-                format!("{}.{}.{}", &caps[3], month, day)
-            })
-            .to_string();
-        *name = RE_WRITTEN_DATE_SHORTENED
-            .replace_all(name, |caps: &regex::Captures| {
-                let month = WRITTEN_MONTHS_SHORTENED_MAP
-                    .get(&caps[1][..3])
-                    .expect("Failed to map month");
-                let day = format!("{:02}", caps[2].parse::<u8>().expect("Failed to parse day"));
-                format!("{}.{}.{}", &caps[3], month, day)
+                let year = &caps["year"];
+                let month_raw = &caps["month"].to_lowercase();
+                let month = WRITTEN_MONTHS_MAP.get(month_raw.as_str()).expect("Failed to map month");
+                let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
+                format!("{year}.{month}.{day}")
             })
             .to_string();
     }
@@ -901,6 +883,14 @@ mod written_date_tests {
         let mut input = "Mar.23.2016".to_string();
         Dots::convert_written_date_format(&mut input);
         assert_eq!(input, "2016.03.23");
+
+        let mut input = "March.1.2011".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2011.03.01");
+
+        let mut input = "December.20.2023".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2023.12.20");
     }
 
     #[test]
