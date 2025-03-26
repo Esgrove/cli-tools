@@ -29,12 +29,17 @@ static RE_DOTCOM: LazyLock<Regex> =
 static RE_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{9,20}").expect("Failed to compile id regex"));
 
-static RE_WRITTEN_DATE: LazyLock<Regex> = LazyLock::new(|| {
+static RE_WRITTEN_DATE_SHORTENED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.(\d{1,2})\.(\d{4})\b")
         .expect("Failed to compile written date regex")
 });
 
-static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
+static RE_WRITTEN_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(January|February|March|April|May|June|July|August|September|October|November|December)\.(\d{1,2})\.(\d{4})\b")
+        .expect("Failed to compile written date regex")
+});
+
+static WRITTEN_MONTHS_SHORTENED_MAP: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     [
         ("Jan", "01"),
         ("Feb", "02"),
@@ -48,6 +53,25 @@ static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("Oct", "10"),
         ("Nov", "11"),
         ("Dec", "12"),
+    ]
+    .into_iter()
+    .collect()
+});
+
+static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
+    [
+        ("January", "01"),
+        ("February", "02"),
+        ("March", "03"),
+        ("April", "04"),
+        ("May", "05"),
+        ("June", "06"),
+        ("July", "07"),
+        ("August", "08"),
+        ("September", "09"),
+        ("October", "10"),
+        ("November", "11"),
+        ("December", "12"),
     ]
     .into_iter()
     .collect()
@@ -551,10 +575,20 @@ impl Dots {
     /// Convert date with written month name to numeral date.
     ///
     /// For example "Jan.3.2020" -> "2020.01.03"
+    /// For example "December.6.2023" -> "2023.12.06"
     fn convert_written_date_format(name: &mut String) {
         *name = RE_WRITTEN_DATE
             .replace_all(name, |caps: &regex::Captures| {
                 let month = WRITTEN_MONTHS_MAP.get(&caps[1][..3]).expect("Failed to map month");
+                let day = format!("{:02}", caps[2].parse::<u8>().expect("Failed to parse day"));
+                format!("{}.{}.{}", &caps[3], month, day)
+            })
+            .to_string();
+        *name = RE_WRITTEN_DATE_SHORTENED
+            .replace_all(name, |caps: &regex::Captures| {
+                let month = WRITTEN_MONTHS_SHORTENED_MAP
+                    .get(&caps[1][..3])
+                    .expect("Failed to map month");
                 let day = format!("{:02}", caps[2].parse::<u8>().expect("Failed to parse day"));
                 format!("{}.{}.{}", &caps[3], month, day)
             })
