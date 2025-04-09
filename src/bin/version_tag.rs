@@ -115,7 +115,7 @@ fn version_tag(
                     }
                 }
             }
-        };
+        }
     }
 
     // Push all the collected tags at once
