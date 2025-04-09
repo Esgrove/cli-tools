@@ -87,7 +87,9 @@ static REPLACE_START: [&str; 11] = [
     "STOCKMANN",
 ];
 
-static FILTER_PREFIXES: [&str; 79] = [
+// TODO: move to user config
+// Non-DJ items
+static FILTER_PREFIXES: [&str; 82] = [
     "1BAR",
     "45 SPECIAL",
     "ALEPA",
@@ -137,6 +139,7 @@ static FILTER_PREFIXES: [&str; 79] = [
     "MOBILEPAY HELSINGIN SEUDUN",
     "MONOMESTA",
     "MUJI",
+    "PAYPAL BJORNBORG",
     "PAYPAL EPIC GAMES",
     "PAYPAL LEVISTRAUSS",
     "PAYPAL MCOMPANY",
@@ -164,7 +167,9 @@ static FILTER_PREFIXES: [&str; 79] = [
     "STADIUM",
     "STOCKMANN",
     "TEERENPELI",
+    "THE SOCIAL BURGER JOINT",
     "TIKETTI.FI",
+    "TORTILLA HOUSE",
     "TUNTUR.MAX OY SKI BISTRO",
     "WOLT",
 ];
