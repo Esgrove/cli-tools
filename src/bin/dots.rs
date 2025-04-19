@@ -84,7 +84,7 @@ static REPLACE: [(&str, &str); 26] = [
     (",.", "."),
     (",", "."),
     ("-=-", "."),
-    (".&.", "."),
+    (".&.", ".and."),
     (".-.", "."),
     (".rq", ""),
     ("www.", ""),
@@ -98,7 +98,7 @@ static REPLACE: [(&str, &str); 26] = [
 const RESOLUTIONS: [&str; 6] = ["540", "720", "1080", "1920", "2160", "3840"];
 
 #[derive(Debug, Parser)]
-#[command(author, version, name = "dots", about = "Rename files to use dots")]
+#[command(author, version, name = "dots", about = "Rename files to use dot formatting")]
 struct Args {
     /// Optional input directory or file
     path: Option<String>,
@@ -156,7 +156,7 @@ struct Args {
     verbose: bool,
 }
 
-/// Config from config file
+/// Config from a config file
 #[derive(Debug, Default, Deserialize)]
 struct DotsConfig {
     #[serde(default)]
@@ -183,7 +183,7 @@ struct DotsConfig {
     verbose: bool,
 }
 
-/// Wrapper needed to parse config section.
+/// Wrapper needed for parsing config section.
 #[derive(Debug, Default, Deserialize)]
 struct UserConfig {
     #[serde(default)]
