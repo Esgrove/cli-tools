@@ -29,6 +29,9 @@ static RE_DOTCOM: LazyLock<Regex> =
 static RE_IDENTIFIER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{9,20}").expect("Failed to compile id regex"));
 
+static RE_RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b\d{3,4}x\d{3,4}\b").expect("Failed to compile resolution regex"));
+
 static RE_WRITTEN_DATE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>\d{1,2})\.(?P<year>\d{4})\b",
@@ -536,18 +539,19 @@ impl Dots {
     }
 
     fn remove_random_identifiers(name: &mut String) {
-        let result = RE_IDENTIFIER.replace_all(name, |caps: &regex::Captures| {
-            let matched_str = &caps[0];
-            if Self::has_at_least_six_digits(matched_str)
-                && !RESOLUTIONS.iter().any(|&number| matched_str.contains(number))
-            {
-                String::new()
-            } else {
-                matched_str.to_string()
-            }
-        });
-
-        *name = result.trim().to_string();
+        *name = RE_IDENTIFIER
+            .replace_all(name, |caps: &regex::Captures| {
+                let matched_str = &caps[0];
+                if Self::has_at_least_six_digits(matched_str)
+                    && !RE_RESOLUTION.is_match(matched_str)
+                    && !RESOLUTIONS.iter().any(|&number| matched_str.contains(number))
+                {
+                    String::new()
+                } else {
+                    matched_str.trim().to_string()
+                }
+            })
+            .to_string();
     }
 
     fn has_at_least_six_digits(s: &str) -> bool {
@@ -830,6 +834,16 @@ mod dots_tests {
     #[test]
     fn test_format_name_no_changes() {
         assert_eq!(DOTS.format_name("SingleWord"), "SingleWord");
+    }
+
+    #[test]
+    fn test_format_name_full_resolution() {
+        assert_eq!(
+            DOTS.format_name("test.string.with resolution. 1234x900"),
+            "Test.String.With.Resolution.1234x900"
+        );
+        assert_eq!(DOTS.format_name("resolution 719x719"), "Resolution.719x719");
+        assert_eq!(DOTS.format_name("resolution 122225x719"), "Resolution");
     }
 
     #[test]
