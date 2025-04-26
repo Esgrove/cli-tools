@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "2.12.1"
+version = "2.13.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/Esgrove/cli-tools"
 keywords = ["cli", "rename"]
 categories = ["command-line-utilities"]
-rust-version = "1.85"
+rust-version = "1.86"
 
 [dependencies]
 anyhow = "1.0.98"
@@ -25,7 +25,7 @@ indicatif = { version = "0.17.11", features = ["tokio", "futures"] }
 itertools = "0.14.0"
 num_cpus = "1.16.0"
 regex = "1.11.1"
-rust_xlsxwriter = { version = "0.86.0", features = ["chrono", "serde"] }
+rust_xlsxwriter = { version = "0.86.1", features = ["chrono", "serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tempfile = "3.19.1"
