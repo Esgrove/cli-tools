@@ -545,6 +545,7 @@ impl Dots {
                 if Self::has_at_least_six_digits(matched_str)
                     && !RE_RESOLUTION.is_match(matched_str)
                     && !RESOLUTIONS.iter().any(|&number| matched_str.contains(number))
+                    && !name.contains("_hash2_")
                 {
                     String::new()
                 } else {
