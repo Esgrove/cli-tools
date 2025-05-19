@@ -470,6 +470,18 @@ impl Dots {
                 acc.replace(pattern, replacement)
             });
 
+        new_name = RE_BRACKETS.replace_all(&new_name, ".").to_string();
+        new_name = RE_DOTCOM.replace_all(&new_name, ".").to_string();
+        new_name = RE_EXCLAMATION.replace_all(&new_name, ".").to_string();
+        new_name = RE_WHITESPACE.replace_all(&new_name, ".").to_string();
+        new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
+
+        Self::remove_special_characters(&mut new_name);
+
+        if self.config.convert_case {
+            Self::convert_to_lowercase(&mut new_name);
+        }
+
         // Apply extra replacements from args and user config
         new_name = self
             .config
@@ -486,20 +498,8 @@ impl Dots {
             }
         }
 
-        new_name = RE_BRACKETS.replace_all(&new_name, ".").to_string();
-        new_name = RE_DOTCOM.replace_all(&new_name, ".").to_string();
-        new_name = RE_EXCLAMATION.replace_all(&new_name, ".").to_string();
-        new_name = RE_WHITESPACE.replace_all(&new_name, ".").to_string();
-        new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
-
-        Self::remove_special_characters(&mut new_name);
-
         if self.config.remove_random {
             Self::remove_random_identifiers(&mut new_name);
-        }
-
-        if self.config.convert_case {
-            Self::convert_to_lowercase(&mut new_name);
         }
 
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
