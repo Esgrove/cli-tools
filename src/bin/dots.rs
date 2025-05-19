@@ -479,7 +479,7 @@ impl Dots {
         Self::remove_special_characters(&mut new_name);
 
         if self.config.convert_case {
-            Self::convert_to_lowercase(&mut new_name);
+            new_name = new_name.to_lowercase();
         }
 
         // Apply extra replacements from args and user config
@@ -672,6 +672,7 @@ impl Dots {
     /// Convert to lowercase.
     ///
     /// Splits from dot and only converts parts longer than 3 characters.
+    #[allow(unused)]
     fn convert_to_lowercase(name: &mut String) {
         let parts: Vec<_> = name
             .split('.')
@@ -881,9 +882,9 @@ mod dots_tests {
                 ..Default::default()
             },
         };
-        assert_eq!(dots_case.format_name("CAP WORD GL"), "CAP.Word.GL");
-        assert_eq!(dots_case.format_name("testCAP CAP WORD GL"), "Testcap.CAP.Word.GL");
-        assert_eq!(dots_case.format_name("test CAP CAP WORD GL"), "Test.CAP.CAP.Word.GL");
+        assert_eq!(dots_case.format_name("CAP WORD GL"), "Cap.Word.Gl");
+        assert_eq!(dots_case.format_name("testCAP CAP WORD GL"), "Testcap.Cap.Word.Gl");
+        assert_eq!(dots_case.format_name("test CAP CAP WORD GL"), "Test.Cap.Cap.Word.Gl");
     }
 
     #[test]
