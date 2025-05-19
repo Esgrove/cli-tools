@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -497,11 +498,11 @@ impl Dots {
             Self::remove_random_identifiers(&mut new_name);
         }
 
-        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
-
         if self.config.convert_case {
-            new_name = new_name.to_lowercase();
+            Self::convert_to_lowercase(&mut new_name);
         }
+
+        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
 
         // Temporarily convert dots back to whitespace so titlecase works
         new_name = new_name.replace('.', " ");
@@ -666,6 +667,24 @@ impl Dots {
                 format!("{year}.{month}.{day}")
             })
             .to_string();
+    }
+
+    /// Convert to lowercase.
+    ///
+    /// Splits from dot and only converts parts longer than 3 characters.
+    fn convert_to_lowercase(name: &mut String) {
+        let parts: Vec<_> = name
+            .split('.')
+            .map(|s| {
+                if s.chars().count() > 3 {
+                    Cow::Owned(s.to_lowercase())
+                } else {
+                    Cow::Borrowed(s)
+                }
+            })
+            .collect();
+
+        *name = parts.join(".");
     }
 }
 
@@ -848,6 +867,23 @@ mod dots_tests {
         assert_eq!(DOTS.format_name("some file"), "Some.File");
         assert_eq!(DOTS.format_name("word"), "Word");
         assert_eq!(DOTS.format_name("__word__"), "Word");
+        assert_eq!(DOTS.format_name("testCAP CAP WORD GL"), "testCAP.CAP.WORD.GL");
+        assert_eq!(DOTS.format_name("test CAP CAP WORD GL"), "Test.CAP.CAP.WORD.GL");
+        assert_eq!(DOTS.format_name("CAP WORD GL"), "Cap.Word.Gl");
+    }
+
+    #[test]
+    fn test_format_convert_case() {
+        let dots_case = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                convert_case: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(dots_case.format_name("CAP WORD GL"), "CAP.Word.GL");
+        assert_eq!(dots_case.format_name("testCAP CAP WORD GL"), "Testcap.CAP.Word.GL");
+        assert_eq!(dots_case.format_name("test CAP CAP WORD GL"), "Test.CAP.CAP.Word.GL");
     }
 
     #[test]
