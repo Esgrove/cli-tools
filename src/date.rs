@@ -16,7 +16,7 @@ static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([12]\d{3})\.([12]\d|3[01]|0?[1-9])\.([12]\d|3[01]|0?[1-9])")
+    Regex::new(r"\b([12]\d{3})\.([12]\d|3[01]|0?[1-9])\.([12]\d|3[01]|0?[1-9])\b")
         .expect("Failed to create regex pattern for correct date")
 });
 
@@ -320,6 +320,10 @@ mod filename_tests {
         let correct = "2023.12.30.txt";
         assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
         assert_eq!(reorder_filename_date(filename, true, false), Some(correct.to_string()));
+
+        let filename = "ABCGIO1848.09.06.2022.720p.mp4";
+        let correct = "ABCGIO1848.2022.06.09.720p.mp4";
+        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
     }
 
     #[test]
