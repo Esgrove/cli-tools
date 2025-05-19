@@ -364,13 +364,6 @@ impl Dots {
             let mut new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
-            if self.config.dryrun {
-                println!("{}", format!("Dryrun {number}:").bold().cyan());
-                cli_tools::show_diff(&old_str, &new_str);
-                num_renamed += 1;
-                continue;
-            }
-
             let capitalization_change_only = if new_str.to_lowercase() == old_str.to_lowercase() {
                 // File path contains only capitalisation changes:
                 // Need to use a temp file to workaround case-insensitive file systems.
@@ -400,6 +393,12 @@ impl Dots {
                 }
             }
 
+            if self.config.dryrun {
+                println!("{}", format!("Dryrun {number}:").bold().cyan());
+                cli_tools::show_diff(&old_str, &new_str);
+                num_renamed += 1;
+                continue;
+            }
             println!("{}", format!("Rename {number}:").bold().magenta());
             cli_tools::show_diff(&old_str, &new_str);
 
