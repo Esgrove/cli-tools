@@ -270,6 +270,8 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[&str], recursive: bool) ->
             .filter(|path| {
                 path.is_file()
                     && path.extension().is_some_and(|ext| {
+                        // I want debug formatting here for extension since it shows all characters
+                        #[allow(clippy::unnecessary_debug_formatting)]
                         file_extensions.contains(
                             &ext.to_str()
                                 .unwrap_or_else(|| panic!("Invalid file extension: {ext:#?}")),

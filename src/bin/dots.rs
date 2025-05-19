@@ -122,6 +122,10 @@ struct Args {
     #[arg(short, long)]
     force: bool,
 
+    /// Increment conflicting file name with running index
+    #[arg(short, long)]
+    increment: bool,
+
     /// Only print changes without renaming files
     #[arg(short, long)]
     print: bool,
@@ -145,6 +149,10 @@ struct Args {
     /// Substitute pattern with replacement in filenames
     #[arg(short, long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     substitute: Vec<String>,
+
+    /// Remove random strings
+    #[arg(short = 'm', long)]
+    random: bool,
 
     /// Remove pattern from filenames
     #[arg(short = 'z', long, action = clap::ArgAction::Append, name = "PATTERN")]
@@ -183,7 +191,11 @@ struct DotsConfig {
     #[serde(default)]
     recursive: bool,
     #[serde(default)]
+    remove_random: bool,
+    #[serde(default)]
     verbose: bool,
+    #[serde(default)]
+    increment: bool,
 }
 
 /// Wrapper needed for parsing config section.
@@ -196,19 +208,21 @@ struct UserConfig {
 /// Final config created from CLI arguments and user config file.
 #[derive(Debug, Default)]
 struct Config {
-    replace: Vec<(String, String)>,
-    regex_replace: Vec<(Regex, String)>,
-    move_to_start: Vec<String>,
-    move_to_end: Vec<String>,
-    prefix: Option<String>,
-    suffix: Option<String>,
-    prefix_dir: bool,
     convert_case: bool,
     debug: bool,
     directory: bool,
     dryrun: bool,
+    increment_name: bool,
+    move_to_end: Vec<String>,
+    move_to_start: Vec<String>,
     overwrite: bool,
+    prefix: Option<String>,
+    prefix_dir: bool,
     recursive: bool,
+    regex_replace: Vec<(Regex, String)>,
+    remove_random: bool,
+    replace: Vec<(String, String)>,
+    suffix: Option<String>,
     verbose: bool,
 }
 
@@ -345,9 +359,9 @@ impl Dots {
         let mut num_renamed: usize = 0;
         let max_items = paths.len();
         let max_chars = paths.len().to_string().chars().count();
-        for (index, (path, new_path)) in paths.into_iter().enumerate() {
+        for (index, (path, mut new_path)) in paths.into_iter().enumerate() {
             let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
-            let new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
+            let mut new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
             if self.config.dryrun {
@@ -364,12 +378,26 @@ impl Dots {
             } else {
                 false
             };
+
             if !capitalization_change_only && new_path.exists() && !self.config.overwrite {
-                println!(
-                    "{}",
-                    format!("Skipping rename to already existing file: {new_str}").yellow()
-                );
-                continue;
+                if self.config.increment_name {
+                    match Self::get_incremented_path(&new_path) {
+                        Ok(incremented_path) => {
+                            new_str = cli_tools::get_relative_path_or_filename(&incremented_path, &self.root);
+                            new_path = incremented_path;
+                        }
+                        Err(e) => {
+                            println!("Error while incrementing name: {e}");
+                            continue;
+                        }
+                    }
+                } else {
+                    println!(
+                        "{}",
+                        format!("Skipping rename to already existing file: {new_str}").yellow()
+                    );
+                    continue;
+                }
             }
 
             println!("{}", format!("Rename {number}:").bold().magenta());
@@ -453,7 +481,10 @@ impl Dots {
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
 
         Self::remove_special_characters(&mut new_name);
-        Self::remove_random_identifiers(&mut new_name);
+
+        if self.config.remove_random {
+            Self::remove_random_identifiers(&mut new_name);
+        }
 
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
 
@@ -566,6 +597,20 @@ impl Dots {
         fs::rename(&temp_file, new_path)
     }
 
+    fn get_incremented_path(original: &Path) -> Result<PathBuf> {
+        let mut index = 2;
+        let parent = original.parent().unwrap_or_else(|| Path::new(""));
+        let (name, extension) = cli_tools::get_normalized_file_name_and_extension(original)?;
+        loop {
+            let file_name = format!("{name}.{index}.{extension}");
+            let new_path = parent.join(file_name);
+            if !new_path.exists() {
+                return Ok(new_path);
+            }
+            index += 1;
+        }
+    }
+
     /// Convert date with written month name to numeral date.
     ///
     /// For example "Jan.3.2020" -> "2020.01.03"
@@ -653,17 +698,19 @@ impl Config {
         Ok(Self {
             replace,
             regex_replace,
-            move_to_start: user_config.move_to_start,
-            move_to_end: user_config.move_to_end,
-            prefix: args.prefix,
-            suffix: args.suffix,
             convert_case: args.case,
-            prefix_dir: args.prefix_dir || user_config.prefix_dir,
             debug: args.debug || user_config.debug,
             directory: args.directory || user_config.directory,
             dryrun: args.print || user_config.dryrun,
+            increment_name: args.increment || user_config.increment,
+            move_to_end: user_config.move_to_end,
+            move_to_start: user_config.move_to_start,
             overwrite: args.force || user_config.overwrite,
+            prefix: args.prefix,
+            prefix_dir: args.prefix_dir || user_config.prefix_dir,
             recursive: args.recursive || user_config.recursive,
+            remove_random: args.random || user_config.remove_random,
+            suffix: args.suffix,
             verbose: args.verbose || user_config.verbose,
         })
     }
@@ -744,6 +791,13 @@ mod dots_tests {
     use super::*;
 
     static DOTS: LazyLock<Dots> = LazyLock::new(Dots::default);
+    static DOTS_INCREMENT: LazyLock<Dots> = LazyLock::new(|| Dots {
+        root: PathBuf::default(),
+        config: Config {
+            remove_random: true,
+            ..Default::default()
+        },
+    });
 
     #[test]
     fn test_format_basic() {
@@ -840,11 +894,11 @@ mod dots_tests {
     #[test]
     fn test_format_name_full_resolution() {
         assert_eq!(
-            DOTS.format_name("test.string.with resolution. 1234x900"),
+            DOTS_INCREMENT.format_name("test.string.with resolution. 1234x900"),
             "Test.String.With.Resolution.1234x900"
         );
-        assert_eq!(DOTS.format_name("resolution 719x719"), "Resolution.719x719");
-        assert_eq!(DOTS.format_name("resolution 122225x719"), "Resolution");
+        assert_eq!(DOTS_INCREMENT.format_name("resolution 719x719"), "Resolution.719x719");
+        assert_eq!(DOTS_INCREMENT.format_name("resolution 122225x719"), "Resolution");
     }
 
     #[test]
@@ -875,17 +929,16 @@ mod dots_tests {
 
     #[test]
     fn test_remove_identifier() {
-        let dots = Dots::default();
         assert_eq!(
-            dots.format_name("This is a string test ^[640e54a564228]"),
+            DOTS_INCREMENT.format_name("This is a string test ^[640e54a564228]"),
             "This.Is.a.String.Test"
         );
         assert_eq!(
-            dots.format_name("This.Is.a.test.string.65f09e4248e03..."),
+            DOTS_INCREMENT.format_name("This.Is.a.test.string.65f09e4248e03..."),
             "This.Is.a.Test.String"
         );
-        assert_eq!(dots.format_name("test Ph5d9473a841fe9"), "Test");
-        assert_eq!(dots.format_name("Test-355989849"), "Test");
+        assert_eq!(DOTS_INCREMENT.format_name("test Ph5d9473a841fe9"), "Test");
+        assert_eq!(DOTS_INCREMENT.format_name("Test-355989849"), "Test");
     }
 }
 
