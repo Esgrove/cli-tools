@@ -12,6 +12,8 @@ use serde::Deserialize;
 use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 
+use cli_tools::date::RE_CORRECT_DATE_FORMAT;
+
 static RE_BRACKETS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[({\]})]+").expect("Failed to create regex pattern for brackets"));
 
@@ -162,6 +164,10 @@ struct Args {
     #[arg(long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     regex: Vec<String>,
 
+    /// Assume year is first in short dates
+    #[arg(short, long)]
+    year: bool,
+
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -171,31 +177,35 @@ struct Args {
 #[derive(Debug, Default, Deserialize)]
 struct DotsConfig {
     #[serde(default)]
-    replace: Vec<(String, String)>,
-    #[serde(default)]
-    regex_replace: Vec<(String, String)>,
-    #[serde(default)]
-    move_to_start: Vec<String>,
-    #[serde(default)]
-    move_to_end: Vec<String>,
-    #[serde(default)]
-    prefix_dir: bool,
+    date_starts_with_year: bool,
     #[serde(default)]
     debug: bool,
     #[serde(default)]
+    directory: bool,
+    #[serde(default)]
     dryrun: bool,
+    #[serde(default)]
+    increment: bool,
+    #[serde(default)]
+    move_date_after_prefix: Vec<String>,
+    #[serde(default)]
+    move_to_end: Vec<String>,
+    #[serde(default)]
+    move_to_start: Vec<String>,
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
-    directory: bool,
+    prefix_dir: bool,
     #[serde(default)]
     recursive: bool,
     #[serde(default)]
+    regex_replace: Vec<(String, String)>,
+    #[serde(default)]
     remove_random: bool,
     #[serde(default)]
-    verbose: bool,
+    replace: Vec<(String, String)>,
     #[serde(default)]
-    increment: bool,
+    verbose: bool,
 }
 
 /// Wrapper needed for parsing config section.
@@ -209,10 +219,12 @@ struct UserConfig {
 #[derive(Debug, Default)]
 struct Config {
     convert_case: bool,
+    date_starts_with_year: bool,
     debug: bool,
     directory: bool,
     dryrun: bool,
     increment_name: bool,
+    move_date_after_prefix: Vec<String>,
     move_to_end: Vec<String>,
     move_to_start: Vec<String>,
     overwrite: bool,
@@ -501,6 +513,14 @@ impl Dots {
 
         Self::convert_written_date_format(&mut new_name);
 
+        if let Some(date_flipped_name) = if self.config.directory {
+            cli_tools::date::reorder_directory_date(&new_name)
+        } else {
+            cli_tools::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false)
+        } {
+            new_name = date_flipped_name;
+        }
+
         if let Some(ref prefix) = self.config.prefix {
             if new_name.contains(prefix) {
                 new_name = new_name.replace(prefix, "");
@@ -533,6 +553,9 @@ impl Dots {
         if !self.config.move_to_end.is_empty() {
             self.move_to_end(&mut new_name);
         }
+        if !self.config.move_date_after_prefix.is_empty() {
+            self.move_date_after_prefix(&mut new_name);
+        }
 
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
@@ -551,6 +574,25 @@ impl Dots {
         for sub in &self.config.move_to_end {
             if name.contains(sub) {
                 *name = format!("{}.{}", name.replace(sub, ""), sub);
+            }
+        }
+    }
+
+    fn move_date_after_prefix(&self, name: &mut String) {
+        for prefix in &self.config.move_date_after_prefix {
+            if name.starts_with(prefix) {
+                if let Some(date_match) = RE_CORRECT_DATE_FORMAT.find(name) {
+                    let date = date_match.as_str();
+                    let mut new_name = name.clone();
+
+                    // Remove the date from its current location
+                    new_name.replace_range(date_match.range(), "");
+
+                    let insert_pos = prefix.len();
+                    new_name.insert_str(insert_pos, &format!(".{date}."));
+
+                    *name = new_name;
+                }
             }
         }
     }
@@ -698,10 +740,12 @@ impl Config {
             replace,
             regex_replace,
             convert_case: args.case,
+            date_starts_with_year: args.year || user_config.date_starts_with_year,
             debug: args.debug || user_config.debug,
             directory: args.directory || user_config.directory,
             dryrun: args.print || user_config.dryrun,
             increment_name: args.increment || user_config.increment,
+            move_date_after_prefix: user_config.move_date_after_prefix,
             move_to_end: user_config.move_to_end,
             move_to_start: user_config.move_to_start,
             overwrite: args.force || user_config.overwrite,
@@ -939,6 +983,50 @@ mod dots_tests {
         assert_eq!(DOTS_INCREMENT.format_name("test Ph5d9473a841fe9"), "Test");
         assert_eq!(DOTS_INCREMENT.format_name("Test-355989849"), "Test");
     }
+
+    #[test]
+    fn test_format_date() {
+        assert_eq!(
+            DOTS.format_name("This is a test string test 1.1.2014"),
+            "This.Is.a.Test.String.Test.2014.01.01"
+        );
+        assert_eq!(
+            DOTS.format_name("Test.This.Is.a.test.string.test.30.05.2020"),
+            "Test.This.Is.a.Test.String.Test.2020.05.30"
+        );
+        assert_eq!(
+            DOTS.format_name("Testing date 30.05.2020 in the middle"),
+            "Testing.Date.2020.05.30.in.the.Middle"
+        );
+    }
+
+    #[test]
+    fn test_format_date_year_first() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                date_starts_with_year: true,
+                ..Default::default()
+            },
+        };
+
+        assert_eq!(
+            dots.format_name("This is a test string test 1.1.2014"),
+            "This.Is.a.Test.String.Test.2014.01.01"
+        );
+        assert_eq!(
+            dots.format_name("Test.This.Is.a.test.string.test.30.05.2020"),
+            "Test.This.Is.a.Test.String.Test.2020.05.30"
+        );
+        assert_eq!(
+            dots.format_name("Test.This.Is.a.test.string.test.24.02.20"),
+            "Test.This.Is.a.Test.String.Test.2024.02.20"
+        );
+        assert_eq!(
+            dots.format_name("Testing date 16.10.20 in the middle"),
+            "Testing.Date.2016.10.20.in.the.Middle"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -993,5 +1081,51 @@ mod written_date_tests {
         let mut input = "Something.Feb.Jun.09.2022".to_string();
         Dots::convert_written_date_format(&mut input);
         assert_eq!(input, "Something.Feb.2022.06.09");
+    }
+}
+
+#[cfg(test)]
+mod move_date_tests {
+    use super::*;
+
+    static DOTS: LazyLock<Dots> = LazyLock::new(|| Dots {
+        root: PathBuf::default(),
+        config: Config {
+            move_date_after_prefix: vec!["Test".to_string(), "Prefix".to_string()],
+            date_starts_with_year: true,
+            ..Default::default()
+        },
+    });
+
+    #[test]
+    fn test_valid_date() {
+        assert_eq!(
+            DOTS.format_name("Test something 2010.11.16"),
+            "Test.2010.11.16.Something"
+        );
+        assert_eq!(
+            DOTS.format_name("Test something 1080p 2010.11.16"),
+            "Test.2010.11.16.Something.1080p"
+        );
+    }
+
+    #[test]
+    fn test_short_date() {
+        assert_eq!(
+            DOTS.format_name("Test something else 25.05.30"),
+            "Test.2025.05.30.Something.Else"
+        );
+    }
+
+    #[test]
+    fn test_no_match_with_valid_date() {
+        assert_eq!(
+            DOTS.format_name("something else 2024.01.01"),
+            "Something.Else.2024.01.01"
+        );
+        assert_eq!(
+            DOTS.format_name("something else 2160p 24.05.28"),
+            "Something.Else.2160p.2024.05.28"
+        );
     }
 }
