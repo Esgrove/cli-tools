@@ -35,11 +35,18 @@ static RE_IDENTIFIER: LazyLock<Regex> =
 static RE_RESOLUTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d{3,4}x\d{3,4}\b").expect("Failed to compile resolution regex"));
 
-static RE_WRITTEN_DATE: LazyLock<Regex> = LazyLock::new(|| {
+static RE_WRITTEN_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>\d{1,2})\.(?P<year>\d{4})\b",
     )
-        .expect("Failed to compile written date regex")
+        .expect("Failed to compile MDY written date regex")
+});
+
+static RE_WRITTEN_DATE_DMY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?P<day>\d{1,2})\.(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<year>\d{4})\b",
+    )
+        .expect("Failed to compile DMY written date regex")
 });
 
 static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
@@ -655,10 +662,26 @@ impl Dots {
 
     /// Convert date with written month name to numeral date.
     ///
-    /// For example "Jan.3.2020" -> "2020.01.03"
-    /// For example "December.6.2023" -> "2023.12.06"
+    /// For example:
+    /// ```not_rust
+    /// "Jan.3.2020" -> "2020.01.03"
+    /// "December.6.2023" -> "2023.12.06"
+    /// "23.May.2016" -> "2016.05.23"
+    /// ```
     fn convert_written_date_format(name: &mut String) {
-        *name = RE_WRITTEN_DATE
+        // Replace Month.Day.Year
+        *name = RE_WRITTEN_DATE_MDY
+            .replace_all(name, |caps: &regex::Captures| {
+                let year = &caps["year"];
+                let month_raw = &caps["month"].to_lowercase();
+                let month = WRITTEN_MONTHS_MAP.get(month_raw.as_str()).expect("Failed to map month");
+                let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
+                format!("{year}.{month}.{day}")
+            })
+            .to_string();
+
+        // Replace Day.Month.Year
+        *name = RE_WRITTEN_DATE_DMY
             .replace_all(name, |caps: &regex::Captures| {
                 let year = &caps["year"];
                 let month_raw = &caps["month"].to_lowercase();
@@ -1076,11 +1099,23 @@ mod written_date_tests {
         Dots::convert_written_date_format(&mut input);
         assert_eq!(input, "2016.03.23");
 
+        let mut input = "23.mar.2016".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2016.03.23");
+
         let mut input = "March.1.2011".to_string();
         Dots::convert_written_date_format(&mut input);
         assert_eq!(input, "2011.03.01");
 
+        let mut input = "1.March.2011".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2011.03.01");
+
         let mut input = "December.20.2023".to_string();
+        Dots::convert_written_date_format(&mut input);
+        assert_eq!(input, "2023.12.20");
+
+        let mut input = "20.December.2023".to_string();
         Dots::convert_written_date_format(&mut input);
         assert_eq!(input, "2023.12.20");
     }
