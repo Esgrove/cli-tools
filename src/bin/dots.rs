@@ -571,9 +571,14 @@ impl Dots {
     }
 
     fn move_to_start(&self, name: &mut String) {
-        for sub in &self.config.move_to_start {
-            if name.contains(sub) {
-                *name = format!("{}.{}", sub, name.replace(sub, ""));
+        for pattern in &self.config.move_to_start {
+            let sub = if pattern.ends_with('.') {
+                pattern.to_string()
+            } else {
+                format!("{pattern}.")
+            };
+            if name.contains(pattern) {
+                *name = format!("{}.{}", sub, name.replace(pattern, ""));
             }
         }
     }
