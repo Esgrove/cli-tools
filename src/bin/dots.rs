@@ -205,6 +205,8 @@ struct DotsConfig {
     #[serde(default)]
     prefix_dir: bool,
     #[serde(default)]
+    pre_replace: Vec<(String, String)>,
+    #[serde(default)]
     recursive: bool,
     #[serde(default)]
     regex_replace: Vec<(String, String)>,
@@ -236,6 +238,7 @@ struct Config {
     move_to_end: Vec<String>,
     move_to_start: Vec<String>,
     overwrite: bool,
+    pre_replace: Vec<(String, String)>,
     prefix: Option<String>,
     prefix_dir: bool,
     recursive: bool,
@@ -468,14 +471,23 @@ impl Dots {
         Ok(path.with_file_name(formatted_name))
     }
 
-    /// Format the file name stem without the file extension
+    /// Format the file name without the file extension
     fn format_name(&self, file_name: &str) -> String {
+        let mut file_name = String::from(file_name);
+        if !self.config.pre_replace.is_empty() {
+            file_name = self
+                .config
+                .pre_replace
+                .iter()
+                .fold(file_name, |acc, (pattern, replacement)| {
+                    acc.replace(pattern, replacement)
+                });
+        }
+
         // Apply static replacements
-        let mut new_name = REPLACE
-            .iter()
-            .fold(file_name.to_string(), |acc, &(pattern, replacement)| {
-                acc.replace(pattern, replacement)
-            });
+        let mut new_name = REPLACE.iter().fold(file_name, |acc, &(pattern, replacement)| {
+            acc.replace(pattern, replacement)
+        });
 
         new_name = RE_BRACKETS.replace_all(&new_name, ".").to_string();
         new_name = RE_DOTCOM.replace_all(&new_name, ".").to_string();
@@ -797,6 +809,7 @@ impl Config {
             move_to_end: user_config.move_to_end,
             move_to_start: user_config.move_to_start,
             overwrite: args.force || user_config.overwrite,
+            pre_replace: user_config.pre_replace,
             prefix: args.prefix,
             prefix_dir: args.prefix_dir || user_config.prefix_dir,
             recursive: args.recursive || user_config.recursive,
