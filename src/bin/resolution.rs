@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
 
-const FILE_EXTENSIONS: [&str; 4] = ["mp4", "mkv", "wmv", "avi"];
+const FILE_EXTENSIONS: [&str; 5] = ["mp4", "mkv", "wmv", "mov", "avi"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 const RESOLUTION_TOLERANCE: f32 = 0.025;
@@ -312,8 +312,8 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFPro
     Ok(results)
 }
 
-#[inline]
 /// Create a Semaphore with half the number of logical CPU cores available.
+#[inline]
 fn create_semaphore_for_num_physical_cpus() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(num_cpus::get_physical()))
 }
@@ -321,7 +321,6 @@ fn create_semaphore_for_num_physical_cpus() -> Arc<Semaphore> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-
     let absolute_input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
 
     if args.debug {
