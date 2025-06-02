@@ -536,7 +536,7 @@ impl Dots {
         if let Some(date_flipped_name) = if self.config.directory {
             cli_tools::date::reorder_directory_date(&new_name)
         } else {
-            cli_tools::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false)
+            cli_tools::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
         } {
             new_name = date_flipped_name;
         }

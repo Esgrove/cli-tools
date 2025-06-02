@@ -85,8 +85,22 @@ impl std::fmt::Display for Date {
 }
 
 /// Check if filename contains a matching date and reorder it.
-pub fn reorder_filename_date(filename: &str, year_first: bool, verbose: bool) -> Option<String> {
-    if RE_CORRECT_DATE_FORMAT.is_match(filename) {
+pub fn reorder_filename_date(filename: &str, year_first: bool, swap_year: bool, verbose: bool) -> Option<String> {
+    if let Some(caps) = RE_CORRECT_DATE_FORMAT.captures(filename) {
+        if swap_year {
+            let original = caps.get(0).map(|m| m.as_str())?;
+            let year = caps.get(1).map(|m| m.as_str())?;
+            let month = caps.get(2).map(|m| m.as_str())?;
+            let day = caps.get(3).map(|m| m.as_str())?;
+
+            // Treat year as day and day as year suffix
+            let new_day = format!("{:02}", year.parse::<u32>().ok()? % 100);
+            let new_year = format!("20{day}");
+            let new_date = format!("{new_year}.{month}.{new_day}");
+            let updated_filename = filename.replacen(original, &new_date, 1);
+            return Some(updated_filename);
+        }
+        // Correctly formatted, skip...
         if verbose {
             println!("Skipping: {}", filename.yellow());
         }
@@ -314,118 +328,151 @@ mod filename_tests {
     fn normal_date() {
         let filename = "20.12.23.txt";
         let correct = "2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
 
         let filename = "30.12.23.txt";
         let correct = "2023.12.30.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
-        assert_eq!(reorder_filename_date(filename, true, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+        assert_eq!(
+            reorder_filename_date(filename, true, false, false),
+            Some(correct.to_string())
+        );
 
         let filename = "ABCGIO1848.09.06.2022.720p.mp4";
         let correct = "ABCGIO1848.2022.06.09.720p.mp4";
-        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
     fn full_date() {
         let filename = "report_20.12.2023.txt";
         let correct = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
     fn short_date() {
         let filename = "report_20.12.23.txt";
         let correct = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
     fn single_digit_date() {
         let filename = "report_1.2.23.txt";
         let correct = "report_2023.02.01.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
     fn single_digit_date_with_full_year() {
         let filename = "report_8.7.2023.txt";
         let correct = "report_2023.07.08.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
     fn no_date() {
         let filename = "report.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), None);
-        assert_eq!(reorder_filename_date(filename, true, false), None);
+        assert_eq!(reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
         let filename = "123.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), None);
-        assert_eq!(reorder_filename_date(filename, true, false), None);
+        assert_eq!(reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
         let filename = "00.11.22.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), None);
-        assert_eq!(reorder_filename_date(filename, true, false), None);
+        assert_eq!(reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
         let filename = "name1000.5.22.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), None);
-        assert_eq!(reorder_filename_date(filename, true, false), None);
+        assert_eq!(reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
     }
 
     #[test]
     fn correct_date_format() {
         let filename = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename, false, false), None);
+        assert_eq!(reorder_filename_date(filename, false, false, false), None);
     }
 
     #[test]
     fn correct_date_format_year_first() {
         let filename = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename, true, false), None);
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
     }
 
     #[test]
     fn full_date_year_first() {
         let filename = "report_23.12.20.txt";
         let correct = "report_2023.12.20.txt";
-        assert_eq!(reorder_filename_date(filename, true, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(filename, true, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
     fn not_a_valid_date() {
         let filename = "test-EKS510.13.720p.mp4";
-        assert_eq!(reorder_filename_date(filename, false, false), None);
-        assert_eq!(reorder_filename_date(filename, true, false), None);
+        assert_eq!(reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
 
         let filename = "testing08.12.1080p.mp4";
-        assert_eq!(reorder_filename_date(filename, false, false), None);
-        assert_eq!(reorder_filename_date(filename, true, false), None);
+        assert_eq!(reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
     }
 
     #[test]
     fn extra_numbers() {
         let name = "meeting.500.2023.02.03";
-        assert_eq!(reorder_filename_date(name, true, false), None);
+        assert_eq!(reorder_filename_date(name, true, false, false), None);
         let name = "something.500.24.07.12";
         let correct = "something.500.2012.07.24";
-        assert_eq!(reorder_filename_date(name, false, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(name, false, false, false),
+            Some(correct.to_string())
+        );
         let name = "something.500.24.07.12";
         let correct = "something.500.2024.07.12";
-        assert_eq!(reorder_filename_date(name, true, false), Some(correct.to_string()));
+        assert_eq!(
+            reorder_filename_date(name, true, false, false),
+            Some(correct.to_string())
+        );
         let name = "meeting 0000.2019-11-17";
-        assert_eq!(reorder_filename_date(name, true, false), None);
+        assert_eq!(reorder_filename_date(name, true, false, false), None);
         let name = "meeting 0000.11.22.pdf";
-        assert_eq!(reorder_filename_date(name, true, false), None);
+        assert_eq!(reorder_filename_date(name, true, false, false), None);
         let name = "meeting 00.11.2022.pdf";
-        assert_eq!(reorder_filename_date(name, false, false), None);
+        assert_eq!(reorder_filename_date(name, false, false, false), None);
         let name = "2000.11.2022.pdf";
-        assert_eq!(reorder_filename_date(name, false, false), None);
+        assert_eq!(reorder_filename_date(name, false, false, false), None);
         let name = "2000.11.200.pdf";
-        assert_eq!(reorder_filename_date(name, false, false), None);
+        assert_eq!(reorder_filename_date(name, false, false, false), None);
         let name = "1080.11.200.pdf";
-        assert_eq!(reorder_filename_date(name, false, false), None);
+        assert_eq!(reorder_filename_date(name, false, false, false), None);
         let name = "600.00.11.2222.pdf";
-        assert_eq!(reorder_filename_date(name, false, false), None);
+        assert_eq!(reorder_filename_date(name, false, false, false), None);
         let name = "99 meeting 20 2019-11-17";
-        assert_eq!(reorder_filename_date(name, true, false), None);
+        assert_eq!(reorder_filename_date(name, true, false, false), None);
     }
 }
 

@@ -43,6 +43,10 @@ struct Args {
     #[arg(short, long)]
     recursive: bool,
 
+    /// Swap year and day around
+    #[arg(short, long)]
+    swap: bool,
+
     /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -77,6 +81,7 @@ fn main() -> Result<()> {
             args.print,
             args.year,
             args.force,
+            args.swap,
             args.verbose,
         )
     }
@@ -90,6 +95,7 @@ fn date_flip_files(
     dryrun: bool,
     starts_with_year: bool,
     overwrite_existing: bool,
+    swap_year: bool,
     verbose: bool,
 ) -> Result<()> {
     let (files, root) = files_to_rename(path, file_extensions, recursive)?;
@@ -105,7 +111,8 @@ fn date_flip_files(
             .to_string_lossy()
             .into_owned();
 
-        if let Some(new_name) = cli_tools::date::reorder_filename_date(&filename, starts_with_year, verbose) {
+        if let Some(new_name) = cli_tools::date::reorder_filename_date(&filename, starts_with_year, swap_year, verbose)
+        {
             files_to_rename.push(RenameItem {
                 path: file,
                 filename,
