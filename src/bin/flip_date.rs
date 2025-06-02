@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
+use serde::Deserialize;
 use walkdir::WalkDir;
 
-static FILE_EXTENSIONS: [&str; 7] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "mkv"];
+static FILE_EXTENSIONS: [&str; 9] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "mkv", "mov", "avi"];
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +53,46 @@ struct Args {
     verbose: bool,
 }
 
+/// Config from a config file
+#[derive(Debug, Default, Deserialize)]
+struct DateConfig {
+    #[serde(default)]
+    directory: bool,
+    #[serde(default)]
+    dryrun: bool,
+    #[serde(default)]
+    file_extensions: Vec<String>,
+    overwrite: bool,
+    #[serde(default)]
+    recursive: bool,
+    #[serde(default)]
+    swap_year: bool,
+    #[serde(default)]
+    verbose: bool,
+    #[serde(default)]
+    year_first: bool,
+}
+
+/// Wrapper needed for parsing the config file section.
+#[derive(Debug, Default, Deserialize)]
+struct UserConfig {
+    #[serde(default)]
+    flip_date: DateConfig,
+}
+
+/// Final config created from CLI arguments and user config file.
+#[derive(Debug, Default)]
+struct Config {
+    directory_mode: bool,
+    dryrun: bool,
+    file_extensions: Vec<String>,
+    overwrite: bool,
+    recursive: bool,
+    swap_year: bool,
+    verbose: bool,
+    year_first: bool,
+}
+
 #[derive(Debug)]
 struct RenameItem {
     path: PathBuf,
@@ -59,46 +100,64 @@ struct RenameItem {
     new_name: String,
 }
 
+impl DateConfig {
+    /// Try to read user config from the file if it exists.
+    /// Otherwise, fall back to default config.
+    fn get_user_config() -> Self {
+        cli_tools::config::CONFIG_PATH
+            .as_deref()
+            .and_then(|path| fs::read_to_string(path).ok())
+            .and_then(|config_string| toml::from_str::<UserConfig>(&config_string).ok())
+            .map(|config| config.flip_date)
+            .unwrap_or_default()
+    }
+}
+
+impl Config {
+    /// Create config from given command line args and user config file.
+    pub fn from_args(args: Args) -> Self {
+        let user_config = DateConfig::get_user_config();
+
+        // Determine which extensions to use (args > config > default)
+        let file_extensions = args
+            .extensions
+            .filter(|extensions| !extensions.is_empty())
+            .or({
+                if user_config.file_extensions.is_empty() {
+                    None
+                } else {
+                    Some(user_config.file_extensions)
+                }
+            })
+            .unwrap_or_else(|| FILE_EXTENSIONS.iter().map(std::string::ToString::to_string).collect());
+
+        Self {
+            directory_mode: args.dir || user_config.directory,
+            dryrun: args.print || user_config.dryrun,
+            file_extensions,
+            overwrite: args.force || user_config.overwrite,
+            recursive: args.recursive || user_config.recursive,
+            swap_year: args.swap || user_config.swap_year,
+            verbose: args.verbose || user_config.verbose,
+            year_first: args.year || user_config.year_first,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let path = cli_tools::resolve_input_path(args.path.as_deref())?;
-    if args.dir {
-        date_flip_directories(path, args.recursive, args.print)
+    let config = Config::from_args(args);
+    if config.directory_mode {
+        date_flip_directories(path, &config)
     } else {
-        let extensions = args.extensions.unwrap_or_default();
-        let extensions_owned;
-        let file_extensions: &[&str] = if extensions.is_empty() {
-            &FILE_EXTENSIONS
-        } else {
-            extensions_owned = extensions.iter().map(String::as_str).collect::<Vec<_>>();
-            &extensions_owned
-        };
-
-        date_flip_files(
-            &path,
-            file_extensions,
-            args.recursive,
-            args.print,
-            args.year,
-            args.force,
-            args.swap,
-            args.verbose,
-        )
+        date_flip_files(&path, &config)
     }
 }
 
 /// Flip date to start with year for all matching files from the given path.
-fn date_flip_files(
-    path: &PathBuf,
-    file_extensions: &[&str],
-    recursive: bool,
-    dryrun: bool,
-    starts_with_year: bool,
-    overwrite_existing: bool,
-    swap_year: bool,
-    verbose: bool,
-) -> Result<()> {
-    let (files, root) = files_to_rename(path, file_extensions, recursive)?;
+fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
+    let (files, root) = files_to_rename(path, &config.file_extensions, config.recursive)?;
     if files.is_empty() {
         anyhow::bail!("No files to process");
     }
@@ -111,7 +170,8 @@ fn date_flip_files(
             .to_string_lossy()
             .into_owned();
 
-        if let Some(new_name) = cli_tools::date::reorder_filename_date(&filename, starts_with_year, swap_year, verbose)
+        if let Some(new_name) =
+            cli_tools::date::reorder_filename_date(&filename, config.year_first, config.swap_year, config.verbose)
         {
             files_to_rename.push(RenameItem {
                 path: file,
@@ -124,7 +184,7 @@ fn date_flip_files(
     // Case-insensitive sort by filename
     files_to_rename.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
 
-    let heading = if dryrun {
+    let heading = if config.dryrun {
         "Dryrun:".cyan().bold()
     } else {
         "Rename:".magenta().bold()
@@ -133,9 +193,9 @@ fn date_flip_files(
     for item in files_to_rename {
         println!("{heading}");
         cli_tools::show_diff(&item.filename, &item.new_name);
-        if !dryrun {
+        if !config.dryrun {
             let new_path = root.join(item.new_name);
-            if new_path.exists() && !overwrite_existing {
+            if new_path.exists() && !config.overwrite {
                 eprintln!("{}", "File already exists".yellow());
             } else {
                 fs::rename(item.path, new_path).context("Failed to rename file")?;
@@ -147,8 +207,8 @@ fn date_flip_files(
 }
 
 /// Flip date to start with year for all matching directories from given path.
-fn date_flip_directories(path: PathBuf, recursive: bool, dryrun: bool) -> Result<()> {
-    let directories = directories_to_rename(path, recursive)?;
+fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
+    let directories = directories_to_rename(path, config.recursive)?;
     if directories.is_empty() {
         anyhow::bail!("No directories to rename")
     }
@@ -167,7 +227,7 @@ fn date_flip_directories(path: PathBuf, recursive: bool, dryrun: bool) -> Result
             directory.new_name,
             width = max_chars
         );
-        if !dryrun {
+        if !config.dryrun {
             fs::rename(&directory.path, &new_path).with_context(|| {
                 format!(
                     "Failed to rename {} to {}",
@@ -182,7 +242,7 @@ fn date_flip_directories(path: PathBuf, recursive: bool, dryrun: bool) -> Result
 }
 
 /// Get list of files to process
-fn files_to_rename(path: &PathBuf, file_extensions: &[&str], recursive: bool) -> Result<(Vec<PathBuf>, PathBuf)> {
+fn files_to_rename(path: &PathBuf, file_extensions: &[String], recursive: bool) -> Result<(Vec<PathBuf>, PathBuf)> {
     let (mut files, root) = if path.is_file() {
         (
             vec![path.clone()],
@@ -198,12 +258,9 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[&str], recursive: bool) ->
             .filter(|path| {
                 path.is_file()
                     && path.extension().is_some_and(|ext| {
-                        // I want debug formatting here for extension since it shows all characters
-                        #[allow(clippy::unnecessary_debug_formatting)]
-                        file_extensions.contains(
-                            &ext.to_str()
-                                .unwrap_or_else(|| panic!("Invalid file extension: {ext:#?}")),
-                        )
+                        file_extensions
+                            .iter()
+                            .any(|e| ext.to_str().is_some_and(|ext_str| e == ext_str))
                     })
             })
             .collect();
