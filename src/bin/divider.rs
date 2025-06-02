@@ -15,7 +15,7 @@ struct Args {
     #[arg(short, long, default_value_t = 120)]
     length: usize,
 
-    /// Divider length in number of characters
+    /// Divider character to use
     #[arg(short, long = "char", default_value_t = '%')]
     character: char,
 
