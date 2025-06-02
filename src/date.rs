@@ -103,15 +103,11 @@ impl std::fmt::Display for Date {
 pub fn reorder_filename_date(filename: &str, year_first: bool, swap_year: bool, verbose: bool) -> Option<String> {
     if RE_CORRECT_DATE_FORMAT.is_match(filename) {
         if swap_year {
-            if let Some(captures) = RE_CORRECT_DATE_FORMAT.captures(filename) {
-                let original = captures.get(0).map(|m| m.as_str())?;
-                if let Some(date) = parse_date_from_match(filename, &captures) {
-                    if let Some(new_date) = date.swap_year() {
-                        let updated_filename = filename.replacen(original, &new_date.dot_format(), 1);
-                        return Some(updated_filename);
-                    }
-                }
-            }
+            let captures = RE_CORRECT_DATE_FORMAT.captures(filename)?;
+            let original_date = captures.get(0)?.as_str();
+            let swapped_date = parse_date_from_match(filename, &captures)?.swap_year()?;
+            let updated_filename = filename.replacen(original_date, &swapped_date.dot_format(), 1);
+            return Some(updated_filename);
         }
         // Correctly formatted, skip...
         if verbose {
