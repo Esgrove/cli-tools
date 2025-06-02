@@ -16,7 +16,7 @@ static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([12]\d{3})\.([12]\d|3[01]|0?[1-9])\.([12]\d|3[01]|0?[1-9])\b")
+    Regex::new(r"\b(?P<year>[12]\d{3})\.(?P<month>[12]\d|3[01]|0?[1-9])\.(?P<day>[12]\d|3[01]|0?[1-9])\b")
         .expect("Failed to create regex pattern for correct date")
 });
 
@@ -66,6 +66,21 @@ impl Date {
         Self::try_from(year, month, day)
     }
 
+    /// Swap year and day fields.
+    /// Assumes the current year is actually the day and the current day is a 2-digit suffix for the year.
+    ///
+    /// For example: `2005.12.23` → `2023.12.05`
+    #[must_use]
+    pub fn swap_year(&self) -> Option<Self> {
+        // Use the last two digits of `year` as the new day
+        let new_day = self.year % 100;
+
+        // Prepend "20" to the existing day field to form a new year
+        let new_year = 2000 + self.day;
+
+        Self::try_from(new_year, self.month, new_day)
+    }
+
     #[must_use]
     pub fn dash_format(&self) -> String {
         format!("{}-{:02}-{:02}", self.year, self.month, self.day)
@@ -86,19 +101,17 @@ impl std::fmt::Display for Date {
 
 /// Check if filename contains a matching date and reorder it.
 pub fn reorder_filename_date(filename: &str, year_first: bool, swap_year: bool, verbose: bool) -> Option<String> {
-    if let Some(caps) = RE_CORRECT_DATE_FORMAT.captures(filename) {
+    if RE_CORRECT_DATE_FORMAT.is_match(filename) {
         if swap_year {
-            let original = caps.get(0).map(|m| m.as_str())?;
-            let year = caps.get(1).map(|m| m.as_str())?;
-            let month = caps.get(2).map(|m| m.as_str())?;
-            let day = caps.get(3).map(|m| m.as_str())?;
-
-            // Treat year as day and day as year suffix
-            let new_day = format!("{:02}", year.parse::<u32>().ok()? % 100);
-            let new_year = format!("20{day}");
-            let new_date = format!("{new_year}.{month}.{new_day}");
-            let updated_filename = filename.replacen(original, &new_date, 1);
-            return Some(updated_filename);
+            if let Some(captures) = RE_CORRECT_DATE_FORMAT.captures(filename) {
+                let original = captures.get(0).map(|m| m.as_str())?;
+                if let Some(date) = parse_date_from_match(filename, &captures) {
+                    if let Some(new_date) = date.swap_year() {
+                        let updated_filename = filename.replacen(original, &new_date.dot_format(), 1);
+                        return Some(updated_filename);
+                    }
+                }
+            }
         }
         // Correctly formatted, skip...
         if verbose {
@@ -273,6 +286,7 @@ mod regex_tests {
         assert!(RE_CORRECT_DATE_FORMAT.is_match("2023.12.30"));
         assert!(RE_CORRECT_DATE_FORMAT.is_match("2024.11.30.txt"));
         assert!(RE_CORRECT_DATE_FORMAT.is_match("2020.01.01"));
+
         assert!(!RE_CORRECT_DATE_FORMAT.is_match("23.12.30"));
         assert!(!RE_CORRECT_DATE_FORMAT.is_match("0123.12.30"));
         assert!(!RE_CORRECT_DATE_FORMAT.is_match("0000.00.30"));
@@ -473,6 +487,43 @@ mod filename_tests {
         assert_eq!(reorder_filename_date(name, false, false, false), None);
         let name = "99 meeting 20 2019-11-17";
         assert_eq!(reorder_filename_date(name, true, false, false), None);
+    }
+
+    #[test]
+    fn swap_year() {
+        let filename = "2023.12.05.jpg";
+        let correct = "2005.12.23.jpg";
+        let result = reorder_filename_date(filename, false, true, true);
+        assert_eq!(result, Some(correct.to_string()));
+
+        let filename = "photo 2023.12.05.jpg";
+        let correct = "photo 2005.12.23.jpg";
+        let result = reorder_filename_date(filename, false, true, true);
+        assert_eq!(result, Some(correct.to_string()));
+
+        let filename = "photo-2001.09.24.jpg";
+        let correct = "photo-2024.09.01.jpg";
+        let result = reorder_filename_date(filename, true, true, true);
+        assert_eq!(result, Some(correct.to_string()));
+
+        let filename = "clip.2001.01.09.mov";
+        let correct = "clip.2009.01.01.mov";
+        let result = reorder_filename_date(filename, true, true, true);
+        assert_eq!(result, Some(correct.to_string()));
+    }
+
+    #[test]
+    fn swap_year_invalid_future_year() {
+        let future_suffix = (*CURRENT_YEAR + 1) % 100;
+        let filename = format!("sample_2024.06.{future_suffix:02}.mp4");
+        // Should return None because new_year = 20{suffix} > CURRENT_YEAR
+        assert_eq!(reorder_filename_date(&filename, true, true, false), None);
+    }
+
+    #[test]
+    fn swap_year_does_not_trigger_without_flag() {
+        let filename = "photo_2023.12.05.jpg";
+        assert_eq!(reorder_filename_date(filename, true, false, false), None);
     }
 }
 
