@@ -584,13 +584,10 @@ impl Dots {
 
     fn move_to_start(&self, name: &mut String) {
         for pattern in &self.config.move_to_start {
-            let sub = if pattern.ends_with('.') {
-                pattern.to_string()
-            } else {
-                format!("{pattern}.")
-            };
-            if name.contains(pattern) {
-                *name = format!("{}.{}", sub, name.replace(pattern, ""));
+            let re = Regex::new(&format!(r"\b{}\b", regex::escape(pattern))).expect("Failed to create regex pattern");
+
+            if re.is_match(name) {
+                *name = format!("{}.{}", pattern, re.replace(name, ""));
             }
         }
     }
@@ -1026,13 +1023,21 @@ mod dots_tests {
     fn test_move_to_start() {
         let mut dots = Dots::default();
         dots.config.move_to_start = vec!["Test".to_string()];
-        assert_eq!(dots.format_name("This is a test string test"), "Test.This.Is.a.String");
+        assert_eq!(
+            dots.format_name("This is a test string test"),
+            "Test.This.Is.a.String.Test"
+        );
         assert_eq!(
             dots.format_name("Test.This.Is.a.test.string.test"),
-            "Test.This.Is.a.String"
+            "Test.This.Is.a.Test.String.Test"
         );
         assert_eq!(dots.format_name("test"), "Test");
         assert_eq!(dots.format_name("Test"), "Test");
+        assert_eq!(
+            dots.format_name("TestOther should not be broken"),
+            "TestOther.Should.Not.Be.Broken"
+        );
+        assert_eq!(dots.format_name("Test-Something-else"), "Test.Something.Else");
     }
 
     #[test]
