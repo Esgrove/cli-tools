@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
 
-const FILE_EXTENSIONS: [&str; 5] = ["mp4", "mkv", "wmv", "mov", "avi"];
+const FILE_EXTENSIONS: [&str; 6] = ["mp4", "mkv", "wmv", "mov", "avi", "m4v"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 const RESOLUTION_TOLERANCE: f32 = 0.025;
@@ -89,7 +89,11 @@ enum RenameStatus {
 
 impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}x{}", self.width, self.height)
+        if self.width < self.height {
+            write!(f, "Vertical.{}x{}", self.width, self.height)
+        } else {
+            write!(f, "{}x{}", self.width, self.height)
+        }
     }
 }
 
@@ -97,7 +101,7 @@ impl fmt::Display for ResolutionMatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}p: width {:#?}, height {:#?}",
+            "{}p: width {:?}, height {:?}",
             self.label_height, self.width_range, self.height_range
         )
     }
@@ -135,18 +139,26 @@ impl FFProbeResult {
 impl Resolution {
     fn label(&self) -> String {
         match self.height {
-            480 | 540 | 544 | 576 | 600 | 720 | 1080 | 1440 | 2160 => format!("{}p", self.height),
             // Vertical video
-            1280 if self.width == 720 => "720p".to_string(),
-            1920 if self.width == 1080 => "1080p".to_string(),
-            2560 if self.width == 1440 => "1440p".to_string(),
-            3840 if self.width == 2160 => "2160p".to_string(),
+            1280 if self.width == 720 => "Vertical.720p".to_string(),
+            1920 if self.width == 1080 => "Vertical.1080p".to_string(),
+            2560 if self.width == 1440 => "Vertical.1440p".to_string(),
+            3840 if self.width == 2160 => "Vertical.2160p".to_string(),
+            480 | 540 | 544 | 576 | 600 | 720 | 1080 | 1440 | 2160 => format!("{}p", self.height),
             _ => self.label_fuzzy(),
         }
     }
 
     fn label_fuzzy(&self) -> String {
         for res in &FUZZY_RESOLUTIONS {
+            if self.height > self.width
+                && self.height >= res.width_range.0
+                && self.height <= res.width_range.1
+                && self.width >= res.height_range.0
+                && self.width <= res.height_range.1
+            {
+                return format!("Vertical.{}p", res.label_height);
+            }
             if self.width >= res.width_range.0
                 && self.width <= res.width_range.1
                 && self.height >= res.height_range.0
@@ -410,6 +422,42 @@ mod tests {
     }
 
     #[test]
+    fn exact_matches_vertical() {
+        assert_eq!(
+            Resolution {
+                width: 720,
+                height: 1280
+            }
+            .label(),
+            "Vertical.720p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 1080,
+                height: 1920
+            }
+            .label(),
+            "Vertical.1080p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 1440,
+                height: 2560
+            }
+            .label(),
+            "Vertical.1440p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 2160,
+                height: 3840
+            }
+            .label(),
+            "Vertical.2160p"
+        );
+    }
+
+    #[test]
     fn approximate_matches() {
         assert_eq!(
             Resolution {
@@ -434,6 +482,14 @@ mod tests {
             }
             .label(),
             "1440p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 1442,
+                height: 2540
+            }
+            .label(),
+            "Vertical.1440p"
         );
         assert_eq!(
             Resolution {
