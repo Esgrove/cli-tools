@@ -215,6 +215,8 @@ struct DotsConfig {
     #[serde(default)]
     replace: Vec<(String, String)>,
     #[serde(default)]
+    remove_from_start: Vec<String>,
+    #[serde(default)]
     verbose: bool,
 }
 
@@ -243,6 +245,7 @@ struct Config {
     prefix_dir: bool,
     recursive: bool,
     regex_replace: Vec<(Regex, String)>,
+    remove_from_start: Vec<String>,
     remove_random: bool,
     replace: Vec<(String, String)>,
     suffix: Option<String>,
@@ -576,6 +579,9 @@ impl Dots {
         if !self.config.move_date_after_prefix.is_empty() {
             self.move_date_after_prefix(&mut new_name);
         }
+        if !self.config.remove_from_start.is_empty() {
+            self.remove_from_start(&mut new_name);
+        }
 
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
@@ -615,6 +621,20 @@ impl Dots {
 
                     *name = new_name;
                 }
+            }
+        }
+    }
+
+    fn remove_from_start(&self, name: &mut String) {
+        for pattern in &self.config.remove_from_start {
+            let re = Regex::new(&format!(r"\b{}\b", regex::escape(pattern))).expect("Failed to create regex pattern");
+            if let Some(last_match) = re.find_iter(name).last() {
+                // Split the text into parts before the last regex match
+                let before_last = &name[..last_match.start()];
+                let after_last = &name[last_match.start()..];
+
+                // Remove all occurrences from the first part using regex
+                *name = format!("{}.{after_last}", re.replace_all(before_last, ""));
             }
         }
     }
@@ -811,6 +831,7 @@ impl Config {
             prefix_dir: args.prefix_dir || user_config.prefix_dir,
             recursive: args.recursive || user_config.recursive,
             remove_random: args.random || user_config.remove_random,
+            remove_from_start: user_config.remove_from_start,
             suffix: args.suffix,
             verbose: args.verbose || user_config.verbose,
         })
@@ -1222,5 +1243,47 @@ mod move_date_tests {
             DOTS.format_name("something else 2160p 24.05.28"),
             "Something.Else.2160p.2024.05.28"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_remove_from_start {
+    use super::*;
+
+    static DOTS: LazyLock<Dots> = LazyLock::new(|| Dots {
+        root: PathBuf::default(),
+        config: Config {
+            remove_from_start: vec!["Test".to_string(), "test".to_string()],
+            ..Default::default()
+        },
+    });
+
+    #[test]
+    fn test_no_patterns() {
+        assert_eq!(DOTS.format_name("test.string.test"), "String.Test");
+    }
+
+    #[test]
+    fn test_single_occurrence() {
+        assert_eq!(DOTS.format_name("test.string"), "Test.String");
+    }
+
+    #[test]
+    fn test_multiple_occurrences() {
+        assert_eq!(DOTS.format_name("test.string.test.test"), "String.Test");
+        assert_eq!(
+            DOTS.format_name("test.string.test.something.test"),
+            "String.Something.Test"
+        );
+    }
+
+    #[test]
+    fn test_partial_word_match() {
+        assert_eq!(DOTS.format_name("testing.test.contest"), "Testing.Test.Contest");
+    }
+
+    #[test]
+    fn test_consecutive_patterns() {
+        assert_eq!(DOTS.format_name("test.test.test.test"), "Test");
     }
 }
