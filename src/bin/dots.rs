@@ -153,7 +153,7 @@ struct Args {
     prefix_dir: bool,
 
     /// Append suffix to the end
-    #[arg(long)]
+    #[arg(short = 'u', long)]
     suffix: Option<String>,
 
     /// Substitute pattern with replacement in filenames
@@ -169,7 +169,7 @@ struct Args {
     remove: Vec<String>,
 
     /// Substitute regex pattern with replacement in filenames
-    #[arg(long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
+    #[arg(short = 'g', long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     regex: Vec<String>,
 
     /// Assume year is first in short dates
