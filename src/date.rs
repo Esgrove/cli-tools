@@ -5,6 +5,17 @@ use colored::Colorize;
 use regex::{Captures, Regex};
 
 // Static variables that are initialised at runtime the first time they are accessed.
+
+pub static CURRENT_YEAR: LazyLock<i32> = LazyLock::new(|| chrono::Utc::now().year());
+
+pub static RE_YEAR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(20\d{2})\b").expect("Failed to create regex pattern for yyyy year"));
+
+pub static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?P<year>[12]\d{3})\.(?P<month>[12]\d|3[01]|0?[1-9])\.(?P<day>[12]\d|3[01]|0?[1-9])\b")
+        .expect("Failed to create regex pattern for correct date")
+});
+
 static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?P<day>[12]\d|3[01]|0?[1-9])\.(?P<month>1[0-2]|0?[1-9])\.(?P<year>\d{4})")
         .expect("Failed to create regex pattern for dd.mm.yyyy")
@@ -13,11 +24,6 @@ static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
 static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?P<year>[12]\d{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12]\d|3[01]|0?[1-9])")
         .expect("Failed to create regex pattern for yyyy.mm.dd")
-});
-
-pub static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?P<year>[12]\d{3})\.(?P<month>[12]\d|3[01]|0?[1-9])\.(?P<day>[12]\d|3[01]|0?[1-9])\b")
-        .expect("Failed to create regex pattern for correct date")
 });
 
 static RE_FULL_DATE: LazyLock<Regex> = LazyLock::new(|| {
@@ -35,19 +41,17 @@ static RE_SHORT_DATE_YEAR_FIRST: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Failed to create regex pattern for short date")
 });
 
-static CURRENT_YEAR: LazyLock<i32> = LazyLock::new(|| chrono::Utc::now().year());
-
 pub struct Date {
-    pub year: u32,
-    pub month: u32,
-    pub day: u32,
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
 }
 
 impl Date {
     /// Check that date is valid
     #[must_use]
-    pub fn try_from(year: u32, month: u32, day: u32) -> Option<Self> {
-        if year <= *CURRENT_YEAR as u32 && year >= 2000 && month > 0 && month <= 12 && day > 0 && day <= 31 {
+    pub fn try_from(year: i32, month: i32, day: i32) -> Option<Self> {
+        if year <= *CURRENT_YEAR && year >= 2000 && month > 0 && month <= 12 && day > 0 && day <= 31 {
             Some(Self { year, month, day })
         } else {
             None
@@ -60,9 +64,9 @@ impl Date {
             return None;
         }
         let year = format!("20{year}");
-        let year = year.parse::<u32>().ok()?;
-        let month = month.parse::<u32>().ok()?;
-        let day = day.parse::<u32>().ok()?;
+        let year = year.parse::<i32>().ok()?;
+        let month = month.parse::<i32>().ok()?;
+        let day = day.parse::<i32>().ok()?;
         Self::try_from(year, month, day)
     }
 
@@ -229,15 +233,15 @@ fn parse_date_from_match(name: &str, caps: &Captures) -> Option<Date> {
         eprintln!("{}", format!("Failed to extract 'day' from '{name}'").red());
         return None;
     };
-    let Ok(year) = year_str.parse::<u32>() else {
+    let Ok(year) = year_str.parse::<i32>() else {
         eprintln!("{}", format!("Failed to parse 'year' in '{name}'").red());
         return None;
     };
-    let Ok(month) = month_str.parse::<u32>() else {
+    let Ok(month) = month_str.parse::<i32>() else {
         eprintln!("{}", format!("Failed to parse 'month' in '{name}'").red());
         return None;
     };
-    let Ok(day) = day_str.parse::<u32>() else {
+    let Ok(day) = day_str.parse::<i32>() else {
         eprintln!("{}", format!("Failed to parse 'day' in '{name}'").red());
         return None;
     };
@@ -245,15 +249,15 @@ fn parse_date_from_match(name: &str, caps: &Captures) -> Option<Date> {
 }
 
 fn parse_date_from_dd_mm_yyyy(day: &str, month: &str, year: &str) -> Option<Date> {
-    let Ok(year) = year.parse::<u32>() else {
+    let Ok(year) = year.parse::<i32>() else {
         eprintln!("{}", format!("Failed to parse year from '{year}'").red());
         return None;
     };
-    let Ok(month) = month.parse::<u32>() else {
+    let Ok(month) = month.parse::<i32>() else {
         eprintln!("{}", format!("Failed to parse month from '{month}'").red());
         return None;
     };
-    let Ok(day) = day.parse::<u32>() else {
+    let Ok(day) = day.parse::<i32>() else {
         eprintln!("{}", format!("Failed to parse day from '{day}'").red());
         return None;
     };

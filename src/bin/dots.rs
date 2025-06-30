@@ -13,7 +13,7 @@ use serde::Deserialize;
 use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 
-use cli_tools::date::RE_CORRECT_DATE_FORMAT;
+use cli_tools::date::{CURRENT_YEAR, RE_CORRECT_DATE_FORMAT, RE_YEAR};
 
 static RE_BRACKETS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[({\]})]+").expect("Failed to create regex pattern for brackets"));
@@ -686,6 +686,19 @@ impl Dots {
                     new_name.insert_str(insert_pos, &format!(".{date}."));
 
                     *name = new_name;
+                }
+                if let Some(date_match) = RE_YEAR.find(name) {
+                    let date = date_match.as_str().parse::<i32>().expect("Failed to parse year");
+                    if date <= *CURRENT_YEAR {
+                        let mut new_name = name.clone();
+
+                        new_name.replace_range(date_match.range(), "");
+
+                        let insert_pos = prefix.len();
+                        new_name.insert_str(insert_pos, &format!(".{date}."));
+
+                        *name = new_name;
+                    }
                 }
             }
         }
