@@ -251,6 +251,7 @@ struct Config {
     prefix_dir: bool,
     recursive: bool,
     regex_replace: Vec<(Regex, String)>,
+    regex_replace_after: Vec<(Regex, String)>,
     remove_from_start: Vec<String>,
     remove_random: bool,
     replace: Vec<(String, String)>,
@@ -331,9 +332,8 @@ impl Dots {
                 }
                 let prefix_regex_full_date = Regex::new(
                     format!(
-                        "^({}\\.){}",
+                        "^({}\\.)(.+?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
                         regex::escape(&name),
-                        r"(.+?\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\.1[0-2]|0?[1-9]\.[12]\d|3[01]|0?[1-9]\.)"
                     )
                     .as_str(),
                 )
@@ -341,16 +341,15 @@ impl Dots {
 
                 let prefix_regex_year = Regex::new(
                     format!(
-                        "^({}\\.){}",
-                        regex::escape(&name),
-                        r"(.+?\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\.)"
+                        "^({}\\.)(.+?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
+                        regex::escape(&name)
                     )
                     .as_str(),
                 )
                 .context("Failed to compile prefix dir year regex")?;
 
                 self.config.prefix = Option::from(name);
-                self.config.regex_replace.extend([
+                self.config.regex_replace_after.extend([
                     (prefix_regex_full_date, "$2.$3.$1.".to_string()),
                     (prefix_regex_year, "$2.$3.$1.".to_string()),
                 ]);
@@ -624,6 +623,14 @@ impl Dots {
             self.remove_from_start(&mut new_name);
         }
 
+        // Apply regex replacements
+        // Workaround for prefix regex
+        if !self.config.regex_replace_after.is_empty() {
+            for (regex, replacement) in &self.config.regex_replace {
+                new_name = regex.replace_all(&new_name, replacement).to_string();
+            }
+        }
+
         new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
         new_name
@@ -871,6 +878,7 @@ impl Config {
             prefix: args.prefix,
             prefix_dir: args.prefix_dir || user_config.prefix_dir,
             recursive: args.recursive || user_config.recursive,
+            regex_replace_after: Vec::default(),
             remove_from_start: user_config.remove_from_start,
             remove_random: args.random || user_config.remove_random,
             suffix: args.suffix,
