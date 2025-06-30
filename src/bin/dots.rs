@@ -892,16 +892,26 @@ impl Config {
         let mut regex_replace = args.parse_regex_substitutes()?;
         let config_regex = Self::compile_regex_patterns(&user_config.regex_replace)?;
         regex_replace.extend(config_regex);
+        let move_date_after_prefix = user_config
+            .move_date_after_prefix
+            .into_iter()
+            .map(|mut s| {
+                if !s.ends_with('.') {
+                    s.push('.');
+                }
+                s
+            })
+            .collect::<Vec<_>>();
         Ok(Self {
             replace,
             regex_replace,
+            move_date_after_prefix,
             convert_case: args.case,
             date_starts_with_year: args.year || user_config.date_starts_with_year,
             debug: args.debug || user_config.debug,
             directory: args.directory || user_config.directory,
             dryrun: args.print || user_config.dryrun,
             increment_name: args.increment || user_config.increment,
-            move_date_after_prefix: user_config.move_date_after_prefix,
             move_to_end: user_config.move_to_end,
             move_to_start: user_config.move_to_start,
             overwrite: args.force || user_config.overwrite,
