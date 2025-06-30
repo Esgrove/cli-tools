@@ -279,15 +279,15 @@ impl Dots {
 
     /// Run renaming.
     pub fn run(&mut self) -> Result<()> {
-        if self.config.debug {
-            println!("{self}");
-        }
-
         let (paths_to_rename, name) = if self.config.directory {
             (self.gather_directories_to_rename(), "directories")
         } else {
             (self.gather_files_to_rename()?, "files")
         };
+
+        if self.config.debug {
+            println!("{self}");
+        }
 
         if paths_to_rename.is_empty() {
             if self.config.verbose {
@@ -329,7 +329,31 @@ impl Dots {
                 if self.config.verbose {
                     println!("Using directory prefix: {name}");
                 }
+                let prefix_regex_full_date = Regex::new(
+                    format!(
+                        "^({}\\.){}",
+                        regex::escape(&name),
+                        r"(.+?\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\.1[0-2]|0?[1-9]\.[12]\d|3[01]|0?[1-9]\.)"
+                    )
+                    .as_str(),
+                )
+                .context("Failed to compile prefix dir full date regex")?;
+
+                let prefix_regex_year = Regex::new(
+                    format!(
+                        "^({}\\.){}",
+                        regex::escape(&name),
+                        r"(.+?\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\.)"
+                    )
+                    .as_str(),
+                )
+                .context("Failed to compile prefix dir year regex")?;
+
                 self.config.prefix = Option::from(name);
+                self.config.regex_replace.extend([
+                    (prefix_regex_full_date, "$2.$3.$1".to_string()),
+                    (prefix_regex_year, "$2.$3.$1".to_string()),
+                ]);
             } else if self.config.suffix_dir {
                 if self.config.verbose {
                     println!("Using directory suffix: {name}");
@@ -896,6 +920,7 @@ impl fmt::Display for Config {
         writeln!(f, "  debug:      {}", cli_tools::colorize_bool(self.debug))?;
         writeln!(f, "  dryrun:     {}", cli_tools::colorize_bool(self.dryrun))?;
         writeln!(f, "  prefix dir: {}", cli_tools::colorize_bool(self.prefix_dir))?;
+        writeln!(f, "  suffix dir: {}", cli_tools::colorize_bool(self.suffix_dir))?;
         writeln!(f, "  overwrite:  {}", cli_tools::colorize_bool(self.overwrite))?;
         writeln!(f, "  recursive:  {}", cli_tools::colorize_bool(self.recursive))?;
         writeln!(f, "  verbose:    {}", cli_tools::colorize_bool(self.verbose))?;
