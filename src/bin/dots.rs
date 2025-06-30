@@ -152,6 +152,10 @@ struct Args {
     #[arg(short = 'b', long, conflicts_with = "prefix")]
     prefix_dir: bool,
 
+    /// Suffix files with directory name
+    #[arg(short = 'j', long, conflicts_with = "suffix")]
+    suffix_dir: bool,
+
     /// Append suffix to the end
     #[arg(short = 'u', long)]
     suffix: Option<String>,
@@ -205,6 +209,8 @@ struct DotsConfig {
     #[serde(default)]
     prefix_dir: bool,
     #[serde(default)]
+    suffix_dir: bool,
+    #[serde(default)]
     pre_replace: Vec<(String, String)>,
     #[serde(default)]
     recursive: bool,
@@ -249,6 +255,7 @@ struct Config {
     remove_random: bool,
     replace: Vec<(String, String)>,
     suffix: Option<String>,
+    suffix_dir: bool,
     verbose: bool,
 }
 
@@ -310,18 +317,25 @@ impl Dots {
 
     /// Get all files that need to be renamed.
     fn gather_files_to_rename(&mut self) -> Result<Vec<(PathBuf, PathBuf)>> {
-        if self.config.prefix_dir {
+        if self.config.prefix_dir || self.config.suffix_dir {
             let formatted_dir = if self.root.is_dir() {
                 cli_tools::get_normalized_dir_name(&self.root)?
             } else {
                 let parent_dir = self.root.parent().context("Failed to get parent dir")?;
                 cli_tools::get_normalized_dir_name(parent_dir)?
             };
-            let prefix = self.format_name(&formatted_dir);
-            if self.config.verbose {
-                println!("Using directory prefix: {prefix}");
+            let name = self.format_name(&formatted_dir);
+            if self.config.prefix_dir {
+                if self.config.verbose {
+                    println!("Using directory prefix: {name}");
+                }
+                self.config.prefix = Option::from(name);
+            } else if self.config.suffix_dir {
+                if self.config.verbose {
+                    println!("Using directory suffix: {name}");
+                }
+                self.config.suffix = Option::from(name);
             }
-            self.config.prefix = Option::from(prefix);
         }
 
         if self.root.is_file() {
@@ -558,15 +572,16 @@ impl Dots {
         }
         if let Some(ref suffix) = self.config.suffix {
             if new_name.contains(suffix) {
-                new_name = new_name.replace(suffix, "");
-            }
-            let lower_name = new_name.to_lowercase();
-            let lower_suffix = suffix.to_lowercase();
-            if lower_name.ends_with(&lower_suffix) {
-                new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
+                self.remove_from_start(&mut new_name);
             } else {
-                // If it doesn't end with the suffix, append it
-                new_name = format!("{new_name}.{suffix}");
+                let lower_name = new_name.to_lowercase();
+                let lower_suffix = suffix.to_lowercase();
+                if lower_name.ends_with(&lower_suffix) {
+                    new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
+                } else {
+                    // If it doesn't end with the suffix, append it
+                    new_name = format!("{new_name}.{suffix}");
+                }
             }
         }
 
@@ -830,9 +845,10 @@ impl Config {
             prefix: args.prefix,
             prefix_dir: args.prefix_dir || user_config.prefix_dir,
             recursive: args.recursive || user_config.recursive,
-            remove_random: args.random || user_config.remove_random,
             remove_from_start: user_config.remove_from_start,
+            remove_random: args.random || user_config.remove_random,
             suffix: args.suffix,
+            suffix_dir: args.suffix_dir || user_config.suffix_dir,
             verbose: args.verbose || user_config.verbose,
         })
     }
