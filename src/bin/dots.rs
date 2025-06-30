@@ -559,8 +559,8 @@ impl Dots {
         }
 
         if let Some(ref prefix) = self.config.prefix {
-            if new_name.contains(prefix) {
-                new_name = new_name.replace(prefix, "");
+            if !new_name.starts_with(prefix) && new_name.contains(prefix) {
+                new_name = new_name.replacen(prefix, "", 1);
             }
             let lower_name = new_name.to_lowercase();
             let lower_prefix = prefix.to_lowercase();
@@ -571,6 +571,9 @@ impl Dots {
             }
         }
         if let Some(ref suffix) = self.config.suffix {
+            if new_name.starts_with(suffix) {
+                new_name = new_name.replacen(suffix, "", 1);
+            }
             if new_name.contains(suffix) {
                 self.remove_from_start(&mut new_name);
             } else {
@@ -579,7 +582,6 @@ impl Dots {
                 if lower_name.ends_with(&lower_suffix) {
                     new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
                 } else {
-                    // If it doesn't end with the suffix, append it
                     new_name = format!("{new_name}.{suffix}");
                 }
             }
