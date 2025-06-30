@@ -351,8 +351,8 @@ impl Dots {
 
                 self.config.prefix = Option::from(name);
                 self.config.regex_replace.extend([
-                    (prefix_regex_full_date, "$2.$3.$1".to_string()),
-                    (prefix_regex_year, "$2.$3.$1".to_string()),
+                    (prefix_regex_full_date, "$2.$3.$1.".to_string()),
+                    (prefix_regex_year, "$2.$3.$1.".to_string()),
                 ]);
             } else if self.config.suffix_dir {
                 if self.config.verbose {
