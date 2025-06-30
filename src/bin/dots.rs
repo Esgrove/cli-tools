@@ -330,7 +330,7 @@ impl Dots {
                 if self.config.verbose {
                     println!("Using directory prefix: {name}");
                 }
-                let prefix_regex_full_date = Regex::new(
+                let prefix_regex_start_full_date = Regex::new(
                     format!(
                         "^({}\\.)(.+?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
                         regex::escape(&name),
@@ -339,7 +339,7 @@ impl Dots {
                 )
                 .context("Failed to compile prefix dir full date regex")?;
 
-                let prefix_regex_year = Regex::new(
+                let prefix_regex_start_year = Regex::new(
                     format!(
                         "^({}\\.)(.+?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
                         regex::escape(&name)
@@ -348,10 +348,28 @@ impl Dots {
                 )
                 .context("Failed to compile prefix dir year regex")?;
 
+                let prefix_regex_middle_full_date = Regex::new(
+                    format!(
+                        "^(.+?\\.)({}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
+                        regex::escape(&name),
+                    ).as_str(),
+                ).context("Failed to compile prefix dir full date regex")?;
+
+                let prefix_regex_middle_year = Regex::new(
+                    format!(
+                        "^(.+?\\.)({}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
+                        regex::escape(&name)
+                    )
+                    .as_str(),
+                )
+                .context("Failed to compile prefix dir year regex")?;
+
                 self.config.prefix = Option::from(name);
                 self.config.regex_replace_after.extend([
-                    (prefix_regex_full_date, "$2.$3.$1.".to_string()),
-                    (prefix_regex_year, "$2.$3.$1.".to_string()),
+                    (prefix_regex_start_full_date, "$2.$3.$1.".to_string()),
+                    (prefix_regex_start_year, "$2.$3.$1.".to_string()),
+                    (prefix_regex_middle_full_date, "$1.$3.$2.".to_string()),
+                    (prefix_regex_middle_year, "$1.$3.$2.".to_string()),
                 ]);
             } else if self.config.suffix_dir {
                 if self.config.verbose {
@@ -626,7 +644,7 @@ impl Dots {
         // Apply regex replacements
         // Workaround for prefix regex
         if !self.config.regex_replace_after.is_empty() {
-            for (regex, replacement) in &self.config.regex_replace {
+            for (regex, replacement) in &self.config.regex_replace_after {
                 new_name = regex.replace_all(&new_name, replacement).to_string();
             }
         }
