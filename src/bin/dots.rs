@@ -132,6 +132,10 @@ struct Args {
     #[arg(short, long)]
     force: bool,
 
+    /// Filter items to rename
+    #[arg(short = 'w', long, action = clap::ArgAction::Append, name = "PATTERN")]
+    filter: Vec<String>,
+
     /// Increment conflicting file name with running index
     #[arg(short, long)]
     increment: bool,
@@ -199,6 +203,8 @@ struct DotsConfig {
     #[serde(default)]
     increment: bool,
     #[serde(default)]
+    filter_names: Vec<String>,
+    #[serde(default)]
     move_date_after_prefix: Vec<String>,
     #[serde(default)]
     move_to_end: Vec<String>,
@@ -239,8 +245,8 @@ struct Config {
     convert_case: bool,
     date_starts_with_year: bool,
     debug: bool,
-    directory: bool,
     dryrun: bool,
+    filter_names: Vec<String>,
     increment_name: bool,
     move_date_after_prefix: Vec<String>,
     move_to_end: Vec<String>,
@@ -254,6 +260,7 @@ struct Config {
     regex_replace_after: Vec<(Regex, String)>,
     remove_from_start: Vec<String>,
     remove_random: bool,
+    rename_directories: bool,
     replace: Vec<(String, String)>,
     suffix: Option<String>,
     suffix_dir: bool,
@@ -264,14 +271,20 @@ struct Config {
 struct Dots {
     root: PathBuf,
     config: Config,
+    path_given: bool,
 }
 
 impl Dots {
     /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Self> {
+        let path_given = args.path.is_some();
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args)?;
-        Ok(Self { root, config })
+        Ok(Self {
+            root,
+            config,
+            path_given,
+        })
     }
 
     pub fn run_with_args(args: Args) -> Result<()> {
@@ -280,8 +293,11 @@ impl Dots {
 
     /// Run renaming.
     pub fn run(&mut self) -> Result<()> {
-        let (paths_to_rename, name) = if self.config.directory {
-            (self.gather_directories_to_rename(), "directories")
+        if self.config.rename_directories && self.root.is_file() {
+            anyhow::bail!("Cannot rename directories when a file was given as input path");
+        }
+        let (paths_to_rename, name) = if self.config.rename_directories {
+            (self.gather_directories_to_rename(self.path_given), "directories")
         } else {
             (self.gather_files_to_rename()?, "files")
         };
@@ -300,7 +316,7 @@ impl Dots {
         let num_renamed = self.rename_paths(paths_to_rename);
         let message = format!(
             "{num_renamed} {}",
-            match (self.config.directory, num_renamed > 1) {
+            match (self.config.rename_directories, num_renamed > 1) {
                 (true, true) => "directories",
                 (true, false) => "directory",
                 (false, true) => "files",
@@ -404,6 +420,17 @@ impl Dots {
             // ignore hidden files (name starting with ".")
             .filter_entry(|e| !cli_tools::is_hidden(e))
             .filter_map(Result::ok)
+            .filter(|entry| {
+                // Check all filter names are present in the path
+                if self.config.filter_names.is_empty() {
+                    true
+                } else {
+                    let path_str = cli_tools::path_to_string(entry.path());
+                    self.config.filter_names.iter().all(|name| {
+                        path_str.contains(name)
+                    })
+                }
+            })
             .filter_map(|entry| {
                 let path = entry.path();
                 self.formatted_filepath(path)
@@ -416,13 +443,35 @@ impl Dots {
     }
 
     /// Get all directories that need to be renamed.
-    fn gather_directories_to_rename(&self) -> Vec<(PathBuf, PathBuf)> {
+    fn gather_directories_to_rename(&self, path_specified: bool) -> Vec<(PathBuf, PathBuf)> {
+        // If a directory was given as input, use that unless recursive mode is enabled
+        if path_specified && !self.config.recursive {
+            return self
+                .formatted_directory_path(&self.root)
+                .ok()
+                .filter(|new_path| &self.root != new_path)
+                .map(|new_path| (self.root.clone(), new_path))
+                .into_iter()
+                .collect();
+        }
+
         let max_depth = if self.config.recursive { 100 } else { 1 };
         WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
+            .filter(|entry| {
+                // Check all filter names are present in the path
+                if self.config.filter_names.is_empty() {
+                    true
+                } else {
+                    let path_str = cli_tools::path_to_string(entry.path());
+                    self.config.filter_names.iter().all(|name| {
+                        path_str.contains(name)
+                    })
+                }
+            })
             .filter_map(|entry| {
                 let path = entry.path();
                 self.formatted_directory_path(path)
@@ -591,7 +640,7 @@ impl Dots {
 
         Self::convert_written_date_format(&mut new_name);
 
-        if let Some(date_flipped_name) = if self.config.directory {
+        if let Some(date_flipped_name) = if self.config.rename_directories {
             cli_tools::date::reorder_directory_date(&new_name)
         } else {
             cli_tools::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
@@ -892,6 +941,8 @@ impl Config {
         let mut regex_replace = args.parse_regex_substitutes()?;
         let config_regex = Self::compile_regex_patterns(&user_config.regex_replace)?;
         regex_replace.extend(config_regex);
+        let mut filter_names = user_config.filter_names;
+        filter_names.extend(args.filter);
         let move_date_after_prefix = user_config
             .move_date_after_prefix
             .into_iter()
@@ -903,15 +954,14 @@ impl Config {
             })
             .collect::<Vec<_>>();
         Ok(Self {
-            replace,
-            regex_replace,
-            move_date_after_prefix,
             convert_case: args.case,
             date_starts_with_year: args.year || user_config.date_starts_with_year,
             debug: args.debug || user_config.debug,
-            directory: args.directory || user_config.directory,
+            rename_directories: args.directory || user_config.directory,
             dryrun: args.print || user_config.dryrun,
+            filter_names,
             increment_name: args.increment || user_config.increment,
+            move_date_after_prefix,
             move_to_end: user_config.move_to_end,
             move_to_start: user_config.move_to_start,
             overwrite: args.force || user_config.overwrite,
@@ -919,9 +969,11 @@ impl Config {
             prefix: args.prefix,
             prefix_dir: args.prefix_dir || user_config.prefix_dir,
             recursive: args.recursive || user_config.recursive,
+            regex_replace,
             regex_replace_after: Vec::default(),
             remove_from_start: user_config.remove_from_start,
             remove_random: args.random || user_config.remove_random,
+            replace,
             suffix: args.suffix,
             suffix_dir: args.suffix_dir || user_config.suffix_dir,
             verbose: args.verbose || user_config.verbose,
@@ -955,6 +1007,11 @@ impl DotsConfig {
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let filter_names = if self.filter_names.is_empty() {
+            "filter_names: []".to_string()
+        } else {
+            "filter_names:\n".to_string() + &*self.filter_names.iter().map(|name| format!("    {name}")).join("\n")
+        };
         let replace = if self.replace.is_empty() {
             "replace:   []".to_string()
         } else {
@@ -983,6 +1040,7 @@ impl fmt::Display for Config {
             "  suffix:     \"{}\"",
             self.suffix.as_ref().unwrap_or(&String::new())
         )?;
+        writeln!(f, "  {filter_names}")?;
         writeln!(f, "  {replace}")?;
         writeln!(f, "  {regex_replace}")
     }
@@ -1011,6 +1069,7 @@ mod dots_tests {
             remove_random: true,
             ..Default::default()
         },
+        path_given: false,
     });
 
     #[test]
@@ -1032,6 +1091,7 @@ mod dots_tests {
                 convert_case: true,
                 ..Default::default()
             },
+            path_given: false,
         };
         assert_eq!(dots_case.format_name("CAP WORD GL"), "Cap.Word.Gl");
         assert_eq!(dots_case.format_name("testCAP CAP WORD GL"), "Testcap.Cap.Word.Gl");
@@ -1204,6 +1264,7 @@ mod dots_tests {
                 date_starts_with_year: true,
                 ..Default::default()
             },
+            path_given: false,
         };
 
         assert_eq!(
@@ -1303,6 +1364,7 @@ mod move_date_tests {
             date_starts_with_year: true,
             ..Default::default()
         },
+        path_given: false,
     });
 
     #[test]
@@ -1348,6 +1410,7 @@ mod test_remove_from_start {
             remove_from_start: vec!["Test".to_string(), "test".to_string()],
             ..Default::default()
         },
+        path_given: false,
     });
 
     #[test]
