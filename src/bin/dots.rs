@@ -133,7 +133,7 @@ struct Args {
     force: bool,
 
     /// Filter items to rename
-    #[arg(short = 'w', long, action = clap::ArgAction::Append, name = "PATTERN")]
+    #[arg(short = 'w', long, num_args = 1, action = clap::ArgAction::Append, name = "FILTER_PATTERN")]
     filter: Vec<String>,
 
     /// Increment conflicting file name with running index
@@ -173,7 +173,7 @@ struct Args {
     random: bool,
 
     /// Remove pattern from filenames
-    #[arg(short = 'z', long, action = clap::ArgAction::Append, name = "PATTERN")]
+    #[arg(short = 'z', long, num_args = 1, action = clap::ArgAction::Append, name = "PATTERN")]
     remove: Vec<String>,
 
     /// Substitute regex pattern with replacement in filenames
@@ -277,6 +277,9 @@ struct Dots {
 impl Dots {
     /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Self> {
+        if args.debug {
+            println!("{args:#?}");
+        }
         let path_given = args.path.is_some();
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args)?;
@@ -957,7 +960,6 @@ impl Config {
             convert_case: args.case,
             date_starts_with_year: args.year || user_config.date_starts_with_year,
             debug: args.debug || user_config.debug,
-            rename_directories: args.directory || user_config.directory,
             dryrun: args.print || user_config.dryrun,
             filter_names,
             increment_name: args.increment || user_config.increment,
@@ -973,6 +975,7 @@ impl Config {
             regex_replace_after: Vec::default(),
             remove_from_start: user_config.remove_from_start,
             remove_random: args.random || user_config.remove_random,
+            rename_directories: args.directory || user_config.directory,
             replace,
             suffix: args.suffix,
             suffix_dir: args.suffix_dir || user_config.suffix_dir,
