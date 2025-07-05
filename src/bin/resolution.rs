@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
 
-const FILE_EXTENSIONS: [&str; 6] = ["mp4", "mkv", "wmv", "mov", "avi", "m4v"];
+const FILE_EXTENSIONS: [&str; 7] = ["mp4", "mkv", "wmv", "mov", "avi", "m4v", "flv"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 const RESOLUTION_TOLERANCE: f32 = 0.025;
