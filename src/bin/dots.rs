@@ -79,7 +79,7 @@ static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyL
     .collect()
 });
 
-static REPLACE: [(&str, &str); 26] = [
+static REPLACE: [(&str, &str); 27] = [
     (" ", "."),
     (" - ", " "),
     (", ", " "),
@@ -94,6 +94,7 @@ static REPLACE: [(&str, &str); 26] = [
     ("$", "."),
     (";", "."),
     ("@", "."),
+    ("+", "."),
     ("=", "."),
     (",.", "."),
     (",", "."),
