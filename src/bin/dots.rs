@@ -639,9 +639,6 @@ impl Dots {
         new_name = titlecase::titlecase(&new_name);
         new_name = new_name.replace(' ', ".");
 
-        // Fix encoding capitalization
-        new_name = new_name.replace("X265", "x265").replace("X264", "x264");
-
         Self::convert_written_date_format(&mut new_name);
 
         if let Some(date_flipped_name) = if self.config.rename_directories {
