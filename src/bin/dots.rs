@@ -999,8 +999,23 @@ impl DotsConfig {
     fn get_user_config() -> Self {
         cli_tools::config::CONFIG_PATH
             .as_deref()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|config_string| toml::from_str::<UserConfig>(&config_string).ok())
+            .and_then(|path| {
+                fs::read_to_string(path)
+                    .map_err(|e| {
+                        eprintln!(
+                            "{}",
+                            format!("Error reading config file {}: {}", path.display(), e).red()
+                        );
+                    })
+                    .ok()
+            })
+            .and_then(|config_string| {
+                toml::from_str::<UserConfig>(&config_string)
+                    .map_err(|e| {
+                        eprintln!("{}", format!("Error reading config file: {e}").red());
+                    })
+                    .ok()
+            })
             .map(|config| config.dots)
             .unwrap_or_default()
     }
