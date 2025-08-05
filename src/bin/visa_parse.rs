@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
-use std::io::Write;
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -12,6 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Local, NaiveDate};
 use clap::Parser;
 use colored::Colorize;
+use encoding_rs::Encoding;
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, RowNum, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -336,21 +336,41 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
         }
     };
 
-    let reader = BufReader::new(xml_file);
-    for line in reader.lines().map_while(Result::ok) {
-        if let Some(caps) = RE_START_DATE.captures(&line) {
+    // Read the first 256 bytes to detect encoding
+    let mut buf_reader = BufReader::new(&xml_file);
+    let mut buf = [0; 256];
+    let n = buf_reader.read(&mut buf).unwrap_or(0);
+    let header = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+    let encoding_name = header
+        .split("encoding=")
+        .nth(1)
+        .and_then(|s| s.split(['"', '\'']).nth(1))
+        .unwrap_or("iso-8859-15");
+    let encoding = Encoding::for_label(encoding_name.as_bytes()).unwrap_or(encoding_rs::ISO_8859_15);
+
+    // Read the whole file as bytes
+    let mut xml_file = xml_file;
+    xml_file.seek(SeekFrom::Start(0)).ok();
+    let mut bytes = Vec::new();
+    xml_file.read_to_end(&mut bytes).ok();
+
+    // Decode to UTF-8
+    let (cow, _, had_errors) = encoding.decode(&bytes);
+    if had_errors {
+        eprintln!("{}", "Warning: Decoding errors occurred".yellow());
+    }
+
+    // Process lines as UTF-8
+    for line in cow.lines() {
+        if let Some(caps) = RE_START_DATE.captures(line) {
             if let Some(matched) = caps.get(1) {
                 match matched.as_str().parse::<i32>() {
-                    Ok(y) => {
-                        year = y;
-                    }
-                    Err(e) => {
-                        eprintln!("{}", format!("Failed to parse year from start date: {e}").red());
-                    }
+                    Ok(y) => year = y,
+                    Err(e) => eprintln!("{}", format!("Failed to parse year from start date: {e}").red()),
                 }
             }
         }
-        if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(&line) {
+        if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(line) {
             if let Some(matched) = caps.get(1) {
                 let text = matched.as_str();
                 if RE_ITEM_DATE.is_match(text) {
