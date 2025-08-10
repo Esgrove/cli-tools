@@ -37,19 +37,38 @@ Options:
 ## Dots
 
 ```console
-Replace whitespaces in filenames with dots
+Rename files to use dot formatting
 
-Usage: dots [OPTIONS] [PATH]
+Usage: dots [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion, --completion  Generate shell completions
+  help                      Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -f, --force    Overwrite existing files
-  -p, --print    Only print changes without renaming
-  -v, --verbose  Verbose output
-  -h, --help     Print help
-  -V, --version  Print version
+  -c, --case                                Convert casing
+      --debug                               Enable debug prints
+  -d, --directory                           Rename directories
+  -f, --force                               Overwrite existing files
+  -w, --filter <FILTER_PATTERN>             Filter items to rename
+  -i, --increment                           Increment conflicting file name with running index
+  -p, --print                               Only print changes without renaming files
+  -r, --recursive                           Recursive directory iteration
+  -x, --prefix <PREFIX>                     Append prefix to the start
+  -b, --prefix-dir                          Prefix files with directory name
+  -j, --suffix-dir                          Suffix files with directory name
+  -u, --suffix <SUFFIX>                     Append suffix to the end
+  -s, --substitute <PATTERN> <REPLACEMENT>  Substitute pattern with replacement in filenames
+  -m, --random                              Remove random strings
+  -z, --remove <PATTERN>                    Remove pattern from filenames
+  -g, --regex <PATTERN> <REPLACEMENT>       Substitute regex pattern with replacement in filenames
+  -y, --year                                Assume year is first in short dates
+  -v, --verbose                             Verbose output
+  -h, --help                                Print help
+  -V, --version                             Print version
 ```
 
 ## Flip-date

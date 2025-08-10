@@ -5,7 +5,8 @@ use std::sync::LazyLock;
 use std::{fmt, fs};
 
 use anyhow::{Context, Result, anyhow};
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use colored::Colorize;
 use itertools::Itertools;
 use regex::Regex;
@@ -111,7 +112,7 @@ static REPLACE: [(&str, &str); 27] = [
 
 const RESOLUTIONS: [&str; 6] = ["540", "720", "1080", "1920", "2160", "3840"];
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(author, version, name = "dots", about = "Rename files to use dot formatting")]
 struct Args {
     /// Optional input directory or file
@@ -188,6 +189,28 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Available subcommands
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[allow(clippy::doc_markdown)]
+#[derive(Subcommand)]
+enum Command {
+    /// Generate shell completions
+    ///
+    /// Usage examples:
+    /// - `dots --completion bash`
+    /// - `dots completion --install zsh`
+    /// - `dots completion zsh > "$HOME/.oh-my-zsh/custom/plugins/dots/_dots"`
+    #[command(long_flag("completion"), verbatim_doc_comment)]
+    Completion {
+        shell: Shell,
+        /// Output completion directly to the default directory instead of stdout
+        #[arg(short, long, default_value_t = false)]
+        install: bool,
+    },
 }
 
 /// Config from a config file
@@ -278,9 +301,6 @@ struct Dots {
 impl Dots {
     /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Self> {
-        if args.debug {
-            println!("{args:#?}");
-        }
         let path_given = args.path.is_some();
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args)?;
@@ -1074,7 +1094,15 @@ impl fmt::Display for Dots {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    Dots::run_with_args(args)
+    if let Some(ref command) = args.command {
+        match command {
+            Command::Completion { shell, install } => {
+                cli_tools::generate_shell_completion(*shell, Args::command(), *install, "dots")
+            }
+        }
+    } else {
+        Dots::run_with_args(args)
+    }
 }
 
 #[cfg(test)]
