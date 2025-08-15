@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use std::{fmt, fs};
 
 use anyhow::{Context, Result, anyhow};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use colored::Colorize;
 use itertools::Itertools;
@@ -116,7 +116,8 @@ const RESOLUTIONS: [&str; 6] = ["540", "720", "1080", "1920", "2160", "3840"];
 #[command(author, version, name = "dots", about = "Rename files to use dot formatting")]
 struct Args {
     /// Optional input directory or file
-    path: Option<String>,
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    path: Option<PathBuf>,
 
     /// Convert casing
     #[arg(short, long)]
@@ -155,11 +156,11 @@ struct Args {
     prefix: Option<String>,
 
     /// Prefix files with directory name
-    #[arg(short = 'b', long, conflicts_with = "prefix")]
+    #[arg(short = 'b', long, conflicts_with = "prefix")] // , value_hint = clap::ValueHint::DirPath
     prefix_dir: bool,
 
     /// Suffix files with directory name
-    #[arg(short = 'j', long, conflicts_with = "suffix")]
+    #[arg(short = 'j', long, conflicts_with = "suffix")] // , value_hint = clap::ValueHint::DirPath
     suffix_dir: bool,
 
     /// Append suffix to the end
@@ -186,31 +187,13 @@ struct Args {
     #[arg(short, long)]
     year: bool,
 
+    /// Generate shell completion
+    #[arg(short = 'l', long)]
+    completion: Option<Shell>,
+
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
-
-    /// Available subcommands
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[allow(clippy::doc_markdown)]
-#[derive(Subcommand)]
-enum Command {
-    /// Generate shell completions
-    ///
-    /// Usage examples:
-    /// - `dots --completion bash`
-    /// - `dots completion --install zsh`
-    /// - `dots completion zsh > "$HOME/.oh-my-zsh/custom/plugins/dots/_dots"`
-    #[command(long_flag("completion"), verbatim_doc_comment)]
-    Completion {
-        shell: Shell,
-        /// Output completion directly to the default directory instead of stdout
-        #[arg(short, long, default_value_t = false)]
-        install: bool,
-    },
 }
 
 /// Config from a config file
@@ -302,7 +285,7 @@ impl Dots {
     /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Self> {
         let path_given = args.path.is_some();
-        let root = cli_tools::resolve_input_path(args.path.as_deref())?;
+        let root = cli_tools::resolve_input_path(args.path.as_ref().map(|p| p.to_str().unwrap_or("")))?;
         let config = Config::from_args(args)?;
         Ok(Self {
             root,
@@ -1094,12 +1077,8 @@ impl fmt::Display for Dots {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if let Some(ref command) = args.command {
-        match command {
-            Command::Completion { shell, install } => {
-                cli_tools::generate_shell_completion(*shell, Args::command(), *install, "dots")
-            }
-        }
+    if let Some(ref shell) = args.completion {
+        cli_tools::generate_shell_completion(*shell, Args::command(), true, "dots")
     } else {
         Dots::run_with_args(args)
     }
