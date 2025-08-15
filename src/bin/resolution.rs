@@ -254,6 +254,8 @@ async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> 
     if recursive {
         for entry in WalkDir::new(path)
             .into_iter()
+            // ignore hidden files (name starting with ".")
+            .filter_entry(|e| !cli_tools::is_hidden(e))
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
         {
@@ -266,9 +268,9 @@ async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> 
         }
     } else {
         let mut dir_entries = tokio::fs::read_dir(&path).await?;
-        while let Some(entry) = dir_entries.next_entry().await? {
+        while let Some(ref entry) = dir_entries.next_entry().await? {
             let path = entry.path();
-            if path.is_file() {
+            if path.is_file() && !cli_tools::is_hidden_tokio(entry) {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     if FILE_EXTENSIONS.contains(&ext) {
                         files.push(path);

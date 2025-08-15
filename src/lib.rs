@@ -12,7 +12,6 @@ use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
 use unicode_normalization::UnicodeNormalization;
-use walkdir::DirEntry;
 
 /// Append an extension to `PathBuf`, which is missing from the standard lib :(
 pub fn append_extension_to_path(path: PathBuf, extension: impl AsRef<OsStr>) -> PathBuf {
@@ -55,8 +54,17 @@ pub fn get_normalized_dir_name(path: &Path) -> Result<String> {
 
 /// Check if entry is a hidden file or directory (starts with '.')
 #[must_use]
-pub fn is_hidden(entry: &DirEntry) -> bool {
-    entry.file_name().to_str().is_some_and(|s| s.starts_with('.'))
+pub fn is_hidden(entry: &walkdir::DirEntry) -> bool {
+    let name_bytes = entry.file_name().as_encoded_bytes();
+    !name_bytes.is_empty() && name_bytes[0] == b'.'
+}
+
+/// Check if entry is a hidden file or directory (starts with '.')
+#[must_use]
+pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
+    let name = entry.file_name();
+    let name_bytes = name.as_encoded_bytes();
+    !name_bytes.is_empty() && name_bytes[0] == b'.'
 }
 
 /// Resolves the provided input path to a directory or file to an absolute path.
