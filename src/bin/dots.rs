@@ -294,6 +294,8 @@ impl Dots {
         })
     }
 
+    /// Run renaming with given args.
+    #[inline]
     pub fn run_with_args(args: Args) -> Result<()> {
         Self::new(args)?.run()
     }
@@ -502,8 +504,8 @@ impl Dots {
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
             let capitalization_change_only = if new_str.to_lowercase() == old_str.to_lowercase() {
-                // File path contains only capitalisation changes:
-                // Need to use a temp file to workaround case-insensitive file systems.
+                // File path contains only capitalization changes:
+                // Need to use a temp file to work around case-insensitive file systems.
                 true
             } else {
                 false
@@ -942,14 +944,17 @@ impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Result<Self> {
         let user_config = DotsConfig::get_user_config();
+        let mut filter_names = user_config.filter_names;
         let mut replace = args.parse_substitutes();
+        let mut regex_replace = args.parse_regex_substitutes()?;
+        let config_regex = Self::compile_regex_patterns(user_config.regex_replace)?;
+
+        filter_names.extend(replace.iter().map(|(pattern, _)| pattern.clone()));
         replace.extend(args.parse_removes());
         replace.extend(user_config.replace);
-        let mut regex_replace = args.parse_regex_substitutes()?;
-        let config_regex = Self::compile_regex_patterns(&user_config.regex_replace)?;
         regex_replace.extend(config_regex);
-        let mut filter_names = user_config.filter_names;
         filter_names.extend(args.filter);
+
         let move_date_after_prefix = user_config
             .move_date_after_prefix
             .into_iter()
@@ -960,6 +965,7 @@ impl Config {
                 s
             })
             .collect::<Vec<_>>();
+
         Ok(Self {
             convert_case: args.case,
             date_starts_with_year: args.year || user_config.date_starts_with_year,
@@ -987,12 +993,12 @@ impl Config {
         })
     }
 
-    fn compile_regex_patterns(regex_pairs: &[(String, String)]) -> Result<Vec<(Regex, String)>> {
+    fn compile_regex_patterns(regex_pairs: Vec<(String, String)>) -> Result<Vec<(Regex, String)>> {
         let mut compiled_pairs = Vec::new();
 
         for (pattern, replacement) in regex_pairs {
-            let regex = Regex::new(pattern).with_context(|| format!("Invalid regex: '{pattern}'"))?;
-            compiled_pairs.push((regex, replacement.clone()));
+            let regex = Regex::new(&pattern).with_context(|| format!("Invalid regex: '{pattern}'"))?;
+            compiled_pairs.push((regex, replacement));
         }
 
         Ok(compiled_pairs)
