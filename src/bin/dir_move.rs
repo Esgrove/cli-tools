@@ -44,12 +44,12 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let root = cli_tools::resolve_input_path(args.path.as_ref().map(|p| p.to_str().unwrap_or("")))?;
     args.completion.as_ref().map_or_else(
-        || move_files_to_dir(&root, args.print, args.force),
+        || move_files_to_dir(&root, args.print, args.force, args.verbose),
         |shell| cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME")),
     )
 }
 
-pub fn move_files_to_dir(base_path: &Path, dryrun: bool, overwrite: bool) -> anyhow::Result<()> {
+pub fn move_files_to_dir(base_path: &Path, dryrun: bool, overwrite: bool, verbose: bool) -> anyhow::Result<()> {
     // Collect directories in the base path
     let mut dirs: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(base_path)? {
@@ -70,16 +70,28 @@ pub fn move_files_to_dir(base_path: &Path, dryrun: bool, overwrite: bool) -> any
             let relative_file = file_path.strip_prefix(base_path).unwrap_or(file_path);
 
             for dir in &dirs {
-                let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+                let dir_name_lower = dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .replace('.', " ");
                 let file_name_lower = file_name.to_lowercase().replace('.', " ");
 
-                if file_name_lower.contains(&dir_name) {
+                if file_name_lower.contains(&dir_name_lower) {
+                    // Check if the file is already in the target directory
+                    if file_path.starts_with(dir) {
+                        continue;
+                    }
+
                     let relative_dir = dir.strip_prefix(base_path).unwrap_or(dir);
-                    println!(
-                        "Match found:\n  Dir:  {}\n  File: {}",
-                        relative_dir.display(),
-                        relative_file.display()
-                    );
+                    if verbose {
+                        println!(
+                            "Match found:\n  Dir:  {}\n  File: {}",
+                            relative_dir.display(),
+                            relative_file.display()
+                        );
+                    }
 
                     if !dryrun {
                         print!("Move this file? (y/N): ");
