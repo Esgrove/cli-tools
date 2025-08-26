@@ -178,7 +178,7 @@ static FILTER_PREFIXES: [&str; 82] = [
 #[command(
     author,
     version,
-    name = "visa-parse",
+    name = env!("CARGO_BIN_NAME"),
     about = "Parse Finvoice XML credit card statement files"
 )]
 struct Args {

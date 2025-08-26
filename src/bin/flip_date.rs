@@ -13,7 +13,7 @@ static FILE_EXTENSIONS: [&str; 9] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "
 #[command(
     author,
     version,
-    name = "flip-date",
+    name = env!("CARGO_BIN_NAME"),
     about = "Flip dates in file and directory names to start with year"
 )]
 struct Args {

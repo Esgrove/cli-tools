@@ -6,7 +6,7 @@ use colored::Colorize;
 use git2::{Oid, Repository};
 
 #[derive(Parser, Debug)]
-#[command(author, version, name = "vtag", about = "Create git version tags for a Rust project")]
+#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create git version tags for a Rust project")]
 struct Args {
     /// Optional git repository path. Defaults to current directory.
     path: Option<String>,

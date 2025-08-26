@@ -196,6 +196,28 @@ pub fn path_to_string_relative(path: &Path) -> String {
     path_to_string(&get_relative_path_from_current_working_directory(path))
 }
 
+pub fn print_error(message: &str) {
+    eprintln!("{}", format!("Error: {message}").red());
+}
+
+#[macro_export]
+macro_rules! print_error {
+    ($($arg:tt)*) => {
+        $crate::print_error(&format!($($arg)*))
+    };
+}
+
+pub fn print_warning(message: &str) {
+    eprintln!("{}", message.yellow());
+}
+
+#[macro_export]
+macro_rules! print_warning {
+    ($($arg:tt)*) => {
+        $crate::print_warning(&format!($($arg)*))
+    };
+}
+
 /// Create a coloured diff for the given strings.
 pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
     let changeset = Changeset::new(old, new, "");

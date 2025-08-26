@@ -4,7 +4,7 @@ use clap::Parser;
 #[command(
     author,
     version,
-    name = "divider",
+    name = env!("CARGO_BIN_NAME"),
     about = "Print divider comment with centered text"
 )]
 struct Args {

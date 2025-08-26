@@ -113,7 +113,7 @@ static REPLACE: [(&str, &str); 27] = [
 const RESOLUTIONS: [&str; 6] = ["540", "720", "1080", "1920", "2160", "3840"];
 
 #[derive(Parser)]
-#[command(author, version, name = "dots", about = "Rename files to use dot formatting")]
+#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Rename files to use dot formatting")]
 struct Args {
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]
@@ -1078,7 +1078,7 @@ impl fmt::Display for Dots {
 fn main() -> Result<()> {
     let args = Args::parse();
     if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, Args::command(), true, "dots")
+        cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
     } else {
         Dots::run_with_args(args)
     }

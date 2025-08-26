@@ -43,6 +43,10 @@ name = "div"
 path = "src/bin/divider.rs"
 
 [[bin]]
+name = "dirmove"
+path = "src/bin/dir_move.rs"
+
+[[bin]]
 name = "dots"
 path = "src/bin/dots.rs"
 
