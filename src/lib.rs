@@ -72,6 +72,13 @@ pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
 /// If `path` is `None`, the current working directory is used.
 /// The function verifies that the provided path exists and is accessible,
 /// returning an error if it does not.
+/// ```rust
+/// use std::path::{Path, PathBuf};
+/// use cli_tools::resolve_input_path;
+///
+/// let path = Path::new("src");
+/// let absolute_path = resolve_input_path(Some(path)).unwrap();
+/// ```
 #[inline]
 pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
     let input_path = path
@@ -110,10 +117,10 @@ pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
 ///
 /// ```rust
 /// use std::path::PathBuf;
-/// use cli_tools::resolve_input_path;
+/// use cli_tools::resolve_input_path_str;
 ///
 /// let path = Some("src");
-/// let absolute_path = resolve_input_path(path).unwrap();
+/// let absolute_path = resolve_input_path_str(path).unwrap();
 /// ```
 #[inline]
 pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
