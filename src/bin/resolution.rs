@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
 
-const FILE_EXTENSIONS: [&str; 7] = ["mp4", "mkv", "wmv", "mov", "avi", "m4v", "flv"];
+const FILE_EXTENSIONS: [&str; 10] = ["mp4", "mkv", "wmv", "mov", "avi", "m4v", "flv", "webm", "ts", "mpg"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 const RESOLUTION_TOLERANCE: f32 = 0.025;
@@ -187,7 +187,7 @@ impl fmt::Display for FFProbeResult {
             );
             write!(
                 f,
-                "{:>4}x{:<4}   {:>9}   {}",
+                "{:>4}x{:<4}   {:>18}   {}",
                 self.resolution.width,
                 self.resolution.height,
                 self.resolution.label(),
@@ -195,6 +195,57 @@ impl fmt::Display for FFProbeResult {
             )
         })
     }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    let absolute_input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
+
+    if args.debug {
+        println!("Fuzzy resolution ranges:");
+        for res in &FUZZY_RESOLUTIONS {
+            println!("  {res}");
+        }
+    }
+
+    let files = gather_files_without_resolution_label(&absolute_input_path, args.recursive).await?;
+
+    if files.is_empty() {
+        if args.verbose {
+            println!("No video files to process");
+        }
+        return Ok(());
+    }
+
+    if args.verbose || args.debug {
+        println!("Processing {} files...", files.len());
+    }
+
+    // Keep successfully processed files, print errors for ffprobe command
+    let mut files_to_process: Vec<FFProbeResult> = get_resolutions(files)
+        .await?
+        .into_iter()
+        .filter_map(|res| match res {
+            Ok(val) => Some(val),
+            Err(err) => {
+                eprintln!("Error: {err}");
+                None
+            }
+        })
+        .collect();
+
+    files_to_process.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
+
+    for result in files_to_process {
+        if !args.print {
+            if let Err(error) = result.rename(args.force) {
+                println!("{}", format!("{error}").red());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
@@ -221,32 +272,6 @@ const fn compute_bounds(res: u32) -> (u32, u32) {
     let min = res.saturating_sub(tolerance);
     let max = res.saturating_add(tolerance);
     (min, max)
-}
-
-async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
-    let path = cli_tools::path_to_string(&file);
-    let command = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json \"{path}\" | jq .streams[0]"
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdout(Stdio::piped())
-        .output()
-        .await;
-
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                let resolution: Resolution = serde_json::from_slice(&output.stdout)
-                    .map_err(|error| anyhow!("Failed to parse output for {path}: {error}"))?;
-                Ok(FFProbeResult { file, resolution })
-            } else {
-                Err(anyhow!("{path}: {}", std::str::from_utf8(&output.stderr)?))
-            }
-        }
-        _ => Err(anyhow!("Command failed for {path}")),
-    }
 }
 
 async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
@@ -327,61 +352,36 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFPro
     Ok(results)
 }
 
+async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
+    let path = cli_tools::path_to_string(&file);
+    let command = format!(
+        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json \"{path}\" | jq .streams[0]"
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .output()
+        .await;
+
+    match output {
+        Ok(output) => {
+            if output.status.success() {
+                let resolution: Resolution = serde_json::from_slice(&output.stdout)
+                    .map_err(|error| anyhow!("Failed to parse output for {path}: {error}"))?;
+                Ok(FFProbeResult { file, resolution })
+            } else {
+                Err(anyhow!("{path}: {}", std::str::from_utf8(&output.stderr)?))
+            }
+        }
+        _ => Err(anyhow!("Command failed for {path}")),
+    }
+}
+
 /// Create a Semaphore with half the number of logical CPU cores available.
 #[inline]
 fn create_semaphore_for_num_physical_cpus() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(num_cpus::get_physical()))
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    let absolute_input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
-
-    if args.debug {
-        println!("Fuzzy resolution ranges:");
-        for res in &FUZZY_RESOLUTIONS {
-            println!("  {res}");
-        }
-    }
-
-    let files = gather_files_without_resolution_label(&absolute_input_path, args.recursive).await?;
-
-    if files.is_empty() {
-        if args.verbose {
-            println!("No video files to process");
-        }
-        return Ok(());
-    }
-
-    if args.verbose || args.debug {
-        println!("Processing {} files...", files.len());
-    }
-
-    // Keep successfully processed files, print errors for ffprobe command
-    let mut files_to_process: Vec<FFProbeResult> = get_resolutions(files)
-        .await?
-        .into_iter()
-        .filter_map(|res| match res {
-            Ok(val) => Some(val),
-            Err(err) => {
-                eprintln!("Error: {err}");
-                None
-            }
-        })
-        .collect();
-
-    files_to_process.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
-
-    for result in files_to_process {
-        if !args.print {
-            if let Err(error) = result.rename(args.force) {
-                println!("{}", format!("{error}").red());
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
