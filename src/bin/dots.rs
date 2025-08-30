@@ -285,7 +285,7 @@ impl Dots {
     /// Init new instance with CLI args.
     pub fn new(args: Args) -> Result<Self> {
         let path_given = args.path.is_some();
-        let root = cli_tools::resolve_input_path(args.path.as_ref().map(|p| p.to_str().unwrap_or("")))?;
+        let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args)?;
         Ok(Self {
             root,

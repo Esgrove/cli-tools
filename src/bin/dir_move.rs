@@ -149,7 +149,7 @@ impl DirectoryInfo {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let root = cli_tools::resolve_input_path(args.path.as_ref().map(|p| p.to_str().unwrap_or("")))?;
+    let root = cli_tools::resolve_input_path(args.path.as_deref())?;
     if let Some(ref shell) = args.completion {
         cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
     } else {

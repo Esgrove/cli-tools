@@ -183,7 +183,8 @@ static FILTER_PREFIXES: [&str; 82] = [
 )]
 struct Args {
     /// Optional input directory or XML file path
-    path: Option<String>,
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    path: Option<PathBuf>,
 
     /// Optional output path (default is the input directory)
     #[arg(short, long, name = "OUTPUT_PATH")]

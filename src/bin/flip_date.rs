@@ -18,7 +18,8 @@ static FILE_EXTENSIONS: [&str; 9] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "
 )]
 struct Args {
     /// Optional input directory or file
-    path: Option<String>,
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    path: Option<PathBuf>,
 
     /// Use directory rename mode
     #[arg(short, long)]

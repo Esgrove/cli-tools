@@ -10,13 +10,13 @@ export REPO_ROOT
 # have some differences for example in the available command line options.
 case "$(uname -s)" in
     "Darwin")
-        export BASH_PLATFORM="mac"
+        BASH_PLATFORM="mac"
         ;;
     "MINGW"*)
-        export BASH_PLATFORM="windows"
+        BASH_PLATFORM="windows"
         ;;
     *)
-        export BASH_PLATFORM="linux"
+        BASH_PLATFORM="linux"
         ;;
 esac
 export BASH_PLATFORM

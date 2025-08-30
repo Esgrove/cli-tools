@@ -69,6 +69,41 @@ pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
 
 /// Resolves the provided input path to a directory or file to an absolute path.
 ///
+/// If `path` is `None`, the current working directory is used.
+/// The function verifies that the provided path exists and is accessible,
+/// returning an error if it does not.
+#[inline]
+pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
+    let input_path = path
+        .map(|p| p.to_str().unwrap_or(""))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let filepath = if input_path.is_empty() {
+        env::current_dir().context("Failed to get current working directory")?
+    } else {
+        PathBuf::from(input_path)
+    };
+    if !filepath.exists() {
+        anyhow::bail!(
+            "Input path does not exist or is not accessible: '{}'",
+            filepath.display()
+        );
+    }
+
+    let absolute_input_path = dunce::canonicalize(&filepath)?;
+
+    // Canonicalize fails for network drives on Windows :(
+    if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
+        Ok(filepath)
+    } else {
+        Ok(absolute_input_path)
+    }
+}
+
+/// Resolves the provided input path to a directory or file to an absolute path.
+///
 /// If `path` is `None` or an empty string, the current working directory is used.
 /// The function verifies that the provided path exists and is accessible,
 /// returning an error if it does not.
@@ -80,7 +115,8 @@ pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
 /// let path = Some("src");
 /// let absolute_path = resolve_input_path(path).unwrap();
 /// ```
-pub fn resolve_input_path(path: Option<&str>) -> Result<PathBuf> {
+#[inline]
+pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
     let input_path = path.unwrap_or_default().trim().to_string();
     let filepath = if input_path.is_empty() {
         env::current_dir().context("Failed to get current working directory")?
@@ -110,6 +146,7 @@ pub fn resolve_input_path(path: Option<&str>) -> Result<PathBuf> {
 /// If `path` is `None` or an empty string, and the absolute input path is a file,
 /// the parent directory of the input path is used.
 /// Otherwise, the input directory is used as the output path.
+#[inline]
 pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Result<PathBuf> {
     let output_path = {
         let path = path.unwrap_or_default().trim().to_string();
@@ -196,6 +233,7 @@ pub fn path_to_string_relative(path: &Path) -> String {
     path_to_string(&get_relative_path_from_current_working_directory(path))
 }
 
+#[inline]
 pub fn print_error(message: &str) {
     eprintln!("{}", format!("Error: {message}").red());
 }
@@ -207,6 +245,7 @@ macro_rules! print_error {
     };
 }
 
+#[inline]
 pub fn print_warning(message: &str) {
     eprintln!("{}", message.yellow());
 }
@@ -362,8 +401,8 @@ fn get_shell_completion_dir(shell: Shell, name: &str) -> Result<PathBuf> {
     Ok(user_dir)
 }
 
-#[inline]
 /// Helper method to assert floating point equality in test cases.
+#[inline]
 pub fn assert_f64_eq(a: f64, b: f64) {
     let epsilon = f64::EPSILON;
     assert!(
@@ -410,20 +449,22 @@ mod lib_tests {
     #[test]
     fn test_resolve_input_path_valid() {
         let dir = tempdir().unwrap();
-        let dir_string = dir.path().to_str().unwrap().to_string();
-        let resolved = resolve_input_path(Some(dir_string.as_str()));
+        let path = dir.path();
+        let resolved = resolve_input_path(Some(path));
         assert!(resolved.is_ok());
     }
 
     #[test]
     fn test_resolve_input_path_nonexistent() {
-        let resolved = resolve_input_path(Some("nonexistent_path"));
+        let path = Path::new("nonexistent");
+        let resolved = resolve_input_path(Some(path));
         assert!(resolved.is_err());
     }
 
     #[test]
     fn test_resolve_input_path_empty() {
-        let resolved = resolve_input_path(Some(" "));
+        let path = Path::new("  \n");
+        let resolved = resolve_input_path(Some(path));
         assert!(resolved.is_ok());
         assert_eq!(resolved.unwrap(), env::current_dir().unwrap());
     }

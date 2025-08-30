@@ -9,7 +9,8 @@ use git2::{Oid, Repository};
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create git version tags for a Rust project")]
 struct Args {
     /// Optional git repository path. Defaults to current directory.
-    path: Option<String>,
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    path: Option<PathBuf>,
 
     /// Only print information without creating or pushing tags
     #[arg(short, long)]

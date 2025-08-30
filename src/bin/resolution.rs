@@ -40,7 +40,8 @@ static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Add video resolution to filenames")]
 struct Args {
     /// Optional input directory or file path
-    path: Option<String>,
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    path: Option<PathBuf>,
 
     /// Enable debug prints
     #[arg(short, long)]
