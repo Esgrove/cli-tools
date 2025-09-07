@@ -525,6 +525,9 @@ impl Dots {
                     );
                 }
             } else {
+                if self.config.verbose {
+                    println!("Moving file: {}", target_file.display());
+                }
                 fs::rename(source_file, &target_file)?;
                 any_files_moved = true;
             }
@@ -585,6 +588,7 @@ impl Dots {
             // Handle directory renaming when target already exists
             // Copy files from source to target directory and remove source directory if empty
             let is_directory_merge = path.is_dir() && new_path.exists() && new_path.is_dir();
+            let mut skip_rename = false;
 
             if !capitalization_change_only && new_path.exists() && !self.config.overwrite && !is_directory_merge {
                 if self.config.increment_name {
@@ -599,39 +603,34 @@ impl Dots {
                         }
                     }
                 } else {
-                    println!(
-                        "{}",
-                        format!("Skipping rename to already existing file: {new_str}").yellow()
-                    );
-                    continue;
+                    skip_rename = true;
                 }
             }
 
             if self.config.dryrun {
                 println!("{}", format!("Dryrun {number}:").bold().cyan());
+                cli_tools::show_diff(&old_str, &new_str);
+
                 if is_directory_merge {
-                    println!("Would merge directory contents: {old_str} -> {new_str}");
-                } else {
-                    cli_tools::show_diff(&old_str, &new_str);
+                    println!("Would merge directory: {old_str} -> {new_str}");
                 }
                 num_renamed += 1;
                 continue;
             }
 
             println!("{}", format!("Rename {number}:").bold().magenta());
+            cli_tools::show_diff(&old_str, &new_str);
 
             if is_directory_merge {
                 if self.config.verbose {
-                    println!("Merging directory contents: {old_str} -> {new_str}");
+                    println!("Merging directory: {old_str} -> {new_str}");
                 }
 
                 match self.move_directory_contents(&path, &new_path) {
                     Ok(_files_moved) => {
                         // Try to remove the source directory and any empty parent directories
                         if let Err(e) = self.remove_empty_directories(&path) {
-                            if self.config.verbose {
-                                eprintln!("Warning: Could not remove empty directories: {e}");
-                            }
+                            eprintln!("{}", format!("Could not remove empty directories: {e}").red());
                         }
                         num_renamed += 1;
                     }
@@ -642,7 +641,13 @@ impl Dots {
                 continue;
             }
 
-            cli_tools::show_diff(&old_str, &new_str);
+            if skip_rename {
+                println!(
+                    "{}",
+                    format!("Skipping rename to already existing file: {new_str}").yellow()
+                );
+                continue;
+            }
 
             let rename_result = if capitalization_change_only {
                 Self::rename_with_temp_file(&path, &new_path)
