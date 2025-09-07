@@ -12,6 +12,7 @@ use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
 use unicode_normalization::UnicodeNormalization;
+use walkdir::WalkDir;
 
 /// Append an extension to `PathBuf`, which is missing from the standard lib :(
 pub fn append_extension_to_path(path: PathBuf, extension: impl AsRef<OsStr>) -> PathBuf {
@@ -65,6 +66,16 @@ pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
     let name = entry.file_name();
     let name_bytes = name.as_encoded_bytes();
     !name_bytes.is_empty() && name_bytes[0] == b'.'
+}
+
+/// Check if directory is empty (contains no files or subdirectories)
+pub fn is_directory_empty(dir: &Path) -> bool {
+    for entry in WalkDir::new(dir).into_iter().filter_map(std::result::Result::ok) {
+        if entry.path() != dir {
+            return false;
+        }
+    }
+    true
 }
 
 /// Resolves the provided input path to a directory or file to an absolute path.

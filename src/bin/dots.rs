@@ -493,6 +493,77 @@ impl Dots {
             .collect()
     }
 
+    /// Move all files recursively from source directory to target directory
+    fn move_directory_contents(&self, source_dir: &Path, target_dir: &Path) -> Result<bool> {
+        let mut any_files_moved = false;
+
+        for entry in WalkDir::new(source_dir)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            let source_file = entry.path();
+            let relative_path = source_file.strip_prefix(source_dir)?;
+            let target_file = target_dir.join(relative_path);
+
+            // Create parent directories if they don't exist
+            if let Some(parent) = target_file.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            if target_file.exists() {
+                if self.config.overwrite {
+                    if self.config.verbose {
+                        println!("Overwriting existing file: {}", target_file.display());
+                    }
+                    fs::rename(source_file, &target_file)?;
+                    any_files_moved = true;
+                } else {
+                    println!(
+                        "{}",
+                        format!("Skipping existing file: {}", target_file.display()).yellow()
+                    );
+                }
+            } else {
+                fs::rename(source_file, &target_file)?;
+                any_files_moved = true;
+            }
+        }
+
+        Ok(any_files_moved)
+    }
+
+    /// Remove empty directories recursively from the bottom up
+    fn remove_empty_directories(&self, dir: &Path) -> Result<()> {
+        for entry in WalkDir::new(dir)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.file_type().is_dir())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        // Process from deepest to shallowest
+        {
+            let dir_path = entry.path();
+            if dir_path != dir && cli_tools::is_directory_empty(dir_path) {
+                if self.config.verbose {
+                    println!("Removing empty directory: {}", dir_path.display());
+                }
+                fs::remove_dir(dir_path)?;
+            }
+        }
+
+        // Finally, try to remove the source directory itself
+        if cli_tools::is_directory_empty(dir) {
+            if self.config.verbose {
+                println!("Removing empty source directory: {}", dir.display());
+            }
+            fs::remove_dir(dir)?;
+        }
+
+        Ok(())
+    }
+
     /// Rename all given path pairs or just print changes if dryrun is enabled.
     fn rename_paths(&self, paths: Vec<(PathBuf, PathBuf)>) -> usize {
         let mut num_renamed: usize = 0;
@@ -511,7 +582,11 @@ impl Dots {
                 false
             };
 
-            if !capitalization_change_only && new_path.exists() && !self.config.overwrite {
+            // Handle directory renaming when target already exists
+            // Copy files from source to target directory and remove source directory if empty
+            let is_directory_merge = path.is_dir() && new_path.exists() && new_path.is_dir();
+
+            if !capitalization_change_only && new_path.exists() && !self.config.overwrite && !is_directory_merge {
                 if self.config.increment_name {
                     match Self::get_incremented_path(&new_path) {
                         Ok(incremented_path) => {
@@ -534,11 +609,39 @@ impl Dots {
 
             if self.config.dryrun {
                 println!("{}", format!("Dryrun {number}:").bold().cyan());
-                cli_tools::show_diff(&old_str, &new_str);
+                if is_directory_merge {
+                    println!("Would merge directory contents: {old_str} -> {new_str}");
+                } else {
+                    cli_tools::show_diff(&old_str, &new_str);
+                }
                 num_renamed += 1;
                 continue;
             }
+
             println!("{}", format!("Rename {number}:").bold().magenta());
+
+            if is_directory_merge {
+                if self.config.verbose {
+                    println!("Merging directory contents: {old_str} -> {new_str}");
+                }
+
+                match self.move_directory_contents(&path, &new_path) {
+                    Ok(_files_moved) => {
+                        // Try to remove the source directory and any empty parent directories
+                        if let Err(e) = self.remove_empty_directories(&path) {
+                            if self.config.verbose {
+                                eprintln!("Warning: Could not remove empty directories: {e}");
+                            }
+                        }
+                        num_renamed += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("{}", format!("Error merging directories: {old_str}\n{e}").red());
+                    }
+                }
+                continue;
+            }
+
             cli_tools::show_diff(&old_str, &new_str);
 
             let rename_result = if capitalization_change_only {
