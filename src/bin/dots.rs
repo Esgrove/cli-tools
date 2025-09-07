@@ -587,7 +587,7 @@ impl Dots {
 
             // Handle directory renaming when target already exists
             // Copy files from source to target directory and remove source directory if empty
-            let is_directory_merge = path.is_dir() && new_path.exists() && new_path.is_dir();
+            let is_directory_merge = path.is_dir() && new_path.exists() && !capitalization_change_only;
             let mut skip_rename = false;
 
             if !capitalization_change_only && new_path.exists() && !self.config.overwrite && !is_directory_merge {
