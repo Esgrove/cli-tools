@@ -1462,6 +1462,7 @@ mod dots_tests {
         assert_eq!(dots.format_name("two example"), "Test.One.Two.Example");
         assert_eq!(dots.format_name("1"), "Test.One.Two.1");
         assert_eq!(dots.format_name("Test one  two three"), "Test.One.Two.Three");
+        assert_eq!(dots.format_name("three"), "Test.One.Two.Three");
         assert_eq!(dots.format_name("test.one.two"), "Test.One.Two");
         assert_eq!(dots.format_name(" test one two "), "Test.One.Two");
         assert_eq!(dots.format_name("Test.One.Two"), "Test.One.Two");
