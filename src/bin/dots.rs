@@ -769,14 +769,36 @@ impl Dots {
             if !new_name.starts_with(prefix) && new_name.contains(prefix) {
                 new_name = new_name.replacen(prefix, "", 1);
             }
+
             let lower_name = new_name.to_lowercase();
             let lower_prefix = prefix.to_lowercase();
+
             if lower_name.starts_with(&lower_prefix) {
+                // Full prefix match - update capitalization
                 new_name = format!("{}{}", prefix, &new_name[prefix.len()..]);
             } else {
-                new_name = format!("{prefix}.{new_name}");
+                // Check if new_name starts with any suffix of the prefix
+                let mut found_suffix_match = false;
+                let prefix_parts: Vec<&str> = prefix.split('.').collect();
+
+                for i in 1..prefix_parts.len() {
+                    let suffix = prefix_parts[i..].join(".");
+                    let lower_suffix = suffix.to_lowercase();
+
+                    if lower_name.starts_with(&lower_suffix) {
+                        // Found a matching suffix, replace with full prefix
+                        new_name = format!("{}{}", prefix, &new_name[suffix.len()..]);
+                        found_suffix_match = true;
+                        break;
+                    }
+                }
+
+                if !found_suffix_match {
+                    new_name = format!("{prefix}.{new_name}");
+                }
             }
         }
+
         if let Some(ref suffix) = self.config.suffix {
             if new_name.starts_with(suffix) {
                 new_name = new_name.replacen(suffix, "", 1);
@@ -1423,6 +1445,26 @@ mod dots_tests {
             dots.format_name("Testing date 16.10.20 in the middle"),
             "Testing.Date.2016.10.20.in.the.Middle"
         );
+    }
+
+    #[test]
+    fn test_prefix_dir() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Test.One.Two".to_string()),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        assert_eq!(dots.format_name("example"), "Test.One.Two.Example");
+        assert_eq!(dots.format_name("two example"), "Test.One.Two.Example");
+        assert_eq!(dots.format_name("1"), "Test.One.Two.1");
+        assert_eq!(dots.format_name("Test one  two three"), "Test.One.Two.Three");
+        assert_eq!(dots.format_name("test.one.two"), "Test.One.Two");
+        assert_eq!(dots.format_name(" test one two "), "Test.One.Two");
+        assert_eq!(dots.format_name("Test.One.Two"), "Test.One.Two");
     }
 }
 
