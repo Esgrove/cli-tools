@@ -174,11 +174,13 @@ fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
         if let Some(new_name) =
             cli_tools::date::reorder_filename_date(&filename, config.year_first, config.swap_year, config.verbose)
         {
-            files_to_rename.push(RenameItem {
-                path: file,
-                filename,
-                new_name,
-            });
+            if new_name.to_lowercase() != filename.to_lowercase() {
+                files_to_rename.push(RenameItem {
+                    path: file,
+                    filename,
+                    new_name,
+                });
+            }
         }
     }
 
@@ -192,10 +194,13 @@ fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
     };
 
     for item in files_to_rename {
+        let new_path = root.join(&item.new_name);
+        if new_path == item.path {
+            continue;
+        }
         println!("{heading}");
         cli_tools::show_diff(&item.filename, &item.new_name);
         if !config.dryrun {
-            let new_path = root.join(item.new_name);
             if new_path.exists() && !config.overwrite {
                 eprintln!("{}", "File already exists".yellow());
             } else {
@@ -207,7 +212,7 @@ fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Flip date to start with year for all matching directories from given path.
+/// Flip date to start with year for all matching directories from the given path.
 fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
     let directories = directories_to_rename(path, config.recursive)?;
     if directories.is_empty() {
