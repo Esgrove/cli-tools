@@ -136,8 +136,12 @@ struct Args {
     force: bool,
 
     /// Filter items to rename
-    #[arg(short = 'w', long, num_args = 1, action = clap::ArgAction::Append, name = "FILTER_PATTERN")]
-    filter: Vec<String>,
+    #[arg(short = 'w', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE_PATTERN")]
+    include: Vec<String>,
+
+    /// Filter items to rename
+    #[arg(short = 'u', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE_PATTERN")]
+    exclude: Vec<String>,
 
     /// Increment conflicting file name with running index
     #[arg(short, long)]
@@ -210,7 +214,7 @@ struct DotsConfig {
     #[serde(default)]
     increment: bool,
     #[serde(default)]
-    filter_names: Vec<String>,
+    include: Vec<String>,
     #[serde(default)]
     move_date_after_prefix: Vec<String>,
     #[serde(default)]
@@ -253,7 +257,8 @@ struct Config {
     date_starts_with_year: bool,
     debug: bool,
     dryrun: bool,
-    filter_names: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
     increment_name: bool,
     move_date_after_prefix: Vec<String>,
     move_to_end: Vec<String>,
@@ -430,15 +435,15 @@ impl Dots {
             .filter_entry(|e| !cli_tools::is_hidden(e))
             .filter_map(Result::ok)
             .filter(|entry| {
-                // Check all filter names are present in the path
-                if self.config.filter_names.is_empty() {
-                    true
-                } else {
-                    let path_str = cli_tools::path_to_string(entry.path());
-                    self.config.filter_names.iter().all(|name| {
-                        path_str.contains(name)
-                    })
-                }
+                // Filter files based on include and exclude lists
+                let path_str = cli_tools::path_to_string(entry.path());
+                let include = self.config.include.iter().all(|name| {
+                    path_str.contains(name)
+                });
+                let exclude = self.config.exclude.iter().all(|name| {
+                    !path_str.contains(name)
+                });
+                include && exclude
             })
             .filter_map(|entry| {
                 let path = entry.path();
@@ -472,11 +477,11 @@ impl Dots {
             .filter(|entry| entry.path().is_dir())
             .filter(|entry| {
                 // Check all filter names are present in the path
-                if self.config.filter_names.is_empty() {
+                if self.config.include.is_empty() {
                     true
                 } else {
                     let path_str = cli_tools::path_to_string(entry.path());
-                    self.config.filter_names.iter().all(|name| {
+                    self.config.include.iter().all(|name| {
                         path_str.contains(name)
                     })
                 }
@@ -1074,16 +1079,16 @@ impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Result<Self> {
         let user_config = DotsConfig::get_user_config();
-        let mut filter_names = user_config.filter_names;
+        let mut include = user_config.include;
         let mut replace = args.parse_substitutes();
         let mut regex_replace = args.parse_regex_substitutes()?;
         let config_regex = Self::compile_regex_patterns(user_config.regex_replace)?;
 
-        filter_names.extend(replace.iter().map(|(pattern, _)| pattern.clone()));
+        include.extend(replace.iter().map(|(pattern, _)| pattern.clone()));
         replace.extend(args.parse_removes());
         replace.extend(user_config.replace);
         regex_replace.extend(config_regex);
-        filter_names.extend(args.filter);
+        include.extend(args.include);
 
         let move_date_after_prefix = user_config
             .move_date_after_prefix
@@ -1101,7 +1106,8 @@ impl Config {
             date_starts_with_year: args.year || user_config.date_starts_with_year,
             debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
-            filter_names,
+            include,
+            exclude: args.exclude,
             increment_name: args.increment || user_config.increment,
             move_date_after_prefix,
             move_to_end: user_config.move_to_end,
@@ -1165,10 +1171,15 @@ impl DotsConfig {
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let filter_names = if self.filter_names.is_empty() {
-            "filter_names: []".to_string()
+        let include = if self.include.is_empty() {
+            "include: []".to_string()
         } else {
-            "filter_names:\n".to_string() + &*self.filter_names.iter().map(|name| format!("    {name}")).join("\n")
+            "include:\n".to_string() + &*self.include.iter().map(|name| format!("    {name}")).join("\n")
+        };
+        let exclude = if self.exclude.is_empty() {
+            "exclude: []".to_string()
+        } else {
+            "exclude:\n".to_string() + &*self.exclude.iter().map(|name| format!("    {name}")).join("\n")
         };
         let replace = if self.replace.is_empty() {
             "replace:   []".to_string()
@@ -1198,7 +1209,8 @@ impl fmt::Display for Config {
             "  suffix:     \"{}\"",
             self.suffix.as_ref().unwrap_or(&String::new())
         )?;
-        writeln!(f, "  {filter_names}")?;
+        writeln!(f, "  {include}")?;
+        writeln!(f, "  {exclude}")?;
         writeln!(f, "  {replace}")?;
         writeln!(f, "  {regex_replace}")
     }
