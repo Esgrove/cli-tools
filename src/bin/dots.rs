@@ -135,11 +135,11 @@ struct Args {
     #[arg(short, long)]
     force: bool,
 
-    /// Filter items to rename
+    /// Include files that match the given pattern
     #[arg(short = 'w', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE_PATTERN")]
     include: Vec<String>,
 
-    /// Filter items to rename
+    /// Exclude files that match the given pattern
     #[arg(short = 'u', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE_PATTERN")]
     exclude: Vec<String>,
 
@@ -191,8 +191,8 @@ struct Args {
     #[arg(short, long)]
     year: bool,
 
-    /// Generate shell completion
-    #[arg(short = 'l', long)]
+    /// Create shell completion
+    #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,
 
     /// Verbose output

@@ -38,7 +38,7 @@ struct Args {
     recursive: bool,
 
     /// Generate shell completion
-    #[arg(short = 'l', long)]
+    #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,
 
     /// Verbose output
