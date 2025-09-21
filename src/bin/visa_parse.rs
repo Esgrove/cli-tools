@@ -363,20 +363,20 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
 
     // Process lines as UTF-8
     for line in cow.lines() {
-        if let Some(caps) = RE_START_DATE.captures(line) {
-            if let Some(matched) = caps.get(1) {
-                match matched.as_str().parse::<i32>() {
-                    Ok(y) => year = y,
-                    Err(e) => eprintln!("{}", format!("Failed to parse year from start date: {e}").red()),
-                }
+        if let Some(caps) = RE_START_DATE.captures(line)
+            && let Some(matched) = caps.get(1)
+        {
+            match matched.as_str().parse::<i32>() {
+                Ok(y) => year = y,
+                Err(e) => eprintln!("{}", format!("Failed to parse year from start date: {e}").red()),
             }
         }
-        if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(line) {
-            if let Some(matched) = caps.get(1) {
-                let text = matched.as_str();
-                if RE_ITEM_DATE.is_match(text) {
-                    lines.push(text.to_string());
-                }
+        if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(line)
+            && let Some(matched) = caps.get(1)
+        {
+            let text = matched.as_str();
+            if RE_ITEM_DATE.is_match(text) {
+                lines.push(text.to_string());
             }
         }
     }
@@ -562,10 +562,10 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
         "{}",
         format!("Writing data to CSV:   {}", output_file.display()).green()
     );
-    if output_file.exists() {
-        if let Err(e) = std::fs::remove_file(&output_file) {
-            eprintln!("{}", format!("Failed to remove existing csv file: {e}").red());
-        }
+    if output_file.exists()
+        && let Err(e) = std::fs::remove_file(&output_file)
+    {
+        eprintln!("{}", format!("Failed to remove existing csv file: {e}").red());
     }
     let mut file = File::create(output_file)?;
     writeln!(file, "Date,Sum,Name")?;
@@ -628,10 +628,10 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     }
     totals_sheet.autofit();
 
-    if output_file.exists() {
-        if let Err(e) = std::fs::remove_file(&output_file) {
-            eprintln!("{}", format!("Failed to remove existing xlsx file: {e}").red());
-        }
+    if output_file.exists()
+        && let Err(e) = std::fs::remove_file(&output_file)
+    {
+        eprintln!("{}", format!("Failed to remove existing xlsx file: {e}").red());
     }
     workbook.save(output_file)?;
     Ok(())

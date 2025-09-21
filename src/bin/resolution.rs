@@ -240,10 +240,10 @@ async fn main() -> anyhow::Result<()> {
     files_to_process.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
 
     for result in files_to_process {
-        if !args.print {
-            if let Err(error) = result.rename(args.force) {
-                println!("{}", format!("{error}").red());
-            }
+        if !args.print
+            && let Err(error) = result.rename(args.force)
+        {
+            println!("{}", format!("{error}").red());
         }
     }
 
@@ -288,22 +288,22 @@ async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> 
             .filter(|e| e.file_type().is_file())
         {
             let path = entry.path();
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                if FILE_EXTENSIONS.contains(&ext) {
-                    files.push(path.to_path_buf());
-                }
+            if let Some(ext) = path.extension().and_then(|s| s.to_str())
+                && FILE_EXTENSIONS.contains(&ext)
+            {
+                files.push(path.to_path_buf());
             }
         }
     } else {
         let mut dir_entries = tokio::fs::read_dir(&path).await?;
         while let Some(ref entry) = dir_entries.next_entry().await? {
             let path = entry.path();
-            if path.is_file() && !cli_tools::is_hidden_tokio(entry) {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    if FILE_EXTENSIONS.contains(&ext) {
-                        files.push(path);
-                    }
-                }
+            if path.is_file()
+                && !cli_tools::is_hidden_tokio(entry)
+                && let Some(ext) = path.extension().and_then(|s| s.to_str())
+                && FILE_EXTENSIONS.contains(&ext)
+            {
+                files.push(path);
             }
         }
     }

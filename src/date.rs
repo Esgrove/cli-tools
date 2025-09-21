@@ -196,20 +196,20 @@ pub fn reorder_filename_date(filename: &str, year_first: bool, swap_year: bool, 
 /// Check if directory name contains a matching date and reorder it.
 pub fn reorder_directory_date(name: &str) -> Option<String> {
     // Handle dd.mm.yyyy format
-    if let Some(caps) = RE_DD_MM_YYYY.captures(name) {
-        if let Some(date) = parse_date_from_match(name, &caps) {
-            let name_part = RE_DD_MM_YYYY.replace(name, "").to_string();
-            let name = get_directory_separator(&name_part);
-            return Some(format!("{}{name}", date.dash_format()));
-        }
+    if let Some(caps) = RE_DD_MM_YYYY.captures(name)
+        && let Some(date) = parse_date_from_match(name, &caps)
+    {
+        let name_part = RE_DD_MM_YYYY.replace(name, "").to_string();
+        let name = get_directory_separator(&name_part);
+        return Some(format!("{}{name}", date.dash_format()));
     }
     // Handle yyyy.mm.dd format
-    if let Some(caps) = RE_YYYY_MM_DD.captures(name) {
-        if let Some(date) = parse_date_from_match(name, &caps) {
-            let name_part = RE_YYYY_MM_DD.replace(name, "").to_string();
-            let name = get_directory_separator(&name_part);
-            return Some(format!("{}{name}", date.dash_format()));
-        }
+    if let Some(caps) = RE_YYYY_MM_DD.captures(name)
+        && let Some(date) = parse_date_from_match(name, &caps)
+    {
+        let name_part = RE_YYYY_MM_DD.replace(name, "").to_string();
+        let name = get_directory_separator(&name_part);
+        return Some(format!("{}{name}", date.dash_format()));
     }
     None
 }

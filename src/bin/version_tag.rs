@@ -72,48 +72,47 @@ fn version_tag(
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
         let tree = commit.tree()?;
-        if let Some(entry) = tree.get_name("Cargo.toml") {
-            if let Ok(blob) = entry
+        if let Some(entry) = tree.get_name("Cargo.toml")
+            && let Ok(blob) = entry
                 .to_object(&repo)
                 .and_then(|obj| obj.into_blob().map_err(|_| git2::Error::from_str("Not a blob")))
-            {
-                let content = std::str::from_utf8(blob.content()).unwrap_or_default();
-                match content.parse::<toml::Value>() {
-                    Ok(toml_value) => {
-                        if let Some(version_number) = toml_value
-                            .get("package")
-                            .and_then(|pkg| pkg.get("version"))
-                            .and_then(toml::Value::as_str)
-                        {
-                            if current_tag == version_number {
-                                if verbose {
-                                    println!("{}", format!("Skip {}: {}", version_number, commit.id()).yellow());
-                                }
-                                continue;
+        {
+            let content = std::str::from_utf8(blob.content()).unwrap_or_default();
+            match content.parse::<toml::Value>() {
+                Ok(toml_value) => {
+                    if let Some(version_number) = toml_value
+                        .get("package")
+                        .and_then(|pkg| pkg.get("version"))
+                        .and_then(toml::Value::as_str)
+                    {
+                        if current_tag == version_number {
+                            if verbose {
+                                println!("{}", format!("Skip {}: {}", version_number, commit.id()).yellow());
                             }
+                            continue;
+                        }
 
-                            current_tag = version_number.to_string();
-                            println!("{}", version_number.to_string().bold());
+                        current_tag = version_number.to_string();
+                        println!("{}", version_number.to_string().bold());
 
-                            let version_tag = format!("v{version_number}");
-                            let tag_exists = tag_name_exists(&repo, &version_tag)?;
-                            if tag_exists {
-                                println!("{}", format!("Tag {version_tag} already exists, skipping...").yellow());
+                        let version_tag = format!("v{version_number}");
+                        let tag_exists = tag_name_exists(&repo, &version_tag)?;
+                        if tag_exists {
+                            println!("{}", format!("Tag {version_tag} already exists, skipping...").yellow());
+                        } else {
+                            create_version_tag(&repo, &version_tag, version_number, commit.id(), dryrun)?;
+                        }
+                        if push && !(new_tags_only && tag_exists) {
+                            if combined_push {
+                                tags_to_push.push(version_tag);
                             } else {
-                                create_version_tag(&repo, &version_tag, version_number, commit.id(), dryrun)?;
-                            }
-                            if push && !(new_tags_only && tag_exists) {
-                                if combined_push {
-                                    tags_to_push.push(version_tag);
-                                } else {
-                                    push_tag(&repo, &version_tag, dryrun)?;
-                                }
+                                push_tag(&repo, &version_tag, dryrun)?;
                             }
                         }
                     }
-                    Err(e) => {
-                        println!("Failed to parse TOML: {e}");
-                    }
+                }
+                Err(e) => {
+                    println!("Failed to parse TOML: {e}");
                 }
             }
         }

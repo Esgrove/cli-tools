@@ -173,14 +173,13 @@ fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
 
         if let Some(new_name) =
             cli_tools::date::reorder_filename_date(&filename, config.year_first, config.swap_year, config.verbose)
+            && new_name.to_lowercase() != filename.to_lowercase()
         {
-            if new_name.to_lowercase() != filename.to_lowercase() {
-                files_to_rename.push(RenameItem {
-                    path: file,
-                    filename,
-                    new_name,
-                });
-            }
+            files_to_rename.push(RenameItem {
+                path: file,
+                filename,
+                new_name,
+            });
         }
     }
 
