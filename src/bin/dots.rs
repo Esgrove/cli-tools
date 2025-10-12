@@ -187,7 +187,7 @@ struct Args {
     #[arg(short = 'g', long, num_args = 2, action = clap::ArgAction::Append, value_names = ["PATTERN", "REPLACEMENT"])]
     regex: Vec<String>,
 
-    /// Assume year is first in short dates
+    /// Assume year is last in short dates
     #[arg(short, long)]
     year: bool,
 
@@ -203,7 +203,7 @@ struct Args {
 /// Config from a config file
 #[derive(Debug, Default, Deserialize)]
 struct DotsConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     date_starts_with_year: bool,
     #[serde(default)]
     debug: bool,
@@ -1103,7 +1103,7 @@ impl Config {
 
         Ok(Self {
             convert_case: args.case,
-            date_starts_with_year: args.year || user_config.date_starts_with_year,
+            date_starts_with_year: !args.year || user_config.date_starts_with_year,
             debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
             include,
@@ -1221,6 +1221,10 @@ impl fmt::Display for Dots {
         writeln!(f, "Root: {}", self.root.display())?;
         write!(f, "{}", self.config)
     }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 fn main() -> Result<()> {
