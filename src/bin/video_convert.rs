@@ -159,6 +159,12 @@ struct VideoInfo {
     bitrate_kbps: u64,
     /// File size in bytes
     size_bytes: u64,
+    /// Duration in seconds
+    duration: f64,
+    /// Video width in pixels
+    width: u32,
+    /// Video height in pixels
+    height: u32,
 }
 
 /// Result of processing a single file
@@ -210,6 +216,7 @@ impl ConversionStats {
         }
     }
 
+    #[allow(clippy::cast_possible_wrap, clippy::missing_const_for_fn)]
     fn space_saved(&self) -> i64 {
         self.total_original_size as i64 - self.total_converted_size as i64
     }
@@ -220,52 +227,39 @@ impl ConversionStats {
         println!("Files remuxed:   {}", self.files_remuxed);
         println!("Files skipped:   {}", self.files_skipped);
         println!("Files failed:    {}", self.files_failed);
-        println!("");
+        println!();
 
         if self.files_converted > 0 {
-            println!("Total original size:    {}", format_size(self.total_original_size));
-            println!("Total converted size:   {}", format_size(self.total_converted_size));
+            println!(
+                "Total original size:    {}",
+                cli_tools::format_size(self.total_original_size)
+            );
+            println!(
+                "Total converted size:   {}",
+                cli_tools::format_size(self.total_converted_size)
+            );
 
             if self.total_original_size > 0 {
                 let ratio = self.total_converted_size as f64 / self.total_original_size as f64 * 100.0;
 
                 let saved = self.space_saved();
                 if saved >= 0 {
-                    println!("Space saved:     {} ({:.1}%)", format_size(saved as u64), ratio);
+                    println!(
+                        "Space saved:     {} ({:.1}%)",
+                        cli_tools::format_size(saved as u64),
+                        ratio
+                    );
                 } else {
-                    println!("Space increased: {} ({:.1}%)", format_size((-saved) as u64), ratio);
+                    println!(
+                        "Space increased: {} ({:.1}%)",
+                        cli_tools::format_size((-saved) as u64),
+                        ratio
+                    );
                 }
             }
         }
 
-        println!("Total time:      {}", format_duration(self.total_duration));
-    }
-}
-
-/// Format bytes as human-readable size
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    }
-}
-
-/// Format duration as human-readable string
-fn format_duration(duration: Duration) -> String {
-    let secs = duration.as_secs();
-    if secs >= 3600 {
-        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else if secs >= 60 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
+        println!("Total time:      {}", cli_tools::format_duration(self.total_duration));
     }
 }
 
@@ -309,6 +303,21 @@ impl VideoFile {
         let extension = cli_tools::path_to_file_extension_string(&path);
 
         Self { path, name, extension }
+    }
+}
+
+impl std::fmt::Display for VideoInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Size: {}, Duration: {:.2}, Codec: {}\nResolution: {}x{}, Bitrate: {:.1} Mbps",
+            cli_tools::format_size(self.size_bytes),
+            cli_tools::format_duration_seconds(self.duration),
+            self.codec,
+            self.width,
+            self.height,
+            self.bitrate_kbps / 1000,
+        )
     }
 }
 
@@ -423,13 +432,14 @@ impl VideoConvert {
         Ok(files)
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn process_files(&self, files: Vec<VideoFile>) -> Result<ConversionStats> {
         let mut stats = ConversionStats::default();
         let total = files.len().min(self.config.number);
         let total_digits = total.to_string().chars().count();
 
         let mut processed_files: usize = 0;
-        for (index, file) in files.into_iter().enumerate() {
+        for file in files {
             let file_display = cli_tools::path_to_string_relative(&file.path);
             println!(
                 "[{:>width$}/{}] Processing: {}",
@@ -450,8 +460,8 @@ impl VideoConvert {
                 } => {
                     println!(
                         "  ✓ Converted: {} -> {}",
-                        format_size(*original_size),
-                        format_size(*converted_size),
+                        cli_tools::format_size(*original_size),
+                        cli_tools::format_size(*converted_size),
                     );
                     processed_files += 1;
                 }
@@ -485,12 +495,7 @@ impl VideoConvert {
             }
         };
 
-        println!(
-            "  Codec: {}, Bitrate: {} Mbps, Size: {}",
-            info.codec,
-            info.bitrate_kbps,
-            format_size(info.size_bytes)
-        );
+        println!("{}", info);
 
         // Check bitrate threshold
         if info.bitrate_kbps < self.config.bitrate {
@@ -511,7 +516,7 @@ impl VideoConvert {
             };
         }
 
-        let output_path = self.generate_output_path(file);
+        let output_path = Self::get_output_path(file);
 
         // Check if output already exists
         if output_path.exists() && !self.config.overwrite {
@@ -528,10 +533,10 @@ impl VideoConvert {
 
         match result {
             Ok(()) => {
-                if !self.config.dryrun {
-                    if let Err(e) = self.delete_original_file(&file.path) {
-                        print_warning!("Failed to delete original file: {e}");
-                    }
+                if !self.config.dryrun
+                    && let Err(e) = self.delete_original_file(&file.path)
+                {
+                    print_warning!("Failed to delete original file: {e}");
                 }
 
                 if is_hevc {
@@ -553,61 +558,102 @@ impl VideoConvert {
         let output = Command::new("ffprobe")
             .args([
                 "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
+                "error",
                 "-select_streams",
-                "v:0",
+                "v",
+                "-show_entries",
+                "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
+                "-output_format",
+                "default=nokey=0:noprint_wrappers=1",
             ])
             .arg(path)
             .output()
             .context("Failed to execute ffprobe")?;
 
+        let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() {
-            anyhow::bail!("ffprobe failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!("ffprobe failed: {}", stderr.trim());
         }
 
-        let json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).context("Failed to parse ffprobe output")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-        // Get codec from first video stream
-        let codec = json["streams"]
-            .as_array()
-            .and_then(|streams| streams.first())
-            .and_then(|stream| stream["codec_name"].as_str())
-            .unwrap_or("unknown")
-            .to_lowercase();
+        // Parse key=value pairs from output
+        // Example output:
+        // ```
+        //  codec_name=h264
+        //  bit_rate=7345573
+        //  duration=2425.237007
+        //  size=2292495805
+        //  bit_rate=7562133
+        // ```
+        let mut codec = String::new();
+        let mut bitrate_bps: Option<u64> = None;
+        let mut size_bytes: Option<u64> = None;
+        let mut duration: Option<f64> = None;
+        let mut width: Option<u32> = None;
+        let mut height: Option<u32> = None;
 
-        // Get bitrate from format (in bits/sec, convert to kbps)
-        let bitrate_bps = json["format"]["bit_rate"]
-            .as_str()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        let bitrate_kbps = bitrate_bps / 1000;
+        for line in stdout.lines() {
+            let line = line.trim();
+            if let Some((key, value)) = line.split_once('=') {
+                match key {
+                    "codec_name" => codec = value.to_lowercase(),
+                    // Try multiple bitrate sources: stream bit_rate, format bit_rate, or BPS tags
+                    "bit_rate" | "BPS" | "BPS-eng" => {
+                        if bitrate_bps.is_none()
+                            && let Ok(bps) = value.parse::<u64>()
+                            && bps > 0
+                        {
+                            bitrate_bps = Some(bps);
+                        }
+                    }
+                    "size" => {
+                        if let Ok(size) = value.parse::<u64>() {
+                            size_bytes = Some(size);
+                        }
+                    }
+                    "duration" => {
+                        if let Ok(seconds) = value.parse::<f64>() {
+                            duration = Some(seconds);
+                        }
+                    }
+                    "width" => {
+                        if let Ok(w) = value.parse::<u32>() {
+                            width = Some(w);
+                        }
+                    }
+                    "height" => {
+                        if let Ok(h) = value.parse::<u32>() {
+                            height = Some(h);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
 
-        // Get file size
-        let size_bytes = json["format"]["size"]
-            .as_str()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+        // Fall back to file metadata for size if not in ffprobe output
+        let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+
+        // Convert bitrate from bps to kbps
+        let bitrate_kbps = bitrate_bps.unwrap_or(0) / 1000;
+
+        let duration = duration.unwrap_or(0.0);
+        let width = width.unwrap_or(0);
+        let height = height.unwrap_or(0);
+
+        if !stderr.is_empty() && self.config.verbose {
+            print_warning!("ffprobe: {}", stderr.trim());
+        }
 
         Ok(VideoInfo {
             codec,
             bitrate_kbps,
             size_bytes,
+            duration,
+            width,
+            height,
         })
-    }
-
-    /// Generate output path for converted file
-    fn generate_output_path(&self, file: &VideoFile) -> PathBuf {
-        let stem = file.path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-        let parent = file.path.parent().unwrap_or_else(|| Path::new("."));
-
-        // Add .x265 marker and use mp4 extension
-        let new_name = format!("{stem}.x265.mp4");
-        parent.join(new_name)
     }
 
     /// Remux video (copy streams to new container)
@@ -616,16 +662,12 @@ impl VideoConvert {
             println!("  Remuxing to: {}", output.display());
         }
 
-        if self.config.dryrun {
-            println!("  [DRY RUN] ffmpeg -i {:?} -c copy {:?}", input, output);
-            return Ok(());
-        }
-
         let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-i"]).arg(input).args(["-c", "copy", "-y"]).arg(output);
+        cmd.arg("-i").arg(input).args(["-c", "copy", "-y"]).arg(output);
 
-        if !self.config.verbose {
-            cmd.args(["-v", "quiet", "-stats"]);
+        if self.config.dryrun {
+            println!("[DRYRUN] {cmd:#?}");
+            return Ok(());
         }
 
         let status = cmd.status().context("Failed to execute ffmpeg")?;
@@ -643,14 +685,6 @@ impl VideoConvert {
             println!("  Converting to HEVC: {}", output.display());
         }
 
-        if self.config.dryrun {
-            println!(
-                "  [DRY RUN] ffmpeg -i {:?} -c:v hevc_nvenc -preset p7 -cq 23 -c:a copy {:?}",
-                input, output
-            );
-            return Ok(());
-        }
-
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-i"])
             .arg(input)
@@ -661,6 +695,15 @@ impl VideoConvert {
             cmd.args(["-v", "quiet", "-stats"]);
         }
 
+        if self.config.dryrun {
+            println!(
+                "  [DRY RUN] ffmpeg -i {} -c:v hevc_nvenc -preset p7 -cq 23 -c:a copy {}",
+                input.display(),
+                output.display()
+            );
+            return Ok(());
+        }
+
         let status = cmd.status().context("Failed to execute ffmpeg")?;
 
         if !status.success() {
@@ -669,16 +712,6 @@ impl VideoConvert {
             anyhow::bail!("ffmpeg conversion failed with status: {status}");
         }
 
-        Ok(())
-    }
-
-    /// Handle the original file after successful conversion
-    fn delete_original_file(&self, path: &Path) -> Result<()> {
-        if self.config.delete {
-            fs::remove_file(path).context("Failed to delete original file")?;
-        } else {
-            trash::delete(path).context("Failed to move original file to trash")?;
-        }
         Ok(())
     }
 
@@ -707,6 +740,23 @@ impl VideoConvert {
         }
 
         true
+    }
+
+    /// Get output path for the new file
+    fn get_output_path(file: &VideoFile) -> PathBuf {
+        let parent = file.path.parent().unwrap_or_else(|| Path::new("."));
+        let new_name = format!("{}.x265.mp4", file.name);
+        parent.join(new_name)
+    }
+
+    /// Handle the original file after successful processing
+    fn delete_original_file(&self, path: &Path) -> Result<()> {
+        if self.config.delete {
+            std::fs::remove_file(path).context("Failed to delete original file")?;
+        } else {
+            trash::delete(path).context("Failed to move original file to trash")?;
+        }
+        Ok(())
     }
 }
 
