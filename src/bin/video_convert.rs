@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -529,7 +529,7 @@ impl VideoConvert {
         let result = if is_hevc {
             self.remux_to_mp4(&file.path, &output_path)
         } else {
-            self.convert_to_hevc_mp4(&file.path, &output_path)
+            self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension)
         };
 
         match result {
@@ -699,41 +699,138 @@ impl VideoConvert {
             return Ok(());
         }
 
-        let status = cmd.status().context("Failed to execute ffmpeg")?;
+        let status = cmd
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to execute ffmpeg")?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        // Fallback: if audio codec is not MP4-friendly, transcode audio to AAC
+        print_warning!("Remux failed with code {status}. Retrying with AAC audio transcode...");
+
+        // Remove failed output file if it exists
+        if output.exists() {
+            let _ = fs::remove_file(output);
+        }
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(FFMPEG_DEFAULT_ARGS)
+            .arg("-i")
+            .arg(input)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-map",
+                "-0:t",
+                "-map",
+                "-0:d",
+                "-sn",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                "-tag:v",
+                "hvc1",
+            ])
+            .arg(output);
+
+        let status = cmd
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to execute ffmpeg")?;
 
         if !status.success() {
-            anyhow::bail!("ffmpeg remux failed with status: {status}");
+            let _ = fs::remove_file(output);
+            anyhow::bail!("ffmpeg remux with AAC transcode failed with status: {status}");
         }
 
         Ok(())
     }
 
     /// Convert video to HEVC using NVENC
-    fn convert_to_hevc_mp4(&self, input: &Path, output: &Path) -> Result<()> {
+    fn convert_to_hevc_mp4(&self, input: &Path, output: &Path, info: &VideoInfo, extension: &str) -> Result<()> {
         if self.config.verbose {
             println!("  Converting to HEVC: {}", output.display());
         }
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(["-i"])
-            .arg(input)
-            .args(["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "23", "-c:a", "copy", "-y"])
-            .arg(output);
+        // Determine quality level based on resolution and bitrate.
+        // Quality level 1 to 51, lower is better quality and bigger file size.
+        let is_4k = info.width.max(info.height) >= 2160;
+        let bitrate_mbps = info.bitrate_kbps as f64 / 1000.0;
 
-        if !self.config.verbose {
-            cmd.args(["-v", "quiet", "-stats"]);
+        let quality_level = if is_4k {
+            if bitrate_mbps > 26.0 {
+                30
+            } else if bitrate_mbps > 18.0 {
+                31
+            } else if bitrate_mbps > 10.0 {
+                32
+            } else {
+                33
+            }
+        } else if bitrate_mbps > 16.0 {
+            28
+        } else if bitrate_mbps > 12.0 {
+            29
+        } else if bitrate_mbps > 6.0 {
+            30
+        } else {
+            31
+        };
+
+        println!("  Using quality level: {quality_level}");
+
+        // GPU tuning for RTX 4090 to use more VRAM and improve performance
+        let extra_hw_frames = "64";
+        let lookahead = "48";
+        let preset = "p5"; // slow (good quality)
+
+        // Determine audio codec: copy for mp4/mkv, transcode for others
+        let copy_audio = extension == "mp4" || extension == "mkv";
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(FFMPEG_DEFAULT_ARGS)
+            .args(["-probesize", "50M", "-analyzeduration", "1M"])
+            .args(["-extra_hw_frames", extra_hw_frames])
+            .arg("-i")
+            .arg(input)
+            .args(["-vf", "hwupload_cuda,scale_cuda=format=nv12"])
+            .args(["-c:v", "hevc_nvenc"])
+            .args(["-rc:v", "vbr"])
+            .args(["-cq:v", &quality_level.to_string()])
+            .args(["-preset", preset])
+            .args(["-b:v", "0"])
+            .args(["-rc-lookahead", lookahead])
+            .args(["-spatial_aq", "1", "-temporal_aq", "1"])
+            .args(["-tag:v", "hvc1"]);
+        if copy_audio {
+            cmd.args(["-c:a", "copy"]);
+        } else {
+            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
         }
+        cmd.arg(output);
 
         if self.config.dryrun {
-            println!(
-                "  [DRY RUN] ffmpeg -i {} -c:v hevc_nvenc -preset p7 -cq 23 -c:a copy {}",
-                input.display(),
-                output.display()
-            );
+            println!("[DRYRUN] {cmd:#?}");
             return Ok(());
         }
 
-        let status = cmd.status().context("Failed to execute ffmpeg")?;
+        let status = cmd
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to execute ffmpeg")?;
 
         if !status.success() {
             // Clean up failed output file
