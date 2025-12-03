@@ -245,6 +245,18 @@ pub fn path_to_string(path: &Path) -> String {
     )
 }
 
+/// Convert given path to filename string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_filename_string(path: &Path) -> String {
+    os_str_to_string(path.file_name().unwrap_or_default())
+}
+
+/// Convert given path to file extension lowercase string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_file_extension_string(path: &Path) -> String {
+    os_str_to_string(path.extension().unwrap_or_default()).to_lowercase()
+}
+
 /// Get relative path and convert to string with invalid unicode handling.
 #[must_use]
 pub fn path_to_string_relative(path: &Path) -> String {

@@ -29,9 +29,9 @@ struct Args {
     #[arg(short, long)]
     all: bool,
 
-    /// Skip files with bitrate lower than NUM kbps (default: 8000)
-    #[arg(short, long, default_value = "8000")]
-    bitrate: u32,
+    /// Skip files with bitrate lower than LIMIT kbps
+    #[arg(short, long, name = "LIMIT", default_value_t = 8000)]
+    bitrate: u64,
 
     /// Delete input files immediately instead of moving to trash
     #[arg(short, long)]
@@ -52,6 +52,10 @@ struct Args {
     /// Exclude files that match the given pattern
     #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE_PATTERN")]
     exclude: Vec<String>,
+
+    /// File extensions to convert
+    #[arg(short = 't', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
+    extension: Vec<String>,
 
     /// Number of files to convert (default: 1)
     #[arg(short, long, default_value = "1")]
@@ -80,7 +84,7 @@ struct VideoConvertConfig {
     #[serde(default)]
     convert_all_types: bool,
     #[serde(default)]
-    bitrate: Option<u32>,
+    bitrate: Option<u64>,
     #[serde(default)]
     delete: bool,
     #[serde(default)]
@@ -111,8 +115,9 @@ struct UserConfig {
 
 /// Final config created from CLI arguments and user config file.
 #[derive(Debug, Default)]
+#[allow(unused)]
 struct Config {
-    bitrate: u32,
+    bitrate: u64,
     convert_all: bool,
     convert_other: bool,
     delete: bool,
@@ -131,6 +136,13 @@ struct Config {
 #[derive(Debug)]
 struct VideoConvert {
     config: Config,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct VideoFile {
+    path: PathBuf,
+    name: String,
+    extension: String,
 }
 
 impl VideoConvertConfig {
@@ -155,6 +167,30 @@ impl VideoConvertConfig {
             })
             .map(|config| config.video_convert)
             .unwrap_or_default()
+    }
+}
+
+impl VideoFile {
+    pub fn new(path: &Path) -> Self {
+        let path = path.to_owned();
+        let name = cli_tools::path_to_filename_string(&path);
+        let extension = cli_tools::path_to_file_extension_string(&path);
+
+        Self { path, name, extension }
+    }
+
+    pub fn from_dir_entry(entry: walkdir::DirEntry) -> Self {
+        let path = entry.into_path();
+        let name = cli_tools::path_to_filename_string(&path);
+        let extension = cli_tools::path_to_file_extension_string(&path);
+
+        Self { path, name, extension }
+    }
+}
+
+impl std::fmt::Display for VideoFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path.display())
     }
 }
 
@@ -218,7 +254,7 @@ impl VideoConvert {
         if self.config.verbose {
             println!("Found {} file(s) to process", files.len());
             for file in &files {
-                println!("  {}", file.display());
+                println!("  {}", cli_tools::path_to_string_relative(&file.path));
             }
         }
 
@@ -227,14 +263,16 @@ impl VideoConvert {
 
     /// Gather video files based on the config settings.
     /// Returns a list of files to convert.
-    fn gather_files_to_convert(&self) -> Result<Vec<PathBuf>> {
+    fn gather_files_to_convert(&self) -> Result<Vec<VideoFile>> {
         let path = &self.config.path;
 
         if path.is_file() {
-            if self.should_include_file(path) {
-                return Ok(vec![path.clone()]);
-            }
-            return Ok(vec![]);
+            let file = VideoFile::new(path);
+            return if self.should_include_file(&file) {
+                Ok(vec![file])
+            } else {
+                Ok(vec![])
+            };
         }
 
         // Path must be a directory
@@ -249,42 +287,37 @@ impl VideoConvert {
             .into_iter()
             .filter_map(std::result::Result::ok);
 
-        let mut files: Vec<PathBuf> = walker
+        let mut files: Vec<VideoFile> = walker
             .filter(|entry| entry.file_type().is_file())
-            .map(walkdir::DirEntry::into_path)
-            .filter(|path| self.should_include_file(path))
+            .map(VideoFile::from_dir_entry)
+            .filter(|file| self.should_include_file(file))
             .collect();
 
         files.sort();
         Ok(files)
     }
 
-    /// Check if a file should be included based on extension and include/exclude patterns.
-    fn should_include_file(&self, path: &Path) -> bool {
-        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-
+    /// Check if a file should be converted based on extension and include/exclude patterns.
+    fn should_include_file(&self, file: &VideoFile) -> bool {
         // Skip files with "x265" in the name (already converted)
-        if file_name.contains(".x265.") {
+        if file.name.contains(".x265.") {
             return false;
         }
 
-        // Check file extension
-        let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-
-        if !self.config.extensions.iter().any(|ext| ext == &extension) {
+        if !self.config.extensions.iter().any(|ext| ext == &file.extension) {
             return false;
         }
 
         // Check include patterns (if specified, file must match at least one)
         if !self.config.include.is_empty() {
-            let matches_include = self.config.include.iter().any(|pattern| file_name.contains(pattern));
+            let matches_include = self.config.include.iter().any(|pattern| file.name.contains(pattern));
             if !matches_include {
                 return false;
             }
         }
 
         // Check exclude patterns (file must not match any)
-        if self.config.exclude.iter().any(|pattern| file_name.contains(pattern)) {
+        if self.config.exclude.iter().any(|pattern| file.name.contains(pattern)) {
             return false;
         }
 
