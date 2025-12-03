@@ -59,6 +59,10 @@ name = "res"
 path = "src/bin/resolution.rs"
 
 [[bin]]
+name = "vconvert"
+path = "src/bin/video_convert.rs"
+
+[[bin]]
 name = "visaparse"
 path = "src/bin/visa_parse.rs"
 
