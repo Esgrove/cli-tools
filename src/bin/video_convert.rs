@@ -23,6 +23,8 @@ const ALL_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg"
 
 const TARGET_EXTENSION: &str = "mp4";
 
+const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
 struct Args {
@@ -495,15 +497,14 @@ impl VideoConvert {
             }
         };
 
-        println!("{}", info);
+        println!("{info}");
 
         // Check bitrate threshold
         if info.bitrate_kbps < self.config.bitrate {
+            let bitrate = info.bitrate_kbps;
+            let threshold = self.config.bitrate;
             return ProcessResult::Skipped {
-                reason: format!(
-                    "Bitrate {} kbps is below threshold {} kbps",
-                    info.bitrate_kbps, self.config.bitrate
-                ),
+                reason: format!("Bitrate {bitrate} kbps is below threshold {threshold} kbps"),
             };
         }
 
@@ -662,8 +663,36 @@ impl VideoConvert {
             println!("  Remuxing to: {}", output.display());
         }
 
+        // Try pure copy and drop unsupported streams
+        // -map 0:v:0   -> first video stream only
+        // -map 0:a?    -> all audio streams (optional, if any)
+        // -map -0:t    -> drop attachments
+        // -map -0:d    -> drop data streams
+        // -sn          -> drop subtitles (avoids failures with non-mov_text subs)
         let mut cmd = Command::new("ffmpeg");
-        cmd.arg("-i").arg(input).args(["-c", "copy", "-y"]).arg(output);
+        cmd.args(FFMPEG_DEFAULT_ARGS)
+            .arg("-i")
+            .arg(input)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-map",
+                "-0:t",
+                "-map",
+                "-0:d",
+                "-sn",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "-tag:v",
+                "hvc1",
+            ])
+            .arg(output);
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
