@@ -178,7 +178,7 @@ enum ProcessResult {
     Remuxed {},
     /// File was skipped (already HEVC in correct container or low bitrate)
     Skipped { reason: String },
-    /// Processing failed
+    /// Failed to process file
     Failed { error: String },
 }
 
@@ -444,11 +444,16 @@ impl VideoConvert {
         for file in files {
             let file_display = cli_tools::path_to_string_relative(&file.path);
             println!(
-                "[{:>width$}/{}] Processing: {}",
-                processed_files + 1,
-                self.config.number,
-                file_display,
-                width = total_digits
+                "{}",
+                format!(
+                    "[{:>width$}/{}] Processing: {}",
+                    processed_files + 1,
+                    self.config.number,
+                    file_display,
+                    width = total_digits
+                )
+                .bold()
+                .magenta()
             );
 
             let start = Instant::now();
@@ -526,31 +531,10 @@ impl VideoConvert {
             };
         }
 
-        let result = if is_hevc {
+        if is_hevc {
             self.remux_to_mp4(&file.path, &output_path)
         } else {
             self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension)
-        };
-
-        match result {
-            Ok(()) => {
-                if !self.config.dryrun
-                    && let Err(e) = self.delete_original_file(&file.path)
-                {
-                    print_warning!("Failed to delete original file: {e}");
-                }
-
-                if is_hevc {
-                    ProcessResult::Remuxed {}
-                } else {
-                    let new_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                    ProcessResult::Converted {
-                        original_size: info.size_bytes,
-                        converted_size: new_size,
-                    }
-                }
-            }
-            Err(e) => ProcessResult::Failed { error: e.to_string() },
         }
     }
 
@@ -658,9 +642,9 @@ impl VideoConvert {
     }
 
     /// Remux video (copy streams to new container)
-    fn remux_to_mp4(&self, input: &Path, output: &Path) -> Result<()> {
+    fn remux_to_mp4(&self, input: &Path, output: &Path) -> ProcessResult {
         if self.config.verbose {
-            println!("  Remuxing to: {}", output.display());
+            println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
         }
 
         // Try pure copy and drop unsupported streams
@@ -696,17 +680,23 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
-            return Ok(());
+            return ProcessResult::Remuxed {};
         }
 
-        let status = cmd
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to execute ffmpeg")?;
+        let status = match cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
+            Ok(s) => s,
+            Err(e) => {
+                return ProcessResult::Failed {
+                    error: format!("Failed to execute ffmpeg: {e}"),
+                };
+            }
+        };
 
         if status.success() {
-            return Ok(());
+            if let Err(e) = self.delete_original_file(input) {
+                print_warning!("Failed to delete original file: {e}");
+            }
+            return ProcessResult::Remuxed {};
         }
 
         // Fallback: if audio codec is not MP4-friendly, transcode audio to AAC
@@ -744,24 +734,33 @@ impl VideoConvert {
             ])
             .arg(output);
 
-        let status = cmd
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to execute ffmpeg")?;
+        let status = match cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
+            Ok(s) => s,
+            Err(e) => {
+                return ProcessResult::Failed {
+                    error: format!("Failed to execute ffmpeg: {e}"),
+                };
+            }
+        };
 
         if !status.success() {
             let _ = fs::remove_file(output);
-            anyhow::bail!("ffmpeg remux with AAC transcode failed with status: {status}");
+            return ProcessResult::Failed {
+                error: format!("ffmpeg remux with AAC transcode failed with status: {status}"),
+            };
         }
 
-        Ok(())
+        if let Err(e) = self.delete_original_file(input) {
+            print_warning!("Failed to delete original file: {e}");
+        }
+
+        ProcessResult::Remuxed {}
     }
 
     /// Convert video to HEVC using NVENC
-    fn convert_to_hevc_mp4(&self, input: &Path, output: &Path, info: &VideoInfo, extension: &str) -> Result<()> {
+    fn convert_to_hevc_mp4(&self, input: &Path, output: &Path, info: &VideoInfo, extension: &str) -> ProcessResult {
         if self.config.verbose {
-            println!("  Converting to HEVC: {}", output.display());
+            println!("Converting to HEVC: {}", cli_tools::path_to_string_relative(output));
         }
 
         // Determine quality level based on resolution and bitrate.
@@ -823,22 +822,39 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
-            return Ok(());
+            return ProcessResult::Converted {
+                original_size: info.size_bytes,
+                converted_size: 0,
+            };
         }
 
-        let status = cmd
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .context("Failed to execute ffmpeg")?;
+        let status = match cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
+            Ok(s) => s,
+            Err(e) => {
+                return ProcessResult::Failed {
+                    error: format!("Failed to execute ffmpeg: {e}"),
+                };
+            }
+        };
 
         if !status.success() {
             // Clean up failed output file
             let _ = fs::remove_file(output);
-            anyhow::bail!("ffmpeg conversion failed with status: {status}");
+            return ProcessResult::Failed {
+                error: format!("ffmpeg conversion failed with status: {status}"),
+            };
         }
 
-        Ok(())
+        if let Err(e) = self.delete_original_file(input) {
+            print_warning!("Failed to delete original file: {e}");
+        }
+
+        let new_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
+
+        ProcessResult::Converted {
+            original_size: info.size_bytes,
+            converted_size: new_size,
+        }
     }
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
