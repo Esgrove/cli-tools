@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "3.4.0"
+version = "4.0.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/Esgrove/cli-tools"
 keywords = ["cli", "rename"]
 categories = ["command-line-utilities"]
-rust-version = "1.89"
+rust-version = "1.90"
 
 [dependencies]
 anyhow = "1.0.100"
