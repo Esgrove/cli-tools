@@ -46,19 +46,19 @@ struct Args {
     force: bool,
 
     /// Include files that match the given pattern
-    #[arg(short = 'i', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE_PATTERN")]
+    #[arg(short = 'i', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
     include: Vec<String>,
 
     /// Exclude files that match the given pattern
-    #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE_PATTERN")]
+    #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
     exclude: Vec<String>,
 
-    /// File extensions to convert
+    /// Override file extensions to convert
     #[arg(short = 't', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
     extension: Vec<String>,
 
-    /// Number of files to convert (default: 1)
-    #[arg(short, long, default_value = "1")]
+    /// Number of files to convert
+    #[arg(short, long, default_value_t = 1)]
     number: usize,
 
     /// Convert file types other than mp4
@@ -208,7 +208,9 @@ impl Config {
         let convert_all = args.all || user_config.convert_all_types;
         let convert_other = args.other || user_config.convert_other_types;
 
-        let extensions = if !user_config.extensions.is_empty() {
+        let extensions = if !args.extension.is_empty() {
+            args.extension.iter().map(|s| s.to_lowercase()).collect()
+        } else if !user_config.extensions.is_empty() {
             user_config.extensions.iter().map(|s| s.to_lowercase()).collect()
         } else if args.all || user_config.convert_all_types {
             ALL_EXTENSIONS.iter().map(|s| (*s).to_string()).collect()
@@ -253,10 +255,9 @@ impl VideoConvert {
 
         if self.config.verbose {
             println!("Found {} file(s) to process", files.len());
-            for file in &files {
-                println!("  {}", cli_tools::path_to_string_relative(&file.path));
-            }
         }
+
+        self.process_files(files)?;
 
         Ok(())
     }
@@ -295,6 +296,13 @@ impl VideoConvert {
 
         files.sort();
         Ok(files)
+    }
+
+    fn process_files(&self, files: Vec<VideoFile>) -> Result<()> {
+        for file in files {
+            println!("  {}", cli_tools::path_to_string_relative(&file.path));
+        }
+        Ok(())
     }
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
