@@ -1,13 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use clap_complete::Shell;
+use colored::Colorize;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use cli_tools::print_error;
+use cli_tools::{print_error, print_warning};
 
 /// Default video extensions
 const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];
@@ -17,6 +20,8 @@ const OTHER_EXTENSIONS: &[&str] = &["mkv", "wmv", "flv", "m4v", "ts", "mpg", "av
 
 /// All video extensions
 const ALL_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
+
+const TARGET_EXTENSION: &str = "mp4";
 
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
@@ -145,6 +150,125 @@ struct VideoFile {
     extension: String,
 }
 
+/// Information about a video file from ffprobe
+#[derive(Debug)]
+struct VideoInfo {
+    /// Video codec name (e.g., "hevc", "h264")
+    codec: String,
+    /// Video bitrate in kbps
+    bitrate_kbps: u64,
+    /// File size in bytes
+    size_bytes: u64,
+}
+
+/// Result of processing a single file
+#[derive(Debug)]
+enum ProcessResult {
+    /// File was converted successfully
+    Converted { original_size: u64, converted_size: u64 },
+    /// File was remuxed (already HEVC, just changed container to MP4)
+    Remuxed {},
+    /// File was skipped (already HEVC in correct container or low bitrate)
+    Skipped { reason: String },
+    /// Processing failed
+    Failed { error: String },
+}
+
+/// Statistics for the conversion run
+#[derive(Debug, Default)]
+struct ConversionStats {
+    files_converted: usize,
+    files_remuxed: usize,
+    files_skipped: usize,
+    files_failed: usize,
+    total_original_size: u64,
+    total_converted_size: u64,
+    total_duration: Duration,
+}
+
+impl ConversionStats {
+    fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
+        self.total_duration += duration;
+        match result {
+            ProcessResult::Converted {
+                original_size,
+                converted_size,
+            } => {
+                self.files_converted += 1;
+                self.total_original_size += original_size;
+                self.total_converted_size += converted_size;
+            }
+            ProcessResult::Remuxed {} => {
+                self.files_remuxed += 1;
+            }
+            ProcessResult::Skipped { .. } => {
+                self.files_skipped += 1;
+            }
+            ProcessResult::Failed { .. } => {
+                self.files_failed += 1;
+            }
+        }
+    }
+
+    fn space_saved(&self) -> i64 {
+        self.total_original_size as i64 - self.total_converted_size as i64
+    }
+
+    fn print_summary(&self) {
+        println!("{}", "\n--- Conversion Summary ---".bold().magenta());
+        println!("Files converted: {}", self.files_converted);
+        println!("Files remuxed:   {}", self.files_remuxed);
+        println!("Files skipped:   {}", self.files_skipped);
+        println!("Files failed:    {}", self.files_failed);
+        println!("");
+
+        if self.files_converted > 0 {
+            println!("Total original size:    {}", format_size(self.total_original_size));
+            println!("Total converted size:   {}", format_size(self.total_converted_size));
+
+            if self.total_original_size > 0 {
+                let ratio = self.total_converted_size as f64 / self.total_original_size as f64 * 100.0;
+
+                let saved = self.space_saved();
+                if saved >= 0 {
+                    println!("Space saved:     {} ({:.1}%)", format_size(saved as u64), ratio);
+                } else {
+                    println!("Space increased: {} ({:.1}%)", format_size((-saved) as u64), ratio);
+                }
+            }
+        }
+
+        println!("Total time:      {}", format_duration(self.total_duration));
+    }
+}
+
+/// Format bytes as human-readable size
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    }
+}
+
+/// Format duration as human-readable string
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 impl VideoConvertConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
@@ -257,7 +381,8 @@ impl VideoConvert {
             println!("Found {} file(s) to process", files.len());
         }
 
-        self.process_files(files)?;
+        let stats = self.process_files(files)?;
+        stats.print_summary();
 
         Ok(())
     }
@@ -298,9 +423,261 @@ impl VideoConvert {
         Ok(files)
     }
 
-    fn process_files(&self, files: Vec<VideoFile>) -> Result<()> {
-        for file in files {
-            println!("  {}", cli_tools::path_to_string_relative(&file.path));
+    fn process_files(&self, files: Vec<VideoFile>) -> Result<ConversionStats> {
+        let mut stats = ConversionStats::default();
+        let total = files.len().min(self.config.number);
+        let total_digits = total.to_string().chars().count();
+
+        let mut processed_files: usize = 0;
+        for (index, file) in files.into_iter().enumerate() {
+            let file_display = cli_tools::path_to_string_relative(&file.path);
+            println!(
+                "[{:>width$}/{}] Processing: {}",
+                processed_files + 1,
+                self.config.number,
+                file_display,
+                width = total_digits
+            );
+
+            let start = Instant::now();
+            let result = self.process_single_file(&file);
+            let duration = start.elapsed();
+
+            match &result {
+                ProcessResult::Converted {
+                    original_size,
+                    converted_size,
+                } => {
+                    println!(
+                        "  ✓ Converted: {} -> {}",
+                        format_size(*original_size),
+                        format_size(*converted_size),
+                    );
+                    processed_files += 1;
+                }
+                ProcessResult::Remuxed {} => {
+                    println!("  ✓ Remuxed",);
+                    processed_files += 1;
+                }
+                ProcessResult::Skipped { reason } => {
+                    println!("  ⊘ Skipped: {reason}");
+                }
+                ProcessResult::Failed { error } => {
+                    print_error!("  ✗ Failed: {error}");
+                }
+            }
+
+            stats.add_result(&result, duration);
+        }
+
+        Ok(stats)
+    }
+
+    /// Process a single video file
+    fn process_single_file(&self, file: &VideoFile) -> ProcessResult {
+        // Get video info
+        let info = match self.get_video_info(&file.path) {
+            Ok(info) => info,
+            Err(e) => {
+                return ProcessResult::Failed {
+                    error: format!("Failed to get video info: {e}"),
+                };
+            }
+        };
+
+        println!(
+            "  Codec: {}, Bitrate: {} Mbps, Size: {}",
+            info.codec,
+            info.bitrate_kbps,
+            format_size(info.size_bytes)
+        );
+
+        // Check bitrate threshold
+        if info.bitrate_kbps < self.config.bitrate {
+            return ProcessResult::Skipped {
+                reason: format!(
+                    "Bitrate {} kbps is below threshold {} kbps",
+                    info.bitrate_kbps, self.config.bitrate
+                ),
+            };
+        }
+
+        // Determine if we need to convert or just remux
+        let is_hevc = info.codec == "hevc" || info.codec == "h265";
+
+        if is_hevc && file.extension == TARGET_EXTENSION {
+            return ProcessResult::Skipped {
+                reason: "Already HEVC in MP4 container".to_string(),
+            };
+        }
+
+        let output_path = self.generate_output_path(file);
+
+        // Check if output already exists
+        if output_path.exists() && !self.config.overwrite {
+            return ProcessResult::Skipped {
+                reason: format!("Output file already exists: {}", output_path.display()),
+            };
+        }
+
+        let result = if is_hevc {
+            self.remux_to_mp4(&file.path, &output_path)
+        } else {
+            self.convert_to_hevc_mp4(&file.path, &output_path)
+        };
+
+        match result {
+            Ok(()) => {
+                if !self.config.dryrun {
+                    if let Err(e) = self.delete_original_file(&file.path) {
+                        print_warning!("Failed to delete original file: {e}");
+                    }
+                }
+
+                if is_hevc {
+                    ProcessResult::Remuxed {}
+                } else {
+                    let new_size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                    ProcessResult::Converted {
+                        original_size: info.size_bytes,
+                        converted_size: new_size,
+                    }
+                }
+            }
+            Err(e) => ProcessResult::Failed { error: e.to_string() },
+        }
+    }
+
+    /// Get video information using ffprobe
+    fn get_video_info(&self, path: &Path) -> Result<VideoInfo> {
+        let output = Command::new("ffprobe")
+            .args([
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                "-select_streams",
+                "v:0",
+            ])
+            .arg(path)
+            .output()
+            .context("Failed to execute ffprobe")?;
+
+        if !output.status.success() {
+            anyhow::bail!("ffprobe failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).context("Failed to parse ffprobe output")?;
+
+        // Get codec from first video stream
+        let codec = json["streams"]
+            .as_array()
+            .and_then(|streams| streams.first())
+            .and_then(|stream| stream["codec_name"].as_str())
+            .unwrap_or("unknown")
+            .to_lowercase();
+
+        // Get bitrate from format (in bits/sec, convert to kbps)
+        let bitrate_bps = json["format"]["bit_rate"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let bitrate_kbps = bitrate_bps / 1000;
+
+        // Get file size
+        let size_bytes = json["format"]["size"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+
+        Ok(VideoInfo {
+            codec,
+            bitrate_kbps,
+            size_bytes,
+        })
+    }
+
+    /// Generate output path for converted file
+    fn generate_output_path(&self, file: &VideoFile) -> PathBuf {
+        let stem = file.path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+        let parent = file.path.parent().unwrap_or_else(|| Path::new("."));
+
+        // Add .x265 marker and use mp4 extension
+        let new_name = format!("{stem}.x265.mp4");
+        parent.join(new_name)
+    }
+
+    /// Remux video (copy streams to new container)
+    fn remux_to_mp4(&self, input: &Path, output: &Path) -> Result<()> {
+        if self.config.verbose {
+            println!("  Remuxing to: {}", output.display());
+        }
+
+        if self.config.dryrun {
+            println!("  [DRY RUN] ffmpeg -i {:?} -c copy {:?}", input, output);
+            return Ok(());
+        }
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-i"]).arg(input).args(["-c", "copy", "-y"]).arg(output);
+
+        if !self.config.verbose {
+            cmd.args(["-v", "quiet", "-stats"]);
+        }
+
+        let status = cmd.status().context("Failed to execute ffmpeg")?;
+
+        if !status.success() {
+            anyhow::bail!("ffmpeg remux failed with status: {status}");
+        }
+
+        Ok(())
+    }
+
+    /// Convert video to HEVC using NVENC
+    fn convert_to_hevc_mp4(&self, input: &Path, output: &Path) -> Result<()> {
+        if self.config.verbose {
+            println!("  Converting to HEVC: {}", output.display());
+        }
+
+        if self.config.dryrun {
+            println!(
+                "  [DRY RUN] ffmpeg -i {:?} -c:v hevc_nvenc -preset p7 -cq 23 -c:a copy {:?}",
+                input, output
+            );
+            return Ok(());
+        }
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-i"])
+            .arg(input)
+            .args(["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "23", "-c:a", "copy", "-y"])
+            .arg(output);
+
+        if !self.config.verbose {
+            cmd.args(["-v", "quiet", "-stats"]);
+        }
+
+        let status = cmd.status().context("Failed to execute ffmpeg")?;
+
+        if !status.success() {
+            // Clean up failed output file
+            let _ = fs::remove_file(output);
+            anyhow::bail!("ffmpeg conversion failed with status: {status}");
+        }
+
+        Ok(())
+    }
+
+    /// Handle the original file after successful conversion
+    fn delete_original_file(&self, path: &Path) -> Result<()> {
+        if self.config.delete {
+            fs::remove_file(path).context("Failed to delete original file")?;
+        } else {
+            trash::delete(path).context("Failed to move original file to trash")?;
         }
         Ok(())
     }
