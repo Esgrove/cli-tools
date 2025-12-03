@@ -360,6 +360,7 @@ pub fn show_diff(old: &str, new: &str) {
 }
 
 /// Format bytes as human-readable size
+#[must_use]
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -375,6 +376,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// Format duration as human-readable string
+#[must_use]
 pub fn format_duration(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
     if secs >= 3600 {
@@ -387,6 +389,7 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 }
 
 /// Format duration as human-readable string
+#[must_use]
 pub fn format_duration_seconds(seconds: f64) -> String {
     let secs = seconds as u64;
     if secs >= 3600 {
