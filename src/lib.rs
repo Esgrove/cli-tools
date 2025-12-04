@@ -424,7 +424,7 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Format duration as human-readable string
+/// Format duration as a human-readable string
 #[must_use]
 pub fn format_duration(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
@@ -437,7 +437,7 @@ pub fn format_duration(duration: std::time::Duration) -> String {
     }
 }
 
-/// Format duration as human-readable string
+/// Format duration from seconds as a human-readable string
 #[must_use]
 pub fn format_duration_seconds(seconds: f64) -> String {
     let secs = seconds as u64;

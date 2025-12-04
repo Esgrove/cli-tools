@@ -1387,7 +1387,7 @@ impl VideoConvert {
 
     /// Check if a path is on a network drive (non-Windows: always returns false)
     #[cfg(not(windows))]
-    fn is_network_path(_path: &Path) -> bool {
+    const fn is_network_path(_path: &Path) -> bool {
         false
     }
 }
