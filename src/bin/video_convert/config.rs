@@ -16,7 +16,7 @@ const OTHER_EXTENSIONS: &[&str] = &["mkv", "wmv", "flv", "m4v", "ts", "mpg", "av
 /// All video extensions
 const ALL_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
 
-/// Config from a config file
+/// User configuration from the config file.
 #[derive(Debug, Default, Deserialize)]
 pub struct VideoConvertConfig {
     #[serde(default)]
@@ -138,6 +138,7 @@ impl Config {
         })
     }
 
+    /// Convert a slice of strings to lowercase.
     fn lowercase_vec(slice: &[impl AsRef<str>]) -> Vec<String> {
         slice.iter().map(|s| s.as_ref().to_lowercase()).collect()
     }

@@ -27,6 +27,7 @@ pub struct ConversionStats {
 }
 
 impl ConversionStats {
+    /// Create new conversion stats with original and converted file sizes.
     pub(crate) const fn new(original_size: u64, converted_size: u64) -> Self {
         Self {
             original_size,
@@ -51,6 +52,7 @@ impl ConversionStats {
 }
 
 impl RunStats {
+    /// Record the result of processing a file.
     pub(crate) fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
         self.total_duration += duration;
         match result {
@@ -75,15 +77,18 @@ impl RunStats {
         }
     }
 
+    /// Get the total number of skipped files.
     pub(crate) const fn total_skipped(&self) -> usize {
         self.files_skipped_converted + self.files_skipped_bitrate + self.files_skipped_duplicate
     }
 
+    /// Calculate total space saved (negative if size increased).
     #[allow(clippy::cast_possible_wrap)]
     pub(crate) const fn space_saved(&self) -> i64 {
         self.total_original_size as i64 - self.total_converted_size as i64
     }
 
+    /// Print a summary of conversion statistics to stdout.
     pub(crate) fn print_summary(&self) {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
         println!("Files converted:        {}", self.files_converted);

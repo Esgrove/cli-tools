@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -19,11 +19,13 @@ use crate::stats::{ConversionStats, RunStats};
 const TARGET_EXTENSION: &str = "mp4";
 const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
 
+/// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert {
     config: Config,
     logger: RefCell<FileLogger>,
 }
 
+/// A video file with its path and parsed name components.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct VideoFile {
     path: PathBuf,
@@ -75,6 +77,7 @@ pub enum ProcessResult {
 }
 
 impl ProcessResult {
+    /// A successful conversion result with size statistics.
     const fn converted(original_size: u64, converted_size: u64, output: PathBuf) -> Self {
         Self::Converted {
             output,
@@ -84,12 +87,20 @@ impl ProcessResult {
 }
 
 impl VideoFile {
+    /// Create a new `VideoFile` from a path, extracting name and extension.
     fn new(path: &Path) -> Self {
         let path = path.to_owned();
         let name = cli_tools::path_to_file_stem_string(&path);
         let extension = cli_tools::path_to_file_extension_string(&path);
 
         Self { path, name, extension }
+    }
+
+    /// Get the output path for the converted file.
+    fn output_path(&self) -> PathBuf {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let new_name = format!("{}.x265.mp4", self.name);
+        parent.join(new_name)
     }
 }
 
@@ -130,6 +141,7 @@ impl From<walkdir::DirEntry> for VideoFile {
 }
 
 impl VideoConvert {
+    /// Create a new video converter from command line arguments.
     pub fn new(args: VideoConvertArgs) -> Result<Self> {
         let user_config = VideoConvertConfig::get_user_config();
         let config = Config::try_from_args(args, user_config)?;
@@ -138,6 +150,7 @@ impl VideoConvert {
         Ok(Self { config, logger })
     }
 
+    /// Run the video conversion process.
     pub fn run(&self) -> Result<()> {
         let files = self.gather_files_to_convert()?;
         if files.is_empty() {
@@ -209,6 +222,7 @@ impl VideoConvert {
         Ok(files)
     }
 
+    /// Process video files.
     fn process_files(&self, files: Vec<VideoFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
         let mut stats = RunStats::default();
         let total = files.len();
@@ -345,7 +359,7 @@ impl VideoConvert {
             });
         }
 
-        let output_path = Self::get_output_path(file);
+        let output_path = file.output_path();
 
         // Check if output already exists
         if output_path.exists() && !self.config.overwrite {
@@ -809,17 +823,10 @@ impl VideoConvert {
         self.logger.borrow_mut().log_stats(stats);
     }
 
-    /// Get output path for the new file
-    fn get_output_path(file: &VideoFile) -> PathBuf {
-        let parent = file.path.parent().unwrap_or_else(|| Path::new("."));
-        let new_name = format!("{}.x265.mp4", file.name);
-        parent.join(new_name)
-    }
-
     /// Handle the original file after successful processing
     fn delete_original_file(&self, path: &Path) -> Result<()> {
         // Use direct delete if configured or if on a network drive (trash doesn't work there)
-        if self.config.delete || Self::is_network_path(path) {
+        if self.config.delete || cli_tools::is_network_path(path) {
             println!("Deleting: {}", path.display());
             std::fs::remove_file(path).context("Failed to delete original file")?;
         } else {
@@ -828,69 +835,22 @@ impl VideoConvert {
         }
         Ok(())
     }
-
-    /// Check if a path is on a network drive (Windows only).
-    /// Uses Windows API to detect mapped network drives and UNC paths.
-    #[cfg(windows)]
-    #[allow(unsafe_code)]
-    fn is_network_path(path: &Path) -> bool {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
-
-        const DRIVE_REMOTE: u32 = 4;
-
-        // Check for UNC paths (\\server\share)
-        let path_str = path.to_string_lossy();
-        if path_str.starts_with(r"\\") {
-            return true;
-        }
-
-        // Check drive type for mapped network drives
-        if let Some(prefix) = path.components().next() {
-            let prefix_str = prefix.as_os_str();
-            // Create a root path like "X:\"
-            let mut root: Vec<u16> = prefix_str.encode_wide().collect();
-            if root.len() >= 2 && root[1] == u16::from(b':') {
-                root.push(u16::from(b'\\'));
-                root.push(0); // null terminator
-
-                // SAFETY: GetDriveTypeW is a safe Windows API call that only reads
-                // the null-terminated string to determine drive type
-                let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
-                return drive_type == DRIVE_REMOTE;
-            }
-        }
-
-        false
-    }
-
-    /// Check if a path is on a network drive (non-Windows: always returns false)
-    #[cfg(not(windows))]
-    const fn is_network_path(_path: &Path) -> bool {
-        false
-    }
 }
 
 /// Run a command in a new process group to prevent Ctrl+C from propagating to it.
 /// This allows the main program to handle the signal and finish the current file gracefully.
-#[cfg(windows)]
 fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Stdio;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-}
-
-#[cfg(unix)]
-fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-    // Set process group to 0 to prevent SIGINT propagation
-    cmd.process_group(0)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(unix)]
+    {
+        // Set process group to 0 to prevent SIGINT propagation
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
 }

@@ -522,6 +522,51 @@ fn get_shell_completion_dir(shell: Shell, name: &str) -> Result<PathBuf> {
     Ok(user_dir)
 }
 
+/// Check if a path is on a network drive.
+/// On Windows, detects mapped network drives and UNC paths.
+/// On other platforms, always returns false.
+#[cfg(windows)]
+#[must_use]
+pub fn is_network_path(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+    const DRIVE_REMOTE: u32 = 4;
+
+    // Check for UNC paths (\\server\share)
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with(r"\\") {
+        return true;
+    }
+
+    // Check drive type for mapped network drives
+    if let Some(prefix) = path.components().next() {
+        let prefix_str = prefix.as_os_str();
+        // Create a root path like "X:\"
+        let mut root: Vec<u16> = prefix_str.encode_wide().collect();
+        if root.len() >= 2 && root[1] == u16::from(b':') {
+            root.push(u16::from(b'\\'));
+            root.push(0); // null terminator
+
+            // SAFETY: GetDriveTypeW is a safe Windows API call that only reads
+            // the null-terminated string to determine drive type
+            #[allow(unsafe_code)]
+            let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
+            return drive_type == DRIVE_REMOTE;
+        }
+    }
+
+    false
+}
+
+/// Check if a path is on a network drive.
+/// On Windows, detects mapped network drives and UNC paths.
+/// On other platforms, always returns false.
+#[cfg(not(windows))]
+pub const fn is_network_path(_path: &Path) -> bool {
+    false
+}
+
 /// Helper method to assert floating point equality in test cases.
 #[inline]
 pub fn assert_f64_eq(a: f64, b: f64) {
