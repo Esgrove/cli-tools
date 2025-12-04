@@ -249,13 +249,13 @@ impl ConversionStats {
                 let saved = self.space_saved();
                 if saved >= 0 {
                     println!(
-                        "Space saved:     {} ({:.1}%)",
+                        "Space saved:            {} ({:.1}%)",
                         cli_tools::format_size(saved as u64),
                         ratio
                     );
                 } else {
                     println!(
-                        "Space increased: {} ({:.1}%)",
+                        "Space increased:        {} ({:.1}%)",
                         cli_tools::format_size((-saved) as u64),
                         ratio
                     );
@@ -263,7 +263,10 @@ impl ConversionStats {
             }
         }
 
-        println!("Total time:      {}", cli_tools::format_duration(self.total_duration));
+        println!(
+            "Total time:             {}",
+            cli_tools::format_duration(self.total_duration)
+        );
     }
 }
 
@@ -295,7 +298,7 @@ impl VideoConvertConfig {
 impl VideoFile {
     pub fn new(path: &Path) -> Self {
         let path = path.to_owned();
-        let name = cli_tools::path_to_filename_string(&path);
+        let name = cli_tools::path_to_file_stem_string(&path);
         let extension = cli_tools::path_to_file_extension_string(&path);
 
         Self { path, name, extension }
@@ -303,7 +306,7 @@ impl VideoFile {
 
     pub fn from_dir_entry(entry: walkdir::DirEntry) -> Self {
         let path = entry.into_path();
-        let name = cli_tools::path_to_filename_string(&path);
+        let name = cli_tools::path_to_file_stem_string(&path);
         let extension = cli_tools::path_to_file_extension_string(&path);
 
         Self { path, name, extension }
@@ -314,13 +317,13 @@ impl std::fmt::Display for VideoInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Size: {}, Duration: {:.2}, Codec: {}\nResolution: {}x{}, Bitrate: {:.1} Mbps",
+            "Codec: {}\nSize: {}\nDuration: {}\nResolution: {}x{}\nBitrate: {:.2} Mbps",
+            self.codec,
             cli_tools::format_size(self.size_bytes),
             cli_tools::format_duration_seconds(self.duration),
-            self.codec,
             self.width,
             self.height,
-            self.bitrate_kbps / 1000,
+            self.bitrate_kbps as f64 / 1000.0,
         )
     }
 }
@@ -495,21 +498,25 @@ impl VideoConvert {
                     converted_size,
                 } => {
                     println!(
-                        "  ✓ Converted: {} -> {}",
-                        cli_tools::format_size(*original_size),
-                        cli_tools::format_size(*converted_size),
+                        "{}",
+                        format!(
+                            "✓ Converted: {} -> {}",
+                            cli_tools::format_size(*original_size),
+                            cli_tools::format_size(*converted_size)
+                        )
+                        .cyan()
                     );
                     processed_files += 1;
                 }
                 ProcessResult::Remuxed {} => {
-                    println!("  ✓ Remuxed");
+                    println!("{}", "✓ Remuxed".green());
                     processed_files += 1;
                 }
                 ProcessResult::Skipped { reason } => {
-                    println!("  ⊘ Skipped: {reason}");
+                    print_warning!("⊘ Skipped: {reason}");
                 }
                 ProcessResult::Failed { error } => {
-                    print_error!("  ✗ Failed: {error}");
+                    print_error!("✗ {error}");
                 }
             }
 
@@ -817,7 +824,7 @@ impl VideoConvert {
             31
         };
 
-        println!("  Using quality level: {quality_level}");
+        println!("Using quality level: {quality_level}");
 
         // GPU tuning for RTX 4090 to use more VRAM and improve performance
         let extra_hw_frames = "64";

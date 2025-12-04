@@ -251,6 +251,12 @@ pub fn path_to_filename_string(path: &Path) -> String {
     os_str_to_string(path.file_name().unwrap_or_default())
 }
 
+/// Convert given path to file stem string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_file_stem_string(path: &Path) -> String {
+    os_str_to_string(path.file_stem().unwrap_or_default())
+}
+
 /// Convert given path to file extension lowercase string with invalid Unicode handling.
 #[must_use]
 pub fn path_to_file_extension_string(path: &Path) -> String {
@@ -397,7 +403,7 @@ pub fn format_duration_seconds(seconds: f64) -> String {
     } else if secs >= 60 {
         format!("{}m {:02}s", secs / 60, secs % 60)
     } else {
-        format!("{secs}s")
+        format!("{seconds:.1}s")
     }
 }
 
