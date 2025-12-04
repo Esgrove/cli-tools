@@ -104,6 +104,35 @@ impl VideoFile {
     }
 }
 
+impl VideoInfo {
+    /// Determine quality level based on resolution and bitrate.
+    /// Quality level 1 to 51, lower is better quality and bigger file size.
+    fn quality_level(&self) -> u8 {
+        let is_4k = self.width.max(self.height) >= 2160;
+        let bitrate_mbps = self.bitrate_kbps as f64 / 1000.0;
+
+        if is_4k {
+            if bitrate_mbps > 26.0 {
+                30
+            } else if bitrate_mbps > 18.0 {
+                31
+            } else if bitrate_mbps > 10.0 {
+                32
+            } else {
+                33
+            }
+        } else if bitrate_mbps > 16.0 {
+            28
+        } else if bitrate_mbps > 12.0 {
+            29
+        } else if bitrate_mbps > 6.0 {
+            30
+        } else {
+            31
+        }
+    }
+}
+
 impl std::fmt::Display for VideoInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Codec:      {}", self.codec)?;
@@ -491,7 +520,7 @@ impl VideoConvert {
             println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
         }
 
-        self.log_start(input, "remux", file_index, info);
+        self.log_start(input, "remux", file_index, info, None);
 
         // Try pure copy and drop unsupported streams
         // -map 0:v:0   -> first video stream only
@@ -629,38 +658,14 @@ impl VideoConvert {
         );
         println!("{info}");
 
+        let quality_level = info.quality_level();
+
         if self.config.verbose {
             println!("Converting: {}", cli_tools::path_to_string_relative(output));
+            println!("Using quality level: {quality_level}");
         }
 
-        self.log_start(input, "convert", file_index, info);
-
-        // Determine quality level based on resolution and bitrate.
-        // Quality level 1 to 51, lower is better quality and bigger file size.
-        let is_4k = info.width.max(info.height) >= 2160;
-        let bitrate_mbps = info.bitrate_kbps as f64 / 1000.0;
-
-        let quality_level = if is_4k {
-            if bitrate_mbps > 26.0 {
-                30
-            } else if bitrate_mbps > 18.0 {
-                31
-            } else if bitrate_mbps > 10.0 {
-                32
-            } else {
-                33
-            }
-        } else if bitrate_mbps > 16.0 {
-            28
-        } else if bitrate_mbps > 12.0 {
-            29
-        } else if bitrate_mbps > 6.0 {
-            30
-        } else {
-            31
-        };
-
-        println!("Using quality level: {quality_level}");
+        self.log_start(input, "convert", file_index, info, Some(quality_level));
 
         // Determine audio codec: copy for mp4/mkv, transcode for others
         let copy_audio = extension == "mp4" || extension == "mkv";
@@ -722,7 +727,7 @@ impl VideoConvert {
     fn build_hevc_command(
         input: &Path,
         output: &Path,
-        quality_level: u32,
+        quality_level: u8,
         copy_audio: bool,
         use_cuda_filters: bool,
     ) -> Command {
@@ -795,10 +800,17 @@ impl VideoConvert {
         self.logger.borrow_mut().log_init(&self.config);
     }
 
-    fn log_start(&self, file_path: &Path, operation: &str, file_index: &str, info: &VideoInfo) {
+    fn log_start(
+        &self,
+        file_path: &Path,
+        operation: &str,
+        file_index: &str,
+        info: &VideoInfo,
+        quality_level: Option<u8>,
+    ) {
         self.logger
             .borrow_mut()
-            .log_start(file_path, operation, file_index, info);
+            .log_start(file_path, operation, file_index, info, quality_level);
     }
 
     fn log_success(

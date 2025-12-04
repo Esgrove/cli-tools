@@ -75,10 +75,17 @@ impl FileLogger {
     }
 
     /// Log when starting a conversion or remux operation
-    pub(crate) fn log_start(&mut self, file_path: &Path, operation: &str, file_index: &str, info: &VideoInfo) {
+    pub(crate) fn log_start(
+        &mut self,
+        file_path: &Path,
+        operation: &str,
+        file_index: &str,
+        info: &VideoInfo,
+        quality_level: Option<u8>,
+    ) {
         let _ = writeln!(
             self.writer,
-            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps ",
+            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps{}",
             Self::timestamp(),
             operation.to_uppercase(),
             file_index,
@@ -87,6 +94,11 @@ impl FileLogger {
             info.width,
             info.height,
             info.bitrate_kbps as f64 / 1000.0,
+            if let Some(quality_level) = quality_level {
+                format!(" | Level: {quality_level}")
+            } else {
+                String::new()
+            }
         );
         let _ = self.writer.flush();
     }
