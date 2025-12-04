@@ -78,6 +78,49 @@ pub fn is_directory_empty(dir: &Path) -> bool {
     true
 }
 
+/// Insert a suffix before the file extension.
+///
+/// Takes a path and inserts the given suffix string between the file stem and the file extension.
+/// If the file has no extension, the suffix is appended to the end.
+///
+/// ```rust
+/// use std::path::Path;
+/// use cli_tools::insert_suffix_before_extension;
+///
+/// // Basic usage with extension
+/// let path = Path::new("video.1080p.mp4");
+/// let result = insert_suffix_before_extension(path, ".x265");
+/// assert_eq!(result.to_str().unwrap(), "video.1080p.x265.mp4");
+///
+/// // With directory path
+/// let path = Path::new("subdir/video.mp4");
+/// let result = insert_suffix_before_extension(path, ".converted");
+/// assert_eq!(result, Path::new("subdir/video.converted.mp4"));
+///
+/// // Without extension
+/// let path = Path::new("README");
+/// let result = insert_suffix_before_extension(path, ".backup");
+/// assert_eq!(result.to_str().unwrap(), "README.backup");
+/// ```
+#[must_use]
+pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    let new_name = if extension.is_empty() {
+        format!("{stem}{suffix}")
+    } else {
+        format!("{stem}{suffix}.{extension}")
+    };
+
+    if parent.as_os_str().is_empty() {
+        PathBuf::from(new_name)
+    } else {
+        parent.join(new_name)
+    }
+}
+
 /// Resolves the provided input path to a directory or file to an absolute path.
 ///
 /// If `path` is `None`, the current working directory is used.

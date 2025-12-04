@@ -178,7 +178,9 @@ struct VideoInfo {
 struct RunStats {
     files_converted: usize,
     files_remuxed: usize,
-    files_skipped: usize,
+    files_skipped_converted: usize,
+    files_skipped_bitrate: usize,
+    files_skipped_duplicate: usize,
     files_failed: usize,
     total_original_size: u64,
     total_converted_size: u64,
@@ -197,6 +199,17 @@ struct FileLogger {
     writer: BufWriter<File>,
 }
 
+/// Reasons why a file was skipped
+#[derive(Debug)]
+enum SkipReason {
+    /// File is already HEVC in MP4 container
+    AlreadyConverted,
+    /// File bitrate is below the threshold
+    BitrateBelowThreshold { bitrate: u64, threshold: u64 },
+    /// Output file already exists
+    OutputExists { path: PathBuf },
+}
+
 /// Result of processing a single file
 #[derive(Debug)]
 enum ProcessResult {
@@ -204,8 +217,8 @@ enum ProcessResult {
     Converted(ConversionStats),
     /// File was remuxed (already HEVC, just changed container to MP4)
     Remuxed,
-    /// File was skipped (already HEVC in correct container or low bitrate)
-    Skipped { reason: String },
+    /// File was skipped
+    Skipped(SkipReason),
     /// Failed to process file
     Failed { error: String },
 }
@@ -358,7 +371,24 @@ impl FileLogger {
         let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
         let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
         let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
-        let _ = writeln!(self.writer, "  Files skipped:   {}", stats.files_skipped);
+        let _ = writeln!(self.writer, "  Files skipped:   {}", stats.total_skipped());
+        if stats.total_skipped() > 0 {
+            let _ = writeln!(
+                self.writer,
+                "    - Already converted:   {}",
+                stats.files_skipped_converted
+            );
+            let _ = writeln!(
+                self.writer,
+                "    - Below bitrate limit: {}",
+                stats.files_skipped_bitrate
+            );
+            let _ = writeln!(
+                self.writer,
+                "    - Duplicate:           {}",
+                stats.files_skipped_duplicate
+            );
+        }
         let _ = writeln!(self.writer, "  Files failed:    {}", stats.files_failed);
 
         if stats.files_converted > 0 {
@@ -407,13 +437,19 @@ impl RunStats {
             ProcessResult::Remuxed => {
                 self.files_remuxed += 1;
             }
-            ProcessResult::Skipped { .. } => {
-                self.files_skipped += 1;
-            }
+            ProcessResult::Skipped(reason) => match reason {
+                SkipReason::AlreadyConverted => self.files_skipped_converted += 1,
+                SkipReason::BitrateBelowThreshold { .. } => self.files_skipped_bitrate += 1,
+                SkipReason::OutputExists { .. } => self.files_skipped_duplicate += 1,
+            },
             ProcessResult::Failed { .. } => {
                 self.files_failed += 1;
             }
         }
+    }
+
+    const fn total_skipped(&self) -> usize {
+        self.files_skipped_converted + self.files_skipped_bitrate + self.files_skipped_duplicate
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -425,7 +461,12 @@ impl RunStats {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
         println!("Files converted: {}", self.files_converted);
         println!("Files remuxed:   {}", self.files_remuxed);
-        println!("Files skipped:   {}", self.files_skipped);
+        println!("Files skipped:   {}", self.total_skipped());
+        if self.total_skipped() > 0 {
+            println!("  - Already converted: {}", self.files_skipped_converted);
+            println!("  - Below bitrate:     {}", self.files_skipped_bitrate);
+            println!("  - Duplicates:        {}", self.files_skipped_duplicate);
+        }
         println!("Files failed:    {}", self.files_failed);
         println!();
 
@@ -539,6 +580,20 @@ impl std::fmt::Display for ConversionStats {
             cli_tools::format_size(self.converted_size),
             self.change_percentage()
         )
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyConverted => write!(f, "Already HEVC in MP4 container"),
+            Self::BitrateBelowThreshold { bitrate, threshold } => {
+                write!(f, "Bitrate {bitrate} kbps is below threshold {threshold} kbps")
+            }
+            Self::OutputExists { path } => {
+                write!(f, "Output file already exists: {}", path.display())
+            }
+        }
     }
 }
 
@@ -683,7 +738,7 @@ impl VideoConvert {
 
         self.log_init();
 
-        for file in files {
+        for (index, file) in files.into_iter().enumerate() {
             // Check abort flag before starting a new file
             if abort_flag.load(Ordering::SeqCst) {
                 aborted = true;
@@ -694,16 +749,11 @@ impl VideoConvert {
                 break;
             }
 
+            if !self.config.verbose {
+                println!("\r{index}");
+            }
+
             let file_index = format!("[{:>width$}/{}]", processed_files + 1, total, width = total_digits);
-            println!(
-                "{}",
-                format!(
-                    "{file_index} Processing: {}",
-                    cli_tools::path_to_string_relative(&file.path)
-                )
-                .bold()
-                .magenta()
-            );
 
             let start = Instant::now();
             let result = self.process_single_file(&file, &file_index);
@@ -726,9 +776,11 @@ impl VideoConvert {
                     self.log_success(&file.path, "remux", &file_index, duration, None);
                     processed_files += 1;
                 }
-                ProcessResult::Skipped { reason } => {
-                    print_warning!("⊘ Skipped: {reason}");
-                    // Not logging skipped files as per user request
+                ProcessResult::Skipped(reason) => {
+                    if self.config.verbose {
+                        print_warning!("[{index}]: {}", cli_tools::path_to_string_relative(&file.path));
+                        println!("⊘ Skipped: {reason}");
+                    }
                 }
                 ProcessResult::Failed { error } => {
                     print_error!("{error}");
@@ -755,38 +807,74 @@ impl VideoConvert {
             }
         };
 
-        println!("{info}");
-
         // Determine if we need to convert or just remux
         let is_hevc = info.codec == "hevc" || info.codec == "h265";
 
         if is_hevc && file.extension == TARGET_EXTENSION {
-            return ProcessResult::Skipped {
-                reason: "Already HEVC in MP4 container".to_string(),
-            };
+            // Rename to add .x265. suffix if missing
+            if !file.name.contains(".x265") {
+                let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
+                // Check if the new path already exists
+                if new_path.exists() && !self.config.overwrite {
+                    return ProcessResult::Skipped(SkipReason::OutputExists { path: new_path });
+                }
+                if self.config.dryrun {
+                    println!(
+                        "[DRYRUN] Would rename: {} -> {}",
+                        cli_tools::path_to_string_relative(&file.path),
+                        cli_tools::path_to_string_relative(&new_path)
+                    );
+                } else if let Err(e) = std::fs::rename(&file.path, &new_path) {
+                    print_warning!("Failed to rename file: {e}");
+                } else {
+                    println!(
+                        "Renamed: {} -> {}",
+                        cli_tools::path_to_string_relative(&file.path),
+                        cli_tools::path_to_string_relative(&new_path)
+                    );
+                }
+            }
+            return ProcessResult::Skipped(SkipReason::AlreadyConverted);
         }
 
         // Check bitrate threshold
         if info.bitrate_kbps < self.config.bitrate_limit {
-            let bitrate = info.bitrate_kbps;
-            let threshold = self.config.bitrate_limit;
-            return ProcessResult::Skipped {
-                reason: format!("Bitrate {bitrate} kbps is below threshold {threshold} kbps"),
-            };
+            return ProcessResult::Skipped(SkipReason::BitrateBelowThreshold {
+                bitrate: info.bitrate_kbps,
+                threshold: self.config.bitrate_limit,
+            });
         }
 
         let output_path = Self::get_output_path(file);
 
         // Check if output already exists
         if output_path.exists() && !self.config.overwrite {
-            return ProcessResult::Skipped {
-                reason: format!("Output file already exists: {}", output_path.display()),
-            };
+            return ProcessResult::Skipped(SkipReason::OutputExists { path: output_path });
         }
 
         if is_hevc {
+            println!(
+                "{}",
+                format!(
+                    "{file_index} Remuxing: {}",
+                    cli_tools::path_to_string_relative(&file.path)
+                )
+                .bold()
+                .magenta()
+            );
+            println!("{info}");
             self.remux_to_mp4(&file.path, &output_path, &info, file_index)
         } else {
+            println!(
+                "{}",
+                format!(
+                    "{file_index} Converting: {}",
+                    cli_tools::path_to_string_relative(&file.path)
+                )
+                .bold()
+                .magenta()
+            );
+            println!("{info}");
             self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension, file_index)
         }
     }
@@ -949,7 +1037,7 @@ impl VideoConvert {
 
         if status.success() {
             if let Err(e) = self.delete_original_file(input) {
-                print_warning!("Failed to delete original file: {e}");
+                print_error!("Failed to delete original file: {e}");
             }
             return ProcessResult::Remuxed {};
         }
@@ -1009,7 +1097,7 @@ impl VideoConvert {
         }
 
         if let Err(e) = self.delete_original_file(input) {
-            print_warning!("Failed to delete original file: {e}");
+            print_error!("Failed to delete original file: {e}");
         }
 
         ProcessResult::Remuxed {}
@@ -1103,7 +1191,7 @@ impl VideoConvert {
         }
 
         if let Err(e) = self.delete_original_file(input) {
-            print_warning!("Failed to delete original file: {e}");
+            print_error!("Failed to delete original file: {e}");
         }
 
         let new_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
