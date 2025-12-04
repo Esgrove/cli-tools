@@ -558,14 +558,6 @@ impl VideoFile {
 
         Self { path, name, extension }
     }
-
-    pub fn from_dir_entry(entry: walkdir::DirEntry) -> Self {
-        let path = entry.into_path();
-        let name = cli_tools::path_to_file_stem_string(&path);
-        let extension = cli_tools::path_to_file_extension_string(&path);
-
-        Self { path, name, extension }
-    }
 }
 
 impl std::fmt::Display for VideoInfo {
@@ -617,6 +609,12 @@ impl std::ops::AddAssign<ConversionStats> for RunStats {
     }
 }
 
+impl From<walkdir::DirEntry> for VideoFile {
+    fn from(entry: walkdir::DirEntry) -> Self {
+        Self::new(&entry.into_path())
+    }
+}
+
 impl Config {
     /// Create config from given command line args and user config file.
     pub fn try_from_args(args: Args, user_config: VideoConvertConfig) -> Result<Self> {
@@ -632,15 +630,15 @@ impl Config {
         let convert_other = args.other || user_config.convert_other_types;
 
         let extensions = if !args.extension.is_empty() {
-            args.extension.iter().map(|s| s.to_lowercase()).collect()
+            to_lowercase_vec(&args.extension)
         } else if !user_config.extensions.is_empty() {
-            user_config.extensions.iter().map(|s| s.to_lowercase()).collect()
-        } else if args.all || user_config.convert_all_types {
-            ALL_EXTENSIONS.iter().map(|s| (*s).to_string()).collect()
-        } else if args.other || user_config.convert_other_types {
-            OTHER_EXTENSIONS.iter().map(|s| (*s).to_string()).collect()
+            to_lowercase_vec(&user_config.extensions)
+        } else if convert_all {
+            to_lowercase_vec(ALL_EXTENSIONS)
+        } else if convert_other {
+            to_lowercase_vec(OTHER_EXTENSIONS)
         } else {
-            DEFAULT_EXTENSIONS.iter().map(|s| (*s).to_string()).collect()
+            to_lowercase_vec(DEFAULT_EXTENSIONS)
         };
 
         Ok(Self {
@@ -733,7 +731,7 @@ impl VideoConvert {
             .filter_entry(|entry| !cli_tools::is_hidden(entry))
             .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_type().is_file())
-            .map(VideoFile::from_dir_entry)
+            .map(VideoFile::from)
             .filter(|file| self.should_include_file(file))
             .collect();
 
@@ -1284,7 +1282,7 @@ impl VideoConvert {
     /// Check if a file should be converted based on extension and include/exclude patterns.
     fn should_include_file(&self, file: &VideoFile) -> bool {
         // Skip files with "x265" in the name (already converted)
-        if file.name.contains(".x265.") {
+        if file.name.contains(".x265") && file.extension == TARGET_EXTENSION {
             return false;
         }
 
@@ -1423,6 +1421,10 @@ fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
+}
+
+fn to_lowercase_vec(slice: &[impl AsRef<str>]) -> Vec<String> {
+    slice.iter().map(|s| s.as_ref().to_lowercase()).collect()
 }
 
 fn main() -> Result<()> {
