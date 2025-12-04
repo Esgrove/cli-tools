@@ -701,15 +701,18 @@ impl VideoConvert {
         // Determine audio codec: copy for mp4/mkv, transcode for others
         let copy_audio = extension == "mp4" || extension == "mkv";
 
-        let mut cmd = Self::build_hevc_command(input, output, quality_level, copy_audio, true);
+        // Track whether CUDA filters worked for potential reconversion
+        let mut use_cuda_filters = true;
+
+        let mut ffmpeg_command = Self::build_ffmpeg_command(input, output, quality_level, copy_audio, true);
 
         if self.config.dryrun {
-            println!("[DRYRUN] {cmd:#?}");
+            println!("[DRYRUN] {ffmpeg_command:#?}");
             return ProcessResult::converted(info.size_bytes, info.bitrate_kbps, 0, 0, output.to_path_buf());
         }
 
         // First attempt: try with CUDA filters for better performance
-        let status = match Self::run_command_isolated(&mut cmd) {
+        let status = match Self::run_command_isolated(&mut ffmpeg_command) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -724,8 +727,9 @@ impl VideoConvert {
 
             // Retry without CUDA filters (fallback for format compatibility issues)
             print_error!("CUDA filter failed, retrying with CPU-based filtering...");
-            let mut cmd = Self::build_hevc_command(input, output, quality_level, copy_audio, false);
-            let status = match Self::run_command_isolated(&mut cmd) {
+            use_cuda_filters = false;
+            ffmpeg_command = Self::build_ffmpeg_command(input, output, quality_level, copy_audio, false);
+            let status = match Self::run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
                     return ProcessResult::Failed {
@@ -752,6 +756,50 @@ impl VideoConvert {
                     error: format!("Failed to get output video info: {e}"),
                 };
             }
+        };
+
+        // If output is larger than input, reconvert once with lower quality
+        let output_info = if output_info.size_bytes > info.size_bytes {
+            let new_quality_level = quality_level + 2;
+            print_warning!(
+                "Output file ({}) is larger than input ({}), reconverting with lower quality level ({})",
+                cli_tools::format_size(output_info.size_bytes),
+                cli_tools::format_size(info.size_bytes),
+                new_quality_level
+            );
+            let _ = fs::remove_file(output);
+
+            ffmpeg_command = Self::build_ffmpeg_command(input, output, new_quality_level, copy_audio, use_cuda_filters);
+            let status = match Self::run_command_isolated(&mut ffmpeg_command) {
+                Ok(s) => s,
+                Err(e) => {
+                    return ProcessResult::Failed {
+                        error: format!("Failed to execute ffmpeg (reconvert): {e}"),
+                    };
+                }
+            };
+
+            if !status.success() {
+                let _ = fs::remove_file(output);
+                return ProcessResult::Failed {
+                    error: format!(
+                        "ffmpeg reconversion failed with status: {}",
+                        status.code().unwrap_or(-1)
+                    ),
+                };
+            }
+
+            match self.get_video_info(output) {
+                Ok(info) => info,
+                Err(e) => {
+                    let _ = fs::remove_file(output);
+                    return ProcessResult::Failed {
+                        error: format!("Failed to get reconverted video info: {e}"),
+                    };
+                }
+            }
+        } else {
+            output_info
         };
 
         // Validate output duration
@@ -783,7 +831,7 @@ impl VideoConvert {
     /// Build the ffmpeg command for HEVC conversion.
     /// When `use_cuda_filters` is true, uses `hwupload_cuda` and `scale_cuda` for GPU-accelerated filtering.
     /// When false, uses CPU-based filtering which is more compatible but slightly slower.
-    fn build_hevc_command(
+    fn build_ffmpeg_command(
         input: &Path,
         output: &Path,
         quality_level: u8,
@@ -830,26 +878,27 @@ impl VideoConvert {
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
     fn should_include_file(&self, file: &VideoFile) -> bool {
-        // Skip files with "x265" in the name (already converted)
+        // Skip files with "x265" in the filename (already converted)
         if file.name.contains(".x265") && file.extension == TARGET_EXTENSION {
             return false;
         }
 
+        // Check file extension is one of the allowed extensions
         if !self.config.extensions.iter().any(|ext| ext == &file.extension) {
             return false;
         }
 
-        // Check include patterns (if specified, file must match at least one)
+        // Check exclude patterns (filename must not match any)
+        if self.config.exclude.iter().any(|pattern| file.name.contains(pattern)) {
+            return false;
+        }
+
+        // Check include patterns (if specified, filename must match at least one)
         if !self.config.include.is_empty() {
             let matches_include = self.config.include.iter().any(|pattern| file.name.contains(pattern));
             if !matches_include {
                 return false;
             }
-        }
-
-        // Check exclude patterns (file must not match any)
-        if self.config.exclude.iter().any(|pattern| file.name.contains(pattern)) {
-            return false;
         }
 
         true
