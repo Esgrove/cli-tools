@@ -240,14 +240,15 @@ impl VideoConvert {
                 aborted = true;
                 break;
             }
-            if processed_files >= num_files_to_process {
-                println!("\nReached file limit");
-                break;
-            }
 
             if !self.config.verbose {
                 print!("\rProcessing: {index}/{total}");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
+
+            if processed_files >= num_files_to_process {
+                println!("\nReached file limit");
+                break;
             }
 
             let file_index = format!(
