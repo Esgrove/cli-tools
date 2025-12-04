@@ -231,10 +231,9 @@ impl FileLogger {
     }
 
     /// Log when starting the program
-    #[allow(clippy::unnecessary_debug_formatting)]
     fn log_init(&mut self, config: &Config) {
         if let Some(ref mut file) = self.file {
-            let _ = writeln!(file, "[{}] INIT {:#?}", Self::timestamp(), config.path);
+            let _ = writeln!(file, "[{}] INIT \"{}\"", Self::timestamp(), config.path.display());
             let _ = writeln!(file, "  bitrate: {}", config.bitrate);
             let _ = writeln!(file, "  convert all: {}", config.convert_all);
             let _ = writeln!(file, "  convert other: {}", config.convert_other);
@@ -255,21 +254,19 @@ impl FileLogger {
     }
 
     /// Log when starting a conversion or remux operation
-    #[allow(clippy::unnecessary_debug_formatting)]
     fn log_start(&mut self, file_path: &Path, operation: &str) {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] START   {} - {:#?}",
+                "[{}] START   {} - \"{}\"",
                 Self::timestamp(),
                 operation.to_uppercase(),
-                file_path
+                file_path.display()
             );
         }
     }
 
     /// Log when a conversion or remux finishes successfully
-    #[allow(clippy::unnecessary_debug_formatting)]
     fn log_success(
         &mut self,
         file_path: &Path,
@@ -292,10 +289,10 @@ impl FileLogger {
             };
             let _ = writeln!(
                 file,
-                "[{}] SUCCESS {} - {:#?} | Duration: {}{}",
+                "[{}] SUCCESS {} - \"{}\" | Duration: {}{}",
                 Self::timestamp(),
                 operation.to_uppercase(),
-                file_path,
+                file_path.display(),
                 duration_str,
                 size_info
             );
@@ -308,10 +305,10 @@ impl FileLogger {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] ERROR   {} - {:#?} | {}",
+                "[{}] ERROR   {} - \"{}\" | {}",
                 Self::timestamp(),
                 operation.to_uppercase(),
-                file_path,
+                file_path.display(),
                 error
             );
         }
