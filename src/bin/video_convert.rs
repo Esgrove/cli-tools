@@ -126,7 +126,6 @@ struct UserConfig {
 
 /// Final config created from CLI arguments and user config file.
 #[derive(Debug, Default)]
-#[allow(unused)]
 struct Config {
     bitrate: u64,
     convert_all: bool,
@@ -236,6 +235,8 @@ impl FileLogger {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(file, "[{}] INIT {}", Self::timestamp(), config.path.display());
             let _ = writeln!(file, "  bitrate: {}", config.bitrate);
+            let _ = writeln!(file, "  convert all: {}", config.convert_all);
+            let _ = writeln!(file, "  convert other: {}", config.convert_other);
             if !config.include.is_empty() {
                 let _ = writeln!(file, "  include: {:#?}", config.include);
             }
@@ -401,8 +402,8 @@ impl ConversionStats {
         }
     }
 
-    #[allow(clippy::cast_possible_wrap, clippy::missing_const_for_fn)]
-    fn space_saved(&self) -> i64 {
+    #[allow(clippy::cast_possible_wrap)]
+    const fn space_saved(&self) -> i64 {
         self.total_original_size as i64 - self.total_converted_size as i64
     }
 
@@ -425,9 +426,9 @@ impl ConversionStats {
             );
 
             if self.total_original_size > 0 {
-                let ratio = self.total_converted_size as f64 / self.total_original_size as f64 * 100.0;
-
                 let saved = self.space_saved();
+                let ratio = saved.abs() as f64 / self.total_original_size as f64 * 100.0;
+
                 if saved >= 0 {
                     println!(
                         "Space saved:            {} ({:.1}%)",
