@@ -85,7 +85,7 @@ impl FileLogger {
     ) {
         let _ = writeln!(
             self.writer,
-            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps{}",
+            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps {:.2} {:.0} FPS",
             Self::timestamp(),
             operation.to_uppercase(),
             file_index,
@@ -94,6 +94,7 @@ impl FileLogger {
             info.width,
             info.height,
             info.bitrate_kbps as f64 / 1000.0,
+            info.frames_per_second,
             quality_level.map_or_else(String::new, |q| format!(" | Level: {q}"))
         );
         let _ = self.writer.flush();

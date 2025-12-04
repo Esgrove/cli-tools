@@ -23,31 +23,39 @@ pub struct RunStats {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ConversionStats {
     original_size: u64,
+    original_bitrate_kbps: u64,
     converted_size: u64,
+    converted_bitrate_kbps: u64,
 }
 
 impl ConversionStats {
-    /// Create new conversion stats with original and converted file sizes.
-    pub(crate) const fn new(original_size: u64, converted_size: u64) -> Self {
+    /// Create conversion stats with original and converted file sizes and bitrates.
+    pub(crate) const fn new(
+        original_size: u64,
+        original_bitrate_kbps: u64,
+        converted_size: u64,
+        output_bitrate_kbps: u64,
+    ) -> Self {
         Self {
             original_size,
+            original_bitrate_kbps,
             converted_size,
+            converted_bitrate_kbps: output_bitrate_kbps,
         }
     }
 
-    /// Calculate the size difference (positive = reduced, negative = increased)
+    /// Calculate the size difference
     #[allow(clippy::cast_possible_wrap)]
     const fn size_difference(&self) -> i64 {
-        self.original_size as i64 - self.converted_size as i64
+        self.converted_size as i64 - self.original_size as i64
     }
 
-    /// Calculate the percentage change (positive = reduced, negative = increased)
+    /// Calculate the percentage change
     fn change_percentage(&self) -> f64 {
         if self.original_size == 0 || self.converted_size == 0 {
             return 0.0;
         }
-        let diff = self.size_difference();
-        diff as f64 / self.original_size as f64 * 100.0
+        self.size_difference() as f64 / self.original_size as f64 * 100.0
     }
 }
 
@@ -151,10 +159,12 @@ impl std::fmt::Display for ConversionStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} -> {} ({:.1}%)",
+            "{} / {:.2} Mbps -> {} / {:.2} Mbps ({:.1}%)",
             cli_tools::format_size(self.original_size),
+            self.original_bitrate_kbps as f64 / 1000.0,
             cli_tools::format_size(self.converted_size),
-            self.change_percentage()
+            self.converted_bitrate_kbps as f64 / 1000.0,
+            self.change_percentage(),
         )
     }
 }

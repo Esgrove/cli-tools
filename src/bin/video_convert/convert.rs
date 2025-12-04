@@ -48,6 +48,8 @@ pub struct VideoInfo {
     pub(crate) width: u32,
     /// Video height in pixels
     pub(crate) height: u32,
+    /// Framerate in frames per second
+    pub(crate) frames_per_second: f64,
 }
 
 /// Reasons why a file was skipped
@@ -78,10 +80,21 @@ pub enum ProcessResult {
 
 impl ProcessResult {
     /// A successful conversion result with size statistics.
-    const fn converted(original_size: u64, converted_size: u64, output: PathBuf) -> Self {
+    const fn converted(
+        original_size: u64,
+        original_bitrate_kbps: u64,
+        converted_size: u64,
+        output_bitrate_kbps: u64,
+        output: PathBuf,
+    ) -> Self {
         Self::Converted {
             output,
-            stats: ConversionStats::new(original_size, converted_size),
+            stats: ConversionStats::new(
+                original_size,
+                original_bitrate_kbps,
+                converted_size,
+                output_bitrate_kbps,
+            ),
         }
     }
 }
@@ -137,7 +150,12 @@ impl std::fmt::Display for VideoInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Codec:      {}", self.codec)?;
         writeln!(f, "Size:       {}", cli_tools::format_size(self.size_bytes))?;
-        writeln!(f, "Bitrate:    {:.2} Mbps", self.bitrate_kbps as f64 / 1000.0)?;
+        writeln!(
+            f,
+            "Bitrate:    {:.2} Mbps @ {:.0} FPS",
+            self.bitrate_kbps as f64 / 1000.0,
+            self.frames_per_second
+        )?;
         writeln!(f, "Duration:   {}", cli_tools::format_duration_seconds(self.duration))?;
         write!(f, "Resolution: {}x{}", self.width, self.height)
     }
@@ -157,7 +175,7 @@ impl std::fmt::Display for SkipReason {
                 write!(f, "Bitrate {bitrate} kbps is below threshold {threshold} kbps")
             }
             Self::OutputExists { path } => {
-                write!(f, "Output file already exists: {}", path.display())
+                write!(f, "Output file already exists: \"{}\"", path.display())
             }
         }
     }
@@ -412,7 +430,7 @@ impl VideoConvert {
                 "-select_streams",
                 "v",
                 "-show_entries",
-                "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
+                "stream=codec_name,bit_rate,width,height,r_frame_rate:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
                 "-output_format",
                 "default=nokey=0:noprint_wrappers=1",
             ])
@@ -435,6 +453,7 @@ impl VideoConvert {
         //  duration=2425.237007
         //  size=2292495805
         //  bit_rate=7562133
+        //  r_frame_rate=30/1
         // ```
         let mut codec = String::new();
         let mut bitrate_bps: Option<u64> = None;
@@ -442,6 +461,7 @@ impl VideoConvert {
         let mut duration: Option<f64> = None;
         let mut width: Option<u32> = None;
         let mut height: Option<u32> = None;
+        let mut frames_per_second: Option<f64> = None;
 
         for line in stdout.lines() {
             let line = line.trim();
@@ -477,6 +497,15 @@ impl VideoConvert {
                             height = Some(h);
                         }
                     }
+                    "r_frame_rate" => {
+                        // Parse fractional framerate like "30/1" or "30000/1001"
+                        if let Some((num, den)) = value.split_once('/')
+                            && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())
+                            && d > 0.0
+                        {
+                            frames_per_second = Some(n / d);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -491,6 +520,7 @@ impl VideoConvert {
         let duration = duration.unwrap_or(0.0);
         let width = width.unwrap_or(0);
         let height = height.unwrap_or(0);
+        let frames_per_second = frames_per_second.unwrap_or(0.0);
 
         if !stderr.is_empty() && self.config.verbose {
             print_warning!("ffprobe: {}", stderr.trim());
@@ -503,6 +533,7 @@ impl VideoConvert {
             duration,
             width,
             height,
+            frames_per_second,
         })
     }
 
@@ -570,7 +601,7 @@ impl VideoConvert {
         };
 
         if status.success() {
-            if let Err(e) = self.delete_original_file(input) {
+            if let Err(e) = self.delete_file(input) {
                 print_error!("Failed to delete original file: {e}");
             }
             return ProcessResult::Remuxed {
@@ -632,7 +663,7 @@ impl VideoConvert {
             };
         }
 
-        if let Err(e) = self.delete_original_file(input) {
+        if let Err(e) = self.delete_file(input) {
             print_error!("Failed to delete original file: {e}");
         }
 
@@ -674,7 +705,7 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
-            return ProcessResult::converted(info.size_bytes, 0, output.to_path_buf());
+            return ProcessResult::converted(info.size_bytes, info.bitrate_kbps, 0, 0, output.to_path_buf());
         }
 
         // First attempt: try with CUDA filters for better performance
@@ -712,13 +743,41 @@ impl VideoConvert {
             }
         }
 
-        if let Err(e) = self.delete_original_file(input) {
+        // Get output file info and validate
+        let output_info = match self.get_video_info(output) {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = fs::remove_file(output);
+                return ProcessResult::Failed {
+                    error: format!("Failed to get output video info: {e}"),
+                };
+            }
+        };
+
+        // Validate output duration
+        if output_info.duration < info.duration * 0.85 {
+            if let Err(e) = self.delete_file(output) {
+                print_error!("Failed to delete output file: {e}");
+            }
+            return ProcessResult::Failed {
+                error: format!(
+                    "Output duration {:.1}s is less than 90% of original {:.1}s",
+                    output_info.duration, info.duration
+                ),
+            };
+        }
+
+        if let Err(e) = self.delete_file(input) {
             print_error!("Failed to delete original file: {e}");
         }
 
-        let new_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
-
-        ProcessResult::converted(info.size_bytes, new_size, output.to_path_buf())
+        ProcessResult::converted(
+            info.size_bytes,
+            info.bitrate_kbps,
+            output_info.size_bytes,
+            output_info.bitrate_kbps,
+            output.to_path_buf(),
+        )
     }
 
     /// Build the ffmpeg command for HEVC conversion.
@@ -836,9 +895,8 @@ impl VideoConvert {
         self.logger.borrow_mut().log_stats(stats);
     }
 
-    /// Handle the original file after successful processing
-    fn delete_original_file(&self, path: &Path) -> Result<()> {
-        // Use direct delete if configured or if on a network drive (trash doesn't work there)
+    fn delete_file(&self, path: &Path) -> Result<()> {
+        // Use direct delete if configured or if on a Windows network drive (trash doesn't work there)
         if self.config.delete || cli_tools::is_network_path(path) {
             println!("Deleting: {}", path.display());
             std::fs::remove_file(path).context("Failed to delete original file")?;
