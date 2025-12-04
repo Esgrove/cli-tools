@@ -459,15 +459,22 @@ impl RunStats {
 
     fn print_summary(&self) {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
-        println!("Files converted: {}", self.files_converted);
-        println!("Files remuxed:   {}", self.files_remuxed);
-        println!("Files skipped:   {}", self.total_skipped());
+        println!("Files converted:        {}", self.files_converted);
+        println!("Files remuxed:          {}", self.files_remuxed);
+        println!(
+            "Files failed:           {}",
+            if self.files_failed > 0 {
+                self.files_failed.to_string().red()
+            } else {
+                "0".normal()
+            }
+        );
+        println!("Files skipped:          {}", self.total_skipped());
         if self.total_skipped() > 0 {
-            println!("  - Already converted: {}", self.files_skipped_converted);
-            println!("  - Below bitrate:     {}", self.files_skipped_bitrate);
-            println!("  - Duplicates:        {}", self.files_skipped_duplicate);
+            println!("  - Already converted:  {}", self.files_skipped_converted);
+            println!("  - Below bitrate:      {}", self.files_skipped_bitrate);
+            println!("  - Duplicates:         {}", self.files_skipped_duplicate);
         }
-        println!("Files failed:    {}", self.files_failed);
         println!();
 
         if self.files_converted > 0 {
@@ -750,7 +757,8 @@ impl VideoConvert {
             }
 
             if !self.config.verbose {
-                println!("\r{index}");
+                print!("\rProcessing: {index}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
 
             let file_index = format!("[{:>width$}/{}]", processed_files + 1, total, width = total_digits);
@@ -1170,7 +1178,7 @@ impl VideoConvert {
             let _ = fs::remove_file(output);
 
             // Retry without CUDA filters (fallback for format compatibility issues)
-            println!("CUDA filter failed, retrying with CPU-based filtering...");
+            print_error!("CUDA filter failed, retrying with CPU-based filtering...");
             let mut cmd = Self::build_hevc_command(input, output, quality_level, copy_audio, false);
             let status = match run_command_isolated(&mut cmd) {
                 Ok(s) => s,
