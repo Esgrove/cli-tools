@@ -178,6 +178,7 @@ struct VideoInfo {
 struct RunStats {
     files_converted: usize,
     files_remuxed: usize,
+    files_renamed: usize,
     files_skipped_converted: usize,
     files_skipped_bitrate: usize,
     files_skipped_duplicate: usize,
@@ -217,6 +218,8 @@ enum ProcessResult {
     Converted { output: PathBuf, stats: ConversionStats },
     /// File was remuxed (already HEVC, just changed container to MP4)
     Remuxed { output: PathBuf },
+    /// File was renamed (already HEVC, added .x265 suffix)
+    Renamed { output: PathBuf },
     /// File was skipped
     Skipped(SkipReason),
     /// Failed to process file
@@ -374,6 +377,7 @@ impl FileLogger {
         let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
         let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
         let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
+        let _ = writeln!(self.writer, "  Files renamed:   {}", stats.files_renamed);
         let _ = writeln!(self.writer, "  Files skipped:   {}", stats.total_skipped());
         if stats.total_skipped() > 0 {
             let _ = writeln!(
@@ -440,6 +444,9 @@ impl RunStats {
             ProcessResult::Remuxed { .. } => {
                 self.files_remuxed += 1;
             }
+            ProcessResult::Renamed { .. } => {
+                self.files_renamed += 1;
+            }
             ProcessResult::Skipped(reason) => match reason {
                 SkipReason::AlreadyConverted => self.files_skipped_converted += 1,
                 SkipReason::BitrateBelowThreshold { .. } => self.files_skipped_bitrate += 1,
@@ -464,6 +471,7 @@ impl RunStats {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
         println!("Files converted:        {}", self.files_converted);
         println!("Files remuxed:          {}", self.files_remuxed);
+        println!("Files renamed:          {}", self.files_renamed);
         println!(
             "Files failed:           {}",
             if self.files_failed > 0 {
@@ -788,6 +796,9 @@ impl VideoConvert {
                     self.log_success(output, "remux", &file_index, duration, None);
                     processed_files += 1;
                 }
+                ProcessResult::Renamed { output } => {
+                    self.log_success(output, "rename", &file_index, duration, None);
+                }
                 ProcessResult::Skipped(reason) => {
                     if self.config.verbose {
                         print_warning!("[{index}]: {}", cli_tools::path_to_string_relative(&file.path));
@@ -836,20 +847,24 @@ impl VideoConvert {
                     return ProcessResult::Skipped(SkipReason::OutputExists { path: new_path });
                 }
                 if self.config.dryrun {
-                    println!(
-                        "[DRYRUN] Would rename: {} -> {}",
-                        cli_tools::path_to_string_relative(&file.path),
-                        cli_tools::path_to_string_relative(&new_path)
-                    );
-                } else if let Err(e) = std::fs::rename(&file.path, &new_path) {
-                    print_error!("Failed to rename file: {e}");
-                } else {
-                    println!("{}", "Renamed:".bold());
+                    println!("{}", "[DRYRUN] Rename:                ".bold());
                     cli_tools::show_diff(
                         &cli_tools::path_to_string_relative(&file.path),
                         &cli_tools::path_to_string_relative(&new_path),
                     );
+                    return ProcessResult::Renamed { output: new_path };
+                } else if let Err(e) = std::fs::rename(&file.path, &new_path) {
+                    return ProcessResult::Failed {
+                        error: format!("Failed to rename file: {e}"),
+                    };
                 }
+                // Extra whitespace to ensure running index is erased
+                println!("{}", "Renamed:                ".bold());
+                cli_tools::show_diff(
+                    &cli_tools::path_to_string_relative(&file.path),
+                    &cli_tools::path_to_string_relative(&new_path),
+                );
+                return ProcessResult::Renamed { output: new_path };
             }
             return ProcessResult::Skipped(SkipReason::AlreadyConverted);
         }
