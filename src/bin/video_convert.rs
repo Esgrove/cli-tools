@@ -127,7 +127,7 @@ struct UserConfig {
 /// Final config created from CLI arguments and user config file.
 #[derive(Debug, Default)]
 struct Config {
-    bitrate: u64,
+    bitrate_limit: u64,
     convert_all: bool,
     convert_other: bool,
     delete: bool,
@@ -234,9 +234,9 @@ impl FileLogger {
     fn log_init(&mut self, config: &Config) {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(file, "[{}] INIT \"{}\"", Self::timestamp(), config.path.display());
-            let _ = writeln!(file, "  bitrate: {}", config.bitrate);
-            let _ = writeln!(file, "  convert all: {}", config.convert_all);
-            let _ = writeln!(file, "  convert other: {}", config.convert_other);
+            let _ = writeln!(file, "  bitrate_limit: {}", config.bitrate_limit);
+            let _ = writeln!(file, "  convert_all: {}", config.convert_all);
+            let _ = writeln!(file, "  convert_other: {}", config.convert_other);
             if !config.include.is_empty() {
                 let _ = writeln!(file, "  include: {:?}", config.include);
             }
@@ -544,7 +544,7 @@ impl Config {
         };
 
         Ok(Self {
-            bitrate: user_config.bitrate.unwrap_or(args.bitrate),
+            bitrate_limit: user_config.bitrate.unwrap_or(args.bitrate),
             convert_all,
             convert_other,
             delete: args.delete || user_config.delete,
@@ -751,9 +751,9 @@ impl VideoConvert {
         }
 
         // Check bitrate threshold
-        if info.bitrate_kbps < self.config.bitrate {
+        if info.bitrate_kbps < self.config.bitrate_limit {
             let bitrate = info.bitrate_kbps;
-            let threshold = self.config.bitrate;
+            let threshold = self.config.bitrate_limit;
             return ProcessResult::Skipped {
                 reason: format!("Bitrate {bitrate} kbps is below threshold {threshold} kbps"),
             };
