@@ -318,15 +318,15 @@ impl FileLogger {
     fn log_start(&mut self, file_path: &Path, operation: &str, file_index: &str, info: &VideoInfo) {
         let _ = writeln!(
             self.writer,
-            "[{}] START   {} {} - \"{}\" | {}x{} {}kbps {}",
+            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps ",
             Self::timestamp(),
             operation.to_uppercase(),
             file_index,
             file_path.display(),
+            info.codec,
             info.width,
             info.height,
-            info.bitrate_kbps,
-            info.codec
+            info.bitrate_kbps as f64 / 1000.0,
         );
         let _ = self.writer.flush();
     }
