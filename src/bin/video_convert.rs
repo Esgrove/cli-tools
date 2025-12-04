@@ -219,13 +219,37 @@ impl FileLogger {
             fs::create_dir_all(&log_dir).ok()?;
         }
 
-        let log_path = log_dir.join("video_convert.log");
+        let log_path = log_dir.join(format!(
+            "video_convert_{}.log",
+            Local::now().format("%Y-%m-%d_%H-%M-%S")
+        ));
 
         OpenOptions::new().create(true).append(true).open(log_path).ok()
     }
 
     fn timestamp() -> String {
         Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    /// Log when starting the program
+    fn log_init(&mut self, config: &Config) {
+        if let Some(ref mut file) = self.file {
+            let _ = writeln!(file, "[{}] INIT {}", Self::timestamp(), config.path.display());
+            let _ = writeln!(file, "  bitrate: {}", config.bitrate);
+            if !config.include.is_empty() {
+                let _ = writeln!(file, "  include: {:#?}", config.include);
+            }
+            if !config.exclude.is_empty() {
+                let _ = writeln!(file, "  exclude: {:#?}", config.exclude);
+            }
+            let _ = writeln!(file, "  extensions: {:#?}", config.extensions);
+            let _ = writeln!(file, "  recursive: {}", config.recursive);
+            let _ = writeln!(file, "  delete: {}", config.delete);
+            let _ = writeln!(file, "  overwrite: {}", config.overwrite);
+            let _ = writeln!(file, "  dryrun: {}", config.dryrun);
+            let _ = writeln!(file, "  number: {}", config.number);
+            let _ = writeln!(file, "  verbose: {}", config.verbose);
+        }
     }
 
     /// Log when starting a conversion or remux operation
@@ -622,6 +646,8 @@ impl VideoConvert {
 
         let mut processed_files: usize = 0;
         let mut aborted = false;
+
+        logger.log_init(&self.config);
 
         for file in files {
             // Check abort flag before starting a new file
