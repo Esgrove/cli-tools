@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -392,7 +394,26 @@ impl VideoConvert {
             println!("Found {} file(s) to process", files.len());
         }
 
-        let stats = self.process_files(files)?;
+        // Set up Ctrl+C handler for graceful abort
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let abort_flag_handler = Arc::clone(&abort_flag);
+
+        ctrlc::set_handler(move || {
+            if abort_flag_handler.load(Ordering::SeqCst) {
+                // Second Ctrl+C - force exit
+                std::process::exit(130);
+            }
+            println!("\n{}", "Received Ctrl+C, finishing current file...".yellow().bold());
+            abort_flag_handler.store(true, Ordering::SeqCst);
+        })
+        .expect("Failed to set Ctrl+C handler");
+
+        let (stats, aborted) = self.process_files(files, &abort_flag);
+
+        if aborted {
+            println!("\n{}", "Aborted by user".bold().red());
+        }
+
         stats.print_summary();
 
         Ok(())
@@ -434,22 +455,27 @@ impl VideoConvert {
         Ok(files)
     }
 
-    #[allow(clippy::unnecessary_wraps)]
-    fn process_files(&self, files: Vec<VideoFile>) -> Result<ConversionStats> {
+    fn process_files(&self, files: Vec<VideoFile>, abort_flag: &AtomicBool) -> (ConversionStats, bool) {
         let mut stats = ConversionStats::default();
         let total = files.len().min(self.config.number);
         let total_digits = total.to_string().chars().count();
 
         let mut processed_files: usize = 0;
+        let mut aborted = false;
+
         for file in files {
-            let file_display = cli_tools::path_to_string_relative(&file.path);
+            // Check abort flag before starting a new file
+            if abort_flag.load(Ordering::SeqCst) {
+                aborted = true;
+                break;
+            }
             println!(
                 "{}",
                 format!(
                     "[{:>width$}/{}] Processing: {}",
                     processed_files + 1,
                     self.config.number,
-                    file_display,
+                    cli_tools::path_to_string_relative(&file.path),
                     width = total_digits
                 )
                 .bold()
@@ -473,7 +499,7 @@ impl VideoConvert {
                     processed_files += 1;
                 }
                 ProcessResult::Remuxed {} => {
-                    println!("  ✓ Remuxed",);
+                    println!("  ✓ Remuxed");
                     processed_files += 1;
                 }
                 ProcessResult::Skipped { reason } => {
@@ -487,7 +513,7 @@ impl VideoConvert {
             stats.add_result(&result, duration);
         }
 
-        Ok(stats)
+        (stats, aborted)
     }
 
     /// Process a single video file
