@@ -1,13 +1,59 @@
-# Copy config to ~/.config/cli-tools.toml
+# Common config for all CLI tools.
+# Copy file to ~/.config/cli-tools.toml
 
-[divider]
+[dirmove]
+# dryrun = false
+# filter = []
+# ignore = []
+# overwrite = false
+# recursive = false
+# verbose = false
 
 [dots]
+# date_starts_with_year = true
+# debug = false
+# directory = false
+# dryrun = false
+# increment = false
+# include = []
+# move_date_after_prefix = []
+# move_to_end = []
+# move_to_start = []
+# overwrite = false
+# prefix_dir = false
+# suffix_dir = false
+# pre_replace = []
+# recursive = false
+# regex_replace = []
+# remove_random = false
+# remove_from_start = []
+# verbose = false
+
+# replacement pairs:
 replace = [
     [".WEBDL", ""],
-    [".HEVC", ""],
+    [".HEVC", ".x265"],
 ]
 
 [flip_date]
+# directory = false
+# dryrun = false
+# file_extensions = []
+# overwrite = false
+# recursive = false
+# swap_year = false
+# verbose = false
+# year_first = false
 
-[visa_parse]
+[video_convert]
+# bitrate = 8000
+# convert_all_types = false
+# convert_other_types = false
+# delete = false
+# exclude = []
+# include = []
+# extensions = []
+# number = 0
+# overwrite = false
+# recursive = false
+# verbose = false
