@@ -1,6 +1,8 @@
-use crate::convert::{ProcessResult, SkipReason};
-use colored::Colorize;
 use std::time::Duration;
+
+use colored::Colorize;
+
+use crate::convert::{ProcessResult, SkipReason};
 
 /// Statistics for the conversion run
 #[derive(Debug, Default)]
