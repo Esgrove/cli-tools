@@ -94,11 +94,7 @@ impl FileLogger {
             info.width,
             info.height,
             info.bitrate_kbps as f64 / 1000.0,
-            if let Some(quality_level) = quality_level {
-                format!(" | Level: {quality_level}")
-            } else {
-                String::new()
-            }
+            quality_level.map_or_else(String::new, |q| format!(" | Level: {q}"))
         );
         let _ = self.writer.flush();
     }
