@@ -78,6 +78,49 @@ pub fn is_directory_empty(dir: &Path) -> bool {
     true
 }
 
+/// Insert a suffix before the file extension.
+///
+/// Takes a path and inserts the given suffix string between the file stem and the file extension.
+/// If the file has no extension, the suffix is appended to the end.
+///
+/// ```rust
+/// use std::path::Path;
+/// use cli_tools::insert_suffix_before_extension;
+///
+/// // Basic usage with extension
+/// let path = Path::new("video.1080p.mp4");
+/// let result = insert_suffix_before_extension(path, ".x265");
+/// assert_eq!(result.to_str().unwrap(), "video.1080p.x265.mp4");
+///
+/// // With directory path
+/// let path = Path::new("subdir/video.mp4");
+/// let result = insert_suffix_before_extension(path, ".converted");
+/// assert_eq!(result, Path::new("subdir/video.converted.mp4"));
+///
+/// // Without extension
+/// let path = Path::new("README");
+/// let result = insert_suffix_before_extension(path, ".backup");
+/// assert_eq!(result.to_str().unwrap(), "README.backup");
+/// ```
+#[must_use]
+pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    let new_name = if extension.is_empty() {
+        format!("{stem}{suffix}")
+    } else {
+        format!("{stem}{suffix}.{extension}")
+    };
+
+    if parent.as_os_str().is_empty() {
+        PathBuf::from(new_name)
+    } else {
+        parent.join(new_name)
+    }
+}
+
 /// Resolves the provided input path to a directory or file to an absolute path.
 ///
 /// If `path` is `None`, the current working directory is used.
@@ -245,6 +288,24 @@ pub fn path_to_string(path: &Path) -> String {
     )
 }
 
+/// Convert given path to filename string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_filename_string(path: &Path) -> String {
+    os_str_to_string(path.file_name().unwrap_or_default())
+}
+
+/// Convert given path to file stem string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_file_stem_string(path: &Path) -> String {
+    os_str_to_string(path.file_stem().unwrap_or_default())
+}
+
+/// Convert given path to file extension lowercase string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_file_extension_string(path: &Path) -> String {
+    os_str_to_string(path.extension().unwrap_or_default()).to_lowercase()
+}
+
 /// Get relative path and convert to string with invalid unicode handling.
 #[must_use]
 pub fn path_to_string_relative(path: &Path) -> String {
@@ -347,6 +408,48 @@ pub fn show_diff(old: &str, new: &str) {
     }
 }
 
+/// Format bytes as human-readable size
+#[must_use]
+pub fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    }
+}
+
+/// Format duration as a human-readable string
+#[must_use]
+pub fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Format duration from seconds as a human-readable string
+#[must_use]
+pub fn format_duration_seconds(seconds: f64) -> String {
+    let secs = seconds as u64;
+    if secs >= 3600 {
+        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{seconds:.1}s")
+    }
+}
+
 /// Generate a shell completion script for the given shell.
 pub fn generate_shell_completion(shell: Shell, mut command: Command, install: bool, command_name: &str) -> Result<()> {
     if install {
@@ -417,6 +520,52 @@ fn get_shell_completion_dir(shell: Shell, name: &str) -> Result<PathBuf> {
 
     std::fs::create_dir_all(&user_dir)?;
     Ok(user_dir)
+}
+
+/// Check if a path is on a network drive.
+/// On Windows, detects mapped network drives and UNC paths.
+/// On other platforms, always returns false.
+#[cfg(windows)]
+#[must_use]
+pub fn is_network_path(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+    const DRIVE_REMOTE: u32 = 4;
+
+    // Check for UNC paths (\\server\share)
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with(r"\\") {
+        return true;
+    }
+
+    // Check drive type for mapped network drives
+    if let Some(prefix) = path.components().next() {
+        let prefix_str = prefix.as_os_str();
+        // Create a root path like "X:\"
+        let mut root: Vec<u16> = prefix_str.encode_wide().collect();
+        if root.len() >= 2 && root[1] == u16::from(b':') {
+            root.push(u16::from(b'\\'));
+            root.push(0); // null terminator
+
+            // SAFETY: GetDriveTypeW is a safe Windows API call that only reads
+            // the null-terminated string to determine drive type
+            #[allow(unsafe_code)]
+            let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
+            return drive_type == DRIVE_REMOTE;
+        }
+    }
+
+    false
+}
+
+/// Check if a path is on a network drive.
+/// On Windows, detects mapped network drives and UNC paths.
+/// On other platforms, always returns false.
+#[cfg(not(windows))]
+#[must_use]
+pub const fn is_network_path(_path: &Path) -> bool {
+    false
 }
 
 /// Helper method to assert floating point equality in test cases.
