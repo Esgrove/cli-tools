@@ -563,6 +563,7 @@ pub fn is_network_path(path: &Path) -> bool {
 /// On Windows, detects mapped network drives and UNC paths.
 /// On other platforms, always returns false.
 #[cfg(not(windows))]
+#[must_use]
 pub const fn is_network_path(_path: &Path) -> bool {
     false
 }
