@@ -135,6 +135,7 @@ impl FileLogger {
         let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
         let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
         let _ = writeln!(self.writer, "  Files renamed:   {}", stats.files_renamed);
+        let _ = writeln!(self.writer, "  Files failed:    {}", stats.files_failed);
         let _ = writeln!(self.writer, "  Files skipped:   {}", stats.total_skipped());
         if stats.total_skipped() > 0 {
             let _ = writeln!(
@@ -153,7 +154,6 @@ impl FileLogger {
                 stats.files_skipped_duplicate
             );
         }
-        let _ = writeln!(self.writer, "  Files failed:    {}", stats.files_failed);
 
         if stats.files_converted > 0 {
             let _ = writeln!(
@@ -185,7 +185,6 @@ impl FileLogger {
             cli_tools::format_duration(stats.total_duration)
         );
         let _ = writeln!(self.writer, "[{}] END", Self::timestamp());
-        let _ = writeln!(self.writer);
         let _ = self.writer.flush();
     }
 }
