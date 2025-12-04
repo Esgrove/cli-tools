@@ -231,19 +231,20 @@ impl FileLogger {
     }
 
     /// Log when starting the program
+    #[allow(clippy::unnecessary_debug_formatting)]
     fn log_init(&mut self, config: &Config) {
         if let Some(ref mut file) = self.file {
-            let _ = writeln!(file, "[{}] INIT {}", Self::timestamp(), config.path.display());
+            let _ = writeln!(file, "[{}] INIT {:#?}", Self::timestamp(), config.path);
             let _ = writeln!(file, "  bitrate: {}", config.bitrate);
             let _ = writeln!(file, "  convert all: {}", config.convert_all);
             let _ = writeln!(file, "  convert other: {}", config.convert_other);
             if !config.include.is_empty() {
-                let _ = writeln!(file, "  include: {:#?}", config.include);
+                let _ = writeln!(file, "  include: {:?}", config.include);
             }
             if !config.exclude.is_empty() {
-                let _ = writeln!(file, "  exclude: {:#?}", config.exclude);
+                let _ = writeln!(file, "  exclude: {:?}", config.exclude);
             }
-            let _ = writeln!(file, "  extensions: {:#?}", config.extensions);
+            let _ = writeln!(file, "  extensions: {:?}", config.extensions);
             let _ = writeln!(file, "  recursive: {}", config.recursive);
             let _ = writeln!(file, "  delete: {}", config.delete);
             let _ = writeln!(file, "  overwrite: {}", config.overwrite);
@@ -254,19 +255,21 @@ impl FileLogger {
     }
 
     /// Log when starting a conversion or remux operation
+    #[allow(clippy::unnecessary_debug_formatting)]
     fn log_start(&mut self, file_path: &Path, operation: &str) {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] START   {} - {}",
+                "[{}] START   {} - {:#?}",
                 Self::timestamp(),
                 operation.to_uppercase(),
-                file_path.display()
+                file_path
             );
         }
     }
 
     /// Log when a conversion or remux finishes successfully
+    #[allow(clippy::unnecessary_debug_formatting)]
     fn log_success(
         &mut self,
         file_path: &Path,
@@ -289,10 +292,10 @@ impl FileLogger {
             };
             let _ = writeln!(
                 file,
-                "[{}] SUCCESS {} - {} | Duration: {}{}",
+                "[{}] SUCCESS {} - {:#?} | Duration: {}{}",
                 Self::timestamp(),
                 operation.to_uppercase(),
-                file_path.display(),
+                file_path,
                 duration_str,
                 size_info
             );
@@ -300,14 +303,15 @@ impl FileLogger {
     }
 
     /// Log when a conversion or remux fails
+    #[allow(clippy::unnecessary_debug_formatting)]
     fn log_failure(&mut self, file_path: &Path, operation: &str, error: &str) {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] ERROR   {} - {} | {}",
+                "[{}] ERROR   {} - {:#?} | {}",
                 Self::timestamp(),
                 operation.to_uppercase(),
-                file_path.display(),
+                file_path,
                 error
             );
         }
