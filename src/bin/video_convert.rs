@@ -842,12 +842,12 @@ impl VideoConvert {
                         cli_tools::path_to_string_relative(&new_path)
                     );
                 } else if let Err(e) = std::fs::rename(&file.path, &new_path) {
-                    print_warning!("Failed to rename file: {e}");
+                    print_error!("Failed to rename file: {e}");
                 } else {
-                    println!(
-                        "Renamed: {} -> {}",
-                        cli_tools::path_to_string_relative(&file.path),
-                        cli_tools::path_to_string_relative(&new_path)
+                    println!("{}", "Renamed:".bold());
+                    cli_tools::show_diff(
+                        &cli_tools::path_to_string_relative(&file.path),
+                        &cli_tools::path_to_string_relative(&new_path),
                     );
                 }
             }
@@ -870,28 +870,8 @@ impl VideoConvert {
         }
 
         if is_hevc {
-            println!(
-                "{}",
-                format!(
-                    "{file_index} Remuxing: {}",
-                    cli_tools::path_to_string_relative(&file.path)
-                )
-                .bold()
-                .magenta()
-            );
-            println!("{info}");
             self.remux_to_mp4(&file.path, &output_path, &info, file_index)
         } else {
-            println!(
-                "{}",
-                format!(
-                    "{file_index} Converting: {}",
-                    cli_tools::path_to_string_relative(&file.path)
-                )
-                .bold()
-                .magenta()
-            );
-            println!("{info}");
             self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension, file_index)
         }
     }
@@ -1001,6 +981,14 @@ impl VideoConvert {
 
     /// Remux video (copy streams to new container)
     fn remux_to_mp4(&self, input: &Path, output: &Path, info: &VideoInfo, file_index: &str) -> ProcessResult {
+        println!(
+            "{}",
+            format!("{file_index} Remuxing: {}", cli_tools::path_to_string_relative(input))
+                .bold()
+                .green()
+        );
+        println!("{info}");
+
         if self.config.verbose {
             println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
         }
@@ -1135,8 +1123,16 @@ impl VideoConvert {
         extension: &str,
         file_index: &str,
     ) -> ProcessResult {
+        println!(
+            "{}",
+            format!("{file_index} Converting: {}", cli_tools::path_to_string_relative(input))
+                .bold()
+                .magenta()
+        );
+        println!("{info}");
+
         if self.config.verbose {
-            println!("Converting to HEVC: {}", cli_tools::path_to_string_relative(output));
+            println!("Converting: {}", cli_tools::path_to_string_relative(output));
         }
 
         self.log_start(input, "convert", file_index, info);
