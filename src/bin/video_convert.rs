@@ -1407,14 +1407,11 @@ fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
 #[cfg(unix)]
 fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
     use std::os::unix::process::CommandExt;
-    // Set process group to prevent SIGINT propagation
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setpgid(0, 0);
-            Ok(())
-        });
-    }
-    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
+    // Set process group to 0 to prevent SIGINT propagation
+    cmd.process_group(0)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
 }
 
 fn main() -> Result<()> {
