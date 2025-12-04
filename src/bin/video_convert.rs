@@ -816,8 +816,7 @@ impl VideoConvert {
     fn process_single_file(&self, file: &VideoFile, file_index: &str) -> ProcessResult {
         if !self.config.verbose {
             // Clear the progress line before printing meaningful output
-            print!("\r{:40}\r", "");
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            print!("\r");
         }
 
         // Get video info
