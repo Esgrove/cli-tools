@@ -1,150 +1,25 @@
 use std::cell::RefCell;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::Local;
-use clap::{CommandFactory, Parser};
-use clap_complete::Shell;
+use cli_tools::{print_error, print_warning};
 use colored::Colorize;
-use serde::Deserialize;
 use walkdir::WalkDir;
 
-use cli_tools::{print_error, print_warning};
-
-/// Default video extensions
-const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];
-
-/// Other video extensions excluding mp4
-const OTHER_EXTENSIONS: &[&str] = &["mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
-
-/// All video extensions
-const ALL_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
+use crate::VideoConvertArgs;
+use crate::config::{Config, VideoConvertConfig};
+use crate::logger::FileLogger;
+use crate::stats::{ConversionStats, RunStats};
 
 const TARGET_EXTENSION: &str = "mp4";
-
 const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
 
-#[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
-struct Args {
-    /// Optional input directory or file
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
-    path: Option<PathBuf>,
-
-    /// Convert all known video file types
-    #[arg(short, long)]
-    all: bool,
-
-    /// Skip files with bitrate lower than LIMIT kbps
-    #[arg(short, long, name = "LIMIT", default_value_t = 8000)]
-    bitrate: u64,
-
-    /// Delete input files immediately instead of moving to trash
-    #[arg(short, long)]
-    delete: bool,
-
-    /// Print commands without running them
-    #[arg(short, long)]
-    print: bool,
-
-    /// Overwrite existing output files
-    #[arg(short, long)]
-    force: bool,
-
-    /// Include files that match the given pattern
-    #[arg(short = 'i', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
-    include: Vec<String>,
-
-    /// Exclude files that match the given pattern
-    #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
-    exclude: Vec<String>,
-
-    /// Override file extensions to convert
-    #[arg(short = 't', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
-    extension: Vec<String>,
-
-    /// Number of files to convert
-    #[arg(short, long, default_value_t = 1)]
-    number: usize,
-
-    /// Don't convert MP4 files
-    #[arg(short, long)]
-    other: bool,
-
-    /// Recurse into subdirectories
-    #[arg(short, long)]
-    recurse: bool,
-
-    /// Generate shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
-    /// Display commands being executed
-    #[arg(short, long)]
-    verbose: bool,
-}
-
-/// Config from a config file
-#[derive(Debug, Default, Deserialize)]
-struct VideoConvertConfig {
-    #[serde(default)]
-    convert_all_types: bool,
-    #[serde(default)]
-    bitrate: Option<u64>,
-    #[serde(default)]
-    delete: bool,
-    #[serde(default)]
-    exclude: Vec<String>,
-    /// Custom list of file extensions to process (overrides all/other flags)
-    #[serde(default)]
-    extensions: Vec<String>,
-    #[serde(default)]
-    include: Vec<String>,
-    #[serde(default)]
-    number: Option<usize>,
-    #[serde(default)]
-    convert_other_types: bool,
-    #[serde(default)]
-    overwrite: bool,
-    #[serde(default)]
-    recursive: bool,
-    #[serde(default)]
-    verbose: bool,
-}
-
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    video_convert: VideoConvertConfig,
-}
-
-/// Final config created from CLI arguments and user config file.
-#[derive(Debug, Default)]
-struct Config {
-    bitrate_limit: u64,
-    convert_all: bool,
-    convert_other: bool,
-    delete: bool,
-    dryrun: bool,
-    exclude: Vec<String>,
-    include: Vec<String>,
-    /// File extensions to convert (lowercase, without leading dot)
-    extensions: Vec<String>,
-    number: usize,
-    overwrite: bool,
-    path: PathBuf,
-    recursive: bool,
-    verbose: bool,
-}
-
-struct VideoConvert {
+pub struct VideoConvert {
     config: Config,
     logger: RefCell<FileLogger>,
 }
@@ -158,51 +33,24 @@ struct VideoFile {
 
 /// Information about a video file from ffprobe
 #[derive(Debug)]
-struct VideoInfo {
+pub struct VideoInfo {
     /// Video codec name (e.g., "hevc", "h264")
-    codec: String,
+    pub(crate) codec: String,
     /// Video bitrate in kbps
-    bitrate_kbps: u64,
+    pub(crate) bitrate_kbps: u64,
     /// File size in bytes
-    size_bytes: u64,
+    pub(crate) size_bytes: u64,
     /// Duration in seconds
-    duration: f64,
+    pub(crate) duration: f64,
     /// Video width in pixels
-    width: u32,
+    pub(crate) width: u32,
     /// Video height in pixels
-    height: u32,
-}
-
-/// Statistics for the conversion run
-#[derive(Debug, Default)]
-struct RunStats {
-    files_converted: usize,
-    files_remuxed: usize,
-    files_renamed: usize,
-    files_skipped_converted: usize,
-    files_skipped_bitrate: usize,
-    files_skipped_duplicate: usize,
-    files_failed: usize,
-    total_original_size: u64,
-    total_converted_size: u64,
-    total_duration: Duration,
-}
-
-/// Statistics for a single file conversion
-#[derive(Debug, Default, Clone, Copy)]
-struct ConversionStats {
-    original_size: u64,
-    converted_size: u64,
-}
-
-/// Simple file logger for conversion operations with buffered writes
-struct FileLogger {
-    writer: BufWriter<File>,
+    pub(crate) height: u32,
 }
 
 /// Reasons why a file was skipped
 #[derive(Debug)]
-enum SkipReason {
+pub enum SkipReason {
     /// File is already HEVC in MP4 container
     AlreadyConverted,
     /// File bitrate is below the threshold
@@ -213,7 +61,7 @@ enum SkipReason {
 
 /// Result of processing a single file
 #[derive(Debug)]
-enum ProcessResult {
+pub enum ProcessResult {
     /// File was converted successfully
     Converted { output: PathBuf, stats: ConversionStats },
     /// File was remuxed (already HEVC, just changed container to MP4)
@@ -235,323 +83,8 @@ impl ProcessResult {
     }
 }
 
-impl ConversionStats {
-    const fn new(original_size: u64, converted_size: u64) -> Self {
-        Self {
-            original_size,
-            converted_size,
-        }
-    }
-
-    /// Calculate the size difference (positive = saved, negative = increased)
-    #[allow(clippy::cast_possible_wrap)]
-    const fn size_difference(&self) -> i64 {
-        self.original_size as i64 - self.converted_size as i64
-    }
-
-    /// Calculate the percentage change (positive = reduced, negative = increased)
-    fn change_percentage(&self) -> f64 {
-        if self.original_size == 0 || self.converted_size == 0 {
-            return 0.0;
-        }
-        let diff = self.size_difference();
-        diff as f64 / self.original_size as f64 * 100.0
-    }
-}
-
-impl FileLogger {
-    /// Create a new file logger, writing to ~/logs/cli-tools/video_convert_<timestamp>.log
-    fn new() -> Result<Self> {
-        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
-        let log_dir = home_dir.join("logs").join("cli-tools");
-
-        // Create log directory if it doesn't exist
-        if !log_dir.exists() {
-            fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
-        }
-
-        let log_path = log_dir.join(format!(
-            "video_convert_{}.log",
-            Local::now().format("%Y-%m-%d_%H-%M-%S")
-        ));
-
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("Failed to create log file: {}", log_path.display()))?;
-
-        Ok(Self {
-            writer: BufWriter::new(file),
-        })
-    }
-
-    fn timestamp() -> String {
-        Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
-    }
-
-    /// Log when starting the program
-    fn log_init(&mut self, config: &Config) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] INIT \"{}\"",
-            Self::timestamp(),
-            config.path.display()
-        );
-        let _ = writeln!(self.writer, "  bitrate_limit: {}", config.bitrate_limit);
-        let _ = writeln!(self.writer, "  convert_all: {}", config.convert_all);
-        let _ = writeln!(self.writer, "  convert_other: {}", config.convert_other);
-        if !config.include.is_empty() {
-            let _ = writeln!(self.writer, "  include: {:?}", config.include);
-        }
-        if !config.exclude.is_empty() {
-            let _ = writeln!(self.writer, "  exclude: {:?}", config.exclude);
-        }
-        let _ = writeln!(self.writer, "  extensions: {:?}", config.extensions);
-        let _ = writeln!(self.writer, "  recursive: {}", config.recursive);
-        let _ = writeln!(self.writer, "  delete: {}", config.delete);
-        let _ = writeln!(self.writer, "  overwrite: {}", config.overwrite);
-        let _ = writeln!(self.writer, "  dryrun: {}", config.dryrun);
-        let _ = writeln!(self.writer, "  number: {}", config.number);
-        let _ = writeln!(self.writer, "  verbose: {}", config.verbose);
-        let _ = self.writer.flush();
-    }
-
-    /// Log when starting a conversion or remux operation
-    fn log_start(&mut self, file_path: &Path, operation: &str, file_index: &str, info: &VideoInfo) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps ",
-            Self::timestamp(),
-            operation.to_uppercase(),
-            file_index,
-            file_path.display(),
-            info.codec,
-            info.width,
-            info.height,
-            info.bitrate_kbps as f64 / 1000.0,
-        );
-        let _ = self.writer.flush();
-    }
-
-    /// Log when a conversion or remux finishes successfully
-    fn log_success(
-        &mut self,
-        file_path: &Path,
-        operation: &str,
-        file_index: &str,
-        duration: Duration,
-        stats: Option<&ConversionStats>,
-    ) {
-        let duration_str = cli_tools::format_duration(duration);
-        let size_info = stats.map_or(String::new(), |s| format!(" | {s}"));
-        let _ = writeln!(
-            self.writer,
-            "[{}] SUCCESS {} {} - \"{}\" | Time: {}{}",
-            Self::timestamp(),
-            operation.to_uppercase(),
-            file_index,
-            file_path.display(),
-            duration_str,
-            size_info
-        );
-        let _ = self.writer.flush();
-    }
-
-    /// Log when a conversion or remux fails
-    fn log_failure(&mut self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] ERROR   {} {} - \"{}\" | {}",
-            Self::timestamp(),
-            operation.to_uppercase(),
-            file_index,
-            file_path.display(),
-            error
-        );
-        let _ = self.writer.flush();
-    }
-
-    /// Log final statistics
-    fn log_stats(&mut self, stats: &RunStats) {
-        let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
-        let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
-        let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
-        let _ = writeln!(self.writer, "  Files renamed:   {}", stats.files_renamed);
-        let _ = writeln!(self.writer, "  Files skipped:   {}", stats.total_skipped());
-        if stats.total_skipped() > 0 {
-            let _ = writeln!(
-                self.writer,
-                "    - Already converted:   {}",
-                stats.files_skipped_converted
-            );
-            let _ = writeln!(
-                self.writer,
-                "    - Below bitrate limit: {}",
-                stats.files_skipped_bitrate
-            );
-            let _ = writeln!(
-                self.writer,
-                "    - Duplicate:           {}",
-                stats.files_skipped_duplicate
-            );
-        }
-        let _ = writeln!(self.writer, "  Files failed:    {}", stats.files_failed);
-
-        if stats.files_converted > 0 {
-            let _ = writeln!(
-                self.writer,
-                "  Total original size:  {}",
-                cli_tools::format_size(stats.total_original_size)
-            );
-            let _ = writeln!(
-                self.writer,
-                "  Total converted size: {}",
-                cli_tools::format_size(stats.total_converted_size)
-            );
-
-            let saved = stats.space_saved();
-            if saved >= 0 {
-                let _ = writeln!(self.writer, "  Space saved: {}", cli_tools::format_size(saved as u64));
-            } else {
-                let _ = writeln!(
-                    self.writer,
-                    "  Space increased: {}",
-                    cli_tools::format_size((-saved) as u64)
-                );
-            }
-        }
-
-        let _ = writeln!(
-            self.writer,
-            "  Total time: {}",
-            cli_tools::format_duration(stats.total_duration)
-        );
-        let _ = writeln!(self.writer, "[{}] END", Self::timestamp());
-        let _ = writeln!(self.writer);
-        let _ = self.writer.flush();
-    }
-}
-
-impl RunStats {
-    fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
-        self.total_duration += duration;
-        match result {
-            ProcessResult::Converted { stats, .. } => {
-                self.files_converted += 1;
-                *self += *stats;
-            }
-            ProcessResult::Remuxed { .. } => {
-                self.files_remuxed += 1;
-            }
-            ProcessResult::Renamed { .. } => {
-                self.files_renamed += 1;
-            }
-            ProcessResult::Skipped(reason) => match reason {
-                SkipReason::AlreadyConverted => self.files_skipped_converted += 1,
-                SkipReason::BitrateBelowThreshold { .. } => self.files_skipped_bitrate += 1,
-                SkipReason::OutputExists { .. } => self.files_skipped_duplicate += 1,
-            },
-            ProcessResult::Failed { .. } => {
-                self.files_failed += 1;
-            }
-        }
-    }
-
-    const fn total_skipped(&self) -> usize {
-        self.files_skipped_converted + self.files_skipped_bitrate + self.files_skipped_duplicate
-    }
-
-    #[allow(clippy::cast_possible_wrap)]
-    const fn space_saved(&self) -> i64 {
-        self.total_original_size as i64 - self.total_converted_size as i64
-    }
-
-    fn print_summary(&self) {
-        println!("{}", "\n--- Conversion Summary ---".bold().magenta());
-        println!("Files converted:        {}", self.files_converted);
-        println!("Files remuxed:          {}", self.files_remuxed);
-        println!("Files renamed:          {}", self.files_renamed);
-        println!(
-            "Files failed:           {}",
-            if self.files_failed > 0 {
-                self.files_failed.to_string().red()
-            } else {
-                "0".normal()
-            }
-        );
-        println!("Files skipped:          {}", self.total_skipped());
-        if self.total_skipped() > 0 {
-            println!("  - Already converted:  {}", self.files_skipped_converted);
-            println!("  - Below bitrate:      {}", self.files_skipped_bitrate);
-            println!("  - Duplicates:         {}", self.files_skipped_duplicate);
-        }
-        println!();
-
-        if self.files_converted > 0 {
-            println!(
-                "Total original size:    {}",
-                cli_tools::format_size(self.total_original_size)
-            );
-            println!(
-                "Total converted size:   {}",
-                cli_tools::format_size(self.total_converted_size)
-            );
-
-            if self.total_original_size > 0 {
-                let saved = self.space_saved();
-                let ratio = saved.abs() as f64 / self.total_original_size as f64 * 100.0;
-
-                if saved >= 0 {
-                    println!(
-                        "Space saved:            {} ({:.1}%)",
-                        cli_tools::format_size(saved as u64),
-                        ratio
-                    );
-                } else {
-                    println!(
-                        "Space increased:        {} ({:.1}%)",
-                        cli_tools::format_size((-saved) as u64),
-                        ratio
-                    );
-                }
-            }
-        }
-
-        println!(
-            "Total time:             {}",
-            cli_tools::format_duration(self.total_duration)
-        );
-    }
-}
-
-impl VideoConvertConfig {
-    /// Try to read user config from the file if it exists.
-    /// Otherwise, fall back to default config.
-    fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|e| {
-                        print_error!("Error reading config file {}: {e}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|e| {
-                        print_error!("Error reading config file: {e}");
-                    })
-                    .ok()
-            })
-            .map(|config| config.video_convert)
-            .unwrap_or_default()
-    }
-}
-
 impl VideoFile {
-    pub fn new(path: &Path) -> Self {
+    fn new(path: &Path) -> Self {
         let path = path.to_owned();
         let name = cli_tools::path_to_file_stem_string(&path);
         let extension = cli_tools::path_to_file_extension_string(&path);
@@ -576,18 +109,6 @@ impl std::fmt::Display for VideoFile {
     }
 }
 
-impl std::fmt::Display for ConversionStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} -> {} ({:.1}%)",
-            cli_tools::format_size(self.original_size),
-            cli_tools::format_size(self.converted_size),
-            self.change_percentage()
-        )
-    }
-}
-
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -602,65 +123,14 @@ impl std::fmt::Display for SkipReason {
     }
 }
 
-impl std::ops::AddAssign<ConversionStats> for RunStats {
-    fn add_assign(&mut self, stats: ConversionStats) {
-        self.total_original_size += stats.original_size;
-        self.total_converted_size += stats.converted_size;
-    }
-}
-
 impl From<walkdir::DirEntry> for VideoFile {
     fn from(entry: walkdir::DirEntry) -> Self {
         Self::new(&entry.into_path())
     }
 }
 
-impl Config {
-    /// Create config from given command line args and user config file.
-    pub fn try_from_args(args: Args, user_config: VideoConvertConfig) -> Result<Self> {
-        let mut include = args.include;
-        include.extend(user_config.include);
-
-        let mut exclude = args.exclude;
-        exclude.extend(user_config.exclude);
-
-        let path = cli_tools::resolve_input_path(args.path.as_deref())?;
-
-        let convert_all = args.all || user_config.convert_all_types;
-        let convert_other = args.other || user_config.convert_other_types;
-
-        let extensions = if !args.extension.is_empty() {
-            to_lowercase_vec(&args.extension)
-        } else if !user_config.extensions.is_empty() {
-            to_lowercase_vec(&user_config.extensions)
-        } else if convert_all {
-            to_lowercase_vec(ALL_EXTENSIONS)
-        } else if convert_other {
-            to_lowercase_vec(OTHER_EXTENSIONS)
-        } else {
-            to_lowercase_vec(DEFAULT_EXTENSIONS)
-        };
-
-        Ok(Self {
-            bitrate_limit: user_config.bitrate.unwrap_or(args.bitrate),
-            convert_all,
-            convert_other,
-            delete: args.delete || user_config.delete,
-            dryrun: args.print,
-            exclude,
-            extensions,
-            include,
-            number: user_config.number.unwrap_or(args.number),
-            overwrite: args.force || user_config.overwrite,
-            path,
-            recursive: args.recurse || user_config.recursive,
-            verbose: args.verbose || user_config.verbose,
-        })
-    }
-}
-
 impl VideoConvert {
-    pub fn new(args: Args) -> Result<Self> {
+    pub fn new(args: VideoConvertArgs) -> Result<Self> {
         let user_config = VideoConvertConfig::get_user_config();
         let config = Config::try_from_args(args, user_config)?;
         let logger = RefCell::new(FileLogger::new()?);
@@ -1406,6 +876,7 @@ impl VideoConvert {
 #[cfg(windows)]
 fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     cmd.creation_flags(CREATE_NEW_PROCESS_GROUP)
         .stdout(Stdio::inherit())
@@ -1416,22 +887,10 @@ fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
 #[cfg(unix)]
 fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
     use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
     // Set process group to 0 to prevent SIGINT propagation
     cmd.process_group(0)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-}
-
-fn to_lowercase_vec(slice: &[impl AsRef<str>]) -> Vec<String> {
-    slice.iter().map(|s| s.as_ref().to_lowercase()).collect()
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
-    } else {
-        VideoConvert::new(args)?.run()
-    }
 }
