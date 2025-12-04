@@ -254,14 +254,19 @@ impl FileLogger {
     }
 
     /// Log when starting a conversion or remux operation
-    fn log_start(&mut self, file_path: &Path, operation: &str) {
+    fn log_start(&mut self, file_path: &Path, operation: &str, file_index: &str, info: &VideoInfo) {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] START   {} - \"{}\"",
+                "[{}] START   {} {} - \"{}\" | {}x{} {}kbps {}",
                 Self::timestamp(),
                 operation.to_uppercase(),
-                file_path.display()
+                file_index,
+                file_path.display(),
+                info.width,
+                info.height,
+                info.bitrate_kbps,
+                info.codec
             );
         }
     }
@@ -271,6 +276,7 @@ impl FileLogger {
         &mut self,
         file_path: &Path,
         operation: &str,
+        file_index: &str,
         duration: Duration,
         original_size: Option<u64>,
         converted_size: Option<u64>,
@@ -289,9 +295,10 @@ impl FileLogger {
             };
             let _ = writeln!(
                 file,
-                "[{}] SUCCESS {} - \"{}\" | Duration: {}{}",
+                "[{}] SUCCESS {} {} - \"{}\" | Duration: {}{}",
                 Self::timestamp(),
                 operation.to_uppercase(),
+                file_index,
                 file_path.display(),
                 duration_str,
                 size_info
@@ -300,14 +307,14 @@ impl FileLogger {
     }
 
     /// Log when a conversion or remux fails
-    #[allow(clippy::unnecessary_debug_formatting)]
-    fn log_failure(&mut self, file_path: &Path, operation: &str, error: &str) {
+    fn log_failure(&mut self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] ERROR   {} - \"{}\" | {}",
+                "[{}] ERROR   {} {} - \"{}\" | {}",
                 Self::timestamp(),
                 operation.to_uppercase(),
+                file_index,
                 file_path.display(),
                 error
             );
@@ -661,21 +668,20 @@ impl VideoConvert {
                 println!("\nReached file limit");
                 break;
             }
+
+            let file_index = format!("[{:>width$}/{}]", processed_files + 1, total, width = total_digits);
             println!(
                 "{}",
                 format!(
-                    "[{:>width$}/{}] Processing: {}",
-                    processed_files + 1,
-                    self.config.number,
-                    cli_tools::path_to_string_relative(&file.path),
-                    width = total_digits
+                    "{file_index} Processing: {}",
+                    cli_tools::path_to_string_relative(&file.path)
                 )
                 .bold()
                 .magenta()
             );
 
             let start = Instant::now();
-            let result = self.process_single_file(&file, &mut logger);
+            let result = self.process_single_file(&file, &mut logger, &file_index);
             let duration = start.elapsed();
 
             match &result {
@@ -696,6 +702,7 @@ impl VideoConvert {
                     logger.log_success(
                         &file.path,
                         "convert",
+                        &file_index,
                         duration,
                         Some(*original_size),
                         Some(*converted_size),
@@ -707,7 +714,7 @@ impl VideoConvert {
                         "{}",
                         format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
                     );
-                    logger.log_success(&file.path, "remux", duration, None, None);
+                    logger.log_success(&file.path, "remux", &file_index, duration, None, None);
                     processed_files += 1;
                 }
                 ProcessResult::Skipped { reason } => {
@@ -716,7 +723,7 @@ impl VideoConvert {
                 }
                 ProcessResult::Failed { error } => {
                     print_error!("✗ {error}");
-                    logger.log_failure(&file.path, "process", error);
+                    logger.log_failure(&file.path, "process", &file_index, error);
                 }
             }
 
@@ -728,7 +735,7 @@ impl VideoConvert {
     }
 
     /// Process a single video file
-    fn process_single_file(&self, file: &VideoFile, logger: &mut FileLogger) -> ProcessResult {
+    fn process_single_file(&self, file: &VideoFile, logger: &mut FileLogger, file_index: &str) -> ProcessResult {
         // Get video info
         let info = match self.get_video_info(&file.path) {
             Ok(info) => info,
@@ -769,9 +776,9 @@ impl VideoConvert {
         }
 
         if is_hevc {
-            self.remux_to_mp4(&file.path, &output_path, logger)
+            self.remux_to_mp4(&file.path, &output_path, &info, file_index, logger)
         } else {
-            self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension, logger)
+            self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension, file_index, logger)
         }
     }
 
@@ -879,12 +886,19 @@ impl VideoConvert {
     }
 
     /// Remux video (copy streams to new container)
-    fn remux_to_mp4(&self, input: &Path, output: &Path, logger: &mut FileLogger) -> ProcessResult {
+    fn remux_to_mp4(
+        &self,
+        input: &Path,
+        output: &Path,
+        info: &VideoInfo,
+        file_index: &str,
+        logger: &mut FileLogger,
+    ) -> ProcessResult {
         if self.config.verbose {
             println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
         }
 
-        logger.log_start(input, "remux");
+        logger.log_start(input, "remux", file_index, info);
 
         // Try pure copy and drop unsupported streams
         // -map 0:v:0   -> first video stream only
@@ -1003,13 +1017,14 @@ impl VideoConvert {
         output: &Path,
         info: &VideoInfo,
         extension: &str,
+        file_index: &str,
         logger: &mut FileLogger,
     ) -> ProcessResult {
         if self.config.verbose {
             println!("Converting to HEVC: {}", cli_tools::path_to_string_relative(output));
         }
 
-        logger.log_start(input, "convert");
+        logger.log_start(input, "convert", file_index, info);
 
         // Determine quality level based on resolution and bitrate.
         // Quality level 1 to 51, lower is better quality and bigger file size.
