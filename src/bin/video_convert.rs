@@ -1,5 +1,6 @@
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -143,9 +144,9 @@ struct Config {
     verbose: bool,
 }
 
-#[derive(Debug)]
 struct VideoConvert {
     config: Config,
+    logger: RefCell<FileLogger>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -197,25 +198,20 @@ struct ConversionStats {
     total_duration: Duration,
 }
 
-/// Simple file logger for conversion operations
+/// Simple file logger for conversion operations with buffered writes
 struct FileLogger {
-    file: Option<File>,
+    writer: BufWriter<File>,
 }
 
 impl FileLogger {
-    /// Create a new file logger, writing to ~/.local/share/cli-tools/logs/video_convert.log
-    fn new() -> Self {
-        let file = Self::create_log_file();
-        Self { file }
-    }
-
-    fn create_log_file() -> Option<File> {
-        let home_dir = dirs::home_dir()?;
+    /// Create a new file logger, writing to ~/logs/cli-tools/video_convert_<timestamp>.log
+    fn new() -> Result<Self> {
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let log_dir = home_dir.join("logs").join("cli-tools");
 
         // Create log directory if it doesn't exist
         if !log_dir.exists() {
-            fs::create_dir_all(&log_dir).ok()?;
+            fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
         }
 
         let log_path = log_dir.join(format!(
@@ -223,7 +219,15 @@ impl FileLogger {
             Local::now().format("%Y-%m-%d_%H-%M-%S")
         ));
 
-        OpenOptions::new().create(true).append(true).open(log_path).ok()
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("Failed to create log file: {}", log_path.display()))?;
+
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
     }
 
     fn timestamp() -> String {
@@ -232,43 +236,46 @@ impl FileLogger {
 
     /// Log when starting the program
     fn log_init(&mut self, config: &Config) {
-        if let Some(ref mut file) = self.file {
-            let _ = writeln!(file, "[{}] INIT \"{}\"", Self::timestamp(), config.path.display());
-            let _ = writeln!(file, "  bitrate_limit: {}", config.bitrate_limit);
-            let _ = writeln!(file, "  convert_all: {}", config.convert_all);
-            let _ = writeln!(file, "  convert_other: {}", config.convert_other);
-            if !config.include.is_empty() {
-                let _ = writeln!(file, "  include: {:?}", config.include);
-            }
-            if !config.exclude.is_empty() {
-                let _ = writeln!(file, "  exclude: {:?}", config.exclude);
-            }
-            let _ = writeln!(file, "  extensions: {:?}", config.extensions);
-            let _ = writeln!(file, "  recursive: {}", config.recursive);
-            let _ = writeln!(file, "  delete: {}", config.delete);
-            let _ = writeln!(file, "  overwrite: {}", config.overwrite);
-            let _ = writeln!(file, "  dryrun: {}", config.dryrun);
-            let _ = writeln!(file, "  number: {}", config.number);
-            let _ = writeln!(file, "  verbose: {}", config.verbose);
+        let _ = writeln!(
+            self.writer,
+            "[{}] INIT \"{}\"",
+            Self::timestamp(),
+            config.path.display()
+        );
+        let _ = writeln!(self.writer, "  bitrate_limit: {}", config.bitrate_limit);
+        let _ = writeln!(self.writer, "  convert_all: {}", config.convert_all);
+        let _ = writeln!(self.writer, "  convert_other: {}", config.convert_other);
+        if !config.include.is_empty() {
+            let _ = writeln!(self.writer, "  include: {:?}", config.include);
         }
+        if !config.exclude.is_empty() {
+            let _ = writeln!(self.writer, "  exclude: {:?}", config.exclude);
+        }
+        let _ = writeln!(self.writer, "  extensions: {:?}", config.extensions);
+        let _ = writeln!(self.writer, "  recursive: {}", config.recursive);
+        let _ = writeln!(self.writer, "  delete: {}", config.delete);
+        let _ = writeln!(self.writer, "  overwrite: {}", config.overwrite);
+        let _ = writeln!(self.writer, "  dryrun: {}", config.dryrun);
+        let _ = writeln!(self.writer, "  number: {}", config.number);
+        let _ = writeln!(self.writer, "  verbose: {}", config.verbose);
+        let _ = self.writer.flush();
     }
 
     /// Log when starting a conversion or remux operation
     fn log_start(&mut self, file_path: &Path, operation: &str, file_index: &str, info: &VideoInfo) {
-        if let Some(ref mut file) = self.file {
-            let _ = writeln!(
-                file,
-                "[{}] START   {} {} - \"{}\" | {}x{} {}kbps {}",
-                Self::timestamp(),
-                operation.to_uppercase(),
-                file_index,
-                file_path.display(),
-                info.width,
-                info.height,
-                info.bitrate_kbps,
-                info.codec
-            );
-        }
+        let _ = writeln!(
+            self.writer,
+            "[{}] START   {} {} - \"{}\" | {}x{} {}kbps {}",
+            Self::timestamp(),
+            operation.to_uppercase(),
+            file_index,
+            file_path.display(),
+            info.width,
+            info.height,
+            info.bitrate_kbps,
+            info.codec
+        );
+        let _ = self.writer.flush();
     }
 
     /// Log when a conversion or remux finishes successfully
@@ -281,83 +288,84 @@ impl FileLogger {
         original_size: Option<u64>,
         converted_size: Option<u64>,
     ) {
-        if let Some(ref mut file) = self.file {
-            let duration_str = cli_tools::format_duration(duration);
-            let size_info = match (original_size, converted_size) {
-                (Some(orig), Some(conv)) => {
-                    format!(
-                        " | {} -> {}",
-                        cli_tools::format_size(orig),
-                        cli_tools::format_size(conv)
-                    )
-                }
-                _ => String::new(),
-            };
-            let _ = writeln!(
-                file,
-                "[{}] SUCCESS {} {} - \"{}\" | Duration: {}{}",
-                Self::timestamp(),
-                operation.to_uppercase(),
-                file_index,
-                file_path.display(),
-                duration_str,
-                size_info
-            );
-        }
+        let duration_str = cli_tools::format_duration(duration);
+        let size_info = match (original_size, converted_size) {
+            (Some(orig), Some(conv)) => {
+                format!(
+                    " | {} -> {}",
+                    cli_tools::format_size(orig),
+                    cli_tools::format_size(conv)
+                )
+            }
+            _ => String::new(),
+        };
+        let _ = writeln!(
+            self.writer,
+            "[{}] SUCCESS {} {} - \"{}\" | Duration: {}{}",
+            Self::timestamp(),
+            operation.to_uppercase(),
+            file_index,
+            file_path.display(),
+            duration_str,
+            size_info
+        );
+        let _ = self.writer.flush();
     }
 
     /// Log when a conversion or remux fails
     fn log_failure(&mut self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
-        if let Some(ref mut file) = self.file {
-            let _ = writeln!(
-                file,
-                "[{}] ERROR   {} {} - \"{}\" | {}",
-                Self::timestamp(),
-                operation.to_uppercase(),
-                file_index,
-                file_path.display(),
-                error
-            );
-        }
+        let _ = writeln!(
+            self.writer,
+            "[{}] ERROR   {} {} - \"{}\" | {}",
+            Self::timestamp(),
+            operation.to_uppercase(),
+            file_index,
+            file_path.display(),
+            error
+        );
+        let _ = self.writer.flush();
     }
 
     /// Log final statistics
     fn log_stats(&mut self, stats: &ConversionStats) {
-        if let Some(ref mut file) = self.file {
-            let _ = writeln!(file, "[{}] STATISTICS", Self::timestamp());
-            let _ = writeln!(file, "  Files converted: {}", stats.files_converted);
-            let _ = writeln!(file, "  Files remuxed:   {}", stats.files_remuxed);
-            let _ = writeln!(file, "  Files skipped:   {}", stats.files_skipped);
-            let _ = writeln!(file, "  Files failed:    {}", stats.files_failed);
+        let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
+        let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
+        let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
+        let _ = writeln!(self.writer, "  Files skipped:   {}", stats.files_skipped);
+        let _ = writeln!(self.writer, "  Files failed:    {}", stats.files_failed);
 
-            if stats.files_converted > 0 {
-                let _ = writeln!(
-                    file,
-                    "  Total original size:  {}",
-                    cli_tools::format_size(stats.total_original_size)
-                );
-                let _ = writeln!(
-                    file,
-                    "  Total converted size: {}",
-                    cli_tools::format_size(stats.total_converted_size)
-                );
-
-                let saved = stats.space_saved();
-                if saved >= 0 {
-                    let _ = writeln!(file, "  Space saved: {}", cli_tools::format_size(saved as u64));
-                } else {
-                    let _ = writeln!(file, "  Space increased: {}", cli_tools::format_size((-saved) as u64));
-                }
-            }
-
+        if stats.files_converted > 0 {
             let _ = writeln!(
-                file,
-                "  Total time: {}",
-                cli_tools::format_duration(stats.total_duration)
+                self.writer,
+                "  Total original size:  {}",
+                cli_tools::format_size(stats.total_original_size)
             );
-            let _ = writeln!(file, "[{}] END", Self::timestamp());
-            let _ = writeln!(file);
+            let _ = writeln!(
+                self.writer,
+                "  Total converted size: {}",
+                cli_tools::format_size(stats.total_converted_size)
+            );
+
+            let saved = stats.space_saved();
+            if saved >= 0 {
+                let _ = writeln!(self.writer, "  Space saved: {}", cli_tools::format_size(saved as u64));
+            } else {
+                let _ = writeln!(
+                    self.writer,
+                    "  Space increased: {}",
+                    cli_tools::format_size((-saved) as u64)
+                );
+            }
         }
+
+        let _ = writeln!(
+            self.writer,
+            "  Total time: {}",
+            cli_tools::format_duration(stats.total_duration)
+        );
+        let _ = writeln!(self.writer, "[{}] END", Self::timestamp());
+        let _ = writeln!(self.writer);
+        let _ = self.writer.flush();
     }
 }
 
@@ -572,8 +580,9 @@ impl VideoConvert {
     pub fn new(args: Args) -> Result<Self> {
         let user_config = VideoConvertConfig::get_user_config();
         let config = Config::try_from_args(args, user_config)?;
+        let logger = RefCell::new(FileLogger::new()?);
 
-        Ok(Self { config })
+        Ok(Self { config, logger })
     }
 
     pub fn run(&self) -> Result<()> {
@@ -649,14 +658,13 @@ impl VideoConvert {
 
     fn process_files(&self, files: Vec<VideoFile>, abort_flag: &AtomicBool) -> (ConversionStats, bool) {
         let mut stats = ConversionStats::default();
-        let mut logger = FileLogger::new();
         let total = files.len().min(self.config.number);
         let total_digits = total.to_string().chars().count();
 
         let mut processed_files: usize = 0;
         let mut aborted = false;
 
-        logger.log_init(&self.config);
+        self.logger.borrow_mut().log_init(&self.config);
 
         for file in files {
             // Check abort flag before starting a new file
@@ -681,7 +689,7 @@ impl VideoConvert {
             );
 
             let start = Instant::now();
-            let result = self.process_single_file(&file, &mut logger, &file_index);
+            let result = self.process_single_file(&file, &file_index);
             let duration = start.elapsed();
 
             match &result {
@@ -699,7 +707,7 @@ impl VideoConvert {
                         )
                         .cyan()
                     );
-                    logger.log_success(
+                    self.logger.borrow_mut().log_success(
                         &file.path,
                         "convert",
                         &file_index,
@@ -714,7 +722,9 @@ impl VideoConvert {
                         "{}",
                         format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
                     );
-                    logger.log_success(&file.path, "remux", &file_index, duration, None, None);
+                    self.logger
+                        .borrow_mut()
+                        .log_success(&file.path, "remux", &file_index, duration, None, None);
                     processed_files += 1;
                 }
                 ProcessResult::Skipped { reason } => {
@@ -723,19 +733,21 @@ impl VideoConvert {
                 }
                 ProcessResult::Failed { error } => {
                     print_error!("✗ {error}");
-                    logger.log_failure(&file.path, "process", &file_index, error);
+                    self.logger
+                        .borrow_mut()
+                        .log_failure(&file.path, "process", &file_index, error);
                 }
             }
 
             stats.add_result(&result, duration);
         }
 
-        logger.log_stats(&stats);
+        self.logger.borrow_mut().log_stats(&stats);
         (stats, aborted)
     }
 
     /// Process a single video file
-    fn process_single_file(&self, file: &VideoFile, logger: &mut FileLogger, file_index: &str) -> ProcessResult {
+    fn process_single_file(&self, file: &VideoFile, file_index: &str) -> ProcessResult {
         // Get video info
         let info = match self.get_video_info(&file.path) {
             Ok(info) => info,
@@ -776,9 +788,9 @@ impl VideoConvert {
         }
 
         if is_hevc {
-            self.remux_to_mp4(&file.path, &output_path, &info, file_index, logger)
+            self.remux_to_mp4(&file.path, &output_path, &info, file_index)
         } else {
-            self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension, file_index, logger)
+            self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension, file_index)
         }
     }
 
@@ -886,19 +898,12 @@ impl VideoConvert {
     }
 
     /// Remux video (copy streams to new container)
-    fn remux_to_mp4(
-        &self,
-        input: &Path,
-        output: &Path,
-        info: &VideoInfo,
-        file_index: &str,
-        logger: &mut FileLogger,
-    ) -> ProcessResult {
+    fn remux_to_mp4(&self, input: &Path, output: &Path, info: &VideoInfo, file_index: &str) -> ProcessResult {
         if self.config.verbose {
             println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
         }
 
-        logger.log_start(input, "remux", file_index, info);
+        self.logger.borrow_mut().log_start(input, "remux", file_index, info);
 
         // Try pure copy and drop unsupported streams
         // -map 0:v:0   -> first video stream only
@@ -1018,13 +1023,12 @@ impl VideoConvert {
         info: &VideoInfo,
         extension: &str,
         file_index: &str,
-        logger: &mut FileLogger,
     ) -> ProcessResult {
         if self.config.verbose {
             println!("Converting to HEVC: {}", cli_tools::path_to_string_relative(output));
         }
 
-        logger.log_start(input, "convert", file_index, info);
+        self.logger.borrow_mut().log_start(input, "convert", file_index, info);
 
         // Determine quality level based on resolution and bitrate.
         // Quality level 1 to 51, lower is better quality and bigger file size.
