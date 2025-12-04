@@ -469,6 +469,10 @@ impl VideoConvert {
                 aborted = true;
                 break;
             }
+            if processed_files >= total {
+                println!("\nReached file limit");
+                break;
+            }
             println!(
                 "{}",
                 format!(
