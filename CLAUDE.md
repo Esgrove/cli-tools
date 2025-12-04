@@ -16,7 +16,7 @@ cargo fmt
 cargo test
 ```
 
-### Other useful commands
+### Other commands
 
 ```shell
 # Build all binaries
@@ -47,9 +47,16 @@ cargo fmt
     - `visa_parse.rs` → `visaparse` - Parse Finvoice XML credit card statements and collect data
     - `version_tag.rs` → `vtag` - Create git version tags for Rust projects
 
+## Code organization
+
+- Put all struct definitions before their implementations
+- Functions after implementations
+- In implementations, Order public methods before private methods
+- In implementations, put associated functions last
+
 ## Code Style and Conventions
 
-- Uses Rust 2024 edition with MSRV 1.90
+- Uses Rust 2024 edition
 - Clippy is configured with pedantic and nursery lints enabled
 - `unsafe_code` is forbidden
 - `unwrap_used` and `enum_glob_use` are denied
