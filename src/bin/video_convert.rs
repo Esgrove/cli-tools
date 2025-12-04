@@ -1,11 +1,13 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use clap::Parser;
 use clap_complete::Shell;
 use colored::Colorize;
@@ -194,6 +196,161 @@ struct ConversionStats {
     total_original_size: u64,
     total_converted_size: u64,
     total_duration: Duration,
+}
+
+/// Simple file logger for conversion operations
+struct FileLogger {
+    file: Option<File>,
+}
+
+impl FileLogger {
+    /// Create a new file logger, writing to ~/.local/share/cli-tools/logs/video_convert.log
+    fn new() -> Self {
+        let file = Self::create_log_file();
+        Self { file }
+    }
+
+    fn create_log_file() -> Option<File> {
+        let home_dir = dirs::home_dir()?;
+        let log_dir = home_dir.join("logs").join("cli-tools");
+
+        // Create log directory if it doesn't exist
+        if !log_dir.exists() {
+            fs::create_dir_all(&log_dir).ok()?;
+        }
+
+        let log_path = log_dir.join("video_convert.log");
+
+        OpenOptions::new().create(true).append(true).open(log_path).ok()
+    }
+
+    fn timestamp() -> String {
+        Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    /// Log when starting a conversion or remux operation
+    fn log_start(&mut self, file_path: &Path, operation: &str) {
+        if let Some(ref mut file) = self.file {
+            let _ = writeln!(
+                file,
+                "[{}] START {} - {}",
+                Self::timestamp(),
+                operation.to_uppercase(),
+                file_path.display()
+            );
+        }
+    }
+
+    /// Log when a conversion or remux finishes successfully
+    fn log_success(
+        &mut self,
+        file_path: &Path,
+        operation: &str,
+        duration: Duration,
+        original_size: Option<u64>,
+        converted_size: Option<u64>,
+    ) {
+        if let Some(ref mut file) = self.file {
+            let duration_str = cli_tools::format_duration(duration);
+            let size_info = match (original_size, converted_size) {
+                (Some(orig), Some(conv)) => {
+                    format!(
+                        " | {} -> {}",
+                        cli_tools::format_size(orig),
+                        cli_tools::format_size(conv)
+                    )
+                }
+                _ => String::new(),
+            };
+            let _ = writeln!(
+                file,
+                "[{}] SUCCESS {} - {} | Duration: {}{}",
+                Self::timestamp(),
+                operation.to_uppercase(),
+                file_path.display(),
+                duration_str,
+                size_info
+            );
+        }
+    }
+
+    /// Log when a conversion or remux fails
+    fn log_failure(&mut self, file_path: &Path, operation: &str, error: &str) {
+        if let Some(ref mut file) = self.file {
+            let _ = writeln!(
+                file,
+                "[{}] ERROR {} - {} | {}",
+                Self::timestamp(),
+                operation.to_uppercase(),
+                file_path.display(),
+                error
+            );
+        }
+    }
+
+    /// Log final statistics
+    fn log_stats(&mut self, stats: &ConversionStats) {
+        if let Some(ref mut file) = self.file {
+            let _ = writeln!(file, "[{}] STATISTICS", Self::timestamp());
+            let _ = writeln!(file, "  Files converted: {}", stats.files_converted);
+            let _ = writeln!(file, "  Files remuxed:   {}", stats.files_remuxed);
+            let _ = writeln!(file, "  Files skipped:   {}", stats.files_skipped);
+            let _ = writeln!(file, "  Files failed:    {}", stats.files_failed);
+
+            if stats.files_converted > 0 {
+                let _ = writeln!(
+                    file,
+                    "  Total original size:  {}",
+                    cli_tools::format_size(stats.total_original_size)
+                );
+                let _ = writeln!(
+                    file,
+                    "  Total converted size: {}",
+                    cli_tools::format_size(stats.total_converted_size)
+                );
+
+                let saved = stats.space_saved();
+                if saved >= 0 {
+                    let _ = writeln!(file, "  Space saved: {}", cli_tools::format_size(saved as u64));
+                } else {
+                    let _ = writeln!(file, "  Space increased: {}", cli_tools::format_size((-saved) as u64));
+                }
+            }
+
+            let _ = writeln!(
+                file,
+                "  Total time: {}",
+                cli_tools::format_duration(stats.total_duration)
+            );
+            let _ = writeln!(file, "[{}] END", Self::timestamp());
+            let _ = writeln!(file);
+        }
+    }
+}
+
+/// Run a command in a new process group to prevent Ctrl+C from propagating to it.
+/// This allows the main program to handle the signal and finish the current file gracefully.
+#[cfg(windows)]
+fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+}
+
+#[cfg(unix)]
+fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
+    use std::os::unix::process::CommandExt;
+    // Set process group to prevent SIGINT propagation
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
 }
 
 impl ConversionStats {
@@ -459,6 +616,7 @@ impl VideoConvert {
 
     fn process_files(&self, files: Vec<VideoFile>, abort_flag: &AtomicBool) -> (ConversionStats, bool) {
         let mut stats = ConversionStats::default();
+        let mut logger = FileLogger::new();
         let total = files.len().min(self.config.number);
         let total_digits = total.to_string().chars().count();
 
@@ -489,7 +647,7 @@ impl VideoConvert {
             );
 
             let start = Instant::now();
-            let result = self.process_single_file(&file);
+            let result = self.process_single_file(&file, &mut logger);
             let duration = start.elapsed();
 
             match &result {
@@ -500,34 +658,49 @@ impl VideoConvert {
                     println!(
                         "{}",
                         format!(
-                            "✓ Converted: {} -> {}",
+                            "✓ Converted in {} : {} -> {}",
+                            cli_tools::format_duration(duration),
                             cli_tools::format_size(*original_size),
                             cli_tools::format_size(*converted_size)
                         )
                         .cyan()
                     );
+                    logger.log_success(
+                        &file.path,
+                        "convert",
+                        duration,
+                        Some(*original_size),
+                        Some(*converted_size),
+                    );
                     processed_files += 1;
                 }
                 ProcessResult::Remuxed {} => {
-                    println!("{}", "✓ Remuxed".green());
+                    println!(
+                        "{}",
+                        format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
+                    );
+                    logger.log_success(&file.path, "remux", duration, None, None);
                     processed_files += 1;
                 }
                 ProcessResult::Skipped { reason } => {
                     print_warning!("⊘ Skipped: {reason}");
+                    // Not logging skipped files as per user request
                 }
                 ProcessResult::Failed { error } => {
                     print_error!("✗ {error}");
+                    logger.log_failure(&file.path, "process", error);
                 }
             }
 
             stats.add_result(&result, duration);
         }
 
+        logger.log_stats(&stats);
         (stats, aborted)
     }
 
     /// Process a single video file
-    fn process_single_file(&self, file: &VideoFile) -> ProcessResult {
+    fn process_single_file(&self, file: &VideoFile, logger: &mut FileLogger) -> ProcessResult {
         // Get video info
         let info = match self.get_video_info(&file.path) {
             Ok(info) => info,
@@ -540,21 +713,21 @@ impl VideoConvert {
 
         println!("{info}");
 
-        // Check bitrate threshold
-        if info.bitrate_kbps < self.config.bitrate {
-            let bitrate = info.bitrate_kbps;
-            let threshold = self.config.bitrate;
-            return ProcessResult::Skipped {
-                reason: format!("Bitrate {bitrate} kbps is below threshold {threshold} kbps"),
-            };
-        }
-
         // Determine if we need to convert or just remux
         let is_hevc = info.codec == "hevc" || info.codec == "h265";
 
         if is_hevc && file.extension == TARGET_EXTENSION {
             return ProcessResult::Skipped {
                 reason: "Already HEVC in MP4 container".to_string(),
+            };
+        }
+
+        // Check bitrate threshold
+        if info.bitrate_kbps < self.config.bitrate {
+            let bitrate = info.bitrate_kbps;
+            let threshold = self.config.bitrate;
+            return ProcessResult::Skipped {
+                reason: format!("Bitrate {bitrate} kbps is below threshold {threshold} kbps"),
             };
         }
 
@@ -568,9 +741,9 @@ impl VideoConvert {
         }
 
         if is_hevc {
-            self.remux_to_mp4(&file.path, &output_path)
+            self.remux_to_mp4(&file.path, &output_path, logger)
         } else {
-            self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension)
+            self.convert_to_hevc_mp4(&file.path, &output_path, &info, &file.extension, logger)
         }
     }
 
@@ -678,10 +851,12 @@ impl VideoConvert {
     }
 
     /// Remux video (copy streams to new container)
-    fn remux_to_mp4(&self, input: &Path, output: &Path) -> ProcessResult {
+    fn remux_to_mp4(&self, input: &Path, output: &Path, logger: &mut FileLogger) -> ProcessResult {
         if self.config.verbose {
             println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
         }
+
+        logger.log_start(input, "remux");
 
         // Try pure copy and drop unsupported streams
         // -map 0:v:0   -> first video stream only
@@ -719,7 +894,7 @@ impl VideoConvert {
             return ProcessResult::Remuxed {};
         }
 
-        let status = match cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
+        let status = match run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -770,7 +945,7 @@ impl VideoConvert {
             ])
             .arg(output);
 
-        let status = match cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
+        let status = match run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -794,10 +969,19 @@ impl VideoConvert {
     }
 
     /// Convert video to HEVC using NVENC
-    fn convert_to_hevc_mp4(&self, input: &Path, output: &Path, info: &VideoInfo, extension: &str) -> ProcessResult {
+    fn convert_to_hevc_mp4(
+        &self,
+        input: &Path,
+        output: &Path,
+        info: &VideoInfo,
+        extension: &str,
+        logger: &mut FileLogger,
+    ) -> ProcessResult {
         if self.config.verbose {
             println!("Converting to HEVC: {}", cli_tools::path_to_string_relative(output));
         }
+
+        logger.log_start(input, "convert");
 
         // Determine quality level based on resolution and bitrate.
         // Quality level 1 to 51, lower is better quality and bigger file size.
@@ -864,7 +1048,7 @@ impl VideoConvert {
             };
         }
 
-        let status = match cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status() {
+        let status = match run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -930,8 +1114,10 @@ impl VideoConvert {
     /// Handle the original file after successful processing
     fn delete_original_file(&self, path: &Path) -> Result<()> {
         if self.config.delete {
+            println!("Deleting: {}", path.display());
             std::fs::remove_file(path).context("Failed to delete original file")?;
         } else {
+            println!("Trashing: {}", path.display());
             trash::delete(path).context("Failed to move original file to trash")?;
         }
         Ok(())
