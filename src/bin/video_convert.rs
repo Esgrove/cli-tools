@@ -175,7 +175,7 @@ struct VideoInfo {
 
 /// Statistics for the conversion run
 #[derive(Debug, Default)]
-struct ConversionStats {
+struct RunStats {
     files_converted: usize,
     files_remuxed: usize,
     files_skipped: usize,
@@ -183,6 +183,13 @@ struct ConversionStats {
     total_original_size: u64,
     total_converted_size: u64,
     total_duration: Duration,
+}
+
+/// Statistics for a single file conversion
+#[derive(Debug, Default, Clone, Copy)]
+struct ConversionStats {
+    original_size: u64,
+    converted_size: u64,
 }
 
 /// Simple file logger for conversion operations with buffered writes
@@ -194,13 +201,43 @@ struct FileLogger {
 #[derive(Debug)]
 enum ProcessResult {
     /// File was converted successfully
-    Converted { original_size: u64, converted_size: u64 },
+    Converted(ConversionStats),
     /// File was remuxed (already HEVC, just changed container to MP4)
-    Remuxed {},
+    Remuxed,
     /// File was skipped (already HEVC in correct container or low bitrate)
     Skipped { reason: String },
     /// Failed to process file
     Failed { error: String },
+}
+
+impl ProcessResult {
+    const fn converted(original_size: u64, converted_size: u64) -> Self {
+        Self::Converted(ConversionStats::new(original_size, converted_size))
+    }
+}
+
+impl ConversionStats {
+    const fn new(original_size: u64, converted_size: u64) -> Self {
+        Self {
+            original_size,
+            converted_size,
+        }
+    }
+
+    /// Calculate the size difference (positive = saved, negative = increased)
+    #[allow(clippy::cast_possible_wrap)]
+    const fn size_difference(&self) -> i64 {
+        self.original_size as i64 - self.converted_size as i64
+    }
+
+    /// Calculate the percentage change (positive = reduced, negative = increased)
+    fn change_percentage(&self) -> f64 {
+        if self.original_size == 0 || self.converted_size == 0 {
+            return 0.0;
+        }
+        let diff = self.size_difference();
+        diff as f64 / self.original_size as f64 * 100.0
+    }
 }
 
 impl FileLogger {
@@ -285,23 +322,13 @@ impl FileLogger {
         operation: &str,
         file_index: &str,
         duration: Duration,
-        original_size: Option<u64>,
-        converted_size: Option<u64>,
+        stats: Option<&ConversionStats>,
     ) {
         let duration_str = cli_tools::format_duration(duration);
-        let size_info = match (original_size, converted_size) {
-            (Some(orig), Some(conv)) => {
-                format!(
-                    " | {} -> {}",
-                    cli_tools::format_size(orig),
-                    cli_tools::format_size(conv)
-                )
-            }
-            _ => String::new(),
-        };
+        let size_info = stats.map_or(String::new(), |s| format!(" | {s}"));
         let _ = writeln!(
             self.writer,
-            "[{}] SUCCESS {} {} - \"{}\" | Duration: {}{}",
+            "[{}] SUCCESS {} {} - \"{}\" | Time: {}{}",
             Self::timestamp(),
             operation.to_uppercase(),
             file_index,
@@ -327,7 +354,7 @@ impl FileLogger {
     }
 
     /// Log final statistics
-    fn log_stats(&mut self, stats: &ConversionStats) {
+    fn log_stats(&mut self, stats: &RunStats) {
         let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
         let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
         let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
@@ -369,19 +396,15 @@ impl FileLogger {
     }
 }
 
-impl ConversionStats {
+impl RunStats {
     fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
         self.total_duration += duration;
         match result {
-            ProcessResult::Converted {
-                original_size,
-                converted_size,
-            } => {
+            ProcessResult::Converted(stats) => {
                 self.files_converted += 1;
-                self.total_original_size += original_size;
-                self.total_converted_size += converted_size;
+                *self += *stats;
             }
-            ProcessResult::Remuxed {} => {
+            ProcessResult::Remuxed => {
                 self.files_remuxed += 1;
             }
             ProcessResult::Skipped { .. } => {
@@ -504,6 +527,25 @@ impl std::fmt::Display for VideoInfo {
 impl std::fmt::Display for VideoFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.path.display())
+    }
+}
+
+impl std::fmt::Display for ConversionStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} -> {} ({:.1}%)",
+            cli_tools::format_size(self.original_size),
+            cli_tools::format_size(self.converted_size),
+            self.change_percentage()
+        )
+    }
+}
+
+impl std::ops::AddAssign<ConversionStats> for RunStats {
+    fn add_assign(&mut self, stats: ConversionStats) {
+        self.total_original_size += stats.original_size;
+        self.total_converted_size += stats.converted_size;
     }
 }
 
@@ -631,8 +673,8 @@ impl VideoConvert {
         Ok(files)
     }
 
-    fn process_files(&self, files: Vec<VideoFile>, abort_flag: &AtomicBool) -> (ConversionStats, bool) {
-        let mut stats = ConversionStats::default();
+    fn process_files(&self, files: Vec<VideoFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
+        let mut stats = RunStats::default();
         let total = files.len().min(self.config.number);
         let total_digits = total.to_string().chars().count();
 
@@ -668,36 +710,20 @@ impl VideoConvert {
             let duration = start.elapsed();
 
             match &result {
-                ProcessResult::Converted {
-                    original_size,
-                    converted_size,
-                } => {
+                ProcessResult::Converted(stats) => {
                     println!(
                         "{}",
-                        format!(
-                            "✓ Converted in {}: {} -> {}",
-                            cli_tools::format_duration(duration),
-                            cli_tools::format_size(*original_size),
-                            cli_tools::format_size(*converted_size)
-                        )
-                        .cyan()
+                        format!("✓ Converted in {}: {stats}", cli_tools::format_duration(duration)).cyan()
                     );
-                    self.log_success(
-                        &file.path,
-                        "convert",
-                        &file_index,
-                        duration,
-                        Some(*original_size),
-                        Some(*converted_size),
-                    );
+                    self.log_success(&file.path, "convert", &file_index, duration, Some(stats));
                     processed_files += 1;
                 }
-                ProcessResult::Remuxed {} => {
+                ProcessResult::Remuxed => {
                     println!(
                         "{}",
                         format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
                     );
-                    self.log_success(&file.path, "remux", &file_index, duration, None, None);
+                    self.log_success(&file.path, "remux", &file_index, duration, None);
                     processed_files += 1;
                 }
                 ProcessResult::Skipped { reason } => {
@@ -1060,10 +1086,7 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
-            return ProcessResult::Converted {
-                original_size: info.size_bytes,
-                converted_size: 0,
-            };
+            return ProcessResult::converted(info.size_bytes, 0);
         }
 
         let status = match run_command_isolated(&mut cmd) {
@@ -1089,10 +1112,7 @@ impl VideoConvert {
 
         let new_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
 
-        ProcessResult::Converted {
-            original_size: info.size_bytes,
-            converted_size: new_size,
-        }
+        ProcessResult::converted(info.size_bytes, new_size)
     }
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
@@ -1138,17 +1158,11 @@ impl VideoConvert {
         operation: &str,
         file_index: &str,
         duration: Duration,
-        original_size: Option<u64>,
-        converted_size: Option<u64>,
+        stats: Option<&ConversionStats>,
     ) {
-        self.logger.borrow_mut().log_success(
-            file_path,
-            operation,
-            file_index,
-            duration,
-            original_size,
-            converted_size,
-        );
+        self.logger
+            .borrow_mut()
+            .log_success(file_path, operation, file_index, duration, stats);
     }
 
     fn log_failure(&self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
@@ -1157,7 +1171,7 @@ impl VideoConvert {
             .log_failure(file_path, operation, file_index, error);
     }
 
-    fn log_stats(&self, stats: &ConversionStats) {
+    fn log_stats(&self, stats: &RunStats) {
         self.logger.borrow_mut().log_stats(stats);
     }
 
