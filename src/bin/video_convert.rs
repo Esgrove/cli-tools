@@ -173,19 +173,6 @@ struct VideoInfo {
     height: u32,
 }
 
-/// Result of processing a single file
-#[derive(Debug)]
-enum ProcessResult {
-    /// File was converted successfully
-    Converted { original_size: u64, converted_size: u64 },
-    /// File was remuxed (already HEVC, just changed container to MP4)
-    Remuxed {},
-    /// File was skipped (already HEVC in correct container or low bitrate)
-    Skipped { reason: String },
-    /// Failed to process file
-    Failed { error: String },
-}
-
 /// Statistics for the conversion run
 #[derive(Debug, Default)]
 struct ConversionStats {
@@ -201,6 +188,19 @@ struct ConversionStats {
 /// Simple file logger for conversion operations with buffered writes
 struct FileLogger {
     writer: BufWriter<File>,
+}
+
+/// Result of processing a single file
+#[derive(Debug)]
+enum ProcessResult {
+    /// File was converted successfully
+    Converted { original_size: u64, converted_size: u64 },
+    /// File was remuxed (already HEVC, just changed container to MP4)
+    Remuxed {},
+    /// File was skipped (already HEVC in correct container or low bitrate)
+    Skipped { reason: String },
+    /// Failed to process file
+    Failed { error: String },
 }
 
 impl FileLogger {
@@ -367,31 +367,6 @@ impl FileLogger {
         let _ = writeln!(self.writer);
         let _ = self.writer.flush();
     }
-}
-
-/// Run a command in a new process group to prevent Ctrl+C from propagating to it.
-/// This allows the main program to handle the signal and finish the current file gracefully.
-#[cfg(windows)]
-fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-}
-
-#[cfg(unix)]
-fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
-    use std::os::unix::process::CommandExt;
-    // Set process group to prevent SIGINT propagation
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setpgid(0, 0);
-            Ok(())
-        });
-    }
-    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
 }
 
 impl ConversionStats {
@@ -664,7 +639,7 @@ impl VideoConvert {
         let mut processed_files: usize = 0;
         let mut aborted = false;
 
-        self.logger.borrow_mut().log_init(&self.config);
+        self.log_init();
 
         for file in files {
             // Check abort flag before starting a new file
@@ -707,7 +682,7 @@ impl VideoConvert {
                         )
                         .cyan()
                     );
-                    self.logger.borrow_mut().log_success(
+                    self.log_success(
                         &file.path,
                         "convert",
                         &file_index,
@@ -722,9 +697,7 @@ impl VideoConvert {
                         "{}",
                         format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
                     );
-                    self.logger
-                        .borrow_mut()
-                        .log_success(&file.path, "remux", &file_index, duration, None, None);
+                    self.log_success(&file.path, "remux", &file_index, duration, None, None);
                     processed_files += 1;
                 }
                 ProcessResult::Skipped { reason } => {
@@ -733,16 +706,14 @@ impl VideoConvert {
                 }
                 ProcessResult::Failed { error } => {
                     print_error!("✗ {error}");
-                    self.logger
-                        .borrow_mut()
-                        .log_failure(&file.path, "process", &file_index, error);
+                    self.log_failure(&file.path, "process", &file_index, error);
                 }
             }
 
             stats.add_result(&result, duration);
         }
 
-        self.logger.borrow_mut().log_stats(&stats);
+        self.log_stats(&stats);
         (stats, aborted)
     }
 
@@ -903,7 +874,7 @@ impl VideoConvert {
             println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
         }
 
-        self.logger.borrow_mut().log_start(input, "remux", file_index, info);
+        self.log_start(input, "remux", file_index, info);
 
         // Try pure copy and drop unsupported streams
         // -map 0:v:0   -> first video stream only
@@ -1028,7 +999,7 @@ impl VideoConvert {
             println!("Converting to HEVC: {}", cli_tools::path_to_string_relative(output));
         }
 
-        self.logger.borrow_mut().log_start(input, "convert", file_index, info);
+        self.log_start(input, "convert", file_index, info);
 
         // Determine quality level based on resolution and bitrate.
         // Quality level 1 to 51, lower is better quality and bigger file size.
@@ -1151,6 +1122,45 @@ impl VideoConvert {
         true
     }
 
+    fn log_init(&self) {
+        self.logger.borrow_mut().log_init(&self.config);
+    }
+
+    fn log_start(&self, file_path: &Path, operation: &str, file_index: &str, info: &VideoInfo) {
+        self.logger
+            .borrow_mut()
+            .log_start(file_path, operation, file_index, info);
+    }
+
+    fn log_success(
+        &self,
+        file_path: &Path,
+        operation: &str,
+        file_index: &str,
+        duration: Duration,
+        original_size: Option<u64>,
+        converted_size: Option<u64>,
+    ) {
+        self.logger.borrow_mut().log_success(
+            file_path,
+            operation,
+            file_index,
+            duration,
+            original_size,
+            converted_size,
+        );
+    }
+
+    fn log_failure(&self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
+        self.logger
+            .borrow_mut()
+            .log_failure(file_path, operation, file_index, error);
+    }
+
+    fn log_stats(&self, stats: &ConversionStats) {
+        self.logger.borrow_mut().log_stats(stats);
+    }
+
     /// Get output path for the new file
     fn get_output_path(file: &VideoFile) -> PathBuf {
         let parent = file.path.parent().unwrap_or_else(|| Path::new("."));
@@ -1169,6 +1179,31 @@ impl VideoConvert {
         }
         Ok(())
     }
+}
+
+/// Run a command in a new process group to prevent Ctrl+C from propagating to it.
+/// This allows the main program to handle the signal and finish the current file gracefully.
+#[cfg(windows)]
+fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+}
+
+#[cfg(unix)]
+fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
+    use std::os::unix::process::CommandExt;
+    // Set process group to prevent SIGINT propagation
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
 }
 
 fn main() -> Result<()> {
