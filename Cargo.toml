@@ -40,6 +40,9 @@ unicode-normalization = "0.1.25"
 unicode-segmentation = "1.12.0"
 walkdir = "2.5.0"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [[bin]]
 name = "div"
 path = "src/bin/divider.rs"
@@ -81,7 +84,7 @@ lto = true
 codegen-units = 1
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [lints.clippy]
 # https://rust-lang.github.io/rust-clippy/master/index.html

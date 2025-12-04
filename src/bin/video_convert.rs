@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use colored::Colorize;
 use serde::Deserialize;
@@ -562,16 +562,11 @@ impl VideoFile {
 
 impl std::fmt::Display for VideoInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Codec: {}\nSize: {}\nDuration: {}\nResolution: {}x{}\nBitrate: {:.2} Mbps",
-            self.codec,
-            cli_tools::format_size(self.size_bytes),
-            cli_tools::format_duration_seconds(self.duration),
-            self.width,
-            self.height,
-            self.bitrate_kbps as f64 / 1000.0,
-        )
+        writeln!(f, "Codec:      {}", self.codec)?;
+        writeln!(f, "Size:       {}", cli_tools::format_size(self.size_bytes))?;
+        writeln!(f, "Bitrate:    {:.2} Mbps", self.bitrate_kbps as f64 / 1000.0)?;
+        writeln!(f, "Duration:   {}", cli_tools::format_duration_seconds(self.duration))?;
+        write!(f, "Resolution: {}x{}", self.width, self.height)
     }
 }
 
@@ -1344,7 +1339,8 @@ impl VideoConvert {
 
     /// Handle the original file after successful processing
     fn delete_original_file(&self, path: &Path) -> Result<()> {
-        if self.config.delete {
+        // Use direct delete if configured or if on a network drive (trash doesn't work there)
+        if self.config.delete || Self::is_network_path(path) {
             println!("Deleting: {}", path.display());
             std::fs::remove_file(path).context("Failed to delete original file")?;
         } else {
@@ -1352,6 +1348,47 @@ impl VideoConvert {
             trash::delete(path).context("Failed to move original file to trash")?;
         }
         Ok(())
+    }
+
+    /// Check if a path is on a network drive (Windows only).
+    /// Uses Windows API to detect mapped network drives and UNC paths.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn is_network_path(path: &Path) -> bool {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+        const DRIVE_REMOTE: u32 = 4;
+
+        // Check for UNC paths (\\server\share)
+        let path_str = path.to_string_lossy();
+        if path_str.starts_with(r"\\") {
+            return true;
+        }
+
+        // Check drive type for mapped network drives
+        if let Some(prefix) = path.components().next() {
+            let prefix_str = prefix.as_os_str();
+            // Create a root path like "X:\"
+            let mut root: Vec<u16> = prefix_str.encode_wide().collect();
+            if root.len() >= 2 && root[1] == u16::from(b':') {
+                root.push(u16::from(b'\\'));
+                root.push(0); // null terminator
+
+                // SAFETY: GetDriveTypeW is a safe Windows API call that only reads
+                // the null-terminated string to determine drive type
+                let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
+                return drive_type == DRIVE_REMOTE;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a path is on a network drive (non-Windows: always returns false)
+    #[cfg(not(windows))]
+    fn is_network_path(_path: &Path) -> bool {
+        false
     }
 }
 
@@ -1382,5 +1419,9 @@ fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    VideoConvert::new(args)?.run()
+    if let Some(ref shell) = args.completion {
+        cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
+    } else {
+        VideoConvert::new(args)?.run()
+    }
 }
