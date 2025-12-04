@@ -560,7 +560,7 @@ impl VideoConvert {
             };
         }
 
-        let status = match run_command_isolated(&mut cmd) {
+        let status = match Self::run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -613,7 +613,7 @@ impl VideoConvert {
             ])
             .arg(output);
 
-        let status = match run_command_isolated(&mut cmd) {
+        let status = match Self::run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -678,7 +678,7 @@ impl VideoConvert {
         }
 
         // First attempt: try with CUDA filters for better performance
-        let status = match run_command_isolated(&mut cmd) {
+        let status = match Self::run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -694,7 +694,7 @@ impl VideoConvert {
             // Retry without CUDA filters (fallback for format compatibility issues)
             print_error!("CUDA filter failed, retrying with CPU-based filtering...");
             let mut cmd = Self::build_hevc_command(input, output, quality_level, copy_audio, false);
-            let status = match run_command_isolated(&mut cmd) {
+            let status = match Self::run_command_isolated(&mut cmd) {
                 Ok(s) => s,
                 Err(e) => {
                     return ProcessResult::Failed {
@@ -848,22 +848,22 @@ impl VideoConvert {
         }
         Ok(())
     }
-}
 
-/// Run a command in a new process group to prevent Ctrl+C from propagating to it.
-/// This allows the main program to handle the signal and finish the current file gracefully.
-fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    /// Run a command in a new process group to prevent Ctrl+C from propagating to it.
+    /// This allows the main program to handle the signal and finish the current file gracefully.
+    fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
+        #[cfg(unix)]
+        {
+            // Set process group to 0 to prevent SIGINT propagation
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
     }
-    #[cfg(unix)]
-    {
-        // Set process group to 0 to prevent SIGINT propagation
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
 }
