@@ -731,7 +731,7 @@ impl VideoConvert {
                     // Not logging skipped files as per user request
                 }
                 ProcessResult::Failed { error } => {
-                    print_error!("✗ {error}");
+                    print_error!("{error}");
                     self.log_failure(&file.path, "process", &file_index, error);
                 }
             }
@@ -1001,7 +1001,10 @@ impl VideoConvert {
         if !status.success() {
             let _ = fs::remove_file(output);
             return ProcessResult::Failed {
-                error: format!("ffmpeg remux with AAC transcode failed with status: {status}"),
+                error: format!(
+                    "ffmpeg remux with AAC transcode failed with status: {}",
+                    status.code().unwrap_or(-1)
+                ),
             };
         }
 
@@ -1054,41 +1057,17 @@ impl VideoConvert {
 
         println!("Using quality level: {quality_level}");
 
-        // GPU tuning for RTX 4090 to use more VRAM and improve performance
-        let extra_hw_frames = "64";
-        let lookahead = "48";
-        let preset = "p5"; // slow (good quality)
-
         // Determine audio codec: copy for mp4/mkv, transcode for others
         let copy_audio = extension == "mp4" || extension == "mkv";
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(FFMPEG_DEFAULT_ARGS)
-            .args(["-probesize", "50M", "-analyzeduration", "1M"])
-            .args(["-extra_hw_frames", extra_hw_frames])
-            .arg("-i")
-            .arg(input)
-            .args(["-vf", "hwupload_cuda,scale_cuda=format=nv12"])
-            .args(["-c:v", "hevc_nvenc"])
-            .args(["-rc:v", "vbr"])
-            .args(["-cq:v", &quality_level.to_string()])
-            .args(["-preset", preset])
-            .args(["-b:v", "0"])
-            .args(["-rc-lookahead", lookahead])
-            .args(["-spatial_aq", "1", "-temporal_aq", "1"])
-            .args(["-tag:v", "hvc1"]);
-        if copy_audio {
-            cmd.args(["-c:a", "copy"]);
-        } else {
-            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
-        }
-        cmd.arg(output);
+        let mut cmd = Self::build_hevc_command(input, output, quality_level, copy_audio, true);
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
             return ProcessResult::converted(info.size_bytes, 0);
         }
 
+        // First attempt: try with CUDA filters for better performance
         let status = match run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
@@ -1101,9 +1080,26 @@ impl VideoConvert {
         if !status.success() {
             // Clean up failed output file
             let _ = fs::remove_file(output);
-            return ProcessResult::Failed {
-                error: format!("ffmpeg conversion failed with status: {status}"),
+
+            // Retry without CUDA filters (fallback for format compatibility issues)
+            println!("CUDA filter failed, retrying with CPU-based filtering...");
+            let mut cmd = Self::build_hevc_command(input, output, quality_level, copy_audio, false);
+            let status = match run_command_isolated(&mut cmd) {
+                Ok(s) => s,
+                Err(e) => {
+                    return ProcessResult::Failed {
+                        error: format!("Failed to execute ffmpeg (retry): {e}"),
+                    };
+                }
             };
+
+            if !status.success() {
+                // Clean up failed output file
+                let _ = fs::remove_file(output);
+                return ProcessResult::Failed {
+                    error: format!("ffmpeg conversion failed with status: {}", status.code().unwrap_or(-1)),
+                };
+            }
         }
 
         if let Err(e) = self.delete_original_file(input) {
@@ -1113,6 +1109,54 @@ impl VideoConvert {
         let new_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
 
         ProcessResult::converted(info.size_bytes, new_size)
+    }
+
+    /// Build the ffmpeg command for HEVC conversion.
+    /// When `use_cuda_filters` is true, uses `hwupload_cuda` and `scale_cuda` for GPU-accelerated filtering.
+    /// When false, uses CPU-based filtering which is more compatible but slightly slower.
+    fn build_hevc_command(
+        input: &Path,
+        output: &Path,
+        quality_level: u32,
+        copy_audio: bool,
+        use_cuda_filters: bool,
+    ) -> Command {
+        // GPU tuning for RTX 4090 to use more VRAM and improve performance
+        let extra_hw_frames = "64";
+        let lookahead = "48";
+        let preset = "p5"; // slow (good quality)
+
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(FFMPEG_DEFAULT_ARGS)
+            .args(["-probesize", "50M", "-analyzeduration", "1M"]);
+
+        if use_cuda_filters {
+            cmd.args(["-extra_hw_frames", extra_hw_frames]);
+        }
+
+        cmd.arg("-i").arg(input);
+
+        if use_cuda_filters {
+            cmd.args(["-vf", "hwupload_cuda,scale_cuda=format=nv12"]);
+        }
+
+        cmd.args(["-c:v", "hevc_nvenc"])
+            .args(["-rc:v", "vbr"])
+            .args(["-cq:v", &quality_level.to_string()])
+            .args(["-preset", preset])
+            .args(["-b:v", "0"])
+            .args(["-rc-lookahead", lookahead])
+            .args(["-spatial_aq", "1", "-temporal_aq", "1"])
+            .args(["-tag:v", "hvc1"]);
+
+        if copy_audio {
+            cmd.args(["-c:a", "copy"]);
+        } else {
+            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
+        }
+
+        cmd.arg(output);
+        cmd
     }
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
