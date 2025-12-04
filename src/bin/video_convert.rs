@@ -233,7 +233,7 @@ impl FileLogger {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] START {} - {}",
+                "[{}] START   {} - {}",
                 Self::timestamp(),
                 operation.to_uppercase(),
                 file_path.display()
@@ -279,7 +279,7 @@ impl FileLogger {
         if let Some(ref mut file) = self.file {
             let _ = writeln!(
                 file,
-                "[{}] ERROR {} - {} | {}",
+                "[{}] ERROR   {} - {} | {}",
                 Self::timestamp(),
                 operation.to_uppercase(),
                 file_path.display(),
@@ -658,7 +658,7 @@ impl VideoConvert {
                     println!(
                         "{}",
                         format!(
-                            "✓ Converted in {} : {} -> {}",
+                            "✓ Converted in {}: {} -> {}",
                             cli_tools::format_duration(duration),
                             cli_tools::format_size(*original_size),
                             cli_tools::format_size(*converted_size)
