@@ -440,12 +440,11 @@ impl VideoConvert {
 
         let max_depth = if self.config.recursive { usize::MAX } else { 1 };
 
-        let walker = WalkDir::new(path)
+        let mut files: Vec<VideoFile> = WalkDir::new(path)
             .max_depth(max_depth)
             .into_iter()
-            .filter_map(std::result::Result::ok);
-
-        let mut files: Vec<VideoFile> = walker
+            .filter_entry(|entry| !cli_tools::is_hidden(entry))
+            .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_type().is_file())
             .map(VideoFile::from_dir_entry)
             .filter(|file| self.should_include_file(file))
