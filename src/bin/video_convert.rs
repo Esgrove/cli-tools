@@ -73,7 +73,7 @@ struct Args {
     #[arg(short, long, default_value_t = 1)]
     number: usize,
 
-    /// Convert file types other than mp4
+    /// Don't convert MP4 files
     #[arg(short, long)]
     other: bool,
 
@@ -214,9 +214,9 @@ enum SkipReason {
 #[derive(Debug)]
 enum ProcessResult {
     /// File was converted successfully
-    Converted(ConversionStats),
+    Converted { output: PathBuf, stats: ConversionStats },
     /// File was remuxed (already HEVC, just changed container to MP4)
-    Remuxed,
+    Remuxed { output: PathBuf },
     /// File was skipped
     Skipped(SkipReason),
     /// Failed to process file
@@ -224,8 +224,11 @@ enum ProcessResult {
 }
 
 impl ProcessResult {
-    const fn converted(original_size: u64, converted_size: u64) -> Self {
-        Self::Converted(ConversionStats::new(original_size, converted_size))
+    const fn converted(original_size: u64, converted_size: u64, output: PathBuf) -> Self {
+        Self::Converted {
+            output,
+            stats: ConversionStats::new(original_size, converted_size),
+        }
     }
 }
 
@@ -430,11 +433,11 @@ impl RunStats {
     fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
         self.total_duration += duration;
         match result {
-            ProcessResult::Converted(stats) => {
+            ProcessResult::Converted { stats, .. } => {
                 self.files_converted += 1;
                 *self += *stats;
             }
-            ProcessResult::Remuxed => {
+            ProcessResult::Remuxed { .. } => {
                 self.files_remuxed += 1;
             }
             ProcessResult::Skipped(reason) => match reason {
@@ -737,8 +740,9 @@ impl VideoConvert {
 
     fn process_files(&self, files: Vec<VideoFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
         let mut stats = RunStats::default();
-        let total = files.len().min(self.config.number);
-        let total_digits = total.to_string().chars().count();
+        let total = files.len();
+        let num_files_to_process = total.min(self.config.number);
+        let num_digits = num_files_to_process.to_string().chars().count();
 
         let mut processed_files: usize = 0;
         let mut aborted = false;
@@ -751,37 +755,42 @@ impl VideoConvert {
                 aborted = true;
                 break;
             }
-            if processed_files >= total {
+            if processed_files >= num_files_to_process {
                 println!("\nReached file limit");
                 break;
             }
 
             if !self.config.verbose {
-                print!("\rProcessing: {index}");
+                print!("\rProcessing: {index}/{total}");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
 
-            let file_index = format!("[{:>width$}/{}]", processed_files + 1, total, width = total_digits);
+            let file_index = format!(
+                "[{:>width$}/{}]",
+                processed_files + 1,
+                num_files_to_process,
+                width = num_digits
+            );
 
             let start = Instant::now();
             let result = self.process_single_file(&file, &file_index);
             let duration = start.elapsed();
 
             match &result {
-                ProcessResult::Converted(stats) => {
+                ProcessResult::Converted { output, stats } => {
                     println!(
                         "{}",
                         format!("✓ Converted in {}: {stats}", cli_tools::format_duration(duration)).cyan()
                     );
-                    self.log_success(&file.path, "convert", &file_index, duration, Some(stats));
+                    self.log_success(output, "convert", &file_index, duration, Some(stats));
                     processed_files += 1;
                 }
-                ProcessResult::Remuxed => {
+                ProcessResult::Remuxed { output } => {
                     println!(
                         "{}",
                         format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
                     );
-                    self.log_success(&file.path, "remux", &file_index, duration, None);
+                    self.log_success(output, "remux", &file_index, duration, None);
                     processed_files += 1;
                 }
                 ProcessResult::Skipped(reason) => {
@@ -805,6 +814,12 @@ impl VideoConvert {
 
     /// Process a single video file
     fn process_single_file(&self, file: &VideoFile, file_index: &str) -> ProcessResult {
+        if !self.config.verbose {
+            // Clear the progress line before printing meaningful output
+            print!("\r{:40}\r", "");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+
         // Get video info
         let info = match self.get_video_info(&file.path) {
             Ok(info) => info,
@@ -1031,7 +1046,9 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
-            return ProcessResult::Remuxed {};
+            return ProcessResult::Remuxed {
+                output: output.to_path_buf(),
+            };
         }
 
         let status = match run_command_isolated(&mut cmd) {
@@ -1047,7 +1064,9 @@ impl VideoConvert {
             if let Err(e) = self.delete_original_file(input) {
                 print_error!("Failed to delete original file: {e}");
             }
-            return ProcessResult::Remuxed {};
+            return ProcessResult::Remuxed {
+                output: output.to_path_buf(),
+            };
         }
 
         // Fallback: if audio codec is not MP4-friendly, transcode audio to AAC
@@ -1108,7 +1127,9 @@ impl VideoConvert {
             print_error!("Failed to delete original file: {e}");
         }
 
-        ProcessResult::Remuxed {}
+        ProcessResult::Remuxed {
+            output: output.to_path_buf(),
+        }
     }
 
     /// Convert video to HEVC using NVENC
@@ -1160,7 +1181,7 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
-            return ProcessResult::converted(info.size_bytes, 0);
+            return ProcessResult::converted(info.size_bytes, 0, output.to_path_buf());
         }
 
         // First attempt: try with CUDA filters for better performance
@@ -1204,7 +1225,7 @@ impl VideoConvert {
 
         let new_size = fs::metadata(output).map(|m| m.len()).unwrap_or(0);
 
-        ProcessResult::converted(info.size_bytes, new_size)
+        ProcessResult::converted(info.size_bytes, new_size, output.to_path_buf())
     }
 
     /// Build the ffmpeg command for HEVC conversion.
