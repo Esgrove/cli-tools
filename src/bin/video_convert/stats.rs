@@ -2,17 +2,54 @@ use std::time::Duration;
 
 use colored::Colorize;
 
-use crate::convert::{ProcessResult, SkipReason};
+use crate::convert::ProcessResult;
+
+/// Statistics from the analysis phase.
+#[derive(Debug, Default)]
+pub struct AnalysisStats {
+    pub(crate) to_convert: usize,
+    pub(crate) to_remux: usize,
+    pub(crate) to_rename: usize,
+    pub(crate) skipped_converted: usize,
+    pub(crate) skipped_bitrate: usize,
+    pub(crate) skipped_duplicate: usize,
+    pub(crate) analysis_failed: usize,
+}
+
+impl AnalysisStats {
+    /// Get the total number of skipped files.
+    pub(crate) const fn total_skipped(&self) -> usize {
+        self.skipped_converted + self.skipped_bitrate + self.skipped_duplicate
+    }
+
+    /// Print analysis summary.
+    pub(crate) fn print_summary(&self) {
+        if self.to_rename > 0 {
+            println!("To rename:               {}", self.to_rename);
+        }
+        if self.total_skipped() > 0 {
+            println!("Skipped:                 {}", self.total_skipped());
+            println!(" - Already converted:    {}", self.skipped_converted);
+            println!(" - Below bitrate limit:  {}", self.skipped_bitrate);
+            println!(" - Output exists:        {}", self.skipped_duplicate);
+        }
+        if self.analysis_failed > 0 {
+            println!("{}", format!("Analysis failed:         {}", self.analysis_failed).red());
+        }
+        println!(
+            "Ready to process:        {} ({} convert, {} remux)",
+            self.to_convert + self.to_remux,
+            self.to_convert,
+            self.to_remux
+        );
+    }
+}
 
 /// Statistics for the conversion run
 #[derive(Debug, Default)]
 pub struct RunStats {
     pub(crate) files_converted: usize,
     pub(crate) files_remuxed: usize,
-    pub(crate) files_renamed: usize,
-    pub(crate) files_skipped_converted: usize,
-    pub(crate) files_skipped_bitrate: usize,
-    pub(crate) files_skipped_duplicate: usize,
     pub(crate) files_failed: usize,
     pub(crate) total_original_size: u64,
     pub(crate) total_converted_size: u64,
@@ -71,23 +108,10 @@ impl RunStats {
             ProcessResult::Remuxed { .. } => {
                 self.files_remuxed += 1;
             }
-            ProcessResult::Renamed { .. } => {
-                self.files_renamed += 1;
-            }
-            ProcessResult::Skipped(reason) => match reason {
-                SkipReason::AlreadyConverted => self.files_skipped_converted += 1,
-                SkipReason::BitrateBelowThreshold { .. } => self.files_skipped_bitrate += 1,
-                SkipReason::OutputExists { .. } => self.files_skipped_duplicate += 1,
-            },
             ProcessResult::Failed { .. } => {
                 self.files_failed += 1;
             }
         }
-    }
-
-    /// Get the total number of skipped files.
-    pub(crate) const fn total_skipped(&self) -> usize {
-        self.files_skipped_converted + self.files_skipped_bitrate + self.files_skipped_duplicate
     }
 
     /// Calculate total space saved (negative if size increased).
@@ -101,7 +125,6 @@ impl RunStats {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
         println!("Files converted:         {}", self.files_converted);
         println!("Files remuxed:           {}", self.files_remuxed);
-        println!("Files renamed:           {}", self.files_renamed);
         println!(
             "Files failed:            {}",
             if self.files_failed > 0 {
@@ -110,12 +133,6 @@ impl RunStats {
                 "0".normal()
             }
         );
-        println!("Files skipped:          {}", self.total_skipped());
-        if self.total_skipped() > 0 {
-            println!(" - Already converted:   {}", self.files_skipped_converted);
-            println!(" - Below bitrate limit: {}", self.files_skipped_bitrate);
-            println!(" - Duplicates:          {}", self.files_skipped_duplicate);
-        }
         println!();
 
         if self.files_converted > 0 {
