@@ -421,6 +421,16 @@ impl VideoConvert {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
+        // Parse key=value pairs from output
+        // Example output:
+        // ```
+        //  codec_name=h264
+        //  bit_rate=7345573
+        //  duration=2425.237007
+        //  size=2292495805
+        //  bit_rate=7562133
+        //  r_frame_rate=30/1
+        // ```
         let mut codec = String::new();
         let mut bitrate_bps: Option<u64> = None;
         let mut size_bytes: Option<u64> = None;
@@ -463,6 +473,7 @@ impl VideoConvert {
                         }
                     }
                     "r_frame_rate" => {
+                        // Parse fractional framerate like "30/1" or "30000/1001"
                         if let Some((num, den)) = value.split_once('/')
                             && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())
                             && d > 0.0
@@ -475,8 +486,29 @@ impl VideoConvert {
             }
         }
 
+        // Fall back to file metadata for size if not in ffprobe output
         let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
-        let bitrate_kbps = bitrate_bps.unwrap_or(0) / 1000;
+
+        // Validate required fields
+        if codec.is_empty() {
+            anyhow::bail!("failed to detect video codec");
+        }
+        let Some(bitrate_bps) = bitrate_bps else {
+            anyhow::bail!("failed to detect bitrate");
+        };
+        let Some(duration) = duration else {
+            anyhow::bail!("failed to detect duration");
+        };
+        let Some(width) = width else {
+            anyhow::bail!("failed to detect video width");
+        };
+        let Some(height) = height else {
+            anyhow::bail!("failed to detect video height");
+        };
+        let Some(frames_per_second) = frames_per_second else {
+            anyhow::bail!("failed to detect framerate");
+        };
+
         let warning = if stderr.is_empty() {
             None
         } else {
@@ -485,12 +517,12 @@ impl VideoConvert {
 
         Ok(VideoInfo {
             codec,
-            bitrate_kbps,
+            bitrate_kbps: bitrate_bps / 1000,
             size_bytes,
-            duration: duration.unwrap_or(0.0),
-            width: width.unwrap_or(0),
-            height: height.unwrap_or(0),
-            frames_per_second: frames_per_second.unwrap_or(0.0),
+            duration,
+            width,
+            height,
+            frames_per_second,
             warning,
         })
     }
