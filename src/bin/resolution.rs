@@ -355,28 +355,57 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFPro
 }
 
 async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
-    let path = cli_tools::path_to_string(&file);
-    let command = format!(
-        "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of json \"{path}\" | jq .streams[0]"
-    );
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v",
+            "-show_entries",
+            "stream=width,height",
+            "-output_format",
+            "default=nokey=0:noprint_wrappers=1",
+        ])
+        .arg(&file)
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .output()
         .await;
 
+    let path = file.display();
     match output {
         Ok(output) => {
             if output.status.success() {
-                let resolution: Resolution = serde_json::from_slice(&output.stdout)
+                let resolution = parse_ffprobe_output(&output.stdout)
                     .map_err(|error| anyhow!("Failed to parse output for {path}: {error}"))?;
                 Ok(FFProbeResult { file, resolution })
             } else {
                 Err(anyhow!("{path}: {}", std::str::from_utf8(&output.stderr)?))
             }
         }
-        _ => Err(anyhow!("Command failed for {path}")),
+        Err(e) => Err(anyhow!("Command failed for {path}: {e}")),
+    }
+}
+
+/// Parse ffprobe output in format "width=1920\nheight=1080\n"
+fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
+    let text = std::str::from_utf8(output)?;
+    let mut width = None;
+    let mut height = None;
+
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "width" => width = Some(value.parse()?),
+                "height" => height = Some(value.parse()?),
+                _ => {}
+            }
+        }
+    }
+
+    match (width, height) {
+        (Some(w), Some(h)) => Ok(Resolution { width: w, height: h }),
+        _ => Err(anyhow!("Missing width or height in ffprobe output")),
     }
 }
 
