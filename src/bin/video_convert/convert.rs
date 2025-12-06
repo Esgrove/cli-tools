@@ -286,7 +286,7 @@ impl VideoConvert {
 
         // Process renames: these files are already in HEVC format but missing "x265" label
         if !analysis_output.renames.is_empty() {
-            self.process_renames(&analysis_output.renames);
+            stats.files_renamed = self.process_renames(&analysis_output.renames);
         }
 
         // Process remuxes
@@ -939,10 +939,11 @@ impl VideoConvert {
         }
     }
 
-    /// Process all files that need renaming.
-    fn process_renames(&self, files: &[VideoFile]) {
+    /// Process all files that need renaming. Returns the number of files successfully renamed.
+    fn process_renames(&self, files: &[VideoFile]) -> usize {
         let total = files.len();
         let num_digits = total.to_string().chars().count();
+        let mut renamed_count = 0;
 
         for (index, file) in files.iter().enumerate() {
             let file_index = format!("[{:>width$}/{total}]", index + 1, width = num_digits);
@@ -954,6 +955,7 @@ impl VideoConvert {
                     &cli_tools::path_to_string_relative(&file.path),
                     &cli_tools::path_to_string_relative(&new_path),
                 );
+                renamed_count += 1;
             } else {
                 println!("{}", format!("{file_index} Rename:").bold().purple());
                 cli_tools::show_diff(
@@ -962,9 +964,13 @@ impl VideoConvert {
                 );
                 if let Err(e) = std::fs::rename(&file.path, &new_path) {
                     print_error!("Failed to rename {}: {e}", file.path.display());
+                } else {
+                    renamed_count += 1;
                 }
             }
         }
+
+        renamed_count
     }
 
     /// Process all files that need remuxing.

@@ -18,7 +18,7 @@ pub(crate) struct VideoConvertArgs {
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
 
-    /// Convert all known video file types
+    /// Convert all known video file types (default is only .mp4 and .mkv)
     #[arg(short, long)]
     all: bool,
 
@@ -47,15 +47,15 @@ pub(crate) struct VideoConvertArgs {
     exclude: Vec<String>,
 
     /// Override file extensions to convert
-    #[arg(short = 't', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
+    #[arg(short = 't', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION", conflicts_with_all = ["all", "other"])]
     extension: Vec<String>,
 
     /// Number of files to convert
     #[arg(short, long, default_value_t = 1)]
     number: usize,
 
-    /// Don't convert MP4 files
-    #[arg(short, long)]
+    /// Convert all known video file types except MP4 files
+    #[arg(short, long, conflicts_with = "all")]
     other: bool,
 
     /// Recurse into subdirectories

@@ -8,9 +8,9 @@ use crate::convert::ProcessResult;
 /// Statistics from the video file analysis.
 #[derive(Debug, Default)]
 pub struct AnalysisStats {
-    pub(crate) to_convert: usize,
-    pub(crate) to_remux: usize,
     pub(crate) to_rename: usize,
+    pub(crate) to_remux: usize,
+    pub(crate) to_convert: usize,
     pub(crate) skipped_converted: usize,
     pub(crate) skipped_bitrate: usize,
     pub(crate) skipped_duplicate: usize,
@@ -20,8 +20,9 @@ pub struct AnalysisStats {
 /// Statistics for the conversion run
 #[derive(Debug, Default)]
 pub struct RunStats {
-    pub(crate) files_converted: usize,
+    pub(crate) files_renamed: usize,
     pub(crate) files_remuxed: usize,
+    pub(crate) files_converted: usize,
     pub(crate) files_failed: usize,
     pub(crate) total_original_size: u64,
     pub(crate) total_converted_size: u64,
@@ -120,6 +121,7 @@ impl RunStats {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
         println!("Files converted:         {}", self.files_converted);
         println!("Files remuxed:           {}", self.files_remuxed);
+        println!("Files renamed:           {}", self.files_renamed);
         println!(
             "Files failed:            {}",
             if self.files_failed > 0 {
@@ -187,6 +189,7 @@ impl AddAssign<Self> for RunStats {
     fn add_assign(&mut self, other: Self) {
         self.files_converted += other.files_converted;
         self.files_remuxed += other.files_remuxed;
+        self.files_renamed += other.files_renamed;
         self.files_failed += other.files_failed;
         self.total_original_size += other.total_original_size;
         self.total_converted_size += other.total_converted_size;
@@ -198,6 +201,7 @@ impl AddAssign<&Self> for RunStats {
     fn add_assign(&mut self, other: &Self) {
         self.files_converted += other.files_converted;
         self.files_remuxed += other.files_remuxed;
+        self.files_renamed += other.files_renamed;
         self.files_failed += other.files_failed;
         self.total_original_size += other.total_original_size;
         self.total_converted_size += other.total_converted_size;
