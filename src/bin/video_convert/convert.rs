@@ -272,7 +272,7 @@ impl VideoConvert {
         let mut processed_count: usize = 0;
 
         // Gather candidate files
-        let candidate_files = self.gather_candidate_files()?;
+        let candidate_files = self.gather_files_to_process()?;
         if candidate_files.is_empty() {
             println!("No video files found");
             return Ok(());
@@ -316,8 +316,8 @@ impl VideoConvert {
         Ok(())
     }
 
-    /// Gather candidate video files based on the config.
-    fn gather_candidate_files(&self) -> Result<Vec<VideoFile>> {
+    /// Gather video files based on the config settings.
+    fn gather_files_to_process(&self) -> Result<Vec<VideoFile>> {
         let path = &self.config.path;
 
         if path.is_file() {
@@ -678,7 +678,6 @@ impl VideoConvert {
                 "ffmpeg remux with AAC transcode failed with status: {}",
                 status.code().unwrap_or(-1)
             );
-            print_error!("{error}");
             self.log_failure(input, "remux", file_index, &error);
             return ProcessResult::Failed { error };
         }
@@ -764,7 +763,6 @@ impl VideoConvert {
             if !status.success() {
                 let _ = fs::remove_file(output);
                 let error = format!("ffmpeg failed with status: {}", status.code().unwrap_or(-1));
-                print_error!("{error}");
                 self.log_failure(input, "convert", file_index, &error);
                 return ProcessResult::Failed { error };
             }
@@ -775,7 +773,6 @@ impl VideoConvert {
             Ok(info) => info,
             Err(e) => {
                 let error = format!("Failed to get output info: {e}");
-                print_error!("{error}");
                 self.log_failure(input, "convert", file_index, &error);
                 return ProcessResult::Failed { error };
             }
@@ -797,7 +794,6 @@ impl VideoConvert {
                 Ok(s) => s,
                 Err(e) => {
                     let error = format!("Failed to execute ffmpeg (reconvert): {e}");
-                    print_error!("{error}");
                     self.log_failure(input, "convert", file_index, &error);
                     return ProcessResult::Failed { error };
                 }
@@ -809,7 +805,6 @@ impl VideoConvert {
                     "ffmpeg reconversion failed with status: {}",
                     status.code().unwrap_or(-1)
                 );
-                print_error!("{error}");
                 self.log_failure(input, "convert", file_index, &error);
                 return ProcessResult::Failed { error };
             }
@@ -819,7 +814,6 @@ impl VideoConvert {
                 Err(e) => {
                     let _ = fs::remove_file(output);
                     let error = format!("Failed to get reconverted video info: {e}");
-                    print_error!("{error}");
                     self.log_failure(input, "convert", file_index, &error);
                     return ProcessResult::Failed { error };
                 }
@@ -839,7 +833,6 @@ impl VideoConvert {
                 MIN_DURATION_RATIO * 100.0,
                 info.duration
             );
-            print_error!("{error}");
             self.log_failure(input, "convert", file_index, &error);
             return ProcessResult::Failed { error };
         }
