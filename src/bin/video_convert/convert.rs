@@ -432,7 +432,7 @@ impl VideoConvert {
         //  r_frame_rate=30/1
         // ```
         let mut codec = String::new();
-        let mut bitrate_bps: Option<u64> = None;
+        let mut bitrate_kbps: Option<u64> = None;
         let mut size_bytes: Option<u64> = None;
         let mut duration: Option<f64> = None;
         let mut width: Option<u32> = None;
@@ -445,11 +445,11 @@ impl VideoConvert {
                 match key {
                     "codec_name" => codec = value.to_lowercase(),
                     "bit_rate" | "BPS" | "BPS-eng" => {
-                        if bitrate_bps.is_none()
+                        if bitrate_kbps.is_none()
                             && let Ok(bps) = value.parse::<u64>()
                             && bps > 0
                         {
-                            bitrate_bps = Some(bps);
+                            bitrate_kbps = Some(bps / 1000);
                         }
                     }
                     "size" => {
@@ -493,7 +493,7 @@ impl VideoConvert {
         if codec.is_empty() {
             anyhow::bail!("failed to detect video codec");
         }
-        let Some(bitrate_bps) = bitrate_bps else {
+        let Some(bitrate_kbps) = bitrate_kbps else {
             anyhow::bail!("failed to detect bitrate");
         };
         let Some(duration) = duration else {
@@ -517,7 +517,7 @@ impl VideoConvert {
 
         Ok(VideoInfo {
             codec,
-            bitrate_kbps: bitrate_bps / 1000,
+            bitrate_kbps,
             size_bytes,
             duration,
             width,
