@@ -336,6 +336,54 @@ macro_rules! print_warning {
     };
 }
 
+#[inline]
+pub fn print_green(message: &str) {
+    println!("{}", message.green());
+}
+
+#[macro_export]
+macro_rules! print_green {
+    ($($arg:tt)*) => {
+        $crate::print_green(&format!($($arg)*))
+    };
+}
+
+#[inline]
+pub fn print_magenta(message: &str) {
+    println!("{}", message.magenta());
+}
+
+#[macro_export]
+macro_rules! print_magenta {
+    ($($arg:tt)*) => {
+        $crate::print_magenta(&format!($($arg)*))
+    };
+}
+
+#[inline]
+pub fn print_cyan(message: &str) {
+    println!("{}", message.cyan());
+}
+
+#[macro_export]
+macro_rules! print_cyan {
+    ($($arg:tt)*) => {
+        $crate::print_cyan(&format!($($arg)*))
+    };
+}
+
+#[inline]
+pub fn print_bold(message: &str) {
+    println!("{}", message.bold());
+}
+
+#[macro_export]
+macro_rules! print_bold {
+    ($($arg:tt)*) => {
+        $crate::print_bold(&format!($($arg)*))
+    };
+}
+
 /// Create a coloured diff for the given strings.
 pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
     let changeset = Changeset::new(old, new, "");

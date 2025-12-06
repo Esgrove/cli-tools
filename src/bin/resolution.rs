@@ -13,6 +13,8 @@ use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
 
+use cli_tools::{print_bold, print_green};
+
 const FILE_EXTENSIONS: [&str; 11] = [
     "mp4", "mkv", "wmv", "mov", "avi", "m4v", "flv", "webm", "webp", "ts", "mpg",
 ];
@@ -306,20 +308,25 @@ async fn main() -> anyhow::Result<()> {
             .then_with(|| a.0.file.cmp(&b.0.file))
     });
 
+    let num_files = files_to_process.len();
     if files_to_process.is_empty() {
         if args.verbose {
             println!("No video files require renaming");
         }
         return Ok(());
+    } else if args.verbose {
+        print_bold!("Renaming {num_files} file(s)");
     }
 
-    println!("{}", "Resolution               Label   Path".bold());
+    print_bold!("Resolution               Label   Path");
 
     for (result, new_path) in files_to_process {
         if let Err(error) = result.rename(&new_path, args.force, args.print) {
             cli_tools::print_error!("{error}");
         }
     }
+
+    print_green!("Renamed {num_files} file(s)");
 
     Ok(())
 }
@@ -366,27 +373,21 @@ async fn delete_low_resolution_files(
         return Ok(());
     }
 
+    let num_files = files_to_delete.len();
     if dryrun {
-        println!(
-            "{}",
-            format!(
-                "DRYRUN: Would delete {} file(s) smaller than {}:",
-                files_to_delete.len(),
-                limit
-            )
-            .bold()
-        );
-    } else {
-        println!(
-            "{}",
-            format!("Deleting {} file(s) smaller than {}:", files_to_delete.len(), limit).bold()
-        );
+        print_bold!("DRYRUN: Would delete {num_files} file(s) smaller than {limit}:");
+    } else if verbose {
+        print_bold!("Deleting {num_files} file(s) smaller than {limit}:");
     }
 
     for result in files_to_delete {
         if let Err(error) = result.delete(dryrun) {
             cli_tools::print_error!("{error}");
         }
+    }
+
+    if verbose {
+        print_green!("Deleted {num_files} files");
     }
 
     Ok(())
@@ -508,7 +509,7 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFPro
         .map(|res| res.expect("Download future failed"))
         .collect();
 
-    progress_bar.finish();
+    progress_bar.finish_and_clear();
 
     Ok(results)
 }
