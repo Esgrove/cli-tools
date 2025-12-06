@@ -99,11 +99,11 @@ impl RunStats {
     /// Print a summary of conversion statistics to stdout.
     pub(crate) fn print_summary(&self) {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
-        println!("Files converted:        {}", self.files_converted);
-        println!("Files remuxed:          {}", self.files_remuxed);
-        println!("Files renamed:          {}", self.files_renamed);
+        println!("Files converted:         {}", self.files_converted);
+        println!("Files remuxed:           {}", self.files_remuxed);
+        println!("Files renamed:           {}", self.files_renamed);
         println!(
-            "Files failed:           {}",
+            "Files failed:            {}",
             if self.files_failed > 0 {
                 self.files_failed.to_string().red()
             } else {
@@ -112,44 +112,39 @@ impl RunStats {
         );
         println!("Files skipped:          {}", self.total_skipped());
         if self.total_skipped() > 0 {
-            println!("  - Already converted:  {}", self.files_skipped_converted);
-            println!("  - Below bitrate:      {}", self.files_skipped_bitrate);
-            println!("  - Duplicates:         {}", self.files_skipped_duplicate);
+            println!(" - Already converted:   {}", self.files_skipped_converted);
+            println!(" - Below bitrate limit: {}", self.files_skipped_bitrate);
+            println!(" - Duplicates:          {}", self.files_skipped_duplicate);
         }
         println!();
 
         if self.files_converted > 0 {
-            println!(
-                "Total original size:    {}",
-                cli_tools::format_size(self.total_original_size)
-            );
-            println!(
-                "Total converted size:   {}",
-                cli_tools::format_size(self.total_converted_size)
-            );
+            let original_str = cli_tools::format_size(self.total_original_size);
+            let converted_str = cli_tools::format_size(self.total_converted_size);
 
             if self.total_original_size > 0 {
                 let saved = self.space_saved();
                 let ratio = saved.abs() as f64 / self.total_original_size as f64 * 100.0;
+                let saved_str = cli_tools::format_size(saved.unsigned_abs());
+
+                let max_width = original_str.len().max(converted_str.len()).max(saved_str.len());
+
+                println!("Total original size:     {original_str:>max_width$}");
+                println!("Total converted size:    {converted_str:>max_width$}");
 
                 if saved >= 0 {
-                    println!(
-                        "Space saved:            {} ({:.1}%)",
-                        cli_tools::format_size(saved as u64),
-                        ratio
-                    );
+                    println!("Space saved:             {saved_str:>max_width$} ({ratio:.1}%)");
                 } else {
-                    println!(
-                        "Space increased:        {} ({:.1}%)",
-                        cli_tools::format_size((-saved) as u64),
-                        ratio
-                    );
+                    println!("Space increased:         {saved_str:>max_width$} ({ratio:.1}%)");
                 }
+            } else {
+                println!("Total original size:     {original_str}");
+                println!("Total converted size:    {converted_str}");
             }
         }
 
         println!(
-            "Total time:             {}",
+            "Total time:              {}",
             cli_tools::format_duration(self.total_duration)
         );
     }
@@ -159,7 +154,7 @@ impl std::fmt::Display for ConversionStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} / {:.2} Mbps -> {} / {:.2} Mbps ({:.1}%)",
+            "{} @ {:.2} Mbps -> {} @ {:.2} Mbps ({:.1}%)",
             cli_tools::format_size(self.original_size),
             self.original_bitrate_kbps as f64 / 1000.0,
             cli_tools::format_size(self.converted_size),

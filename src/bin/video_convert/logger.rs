@@ -11,13 +11,15 @@ use crate::config::Config;
 use crate::convert::VideoInfo;
 use crate::stats::{ConversionStats, RunStats};
 
-/// Simple file logger for conversion operations with buffered writes
+/// Simple file logger for conversion operations.
+/// Creates a new file for each run.
+/// Outputs to ~/logs/cli-tools/video_convert_<timestamp>.log
 pub struct FileLogger {
     writer: BufWriter<File>,
 }
 
 impl FileLogger {
-    /// Create a new file logger, writing to ~/logs/cli-tools/video_convert_<timestamp>.log
+    /// Create a new log file to ~/logs/cli-tools/video_convert_<timestamp>.log
     pub(crate) fn new() -> Result<Self> {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let log_dir = home_dir.join("logs").join("cli-tools");
@@ -85,7 +87,7 @@ impl FileLogger {
     ) {
         let _ = writeln!(
             self.writer,
-            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps {:.2} {:.0} FPS",
+            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps {:.0} FPS{}",
             Self::timestamp(),
             operation.to_uppercase(),
             file_index,
@@ -109,8 +111,6 @@ impl FileLogger {
         duration: Duration,
         stats: Option<&ConversionStats>,
     ) {
-        let duration_str = cli_tools::format_duration(duration);
-        let size_info = stats.map_or(String::new(), |s| format!(" | {s}"));
         let _ = writeln!(
             self.writer,
             "[{}] SUCCESS {} {} - \"{}\" | Time: {}{}",
@@ -118,8 +118,8 @@ impl FileLogger {
             operation.to_uppercase(),
             file_index,
             file_path.display(),
-            duration_str,
-            size_info
+            cli_tools::format_duration(duration),
+            stats.map_or(String::new(), |s| format!(" | {s}"))
         );
         let _ = self.writer.flush();
     }
