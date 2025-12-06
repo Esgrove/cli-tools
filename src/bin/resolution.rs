@@ -388,25 +388,30 @@ async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
 }
 
 /// Parse ffprobe output in format "width=1920\nheight=1080\n"
+#[inline]
 fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
-    let text = std::str::from_utf8(output)?;
-    let mut width = None;
-    let mut height = None;
+    let mut lines = output.split(|&b| b == b'\n');
 
-    for line in text.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            match key {
-                "width" => width = Some(value.parse()?),
-                "height" => height = Some(value.parse()?),
-                _ => {}
-            }
-        }
-    }
+    let width = lines
+        .next()
+        .and_then(|line| line.get(6..)) // Skip "width="
+        .ok_or_else(|| anyhow!("Missing width"))?;
 
-    match (width, height) {
-        (Some(w), Some(h)) => Ok(Resolution { width: w, height: h }),
-        _ => Err(anyhow!("Missing width or height in ffprobe output")),
-    }
+    let height = lines
+        .next()
+        .and_then(|line| line.get(7..)) // Skip "height="
+        .ok_or_else(|| anyhow!("Missing height"))?;
+
+    // SAFETY: ffprobe output is always valid ASCII digits
+    #[allow(unsafe_code)]
+    let width = unsafe { std::str::from_utf8_unchecked(width) };
+    #[allow(unsafe_code)]
+    let height = unsafe { std::str::from_utf8_unchecked(height) };
+
+    Ok(Resolution {
+        width: width.parse()?,
+        height: height.parse()?,
+    })
 }
 
 /// Create a Semaphore with half the number of logical CPU cores available.
@@ -597,5 +602,69 @@ mod tests {
             .label(),
             "1250x790"
         );
+    }
+
+    #[test]
+    fn parse_ffprobe_output_1080p() {
+        let output = b"width=1920\nheight=1080\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 1920);
+        assert_eq!(result.height, 1080);
+    }
+
+    #[test]
+    fn parse_ffprobe_output_4k() {
+        let output = b"width=3840\nheight=2160\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 3840);
+        assert_eq!(result.height, 2160);
+    }
+
+    #[test]
+    fn parse_ffprobe_output_720p() {
+        let output = b"width=1280\nheight=720\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 1280);
+        assert_eq!(result.height, 720);
+    }
+
+    #[test]
+    fn parse_ffprobe_output_vertical() {
+        let output = b"width=1080\nheight=1920\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 1080);
+        assert_eq!(result.height, 1920);
+    }
+
+    #[test]
+    fn parse_ffprobe_output_no_trailing_newline() {
+        let output = b"width=1920\nheight=1080";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 1920);
+        assert_eq!(result.height, 1080);
+    }
+
+    #[test]
+    fn parse_ffprobe_output_zero_dimensions() {
+        let output = b"width=0\nheight=0\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 0);
+        assert_eq!(result.height, 0);
+    }
+
+    #[test]
+    fn parse_ffprobe_output_square() {
+        let output = b"width=1080\nheight=1080\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 1080);
+        assert_eq!(result.height, 1080);
+    }
+
+    #[test]
+    fn parse_ffprobe_output_single_digit() {
+        let output = b"width=1\nheight=1\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!(result.width, 1);
+        assert_eq!(result.height, 1);
     }
 }
