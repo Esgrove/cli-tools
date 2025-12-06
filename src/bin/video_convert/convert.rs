@@ -23,6 +23,9 @@ const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-l
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
+/// Minimum ratio of output duration to input duration for a conversion to be considered successful.
+const MIN_DURATION_RATIO: f64 = 0.85;
+
 /// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert {
     config: Config,
@@ -54,6 +57,8 @@ pub struct VideoInfo {
     pub(crate) height: u32,
     /// Framerate in frames per second
     pub(crate) frames_per_second: f64,
+    /// Warning message from ffprobe stderr (if any)
+    pub(crate) warning: Option<String>,
 }
 
 /// Reasons why a file was skipped
@@ -157,7 +162,11 @@ impl std::fmt::Display for VideoInfo {
             self.frames_per_second
         )?;
         writeln!(f, "Duration:   {}", cli_tools::format_duration_seconds(self.duration))?;
-        write!(f, "Resolution: {}x{}", self.width, self.height)
+        write!(f, "Resolution: {}x{}", self.width, self.height)?;
+        if let Some(warning) = &self.warning {
+            write!(f, "\nWarning:    {warning}")?;
+        }
+        Ok(())
     }
 }
 
@@ -553,122 +562,6 @@ impl VideoConvert {
         (stats, aborted)
     }
 
-    /// Get video information using ffprobe
-    fn get_video_info(&self, path: &Path) -> Result<VideoInfo> {
-        let output = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v",
-                "-show_entries",
-                "stream=codec_name,bit_rate,width,height,r_frame_rate:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
-                "-output_format",
-                "default=nokey=0:noprint_wrappers=1",
-            ])
-            .arg(path)
-            .output()
-            .context("Failed to execute ffprobe")?;
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
-            anyhow::bail!("ffprobe failed: {}", stderr.trim());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse key=value pairs from output
-        // Example output:
-        // ```
-        //  codec_name=h264
-        //  bit_rate=7345573
-        //  duration=2425.237007
-        //  size=2292495805
-        //  bit_rate=7562133
-        //  r_frame_rate=30/1
-        // ```
-        let mut codec = String::new();
-        let mut bitrate_bps: Option<u64> = None;
-        let mut size_bytes: Option<u64> = None;
-        let mut duration: Option<f64> = None;
-        let mut width: Option<u32> = None;
-        let mut height: Option<u32> = None;
-        let mut frames_per_second: Option<f64> = None;
-
-        for line in stdout.lines() {
-            let line = line.trim();
-            if let Some((key, value)) = line.split_once('=') {
-                match key {
-                    "codec_name" => codec = value.to_lowercase(),
-                    // Try multiple bitrate sources: stream bit_rate, format bit_rate, or BPS tags
-                    "bit_rate" | "BPS" | "BPS-eng" => {
-                        if bitrate_bps.is_none()
-                            && let Ok(bps) = value.parse::<u64>()
-                            && bps > 0
-                        {
-                            bitrate_bps = Some(bps);
-                        }
-                    }
-                    "size" => {
-                        if let Ok(size) = value.parse::<u64>() {
-                            size_bytes = Some(size);
-                        }
-                    }
-                    "duration" => {
-                        if let Ok(seconds) = value.parse::<f64>() {
-                            duration = Some(seconds);
-                        }
-                    }
-                    "width" => {
-                        if let Ok(w) = value.parse::<u32>() {
-                            width = Some(w);
-                        }
-                    }
-                    "height" => {
-                        if let Ok(h) = value.parse::<u32>() {
-                            height = Some(h);
-                        }
-                    }
-                    "r_frame_rate" => {
-                        // Parse fractional framerate like "30/1" or "30000/1001"
-                        if let Some((num, den)) = value.split_once('/')
-                            && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())
-                            && d > 0.0
-                        {
-                            frames_per_second = Some(n / d);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Fall back to file metadata for size if not in ffprobe output
-        let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
-
-        // Convert bitrate from bps to kbps
-        let bitrate_kbps = bitrate_bps.unwrap_or(0) / 1000;
-
-        let duration = duration.unwrap_or(0.0);
-        let width = width.unwrap_or(0);
-        let height = height.unwrap_or(0);
-        let frames_per_second = frames_per_second.unwrap_or(0.0);
-
-        if !stderr.is_empty() && self.config.verbose {
-            print_warning!("ffprobe: {}", stderr.trim());
-        }
-
-        Ok(VideoInfo {
-            codec,
-            bitrate_kbps,
-            size_bytes,
-            duration,
-            width,
-            height,
-            frames_per_second,
-        })
-    }
-
     /// Remux HEVC video to MP4 container
     fn remux_to_mp4(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
         let input = &file.file.path;
@@ -891,7 +784,7 @@ impl VideoConvert {
         }
 
         // Get output file info and validate
-        let output_info = match self.get_video_info(output) {
+        let output_info = match get_video_info(output) {
             Ok(info) => info,
             Err(e) => {
                 let error = format!("Failed to get output info: {e}");
@@ -934,7 +827,7 @@ impl VideoConvert {
                 return ProcessResult::Failed { error };
             }
 
-            match self.get_video_info(output) {
+            match get_video_info(output) {
                 Ok(info) => info,
                 Err(e) => {
                     let _ = fs::remove_file(output);
@@ -949,13 +842,15 @@ impl VideoConvert {
         };
 
         // Validate output duration
-        if output_info.duration < info.duration * 0.85 {
+        if output_info.duration < info.duration * MIN_DURATION_RATIO {
             if let Err(e) = self.delete_file(output) {
                 print_error!("Failed to delete output file: {e}");
             }
             let error = format!(
-                "Output duration {:.1}s is less than 85% of original {:.1}s",
-                output_info.duration, info.duration
+                "Output duration {:.1}s is less than {:.0}% of original {:.1}s",
+                output_info.duration,
+                MIN_DURATION_RATIO * 100.0,
+                info.duration
             );
             print_error!("{error}");
             self.log_failure(input, "convert", file_index, &error);
@@ -972,11 +867,14 @@ impl VideoConvert {
             output_info.size_bytes,
             output_info.bitrate_kbps,
         );
+
         let duration = start.elapsed();
+
         println!(
             "{}",
             format!("✓ Converted in {}: {stats}", cli_tools::format_duration(duration)).cyan()
         );
+
         self.log_success(output, "convert", file_index, duration, Some(&stats));
 
         ProcessResult::Converted { stats }
@@ -1137,7 +1035,7 @@ impl VideoConvert {
 /// This is a standalone function to allow parallel execution without borrowing `VideoConvert`.
 fn analyze_video_file(file: VideoFile, bitrate_limit: u64, overwrite: bool) -> AnalysisResult {
     // Get video info using ffprobe
-    let info = match get_video_info_standalone(&file.path) {
+    let info = match get_video_info(&file.path) {
         Ok(info) => info,
         Err(e) => {
             return AnalysisResult::Skip {
@@ -1204,8 +1102,8 @@ fn analyze_video_file(file: VideoFile, bitrate_limit: u64, overwrite: bool) -> A
     }
 }
 
-/// Get video information using ffprobe (standalone version for parallel execution).
-fn get_video_info_standalone(path: &Path) -> Result<VideoInfo> {
+/// Get video information using ffprobe.
+fn get_video_info(path: &Path) -> Result<VideoInfo> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -1284,6 +1182,11 @@ fn get_video_info_standalone(path: &Path) -> Result<VideoInfo> {
 
     let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
     let bitrate_kbps = bitrate_bps.unwrap_or(0) / 1000;
+    let warning = if stderr.is_empty() {
+        None
+    } else {
+        Some(stderr.trim().to_string())
+    };
 
     Ok(VideoInfo {
         codec,
@@ -1293,5 +1196,6 @@ fn get_video_info_standalone(path: &Path) -> Result<VideoInfo> {
         width: width.unwrap_or(0),
         height: height.unwrap_or(0),
         frames_per_second: frames_per_second.unwrap_or(0.0),
+        warning,
     })
 }
