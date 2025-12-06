@@ -152,36 +152,53 @@ impl FFProbeResult {
 
 impl Resolution {
     fn label(&self) -> Cow<'static, str> {
-        match self.height {
+        if self.width < self.height {
             // Vertical video
-            1280 if self.width == 720 => Cow::Borrowed("Vertical.720p"),
-            1920 if self.width == 1080 => Cow::Borrowed("Vertical.1080p"),
-            2560 if self.width == 1440 => Cow::Borrowed("Vertical.1440p"),
-            3840 if self.width == 2160 => Cow::Borrowed("Vertical.2160p"),
-            // Standard resolutions
-            480 => Cow::Borrowed("480p"),
-            540 => Cow::Borrowed("540p"),
-            544 => Cow::Borrowed("544p"),
-            576 => Cow::Borrowed("576p"),
-            600 => Cow::Borrowed("600p"),
-            720 => Cow::Borrowed("720p"),
-            1080 => Cow::Borrowed("1080p"),
-            1440 => Cow::Borrowed("1440p"),
-            2160 => Cow::Borrowed("2160p"),
-            _ => self.label_fuzzy(),
+            match (self.width, self.height) {
+                (480, 640 | 720) => Cow::Borrowed("Vertical.480p"),
+                (540, 720) => Cow::Borrowed("Vertical.540p"),
+                (544, 720) => Cow::Borrowed("Vertical.544p"),
+                (576, 720) => Cow::Borrowed("Vertical.576p"),
+                (600, 800) => Cow::Borrowed("Vertical.600p"),
+                (720, 1280) => Cow::Borrowed("Vertical.720p"),
+                (1080, 1920) => Cow::Borrowed("Vertical.1080p"),
+                (1440, 2560) => Cow::Borrowed("Vertical.1440p"),
+                (2160, 3840) => Cow::Borrowed("Vertical.2160p"),
+                _ => self.label_fuzzy_vertical(),
+            }
+        } else {
+            // Horizontal video
+            match (self.width, self.height) {
+                (640 | 720, 480) => Cow::Borrowed("480p"),
+                (720, 540) => Cow::Borrowed("540p"),
+                (720, 544) => Cow::Borrowed("544p"),
+                (720, 576) => Cow::Borrowed("576p"),
+                (800, 600) => Cow::Borrowed("600p"),
+                (1280, 720) => Cow::Borrowed("720p"),
+                (1920, 1080) => Cow::Borrowed("1080p"),
+                (2560, 1440) => Cow::Borrowed("1440p"),
+                (3840, 2160) => Cow::Borrowed("2160p"),
+                _ => self.label_fuzzy_horizontal(),
+            }
         }
     }
 
-    fn label_fuzzy(&self) -> Cow<'static, str> {
+    fn label_fuzzy_vertical(&self) -> Cow<'static, str> {
         for res in &FUZZY_RESOLUTIONS {
-            if self.height > self.width
-                && self.height >= res.width_range.0
+            if self.height >= res.width_range.0
                 && self.height <= res.width_range.1
                 && self.width >= res.height_range.0
                 && self.width <= res.height_range.1
             {
                 return Cow::Owned(format!("Vertical.{}p", res.label_height));
             }
+        }
+        // fall back to full resolution label
+        Cow::Owned(self.to_string())
+    }
+
+    fn label_fuzzy_horizontal(&self) -> Cow<'static, str> {
+        for res in &FUZZY_RESOLUTIONS {
             if self.width >= res.width_range.0
                 && self.width <= res.width_range.1
                 && self.height >= res.height_range.0
@@ -190,7 +207,6 @@ impl Resolution {
                 return Cow::Owned(format!("{}p", res.label_height));
             }
         }
-
         // fall back to full resolution label
         Cow::Owned(self.to_string())
     }
