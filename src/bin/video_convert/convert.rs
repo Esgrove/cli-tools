@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use cli_tools::{print_error, print_warning};
 use colored::Colorize;
+use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use walkdir::WalkDir;
@@ -376,14 +377,9 @@ impl VideoConvert {
 
         let results: Vec<AnalysisResult> = files
             .into_par_iter()
-            .map(|file| {
-                let result = analyze_video_file(file, bitrate_limit, overwrite);
-                progress_bar.inc(1);
-                result
-            })
+            .progress_with(progress_bar)
+            .map(|file| analyze_video_file(file, bitrate_limit, overwrite))
             .collect();
-
-        progress_bar.finish_and_clear();
 
         // Collect files into separate vectors
         let mut to_convert = Vec::new();
