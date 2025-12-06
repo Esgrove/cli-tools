@@ -73,9 +73,9 @@ pub enum SkipReason {
 #[derive(Debug)]
 pub enum ProcessResult {
     /// File was converted successfully
-    Converted { output: PathBuf, stats: ConversionStats },
+    Converted { stats: ConversionStats },
     /// File was remuxed (already HEVC, just changed container to MP4)
-    Remuxed { output: PathBuf },
+    Remuxed {},
     /// Failed to process file
     Failed { error: String },
 }
@@ -87,10 +87,8 @@ impl ProcessResult {
         original_bitrate_kbps: u64,
         converted_size: u64,
         output_bitrate_kbps: u64,
-        output: PathBuf,
     ) -> Self {
         Self::Converted {
-            output,
             stats: ConversionStats::new(
                 original_size,
                 original_bitrate_kbps,
@@ -254,8 +252,6 @@ impl VideoConvert {
         if self.config.verbose {
             println!("Found {} candidate file(s), analyzing...", candidate_files.len());
         }
-
-        // Analyze files in parallel
         let analysis_output = self.analyze_files(candidate_files);
 
         // Handle renames
@@ -289,20 +285,27 @@ impl VideoConvert {
 
         let mut stats = RunStats::default();
         let mut aborted = false;
+        let mut processed_count: usize = 0;
 
-        // Process remuxes first (faster)
-        if !self.config.skip_remux && !analysis_output.to_remux.is_empty() && !aborted {
-            let (remux_stats, was_aborted) = self.process_remuxes(analysis_output.to_remux, &abort_flag);
+        self.log_init();
+
+        // Process remuxes
+        if !self.config.skip_remux && !analysis_output.to_remux.is_empty() {
+            let (remux_stats, was_aborted) =
+                self.process_remuxes(analysis_output.to_remux, &abort_flag, &mut processed_count);
             stats.merge(&remux_stats);
             aborted = was_aborted;
         }
 
         // Process conversions
         if !self.config.skip_convert && !analysis_output.to_convert.is_empty() && !aborted {
-            let (convert_stats, was_aborted) = self.process_conversions(analysis_output.to_convert, &abort_flag);
+            let (convert_stats, was_aborted) =
+                self.process_conversions(analysis_output.to_convert, &abort_flag, &mut processed_count);
             stats.merge(&convert_stats);
             aborted = was_aborted;
         }
+
+        self.log_stats(&stats);
 
         if aborted {
             println!("\n{}", "Aborted by user".bold().red());
@@ -373,11 +376,10 @@ impl VideoConvert {
 
         progress_bar.finish_and_clear();
 
-        // Collect files into separate vectors and errors for sequential processing
+        // Collect files into separate vectors
         let mut to_convert = Vec::new();
         let mut to_remux = Vec::new();
         let mut to_rename = Vec::new();
-        let mut analysis_errors = Vec::new();
         let mut analysis_stats = AnalysisStats::default();
 
         for result in results {
@@ -423,24 +425,25 @@ impl VideoConvert {
                         }
                         SkipReason::AnalysisFailed { error } => {
                             analysis_stats.analysis_failed += 1;
-                            analysis_errors.push((file.path.clone(), error.clone()));
+                            print_error!("{}: {error}", cli_tools::path_to_string_relative(&file.path));
                         }
                     }
-                    if !matches!(reason, SkipReason::AnalysisFailed { .. }) && self.config.verbose {
+                    // Print skipped files
+                    if self.config.verbose && !matches!(reason, SkipReason::AnalysisFailed { .. }) {
                         print_warning!("{}: {reason}", cli_tools::path_to_string_relative(&file.path));
                     }
                 }
             }
         }
 
-        // Print analysis errors
-        for (path, error) in analysis_errors {
-            print_error!("{}: {error}", cli_tools::path_to_string_relative(&path));
+        if self.config.sort_by_bitrate {
+            // Sort by bitrate descending (highest first)
+            to_convert.sort_unstable_by(|a, b| b.info.bitrate_kbps.cmp(&a.info.bitrate_kbps));
+        } else {
+            to_convert.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
         }
 
-        // Sort by path for consistent processing order
-        to_convert.sort_by(|a, b| a.file.path.cmp(&b.file.path));
-        to_remux.sort_by(|a, b| a.file.path.cmp(&b.file.path));
+        to_remux.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
 
         self.log_analysis_stats(&analysis_stats);
         analysis_stats.print_summary();
@@ -454,38 +457,53 @@ impl VideoConvert {
 
     /// Process all files that need renaming.
     fn process_renames(&self, files: &[VideoFile]) {
-        for file in files {
+        let total = files.len();
+        let num_digits = total.to_string().chars().count();
+
+        for (index, file) in files.iter().enumerate() {
+            let file_index = format!("[{:>width$}/{total}]", index + 1, width = num_digits);
             let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
 
             if self.config.dryrun {
-                println!("{}", "[DRYRUN] Rename:".bold());
+                println!("{}", format!("{file_index} [DRYRUN] Rename:").bold().purple());
                 cli_tools::show_diff(
                     &cli_tools::path_to_string_relative(&file.path),
                     &cli_tools::path_to_string_relative(&new_path),
                 );
-            } else if let Err(e) = std::fs::rename(&file.path, &new_path) {
-                print_error!("Failed to rename {}: {e}", file.path.display());
             } else {
-                println!("{}", "Renamed:".bold());
+                println!("{}", format!("{file_index} Rename:").bold().purple());
                 cli_tools::show_diff(
                     &cli_tools::path_to_string_relative(&file.path),
                     &cli_tools::path_to_string_relative(&new_path),
                 );
+                if let Err(e) = std::fs::rename(&file.path, &new_path) {
+                    print_error!("Failed to rename {}: {e}", file.path.display());
+                }
             }
         }
     }
 
     /// Process all files that need remuxing.
-    fn process_remuxes(&self, files: Vec<ProcessableFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
-        self.process_files(files, abort_flag, "Remuxing", |this, file, index| {
+    fn process_remuxes(
+        &self,
+        files: Vec<ProcessableFile>,
+        abort_flag: &AtomicBool,
+        processed_count: &mut usize,
+    ) -> (RunStats, bool) {
+        self.process_files(files, abort_flag, processed_count, |this, file, index| {
             this.remux_to_mp4(file, index)
         })
     }
 
     /// Process all files that need conversion.
-    fn process_conversions(&self, files: Vec<ProcessableFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
-        self.process_files(files, abort_flag, "Converting", |this, file, index| {
-            this.convert_to_hevc_mp4(file, index)
+    fn process_conversions(
+        &self,
+        files: Vec<ProcessableFile>,
+        abort_flag: &AtomicBool,
+        processed_count: &mut usize,
+    ) -> (RunStats, bool) {
+        self.process_files(files, abort_flag, processed_count, |this, file, index| {
+            this.convert_to_hevc(file, index)
         })
     }
 
@@ -494,82 +512,44 @@ impl VideoConvert {
         &self,
         files: Vec<ProcessableFile>,
         abort_flag: &AtomicBool,
-        action_name: &str,
+        processed_count: &mut usize,
         process_fn: F,
     ) -> (RunStats, bool)
     where
         F: Fn(&Self, &ProcessableFile, &str) -> ProcessResult,
     {
         let mut stats = RunStats::default();
-        let total = files.len();
-        let num_files_to_process = total.min(self.config.number);
-        let num_digits = num_files_to_process.to_string().chars().count();
-
-        let mut processed_files: usize = 0;
+        let limit = self.config.number;
+        let num_digits = limit.to_string().chars().count();
         let mut aborted = false;
 
-        self.log_init();
-
-        for (index, file) in files.into_iter().enumerate() {
+        for file in files {
             // Check abort flag before starting a new file
             if abort_flag.load(Ordering::SeqCst) {
                 aborted = true;
                 break;
             }
 
-            if !self.config.verbose {
-                print!("\r{action_name}: {}/{total}", index + 1);
-                let _ = std::io::Write::flush(&mut std::io::stdout());
-            }
-
-            if processed_files >= num_files_to_process {
-                println!("\nReached file limit");
+            if *processed_count >= limit {
+                println!("Reached file limit ({limit})");
                 break;
             }
 
-            let file_index = format!(
-                "[{:>width$}/{}]",
-                processed_files + 1,
-                num_files_to_process,
-                width = num_digits
-            );
-
-            if !self.config.verbose {
-                // Clear the progress line before printing meaningful output
-                print!("\r");
-            }
+            let file_index = format!("[{:>width$}/{limit}]", *processed_count + 1, width = num_digits);
 
             let start = Instant::now();
             let result = process_fn(self, &file, &file_index);
             let duration = start.elapsed();
 
-            match &result {
-                ProcessResult::Converted { output, stats } => {
-                    println!(
-                        "{}",
-                        format!("✓ Converted in {}: {stats}", cli_tools::format_duration(duration)).cyan()
-                    );
-                    self.log_success(output, "convert", &file_index, duration, Some(stats));
-                    processed_files += 1;
-                }
-                ProcessResult::Remuxed { output } => {
-                    println!(
-                        "{}",
-                        format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
-                    );
-                    self.log_success(output, "remux", &file_index, duration, None);
-                    processed_files += 1;
-                }
-                ProcessResult::Failed { error } => {
-                    print_error!("{error}");
-                    self.log_failure(&file.file.path, "process", &file_index, error);
-                }
+            if let ProcessResult::Failed { ref error } = result {
+                print_error!("{}: {error}", cli_tools::path_to_string_relative(&file.file.path));
+            } else {
+                *processed_count += 1;
             }
 
             stats.add_result(&result, duration);
         }
 
-        self.log_stats(&stats);
         (stats, aborted)
     }
 
@@ -697,17 +677,18 @@ impl VideoConvert {
 
         println!(
             "{}",
-            format!("{file_index} Remuxing: {}", cli_tools::path_to_string_relative(input))
+            format!("{file_index} Remux: {}", cli_tools::path_to_string_relative(input))
                 .bold()
                 .green()
         );
         println!("{info}");
 
         if self.config.verbose {
-            println!("Remuxing: {}", cli_tools::path_to_string_relative(output));
+            println!("Output: {}", cli_tools::path_to_string_relative(output));
         }
 
         self.log_start(input, "remux", file_index, info, None);
+        let start = Instant::now();
 
         // Try pure copy and drop unsupported streams
         // -map 0:v:0   -> first video stream only
@@ -742,7 +723,7 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
-            return ProcessResult::Remuxed { output: output.clone() };
+            return ProcessResult::Remuxed {};
         }
 
         let status = match Self::run_command_isolated(&mut cmd) {
@@ -758,7 +739,13 @@ impl VideoConvert {
             if let Err(e) = self.delete_file(input) {
                 print_error!("Failed to delete original file: {e}");
             }
-            return ProcessResult::Remuxed { output: output.clone() };
+            let duration = start.elapsed();
+            println!(
+                "{}",
+                format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
+            );
+            self.log_success(output, "remux", file_index, duration, None);
+            return ProcessResult::Remuxed {};
         }
 
         // Fallback: if audio codec is not MP4-friendly, transcode audio to AAC
@@ -807,23 +794,30 @@ impl VideoConvert {
 
         if !status.success() {
             let _ = fs::remove_file(output);
-            return ProcessResult::Failed {
-                error: format!(
-                    "ffmpeg remux with AAC transcode failed with status: {}",
-                    status.code().unwrap_or(-1)
-                ),
-            };
+            let error = format!(
+                "ffmpeg remux with AAC transcode failed with status: {}",
+                status.code().unwrap_or(-1)
+            );
+            print_error!("{error}");
+            self.log_failure(input, "remux", file_index, &error);
+            return ProcessResult::Failed { error };
         }
 
         if let Err(e) = self.delete_file(input) {
             print_error!("Failed to delete original file: {e}");
         }
 
-        ProcessResult::Remuxed { output: output.clone() }
+        let duration = start.elapsed();
+        println!(
+            "{}",
+            format!("✓ Remuxed in {}", cli_tools::format_duration(duration)).green()
+        );
+        self.log_success(output, "remux", file_index, duration, None);
+        ProcessResult::Remuxed {}
     }
 
     /// Convert video to HEVC using NVENC
-    fn convert_to_hevc_mp4(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
+    fn convert_to_hevc(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
         let input = &file.file.path;
         let output = &file.output_path;
         let info = &file.info;
@@ -845,6 +839,7 @@ impl VideoConvert {
         }
 
         self.log_start(input, "convert", file_index, info, Some(quality_level));
+        let start = Instant::now();
 
         // Determine audio codec: copy for mp4/mkv, transcode for others
         let copy_audio = extension == "mp4" || extension == "mkv";
@@ -856,7 +851,7 @@ impl VideoConvert {
 
         if self.config.dryrun {
             println!("[DRYRUN] {ffmpeg_command:#?}");
-            return ProcessResult::converted(info.size_bytes, info.bitrate_kbps, 0, 0, output.clone());
+            return ProcessResult::converted(info.size_bytes, info.bitrate_kbps, 0, 0);
         }
 
         // First attempt: try with CUDA filters for better performance
@@ -887,11 +882,11 @@ impl VideoConvert {
             };
 
             if !status.success() {
-                // Clean up failed output file
                 let _ = fs::remove_file(output);
-                return ProcessResult::Failed {
-                    error: format!("ffmpeg conversion failed with status: {}", status.code().unwrap_or(-1)),
-                };
+                let error = format!("ffmpeg failed with status: {}", status.code().unwrap_or(-1));
+                print_error!("{error}");
+                self.log_failure(input, "convert", file_index, &error);
+                return ProcessResult::Failed { error };
             }
         }
 
@@ -899,10 +894,10 @@ impl VideoConvert {
         let output_info = match self.get_video_info(output) {
             Ok(info) => info,
             Err(e) => {
-                let _ = fs::remove_file(output);
-                return ProcessResult::Failed {
-                    error: format!("Failed to get output video info: {e}"),
-                };
+                let error = format!("Failed to get output info: {e}");
+                print_error!("{error}");
+                self.log_failure(input, "convert", file_index, &error);
+                return ProcessResult::Failed { error };
             }
         };
 
@@ -921,29 +916,32 @@ impl VideoConvert {
             let status = match Self::run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
-                    return ProcessResult::Failed {
-                        error: format!("Failed to execute ffmpeg (reconvert): {e}"),
-                    };
+                    let error = format!("Failed to execute ffmpeg (reconvert): {e}");
+                    print_error!("{error}");
+                    self.log_failure(input, "convert", file_index, &error);
+                    return ProcessResult::Failed { error };
                 }
             };
 
             if !status.success() {
                 let _ = fs::remove_file(output);
-                return ProcessResult::Failed {
-                    error: format!(
-                        "ffmpeg reconversion failed with status: {}",
-                        status.code().unwrap_or(-1)
-                    ),
-                };
+                let error = format!(
+                    "ffmpeg reconversion failed with status: {}",
+                    status.code().unwrap_or(-1)
+                );
+                print_error!("{error}");
+                self.log_failure(input, "convert", file_index, &error);
+                return ProcessResult::Failed { error };
             }
 
             match self.get_video_info(output) {
                 Ok(info) => info,
                 Err(e) => {
                     let _ = fs::remove_file(output);
-                    return ProcessResult::Failed {
-                        error: format!("Failed to get reconverted video info: {e}"),
-                    };
+                    let error = format!("Failed to get reconverted video info: {e}");
+                    print_error!("{error}");
+                    self.log_failure(input, "convert", file_index, &error);
+                    return ProcessResult::Failed { error };
                 }
             }
         } else {
@@ -955,25 +953,33 @@ impl VideoConvert {
             if let Err(e) = self.delete_file(output) {
                 print_error!("Failed to delete output file: {e}");
             }
-            return ProcessResult::Failed {
-                error: format!(
-                    "Output duration {:.1}s is less than 90% of original {:.1}s",
-                    output_info.duration, info.duration
-                ),
-            };
+            let error = format!(
+                "Output duration {:.1}s is less than 85% of original {:.1}s",
+                output_info.duration, info.duration
+            );
+            print_error!("{error}");
+            self.log_failure(input, "convert", file_index, &error);
+            return ProcessResult::Failed { error };
         }
 
         if let Err(e) = self.delete_file(input) {
             print_error!("Failed to delete original file: {e}");
         }
 
-        ProcessResult::converted(
+        let stats = ConversionStats::new(
             info.size_bytes,
             info.bitrate_kbps,
             output_info.size_bytes,
             output_info.bitrate_kbps,
-            output.clone(),
-        )
+        );
+        let duration = start.elapsed();
+        println!(
+            "{}",
+            format!("✓ Converted in {}: {stats}", cli_tools::format_duration(duration)).cyan()
+        );
+        self.log_success(output, "convert", file_index, duration, Some(&stats));
+
+        ProcessResult::Converted { stats }
     }
 
     /// Build the ffmpeg command for HEVC conversion.

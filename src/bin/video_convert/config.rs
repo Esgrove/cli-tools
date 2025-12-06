@@ -41,6 +41,8 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     recursive: bool,
     #[serde(default)]
+    sort_by_bitrate: bool,
+    #[serde(default)]
     verbose: bool,
 }
 
@@ -61,6 +63,7 @@ pub struct Config {
     pub(crate) recursive: bool,
     pub(crate) skip_convert: bool,
     pub(crate) skip_remux: bool,
+    pub(crate) sort_by_bitrate: bool,
     pub(crate) verbose: bool,
 }
 
@@ -137,6 +140,7 @@ impl Config {
             recursive: args.recurse || user_config.recursive,
             skip_convert: args.skip_convert,
             skip_remux: args.skip_remux,
+            sort_by_bitrate: args.sort_by_bitrate || user_config.sort_by_bitrate,
             verbose: args.verbose || user_config.verbose,
         })
     }

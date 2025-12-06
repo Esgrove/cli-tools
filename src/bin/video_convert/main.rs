@@ -70,6 +70,10 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'm', long)]
     skip_remux: bool,
 
+    /// Sort files by bitrate (highest first)
+    #[arg(short = 's', long)]
+    sort_by_bitrate: bool,
+
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,
