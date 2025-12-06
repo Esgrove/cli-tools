@@ -106,15 +106,13 @@ impl fmt::Display for ResolutionMatch {
 }
 
 impl FFProbeResult {
-    fn rename(&self, overwrite: bool, dryrun: bool) -> anyhow::Result<()> {
-        if let Some(new_path) = self.new_path_if_needed()? {
-            self.print_rename(&new_path);
-            if new_path.exists() && !overwrite {
-                anyhow::bail!("File already exists: {}", cli_tools::path_to_string(&new_path));
-            }
-            if !dryrun {
-                std::fs::rename(&self.file, new_path)?;
-            }
+    fn rename(&self, new_path: &Path, overwrite: bool, dryrun: bool) -> anyhow::Result<()> {
+        self.print_rename(new_path);
+        if new_path.exists() && !overwrite {
+            anyhow::bail!("File already exists: {}", cli_tools::path_to_string(new_path));
+        }
+        if !dryrun {
+            std::fs::rename(&self.file, new_path)?;
         }
         Ok(())
     }
@@ -240,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Keep successfully processed files, print errors for ffprobe command
-    let mut files_to_process: Vec<FFProbeResult> = get_resolutions(files)
+    let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = get_resolutions(files)
         .await?
         .into_iter()
         .filter_map(|res| match res {
@@ -250,9 +248,21 @@ async fn main() -> anyhow::Result<()> {
                 None
             }
         })
+        .filter_map(|result| match result.new_path_if_needed() {
+            Ok(Some(new_path)) => Some((result, new_path)),
+            Ok(None) => None,
+            Err(err) => {
+                eprintln!("Error: {err}");
+                None
+            }
+        })
         .collect();
 
-    files_to_process.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
+    files_to_process.sort_unstable_by(|a, b| {
+        a.0.resolution
+            .cmp(&b.0.resolution)
+            .then_with(|| a.0.file.cmp(&b.0.file))
+    });
 
     if files_to_process.is_empty() {
         if args.verbose {
@@ -263,8 +273,8 @@ async fn main() -> anyhow::Result<()> {
 
     println!("{}", "Resolution               Label   Path".bold());
 
-    for result in files_to_process {
-        if let Err(error) = result.rename(args.force, args.print) {
+    for (result, new_path) in files_to_process {
+        if let Err(error) = result.rename(&new_path, args.force, args.print) {
             cli_tools::print_error!("{error}");
         }
     }
