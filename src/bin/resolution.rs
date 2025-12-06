@@ -38,6 +38,10 @@ static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Failed to create regex pattern for valid resolutions")
 });
 
+static RE_HIGH_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(720p|1080p|1440p|2160p)").expect("Failed to create regex pattern for high resolutions")
+});
+
 #[derive(Parser, Debug)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Add video resolution to filenames")]
 struct Args {
@@ -49,17 +53,22 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
 
+    /// Delete files with width or height smaller than limit (default: 600)
+    #[arg(short = 'x', long)]
+    #[allow(clippy::option_option)]
+    delete: Option<Option<u32>>,
+
     /// Overwrite existing files
     #[arg(short, long)]
     force: bool,
 
-    /// Only print file names without renaming
+    /// Only print file names without renaming or deleting
     #[arg(short, long)]
     print: bool,
 
     /// Recursive directory iteration
     #[arg(short, long)]
-    recursive: bool,
+    recurse: bool,
 
     /// Verbose output
     #[arg(short, long)]
@@ -106,6 +115,20 @@ impl fmt::Display for ResolutionMatch {
 }
 
 impl FFProbeResult {
+    fn delete(&self, dryrun: bool) -> anyhow::Result<()> {
+        let path_str = cli_tools::path_to_string_relative(&self.file);
+        println!(
+            "{:>4}x{:<4}   {}",
+            self.resolution.width,
+            self.resolution.height,
+            path_str.red()
+        );
+        if !dryrun {
+            std::fs::remove_file(&self.file)?;
+        }
+        Ok(())
+    }
+
     fn rename(&self, new_path: &Path, overwrite: bool, dryrun: bool) -> anyhow::Result<()> {
         self.print_rename(new_path);
         if new_path.exists() && !overwrite {
@@ -151,6 +174,11 @@ impl FFProbeResult {
 }
 
 impl Resolution {
+    /// Returns true if width or height is smaller than the given limit.
+    const fn is_smaller_than(&self, limit: u32) -> bool {
+        self.width < limit || self.height < limit
+    }
+
     fn label(&self) -> Cow<'static, str> {
         if self.width < self.height {
             // Vertical video
@@ -224,7 +252,21 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let files = gather_files_without_resolution_label(&absolute_input_path, args.recursive).await?;
+    if let Some(limit) = args.delete {
+        if args.verbose || args.debug {
+            println!("Deleting low resolution files...");
+        }
+        return delete_low_resolution_files(
+            &absolute_input_path,
+            args.recurse,
+            limit.unwrap_or(600),
+            args.print,
+            args.verbose,
+        )
+        .await;
+    }
+
+    let files = gather_files_without_resolution_label(&absolute_input_path, args.recurse).await?;
 
     if files.is_empty() {
         if args.verbose {
@@ -280,6 +322,116 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn delete_low_resolution_files(
+    path: &Path,
+    recursive: bool,
+    limit: u32,
+    dryrun: bool,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    let files = gather_low_resolution_video_files(path, recursive).await?;
+
+    if files.is_empty() {
+        if verbose {
+            println!("No video files to process");
+        }
+        return Ok(());
+    }
+
+    let results: Vec<FFProbeResult> = get_resolutions(files)
+        .await?
+        .into_iter()
+        .filter_map(|res| match res {
+            Ok(val) => Some(val),
+            Err(err) => {
+                eprintln!("Error: {err}");
+                None
+            }
+        })
+        .collect();
+
+    let mut files_to_delete: Vec<FFProbeResult> = results
+        .into_iter()
+        .filter(|result| result.resolution.is_smaller_than(limit))
+        .collect();
+
+    files_to_delete.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
+
+    if files_to_delete.is_empty() {
+        if verbose {
+            println!("No files smaller than {limit}");
+        }
+        return Ok(());
+    }
+
+    if dryrun {
+        println!(
+            "{}",
+            format!(
+                "DRYRUN: Would delete {} file(s) smaller than {}:",
+                files_to_delete.len(),
+                limit
+            )
+            .bold()
+        );
+    } else {
+        println!(
+            "{}",
+            format!("Deleting {} file(s) smaller than {}:", files_to_delete.len(), limit).bold()
+        );
+    }
+
+    for result in files_to_delete {
+        if let Err(error) = result.delete(dryrun) {
+            cli_tools::print_error!("{error}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn gather_low_resolution_video_files(path: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+
+    if recursive {
+        for entry in WalkDir::new(path)
+            .into_iter()
+            .filter_entry(|e| !cli_tools::is_hidden(e))
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+        {
+            let path = entry.path();
+            if let Some(ext) = path.extension().and_then(|s| s.to_str())
+                && FILE_EXTENSIONS.contains(&ext)
+                && path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .is_some_and(|filename| !RE_HIGH_RESOLUTIONS.is_match(filename))
+            {
+                files.push(path.to_path_buf());
+            }
+        }
+    } else {
+        let mut dir_entries = tokio::fs::read_dir(&path).await?;
+        while let Some(ref entry) = dir_entries.next_entry().await? {
+            let path = entry.path();
+            if path.is_file()
+                && !cli_tools::is_hidden_tokio(entry)
+                && let Some(ext) = path.extension().and_then(|s| s.to_str())
+                && FILE_EXTENSIONS.contains(&ext)
+                && path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .is_some_and(|filename| !RE_HIGH_RESOLUTIONS.is_match(filename))
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    Ok(files)
 }
 
 async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
@@ -706,5 +858,59 @@ mod tests {
         let result = parse_ffprobe_output(output).unwrap();
         assert_eq!(result.width, 1);
         assert_eq!(result.height, 1);
+    }
+
+    #[test]
+    fn is_smaller_than_width_below_limit() {
+        let res = Resolution {
+            width: 400,
+            height: 720,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn is_smaller_than_height_below_limit() {
+        let res = Resolution {
+            width: 720,
+            height: 400,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn is_smaller_than_both_below_limit() {
+        let res = Resolution {
+            width: 320,
+            height: 240,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn is_smaller_than_both_above_limit() {
+        let res = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        assert!(!res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn is_smaller_than_at_exact_limit() {
+        let res = Resolution {
+            width: 480,
+            height: 480,
+        };
+        assert!(!res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn is_smaller_than_one_at_limit_one_below() {
+        let res = Resolution {
+            width: 480,
+            height: 479,
+        };
+        assert!(res.is_smaller_than(480));
     }
 }
