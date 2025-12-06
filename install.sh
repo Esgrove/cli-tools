@@ -14,9 +14,22 @@ fi
 
 print_magenta "Installing binaries..."
 cd "$REPO_ROOT"
+
+# Remove existing release binaries to force recompilation with current version number.
+if [ -d "target/release" ]; then
+    for executable in $(get_rust_executable_names); do
+        rm -f "target/release/${executable}"
+    done
+fi
+
+# Touch source files to ensure recompilation
+touch src/lib.rs
+find src/bin -name "*.rs" -exec touch {} \;
+
 cargo install --force --path "$REPO_ROOT"
 echo ""
 
+print_green "Installed binaries:"
 for executable in $(get_rust_executable_names); do
     if [ -z "$(command -v "$executable")" ]; then
         print_error_and_exit "Binary not found. Is the Cargo install directory in path?"
