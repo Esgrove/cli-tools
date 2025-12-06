@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -8,7 +9,6 @@ use clap::Parser;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use serde::Deserialize;
 use tokio::process::Command;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use walkdir::WalkDir;
@@ -66,7 +66,7 @@ struct Args {
     verbose: bool,
 }
 
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Deserialize)]
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 struct Resolution {
     width: u32,
     height: u32,
@@ -83,11 +83,6 @@ struct ResolutionMatch {
 struct FFProbeResult {
     file: PathBuf,
     resolution: Resolution,
-}
-
-enum RenameStatus {
-    NeedsRename(PathBuf),
-    UpToDate(PathBuf),
 }
 
 impl fmt::Display for Resolution {
@@ -112,8 +107,8 @@ impl fmt::Display for ResolutionMatch {
 
 impl FFProbeResult {
     fn rename(&self, overwrite: bool) -> anyhow::Result<()> {
-        if let RenameStatus::NeedsRename(new_path) = self.path_with_label()? {
-            println!("{self}");
+        if let Some(new_path) = self.new_path_if_needed()? {
+            self.print_rename(&new_path);
             if new_path.exists() && !overwrite {
                 anyhow::bail!("File already exists: {}", cli_tools::path_to_string(&new_path));
             }
@@ -122,11 +117,12 @@ impl FFProbeResult {
         Ok(())
     }
 
-    fn path_with_label(&self) -> anyhow::Result<RenameStatus> {
+    /// Returns `Some(new_path)` if file needs renaming, `None` if already up-to-date.
+    fn new_path_if_needed(&self) -> anyhow::Result<Option<PathBuf>> {
         let label = self.resolution.label();
         let (mut name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
-        if name.contains(&label) {
-            Ok(RenameStatus::UpToDate(self.file.clone()))
+        if name.contains(&*label) {
+            Ok(None)
         } else {
             let full_resolution = self.resolution.to_string();
             if name.contains(&full_resolution) {
@@ -134,25 +130,49 @@ impl FFProbeResult {
             }
             let new_file_name = format!("{name}.{label}.{extension}").replace("..", ".");
             let new_path = self.file.with_file_name(&new_file_name);
-            Ok(RenameStatus::NeedsRename(new_path))
+            Ok(Some(new_path))
         }
+    }
+
+    fn print_rename(&self, new_path: &Path) {
+        let (_, new_path_colored) = cli_tools::color_diff(
+            &cli_tools::path_to_string(&self.file),
+            &cli_tools::path_to_string(new_path),
+            false,
+        );
+        println!(
+            "{:>4}x{:<4}   {:>18}   {}",
+            self.resolution.width,
+            self.resolution.height,
+            self.resolution.label(),
+            new_path_colored
+        );
     }
 }
 
 impl Resolution {
-    fn label(&self) -> String {
+    fn label(&self) -> Cow<'static, str> {
         match self.height {
             // Vertical video
-            1280 if self.width == 720 => "Vertical.720p".to_string(),
-            1920 if self.width == 1080 => "Vertical.1080p".to_string(),
-            2560 if self.width == 1440 => "Vertical.1440p".to_string(),
-            3840 if self.width == 2160 => "Vertical.2160p".to_string(),
-            480 | 540 | 544 | 576 | 600 | 720 | 1080 | 1440 | 2160 => format!("{}p", self.height),
+            1280 if self.width == 720 => Cow::Borrowed("Vertical.720p"),
+            1920 if self.width == 1080 => Cow::Borrowed("Vertical.1080p"),
+            2560 if self.width == 1440 => Cow::Borrowed("Vertical.1440p"),
+            3840 if self.width == 2160 => Cow::Borrowed("Vertical.2160p"),
+            // Standard resolutions
+            480 => Cow::Borrowed("480p"),
+            540 => Cow::Borrowed("540p"),
+            544 => Cow::Borrowed("544p"),
+            576 => Cow::Borrowed("576p"),
+            600 => Cow::Borrowed("600p"),
+            720 => Cow::Borrowed("720p"),
+            1080 => Cow::Borrowed("1080p"),
+            1440 => Cow::Borrowed("1440p"),
+            2160 => Cow::Borrowed("2160p"),
             _ => self.label_fuzzy(),
         }
     }
 
-    fn label_fuzzy(&self) -> String {
+    fn label_fuzzy(&self) -> Cow<'static, str> {
         for res in &FUZZY_RESOLUTIONS {
             if self.height > self.width
                 && self.height >= res.width_range.0
@@ -160,42 +180,19 @@ impl Resolution {
                 && self.width >= res.height_range.0
                 && self.width <= res.height_range.1
             {
-                return format!("Vertical.{}p", res.label_height);
+                return Cow::Owned(format!("Vertical.{}p", res.label_height));
             }
             if self.width >= res.width_range.0
                 && self.width <= res.width_range.1
                 && self.height >= res.height_range.0
                 && self.height <= res.height_range.1
             {
-                return format!("{}p", res.label_height);
+                return Cow::Owned(format!("{}p", res.label_height));
             }
         }
 
         // fall back to full resolution label
-        self.to_string()
-    }
-}
-
-impl fmt::Display for FFProbeResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.path_with_label().as_ref().map_or(Err(fmt::Error), |path| {
-            let path = match path {
-                RenameStatus::UpToDate(p) | RenameStatus::NeedsRename(p) => p.as_path(),
-            };
-            let (_, new_path) = cli_tools::color_diff(
-                &cli_tools::path_to_string(&self.file),
-                &cli_tools::path_to_string(path),
-                false,
-            );
-            write!(
-                f,
-                "{:>4}x{:<4}   {:>18}   {}",
-                self.resolution.width,
-                self.resolution.height,
-                self.resolution.label(),
-                new_path
-            )
-        })
+        Cow::Owned(self.to_string())
     }
 }
 
@@ -250,32 +247,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
-    let mut out = [ResolutionMatch {
-        label_height: 0,
-        width_range: (0, 0),
-        height_range: (0, 0),
-    }; KNOWN_RESOLUTIONS.len()];
-    let mut i = 0;
-    while i < KNOWN_RESOLUTIONS.len() {
-        let (w, h) = KNOWN_RESOLUTIONS[i];
-        out[i] = ResolutionMatch {
-            label_height: h,
-            width_range: compute_bounds(w),
-            height_range: compute_bounds(h),
-        };
-        i += 1;
-    }
-    out
-}
-
-const fn compute_bounds(res: u32) -> (u32, u32) {
-    let tolerance = (res as f32 * RESOLUTION_TOLERANCE) as u32;
-    let min = res.saturating_sub(tolerance);
-    let max = res.saturating_add(tolerance);
-    (min, max)
-}
-
 async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
@@ -290,6 +261,10 @@ async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> 
             let path = entry.path();
             if let Some(ext) = path.extension().and_then(|s| s.to_str())
                 && FILE_EXTENSIONS.contains(&ext)
+                && path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .is_some_and(|filename| !RE_RESOLUTIONS.is_match(filename))
             {
                 files.push(path.to_path_buf());
             }
@@ -302,24 +277,21 @@ async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> 
                 && !cli_tools::is_hidden_tokio(entry)
                 && let Some(ext) = path.extension().and_then(|s| s.to_str())
                 && FILE_EXTENSIONS.contains(&ext)
+                && path
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .is_some_and(|filename| !RE_RESOLUTIONS.is_match(filename))
             {
                 files.push(path);
             }
         }
     }
 
-    // Drop files that already contain a resolution label
-    files.retain(|path| {
-        path.file_name()
-            .and_then(|f| f.to_str())
-            .is_some_and(|filename| !RE_RESOLUTIONS.is_match(filename))
-    });
-
     Ok(files)
 }
 
 async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFProbeResult, Error>>> {
-    let semaphore = create_semaphore_for_num_physical_cpus();
+    let semaphore = create_semaphore_for_io_bound();
 
     let progress_bar = Arc::new(ProgressBar::new(files.len() as u64));
     progress_bar.set_style(
@@ -414,10 +386,36 @@ fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
     })
 }
 
-/// Create a Semaphore with half the number of logical CPU cores available.
+/// Create a Semaphore sized for I/O-bound work (4x physical CPU cores).
 #[inline]
-fn create_semaphore_for_num_physical_cpus() -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(num_cpus::get_physical()))
+fn create_semaphore_for_io_bound() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(num_cpus::get_physical() * 4))
+}
+
+const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
+    let mut out = [ResolutionMatch {
+        label_height: 0,
+        width_range: (0, 0),
+        height_range: (0, 0),
+    }; KNOWN_RESOLUTIONS.len()];
+    let mut i = 0;
+    while i < KNOWN_RESOLUTIONS.len() {
+        let (w, h) = KNOWN_RESOLUTIONS[i];
+        out[i] = ResolutionMatch {
+            label_height: h,
+            width_range: compute_bounds(w),
+            height_range: compute_bounds(h),
+        };
+        i += 1;
+    }
+    out
+}
+
+const fn compute_bounds(res: u32) -> (u32, u32) {
+    let tolerance = (res as f32 * RESOLUTION_TOLERANCE) as u32;
+    let min = res.saturating_sub(tolerance);
+    let max = res.saturating_add(tolerance);
+    (min, max)
 }
 
 #[cfg(test)]
