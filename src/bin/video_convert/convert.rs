@@ -251,6 +251,8 @@ impl VideoConvert {
 
     /// Run the video conversion process.
     pub fn run(&self) -> Result<()> {
+        self.log_init();
+
         // Set up Ctrl+C handler for graceful abort
         let abort_flag = Arc::new(AtomicBool::new(false));
         let abort_flag_handler = Arc::clone(&abort_flag);
@@ -269,8 +271,6 @@ impl VideoConvert {
         let mut aborted = false;
         let mut processed_count: usize = 0;
 
-        self.log_init();
-
         // Gather candidate files
         let candidate_files = self.gather_candidate_files()?;
         if candidate_files.is_empty() {
@@ -284,16 +284,13 @@ impl VideoConvert {
         // Analyze files to determine required actions
         let analysis_output = self.analyze_files(candidate_files);
 
-        // Handle renames: these files are already in HEVC format but missing "x265" label
+        // Process renames: these files are already in HEVC format but missing "x265" label
         if !analysis_output.renames.is_empty() {
             self.process_renames(&analysis_output.renames);
         }
 
-        let has_conversions = !self.config.skip_convert && !analysis_output.conversions.is_empty();
-        let has_remuxes = !self.config.skip_remux && !analysis_output.remuxes.is_empty();
-
         // Process remuxes
-        if has_remuxes {
+        if !self.config.skip_remux && !analysis_output.remuxes.is_empty() {
             let (remux_stats, was_aborted) =
                 self.process_remuxes(analysis_output.remuxes, &abort_flag, &mut processed_count);
             stats.merge(&remux_stats);
@@ -301,7 +298,7 @@ impl VideoConvert {
         }
 
         // Process conversions
-        if has_conversions {
+        if !self.config.skip_convert && !analysis_output.conversions.is_empty() {
             let (convert_stats, was_aborted) =
                 self.process_conversions(analysis_output.conversions, &abort_flag, &mut processed_count);
             stats.merge(&convert_stats);

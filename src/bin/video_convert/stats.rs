@@ -4,7 +4,7 @@ use colored::Colorize;
 
 use crate::convert::ProcessResult;
 
-/// Statistics from the analysis phase.
+/// Statistics from the video file analysis.
 #[derive(Debug, Default)]
 pub struct AnalysisStats {
     pub(crate) to_convert: usize,
@@ -14,35 +14,6 @@ pub struct AnalysisStats {
     pub(crate) skipped_bitrate: usize,
     pub(crate) skipped_duplicate: usize,
     pub(crate) analysis_failed: usize,
-}
-
-impl AnalysisStats {
-    /// Get the total number of skipped files.
-    pub(crate) const fn total_skipped(&self) -> usize {
-        self.skipped_converted + self.skipped_bitrate + self.skipped_duplicate
-    }
-
-    /// Print analysis summary.
-    pub(crate) fn print_summary(&self) {
-        if self.to_rename > 0 {
-            println!("To rename:               {}", self.to_rename);
-        }
-        if self.total_skipped() > 0 {
-            println!("Skipped:                 {}", self.total_skipped());
-            println!(" - Already converted:    {}", self.skipped_converted);
-            println!(" - Below bitrate limit:  {}", self.skipped_bitrate);
-            println!(" - Output exists:        {}", self.skipped_duplicate);
-        }
-        if self.analysis_failed > 0 {
-            println!("{}", format!("Analysis failed:         {}", self.analysis_failed).red());
-        }
-        println!(
-            "Ready to process:        {} ({} convert, {} remux)",
-            self.to_convert + self.to_remux,
-            self.to_convert,
-            self.to_remux
-        );
-    }
 }
 
 /// Statistics for the conversion run
@@ -63,6 +34,29 @@ pub struct ConversionStats {
     original_bitrate_kbps: u64,
     converted_size: u64,
     converted_bitrate_kbps: u64,
+}
+
+impl AnalysisStats {
+    /// Get the total number of skipped files.
+    pub(crate) const fn total_skipped(&self) -> usize {
+        self.skipped_converted + self.skipped_bitrate + self.skipped_duplicate
+    }
+
+    /// Print analysis summary.
+    pub(crate) fn print_summary(&self) {
+        println!("To rename:               {}", self.to_rename);
+        println!("To remux:                {}", self.to_remux);
+        println!("To convert:              {}", self.to_convert);
+        if self.total_skipped() > 0 {
+            println!("Skipped:                 {}", self.total_skipped());
+            println!(" - Already converted:    {}", self.skipped_converted);
+            println!(" - Below bitrate limit:  {}", self.skipped_bitrate);
+            println!(" - Output exists:        {}", self.skipped_duplicate);
+        }
+        if self.analysis_failed > 0 {
+            println!("{}", format!("Analysis failed:         {}", self.analysis_failed).red());
+        }
+    }
 }
 
 impl ConversionStats {
