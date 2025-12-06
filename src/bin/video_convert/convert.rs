@@ -230,14 +230,13 @@ struct ProcessableFile {
 }
 
 /// Output from the analysis phase.
-#[allow(clippy::struct_field_names)]
 struct AnalysisOutput {
     /// Files that need full conversion (non-HEVC to HEVC).
-    to_convert: Vec<ProcessableFile>,
+    conversions: Vec<ProcessableFile>,
     /// Files that need remuxing (HEVC but wrong container).
-    to_remux: Vec<ProcessableFile>,
+    remuxes: Vec<ProcessableFile>,
     /// Files that need to be renamed (HEVC MP4 without .x265 suffix).
-    to_rename: Vec<VideoFile>,
+    renames: Vec<VideoFile>,
 }
 
 impl VideoConvert {
@@ -265,12 +264,12 @@ impl VideoConvert {
         let analysis_output = self.analyze_files(candidate_files);
 
         // Handle renames
-        if !analysis_output.to_rename.is_empty() {
-            self.process_renames(&analysis_output.to_rename);
+        if !analysis_output.renames.is_empty() {
+            self.process_renames(&analysis_output.renames);
         }
 
-        let has_conversions = !self.config.skip_convert && !analysis_output.to_convert.is_empty();
-        let has_remuxes = !self.config.skip_remux && !analysis_output.to_remux.is_empty();
+        let has_conversions = !self.config.skip_convert && !analysis_output.conversions.is_empty();
+        let has_remuxes = !self.config.skip_remux && !analysis_output.remuxes.is_empty();
 
         if !has_conversions && !has_remuxes {
             println!("No files to process");
@@ -300,17 +299,17 @@ impl VideoConvert {
         self.log_init();
 
         // Process remuxes
-        if !self.config.skip_remux && !analysis_output.to_remux.is_empty() {
+        if !self.config.skip_remux && !analysis_output.remuxes.is_empty() {
             let (remux_stats, was_aborted) =
-                self.process_remuxes(analysis_output.to_remux, &abort_flag, &mut processed_count);
+                self.process_remuxes(analysis_output.remuxes, &abort_flag, &mut processed_count);
             stats.merge(&remux_stats);
             aborted = was_aborted;
         }
 
         // Process conversions
-        if !self.config.skip_convert && !analysis_output.to_convert.is_empty() && !aborted {
+        if !self.config.skip_convert && !analysis_output.conversions.is_empty() && !aborted {
             let (convert_stats, was_aborted) =
-                self.process_conversions(analysis_output.to_convert, &abort_flag, &mut processed_count);
+                self.process_conversions(analysis_output.conversions, &abort_flag, &mut processed_count);
             stats.merge(&convert_stats);
             aborted = was_aborted;
         }
@@ -382,9 +381,9 @@ impl VideoConvert {
             .collect();
 
         // Collect files into separate vectors
-        let mut to_convert = Vec::new();
-        let mut to_remux = Vec::new();
-        let mut to_rename = Vec::new();
+        let mut conversions = Vec::new();
+        let mut remuxes = Vec::new();
+        let mut renames = Vec::new();
         let mut analysis_stats = AnalysisStats::default();
 
         for result in results {
@@ -395,7 +394,7 @@ impl VideoConvert {
                     output_path,
                 } => {
                     analysis_stats.to_convert += 1;
-                    to_convert.push(ProcessableFile {
+                    conversions.push(ProcessableFile {
                         file,
                         info,
                         output_path,
@@ -407,7 +406,7 @@ impl VideoConvert {
                     output_path,
                 } => {
                     analysis_stats.to_remux += 1;
-                    to_remux.push(ProcessableFile {
+                    remuxes.push(ProcessableFile {
                         file,
                         info,
                         output_path,
@@ -415,7 +414,7 @@ impl VideoConvert {
                 }
                 AnalysisResult::NeedsRename { file } => {
                     analysis_stats.to_rename += 1;
-                    to_rename.push(file);
+                    renames.push(file);
                 }
                 AnalysisResult::Skip { file, reason } => {
                     match &reason {
@@ -443,20 +442,20 @@ impl VideoConvert {
 
         if self.config.sort_by_bitrate {
             // Sort by bitrate descending (highest first)
-            to_convert.sort_unstable_by(|a, b| b.info.bitrate_kbps.cmp(&a.info.bitrate_kbps));
+            conversions.sort_unstable_by(|a, b| b.info.bitrate_kbps.cmp(&a.info.bitrate_kbps));
         } else {
-            to_convert.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
+            conversions.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
         }
 
-        to_remux.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
+        remuxes.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
 
         self.log_analysis_stats(&analysis_stats);
         analysis_stats.print_summary();
 
         AnalysisOutput {
-            to_convert,
-            to_remux,
-            to_rename,
+            conversions,
+            remuxes,
+            renames,
         }
     }
 
