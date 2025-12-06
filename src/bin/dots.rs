@@ -8,11 +8,16 @@ use anyhow::{Context, Result, anyhow};
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use colored::Colorize;
+use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
+use rayon::prelude::*;
 use regex::Regex;
 use serde::Deserialize;
 use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
+
+const PROGRESS_BAR_CHARS: &str = "=>-";
+const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
 use cli_tools::date::{CURRENT_YEAR, RE_CORRECT_DATE_FORMAT, RE_YEAR};
 
@@ -427,33 +432,56 @@ impl Dots {
 
         let max_depth = if self.config.recursive { 100 } else { 1 };
 
-        // Collect and sort all files that need renaming
-        Ok(WalkDir::new(&self.root)
+        // Collect all file paths first
+        let paths: Vec<PathBuf> = WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
-            // ignore hidden files (name starting with ".")
             .filter_entry(|e| !cli_tools::is_hidden(e))
             .filter_map(Result::ok)
-            .filter(|entry| {
-                // Filter files based on include and exclude lists
-                let path_str = cli_tools::path_to_string(entry.path());
-                let include = self.config.include.iter().all(|name| {
-                    path_str.contains(name)
-                });
-                let exclude = self.config.exclude.iter().all(|name| {
-                    !path_str.contains(name)
-                });
-                include && exclude
+            .map(walkdir::DirEntry::into_path)
+            .collect();
+
+        let progress_bar = ProgressBar::new(paths.len() as u64);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template(PROGRESS_BAR_TEMPLATE)
+                .expect("Failed to set progress bar template")
+                .progress_chars(PROGRESS_BAR_CHARS),
+        );
+
+        // Filter and format files in parallel
+        let mut results: Vec<_> = paths
+            .into_par_iter()
+            .filter_map(|path| {
+                let result = {
+                    // Filter based on include and exclude lists
+                    let path_str = cli_tools::path_to_string(&path);
+                    let include = self.config.include.iter().all(|name| path_str.contains(name));
+                    let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
+                    if include && exclude {
+                        self.formatted_filepath(&path)
+                            .ok()
+                            .filter(|new_path| &path != new_path)
+                            .map(|new_path| (path, new_path))
+                    } else {
+                        None
+                    }
+                };
+                progress_bar.inc(1);
+                result
             })
-            .filter_map(|entry| {
-                let path = entry.path();
-                self.formatted_filepath(path)
-                    .ok()
-                    .filter(|new_path| path != new_path)
-                    .map(|new_path| (path.to_path_buf(), new_path))
-            })
-            .sorted_by_key(|(path, _)| path.to_string_lossy().to_lowercase())
-            .collect())
+            .collect();
+
+        progress_bar.finish_and_clear();
+
+        // Sort sequentially after parallel collection
+        results.sort_by(|(a, _), (b, _)| {
+            a.to_string_lossy()
+                .to_lowercase()
+                .cmp(&b.to_string_lossy().to_lowercase())
+        });
+
+        Ok(results)
     }
 
     /// Get all directories that need to be renamed.
@@ -470,32 +498,56 @@ impl Dots {
         }
 
         let max_depth = if self.config.recursive { 100 } else { 1 };
-        WalkDir::new(&self.root)
+
+        // Collect all directory paths first
+        let paths: Vec<PathBuf> = WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
-            .filter(|entry| {
-                // Check all filter names are present in the path
-                if self.config.include.is_empty() {
-                    true
-                } else {
-                    let path_str = cli_tools::path_to_string(entry.path());
-                    self.config.include.iter().all(|name| {
-                        path_str.contains(name)
-                    })
-                }
+            .map(walkdir::DirEntry::into_path)
+            .collect();
+
+        let progress_bar = ProgressBar::new(paths.len() as u64);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template(PROGRESS_BAR_TEMPLATE)
+                .expect("Failed to set progress bar template")
+                .progress_chars(PROGRESS_BAR_CHARS),
+        );
+
+        // Filter and format directories in parallel
+        let mut results: Vec<_> = paths
+            .into_par_iter()
+            .filter_map(|path| {
+                let result = {
+                    // Filter based on include list
+                    let matches_filter = if self.config.include.is_empty() {
+                        true
+                    } else {
+                        let path_str = cli_tools::path_to_string(&path);
+                        self.config.include.iter().all(|name| path_str.contains(name))
+                    };
+                    if matches_filter {
+                        self.formatted_directory_path(&path)
+                            .ok()
+                            .filter(|new_path| &path != new_path)
+                            .map(|new_path| (path, new_path))
+                    } else {
+                        None
+                    }
+                };
+                progress_bar.inc(1);
+                result
             })
-            .filter_map(|entry| {
-                let path = entry.path();
-                self.formatted_directory_path(path)
-                    .ok()
-                    .filter(|new_path| path != new_path)
-                    .map(|new_path| (path.to_path_buf(), new_path))
-            })
-            // Sort by depth to rename children before parents, avoiding renaming conflicts
-            .sorted_by_key(|(path, _)| std::cmp::Reverse(path.components().count()))
-            .collect()
+            .collect();
+
+        progress_bar.finish_and_clear();
+
+        // Sort by depth to rename children before parents, avoiding renaming conflicts
+        results.sort_by_key(|(path, _)| std::cmp::Reverse(path.components().count()));
+
+        results
     }
 
     /// Move all files recursively from source directory to target directory
