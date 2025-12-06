@@ -55,7 +55,7 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
 
-    /// Delete files with width or height smaller than limit (default: 600)
+    /// Delete files with width or height smaller than limit (default: 500)
     #[arg(short = 'x', long)]
     #[allow(clippy::option_option)]
     delete: Option<Option<u32>>,
@@ -261,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
         return delete_low_resolution_files(
             &absolute_input_path,
             args.recurse,
-            limit.unwrap_or(600),
+            limit.unwrap_or(500),
             args.print,
             args.verbose,
         )
