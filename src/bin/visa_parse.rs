@@ -198,7 +198,7 @@ struct Args {
     #[arg(short, long, default_value_t = 20)]
     number: usize,
 
-    /// Verbose output
+    /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
 }

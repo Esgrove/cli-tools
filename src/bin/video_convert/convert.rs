@@ -282,25 +282,51 @@ impl VideoConvert {
         }
 
         // Analyze files to determine required actions
-        let analysis_output = self.analyze_files(candidate_files);
+        let mut analysis_output = self.analyze_files(candidate_files);
 
         // Process renames: these files are already in HEVC format but missing "x265" label
         if !analysis_output.renames.is_empty() {
             stats.files_renamed = self.process_renames(&analysis_output.renames);
         }
 
+        // Calculate total files to process and truncate lists to respect config limit
+        let remux_count = if self.config.skip_remux {
+            0
+        } else {
+            analysis_output.remuxes.len()
+        };
+        let convert_count = if self.config.skip_convert {
+            0
+        } else {
+            analysis_output.conversions.len()
+        };
+        let total_available = remux_count + convert_count;
+        let total_limit = total_available.min(self.config.number);
+
+        // Truncate lists if they exceed the limit
+        if total_available > self.config.number {
+            let remux_limit = remux_count.min(self.config.number);
+            analysis_output.remuxes.truncate(remux_limit);
+            let remaining = self.config.number.saturating_sub(remux_limit);
+            analysis_output.conversions.truncate(remaining);
+        }
+
         // Process remuxes
         if !self.config.skip_remux && !analysis_output.remuxes.is_empty() {
             let (remux_stats, was_aborted) =
-                self.process_remuxes(analysis_output.remuxes, &abort_flag, &mut processed_count);
+                self.process_remuxes(analysis_output.remuxes, &abort_flag, &mut processed_count, total_limit);
             stats += remux_stats;
             aborted = was_aborted;
         }
 
         // Process conversions
-        if !self.config.skip_convert && !analysis_output.conversions.is_empty() {
-            let (convert_stats, was_aborted) =
-                self.process_conversions(analysis_output.conversions, &abort_flag, &mut processed_count);
+        if !self.config.skip_convert && !analysis_output.conversions.is_empty() && !aborted {
+            let (convert_stats, was_aborted) = self.process_conversions(
+                analysis_output.conversions,
+                &abort_flag,
+                &mut processed_count,
+                total_limit,
+            );
             stats += convert_stats;
             aborted = was_aborted;
         }
@@ -357,14 +383,14 @@ impl VideoConvert {
         files: Vec<ProcessableFile>,
         abort_flag: &AtomicBool,
         processed_count: &mut usize,
+        total_limit: usize,
         process_fn: F,
     ) -> (RunStats, bool)
     where
         F: Fn(&Self, &ProcessableFile, &str) -> ProcessResult,
     {
         let mut stats = RunStats::default();
-        let limit = self.config.number;
-        let num_digits = limit.to_string().chars().count();
+        let num_digits = total_limit.to_string().chars().count();
         let mut aborted = false;
 
         for file in files {
@@ -374,12 +400,12 @@ impl VideoConvert {
                 break;
             }
 
-            if *processed_count >= limit {
-                println!("{}", format!("\nReached file limit ({limit})").bold());
+            if *processed_count >= total_limit {
+                println!("{}", format!("\nReached file limit ({total_limit})").bold());
                 break;
             }
 
-            let file_index = format!("[{:>width$}/{limit}]", *processed_count + 1, width = num_digits);
+            let file_index = format!("[{:>width$}/{total_limit}]", *processed_count + 1, width = num_digits);
 
             let start = Instant::now();
             let result = process_fn(self, &file, &file_index);
@@ -682,7 +708,7 @@ impl VideoConvert {
 
         println!(
             "{}",
-            format!("{file_index} Converting: {}", cli_tools::path_to_string_relative(input))
+            format!("{file_index} Convert: {}", cli_tools::path_to_string_relative(input))
                 .bold()
                 .magenta()
         );
@@ -691,7 +717,7 @@ impl VideoConvert {
         let quality_level = info.quality_level();
 
         if self.config.verbose {
-            println!("Converting: {}", cli_tools::path_to_string_relative(output));
+            println!("Output: {}", cli_tools::path_to_string_relative(output));
             println!("Using quality level: {quality_level}");
         }
 
@@ -979,8 +1005,9 @@ impl VideoConvert {
         files: Vec<ProcessableFile>,
         abort_flag: &AtomicBool,
         processed_count: &mut usize,
+        total_limit: usize,
     ) -> (RunStats, bool) {
-        self.process_files(files, abort_flag, processed_count, |this, file, index| {
+        self.process_files(files, abort_flag, processed_count, total_limit, |this, file, index| {
             this.remux_to_mp4(file, index)
         })
     }
@@ -991,8 +1018,9 @@ impl VideoConvert {
         files: Vec<ProcessableFile>,
         abort_flag: &AtomicBool,
         processed_count: &mut usize,
+        total_limit: usize,
     ) -> (RunStats, bool) {
-        self.process_files(files, abort_flag, processed_count, |this, file, index| {
+        self.process_files(files, abort_flag, processed_count, total_limit, |this, file, index| {
             this.convert_to_hevc(file, index)
         })
     }

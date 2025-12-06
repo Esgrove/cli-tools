@@ -78,7 +78,7 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,
 
-    /// Display commands being executed
+    /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
 }

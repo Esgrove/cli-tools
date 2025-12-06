@@ -200,7 +200,7 @@ struct Args {
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,
 
-    /// Verbose output
+    /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
 }

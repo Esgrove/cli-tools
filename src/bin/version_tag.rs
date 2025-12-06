@@ -28,7 +28,7 @@ struct Args {
     #[arg(short, long)]
     single: bool,
 
-    /// Verbose output
+    /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
 }
