@@ -293,7 +293,7 @@ impl VideoConvert {
         if !self.config.skip_remux && !analysis_output.remuxes.is_empty() {
             let (remux_stats, was_aborted) =
                 self.process_remuxes(analysis_output.remuxes, &abort_flag, &mut processed_count);
-            stats.merge(&remux_stats);
+            stats += remux_stats;
             aborted = was_aborted;
         }
 
@@ -301,7 +301,7 @@ impl VideoConvert {
         if !self.config.skip_convert && !analysis_output.conversions.is_empty() {
             let (convert_stats, was_aborted) =
                 self.process_conversions(analysis_output.conversions, &abort_flag, &mut processed_count);
-            stats.merge(&convert_stats);
+            stats += convert_stats;
             aborted = was_aborted;
         }
 
@@ -750,6 +750,7 @@ impl VideoConvert {
         let output_info = match Self::get_video_info(output) {
             Ok(info) => info,
             Err(e) => {
+                let _ = fs::remove_file(output);
                 let error = format!("Failed to get output info: {e}");
                 self.log_failure(input, "convert", file_index, &error);
                 return ProcessResult::Failed { error };

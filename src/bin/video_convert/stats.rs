@@ -1,3 +1,4 @@
+use std::ops::AddAssign;
 use std::time::Duration;
 
 use colored::Colorize;
@@ -91,16 +92,6 @@ impl ConversionStats {
 }
 
 impl RunStats {
-    /// Merge another `RunStats` into this one.
-    pub(crate) fn merge(&mut self, other: &Self) {
-        self.files_converted += other.files_converted;
-        self.files_remuxed += other.files_remuxed;
-        self.files_failed += other.files_failed;
-        self.total_original_size += other.total_original_size;
-        self.total_converted_size += other.total_converted_size;
-        self.total_duration += other.total_duration;
-    }
-
     /// Record the result of processing a file.
     pub(crate) fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
         self.total_duration += duration;
@@ -185,9 +176,31 @@ impl std::fmt::Display for ConversionStats {
     }
 }
 
-impl std::ops::AddAssign<ConversionStats> for RunStats {
+impl AddAssign<ConversionStats> for RunStats {
     fn add_assign(&mut self, stats: ConversionStats) {
         self.total_original_size += stats.original_size;
         self.total_converted_size += stats.converted_size;
+    }
+}
+
+impl AddAssign<Self> for RunStats {
+    fn add_assign(&mut self, other: Self) {
+        self.files_converted += other.files_converted;
+        self.files_remuxed += other.files_remuxed;
+        self.files_failed += other.files_failed;
+        self.total_original_size += other.total_original_size;
+        self.total_converted_size += other.total_converted_size;
+        self.total_duration += other.total_duration;
+    }
+}
+
+impl AddAssign<&Self> for RunStats {
+    fn add_assign(&mut self, other: &Self) {
+        self.files_converted += other.files_converted;
+        self.files_remuxed += other.files_remuxed;
+        self.files_failed += other.files_failed;
+        self.total_original_size += other.total_original_size;
+        self.total_converted_size += other.total_converted_size;
+        self.total_duration += other.total_duration;
     }
 }
