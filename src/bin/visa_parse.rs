@@ -311,7 +311,7 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
         }
     }
 
-    result.sort();
+    result.sort_unstable();
     println!(
         "Found {} items from {}",
         result.len(),

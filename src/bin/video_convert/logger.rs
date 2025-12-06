@@ -9,7 +9,7 @@ use chrono::Local;
 
 use crate::config::Config;
 use crate::convert::VideoInfo;
-use crate::stats::{ConversionStats, RunStats};
+use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 
 /// Simple file logger for conversion operations.
 /// Creates a new file for each run.
@@ -138,31 +138,30 @@ impl FileLogger {
         let _ = self.writer.flush();
     }
 
+    /// Log analysis phase statistics
+    pub(crate) fn log_analysis_stats(&mut self, stats: &AnalysisStats) {
+        let _ = writeln!(self.writer, "[{}] ANALYSIS COMPLETE", Self::timestamp());
+        let _ = writeln!(self.writer, "  Files to convert:      {}", stats.to_convert);
+        let _ = writeln!(self.writer, "  Files to remux:        {}", stats.to_remux);
+        let _ = writeln!(self.writer, "  Files to rename:       {}", stats.to_rename);
+        let _ = writeln!(self.writer, "  Files skipped:         {}", stats.total_skipped());
+        if stats.total_skipped() > 0 {
+            let _ = writeln!(self.writer, "    - Already converted: {}", stats.skipped_converted);
+            let _ = writeln!(self.writer, "    - Below bitrate:     {}", stats.skipped_bitrate);
+            let _ = writeln!(self.writer, "    - Output exists:     {}", stats.skipped_duplicate);
+        }
+        if stats.analysis_failed > 0 {
+            let _ = writeln!(self.writer, "  Analysis failed:       {}", stats.analysis_failed);
+        }
+        let _ = self.writer.flush();
+    }
+
     /// Log final statistics
     pub(crate) fn log_stats(&mut self, stats: &RunStats) {
         let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
         let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
         let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
-        let _ = writeln!(self.writer, "  Files renamed:   {}", stats.files_renamed);
         let _ = writeln!(self.writer, "  Files failed:    {}", stats.files_failed);
-        let _ = writeln!(self.writer, "  Files skipped:   {}", stats.total_skipped());
-        if stats.total_skipped() > 0 {
-            let _ = writeln!(
-                self.writer,
-                "    - Already converted:   {}",
-                stats.files_skipped_converted
-            );
-            let _ = writeln!(
-                self.writer,
-                "    - Below bitrate limit: {}",
-                stats.files_skipped_bitrate
-            );
-            let _ = writeln!(
-                self.writer,
-                "    - Duplicate:           {}",
-                stats.files_skipped_duplicate
-            );
-        }
 
         if stats.files_converted > 0 {
             let _ = writeln!(
