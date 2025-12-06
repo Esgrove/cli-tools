@@ -261,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("{}", format!("{:>9}   {:>18}   Path", "Resolution", "Label").bold());
+    println!("{}", "Resolution               Label   Path".bold());
 
     for result in files_to_process {
         if let Err(error) = result.rename(args.force, args.print) {
