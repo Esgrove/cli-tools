@@ -375,7 +375,7 @@ impl VideoConvert {
             }
 
             if *processed_count >= limit {
-                println!("Reached file limit ({limit})");
+                println!("{}", format!("\nReached file limit ({limit})").bold());
                 break;
             }
 
