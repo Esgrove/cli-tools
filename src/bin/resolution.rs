@@ -106,13 +106,15 @@ impl fmt::Display for ResolutionMatch {
 }
 
 impl FFProbeResult {
-    fn rename(&self, overwrite: bool) -> anyhow::Result<()> {
+    fn rename(&self, overwrite: bool, dryrun: bool) -> anyhow::Result<()> {
         if let Some(new_path) = self.new_path_if_needed()? {
             self.print_rename(&new_path);
             if new_path.exists() && !overwrite {
                 anyhow::bail!("File already exists: {}", cli_tools::path_to_string(&new_path));
             }
-            std::fs::rename(&self.file, new_path)?;
+            if !dryrun {
+                std::fs::rename(&self.file, new_path)?;
+            }
         }
         Ok(())
     }
@@ -136,8 +138,8 @@ impl FFProbeResult {
 
     fn print_rename(&self, new_path: &Path) {
         let (_, new_path_colored) = cli_tools::color_diff(
-            &cli_tools::path_to_string(&self.file),
-            &cli_tools::path_to_string(new_path),
+            &cli_tools::path_to_string_relative(&self.file),
+            &cli_tools::path_to_string_relative(new_path),
             false,
         );
         println!(
@@ -252,11 +254,18 @@ async fn main() -> anyhow::Result<()> {
 
     files_to_process.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
 
+    if files_to_process.is_empty() {
+        if args.verbose {
+            println!("No video files require renaming");
+        }
+        return Ok(());
+    }
+
+    println!("{}", format!("{:>9}   {:>18}   Path", "Resolution", "Label").bold());
+
     for result in files_to_process {
-        if !args.print
-            && let Err(error) = result.rename(args.force)
-        {
-            println!("{}", format!("{error}").red());
+        if let Err(error) = result.rename(args.force, args.print) {
+            cli_tools::print_error!("{error}");
         }
     }
 
@@ -383,23 +392,30 @@ fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
     let width = lines
         .next()
         .and_then(|line| line.get(6..)) // Skip "width="
+        .map(|w| w.strip_suffix(b"\r").unwrap_or(w)) // Handle Windows CRLF
         .ok_or_else(|| anyhow!("Missing width"))?;
 
     let height = lines
         .next()
         .and_then(|line| line.get(7..)) // Skip "height="
+        .map(|h| h.strip_suffix(b"\r").unwrap_or(h)) // Handle Windows CRLF
         .ok_or_else(|| anyhow!("Missing height"))?;
 
     // SAFETY: ffprobe output is always valid ASCII digits
     #[allow(unsafe_code)]
-    let width = unsafe { std::str::from_utf8_unchecked(width) };
+    let width_str = unsafe { std::str::from_utf8_unchecked(width) };
     #[allow(unsafe_code)]
-    let height = unsafe { std::str::from_utf8_unchecked(height) };
+    let height_str = unsafe { std::str::from_utf8_unchecked(height) };
 
-    Ok(Resolution {
-        width: width.parse()?,
-        height: height.parse()?,
-    })
+    let width = width_str
+        .parse()
+        .map_err(|e| anyhow!("Failed to parse width '{width_str}': {e}"))?;
+
+    let height = height_str
+        .parse()
+        .map_err(|e| anyhow!("Failed to parse height '{height_str}': {e}"))?;
+
+    Ok(Resolution { width, height })
 }
 
 /// Create a Semaphore sized for I/O-bound work (4x physical CPU cores).
