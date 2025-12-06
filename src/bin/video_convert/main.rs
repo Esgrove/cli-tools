@@ -62,6 +62,14 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short, long)]
     recurse: bool,
 
+    /// Skip conversion
+    #[arg(short = 'c', long)]
+    skip_convert: bool,
+
+    /// Skip remuxing
+    #[arg(short = 'm', long)]
+    skip_remux: bool,
+
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,

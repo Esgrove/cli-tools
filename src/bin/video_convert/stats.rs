@@ -97,6 +97,16 @@ impl ConversionStats {
 }
 
 impl RunStats {
+    /// Merge another `RunStats` into this one.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.files_converted += other.files_converted;
+        self.files_remuxed += other.files_remuxed;
+        self.files_failed += other.files_failed;
+        self.total_original_size += other.total_original_size;
+        self.total_converted_size += other.total_converted_size;
+        self.total_duration += other.total_duration;
+    }
+
     /// Record the result of processing a file.
     pub(crate) fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
         self.total_duration += duration;
@@ -120,7 +130,7 @@ impl RunStats {
         self.total_original_size as i64 - self.total_converted_size as i64
     }
 
-    /// Print a summary of conversion statistics to stdout.
+    /// Print a summary of conversion statistics.
     pub(crate) fn print_summary(&self) {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
         println!("Files converted:         {}", self.files_converted);

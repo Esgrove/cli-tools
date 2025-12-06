@@ -215,26 +215,21 @@ enum AnalysisResult {
 
 /// A video file with its analyzed info, ready for processing.
 #[derive(Debug)]
-struct AnalyzedFile {
+struct ProcessableFile {
     file: VideoFile,
     info: VideoInfo,
     output_path: PathBuf,
-    action: FileAction,
 }
 
 /// Output from the analysis phase.
+#[allow(clippy::struct_field_names)]
 struct AnalysisOutput {
-    /// Files ready for conversion or remuxing.
-    files_to_process: Vec<AnalyzedFile>,
+    /// Files that need full conversion (non-HEVC to HEVC).
+    to_convert: Vec<ProcessableFile>,
+    /// Files that need remuxing (HEVC but wrong container).
+    to_remux: Vec<ProcessableFile>,
     /// Files that need to be renamed (HEVC MP4 without .x265 suffix).
-    files_to_rename: Vec<VideoFile>,
-}
-
-/// The action to take on a file after analysis.
-#[derive(Debug, Clone, Copy)]
-enum FileAction {
-    Convert,
-    Remux,
+    to_rename: Vec<VideoFile>,
 }
 
 impl VideoConvert {
@@ -263,13 +258,16 @@ impl VideoConvert {
         // Analyze files in parallel
         let analysis_output = self.analyze_files(candidate_files);
 
-        // Handle renames after stats are printed
-        for file in &analysis_output.files_to_rename {
-            self.handle_rename(file);
+        // Handle renames
+        if !analysis_output.to_rename.is_empty() {
+            self.process_renames(&analysis_output.to_rename);
         }
 
-        if analysis_output.files_to_process.is_empty() {
-            println!("No files require conversion");
+        let has_conversions = !self.config.skip_convert && !analysis_output.to_convert.is_empty();
+        let has_remuxes = !self.config.skip_remux && !analysis_output.to_remux.is_empty();
+
+        if !has_conversions && !has_remuxes {
+            println!("No files to process");
             return Ok(());
         }
 
@@ -289,7 +287,22 @@ impl VideoConvert {
         })
         .expect("Failed to set Ctrl+C handler");
 
-        let (stats, aborted) = self.process_analyzed_files(analysis_output.files_to_process, &abort_flag);
+        let mut stats = RunStats::default();
+        let mut aborted = false;
+
+        // Process remuxes first (faster)
+        if !self.config.skip_remux && !analysis_output.to_remux.is_empty() && !aborted {
+            let (remux_stats, was_aborted) = self.process_remuxes(analysis_output.to_remux, &abort_flag);
+            stats.merge(&remux_stats);
+            aborted = was_aborted;
+        }
+
+        // Process conversions
+        if !self.config.skip_convert && !analysis_output.to_convert.is_empty() && !aborted {
+            let (convert_stats, was_aborted) = self.process_conversions(analysis_output.to_convert, &abort_flag);
+            stats.merge(&convert_stats);
+            aborted = was_aborted;
+        }
 
         if aborted {
             println!("\n{}", "Aborted by user".bold().red());
@@ -300,8 +313,7 @@ impl VideoConvert {
         Ok(())
     }
 
-    /// Gather candidate video files based on the config settings.
-    /// This is a fast file system scan that only checks extensions and patterns.
+    /// Gather candidate video files based on the config.
     fn gather_candidate_files(&self) -> Result<Vec<VideoFile>> {
         let path = &self.config.path;
 
@@ -331,12 +343,12 @@ impl VideoConvert {
             .filter(|file| self.should_include_file(file))
             .collect();
 
-        files.sort();
+        files.sort_unstable();
         Ok(files)
     }
 
-    /// Analyze files in parallel using rayon to determine which need processing.
-    /// Runs ffprobe on each file concurrently and filters based on codec/bitrate.
+    /// Analyze files in parallel to determine which need processing.
+    /// Runs ffprobe on each file concurrently and filters based on video information.
     fn analyze_files(&self, files: Vec<VideoFile>) -> AnalysisOutput {
         let progress_bar = ProgressBar::new(files.len() as u64);
         progress_bar.set_style(
@@ -353,7 +365,7 @@ impl VideoConvert {
         let results: Vec<AnalysisResult> = files
             .into_par_iter()
             .map(|file| {
-                let result = analyze_single_file(file, bitrate_limit, overwrite);
+                let result = analyze_video_file(file, bitrate_limit, overwrite);
                 progress_bar.inc(1);
                 result
             })
@@ -361,12 +373,11 @@ impl VideoConvert {
 
         progress_bar.finish_and_clear();
 
-        // Collect files that need renaming and errors for sequential processing
-        let mut files_to_rename = Vec::new();
+        // Collect files into separate vectors and errors for sequential processing
+        let mut to_convert = Vec::new();
+        let mut to_remux = Vec::new();
+        let mut to_rename = Vec::new();
         let mut analysis_errors = Vec::new();
-
-        // Process results, filter to files that need action, and collect stats
-        let mut analyzed_files = Vec::new();
         let mut analysis_stats = AnalysisStats::default();
 
         for result in results {
@@ -377,11 +388,10 @@ impl VideoConvert {
                     output_path,
                 } => {
                     analysis_stats.to_convert += 1;
-                    analyzed_files.push(AnalyzedFile {
+                    to_convert.push(ProcessableFile {
                         file,
                         info,
                         output_path,
-                        action: FileAction::Convert,
                     });
                 }
                 AnalysisResult::NeedsRemux {
@@ -390,16 +400,15 @@ impl VideoConvert {
                     output_path,
                 } => {
                     analysis_stats.to_remux += 1;
-                    analyzed_files.push(AnalyzedFile {
+                    to_remux.push(ProcessableFile {
                         file,
                         info,
                         output_path,
-                        action: FileAction::Remux,
                     });
                 }
                 AnalysisResult::NeedsRename { file } => {
                     analysis_stats.to_rename += 1;
-                    files_to_rename.push(file);
+                    to_rename.push(file);
                 }
                 AnalysisResult::Skip { file, reason } => {
                     match &reason {
@@ -430,40 +439,67 @@ impl VideoConvert {
         }
 
         // Sort by path for consistent processing order
-        analyzed_files.sort_by(|a, b| a.file.path.cmp(&b.file.path));
+        to_convert.sort_by(|a, b| a.file.path.cmp(&b.file.path));
+        to_remux.sort_by(|a, b| a.file.path.cmp(&b.file.path));
 
         self.log_analysis_stats(&analysis_stats);
         analysis_stats.print_summary();
 
         AnalysisOutput {
-            files_to_process: analyzed_files,
-            files_to_rename,
+            to_convert,
+            to_remux,
+            to_rename,
         }
     }
 
-    /// Handle file rename (add .x265 suffix).
-    fn handle_rename(&self, file: &VideoFile) {
-        let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
+    /// Process all files that need renaming.
+    fn process_renames(&self, files: &[VideoFile]) {
+        for file in files {
+            let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
 
-        if self.config.dryrun {
-            println!("{}", "[DRYRUN] Rename:".bold());
-            cli_tools::show_diff(
-                &cli_tools::path_to_string_relative(&file.path),
-                &cli_tools::path_to_string_relative(&new_path),
-            );
-        } else if let Err(e) = std::fs::rename(&file.path, &new_path) {
-            print_error!("Failed to rename {}: {e}", file.path.display());
-        } else {
-            println!("{}", "Renamed:".bold());
-            cli_tools::show_diff(
-                &cli_tools::path_to_string_relative(&file.path),
-                &cli_tools::path_to_string_relative(&new_path),
-            );
+            if self.config.dryrun {
+                println!("{}", "[DRYRUN] Rename:".bold());
+                cli_tools::show_diff(
+                    &cli_tools::path_to_string_relative(&file.path),
+                    &cli_tools::path_to_string_relative(&new_path),
+                );
+            } else if let Err(e) = std::fs::rename(&file.path, &new_path) {
+                print_error!("Failed to rename {}: {e}", file.path.display());
+            } else {
+                println!("{}", "Renamed:".bold());
+                cli_tools::show_diff(
+                    &cli_tools::path_to_string_relative(&file.path),
+                    &cli_tools::path_to_string_relative(&new_path),
+                );
+            }
         }
     }
 
-    /// Process pre-analyzed video files.
-    fn process_analyzed_files(&self, files: Vec<AnalyzedFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
+    /// Process all files that need remuxing.
+    fn process_remuxes(&self, files: Vec<ProcessableFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
+        self.process_files(files, abort_flag, "Remuxing", |this, file, index| {
+            this.remux_to_mp4(file, index)
+        })
+    }
+
+    /// Process all files that need conversion.
+    fn process_conversions(&self, files: Vec<ProcessableFile>, abort_flag: &AtomicBool) -> (RunStats, bool) {
+        self.process_files(files, abort_flag, "Converting", |this, file, index| {
+            this.convert_to_hevc_mp4(file, index)
+        })
+    }
+
+    /// Generic file processing loop.
+    fn process_files<F>(
+        &self,
+        files: Vec<ProcessableFile>,
+        abort_flag: &AtomicBool,
+        action_name: &str,
+        process_fn: F,
+    ) -> (RunStats, bool)
+    where
+        F: Fn(&Self, &ProcessableFile, &str) -> ProcessResult,
+    {
         let mut stats = RunStats::default();
         let total = files.len();
         let num_files_to_process = total.min(self.config.number);
@@ -474,7 +510,7 @@ impl VideoConvert {
 
         self.log_init();
 
-        for (index, analyzed_file) in files.into_iter().enumerate() {
+        for (index, file) in files.into_iter().enumerate() {
             // Check abort flag before starting a new file
             if abort_flag.load(Ordering::SeqCst) {
                 aborted = true;
@@ -482,7 +518,7 @@ impl VideoConvert {
             }
 
             if !self.config.verbose {
-                print!("\rProcessing: {}/{total}", index + 1);
+                print!("\r{action_name}: {}/{total}", index + 1);
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
 
@@ -504,10 +540,7 @@ impl VideoConvert {
             }
 
             let start = Instant::now();
-            let result = match analyzed_file.action {
-                FileAction::Remux => self.remux_to_mp4(&analyzed_file, &file_index),
-                FileAction::Convert => self.convert_to_hevc_mp4(&analyzed_file, &file_index),
-            };
+            let result = process_fn(self, &file, &file_index);
             let duration = start.elapsed();
 
             match &result {
@@ -529,7 +562,7 @@ impl VideoConvert {
                 }
                 ProcessResult::Failed { error } => {
                     print_error!("{error}");
-                    self.log_failure(&analyzed_file.file.path, "process", &file_index, error);
+                    self.log_failure(&file.file.path, "process", &file_index, error);
                 }
             }
 
@@ -656,11 +689,11 @@ impl VideoConvert {
         })
     }
 
-    /// Remux video (copy streams to new container)
-    fn remux_to_mp4(&self, analyzed: &AnalyzedFile, file_index: &str) -> ProcessResult {
-        let input = &analyzed.file.path;
-        let output = &analyzed.output_path;
-        let info = &analyzed.info;
+    /// Remux HEVC video to MP4 container
+    fn remux_to_mp4(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
+        let input = &file.file.path;
+        let output = &file.output_path;
+        let info = &file.info;
 
         println!(
             "{}",
@@ -790,11 +823,11 @@ impl VideoConvert {
     }
 
     /// Convert video to HEVC using NVENC
-    fn convert_to_hevc_mp4(&self, analyzed: &AnalyzedFile, file_index: &str) -> ProcessResult {
-        let input = &analyzed.file.path;
-        let output = &analyzed.output_path;
-        let info = &analyzed.info;
-        let extension = &analyzed.file.extension;
+    fn convert_to_hevc_mp4(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
+        let input = &file.file.path;
+        let output = &file.output_path;
+        let info = &file.info;
+        let extension = &file.file.extension;
 
         println!(
             "{}",
@@ -1096,7 +1129,7 @@ impl VideoConvert {
 
 /// Analyze a single file to determine what action to take.
 /// This is a standalone function to allow parallel execution without borrowing `VideoConvert`.
-fn analyze_single_file(file: VideoFile, bitrate_limit: u64, overwrite: bool) -> AnalysisResult {
+fn analyze_video_file(file: VideoFile, bitrate_limit: u64, overwrite: bool) -> AnalysisResult {
     // Get video info using ffprobe
     let info = match get_video_info_standalone(&file.path) {
         Ok(info) => info,

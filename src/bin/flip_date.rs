@@ -272,7 +272,7 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[String], recursive: bool) 
         (list, path.clone())
     };
 
-    files.sort();
+    files.sort_unstable();
     Ok((files, root))
 }
 

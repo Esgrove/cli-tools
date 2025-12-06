@@ -54,12 +54,13 @@ pub struct Config {
     pub(crate) dryrun: bool,
     pub(crate) exclude: Vec<String>,
     pub(crate) include: Vec<String>,
-    /// File extensions to convert (lowercase, without leading dot)
     pub(crate) extensions: Vec<String>,
     pub(crate) number: usize,
     pub(crate) overwrite: bool,
     pub(crate) path: PathBuf,
     pub(crate) recursive: bool,
+    pub(crate) skip_convert: bool,
+    pub(crate) skip_remux: bool,
     pub(crate) verbose: bool,
 }
 
@@ -134,6 +135,8 @@ impl Config {
             overwrite: args.force || user_config.overwrite,
             path,
             recursive: args.recurse || user_config.recursive,
+            skip_convert: args.skip_convert,
+            skip_remux: args.skip_remux,
             verbose: args.verbose || user_config.verbose,
         })
     }
