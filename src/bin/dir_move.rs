@@ -9,7 +9,6 @@ use clap_complete::Shell;
 use colored::Colorize;
 use itertools::Itertools;
 use serde::Deserialize;
-use walkdir::WalkDir;
 
 use cli_tools::{print_bold, print_error, print_warning};
 
@@ -224,10 +223,54 @@ impl DirMove {
     }
 
     fn move_files_to_dir(&self) -> anyhow::Result<()> {
-        // Collect directories in the base path
-        let mut dirs: Vec<DirectoryInfo> = Vec::new();
         // TODO: implement recurse option for dirs
         let _ = self.config.recurse;
+
+        let directories = self.collect_directories_in_root()?;
+        if directories.is_empty() {
+            if self.config.verbose {
+                println!("No directories found in current path.");
+            }
+            return Ok(());
+        }
+
+        let files_in_root = self.collect_files_in_root()?;
+        if files_in_root.is_empty() {
+            if self.config.verbose {
+                println!("No files found in current directory.");
+            }
+            return Ok(());
+        }
+
+        let matches = Self::match_files_to_directories(&files_in_root, &directories);
+        if matches.is_empty() {
+            if self.config.verbose {
+                println!("No files found matching any directory names.");
+            }
+            return Ok(());
+        }
+
+        // Sort by directory name and process
+        let groups_to_process: Vec<_> = matches
+            .into_iter()
+            .map(|(idx, files)| (&directories[idx], files))
+            .sorted_by(|a, b| a.0.name.cmp(&b.0.name))
+            .collect();
+
+        print_bold!(
+            "Found {} directory match(es) with files to move:\n",
+            groups_to_process.len()
+        );
+
+        for (dir, files) in groups_to_process {
+            self.process_directory_match(dir, &files)?;
+        }
+
+        Ok(())
+    }
+
+    fn collect_directories_in_root(&self) -> anyhow::Result<Vec<DirectoryInfo>> {
+        let mut dirs = Vec::new();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
@@ -240,32 +283,30 @@ impl DirMove {
                         .any(|pattern| dir_name.contains(&pattern.to_lowercase()))
                 {
                     if self.config.verbose {
-                        println!("Ignoring directory: {}", entry.path().display());
+                        println!("Excluding directory: {}", entry.path().display());
                     }
                     continue;
                 }
                 dirs.push(DirectoryInfo::new(entry.path(), &self.root));
             }
         }
+        Ok(dirs)
+    }
 
-        println!("Checking {} directories...", dirs.len());
+    fn collect_files_in_root(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let file_name = entry.file_name().to_string_lossy().to_lowercase();
 
-        // Walk recursively for files
-        for entry in WalkDir::new(&self.root).into_iter().filter_map(Result::ok) {
-            if entry.file_type().is_file() {
-                let file_path = entry.path();
-                let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-
-                let file_name_lower = file_name.to_lowercase();
                 // Skip files that don't match include patterns (if any specified)
                 if !self.config.include.is_empty()
                     && !self
                         .config
                         .include
                         .iter()
-                        .any(|pattern| file_name_lower.contains(&pattern.to_lowercase()))
+                        .any(|pattern| file_name.contains(&pattern.to_lowercase()))
                 {
                     continue;
                 }
@@ -274,55 +315,73 @@ impl DirMove {
                     .config
                     .exclude
                     .iter()
-                    .any(|pattern| file_name_lower.contains(&pattern.to_lowercase()))
+                    .any(|pattern| file_name.contains(&pattern.to_lowercase()))
                 {
                     continue;
                 }
 
-                let relative_file = file_path.strip_prefix(&self.root).unwrap_or(file_path);
+                files.push(entry.path());
+            }
+        }
+        Ok(files)
+    }
 
-                for dir in &dirs {
-                    if file_name_lower.contains(&dir.name) {
-                        // Check if the file is already in the target directory
-                        if file_path.starts_with(&dir.path) {
-                            continue;
-                        }
+    fn match_files_to_directories(files: &[PathBuf], dirs: &[DirectoryInfo]) -> HashMap<usize, Vec<PathBuf>> {
+        let mut matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
 
-                        println!("Dir:  {}\nFile: {}", dir.relative.display(), relative_file.display());
+        for file_path in files {
+            let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Normalize: replace dots with spaces for matching
+            let file_name_normalized = file_name.replace('.', " ").to_lowercase();
 
-                        if !self.config.dryrun {
-                            print!("{}", "Move file? (y/n): ".magenta());
-                            io::stdout().flush()?;
-
-                            let mut input = String::new();
-                            io::stdin().read_line(&mut input)?;
-                            if input.trim().eq_ignore_ascii_case("y") {
-                                let Some(file_name) = file_path.file_name() else {
-                                    print_error!("Could not get file name for path: {}", file_path.display());
-                                    continue;
-                                };
-                                let new_path = dir.path.join(file_name);
-
-                                if new_path.exists() && !self.config.overwrite {
-                                    print_warning!(
-                                        "File already exists at destination (use --force to overwrite): {}",
-                                        new_path.display()
-                                    );
-                                    continue;
-                                }
-
-                                match fs::rename(file_path, &new_path) {
-                                    Ok(()) => println!("Moved"),
-                                    Err(e) => eprintln!("Failed to move file: {e}"),
-                                }
-                            } else {
-                                println!("Skipped");
-                            }
-                        }
-                    }
+            for (idx, dir) in dirs.iter().enumerate() {
+                // dir.name is already lowercase
+                // Check if the normalized filename contains the directory name
+                if file_name_normalized.contains(&dir.name) {
+                    matches.entry(idx).or_default().push(file_path.clone());
+                    break; // Only match to first directory found
                 }
             }
         }
+
+        matches
+    }
+
+    fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<()> {
+        let dir_display = dir.relative.display();
+        println!("{}: {} file(s)", format!("{dir_display}").cyan().bold(), files.len());
+
+        for file_path in files {
+            if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
+                println!("  {name}");
+            }
+        }
+
+        println!("  {} Move to: {}", "→".green(), dir.relative.display());
+
+        if !self.config.dryrun {
+            let confirmed = if self.config.auto {
+                true
+            } else {
+                print!("{}", "Move files to this directory? (y/n): ".magenta());
+                io::stdout().flush()?;
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                input.trim().eq_ignore_ascii_case("y")
+            };
+
+            if confirmed {
+                if let Err(e) = self.move_files_to_target_dir(&dir.path, files) {
+                    print_error!("Failed to move files to {}: {e}", dir.relative.display());
+                }
+            } else {
+                println!("  Skipped");
+            }
+        }
+        println!();
 
         Ok(())
     }
@@ -813,5 +872,158 @@ mod tests {
         assert!(!result.contains_key("Example"));
         assert_eq!(result.len(), 1);
         assert_eq!(result.get("Example.Name").map(Vec::len), Some(3));
+    }
+
+    fn make_test_dirs(names: &[&str]) -> Vec<DirectoryInfo> {
+        names
+            .iter()
+            .map(|n| DirectoryInfo {
+                path: PathBuf::from(*n),
+                relative: PathBuf::from(*n),
+                name: n.to_lowercase(),
+            })
+            .collect()
+    }
+
+    fn make_file_paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| PathBuf::from(*n)).collect()
+    }
+
+    #[test]
+    fn test_match_files_to_directories_basic_match() {
+        // Directory: "Certain Name", files with "Certain.Name" should match
+        let dirs = make_test_dirs(&["Certain Name"]);
+        let files = make_file_paths(&[
+            "Something.else.Certain.Name.video.1.mp4",
+            "Certain.Name.Example.video.2.mp4",
+            "Another.Certain.Name.Example.video.3.mp4",
+            "Another.Name.Example.video.3.mp4",
+            "Cert.Name.Example.video.3.mp4",
+            "Certain.Not.Example.video.mp4",
+        ]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+        assert_eq!(result.get(&0).map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_no_matches() {
+        let dirs = make_test_dirs(&["Some Directory"]);
+        let files = make_file_paths(&["unrelated.file.mp4", "another.file.txt"]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_match_files_to_directories_multiple_dirs() {
+        let dirs = make_test_dirs(&["First Dir", "Second Dir"]);
+        let files = make_file_paths(&["First.Dir.file1.mp4", "Second.Dir.file2.mp4", "First.Dir.file3.mp4"]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(&0).map(Vec::len), Some(2));
+        assert_eq!(result.get(&1).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_case_insensitive() {
+        let dirs = make_test_dirs(&["My Directory"]);
+        let files = make_file_paths(&[
+            "MY.DIRECTORY.file1.mp4",
+            "my.directory.file2.mp4",
+            "My.Directory.file3.mp4",
+        ]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_partial_match() {
+        // Directory "Test Name" should NOT match "Testing.Name.file.mp4"
+        // because "testing name file mp4" does not contain "test name" as substring
+        // ("testing" != "test ")
+        let dirs = make_test_dirs(&["Test Name"]);
+        let files = make_file_paths(&["Testing.Name.file.mp4", "Test.Name.file.mp4"]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 1);
+        // Only "Test.Name.file.mp4" matches because normalized is "test name file mp4"
+        // which contains "test name"
+        // "Testing.Name.file.mp4" normalized is "testing name file mp4" which does NOT
+        // contain "test name" (it has "testing name" not "test name")
+        assert_eq!(result.get(&0).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_first_match_wins() {
+        // If a file could match multiple directories, it matches the first one
+        let dirs = make_test_dirs(&["Common", "Common Name"]);
+        let files = make_file_paths(&["Common.Name.file.mp4"]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        // Should match first directory "Common" (index 0)
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+        assert!(!result.contains_key(&1));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_empty_files() {
+        let dirs = make_test_dirs(&["Some Dir"]);
+        let files: Vec<PathBuf> = Vec::new();
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_match_files_to_directories_empty_dirs() {
+        let dirs: Vec<DirectoryInfo> = Vec::new();
+        let files = make_file_paths(&["some.file.mp4"]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_match_files_to_directories_dots_replaced_with_spaces() {
+        // Verify that dots in filenames are replaced with spaces for matching
+        // Directory "My Show" should match "My.Show.S01E01.mp4"
+        let dirs = make_test_dirs(&["My Show"]);
+        let files = make_file_paths(&["My.Show.S01E01.mp4", "My.Show.S01E02.mp4"]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_mixed_separators() {
+        // Files with various separators in names
+        let dirs = make_test_dirs(&["Show Name"]);
+        let files = make_file_paths(&[
+            "Show.Name.episode.mp4",
+            "Other.Show.Name.here.mp4",
+            "prefix.Show.Name.suffix.mp4",
+        ]);
+
+        let result = DirMove::match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).map(Vec::len), Some(3));
     }
 }
