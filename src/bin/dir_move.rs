@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
@@ -10,7 +11,7 @@ use itertools::Itertools;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use cli_tools::{print_error, print_warning};
+use cli_tools::{print_bold, print_error, print_warning};
 
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
@@ -403,7 +404,10 @@ impl DirMove {
 
         for (file_path, file_name) in &files_with_names {
             if let Some(prefix) = Self::find_best_prefix(file_name, &files_with_names) {
-                prefix_groups.entry(prefix).or_default().push(file_path.clone());
+                prefix_groups
+                    .entry(prefix.into_owned())
+                    .or_default()
+                    .push(file_path.clone());
             }
         }
 
@@ -416,34 +420,32 @@ impl DirMove {
     /// Find the best prefix for a file by checking if other files share the same prefix.
     /// For short simple prefixes (≤4 chars), tries longer prefixes first.
     /// Returns None if only a short prefix exists with no shared longer prefix.
-    fn find_best_prefix(file_name: &str, all_files: &[(PathBuf, String)]) -> Option<String> {
+    fn find_best_prefix<'a>(file_name: &'a str, all_files: &[(PathBuf, String)]) -> Option<Cow<'a, str>> {
         let simple_prefix = file_name.split('.').next().filter(|p| !p.is_empty())?;
 
         // If simple prefix is longer than 4 chars, use it directly
         if simple_prefix.len() > 4 {
-            return Some(simple_prefix.to_string());
+            return Some(Cow::Borrowed(simple_prefix));
         }
 
         // For short prefixes, try to find shared longer prefixes
         // First try 3-part prefix
         if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
-            let matches = all_files
+            let has_matches = all_files
                 .iter()
-                .filter(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 3) == Some(three_part))
-                .count();
-            if matches > 0 {
-                return Some(three_part.to_string());
+                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 3) == Some(three_part));
+            if has_matches {
+                return Some(Cow::Borrowed(three_part));
             }
         }
 
         // Then try 2-part prefix
         if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
-            let matches = all_files
+            let has_matches = all_files
                 .iter()
-                .filter(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 2) == Some(two_part))
-                .count();
-            if matches > 0 {
-                return Some(two_part.to_string());
+                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 2) == Some(two_part));
+            if has_matches {
+                return Some(Cow::Borrowed(two_part));
             }
         }
 
@@ -464,11 +466,13 @@ impl DirMove {
             .collect();
 
         if groups_to_process.is_empty() {
-            println!("No file groups with 3 or more matching prefixes found.");
+            if self.config.verbose {
+                println!("No file groups with 3 or more matching prefixes found.");
+            }
             return Ok(());
         }
 
-        println!(
+        print_bold!(
             "Found {} group(s) with {}+ files sharing the same prefix:\n",
             groups_to_process.len(),
             self.config.min_group_size
@@ -544,8 +548,7 @@ impl DirMove {
                                 .is_some_and(|name| name.starts_with(override_prefix))
                         })
                 })
-                .cloned()
-                .unwrap_or(prefix);
+                .map_or(prefix, std::clone::Clone::clone);
 
             result.entry(target_prefix).or_default().extend(files);
         }
@@ -556,19 +559,28 @@ impl DirMove {
     /// Extract a prefix consisting of the first n dot-separated parts.
     /// Returns None if there aren't enough parts.
     fn get_n_part_prefix(file_name: &str, n: usize) -> Option<&str> {
-        // Need at least n+1 parts (n for prefix, 1 for extension)
-        if file_name.split('.').count() <= n {
-            return None;
+        let mut dots_found = 0;
+        let mut nth_dot_pos = 0;
+
+        for (i, c) in file_name.bytes().enumerate() {
+            if c == b'.' {
+                dots_found += 1;
+                if dots_found == n {
+                    nth_dot_pos = i;
+                } else if dots_found > n {
+                    // Found more than n dots, return prefix up to nth dot
+                    return Some(&file_name[..nth_dot_pos]);
+                }
+            }
         }
 
-        // Find the position after the nth dot
-        let mut pos = 0;
-        for _ in 0..n {
-            pos = file_name[pos..].find('.')? + pos + 1;
+        // If we found exactly n dots, that's n+1 parts which is enough
+        if dots_found >= n && nth_dot_pos > 0 {
+            return Some(&file_name[..nth_dot_pos]);
         }
 
-        // Return everything before the last dot we found (subtract 1 to exclude the dot)
-        Some(&file_name[..pos - 1])
+        // Not enough parts
+        None
     }
 }
 
@@ -621,7 +633,7 @@ mod tests {
         let files = make_test_files(&["LongName.v1.mp4", "Other.v2.mp4"]);
         assert_eq!(
             DirMove::find_best_prefix("LongName.v1.mp4", &files),
-            Some("LongName".to_string())
+            Some(Cow::Borrowed("LongName"))
         );
     }
 
@@ -642,7 +654,7 @@ mod tests {
         ]);
         assert_eq!(
             DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
-            Some("Some.Name.Thing".to_string())
+            Some(Cow::Borrowed("Some.Name.Thing"))
         );
     }
 
@@ -652,7 +664,7 @@ mod tests {
         let files = make_test_files(&["Some.Name.Thing.mp4", "Some.Name.Other.mp4", "Some.Name.More.mp4"]);
         assert_eq!(
             DirMove::find_best_prefix("Some.Name.Thing.mp4", &files),
-            Some("Some.Name".to_string())
+            Some(Cow::Borrowed("Some.Name"))
         );
     }
 
@@ -668,7 +680,7 @@ mod tests {
         // Should match on 3-part, not fall back to 2-part
         assert_eq!(
             DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
-            Some("Some.Name.Thing".to_string())
+            Some(Cow::Borrowed("Some.Name.Thing"))
         );
     }
 
@@ -678,7 +690,7 @@ mod tests {
         let files = make_test_files(&["ABCD.Name.Thing.mp4", "ABCD.Name.Other.mp4"]);
         assert_eq!(
             DirMove::find_best_prefix("ABCD.Name.Thing.mp4", &files),
-            Some("ABCD.Name".to_string())
+            Some(Cow::Borrowed("ABCD.Name"))
         );
     }
 
@@ -688,7 +700,7 @@ mod tests {
         let files = make_test_files(&["ABCDE.Name.Thing.mp4", "ABCDE.Name.Other.mp4"]);
         assert_eq!(
             DirMove::find_best_prefix("ABCDE.Name.Thing.mp4", &files),
-            Some("ABCDE".to_string())
+            Some(Cow::Borrowed("ABCDE"))
         );
     }
 
