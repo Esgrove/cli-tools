@@ -52,7 +52,7 @@ struct Args {
     path: Option<PathBuf>,
 
     /// Enable debug prints
-    #[arg(short, long)]
+    #[arg(short = 'D', long)]
     debug: bool,
 
     /// Delete files with width or height smaller than limit (default: 500)

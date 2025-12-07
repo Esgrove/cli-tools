@@ -2,6 +2,8 @@
 # Copy file to ~/.config/cli-tools.toml
 
 [dirmove]
+# auto = false
+# debug = false
 # dryrun = false
 # filter = []
 # ignore = []

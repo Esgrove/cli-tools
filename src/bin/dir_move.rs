@@ -19,9 +19,17 @@ struct Args {
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
 
+    /// Auto-confirm all prompts without asking
+    #[arg(short, long)]
+    auto: bool,
+
     /// Create directories for files with matching prefixes
     #[arg(short, long)]
     create: bool,
+
+    /// Print debug information
+    #[arg(short = 'D', long)]
+    debug: bool,
 
     /// Overwrite existing files
     #[arg(short, long)]
@@ -64,7 +72,11 @@ struct Args {
 #[derive(Debug, Default, Deserialize)]
 struct MoveConfig {
     #[serde(default)]
+    auto: bool,
+    #[serde(default)]
     create: bool,
+    #[serde(default)]
+    debug: bool,
     #[serde(default)]
     dryrun: bool,
     #[serde(default)]
@@ -93,7 +105,9 @@ struct UserConfig {
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug)]
 struct Config {
+    auto: bool,
     create: bool,
+    debug: bool,
     dryrun: bool,
     include: Vec<String>,
     exclude: Vec<String>,
@@ -159,10 +173,12 @@ impl Config {
             .unique()
             .collect();
         Self {
+            auto: args.auto || user_config.auto,
             create: args.create || user_config.create,
+            debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
-            exclude,
             include,
+            exclude,
             min_group_size: user_config.min_group_size.unwrap_or(args.group),
             overwrite: args.force || user_config.overwrite,
             prefix_overrides,
@@ -191,6 +207,10 @@ impl DirMove {
     pub fn new(args: Args) -> anyhow::Result<Self> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args);
+        if config.debug {
+            eprintln!("Config: {config:#?}");
+            eprintln!("Root: {}", root.display());
+        }
         Ok(Self { root, config })
     }
 
@@ -473,15 +493,20 @@ impl DirMove {
             }
 
             if !self.config.dryrun {
-                print!("{}", "Create directory and move files? (y/n): ".magenta());
-                io::stdout().flush()?;
+                let confirmed = if self.config.auto {
+                    true
+                } else {
+                    print!("{}", "Create directory and move files? (y/n): ".magenta());
+                    io::stdout().flush()?;
 
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    input.trim().eq_ignore_ascii_case("y")
+                };
 
-                if input.trim().eq_ignore_ascii_case("y") {
+                if confirmed {
                     if let Err(e) = self.move_files_to_target_dir(&dir_path, &files) {
-                        print_error!("Failed to process {dir_name}: {e}");
+                        print_error!("Failed to process {}: {e}", dir_name);
                     }
                 } else {
                     println!("  Skipped");
@@ -669,7 +694,9 @@ mod tests {
 
     fn make_test_config(prefix_overrides: Vec<String>) -> Config {
         Config {
+            auto: false,
             create: false,
+            debug: false,
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
