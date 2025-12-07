@@ -78,6 +78,18 @@ impl FileLogger {
         let _ = self.writer.flush();
     }
 
+    /// Log file gathering results
+    pub(crate) fn log_gathered_files(&mut self, file_count: usize, duration: Duration) {
+        let _ = writeln!(
+            self.writer,
+            "[{}] GATHER FILES | {} files found in {}",
+            Self::timestamp(),
+            file_count,
+            cli_tools::format_duration(duration)
+        );
+        let _ = self.writer.flush();
+    }
+
     /// Log when starting a conversion or remux operation
     pub(crate) fn log_start(
         &mut self,
@@ -144,7 +156,7 @@ impl FileLogger {
     pub(crate) fn log_analysis_stats(&mut self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
         let _ = writeln!(
             self.writer,
-            "[{}] ANALYSIS COMPLETE | {} files in {}",
+            "[{}] ANALYSE FILES | {} files in {}",
             Self::timestamp(),
             total_files,
             cli_tools::format_duration(duration)

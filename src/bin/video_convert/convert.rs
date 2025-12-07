@@ -454,6 +454,7 @@ impl VideoConvert {
 
     /// Gather video files based on the config settings.
     fn gather_files_to_process(&self) -> Result<Vec<VideoFile>> {
+        let start = Instant::now();
         let path = &self.config.path;
 
         if path.is_file() {
@@ -483,6 +484,8 @@ impl VideoConvert {
             .collect();
 
         files.sort_unstable();
+
+        self.log_gathered_files(files.len(), start.elapsed());
 
         Ok(files)
     }
@@ -1067,6 +1070,10 @@ impl VideoConvert {
 
     fn log_init(&self) {
         self.logger.borrow_mut().log_init(&self.config);
+    }
+
+    fn log_gathered_files(&self, file_count: usize, duration: Duration) {
+        self.logger.borrow_mut().log_gathered_files(file_count, duration);
     }
 
     fn log_analysis_stats(&self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
