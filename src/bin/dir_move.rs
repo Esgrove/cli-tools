@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use colored::Colorize;
+use itertools::Itertools;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -21,13 +22,13 @@ struct Args {
     #[arg(short, long)]
     force: bool,
 
-    /// Filter file names to rename
-    #[arg(short = 'w', long, num_args = 1, action = clap::ArgAction::Append, name = "FILTER_PATTERN")]
-    filter: Vec<String>,
+    /// Include files that match the given pattern
+    #[arg(short = 'n', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
+    include: Vec<String>,
 
-    /// Directory names to ignore
-    #[arg(short, long, num_args = 1, action = clap::ArgAction::Append, name = "IGNORE_PATTERN")]
-    ignore: Vec<String>,
+    /// Exclude files that match the given pattern
+    #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
+    exclude: Vec<String>,
 
     /// Only print changes without renaming files
     #[arg(short, long)]
@@ -52,9 +53,9 @@ struct MoveConfig {
     #[serde(default)]
     dryrun: bool,
     #[serde(default)]
-    filter: Vec<String>,
+    include: Vec<String>,
     #[serde(default)]
-    ignore: Vec<String>,
+    exclude: Vec<String>,
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
@@ -74,8 +75,8 @@ struct UserConfig {
 #[derive(Debug, Default)]
 struct Config {
     dryrun: bool,
-    filter_names: Vec<String>,
-    ignore_dirs: Vec<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
     overwrite: bool,
     recursive: bool,
     verbose: bool,
@@ -110,14 +111,12 @@ impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Self {
         let user_config = MoveConfig::get_user_config();
-        let mut filter_names = user_config.filter;
-        filter_names.extend(args.filter);
-        let mut ignore_dirs = user_config.ignore;
-        ignore_dirs.extend(args.ignore);
+        let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
+        let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
         Self {
             dryrun: args.print || user_config.dryrun,
-            filter_names,
-            ignore_dirs,
+            include,
+            exclude,
             overwrite: args.force || user_config.overwrite,
             recursive: args.recursive || user_config.recursive,
             verbose: args.verbose || user_config.verbose,
@@ -167,11 +166,11 @@ fn move_files_to_dir(base_path: &Path, config: &Config) -> anyhow::Result<()> {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let dir_name = entry.file_name().to_string_lossy().to_lowercase();
-            if !config.ignore_dirs.is_empty()
+            if !config.exclude.is_empty()
                 && config
-                    .ignore_dirs
+                    .exclude
                     .iter()
-                    .any(|ignore| dir_name.contains(&ignore.to_lowercase()))
+                    .any(|pattern| dir_name.contains(&pattern.to_lowercase()))
             {
                 if config.verbose {
                     println!("Ignoring directory: {}", entry.path().display());
@@ -193,11 +192,20 @@ fn move_files_to_dir(base_path: &Path, config: &Config) -> anyhow::Result<()> {
             };
 
             let file_name_lower = file_name.to_lowercase();
-            if !config.filter_names.is_empty()
+            // Skip files that don't match include patterns (if any specified)
+            if !config.include.is_empty()
                 && !config
-                    .filter_names
+                    .include
                     .iter()
-                    .any(|filter| file_name_lower.contains(&filter.to_lowercase()))
+                    .any(|pattern| file_name_lower.contains(&pattern.to_lowercase()))
+            {
+                continue;
+            }
+            // Skip files that match exclude patterns
+            if config
+                .exclude
+                .iter()
+                .any(|pattern| file_name_lower.contains(&pattern.to_lowercase()))
             {
                 continue;
             }

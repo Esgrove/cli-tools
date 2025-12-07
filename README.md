@@ -28,10 +28,32 @@ Arguments:
 
 Options:
   -l, --length <LENGTH>   Divider length in number of characters [default: 120]
-  -c, --char <CHARACTER>  Divider length in number of characters [default: %]
+  -c, --char <CHARACTER>  Divider character to use [default: %]
   -a, --align             Align multiple divider texts to same start position
   -h, --help              Print help
   -V, --version           Print version
+```
+
+## Dirmove
+
+```console
+Move files to directories based on name
+
+Usage: dirmove [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Optional input directory or file
+
+Options:
+  -f, --force               Overwrite existing files
+  -n, --include <INCLUDE>   Include files that match the given pattern
+  -e, --exclude <EXCLUDE>   Exclude files that match the given pattern
+  -p, --print               Only print changes without renaming files
+  -r, --recursive           Recursive directory iteration
+  -l, --completion <SHELL>  Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose             Print verbose output
+  -h, --help                Print help
+  -V, --version             Print version
 ```
 
 ## Dots
@@ -39,11 +61,7 @@ Options:
 ```console
 Rename files to use dot formatting
 
-Usage: dots [OPTIONS] [PATH] [COMMAND]
-
-Commands:
-  completion, --completion  Generate shell completions
-  help                      Print this message or the help of the given subcommand(s)
+Usage: dots [OPTIONS] [PATH]
 
 Arguments:
   [PATH]  Optional input directory or file
@@ -53,7 +71,8 @@ Options:
       --debug                               Enable debug prints
   -d, --directory                           Rename directories
   -f, --force                               Overwrite existing files
-  -w, --filter <FILTER_PATTERN>             Filter items to rename
+  -n, --include <INCLUDE>                   Include files that match the given pattern
+  -e, --exclude <EXCLUDE>                   Exclude files that match the given pattern
   -i, --increment                           Increment conflicting file name with running index
   -p, --print                               Only print changes without renaming files
   -r, --recursive                           Recursive directory iteration
@@ -65,13 +84,14 @@ Options:
   -m, --random                              Remove random strings
   -z, --remove <PATTERN>                    Remove pattern from filenames
   -g, --regex <PATTERN> <REPLACEMENT>       Substitute regex pattern with replacement in filenames
-  -y, --year                                Assume year is first in short dates
-  -v, --verbose                             Verbose output
+  -y, --year                                Assume year is last in short dates
+  -l, --completion <SHELL>                  Create shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose                             Print verbose output
   -h, --help                                Print help
   -V, --version                             Print version
 ```
 
-## Flip-date
+## Flipdate
 
 Rename files and directories to use `yyyy.mm.dd` date format for files,
 and `yyyy-mm-dd` for directories.
@@ -85,19 +105,80 @@ Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -d, --dir        Use directory rename mode
-  -p, --print      Only print changes without renaming
-  -r, --recursive  Use recursive path handling
-  -h, --help       Print help
-  -V, --version    Print version
+  -d, --dir                     Use directory rename mode
+  -f, --force                   Overwrite existing
+  -e, --extensions <EXTENSION>  Specify file extension(s)
+  -y, --year                    Assume year is first in short dates
+  -p, --print                   Only print changes without renaming
+  -r, --recursive               Use recursive path handling
+  -s, --swap                    Swap year and day around
+  -v, --verbose                 Print verbose output
+  -h, --help                    Print help
+  -V, --version                 Print version
 ```
 
-## Visa-parse
+## Vconvert
+
+Convert video files to HEVC (H.265) format using ffmpeg and NVENC.
+
+```console
+Convert video files to HEVC (H.265) format using ffmpeg and NVENC
+
+Usage: vconvert [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Optional input directory or file
+
+Options:
+  -a, --all                    Convert all known video file types (default is only .mp4 and .mkv)
+  -b, --bitrate <LIMIT>        Skip files with bitrate lower than LIMIT kbps [default: 8000]
+  -d, --delete                 Delete input files immediately instead of moving to trash
+  -p, --print                  Print commands without running them
+  -f, --force                  Overwrite existing output files
+  -i, --include <INCLUDE>      Include files that match the given pattern
+  -e, --exclude <EXCLUDE>      Exclude files that match the given pattern
+  -t, --extension <EXTENSION>  Override file extensions to convert
+  -n, --number <NUMBER>        Number of files to convert [default: 1]
+  -o, --other                  Convert all known video file types except MP4 files
+  -r, --recurse                Recurse into subdirectories
+  -c, --skip-convert           Skip conversion
+  -m, --skip-remux             Skip remuxing
+  -s, --sort-by-bitrate        Sort files by bitrate (highest first)
+  -l, --completion <SHELL>     Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose                Print verbose output
+  -h, --help                   Print help
+  -V, --version                Print version
+```
+
+## Vres
+
+Add video resolution labels to filenames based on actual video dimensions.
+
+```console
+Add video resolution to filenames
+
+Usage: vres [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Optional input directory or file path
+
+Options:
+  -d, --debug              Enable debug prints
+  -x, --delete [<DELETE>]  Delete files with width or height smaller than limit (default: 500)
+  -f, --force              Overwrite existing files
+  -p, --print              Only print file names without renaming or deleting
+  -r, --recurse            Recursive directory iteration
+  -v, --verbose            Print verbose output
+  -h, --help               Print help
+  -V, --version            Print version
+```
+
+## Visaparse
 
 Parse Finvoice credit card statements and output items as CSV and Excel sheet.
 
 ```console
-Parse credit card Finvoice XML files
+Parse Finvoice XML credit card statement files
 
 Usage: visaparse [OPTIONS] [PATH]
 
@@ -105,14 +186,15 @@ Arguments:
   [PATH]  Optional input directory or XML file path
 
 Options:
-  -o, --output <OUTPUT_PATH>  Optional output path (default is same as input dir)
-  -p, --print                 Only print info without writing to file
-  -v, --verbose               Verbose output
+  -o, --output <OUTPUT_PATH>  Optional output path (default is the input directory)
+  -p, --print                 Only print information without writing to file
+  -n, --number <NUMBER>       How many total sums to print with verbose output [default: 20]
+  -v, --verbose               Print verbose output
   -h, --help                  Print help
   -V, --version               Print version
 ```
 
-## Version tag
+## Vtag
 
 ```console
 Create git version tags for a Rust project
@@ -127,7 +209,7 @@ Options:
   -p, --push     Push tags to remote
   -n, --new      Only push new tags that did not exist locally
   -s, --single   Use a single push to push all tags
-  -v, --verbose  Verbose output
+  -v, --verbose  Print verbose output
   -h, --help     Print help
   -V, --version  Print version
 ```

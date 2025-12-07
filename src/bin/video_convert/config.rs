@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use cli_tools::print_error;
+use itertools::Itertools;
 use serde::Deserialize;
 
 use crate::VideoConvertArgs;
@@ -102,11 +103,8 @@ impl VideoConvertConfig {
 impl Config {
     /// Create config from given command line args and user config file.
     pub(crate) fn try_from_args(args: VideoConvertArgs, user_config: VideoConvertConfig) -> Result<Self> {
-        let mut include = args.include;
-        include.extend(user_config.include);
-
-        let mut exclude = args.exclude;
-        exclude.extend(user_config.exclude);
+        let include: Vec<String> = args.include.into_iter().chain(user_config.include).unique().collect();
+        let exclude: Vec<String> = args.exclude.into_iter().chain(user_config.exclude).unique().collect();
 
         let path = cli_tools::resolve_input_path(args.path.as_deref())?;
 

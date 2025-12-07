@@ -141,11 +141,11 @@ struct Args {
     force: bool,
 
     /// Include files that match the given pattern
-    #[arg(short = 'w', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE_PATTERN")]
+    #[arg(short = 'n', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
     include: Vec<String>,
 
     /// Exclude files that match the given pattern
-    #[arg(short = 'u', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE_PATTERN")]
+    #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
     exclude: Vec<String>,
 
     /// Increment conflicting file name with running index
@@ -1131,16 +1131,24 @@ impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Result<Self> {
         let user_config = DotsConfig::get_user_config();
-        let mut include = user_config.include;
         let mut replace = args.parse_substitutes();
+        let removes = args.parse_removes();
         let mut regex_replace = args.parse_regex_substitutes()?;
         let config_regex = Self::compile_regex_patterns(user_config.regex_replace)?;
 
-        include.extend(replace.iter().map(|(pattern, _)| pattern.clone()));
-        replace.extend(args.parse_removes());
+        let include: Vec<String> = user_config
+            .include
+            .into_iter()
+            .chain(replace.iter().map(|(pattern, _)| pattern.clone()))
+            .chain(args.include)
+            .unique()
+            .collect();
+
+        replace.extend(removes);
         replace.extend(user_config.replace);
+        let replace: Vec<(String, String)> = replace.into_iter().unique().collect();
+
         regex_replace.extend(config_regex);
-        include.extend(args.include);
 
         let move_date_after_prefix = user_config
             .move_date_after_prefix
