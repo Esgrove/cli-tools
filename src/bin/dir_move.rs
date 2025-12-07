@@ -10,7 +10,10 @@ use colored::Colorize;
 use itertools::Itertools;
 use serde::Deserialize;
 
-use cli_tools::{print_bold, print_error, print_warning};
+use cli_tools::{
+    get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
+    print_warning,
+};
 
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
@@ -123,8 +126,6 @@ struct Config {
 struct DirectoryInfo {
     /// Absolute path to the directory.
     path: PathBuf,
-    /// Path relative to the root directory.
-    relative: PathBuf,
     /// Normalized directory name (lowercase, dots replaced with spaces).
     name: String,
 }
@@ -189,17 +190,9 @@ impl Config {
 }
 
 impl DirectoryInfo {
-    fn new(path: PathBuf, root: &Path) -> Self {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-            .replace('.', " ");
-
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-
-        Self { path, relative, name }
+    fn new(path: PathBuf) -> Self {
+        let name = path_to_filename_string(&path).to_lowercase().replace('.', " ");
+        Self { path, name }
     }
 }
 
@@ -283,11 +276,11 @@ impl DirMove {
                         .any(|pattern| dir_name.contains(&pattern.to_lowercase()))
                 {
                     if self.config.verbose {
-                        println!("Excluding directory: {}", entry.path().display());
+                        println!("Excluding directory: {}", path_to_string_relative(&entry.path()));
                     }
                     continue;
                 }
-                dirs.push(DirectoryInfo::new(entry.path(), &self.root));
+                dirs.push(DirectoryInfo::new(entry.path()));
             }
         }
         Ok(dirs)
@@ -329,6 +322,10 @@ impl DirMove {
     fn match_files_to_directories(files: &[PathBuf], dirs: &[DirectoryInfo]) -> HashMap<usize, Vec<PathBuf>> {
         let mut matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
 
+        // Sort directory indices by name length (longest first) to match more specific names first
+        let mut dir_indices: Vec<usize> = (0..dirs.len()).collect();
+        dir_indices.sort_by(|&a, &b| dirs[b].name.len().cmp(&dirs[a].name.len()));
+
         for file_path in files {
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -336,12 +333,13 @@ impl DirMove {
             // Normalize: replace dots with spaces for matching
             let file_name_normalized = file_name.replace('.', " ").to_lowercase();
 
-            for (idx, dir) in dirs.iter().enumerate() {
+            for &idx in &dir_indices {
                 // dir.name is already lowercase
                 // Check if the normalized filename contains the directory name
-                if file_name_normalized.contains(&dir.name) {
+                if file_name_normalized.contains(&dirs[idx].name) {
                     matches.entry(idx).or_default().push(file_path.clone());
-                    break; // Only match to first directory found
+                    // Only match to first directory found
+                    break;
                 }
             }
         }
@@ -350,16 +348,14 @@ impl DirMove {
     }
 
     fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<()> {
-        let dir_display = dir.relative.display();
-        println!("{}: {} file(s)", format!("{dir_display}").cyan().bold(), files.len());
+        let dir_display = get_relative_path_or_filename(&dir.path, &self.root);
+        println!("{}: {} file(s)", dir_display.cyan().bold(), files.len());
 
         for file_path in files {
-            if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-                println!("  {name}");
-            }
+            println!("  {}", path_to_filename_string(file_path));
         }
 
-        println!("  {} Move to: {}", "→".green(), dir.relative.display());
+        println!("  {} Move to: {dir_display}", "→".green());
 
         if !self.config.dryrun {
             let confirmed = if self.config.auto {
@@ -375,7 +371,7 @@ impl DirMove {
 
             if confirmed {
                 if let Err(e) = self.move_files_to_target_dir(&dir.path, files) {
-                    print_error!("Failed to move files to {}: {e}", dir.relative.display());
+                    print_error!("Failed to move files to {}: {e}", dir.path.display());
                 }
             } else {
                 println!("  Skipped");
@@ -390,31 +386,27 @@ impl DirMove {
     fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
         if !dir_path.exists() {
             fs::create_dir(dir_path)?;
-            if let Some(name) = dir_path.file_name().and_then(|n| n.to_str()) {
-                println!("  Created directory: {name}");
-            }
+            println!("  Created directory: {}", path_to_filename_string(dir_path));
         }
 
         let mut moved_count = 0;
         for file_path in files {
-            let Some(file_name) = file_path.file_name() else {
+            let file_name = path_to_filename_string(file_path);
+            if file_name.is_empty() {
                 print_error!("Could not get file name for path: {}", file_path.display());
                 continue;
-            };
-            let new_path = dir_path.join(file_name);
+            }
+            let new_path = dir_path.join(&file_name);
 
             if new_path.exists() && !self.config.overwrite {
-                print_warning!(
-                    "Skipping existing file: {}",
-                    cli_tools::path_to_string_relative(&new_path)
-                );
+                print_warning!("Skipping existing file: {}", new_path.display());
                 continue;
             }
 
             match fs::rename(file_path, &new_path) {
                 Ok(()) => {
                     if self.config.verbose {
-                        println!("  Moved: {}", file_name.to_string_lossy());
+                        println!("  Moved: {file_name}");
                     }
                     moved_count += 1;
                 }
@@ -545,9 +537,7 @@ impl DirMove {
 
             println!("{}: {} files", dir_name.cyan().bold(), files.len());
             for file_path in &files {
-                if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-                    println!("  {name}");
-                }
+                println!("  {}", path_to_filename_string(file_path));
             }
 
             if dir_exists {
@@ -879,7 +869,6 @@ mod tests {
             .iter()
             .map(|n| DirectoryInfo {
                 path: PathBuf::from(*n),
-                relative: PathBuf::from(*n),
                 name: n.to_lowercase(),
             })
             .collect()
@@ -965,17 +954,22 @@ mod tests {
     }
 
     #[test]
-    fn test_match_files_to_directories_first_match_wins() {
-        // If a file could match multiple directories, it matches the first one
-        let dirs = make_test_dirs(&["Common", "Common Name"]);
-        let files = make_file_paths(&["Common.Name.file.mp4"]);
+    fn test_match_files_to_directories_longer_match_wins() {
+        // If a file could match multiple directories, longer/more specific name wins
+        // e.g., "ProjectNew" should match before "Project"
+        let dirs = make_test_dirs(&["Project", "ProjectNew"]);
+        let files = make_file_paths(&["ProjectNew.2025.10.12.file.mp4", "Project.2025.10.05.file.mp4"]);
 
         let result = DirMove::match_files_to_directories(&files, &dirs);
 
-        // Should match first directory "Common" (index 0)
-        assert_eq!(result.len(), 1);
+        // Should have matches for both directories
+        assert_eq!(result.len(), 2);
+        // "ProjectNew" file should match "ProjectNew" directory (index 1), not "Project"
+        assert!(result.contains_key(&1));
+        assert_eq!(result.get(&1).map(Vec::len), Some(1));
+        // "Project" file should match "Project" directory (index 0)
         assert!(result.contains_key(&0));
-        assert!(!result.contains_key(&1));
+        assert_eq!(result.get(&0).map(Vec::len), Some(1));
     }
 
     #[test]
