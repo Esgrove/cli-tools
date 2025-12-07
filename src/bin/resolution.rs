@@ -68,7 +68,7 @@ struct Args {
     #[arg(short, long)]
     print: bool,
 
-    /// Recursive directory iteration
+    /// Recurse into subdirectories
     #[arg(short, long)]
     recurse: bool,
 
@@ -333,12 +333,12 @@ async fn main() -> anyhow::Result<()> {
 
 async fn delete_low_resolution_files(
     path: &Path,
-    recursive: bool,
+    recurse: bool,
     limit: u32,
     dryrun: bool,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let files = gather_low_resolution_video_files(path, recursive).await?;
+    let files = gather_low_resolution_video_files(path, recurse).await?;
 
     if files.is_empty() {
         if verbose {
@@ -393,10 +393,10 @@ async fn delete_low_resolution_files(
     Ok(())
 }
 
-async fn gather_low_resolution_video_files(path: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
+async fn gather_low_resolution_video_files(path: &Path, recurse: bool) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
-    if recursive {
+    if recurse {
         for entry in WalkDir::new(path)
             .into_iter()
             .filter_entry(|e| !cli_tools::is_hidden(e))
@@ -435,10 +435,10 @@ async fn gather_low_resolution_video_files(path: &Path, recursive: bool) -> anyh
     Ok(files)
 }
 
-async fn gather_files_without_resolution_label(path: &Path, recursive: bool) -> anyhow::Result<Vec<PathBuf>> {
+async fn gather_files_without_resolution_label(path: &Path, recurse: bool) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
-    if recursive {
+    if recurse {
         for entry in WalkDir::new(path)
             .into_iter()
             // ignore hidden files (name starting with ".")

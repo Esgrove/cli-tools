@@ -41,9 +41,9 @@ struct Args {
     #[arg(short, long)]
     print: bool,
 
-    /// Use recursive path handling
+    /// Recurse into subdirectories
     #[arg(short, long)]
-    recursive: bool,
+    recurse: bool,
 
     /// Swap year and day around
     #[arg(short, long)]
@@ -65,7 +65,7 @@ struct DateConfig {
     file_extensions: Vec<String>,
     overwrite: bool,
     #[serde(default)]
-    recursive: bool,
+    recurse: bool,
     #[serde(default)]
     swap_year: bool,
     #[serde(default)]
@@ -88,7 +88,7 @@ struct Config {
     dryrun: bool,
     file_extensions: Vec<String>,
     overwrite: bool,
-    recursive: bool,
+    recurse: bool,
     swap_year: bool,
     verbose: bool,
     year_first: bool,
@@ -137,7 +137,7 @@ impl Config {
             dryrun: args.print || user_config.dryrun,
             file_extensions,
             overwrite: args.force || user_config.overwrite,
-            recursive: args.recursive || user_config.recursive,
+            recurse: args.recurse || user_config.recurse,
             swap_year: args.swap || user_config.swap_year,
             verbose: args.verbose || user_config.verbose,
             year_first: args.year || user_config.year_first,
@@ -158,7 +158,7 @@ fn main() -> Result<()> {
 
 /// Flip date to start with year for all matching files from the given path.
 fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
-    let (files, root) = files_to_rename(path, &config.file_extensions, config.recursive)?;
+    let (files, root) = files_to_rename(path, &config.file_extensions, config.recurse)?;
     if files.is_empty() {
         anyhow::bail!("No files to process");
     }
@@ -213,7 +213,7 @@ fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
 
 /// Flip date to start with year for all matching directories from the given path.
 fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
-    let directories = directories_to_rename(path, config.recursive)?;
+    let directories = directories_to_rename(path, config.recurse)?;
     if directories.is_empty() {
         anyhow::bail!("No directories to rename")
     }
@@ -247,7 +247,7 @@ fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
 }
 
 /// Get list of files to process
-fn files_to_rename(path: &PathBuf, file_extensions: &[String], recursive: bool) -> Result<(Vec<PathBuf>, PathBuf)> {
+fn files_to_rename(path: &PathBuf, file_extensions: &[String], recurse: bool) -> Result<(Vec<PathBuf>, PathBuf)> {
     let (mut files, root) = if path.is_file() {
         (
             vec![path.clone()],
@@ -256,7 +256,7 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[String], recursive: bool) 
     } else {
         let list: Vec<PathBuf> = WalkDir::new(path)
             .min_depth(1)
-            .max_depth(if recursive { usize::MAX } else { 1 })
+            .max_depth(if recurse { usize::MAX } else { 1 })
             .into_iter()
             .filter_map(std::result::Result::ok)
             .map(walkdir::DirEntry::into_path)
@@ -277,12 +277,10 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[String], recursive: bool) 
 }
 
 /// Get list of directories to process
-fn directories_to_rename(path: PathBuf, recursive: bool) -> Result<Vec<RenameItem>> {
+fn directories_to_rename(path: PathBuf, recurse: bool) -> Result<Vec<RenameItem>> {
     let mut directories_to_rename = Vec::new();
 
-    let walker = WalkDir::new(path)
-        .min_depth(1)
-        .max_depth(if recursive { 100 } else { 1 });
+    let walker = WalkDir::new(path).min_depth(1).max_depth(if recurse { 100 } else { 1 });
 
     for entry in walker {
         let entry = entry.context("Failed to read directory entry")?;

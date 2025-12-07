@@ -34,9 +34,9 @@ struct Args {
     #[arg(short, long)]
     print: bool,
 
-    /// Recursive directory iteration
+    /// Recurse into subdirectories
     #[arg(short, long)]
-    recursive: bool,
+    recurse: bool,
 
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
@@ -59,7 +59,7 @@ struct MoveConfig {
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
-    recursive: bool,
+    recurse: bool,
     #[serde(default)]
     verbose: bool,
 }
@@ -78,7 +78,7 @@ struct Config {
     include: Vec<String>,
     exclude: Vec<String>,
     overwrite: bool,
-    recursive: bool,
+    recurse: bool,
     verbose: bool,
 }
 
@@ -118,7 +118,7 @@ impl Config {
             include,
             exclude,
             overwrite: args.force || user_config.overwrite,
-            recursive: args.recursive || user_config.recursive,
+            recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
         }
     }
@@ -160,8 +160,8 @@ fn main() -> anyhow::Result<()> {
 fn move_files_to_dir(base_path: &Path, config: &Config) -> anyhow::Result<()> {
     // Collect directories in the base path
     let mut dirs: Vec<DirectoryInfo> = Vec::new();
-    // TODO: implement recursive option for dirs
-    let _ = config.recursive;
+    // TODO: implement recurse option for dirs
+    let _ = config.recurse;
     for entry in fs::read_dir(base_path)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {

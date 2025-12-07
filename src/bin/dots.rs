@@ -156,9 +156,9 @@ struct Args {
     #[arg(short, long)]
     print: bool,
 
-    /// Recursive directory iteration
+    /// Recurse into subdirectories
     #[arg(short, long)]
-    recursive: bool,
+    recurse: bool,
 
     /// Append prefix to the start
     #[arg(short = 'x', long)]
@@ -235,7 +235,7 @@ struct DotsConfig {
     #[serde(default)]
     pre_replace: Vec<(String, String)>,
     #[serde(default)]
-    recursive: bool,
+    recurse: bool,
     #[serde(default)]
     regex_replace: Vec<(String, String)>,
     #[serde(default)]
@@ -272,7 +272,7 @@ struct Config {
     pre_replace: Vec<(String, String)>,
     prefix: Option<String>,
     prefix_dir: bool,
-    recursive: bool,
+    recurse: bool,
     regex_replace: Vec<(Regex, String)>,
     regex_replace_after: Vec<(Regex, String)>,
     remove_from_start: Vec<String>,
@@ -430,7 +430,7 @@ impl Dots {
             println!("{}", format!("Formatting files under {}", self.root.display()).bold());
         }
 
-        let max_depth = if self.config.recursive { 100 } else { 1 };
+        let max_depth = if self.config.recurse { 100 } else { 1 };
 
         // Collect all file paths first
         let paths: Vec<PathBuf> = WalkDir::new(&self.root)
@@ -486,8 +486,8 @@ impl Dots {
 
     /// Get all directories that need to be renamed.
     fn gather_directories_to_rename(&self, path_specified: bool) -> Vec<(PathBuf, PathBuf)> {
-        // If a directory was given as input, use that unless recursive mode is enabled
-        if path_specified && !self.config.recursive {
+        // If a directory was given as input, use that unless recurse mode is enabled
+        if path_specified && !self.config.recurse {
             return self
                 .formatted_directory_path(&self.root)
                 .ok()
@@ -497,7 +497,7 @@ impl Dots {
                 .collect();
         }
 
-        let max_depth = if self.config.recursive { 100 } else { 1 };
+        let max_depth = if self.config.recurse { 100 } else { 1 };
 
         // Collect all directory paths first
         let paths: Vec<PathBuf> = WalkDir::new(&self.root)
@@ -1176,7 +1176,7 @@ impl Config {
             pre_replace: user_config.pre_replace,
             prefix: args.prefix,
             prefix_dir: args.prefix_dir || user_config.prefix_dir,
-            recursive: args.recursive || user_config.recursive,
+            recurse: args.recurse || user_config.recurse,
             regex_replace,
             regex_replace_after: Vec::default(),
             remove_from_start: user_config.remove_from_start,
@@ -1257,7 +1257,7 @@ impl fmt::Display for Config {
         writeln!(f, "  prefix dir: {}", cli_tools::colorize_bool(self.prefix_dir))?;
         writeln!(f, "  suffix dir: {}", cli_tools::colorize_bool(self.suffix_dir))?;
         writeln!(f, "  overwrite:  {}", cli_tools::colorize_bool(self.overwrite))?;
-        writeln!(f, "  recursive:  {}", cli_tools::colorize_bool(self.recursive))?;
+        writeln!(f, "  recurse:    {}", cli_tools::colorize_bool(self.recurse))?;
         writeln!(f, "  verbose:    {}", cli_tools::colorize_bool(self.verbose))?;
         writeln!(
             f,

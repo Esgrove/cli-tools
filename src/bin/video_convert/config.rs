@@ -40,7 +40,7 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
-    recursive: bool,
+    recurse: bool,
     #[serde(default)]
     sort_by_bitrate: bool,
     #[serde(default)]
@@ -61,7 +61,7 @@ pub struct Config {
     pub(crate) number: usize,
     pub(crate) overwrite: bool,
     pub(crate) path: PathBuf,
-    pub(crate) recursive: bool,
+    pub(crate) recurse: bool,
     pub(crate) skip_convert: bool,
     pub(crate) skip_remux: bool,
     pub(crate) sort_by_bitrate: bool,
@@ -135,7 +135,7 @@ impl Config {
             number: user_config.number.unwrap_or(args.number),
             overwrite: args.force || user_config.overwrite,
             path,
-            recursive: args.recurse || user_config.recursive,
+            recurse: args.recurse || user_config.recurse,
             skip_convert: args.skip_convert,
             skip_remux: args.skip_remux,
             sort_by_bitrate: args.sort_by_bitrate || user_config.sort_by_bitrate,

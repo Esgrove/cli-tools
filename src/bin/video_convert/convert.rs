@@ -360,7 +360,7 @@ impl VideoConvert {
             anyhow::bail!("Input path '{}' does not exist or is not accessible", path.display());
         }
 
-        let max_depth = if self.config.recursive { usize::MAX } else { 1 };
+        let max_depth = if self.config.recurse { usize::MAX } else { 1 };
 
         let mut files: Vec<VideoFile> = WalkDir::new(path)
             .max_depth(max_depth)

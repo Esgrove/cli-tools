@@ -49,7 +49,7 @@ Options:
   -n, --include <INCLUDE>   Include files that match the given pattern
   -e, --exclude <EXCLUDE>   Exclude files that match the given pattern
   -p, --print               Only print changes without renaming files
-  -r, --recursive           Recursive directory iteration
+  -r, --recurse             Recurse into subdirectories
   -l, --completion <SHELL>  Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose             Print verbose output
   -h, --help                Print help
@@ -75,7 +75,7 @@ Options:
   -e, --exclude <EXCLUDE>                   Exclude files that match the given pattern
   -i, --increment                           Increment conflicting file name with running index
   -p, --print                               Only print changes without renaming files
-  -r, --recursive                           Recursive directory iteration
+  -r, --recurse                             Recurse into subdirectories
   -x, --prefix <PREFIX>                     Append prefix to the start
   -b, --prefix-dir                          Prefix files with directory name
   -j, --suffix-dir                          Suffix files with directory name
@@ -110,7 +110,7 @@ Options:
   -e, --extensions <EXTENSION>  Specify file extension(s)
   -y, --year                    Assume year is first in short dates
   -p, --print                   Only print changes without renaming
-  -r, --recursive               Use recursive path handling
+  -r, --recurse                 Recurse into subdirectories
   -s, --swap                    Swap year and day around
   -v, --verbose                 Print verbose output
   -h, --help                    Print help
