@@ -119,9 +119,9 @@ impl RunStats {
     /// Print a summary of conversion statistics.
     pub(crate) fn print_summary(&self) {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
-        println!("Files converted:         {}", self.files_converted);
-        println!("Files remuxed:           {}", self.files_remuxed);
         println!("Files renamed:           {}", self.files_renamed);
+        println!("Files remuxed:           {}", self.files_remuxed);
+        println!("Files converted:         {}", self.files_converted);
         println!(
             "Files failed:            {}",
             if self.files_failed > 0 {
