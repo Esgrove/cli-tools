@@ -40,7 +40,7 @@ struct Args {
     prefix_override: Vec<String>,
 
     /// Minimum number of matching files needed to create a group
-    #[arg(short, long, default_value_t = 3)]
+    #[arg(short, long, name = "COUNT", default_value_t = 3)]
     group: usize,
 
     /// Only print changes without moving files
@@ -493,7 +493,7 @@ impl DirMove {
     }
 
     /// Apply prefix overrides to groups.
-    /// If a group's prefix starts with an override, merge it under the override name.
+    /// If files in a group start with an override prefix, merge them under the override name.
     fn apply_prefix_overrides(&self, groups: HashMap<String, Vec<PathBuf>>) -> HashMap<String, Vec<PathBuf>> {
         if self.config.prefix_overrides.is_empty() {
             return groups;
@@ -502,12 +502,22 @@ impl DirMove {
         let mut result: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
         for (prefix, files) in groups {
-            // Check if any override matches the start of this prefix
+            // Check if any override matches: either the prefix starts with override,
+            // or the override starts with the prefix (override is more specific),
+            // or any file in the group starts with the override
             let target_prefix = self
                 .config
                 .prefix_overrides
                 .iter()
-                .find(|&override_prefix| prefix.starts_with(override_prefix))
+                .find(|&override_prefix| {
+                    prefix.starts_with(override_prefix)
+                        || override_prefix.starts_with(&prefix)
+                        || files.iter().any(|f| {
+                            f.file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|name| name.starts_with(override_prefix))
+                        })
+                })
                 .cloned()
                 .unwrap_or(prefix);
 
@@ -741,5 +751,27 @@ mod tests {
         // "Some.Name" also starts with "Some" so it gets merged
         assert!(result.contains_key("Some"));
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_prefix_overrides_override_more_specific_than_prefix() {
+        // Override "Example.Name" is more specific than computed prefix "Example"
+        // Files start with "Example.Name" so override should apply
+        let dirmove = make_test_dirmove(vec!["Example.Name".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert(
+            "Example".to_string(),
+            vec![
+                PathBuf::from("Example.Name.Video1.mp4"),
+                PathBuf::from("Example.Name.Video2.mp4"),
+                PathBuf::from("Example.Name.Video3.mp4"),
+            ],
+        );
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Example.Name"));
+        assert!(!result.contains_key("Example"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("Example.Name").map(Vec::len), Some(3));
     }
 }
