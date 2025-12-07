@@ -301,13 +301,15 @@ impl VideoConvert {
             analysis_output.conversions.len()
         };
         let total_available = remux_count + convert_count;
-        let total_limit = total_available.min(self.config.number);
+        let total_limit = self.config.count.map_or(total_available, |c| total_available.min(c));
 
         // Truncate lists if they exceed the limit
-        if total_available > self.config.number {
-            let remux_limit = remux_count.min(self.config.number);
+        if let Some(count) = self.config.count
+            && total_available > count
+        {
+            let remux_limit = remux_count.min(count);
             analysis_output.remuxes.truncate(remux_limit);
-            let remaining = self.config.number.saturating_sub(remux_limit);
+            let remaining = count.saturating_sub(remux_limit);
             analysis_output.conversions.truncate(remaining);
         }
 

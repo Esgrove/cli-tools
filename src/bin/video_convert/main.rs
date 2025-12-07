@@ -26,6 +26,10 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short, long, name = "LIMIT", default_value_t = 8000)]
     bitrate: u64,
 
+    /// Limit the number of files to convert
+    #[arg(short, long)]
+    count: Option<usize>,
+
     /// Delete input files immediately instead of moving to trash
     #[arg(short, long)]
     delete: bool,
@@ -39,7 +43,7 @@ pub(crate) struct VideoConvertArgs {
     force: bool,
 
     /// Include files that match the given pattern
-    #[arg(short = 'i', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
+    #[arg(short = 'n', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
     include: Vec<String>,
 
     /// Exclude files that match the given pattern
@@ -50,10 +54,6 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 't', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION", conflicts_with_all = ["all", "other"])]
     extension: Vec<String>,
 
-    /// Number of files to convert
-    #[arg(short, long, default_value_t = 1)]
-    number: usize,
-
     /// Convert all known video file types except MP4 files
     #[arg(short, long, conflicts_with = "all")]
     other: bool,
@@ -63,7 +63,7 @@ pub(crate) struct VideoConvertArgs {
     recurse: bool,
 
     /// Skip conversion
-    #[arg(short = 'c', long)]
+    #[arg(short = 'k', long)]
     skip_convert: bool,
 
     /// Skip remuxing

@@ -132,16 +132,16 @@ Arguments:
 Options:
   -a, --all                    Convert all known video file types (default is only .mp4 and .mkv)
   -b, --bitrate <LIMIT>        Skip files with bitrate lower than LIMIT kbps [default: 8000]
+  -c, --count <COUNT>          Limit the number of files to convert
   -d, --delete                 Delete input files immediately instead of moving to trash
   -p, --print                  Print commands without running them
   -f, --force                  Overwrite existing output files
-  -i, --include <INCLUDE>      Include files that match the given pattern
+  -n, --include <INCLUDE>      Include files that match the given pattern
   -e, --exclude <EXCLUDE>      Exclude files that match the given pattern
   -t, --extension <EXTENSION>  Override file extensions to convert
-  -n, --number <NUMBER>        Number of files to convert [default: 1]
   -o, --other                  Convert all known video file types except MP4 files
   -r, --recurse                Recurse into subdirectories
-  -c, --skip-convert           Skip conversion
+  -k, --skip-convert           Skip conversion
   -m, --skip-remux             Skip remuxing
   -s, --sort-by-bitrate        Sort files by bitrate (highest first)
   -l, --completion <SHELL>     Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]

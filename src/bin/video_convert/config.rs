@@ -23,18 +23,17 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     convert_all_types: bool,
     #[serde(default)]
+    count: Option<usize>,
+    #[serde(default)]
     bitrate: Option<u64>,
     #[serde(default)]
     delete: bool,
     #[serde(default)]
     exclude: Vec<String>,
-    /// Custom list of file extensions to process (overrides all/other flags)
     #[serde(default)]
     extensions: Vec<String>,
     #[serde(default)]
     include: Vec<String>,
-    #[serde(default)]
-    number: Option<usize>,
     #[serde(default)]
     convert_other_types: bool,
     #[serde(default)]
@@ -47,18 +46,18 @@ pub struct VideoConvertConfig {
     verbose: bool,
 }
 
-/// Final config created from CLI arguments and user config file.
+/// Final config combined from CLI arguments and user config file.
 #[derive(Debug, Default)]
 pub struct Config {
     pub(crate) bitrate_limit: u64,
     pub(crate) convert_all: bool,
     pub(crate) convert_other: bool,
+    pub(crate) count: Option<usize>,
     pub(crate) delete: bool,
     pub(crate) dryrun: bool,
     pub(crate) exclude: Vec<String>,
-    pub(crate) include: Vec<String>,
     pub(crate) extensions: Vec<String>,
-    pub(crate) number: usize,
+    pub(crate) include: Vec<String>,
     pub(crate) overwrite: bool,
     pub(crate) path: PathBuf,
     pub(crate) recurse: bool,
@@ -127,12 +126,12 @@ impl Config {
             bitrate_limit: user_config.bitrate.unwrap_or(args.bitrate),
             convert_all,
             convert_other,
+            count: args.count.or(user_config.count),
             delete: args.delete || user_config.delete,
             dryrun: args.print,
             exclude,
             extensions,
             include,
-            number: user_config.number.unwrap_or(args.number),
             overwrite: args.force || user_config.overwrite,
             path,
             recurse: args.recurse || user_config.recurse,

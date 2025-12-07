@@ -71,7 +71,9 @@ impl FileLogger {
         let _ = writeln!(self.writer, "  delete: {}", config.delete);
         let _ = writeln!(self.writer, "  overwrite: {}", config.overwrite);
         let _ = writeln!(self.writer, "  dryrun: {}", config.dryrun);
-        let _ = writeln!(self.writer, "  number: {}", config.number);
+        if let Some(count) = config.count {
+            let _ = writeln!(self.writer, "  count: {count}");
+        }
         let _ = writeln!(self.writer, "  verbose: {}", config.verbose);
         let _ = self.writer.flush();
     }
