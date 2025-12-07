@@ -279,11 +279,7 @@ fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
 fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<VisaItem>> {
     let mut result: Vec<VisaItem> = Vec::new();
     let num_files = files.len();
-    let digits = if num_files < 10 {
-        1
-    } else {
-        ((num_files as f64).log10() as usize) + 1
-    };
+    let digits = num_files.checked_ilog10().map_or(1, |d| d as usize + 1);
 
     for (number, file) in files.into_iter().enumerate() {
         print!(
@@ -499,8 +495,8 @@ fn format_sum(value: &str) -> Result<f64> {
 /// Print item totals and some statistics.
 fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usize, verbose: bool, num_totals: usize) {
     let total_sum: f64 = items.iter().map(|item| item.sum).sum();
-    let count = items.len() as f64;
-    let average = if count > 0.0 { total_sum / count } else { 0.0 };
+    let count = items.len();
+    let average = if count > 0 { total_sum / count as f64 } else { 0.0 };
 
     println!("Average items per file: {:.1}", items.len() / num_files);
     println!("Total sum: {total_sum:.2}€");
@@ -604,15 +600,15 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     let dj_sheet = workbook.add_worksheet().set_name("DJ")?;
     let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
     dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
-    let mut row: usize = 1;
+    let mut row: RowNum = 1;
     for item in items {
         // Filter out common non-DJ items
         if FILTER_PREFIXES.iter().any(|&prefix| item.name.starts_with(prefix)) {
             continue;
         }
-        dj_sheet.write_string(row as RowNum, 0, item.finnish_date())?;
-        dj_sheet.write_string(row as RowNum, 1, item.name.clone())?;
-        dj_sheet.write_string_with_format(row as RowNum, 2, item.finnish_sum(), &sum_format)?;
+        dj_sheet.write_string(row, 0, item.finnish_date())?;
+        dj_sheet.write_string(row, 1, item.name.clone())?;
+        dj_sheet.write_string_with_format(row, 2, item.finnish_sum(), &sum_format)?;
         row += 1;
     }
     dj_sheet.autofit();
@@ -620,11 +616,11 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     let totals_sheet = workbook.add_worksheet().set_name("TOTALS")?;
     totals_sheet.write_string_with_format(0, 0, "Name", &header_format)?;
     totals_sheet.write_string_with_format(0, 1, "Total sum", &header_format)?;
-    row = 1;
+    let mut totals_row: RowNum = 1;
     for (name, sum) in totals {
-        totals_sheet.write_string(row as RowNum, 0, name)?;
-        totals_sheet.write_string_with_format(row as RowNum, 1, format!("{sum:.2}").replace('.', ","), &sum_format)?;
-        row += 1;
+        totals_sheet.write_string(totals_row, 0, name)?;
+        totals_sheet.write_string_with_format(totals_row, 1, format!("{sum:.2}").replace('.', ","), &sum_format)?;
+        totals_row += 1;
     }
     totals_sheet.autofit();
 

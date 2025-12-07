@@ -124,6 +124,114 @@ impl VideoFile {
 }
 
 impl VideoInfo {
+    /// Parse `VideoInfo` from ffprobe output.
+    fn from_ffprobe_output(stdout: &str, stderr: &str, path: &Path) -> Result<Self> {
+        let mut codec = String::new();
+        let mut bitrate_kbps: Option<u64> = None;
+        let mut size_bytes: Option<u64> = None;
+        let mut duration: Option<f64> = None;
+        let mut width: Option<u32> = None;
+        let mut height: Option<u32> = None;
+        let mut frames_per_second: Option<f64> = None;
+
+        // Parse key=value pairs from output
+        // Example output:
+        // ```
+        //  codec_name=h264
+        //  bit_rate=7345573
+        //  duration=2425.237007
+        //  size=2292495805
+        //  bit_rate=7562133
+        //  r_frame_rate=30/1
+        // ```
+        for line in stdout.lines() {
+            let line = line.trim();
+            if let Some((key, value)) = line.split_once('=') {
+                match key {
+                    "codec_name" => codec = value.to_lowercase(),
+                    "bit_rate" | "BPS" | "BPS-eng" => {
+                        if bitrate_kbps.is_none()
+                            && let Ok(bps) = value.parse::<u64>()
+                            && bps > 0
+                        {
+                            bitrate_kbps = Some(bps / 1000);
+                        }
+                    }
+                    "size" => {
+                        if let Ok(size) = value.parse::<u64>() {
+                            size_bytes = Some(size);
+                        }
+                    }
+                    "duration" => {
+                        if let Ok(seconds) = value.parse::<f64>() {
+                            duration = Some(seconds);
+                        }
+                    }
+                    "width" => {
+                        if let Ok(w) = value.parse::<u32>() {
+                            width = Some(w);
+                        }
+                    }
+                    "height" => {
+                        if let Ok(h) = value.parse::<u32>() {
+                            height = Some(h);
+                        }
+                    }
+                    "r_frame_rate" => {
+                        // Parse fractional framerate like "30/1" or "30000/1001"
+                        if let Some((num, den)) = value.split_once('/')
+                            && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())
+                            && d > 0.0
+                        {
+                            frames_per_second = Some(n / d);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Validate required fields
+        if codec.is_empty() {
+            anyhow::bail!("failed to detect video codec");
+        }
+        let Some(bitrate_kbps) = bitrate_kbps else {
+            anyhow::bail!("failed to detect bitrate");
+        };
+        let Some(duration) = duration else {
+            anyhow::bail!("failed to detect duration");
+        };
+        let Some(width) = width else {
+            anyhow::bail!("failed to detect video width");
+        };
+        let Some(height) = height else {
+            anyhow::bail!("failed to detect video height");
+        };
+        let Some(frames_per_second) = frames_per_second else {
+            anyhow::bail!("failed to detect framerate");
+        };
+
+        let warning = if stderr.is_empty() {
+            None
+        } else {
+            Some(stderr.trim().to_string())
+        };
+
+        // Fall back to file metadata for size if not in ffprobe output
+        let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+
+        Ok(Self {
+            codec,
+            bitrate_kbps,
+            size_bytes,
+            duration,
+            width,
+            height,
+            frames_per_second,
+            warning,
+        })
+    }
+
     /// Determine quality level based on resolution and bitrate.
     /// Quality level 1 to 51, lower is better quality and bigger file size.
     fn quality_level(&self) -> u8 {
@@ -392,7 +500,7 @@ impl VideoConvert {
         F: Fn(&Self, &ProcessableFile, &str) -> ProcessResult,
     {
         let mut stats = RunStats::default();
-        let num_digits = total_limit.to_string().chars().count();
+        let num_digits = total_limit.checked_ilog10().map_or(1, |d| d as usize + 1);
         let mut aborted = false;
 
         for file in files {
@@ -449,110 +557,7 @@ impl VideoConvert {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        // Parse key=value pairs from output
-        // Example output:
-        // ```
-        //  codec_name=h264
-        //  bit_rate=7345573
-        //  duration=2425.237007
-        //  size=2292495805
-        //  bit_rate=7562133
-        //  r_frame_rate=30/1
-        // ```
-        let mut codec = String::new();
-        let mut bitrate_kbps: Option<u64> = None;
-        let mut size_bytes: Option<u64> = None;
-        let mut duration: Option<f64> = None;
-        let mut width: Option<u32> = None;
-        let mut height: Option<u32> = None;
-        let mut frames_per_second: Option<f64> = None;
-
-        for line in stdout.lines() {
-            let line = line.trim();
-            if let Some((key, value)) = line.split_once('=') {
-                match key {
-                    "codec_name" => codec = value.to_lowercase(),
-                    "bit_rate" | "BPS" | "BPS-eng" => {
-                        if bitrate_kbps.is_none()
-                            && let Ok(bps) = value.parse::<u64>()
-                            && bps > 0
-                        {
-                            bitrate_kbps = Some(bps / 1000);
-                        }
-                    }
-                    "size" => {
-                        if let Ok(size) = value.parse::<u64>() {
-                            size_bytes = Some(size);
-                        }
-                    }
-                    "duration" => {
-                        if let Ok(seconds) = value.parse::<f64>() {
-                            duration = Some(seconds);
-                        }
-                    }
-                    "width" => {
-                        if let Ok(w) = value.parse::<u32>() {
-                            width = Some(w);
-                        }
-                    }
-                    "height" => {
-                        if let Ok(h) = value.parse::<u32>() {
-                            height = Some(h);
-                        }
-                    }
-                    "r_frame_rate" => {
-                        // Parse fractional framerate like "30/1" or "30000/1001"
-                        if let Some((num, den)) = value.split_once('/')
-                            && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())
-                            && d > 0.0
-                        {
-                            frames_per_second = Some(n / d);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Fall back to file metadata for size if not in ffprobe output
-        let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
-
-        // Validate required fields
-        if codec.is_empty() {
-            anyhow::bail!("failed to detect video codec");
-        }
-        let Some(bitrate_kbps) = bitrate_kbps else {
-            anyhow::bail!("failed to detect bitrate");
-        };
-        let Some(duration) = duration else {
-            anyhow::bail!("failed to detect duration");
-        };
-        let Some(width) = width else {
-            anyhow::bail!("failed to detect video width");
-        };
-        let Some(height) = height else {
-            anyhow::bail!("failed to detect video height");
-        };
-        let Some(frames_per_second) = frames_per_second else {
-            anyhow::bail!("failed to detect framerate");
-        };
-
-        let warning = if stderr.is_empty() {
-            None
-        } else {
-            Some(stderr.trim().to_string())
-        };
-
-        Ok(VideoInfo {
-            codec,
-            bitrate_kbps,
-            size_bytes,
-            duration,
-            width,
-            height,
-            frames_per_second,
-            warning,
-        })
+        VideoInfo::from_ffprobe_output(&stdout, &stderr, path)
     }
 
     /// Remux HEVC video to MP4 container
@@ -576,36 +581,7 @@ impl VideoConvert {
         self.log_start(input, "remux", file_index, info, None);
         let start = Instant::now();
 
-        // Try pure copy and drop unsupported streams
-        // -map 0:v:0   -> first video stream only
-        // -map 0:a?    -> all audio streams (optional, if any)
-        // -map -0:t    -> drop attachments
-        // -map -0:d    -> drop data streams
-        // -sn          -> drop subtitles (avoids failures with non-mov_text subs)
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(FFMPEG_DEFAULT_ARGS)
-            .arg("-i")
-            .arg(input)
-            .args([
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a?",
-                "-map",
-                "-0:t",
-                "-map",
-                "-0:d",
-                "-sn",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "copy",
-                "-movflags",
-                "+faststart",
-                "-tag:v",
-                "hvc1",
-            ])
-            .arg(output);
+        let mut cmd = Self::build_remux_command(input, output, false);
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
@@ -642,32 +618,7 @@ impl VideoConvert {
             let _ = fs::remove_file(output);
         }
 
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(FFMPEG_DEFAULT_ARGS)
-            .arg("-i")
-            .arg(input)
-            .args([
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a?",
-                "-map",
-                "-0:t",
-                "-map",
-                "-0:d",
-                "-sn",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-movflags",
-                "+faststart",
-                "-tag:v",
-                "hvc1",
-            ])
-            .arg(output);
+        let mut cmd = Self::build_remux_command(input, output, true);
 
         let status = match Self::run_command_isolated(&mut cmd) {
             Ok(s) => s,
@@ -702,6 +653,7 @@ impl VideoConvert {
     }
 
     /// Convert video to HEVC using NVENC
+    #[allow(clippy::too_many_lines)]
     fn convert_to_hevc(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
         let input = &file.file.path;
         let output = &file.output_path;
@@ -848,7 +800,7 @@ impl VideoConvert {
             print_error!("Failed to delete original file: {e}");
         }
 
-        let stats = ConversionStats::new(
+        let conversion_stats = ConversionStats::new(
             info.size_bytes,
             info.bitrate_kbps,
             output_info.size_bytes,
@@ -859,12 +811,18 @@ impl VideoConvert {
 
         println!(
             "{}",
-            format!("✓ Converted in {}: {stats}", cli_tools::format_duration(duration)).cyan()
+            format!(
+                "✓ Converted in {}: {conversion_stats}",
+                cli_tools::format_duration(duration)
+            )
+            .cyan()
         );
 
-        self.log_success(output, "convert", file_index, duration, Some(&stats));
+        self.log_success(output, "convert", file_index, duration, Some(&conversion_stats));
 
-        ProcessResult::Converted { stats }
+        ProcessResult::Converted {
+            stats: conversion_stats,
+        }
     }
 
     /// Analyze files in parallel to determine which need processing.
@@ -973,7 +931,7 @@ impl VideoConvert {
     fn process_renames(&self, files: &[VideoFile]) -> usize {
         let start = Instant::now();
         let total = files.len();
-        let num_digits = total.to_string().chars().count();
+        let num_digits = total.checked_ilog10().map_or(1, |d| d as usize + 1);
         let mut renamed_count = 0;
 
         for (index, file) in files.iter().enumerate() {
@@ -1240,6 +1198,28 @@ impl VideoConvert {
                 output_path,
             }
         }
+    }
+
+    /// Build ffmpeg command for remuxing with stream copy.
+    fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool) -> Command {
+        // -map 0:v:0   -> first video stream only
+        // -map 0:a?    -> all audio streams (optional, if any)
+        // -map -0:t    -> drop attachments
+        // -map -0:d    -> drop data streams
+        // -sn          -> drop subtitles (avoids failures with non-mov_text subs)
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input).args([
+            "-map", "0:v:0", "-map", "0:a?", "-map", "-0:t", "-map", "-0:d", "-sn", "-c:v", "copy",
+        ]);
+
+        if transcode_audio {
+            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
+        } else {
+            cmd.args(["-c:a", "copy"]);
+        }
+
+        cmd.args(["-movflags", "+faststart", "-tag:v", "hvc1"]).arg(output);
+        cmd
     }
 
     /// Run a command in a new process group to prevent Ctrl+C from propagating to it.

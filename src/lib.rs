@@ -29,6 +29,9 @@ pub fn colorize_bool(value: bool) -> ColoredString {
 }
 
 /// Get filename from Path with special characters retained instead of decomposed.
+///
+/// # Errors
+/// Returns an error if the file stem cannot be extracted from the path.
 pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, String)> {
     let file_stem = os_str_to_string(path.file_stem().context("Failed to get file stem")?);
     let file_extension = os_str_to_string(path.extension().unwrap_or_default());
@@ -47,6 +50,9 @@ pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, St
 }
 
 /// Get the normalized directory name from a Path with special characters retained.
+///
+/// # Errors
+/// Returns an error if the directory name cannot be extracted from the path.
 pub fn get_normalized_dir_name(path: &Path) -> Result<String> {
     let dir_name = os_str_to_string(path.file_name().context("Failed to get directory name")?);
 
@@ -133,6 +139,11 @@ pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
 /// let path = Path::new("src");
 /// let absolute_path = resolve_input_path(Some(path)).unwrap();
 /// ```
+/// # Errors
+/// Returns an error if:
+/// - The current working directory cannot be determined
+/// - The provided path does not exist or is not accessible
+/// - Path canonicalization fails
 #[inline]
 pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
     let input_path = path
@@ -176,6 +187,11 @@ pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
 /// let path = Some("src");
 /// let absolute_path = resolve_input_path_str(path).unwrap();
 /// ```
+/// # Errors
+/// Returns an error if:
+/// - The current working directory cannot be determined
+/// - The provided path does not exist or is not accessible
+/// - Path canonicalization fails
 #[inline]
 pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
     let input_path = path.unwrap_or_default().trim().to_string();
@@ -207,6 +223,8 @@ pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
 /// If `path` is `None` or an empty string, and the absolute input path is a file,
 /// the parent directory of the input path is used.
 /// Otherwise, the input directory is used as the output path.
+/// # Errors
+/// Returns an error if the parent directory cannot be determined when the input path is a file.
 #[inline]
 pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Result<PathBuf> {
     let output_path = {
@@ -485,9 +503,14 @@ pub fn format_duration(duration: std::time::Duration) -> String {
     }
 }
 
-/// Format duration from seconds as a human-readable string
+/// Format duration from seconds as a human-readable string.
+/// Negative values are treated as zero.
 #[must_use]
 pub fn format_duration_seconds(seconds: f64) -> String {
+    // Ensure non-negative value before converting to avoid sign loss
+    let seconds = seconds.max(0.0);
+    // Values larger than u64::MAX will saturate, which is acceptable for duration display
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let secs = seconds as u64;
     if secs >= 3600 {
         format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
@@ -499,6 +522,11 @@ pub fn format_duration_seconds(seconds: f64) -> String {
 }
 
 /// Generate a shell completion script for the given shell.
+///
+/// # Errors
+/// Returns an error if:
+/// - The shell completion directory cannot be determined or created
+/// - The completion file cannot be generated or written
 pub fn generate_shell_completion(shell: Shell, mut command: Command, install: bool, command_name: &str) -> Result<()> {
     if install {
         let out_dir = get_shell_completion_dir(shell, command_name)?;
@@ -617,6 +645,9 @@ pub const fn is_network_path(_path: &Path) -> bool {
 }
 
 /// Helper method to assert floating point equality in test cases.
+///
+/// # Panics
+/// Panics if the absolute difference between `a` and `b` exceeds `f64::EPSILON`.
 #[inline]
 pub fn assert_f64_eq(a: f64, b: f64) {
     let epsilon = f64::EPSILON;
