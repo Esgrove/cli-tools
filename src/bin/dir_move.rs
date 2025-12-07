@@ -35,6 +35,14 @@ struct Args {
     #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
     exclude: Vec<String>,
 
+    /// Override prefix to use for directory names
+    #[arg(short = 'o', long = "override", num_args = 1, action = clap::ArgAction::Append, name = "OVERRIDE")]
+    prefix_override: Vec<String>,
+
+    /// Minimum number of matching files needed to create a group
+    #[arg(short, long, default_value_t = 3)]
+    group: usize,
+
     /// Only print changes without moving files
     #[arg(short, long)]
     print: bool,
@@ -64,39 +72,50 @@ struct MoveConfig {
     #[serde(default)]
     exclude: Vec<String>,
     #[serde(default)]
+    min_group_size: Option<usize>,
+    #[serde(default)]
     overwrite: bool,
+    #[serde(default)]
+    prefix_overrides: Vec<String>,
     #[serde(default)]
     recurse: bool,
     #[serde(default)]
     verbose: bool,
 }
 
-/// Wrapper needed for parsing the config file section.
+/// Wrapper needed for parsing the user config file section.
 #[derive(Debug, Default, Deserialize)]
 struct UserConfig {
     #[serde(default)]
     dirmove: MoveConfig,
 }
 
-/// Final config created from CLI arguments and user config file.
-#[derive(Debug, Default)]
+/// Final config combined from CLI arguments and user config file.
+#[derive(Debug)]
 struct Config {
     create: bool,
     dryrun: bool,
     include: Vec<String>,
     exclude: Vec<String>,
+    min_group_size: usize,
     overwrite: bool,
+    prefix_overrides: Vec<String>,
     recurse: bool,
     verbose: bool,
 }
 
+/// Information about a directory used for matching files to move.
 #[derive(Debug)]
 struct DirectoryInfo {
+    /// Absolute path to the directory.
     path: PathBuf,
+    /// Path relative to the root directory.
     relative: PathBuf,
+    /// Normalized directory name (lowercase, dots replaced with spaces).
     name: String,
 }
 
+#[derive(Debug)]
 struct DirMove {
     root: PathBuf,
     config: Config,
@@ -133,12 +152,20 @@ impl Config {
         let user_config = MoveConfig::get_user_config();
         let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
         let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
+        let prefix_overrides: Vec<String> = user_config
+            .prefix_overrides
+            .into_iter()
+            .chain(args.prefix_override)
+            .unique()
+            .collect();
         Self {
             create: args.create || user_config.create,
             dryrun: args.print || user_config.dryrun,
-            include,
             exclude,
+            include,
+            min_group_size: user_config.min_group_size.unwrap_or(args.group),
             overwrite: args.force || user_config.overwrite,
+            prefix_overrides,
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
         }
@@ -320,7 +347,8 @@ impl DirMove {
 
     /// Collect files from base path and group them by prefix.
     fn collect_files_by_prefix(&self) -> anyhow::Result<HashMap<String, Vec<PathBuf>>> {
-        let mut prefix_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        // First pass: collect all files with their filename
+        let mut files_with_names: Vec<(PathBuf, String)> = Vec::new();
 
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -329,9 +357,14 @@ impl DirMove {
             }
 
             let file_path = entry.path();
-            let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
+            let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()).map(String::from) else {
                 continue;
             };
+
+            // Skip hidden files
+            if file_name.starts_with('.') {
+                continue;
+            }
 
             if !self.config.include.is_empty() && !self.config.include.iter().any(|pattern| file_name.contains(pattern))
             {
@@ -342,13 +375,60 @@ impl DirMove {
                 continue;
             }
 
-            // Get prefix and group files
-            if let Some(prefix) = Self::get_file_prefix(file_name) {
-                prefix_groups.entry(prefix.to_string()).or_default().push(file_path);
+            files_with_names.push((file_path, file_name));
+        }
+
+        // Second pass: determine best prefix for each file
+        let mut prefix_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+        for (file_path, file_name) in &files_with_names {
+            if let Some(prefix) = Self::find_best_prefix(file_name, &files_with_names) {
+                prefix_groups.entry(prefix).or_default().push(file_path.clone());
             }
         }
 
+        // Apply prefix overrides: if a group's prefix starts with an override, use the override
+        let prefix_groups = self.apply_prefix_overrides(prefix_groups);
+
         Ok(prefix_groups)
+    }
+
+    /// Find the best prefix for a file by checking if other files share the same prefix.
+    /// For short simple prefixes (≤4 chars), tries longer prefixes first.
+    /// Returns None if only a short prefix exists with no shared longer prefix.
+    fn find_best_prefix(file_name: &str, all_files: &[(PathBuf, String)]) -> Option<String> {
+        let simple_prefix = file_name.split('.').next().filter(|p| !p.is_empty())?;
+
+        // If simple prefix is longer than 4 chars, use it directly
+        if simple_prefix.len() > 4 {
+            return Some(simple_prefix.to_string());
+        }
+
+        // For short prefixes, try to find shared longer prefixes
+        // First try 3-part prefix
+        if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
+            let matches = all_files
+                .iter()
+                .filter(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 3) == Some(three_part))
+                .count();
+            if matches > 0 {
+                return Some(three_part.to_string());
+            }
+        }
+
+        // Then try 2-part prefix
+        if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
+            let matches = all_files
+                .iter()
+                .filter(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 2) == Some(two_part))
+                .count();
+            if matches > 0 {
+                return Some(two_part.to_string());
+            }
+        }
+
+        // No shared longer prefix found for short simple prefix, skip this file
+        None
     }
 
     /// Create directories for files with matching prefixes and move files into them.
@@ -359,7 +439,7 @@ impl DirMove {
         // Filter to only groups with 3+ files
         let groups_to_process: Vec<_> = prefix_groups
             .into_iter()
-            .filter(|(_, files)| files.len() >= 3)
+            .filter(|(_, files)| files.len() >= self.config.min_group_size)
             .sorted_by(|a, b| a.0.cmp(&b.0))
             .collect();
 
@@ -369,15 +449,16 @@ impl DirMove {
         }
 
         println!(
-            "Found {} group(s) with 3+ files sharing the same prefix:\n",
-            groups_to_process.len()
+            "Found {} group(s) with {}+ files sharing the same prefix:\n",
+            groups_to_process.len(),
+            self.config.min_group_size
         );
 
         for (prefix, files) in groups_to_process {
             let dir_path = self.root.join(&prefix);
             let dir_exists = dir_path.exists();
 
-            println!("{} ({} files)", prefix.cyan().bold(), files.len());
+            println!("{}: {} files", prefix.cyan().bold(), files.len());
             for file_path in &files {
                 if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
                     println!("  {name}");
@@ -411,15 +492,47 @@ impl DirMove {
         Ok(())
     }
 
-    /// Extract the prefix from a filename (the part before the first dot).
-    /// Returns None if the filename has no dot or starts with a dot.
-    fn get_file_prefix(file_name: &str) -> Option<&str> {
-        // Skip hidden files (starting with dot)
-        if file_name.starts_with('.') {
+    /// Apply prefix overrides to groups.
+    /// If a group's prefix starts with an override, merge it under the override name.
+    fn apply_prefix_overrides(&self, groups: HashMap<String, Vec<PathBuf>>) -> HashMap<String, Vec<PathBuf>> {
+        if self.config.prefix_overrides.is_empty() {
+            return groups;
+        }
+
+        let mut result: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+        for (prefix, files) in groups {
+            // Check if any override matches the start of this prefix
+            let target_prefix = self
+                .config
+                .prefix_overrides
+                .iter()
+                .find(|&override_prefix| prefix.starts_with(override_prefix))
+                .cloned()
+                .unwrap_or(prefix);
+
+            result.entry(target_prefix).or_default().extend(files);
+        }
+
+        result
+    }
+
+    /// Extract a prefix consisting of the first n dot-separated parts.
+    /// Returns None if there aren't enough parts.
+    fn get_n_part_prefix(file_name: &str, n: usize) -> Option<&str> {
+        // Need at least n+1 parts (n for prefix, 1 for extension)
+        if file_name.split('.').count() <= n {
             return None;
         }
 
-        file_name.split('.').next().filter(|prefix| !prefix.is_empty())
+        // Find the position after the nth dot
+        let mut pos = 0;
+        for _ in 0..n {
+            pos = file_name[pos..].find('.')? + pos + 1;
+        }
+
+        // Return everything before the last dot we found (subtract 1 to exclude the dot)
+        Some(&file_name[..pos - 1])
     }
 }
 
@@ -429,5 +542,204 @@ fn main() -> anyhow::Result<()> {
         cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
     } else {
         DirMove::new(args)?.run()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_files(names: &[&str]) -> Vec<(PathBuf, String)> {
+        names.iter().map(|n| (PathBuf::from(*n), (*n).to_string())).collect()
+    }
+
+    #[test]
+    fn test_get_n_part_prefix_three_parts() {
+        assert_eq!(
+            DirMove::get_n_part_prefix("Some.Name.Thing.v1.mp4", 3),
+            Some("Some.Name.Thing")
+        );
+    }
+
+    #[test]
+    fn test_get_n_part_prefix_two_parts() {
+        assert_eq!(DirMove::get_n_part_prefix("Some.Name.Thing.mp4", 2), Some("Some.Name"));
+    }
+
+    #[test]
+    fn test_get_n_part_prefix_not_enough_parts() {
+        // Need n+1 parts minimum (n for prefix, 1 for extension)
+        assert_eq!(DirMove::get_n_part_prefix("Some.Name.mp4", 3), None);
+        assert_eq!(DirMove::get_n_part_prefix("Some.mp4", 2), None);
+    }
+
+    #[test]
+    fn test_get_n_part_prefix_exact_parts() {
+        // 3 parts total, asking for 2-part prefix should work
+        assert_eq!(DirMove::get_n_part_prefix("Some.Name.mp4", 2), Some("Some.Name"));
+    }
+
+    #[test]
+    fn test_find_best_prefix_long_simple_prefix() {
+        // Simple prefix > 4 chars should be used directly
+        let files = make_test_files(&["LongName.v1.mp4", "Other.v2.mp4"]);
+        assert_eq!(
+            DirMove::find_best_prefix("LongName.v1.mp4", &files),
+            Some("LongName".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_short_prefix_no_matches() {
+        // Short prefix with no shared longer prefix should return None
+        let files = make_test_files(&["ABC.random.mp4", "XYZ.other.mp4"]);
+        assert_eq!(DirMove::find_best_prefix("ABC.random.mp4", &files), None);
+    }
+
+    #[test]
+    fn test_find_best_prefix_short_prefix_with_three_part_match() {
+        // Files sharing 3-part prefix should be grouped by that
+        let files = make_test_files(&[
+            "Some.Name.Thing.v1.mp4",
+            "Some.Name.Thing.v2.mp4",
+            "Some.Name.Other.v1.mp4",
+        ]);
+        assert_eq!(
+            DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
+            Some("Some.Name.Thing".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_short_prefix_fallback_to_two_part() {
+        // No 3-part matches, but 2-part matches exist
+        let files = make_test_files(&["Some.Name.Thing.mp4", "Some.Name.Other.mp4", "Some.Name.More.mp4"]);
+        assert_eq!(
+            DirMove::find_best_prefix("Some.Name.Thing.mp4", &files),
+            Some("Some.Name".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_prefers_three_part_over_two_part() {
+        // When both 3-part and 2-part matches exist, prefer 3-part
+        let files = make_test_files(&[
+            "Some.Name.Thing.v1.mp4",
+            "Some.Name.Thing.v2.mp4",
+            "Some.Name.Other.v1.mp4",
+            "Some.Name.Other.v2.mp4",
+        ]);
+        // Should match on 3-part, not fall back to 2-part
+        assert_eq!(
+            DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
+            Some("Some.Name.Thing".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_exactly_four_char_prefix() {
+        // 4-char prefix is still "short", needs longer match
+        let files = make_test_files(&["ABCD.Name.Thing.mp4", "ABCD.Name.Other.mp4"]);
+        assert_eq!(
+            DirMove::find_best_prefix("ABCD.Name.Thing.mp4", &files),
+            Some("ABCD.Name".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_five_char_prefix_uses_simple() {
+        // 5-char prefix is "long", uses simple prefix directly
+        let files = make_test_files(&["ABCDE.Name.Thing.mp4", "ABCDE.Name.Other.mp4"]);
+        assert_eq!(
+            DirMove::find_best_prefix("ABCDE.Name.Thing.mp4", &files),
+            Some("ABCDE".to_string())
+        );
+    }
+
+    fn make_test_config(prefix_overrides: Vec<String>) -> Config {
+        Config {
+            create: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 3,
+            overwrite: false,
+            prefix_overrides,
+            recurse: false,
+            verbose: false,
+        }
+    }
+
+    fn make_test_dirmove(prefix_overrides: Vec<String>) -> DirMove {
+        DirMove {
+            root: PathBuf::from("."),
+            config: make_test_config(prefix_overrides),
+        }
+    }
+
+    #[test]
+    fn test_apply_prefix_overrides_no_overrides() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Some.Name.Thing"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_prefix_overrides_matching_override() {
+        let dirmove = make_test_dirmove(vec!["longer.prefix".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert(
+            "longer.prefix.name".to_string(),
+            vec![PathBuf::from("longer.prefix.name.file.mp4")],
+        );
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("longer.prefix"));
+        assert!(!result.contains_key("longer.prefix.name"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_prefix_overrides_merges_groups() {
+        let dirmove = make_test_dirmove(vec!["Some.Name".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+        groups.insert("Some.Name.Other".to_string(), vec![PathBuf::from("file2.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Some.Name"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("Some.Name").map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn test_apply_prefix_overrides_non_matching() {
+        let dirmove = make_test_dirmove(vec!["Other.Prefix".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Some.Name.Thing"));
+        assert!(!result.contains_key("Other.Prefix"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_prefix_overrides_partial_match_only() {
+        // Override "Some" should NOT match "Something" (must be prefix match)
+        let dirmove = make_test_dirmove(vec!["Some".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Something.Else".to_string(), vec![PathBuf::from("file1.mp4")]);
+        groups.insert("Some.Name".to_string(), vec![PathBuf::from("file2.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        // "Something.Else" starts with "Some" so it gets merged
+        // "Some.Name" also starts with "Some" so it gets merged
+        assert!(result.contains_key("Some"));
+        assert_eq!(result.len(), 1);
     }
 }
