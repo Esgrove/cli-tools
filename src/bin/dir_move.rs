@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,10 @@ struct Args {
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
 
+    /// Create directories for files with matching prefixes
+    #[arg(short, long)]
+    create: bool,
+
     /// Overwrite existing files
     #[arg(short, long)]
     force: bool,
@@ -30,7 +35,7 @@ struct Args {
     #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
     exclude: Vec<String>,
 
-    /// Only print changes without renaming files
+    /// Only print changes without moving files
     #[arg(short, long)]
     print: bool,
 
@@ -50,6 +55,8 @@ struct Args {
 /// Config from a config file
 #[derive(Debug, Default, Deserialize)]
 struct MoveConfig {
+    #[serde(default)]
+    create: bool,
     #[serde(default)]
     dryrun: bool,
     #[serde(default)]
@@ -74,6 +81,7 @@ struct UserConfig {
 /// Final config created from CLI arguments and user config file.
 #[derive(Debug, Default)]
 struct Config {
+    create: bool,
     dryrun: bool,
     include: Vec<String>,
     exclude: Vec<String>,
@@ -126,6 +134,7 @@ impl Config {
         let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
         let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
         Self {
+            create: args.create || user_config.create,
             dryrun: args.print || user_config.dryrun,
             include,
             exclude,
@@ -159,7 +168,11 @@ impl DirMove {
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
-        self.move_files_to_dir()
+        if self.config.create {
+            self.create_dirs_and_move_files()
+        } else {
+            self.move_files_to_dir()
+        }
     }
 
     fn move_files_to_dir(&self) -> anyhow::Result<()> {
@@ -264,6 +277,149 @@ impl DirMove {
         }
 
         Ok(())
+    }
+
+    /// Move files to the target directory, creating it if needed.
+    fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
+        if !dir_path.exists() {
+            fs::create_dir(dir_path)?;
+            if let Some(name) = dir_path.file_name().and_then(|n| n.to_str()) {
+                println!("  Created directory: {name}");
+            }
+        }
+
+        // Move files
+        for file_path in files {
+            let Some(file_name) = file_path.file_name() else {
+                print_error!("Could not get file name for path: {}", file_path.display());
+                continue;
+            };
+            let new_path = dir_path.join(file_name);
+
+            if new_path.exists() && !self.config.overwrite {
+                print_warning!(
+                    "Skipping existing file: {}",
+                    cli_tools::path_to_string_relative(&new_path)
+                );
+                continue;
+            }
+
+            match fs::rename(file_path, &new_path) {
+                Ok(()) => {
+                    if self.config.verbose {
+                        println!("  Moved: {}", file_name.to_string_lossy());
+                    }
+                }
+                Err(e) => print_error!("Failed to move {}: {e}", file_path.display()),
+            }
+        }
+        println!("  Moved {} files", files.len());
+
+        Ok(())
+    }
+
+    /// Collect files from base path and group them by prefix.
+    fn collect_files_by_prefix(&self) -> anyhow::Result<HashMap<String, Vec<PathBuf>>> {
+        let mut prefix_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+
+            let file_path = entry.path();
+            let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            if !self.config.include.is_empty() && !self.config.include.iter().any(|pattern| file_name.contains(pattern))
+            {
+                continue;
+            }
+            if !self.config.exclude.is_empty() && self.config.exclude.iter().any(|pattern| file_name.contains(pattern))
+            {
+                continue;
+            }
+
+            // Get prefix and group files
+            if let Some(prefix) = Self::get_file_prefix(file_name) {
+                prefix_groups.entry(prefix.to_string()).or_default().push(file_path);
+            }
+        }
+
+        Ok(prefix_groups)
+    }
+
+    /// Create directories for files with matching prefixes and move files into them.
+    /// Only considers files directly in the base path (not recursive).
+    fn create_dirs_and_move_files(&self) -> anyhow::Result<()> {
+        let prefix_groups = self.collect_files_by_prefix()?;
+
+        // Filter to only groups with 3+ files
+        let groups_to_process: Vec<_> = prefix_groups
+            .into_iter()
+            .filter(|(_, files)| files.len() >= 3)
+            .sorted_by(|a, b| a.0.cmp(&b.0))
+            .collect();
+
+        if groups_to_process.is_empty() {
+            println!("No file groups with 3 or more matching prefixes found.");
+            return Ok(());
+        }
+
+        println!(
+            "Found {} group(s) with 3+ files sharing the same prefix:\n",
+            groups_to_process.len()
+        );
+
+        for (prefix, files) in groups_to_process {
+            let dir_path = self.root.join(&prefix);
+            let dir_exists = dir_path.exists();
+
+            println!("{} ({} files)", prefix.cyan().bold(), files.len());
+            for file_path in &files {
+                if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
+                    println!("  {name}");
+                }
+            }
+
+            if dir_exists {
+                println!("  {} Directory already exists", "→".green());
+            } else {
+                println!("  {} Will create directory: {}", "→".yellow(), prefix);
+            }
+
+            if !self.config.dryrun {
+                print!("{}", "Create directory and move files? (y/n): ".magenta());
+                io::stdout().flush()?;
+
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+
+                if input.trim().eq_ignore_ascii_case("y") {
+                    if let Err(e) = self.move_files_to_target_dir(&dir_path, &files) {
+                        print_error!("Failed to process {}: {e}", prefix);
+                    }
+                } else {
+                    println!("  Skipped");
+                }
+            }
+            println!();
+        }
+
+        Ok(())
+    }
+
+    /// Extract the prefix from a filename (the part before the first dot).
+    /// Returns None if the filename has no dot or starts with a dot.
+    fn get_file_prefix(file_name: &str) -> Option<&str> {
+        // Skip hidden files (starting with dot)
+        if file_name.starts_with('.') {
+            return None;
+        }
+
+        file_name.split('.').next().filter(|prefix| !prefix.is_empty())
     }
 }
 
