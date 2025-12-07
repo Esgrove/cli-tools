@@ -455,10 +455,11 @@ impl DirMove {
         );
 
         for (prefix, files) in groups_to_process {
-            let dir_path = self.root.join(&prefix);
+            let dir_name = prefix.replace('.', " ");
+            let dir_path = self.root.join(&dir_name);
             let dir_exists = dir_path.exists();
 
-            println!("{}: {} files", prefix.cyan().bold(), files.len());
+            println!("{}: {} files", dir_name.cyan().bold(), files.len());
             for file_path in &files {
                 if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
                     println!("  {name}");
@@ -468,7 +469,7 @@ impl DirMove {
             if dir_exists {
                 println!("  {} Directory already exists", "→".green());
             } else {
-                println!("  {} Will create directory: {}", "→".yellow(), prefix);
+                println!("  {} Will create directory: {dir_name}", "→".yellow());
             }
 
             if !self.config.dryrun {
@@ -480,7 +481,7 @@ impl DirMove {
 
                 if input.trim().eq_ignore_ascii_case("y") {
                     if let Err(e) = self.move_files_to_target_dir(&dir_path, &files) {
-                        print_error!("Failed to process {}: {e}", prefix);
+                        print_error!("Failed to process {dir_name}: {e}");
                     }
                 } else {
                     println!("  Skipped");
