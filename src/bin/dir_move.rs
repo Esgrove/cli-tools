@@ -336,7 +336,7 @@ impl DirMove {
             }
         }
 
-        // Move files
+        let mut moved_count = 0;
         for file_path in files {
             let Some(file_name) = file_path.file_name() else {
                 print_error!("Could not get file name for path: {}", file_path.display());
@@ -357,11 +357,12 @@ impl DirMove {
                     if self.config.verbose {
                         println!("  Moved: {}", file_name.to_string_lossy());
                     }
+                    moved_count += 1;
                 }
                 Err(e) => print_error!("Failed to move {}: {e}", file_path.display()),
             }
         }
-        println!("  Moved {} files", files.len());
+        println!("  Moved {moved_count} files");
 
         Ok(())
     }
@@ -780,7 +781,6 @@ mod tests {
 
     #[test]
     fn test_apply_prefix_overrides_partial_match_only() {
-        // Override "Some" should NOT match "Something" (must be prefix match)
         let dirmove = make_test_dirmove(vec!["Some".to_string()]);
         let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
         groups.insert("Something.Else".to_string(), vec![PathBuf::from("file1.mp4")]);
