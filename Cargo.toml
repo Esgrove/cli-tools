@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "4.3.0"
+version = "5.0.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -97,9 +97,4 @@ cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 fn_params_excessive_bools = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-similar_names = "allow"
 struct_excessive_bools = "allow"
-too_many_lines = "allow"
-unreadable_literal = "allow"

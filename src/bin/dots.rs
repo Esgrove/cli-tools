@@ -365,47 +365,9 @@ impl Dots {
                 if self.config.verbose {
                     println!("Using directory prefix: {name}");
                 }
-                let prefix_regex_start_full_date = Regex::new(
-                    format!(
-                        "^({}\\.)(.{{1,32}}?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
-                        regex::escape(&name),
-                    )
-                    .as_str(),
-                )
-                .context("Failed to compile prefix dir full date regex")?;
-
-                let prefix_regex_start_year = Regex::new(
-                    format!(
-                        "^({}\\.)(.{{1,32}}?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
-                        regex::escape(&name)
-                    )
-                    .as_str(),
-                )
-                .context("Failed to compile prefix dir year regex")?;
-
-                let prefix_regex_middle_full_date = Regex::new(
-                    format!(
-                        "^(.{{1,32}}?\\.)({}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
-                        regex::escape(&name),
-                    ).as_str(),
-                ).context("Failed to compile prefix dir full date regex")?;
-
-                let prefix_regex_middle_year = Regex::new(
-                    format!(
-                        "^(.{{1,32}}?\\.)({}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
-                        regex::escape(&name)
-                    )
-                    .as_str(),
-                )
-                .context("Failed to compile prefix dir year regex")?;
-
+                let regexes = Self::build_prefix_dir_regexes(&name)?;
                 self.config.prefix = Option::from(name);
-                self.config.regex_replace_after.extend([
-                    (prefix_regex_start_full_date, "$2.$3.$1.".to_string()),
-                    (prefix_regex_start_year, "$2.$3.$1.".to_string()),
-                    (prefix_regex_middle_full_date, "$1.$3.$2.".to_string()),
-                    (prefix_regex_middle_year, "$1.$3.$2.".to_string()),
-                ]);
+                self.config.regex_replace_after.extend(regexes);
             } else if self.config.suffix_dir {
                 if self.config.verbose {
                     println!("Using directory suffix: {name}");
@@ -628,7 +590,7 @@ impl Dots {
     fn rename_paths(&self, paths: Vec<(PathBuf, PathBuf)>) -> usize {
         let mut num_renamed: usize = 0;
         let max_items = paths.len();
-        let max_chars = paths.len().to_string().chars().count();
+        let max_chars = paths.len().checked_ilog10().map_or(1, |d| d as usize + 1);
         for (index, (path, mut new_path)) in paths.into_iter().enumerate() {
             let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
             let mut new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
@@ -754,49 +716,16 @@ impl Dots {
 
     /// Format the file name without the file extension
     fn format_name(&self, file_name: &str) -> String {
-        let mut file_name = String::from(file_name);
-        if !self.config.pre_replace.is_empty() {
-            file_name = self
-                .config
-                .pre_replace
-                .iter()
-                .fold(file_name, |acc, (pattern, replacement)| {
-                    acc.replace(pattern, replacement)
-                });
-        }
+        let mut new_name = String::from(file_name);
 
-        // Apply static replacements
-        let mut new_name = REPLACE.iter().fold(file_name, |acc, &(pattern, replacement)| {
-            acc.replace(pattern, replacement)
-        });
-
-        new_name = RE_BRACKETS.replace_all(&new_name, ".").to_string();
-        new_name = RE_DOTCOM.replace_all(&new_name, ".").to_string();
-        new_name = RE_EXCLAMATION.replace_all(&new_name, ".").to_string();
-        new_name = RE_WHITESPACE.replace_all(&new_name, ".").to_string();
-        new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
-
+        self.apply_replacements(&mut new_name);
         Self::remove_special_characters(&mut new_name);
 
         if self.config.convert_case {
             new_name = new_name.to_lowercase();
         }
 
-        // Apply extra replacements from args and user config
-        new_name = self
-            .config
-            .replace
-            .iter()
-            .fold(new_name, |acc, (pattern, replacement)| {
-                acc.replace(pattern, replacement)
-            });
-
-        // Apply regex replacements from args and user config
-        if !self.config.regex_replace.is_empty() {
-            for (regex, replacement) in &self.config.regex_replace {
-                new_name = regex.replace_all(&new_name, replacement).to_string();
-            }
-        }
+        self.apply_config_replacements(&mut new_name);
 
         if self.config.remove_random {
             Self::remove_random_identifiers(&mut new_name);
@@ -804,14 +733,7 @@ impl Dots {
 
         new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
 
-        // Temporarily convert dots back to whitespace so titlecase works
-        new_name = new_name.replace('.', " ");
-        new_name = titlecase::titlecase(&new_name);
-        new_name = new_name.replace(' ', ".");
-
-        // Fix encoding capitalization
-        new_name = new_name.replace("X265", "x265").replace("X264", "x264");
-
+        Self::apply_titlecase(&mut new_name);
         Self::convert_written_date_format(&mut new_name);
 
         if let Some(date_flipped_name) = if self.config.rename_directories {
@@ -823,54 +745,11 @@ impl Dots {
         }
 
         if let Some(ref prefix) = self.config.prefix {
-            if !new_name.starts_with(prefix) && new_name.contains(prefix) {
-                new_name = new_name.replacen(prefix, "", 1);
-            }
-
-            let lower_name = new_name.to_lowercase();
-            let lower_prefix = prefix.to_lowercase();
-
-            if lower_name.starts_with(&lower_prefix) {
-                // Full prefix match - update capitalization
-                new_name = format!("{}{}", prefix, &new_name[prefix.len()..]);
-            } else {
-                // Check if new_name starts with any suffix of the prefix
-                let mut found_suffix_match = false;
-                let prefix_parts: Vec<&str> = prefix.split('.').collect();
-
-                for i in 1..prefix_parts.len() {
-                    let suffix = prefix_parts[i..].join(".");
-                    let lower_suffix = suffix.to_lowercase();
-
-                    if lower_name.starts_with(&lower_suffix) {
-                        // Found a matching suffix, replace with full prefix
-                        new_name = format!("{}{}", prefix, &new_name[suffix.len()..]);
-                        found_suffix_match = true;
-                        break;
-                    }
-                }
-
-                if !found_suffix_match {
-                    new_name = format!("{prefix}.{new_name}");
-                }
-            }
+            new_name = Self::apply_prefix(&new_name, prefix);
         }
 
         if let Some(ref suffix) = self.config.suffix {
-            if new_name.starts_with(suffix) {
-                new_name = new_name.replacen(suffix, "", 1);
-            }
-            if new_name.contains(suffix) {
-                self.remove_from_start(&mut new_name);
-            } else {
-                let lower_name = new_name.to_lowercase();
-                let lower_suffix = suffix.to_lowercase();
-                if lower_name.ends_with(&lower_suffix) {
-                    new_name = format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix);
-                } else {
-                    new_name = format!("{new_name}.{suffix}");
-                }
-            }
+            new_name = self.apply_suffix(&new_name, suffix);
         }
 
         if !self.config.move_to_start.is_empty() {
@@ -886,17 +765,18 @@ impl Dots {
             self.remove_from_start(&mut new_name);
         }
 
-        // Apply regex replacements
-        // Workaround for prefix regex
+        // Apply regex replacements (workaround for prefix regex)
         if !self.config.regex_replace_after.is_empty() {
             for (regex, replacement) in &self.config.regex_replace_after {
                 new_name = regex.replace_all(&new_name, replacement).to_string();
             }
         }
 
-        new_name = RE_DOTS.replace_all(&new_name, ".").to_string();
-        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
-        new_name
+        RE_DOTS
+            .replace_all(&new_name, ".")
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_string()
     }
 
     fn move_to_start(&self, name: &mut String) {
@@ -976,6 +856,99 @@ impl Dots {
         *name = cleaned;
     }
 
+    /// Apply suffix to the filename, handling various matching scenarios.
+    fn apply_suffix(&self, name: &str, suffix: &str) -> String {
+        let mut new_name = name.to_string();
+
+        if new_name.starts_with(suffix) {
+            new_name = new_name.replacen(suffix, "", 1);
+        }
+
+        if new_name.contains(suffix) {
+            self.remove_from_start(&mut new_name);
+            return new_name;
+        }
+
+        let lower_name = new_name.to_lowercase();
+        let lower_suffix = suffix.to_lowercase();
+
+        if lower_name.ends_with(&lower_suffix) {
+            format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix)
+        } else {
+            format!("{new_name}.{suffix}")
+        }
+    }
+
+    /// Apply static and pre-configured replacements to a filename.
+    fn apply_replacements(&self, name: &mut String) {
+        for (pattern, replacement) in &self.config.pre_replace {
+            *name = name.replace(pattern, replacement);
+        }
+
+        // Apply static replacements
+        for (pattern, replacement) in REPLACE {
+            *name = name.replace(pattern, replacement);
+        }
+
+        *name = RE_BRACKETS.replace_all(name, ".").into_owned();
+        *name = RE_DOTCOM.replace_all(name, ".").into_owned();
+        *name = RE_EXCLAMATION.replace_all(name, ".").into_owned();
+        *name = RE_WHITESPACE.replace_all(name, ".").into_owned();
+        *name = RE_DOTS.replace_all(name, ".").into_owned();
+    }
+
+    /// Apply titlecase formatting.
+    fn apply_titlecase(name: &mut String) {
+        // Temporarily convert dots back to whitespace so titlecase works
+        *name = name.replace('.', " ");
+        *name = titlecase::titlecase(name);
+        *name = name.replace(' ', ".");
+        // Fix encoding capitalization
+        *name = name.replace("X265", "x265").replace("X264", "x264");
+    }
+
+    /// Apply user-configured replacements from args and config file.
+    fn apply_config_replacements(&self, name: &mut String) {
+        for (pattern, replacement) in &self.config.replace {
+            *name = name.replace(pattern, replacement);
+        }
+
+        for (regex, replacement) in &self.config.regex_replace {
+            *name = regex.replace_all(name, replacement).into_owned();
+        }
+    }
+
+    /// Apply prefix to the filename, handling various matching scenarios.
+    fn apply_prefix(name: &str, prefix: &str) -> String {
+        let mut new_name = name.to_string();
+
+        if !new_name.starts_with(prefix) && new_name.contains(prefix) {
+            new_name = new_name.replacen(prefix, "", 1);
+        }
+
+        let lower_name = new_name.to_lowercase();
+        let lower_prefix = prefix.to_lowercase();
+
+        if lower_name.starts_with(&lower_prefix) {
+            // Full prefix match - update capitalization
+            return format!("{}{}", prefix, &new_name[prefix.len()..]);
+        }
+
+        // Check if new_name starts with any suffix of the prefix
+        let prefix_parts: Vec<&str> = prefix.split('.').collect();
+        for i in 1..prefix_parts.len() {
+            let suffix = prefix_parts[i..].join(".");
+            let lower_suffix = suffix.to_lowercase();
+
+            if lower_name.starts_with(&lower_suffix) {
+                // Found a matching suffix, replace with full prefix
+                return format!("{}{}", prefix, &new_name[suffix.len()..]);
+            }
+        }
+
+        format!("{prefix}.{new_name}")
+    }
+
     fn remove_random_identifiers(name: &mut String) {
         *name = RE_IDENTIFIER
             .replace_all(name, |caps: &regex::Captures| {
@@ -991,6 +964,38 @@ impl Dots {
                 }
             })
             .to_string();
+    }
+
+    /// Build regex patterns for prefix directory date reordering.
+    fn build_prefix_dir_regexes(name: &str) -> Result<[(Regex, String); 4]> {
+        let escaped_name = regex::escape(name);
+
+        let prefix_regex_start_full_date = Regex::new(&format!(
+            "^({escaped_name}\\.)(.{{1,32}}?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
+        ))
+        .context("Failed to compile prefix dir full date regex")?;
+
+        let prefix_regex_start_year = Regex::new(&format!(
+            "^({escaped_name}\\.)(.{{1,32}}?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
+        ))
+        .context("Failed to compile prefix dir year regex")?;
+
+        let prefix_regex_middle_full_date = Regex::new(&format!(
+            "^(.{{1,32}}?\\.)({escaped_name}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
+        ))
+        .context("Failed to compile prefix dir middle full date regex")?;
+
+        let prefix_regex_middle_year = Regex::new(&format!(
+            "^(.{{1,32}}?\\.)({escaped_name}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
+        ))
+        .context("Failed to compile prefix dir middle year regex")?;
+
+        Ok([
+            (prefix_regex_start_full_date, "$2.$3.$1.".to_string()),
+            (prefix_regex_start_year, "$2.$3.$1.".to_string()),
+            (prefix_regex_middle_full_date, "$1.$3.$2.".to_string()),
+            (prefix_regex_middle_year, "$1.$3.$2.".to_string()),
+        ])
     }
 
     fn has_at_least_six_digits(s: &str) -> bool {
