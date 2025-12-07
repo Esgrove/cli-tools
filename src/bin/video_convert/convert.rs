@@ -870,7 +870,9 @@ impl VideoConvert {
     /// Analyze files in parallel to determine which need processing.
     /// Runs ffprobe on each file concurrently and filters based on video information.
     fn analyze_files(&self, files: Vec<VideoFile>) -> AnalysisOutput {
-        let progress_bar = ProgressBar::new(files.len() as u64);
+        let start = Instant::now();
+        let total_files = files.len();
+        let progress_bar = ProgressBar::new(total_files as u64);
         progress_bar.set_style(
             ProgressStyle::default_bar()
                 .template(PROGRESS_BAR_TEMPLATE)
@@ -957,7 +959,7 @@ impl VideoConvert {
 
         remuxes.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
 
-        self.log_analysis_stats(&analysis_stats);
+        self.log_analysis_stats(&analysis_stats, total_files, start.elapsed());
         analysis_stats.print_summary();
 
         AnalysisOutput {
@@ -969,6 +971,7 @@ impl VideoConvert {
 
     /// Process all files that need renaming. Returns the number of files successfully renamed.
     fn process_renames(&self, files: &[VideoFile]) -> usize {
+        let start = Instant::now();
         let total = files.len();
         let num_digits = total.to_string().chars().count();
         let mut renamed_count = 0;
@@ -998,6 +1001,7 @@ impl VideoConvert {
             }
         }
 
+        self.log_renames(renamed_count, total, start.elapsed());
         renamed_count
     }
 
@@ -1107,8 +1111,16 @@ impl VideoConvert {
         self.logger.borrow_mut().log_init(&self.config);
     }
 
-    fn log_analysis_stats(&self, stats: &AnalysisStats) {
-        self.logger.borrow_mut().log_analysis_stats(stats);
+    fn log_analysis_stats(&self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
+        self.logger
+            .borrow_mut()
+            .log_analysis_stats(stats, total_files, duration);
+    }
+
+    fn log_renames(&self, renamed_count: usize, total_count: usize, duration: Duration) {
+        self.logger
+            .borrow_mut()
+            .log_renames(renamed_count, total_count, duration);
     }
 
     fn log_start(

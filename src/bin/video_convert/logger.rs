@@ -141,8 +141,14 @@ impl FileLogger {
     }
 
     /// Log analysis phase statistics
-    pub(crate) fn log_analysis_stats(&mut self, stats: &AnalysisStats) {
-        let _ = writeln!(self.writer, "[{}] ANALYSIS COMPLETE", Self::timestamp());
+    pub(crate) fn log_analysis_stats(&mut self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
+        let _ = writeln!(
+            self.writer,
+            "[{}] ANALYSIS COMPLETE | {} files in {}",
+            Self::timestamp(),
+            total_files,
+            cli_tools::format_duration(duration)
+        );
         let _ = writeln!(self.writer, "  Files to convert:      {}", stats.to_convert);
         let _ = writeln!(self.writer, "  Files to remux:        {}", stats.to_remux);
         let _ = writeln!(self.writer, "  Files to rename:       {}", stats.to_rename);
@@ -155,6 +161,19 @@ impl FileLogger {
         if stats.analysis_failed > 0 {
             let _ = writeln!(self.writer, "  Analysis failed:       {}", stats.analysis_failed);
         }
+        let _ = self.writer.flush();
+    }
+
+    /// Log rename operation statistics
+    pub(crate) fn log_renames(&mut self, renamed_count: usize, total_count: usize, duration: Duration) {
+        let _ = writeln!(
+            self.writer,
+            "[{}] RENAMES COMPLETE | {}/{} files renamed in {}",
+            Self::timestamp(),
+            renamed_count,
+            total_count,
+            cli_tools::format_duration(duration)
+        );
         let _ = self.writer.flush();
     }
 
