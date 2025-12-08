@@ -524,14 +524,13 @@ impl DupeFind {
                 let target_path = get_unique_path(&target_dir, &file.filename, &file.stem, &file.extension);
 
                 println!(
-                    "\n{}: {} -> {}",
+                    "\n{}: {}",
                     if self.config.dryrun {
                         "[DRYRUN] Move".magenta()
                     } else {
                         "Move".magenta()
                     },
-                    file.path.display(),
-                    target_path.display()
+                    cli_tools::path_to_string_relative(&target_path)
                 );
 
                 if self.config.dryrun {
