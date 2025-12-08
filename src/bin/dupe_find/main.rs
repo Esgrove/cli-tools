@@ -519,12 +519,18 @@ impl DupeFind {
         );
 
         for (identifier, files) in duplicates {
+            // Use pattern match text as directory name if available, otherwise use identifier
+            let group_name = files
+                .first()
+                .and_then(|f| f.pattern_match.map(|(start, end)| f.filename[start..end].to_string()))
+                .unwrap_or_else(|| identifier.clone());
+
             for file in files {
-                let target_dir = duplicates_dir.join(identifier);
+                let target_dir = duplicates_dir.join(&group_name);
                 let target_path = get_unique_path(&target_dir, &file.filename, &file.stem, &file.extension);
 
                 println!(
-                    "\n{}: {}",
+                    "{}: {}",
                     if self.config.dryrun {
                         "[DRYRUN] Move".magenta()
                     } else {
