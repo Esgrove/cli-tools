@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use colored::Colorize;
 use itertools::Itertools;
+use rayon::prelude::*;
 use regex::Regex;
 use serde::Deserialize;
 use walkdir::WalkDir;
@@ -22,28 +24,46 @@ const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
 /// All video extensions
 const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
 
+/// Regex to match resolution patterns like 720p, 1080p, or 1234x5678
+static RE_RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
+
+/// Regex to match codec patterns
+static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
+    let pattern = format!(r"(?i)\b({})\b", CODEC_PATTERNS.join("|"));
+    Regex::new(&pattern).expect("Invalid codec regex")
+});
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Find duplicate video files based on identifier patterns")]
 struct Args {
-    /// Optional input directory
+    /// Input directories to search
     #[arg(value_hint = clap::ValueHint::DirPath)]
-    path: Option<PathBuf>,
+    paths: Vec<PathBuf>,
 
     /// Identifier patterns to search for (regex)
-    #[arg(short = 'p', long, num_args = 1, action = clap::ArgAction::Append, name = "PATTERN")]
+    #[arg(short = 'g', long, num_args = 1, action = clap::ArgAction::Append, name = "PATTERN")]
     pattern: Vec<String>,
 
-    /// Video file extensions to include
-    #[arg(short = 'x', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
+    /// File extensions to include
+    #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
     extension: Vec<String>,
 
     /// Move duplicates to a "Duplicates" directory
-    #[arg(short, long)]
+    #[arg(short, long = "move")]
     move_files: bool,
 
     /// Only print changes without moving files
-    #[arg(short = 'n', long)]
-    dryrun: bool,
+    #[arg(short, long)]
+    print: bool,
+
+    /// Recurse into subdirectories
+    #[arg(short, long)]
+    recurse: bool,
+
+    /// Use default paths from config file
+    #[arg(short, long)]
+    default: bool,
 
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
@@ -54,9 +74,11 @@ struct Args {
     verbose: bool,
 }
 
-/// Config from a config file
+/// Config from the user config file.
 #[derive(Debug, Default, Deserialize)]
 struct DupeConfig {
+    #[serde(default)]
+    default_paths: Vec<PathBuf>,
     #[serde(default)]
     dryrun: bool,
     #[serde(default)]
@@ -64,7 +86,11 @@ struct DupeConfig {
     #[serde(default)]
     move_files: bool,
     #[serde(default)]
+    paths: Vec<PathBuf>,
+    #[serde(default)]
     patterns: Vec<String>,
+    #[serde(default)]
+    recurse: bool,
     #[serde(default)]
     verbose: bool,
 }
@@ -77,12 +103,13 @@ struct UserConfig {
 }
 
 /// Final config created from CLI arguments and user config file.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Config {
     dryrun: bool,
     extensions: Vec<String>,
     move_files: bool,
     patterns: Vec<Regex>,
+    recurse: bool,
     verbose: bool,
 }
 
@@ -94,12 +121,8 @@ struct FileInfo {
 }
 
 struct DupeFind {
-    root: PathBuf,
+    roots: Vec<PathBuf>,
     config: Config,
-    /// Regex to match resolution patterns like 720p, 1080p, or 1234x5678
-    resolution_regex: Regex,
-    /// Regex to match codec patterns
-    codec_regex: Regex,
 }
 
 impl DupeConfig {
@@ -165,10 +188,11 @@ impl Config {
             .collect();
 
         Ok(Self {
-            dryrun: args.dryrun || user_config.dryrun,
+            dryrun: args.print || user_config.dryrun,
             extensions,
             move_files: args.move_files || user_config.move_files,
             patterns,
+            recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
         })
     }
@@ -183,30 +207,49 @@ impl FileInfo {
 
 impl DupeFind {
     pub fn new(args: &Args) -> anyhow::Result<Self> {
-        let root = cli_tools::resolve_input_path(args.path.as_deref())?;
+        let user_config = DupeConfig::get_user_config();
+
+        // Resolve all input paths:
+        // - If default flag is set, use default_paths from config
+        // - CLI args take priority, then config file, then current directory
+        let roots = if args.default && !user_config.default_paths.is_empty() {
+            user_config
+                .default_paths
+                .iter()
+                .map(|p| cli_tools::resolve_required_input_path(p))
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else if !args.paths.is_empty() {
+            args.paths
+                .iter()
+                .map(|p| cli_tools::resolve_required_input_path(p))
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else if !user_config.paths.is_empty() {
+            user_config
+                .paths
+                .iter()
+                .map(|p| cli_tools::resolve_required_input_path(p))
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            vec![cli_tools::resolve_input_path(None)?]
+        };
+
         let config = Config::from_args(args)?;
 
-        // Regex for matching resolutions: 720p, 1080p, etc., or WxH format like 1920x1080
-        let resolution_regex =
-            Regex::new(r"(?i)[\.\-_]?(\d{3,4}p|\d{3,4}x\d{3,4})[\.\-_]?").expect("Invalid resolution regex");
-
-        // Regex for matching codec patterns
-        let codec_pattern = format!(r"(?i)[\.\-_]?({})[\.\-_]?", CODEC_PATTERNS.join("|"));
-        let codec_regex = Regex::new(&codec_pattern).expect("Invalid codec regex");
-
-        Ok(Self {
-            root,
-            config,
-            resolution_regex,
-            codec_regex,
-        })
+        Ok(Self { roots, config })
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
-        println!("Scanning {} for video files...", self.root.display().to_string().cyan());
+        let paths_display = self
+            .roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("Scanning {} for video files...", paths_display.cyan());
 
         if self.config.verbose {
             println!("Extensions: {:?}", self.config.extensions);
+            println!("Recursive: {}", self.config.recurse);
             if !self.config.patterns.is_empty() {
                 println!(
                     "Patterns: {:?}",
@@ -219,8 +262,8 @@ impl DupeFind {
             }
         }
 
-        // Collect all video files
-        let files = self.collect_video_files();
+        // Collect all video files in parallel
+        let files = self.collect_video_files_parallel();
         println!("Found {} video files", files.len());
 
         // Check for exact filename duplicates in different paths
@@ -237,11 +280,32 @@ impl DupeFind {
         Ok(())
     }
 
-    /// Collect all video files in the directory tree
-    fn collect_video_files(&self) -> Vec<FileInfo> {
+    /// Collect all video files from all root directories in parallel
+    fn collect_video_files_parallel(&self) -> Vec<FileInfo> {
+        let files: Mutex<Vec<FileInfo>> = Mutex::new(Vec::new());
+
+        // Process each root directory in parallel
+        self.roots.par_iter().for_each(|root| {
+            let root_files = self.collect_video_files_from_root(root);
+            if let Ok(mut all_files) = files.lock() {
+                all_files.extend(root_files);
+            }
+        });
+
+        files.into_inner().unwrap_or_default()
+    }
+
+    /// Collect video files from a single root directory
+    fn collect_video_files_from_root(&self, root: &Path) -> Vec<FileInfo> {
         let mut files = Vec::new();
 
-        for entry in WalkDir::new(&self.root).into_iter().filter_map(Result::ok) {
+        let walker = if self.config.recurse {
+            WalkDir::new(root)
+        } else {
+            WalkDir::new(root).max_depth(1)
+        };
+
+        for entry in walker.into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -263,6 +327,7 @@ impl DupeFind {
     }
 
     /// Find files with identical filenames in different directories
+    #[allow(clippy::unused_self)]
     fn find_path_duplicates(&self, files: &[FileInfo]) {
         // Group files by filename
         let mut filename_groups: HashMap<String, Vec<&FileInfo>> = HashMap::new();
@@ -298,8 +363,7 @@ impl DupeFind {
         for (filename, files) in &duplicates {
             println!("\n{}:", filename.cyan());
             for file in files.iter().sorted_by_key(|f| &f.path) {
-                let relative = file.path.strip_prefix(&self.root).unwrap_or(&file.path);
-                println!("  {}", relative.display());
+                println!("  {}", file.path.display());
             }
         }
     }
@@ -339,8 +403,7 @@ impl DupeFind {
         for (identifier, paths) in &duplicates {
             println!("\n{}:", identifier.cyan());
             for file in paths.iter().sorted_by_key(|f| &f.path) {
-                let relative = file.path.strip_prefix(&self.root).unwrap_or(&file.path);
-                println!("  {}", relative.display());
+                println!("  {}", file.path.display());
             }
         }
 
@@ -352,12 +415,13 @@ impl DupeFind {
     }
 
     /// Find files with the same base name but different resolution, codec, or extension
+    #[allow(clippy::unused_self)]
     fn find_variants(&self, files: &[FileInfo]) {
         // Create a normalized name (without resolution, codec, and extension) -> list of files
         let mut normalized_groups: HashMap<String, Vec<&FileInfo>> = HashMap::new();
 
         for file in files {
-            let normalized = self.normalize_filename(&file.filename);
+            let normalized = Self::normalize_filename(&file.filename);
             if !normalized.is_empty() {
                 normalized_groups.entry(normalized).or_default().push(file);
             }
@@ -387,20 +451,17 @@ impl DupeFind {
         for (base_name, files) in &variants {
             println!("\n{}:", base_name.cyan());
             for file in files.iter().sorted_by_key(|f| &f.filename) {
-                let relative = file.path.strip_prefix(&self.root).unwrap_or(&file.path);
                 // Show resolution and codec info
-                let resolution = self
-                    .extract_resolution(&file.filename)
-                    .unwrap_or_else(|| "?".to_string());
+                let resolution = Self::extract_resolution(&file.filename).unwrap_or_else(|| "?".to_string());
                 let codec = Self::extract_codec(&file.filename).unwrap_or_else(|| "?".to_string());
                 let ext = file.path.extension().and_then(|e| e.to_str()).unwrap_or("?");
-                println!("  {} [{}] [{}] [.{}]", relative.display(), resolution, codec, ext);
+                println!("  {} [{}] [{}] [.{}]", file.path.display(), resolution, codec, ext);
             }
         }
     }
 
     /// Normalize a filename by removing resolution, codec, and extension
-    fn normalize_filename(&self, filename: &str) -> String {
+    fn normalize_filename(filename: &str) -> String {
         // Remove extension
         let name = Path::new(filename)
             .file_stem()
@@ -419,7 +480,7 @@ impl DupeFind {
         }
 
         // Remove WxH resolution patterns
-        normalized = self.resolution_regex.replace_all(&normalized, "").to_string();
+        normalized = RE_RESOLUTION.replace_all(&normalized, "").to_string();
 
         // Remove codec patterns
         for codec in CODEC_PATTERNS {
@@ -430,7 +491,7 @@ impl DupeFind {
         }
 
         // Also use regex to catch any remaining codec patterns
-        normalized = self.codec_regex.replace_all(&normalized, "").to_string();
+        normalized = RE_CODEC.replace_all(&normalized, "").to_string();
 
         // Clean up multiple dots/spaces/separators
         loop {
@@ -447,7 +508,7 @@ impl DupeFind {
     }
 
     /// Extract resolution from a filename
-    fn extract_resolution(&self, filename: &str) -> Option<String> {
+    fn extract_resolution(filename: &str) -> Option<String> {
         // First check for common patterns
         let lower = filename.to_lowercase();
         for pattern in RESOLUTION_PATTERNS {
@@ -457,7 +518,7 @@ impl DupeFind {
         }
 
         // Then check for WxH format
-        self.resolution_regex.find(filename).map(|m| {
+        RE_RESOLUTION.find(filename).map(|m| {
             m.as_str()
                 .trim_matches(|c| c == '.' || c == '-' || c == '_')
                 .to_string()
@@ -477,7 +538,15 @@ impl DupeFind {
 
     /// Move duplicate files to a Duplicates directory
     fn move_duplicates(&self, duplicates: &[(String, Vec<&FileInfo>)]) -> anyhow::Result<()> {
-        let duplicates_dir = self.root.join("Duplicates");
+        // Use the first root as the duplicates directory location
+        let duplicates_dir = self.roots.first().map_or_else(
+            || {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("Duplicates")
+            },
+            |r| r.join("Duplicates"),
+        );
 
         if self.config.dryrun {
             println!("\n{}", "Dry run - no files will be moved.".yellow());
@@ -488,14 +557,11 @@ impl DupeFind {
                 let target_dir = duplicates_dir.join(identifier);
                 let target_path = get_unique_path(&target_dir, &file.filename);
 
-                let relative_src = file.path.strip_prefix(&self.root).unwrap_or(&file.path);
-                let relative_dst = target_path.strip_prefix(&self.root).unwrap_or(&target_path);
-
                 println!(
                     "\n{}: {} -> {}",
                     "Move".magenta(),
-                    relative_src.display(),
-                    relative_dst.display()
+                    file.path.display(),
+                    target_path.display()
                 );
 
                 if self.config.dryrun {
@@ -570,60 +636,47 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn create_test_finder() -> DupeFind {
-        let codec_pattern = format!(r"(?i)[\.\-_]?({})[\.\-_]?", CODEC_PATTERNS.join("|"));
-        DupeFind {
-            root: PathBuf::from("."),
-            config: Config {
-                dryrun: true,
-                extensions: vec!["mp4".to_string(), "mkv".to_string()],
-                move_files: false,
-                patterns: vec![],
-                verbose: false,
-            },
-            resolution_regex: Regex::new(r"(?i)[\.\-_]?(\d{3,4}p|\d{3,4}x\d{3,4})[\.\-_]?").expect("Invalid regex"),
-            codec_regex: Regex::new(&codec_pattern).expect("Invalid codec regex"),
-        }
-    }
-
     #[test]
     fn test_extract_resolution_common_patterns() {
-        let finder = create_test_finder();
-
-        assert_eq!(finder.extract_resolution("video.720p.mp4"), Some("720p".to_string()));
-        assert_eq!(finder.extract_resolution("video.1080p.mp4"), Some("1080p".to_string()));
-        assert_eq!(finder.extract_resolution("video.1440p.mp4"), Some("1440p".to_string()));
-        assert_eq!(finder.extract_resolution("video.2160p.mp4"), Some("2160p".to_string()));
+        assert_eq!(DupeFind::extract_resolution("video.720p.mp4"), Some("720p".to_string()));
+        assert_eq!(
+            DupeFind::extract_resolution("video.1080p.mp4"),
+            Some("1080p".to_string())
+        );
+        assert_eq!(
+            DupeFind::extract_resolution("video.1440p.mp4"),
+            Some("1440p".to_string())
+        );
+        assert_eq!(
+            DupeFind::extract_resolution("video.2160p.mp4"),
+            Some("2160p".to_string())
+        );
     }
 
     #[test]
     fn test_extract_resolution_wxh_format() {
-        let finder = create_test_finder();
-
         assert_eq!(
-            finder.extract_resolution("video.1920x1080.mp4"),
+            DupeFind::extract_resolution("video.1920x1080.mp4"),
             Some("1920x1080".to_string())
         );
         assert_eq!(
-            finder.extract_resolution("video.1280x720.mp4"),
+            DupeFind::extract_resolution("video.1280x720.mp4"),
             Some("1280x720".to_string())
         );
         assert_eq!(
-            finder.extract_resolution("video.3840x2160.mp4"),
+            DupeFind::extract_resolution("video.3840x2160.mp4"),
             Some("3840x2160".to_string())
         );
         assert_eq!(
-            finder.extract_resolution("video.640x480.mp4"),
+            DupeFind::extract_resolution("video.640x480.mp4"),
             Some("640x480".to_string())
         );
     }
 
     #[test]
     fn test_extract_resolution_none() {
-        let finder = create_test_finder();
-
-        assert_eq!(finder.extract_resolution("video.mp4"), None);
-        assert_eq!(finder.extract_resolution("video.x265.mp4"), None);
+        assert_eq!(DupeFind::extract_resolution("video.mp4"), None);
+        assert_eq!(DupeFind::extract_resolution("video.x265.mp4"), None);
     }
 
     #[test]
@@ -637,44 +690,36 @@ mod tests {
 
     #[test]
     fn test_normalize_filename_removes_resolution() {
-        let finder = create_test_finder();
-
-        assert_eq!(finder.normalize_filename("video.1080p.mp4"), "video");
-        assert_eq!(finder.normalize_filename("video.720p.mkv"), "video");
-        assert_eq!(finder.normalize_filename("video.1920x1080.mp4"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.1080p.mp4"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.720p.mkv"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.1920x1080.mp4"), "video");
     }
 
     #[test]
     fn test_normalize_filename_removes_codec() {
-        let finder = create_test_finder();
-
-        assert_eq!(finder.normalize_filename("video.x265.mp4"), "video");
-        assert_eq!(finder.normalize_filename("video.x264.mkv"), "video");
-        assert_eq!(finder.normalize_filename("video.h265.mp4"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.x265.mp4"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.x264.mkv"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.h265.mp4"), "video");
     }
 
     #[test]
     fn test_normalize_filename_removes_both() {
-        let finder = create_test_finder();
-
-        assert_eq!(finder.normalize_filename("video.1080p.x265.mp4"), "video");
-        assert_eq!(finder.normalize_filename("video.720p.x264.mkv"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.1080p.x265.mp4"), "video");
+        assert_eq!(DupeFind::normalize_filename("video.720p.x264.mkv"), "video");
         assert_eq!(
-            finder.normalize_filename("Movie.Title.2024.1080p.x265.mp4"),
+            DupeFind::normalize_filename("Movie.Title.2024.1080p.x265.mp4"),
             "movie.title.2024"
         );
     }
 
     #[test]
     fn test_normalize_filename_same_base() {
-        let finder = create_test_finder();
-
         // These should all normalize to the same base name
-        let name1 = finder.normalize_filename("Movie.Title.1080p.mp4");
-        let name2 = finder.normalize_filename("Movie.Title.720p.mp4");
-        let name3 = finder.normalize_filename("Movie.Title.1920x1080.mkv");
-        let name4 = finder.normalize_filename("Movie.Title.1080p.x265.mp4");
-        let name5 = finder.normalize_filename("Movie.Title.720p.x264.mkv");
+        let name1 = DupeFind::normalize_filename("Movie.Title.1080p.mp4");
+        let name2 = DupeFind::normalize_filename("Movie.Title.720p.mp4");
+        let name3 = DupeFind::normalize_filename("Movie.Title.1920x1080.mkv");
+        let name4 = DupeFind::normalize_filename("Movie.Title.1080p.x265.mp4");
+        let name5 = DupeFind::normalize_filename("Movie.Title.720p.x264.mkv");
 
         assert_eq!(name1, name2);
         assert_eq!(name2, name3);
@@ -684,9 +729,7 @@ mod tests {
 
     #[test]
     fn test_normalize_filename_preserves_content() {
-        let finder = create_test_finder();
-
-        let normalized = finder.normalize_filename("Some.Movie.2024.1080p.x265.mp4");
+        let normalized = DupeFind::normalize_filename("Some.Movie.2024.1080p.x265.mp4");
         assert!(normalized.contains("some"));
         assert!(normalized.contains("movie"));
         assert!(normalized.contains("2024"));

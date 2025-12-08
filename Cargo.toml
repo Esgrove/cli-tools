@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "5.1.0"
+version = "6.0.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -57,6 +57,10 @@ name = "dots"
 path = "src/bin/dots.rs"
 
 [[bin]]
+name = "dupefind"
+path = "src/bin/dupe_find.rs"
+
+[[bin]]
 name = "flipdate"
 path = "src/bin/flip_date.rs"
 
@@ -75,10 +79,6 @@ path = "src/bin/visa_parse.rs"
 [[bin]]
 name = "vtag"
 path = "src/bin/version_tag.rs"
-
-[[bin]]
-name = "dupefind"
-path = "src/bin/dupe_find.rs"
 
 [profile.dev]
 incremental = true

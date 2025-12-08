@@ -99,16 +99,18 @@ and detect files with the same name but different resolutions, codecs, or file e
 ```console
 Find duplicate video files based on identifier patterns
 
-Usage: dupefind [OPTIONS] [PATH]
+Usage: dupefind [OPTIONS] [PATHS]...
 
 Arguments:
-  [PATH]  Optional input directory
+  [PATHS]...  Input directories to search
 
 Options:
-  -p, --pattern <PATTERN>      Identifier patterns to search for (regex)
+  -a, --pattern <PATTERN>      Identifier patterns to search for (regex)
   -x, --extension <EXTENSION>  Video file extensions to include
   -m, --move-files             Move duplicates to a "Duplicates" directory
-  -n, --dryrun                 Only print changes without moving files
+  -p, --print                  Only print changes without moving files
+  -r, --recurse                Recurse into subdirectories
+  -d, --default                Use default paths from config file
   -l, --completion <SHELL>     Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose                Print verbose output
   -h, --help                   Print help

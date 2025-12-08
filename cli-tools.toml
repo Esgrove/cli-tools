@@ -63,9 +63,12 @@ replace = [
 # verbose = false
 
 [dupefind]
+# default_paths = []
 # dryrun = false
 # extensions = ["mp4", "mkv", "avi", "mov", "wmv", "webm"]
 # move_files = false
+# paths = []
+# recurse = false
 # verbose = false
 
 # Identifier patterns to search for (regex)
