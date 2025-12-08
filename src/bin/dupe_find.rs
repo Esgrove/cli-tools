@@ -7,6 +7,9 @@ use std::sync::{LazyLock, Mutex};
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 use colored::Colorize;
+#[cfg(not(test))]
+use indicatif::ProgressStyle;
+use indicatif::{ParallelProgressIterator, ProgressBar};
 use itertools::Itertools;
 use rayon::prelude::*;
 use regex::Regex;
@@ -17,6 +20,11 @@ use cli_tools::{print_error, print_warning};
 
 /// Common codec patterns to remove when normalizing
 const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
+
+#[cfg(not(test))]
+const PROGRESS_BAR_CHARS: &str = "=>-";
+#[cfg(not(test))]
+const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
 /// All video extensions
 const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
@@ -342,8 +350,25 @@ impl DupeFind {
             println!("Checking {} files for duplicates...", files.len());
         }
 
-        // Compute normalized filenames in parallel
-        let normalized_keys: Vec<String> = files.par_iter().map(|file| Self::normalize_stem(&file.stem)).collect();
+        // Compute normalized filenames in parallel with progress bar
+        #[cfg(test)]
+        let progress_bar = ProgressBar::hidden();
+        #[cfg(not(test))]
+        let progress_bar = {
+            let pb = ProgressBar::new(files.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PROGRESS_BAR_TEMPLATE)
+                    .expect("Failed to set progress bar template")
+                    .progress_chars(PROGRESS_BAR_CHARS),
+            );
+            pb
+        };
+        let normalized_keys: Vec<String> = files
+            .par_iter()
+            .progress_with(progress_bar)
+            .map(|file| Self::normalize_stem(&file.stem))
+            .collect();
 
         // Use a union-find approach:
         // Map each file to a canonical group key.
@@ -485,10 +510,6 @@ impl DupeFind {
             |r| r.join("Duplicates"),
         );
 
-        if self.config.dryrun {
-            println!("\n{}", "Dry run - no files will be moved.".yellow());
-        }
-
         for (identifier, files) in duplicates {
             for file in files {
                 let target_dir = duplicates_dir.join(identifier);
@@ -496,7 +517,11 @@ impl DupeFind {
 
                 println!(
                     "\n{}: {} -> {}",
-                    "Move".magenta(),
+                    if self.config.dryrun {
+                        "[DRYRUN] Move".magenta()
+                    } else {
+                        "Move".magenta()
+                    },
                     file.path.display(),
                     target_path.display()
                 );
