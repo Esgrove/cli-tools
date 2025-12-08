@@ -518,6 +518,18 @@ impl DupeFind {
             |r| r.join("Duplicates"),
         );
 
+        println!(
+            "{}",
+            format!("\nMoving duplicates to {}", duplicates_dir.display())
+                .magenta()
+                .bold()
+        );
+
+        if self.config.dryrun {
+            // Create the duplicates directory if it doesn't exist
+            std::fs::create_dir_all(&duplicates_dir)?;
+        }
+
         for (identifier, files) in duplicates {
             // Use pattern match text as directory name if available, otherwise use identifier
             let group_name = files
