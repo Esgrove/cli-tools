@@ -1,3 +1,5 @@
+mod tui;
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
@@ -276,12 +278,18 @@ impl DupeFind {
         let duplicates = self.find_all_duplicates(&files);
 
         if duplicates.is_empty() {
-            println!("{}", "\nNo duplicates found".green());
+            println!("{}", "No duplicates found".green());
             return Ok(());
         }
 
+        // Interactive mode when not in print/dryrun mode
+        if !self.config.dryrun {
+            return crate::tui::run_interactive(&duplicates);
+        }
+
+        // Print-only mode
         println!(
-            "\n{}",
+            "{}",
             format!("Found {} duplicate groups:", duplicates.len()).yellow().bold()
         );
 
@@ -592,12 +600,12 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Helper to create a FileInfo for testing
+    /// Helper to create a `FileInfo` for testing
     fn make_file(path: &str, ext: &str) -> FileInfo {
         FileInfo::new(PathBuf::from(path), ext.to_string())
     }
 
-    /// Helper to create a DupeFind with specific patterns for testing
+    /// Helper to create a `DupeFind` with specific patterns for testing
     fn make_dupe_finder(patterns: Vec<&str>) -> DupeFind {
         let patterns = patterns
             .into_iter()
