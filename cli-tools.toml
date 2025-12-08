@@ -61,3 +61,18 @@ replace = [
 # overwrite = false
 # recursive = false
 # verbose = false
+
+[dupefind]
+# dryrun = false
+# extensions = ["mp4", "mkv", "avi", "mov", "wmv", "webm"]
+# move_files = false
+# verbose = false
+
+# Identifier patterns to search for (regex)
+patterns = [
+    "GIO\\d{3,4}",
+    "SZ\\d{3,4}",
+    "NRX\\d{3,4}",
+    "VG\\d{3,4}",
+    "EKS\\d{3,4}",
+]
