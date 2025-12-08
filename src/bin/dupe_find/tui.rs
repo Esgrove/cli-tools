@@ -110,20 +110,25 @@ pub fn run_interactive(duplicates: &[(String, Vec<FileInfo>)]) -> anyhow::Result
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = interactive_loop(&mut terminal, duplicates);
+    let actions = interactive_loop(&mut terminal, duplicates)?;
 
     // Restore terminal
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
 
-    result
+    // Apply actions after terminal is restored so warnings display correctly
+    if !actions.is_empty() {
+        apply_actions(duplicates, &actions)?;
+    }
+
+    Ok(())
 }
 
-/// Main interactive loop
+/// Main interactive loop - returns collected actions to be applied after terminal is restored
 fn interactive_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     duplicates: &[(String, Vec<FileInfo>)],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<(usize, DuplicateAction)>> {
     let mut group_index = 0;
     let mut actions: Vec<(usize, DuplicateAction)> = Vec::new();
 
@@ -145,12 +150,7 @@ fn interactive_loop(
         }
     }
 
-    // Apply all actions
-    if !actions.is_empty() {
-        apply_actions(duplicates, &actions)?;
-    }
-
-    Ok(())
+    Ok(actions)
 }
 
 /// Handle a single duplicate group interactively
@@ -368,9 +368,15 @@ fn apply_actions(duplicates: &[(String, Vec<FileInfo>)], actions: &[(usize, Dupl
             // Delete other files
             for (i, file) in sorted_files.iter().enumerate() {
                 if i != *keep_index {
-                    println!("{}: {}", colored::Colorize::red("Delete"), file.path.display());
-                    // Move to trash instead of permanent delete
-                    if let Err(e) = trash::delete(&file.path) {
+                    // Use direct delete for network paths since trash doesn't work there
+                    let result = if cli_tools::is_network_path(&file.path) {
+                        println!("{}: {}", colored::Colorize::red("Delete"), file.path.display());
+                        std::fs::remove_file(&file.path)
+                    } else {
+                        println!("{}: {}", colored::Colorize::yellow("Trash"), file.path.display());
+                        trash::delete(&file.path).map_err(std::io::Error::other)
+                    };
+                    if let Err(e) = result {
                         print_warning!("Failed to delete {}: {e}", file.path.display());
                     }
                 }
