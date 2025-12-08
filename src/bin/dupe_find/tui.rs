@@ -355,11 +355,10 @@ fn apply_actions(duplicates: &[(String, Vec<FileInfo>)], actions: &[(usize, Dupl
                 let new_path = keep_file.path.with_file_name(&new_filename);
 
                 if new_path != keep_file.path {
-                    println!(
-                        "{}: {} -> {}",
-                        colored::Colorize::cyan("Rename"),
-                        keep_file.path.display(),
-                        new_path.display()
+                    println!("{}", colored::Colorize::cyan("Rename:"));
+                    cli_tools::show_diff(
+                        &cli_tools::path_to_string_relative(&keep_file.path),
+                        &cli_tools::path_to_string_relative(&new_path),
                     );
                     std::fs::rename(&keep_file.path, &new_path)?;
                 }
