@@ -129,7 +129,7 @@ struct Args {
     case: bool,
 
     /// Enable debug prints
-    #[arg(long)]
+    #[arg(short = 'D', long)]
     debug: bool,
 
     /// Rename directories
