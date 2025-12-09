@@ -5,8 +5,8 @@
 # auto = false
 # debug = false
 # dryrun = false
-# filter = []
-# ignore = []
+# include = []
+# exclude = []
 # min_group_size = 3
 # overwrite = false
 # prefix_overrides = ["longer.prefix", "some.name"]
