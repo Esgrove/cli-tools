@@ -91,6 +91,32 @@ Options:
   -V, --version                             Print version
 ```
 
+## Dupefind
+
+Find duplicate video files based on identifier patterns,
+and detect files with the same name but different resolutions, codecs, or file extensions.
+
+```console
+Find duplicate video files based on identifier patterns
+
+Usage: dupefind [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...  Input directories to search
+
+Options:
+  -g, --pattern <PATTERN>      Identifier patterns to search for (regex)
+  -e, --extension <EXTENSION>  Video file extensions to include
+  -m, --move-files             Move duplicates to a "Duplicates" directory
+  -p, --print                  Only print changes without moving files
+  -r, --recurse                Recurse into subdirectories
+  -d, --default                Use default paths from config file
+  -l, --completion <SHELL>     Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose                Print verbose output
+  -h, --help                   Print help
+  -V, --version                Print version
+```
+
 ## Flipdate
 
 Rename files and directories to use `yyyy.mm.dd` date format for files,

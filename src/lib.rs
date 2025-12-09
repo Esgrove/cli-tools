@@ -133,7 +133,7 @@ pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
 /// The function verifies that the provided path exists and is accessible,
 /// returning an error if it does not.
 /// ```rust
-/// use std::path::{Path, PathBuf};
+/// use std::path::Path;
 /// use cli_tools::resolve_input_path;
 ///
 /// let path = Path::new("src");
@@ -146,32 +146,9 @@ pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
 /// - Path canonicalization fails
 #[inline]
 pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
-    let input_path = path
-        .map(|p| p.to_str().unwrap_or(""))
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let input_path = path.map(|p| p.to_str().unwrap_or(""));
 
-    let filepath = if input_path.is_empty() {
-        env::current_dir().context("Failed to get current working directory")?
-    } else {
-        PathBuf::from(input_path)
-    };
-    if !filepath.exists() {
-        anyhow::bail!(
-            "Input path does not exist or is not accessible: '{}'",
-            filepath.display()
-        );
-    }
-
-    let absolute_input_path = dunce::canonicalize(&filepath)?;
-
-    // Canonicalize fails for network drives on Windows :(
-    if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
-        Ok(filepath)
-    } else {
-        Ok(absolute_input_path)
-    }
+    resolve_input_path_str(input_path)
 }
 
 /// Resolves the provided input path to a directory or file to an absolute path.
@@ -194,12 +171,76 @@ pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
 /// - Path canonicalization fails
 #[inline]
 pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
-    let input_path = path.unwrap_or_default().trim().to_string();
+    let input_path = path.unwrap_or_default().trim();
     let filepath = if input_path.is_empty() {
         env::current_dir().context("Failed to get current working directory")?
     } else {
         PathBuf::from(input_path)
     };
+    if !filepath.exists() {
+        anyhow::bail!(
+            "Input path does not exist or is not accessible: '{}'",
+            filepath.display()
+        );
+    }
+
+    let absolute_input_path = dunce::canonicalize(&filepath)?;
+
+    // Canonicalize fails for network drives on Windows :(
+    if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
+        Ok(filepath)
+    } else {
+        Ok(absolute_input_path)
+    }
+}
+
+/// Resolves a required input path to an absolute path.
+///
+/// Unlike `resolve_input_path`,
+/// this function does not fall back to the current working directory when the path is empty.
+/// It requires a valid, non-empty path.
+/// ```rust
+/// use std::path::Path;
+/// use cli_tools::resolve_required_input_path;
+///
+/// let path = Path::new("src");
+/// let absolute_path = resolve_required_input_path(path).unwrap();
+/// ```
+/// # Errors
+/// Returns an error if:
+/// - The provided path is empty
+/// - The path does not exist or is not accessible
+/// - Path canonicalization fails
+pub fn resolve_required_input_path(path: &Path) -> Result<PathBuf> {
+    let input_path = path.to_str().unwrap_or("");
+
+    resolve_required_input_path_str(input_path)
+}
+
+/// Resolves a required input path to an absolute path.
+///
+/// Unlike `resolve_input_path`,
+/// this function does not fall back to the current working directory when the path is empty.
+/// It requires a valid, non-empty path.
+/// ```rust
+/// use cli_tools::resolve_required_input_path_str;
+///
+/// let path = "src";
+/// let absolute_path = resolve_required_input_path_str(path).unwrap();
+/// ```
+/// # Errors
+/// Returns an error if:
+/// - The provided path is empty
+/// - The path does not exist or is not accessible
+/// - Path canonicalization fails
+pub fn resolve_required_input_path_str(path: &str) -> Result<PathBuf> {
+    let input_path = path.trim();
+
+    if input_path.is_empty() {
+        anyhow::bail!("Input path cannot be empty");
+    }
+
+    let filepath = PathBuf::from(input_path);
     if !filepath.exists() {
         anyhow::bail!(
             "Input path does not exist or is not accessible: '{}'",
@@ -720,6 +761,37 @@ mod lib_tests {
         let resolved = resolve_input_path(None);
         assert!(resolved.is_ok());
         assert_eq!(resolved.unwrap(), env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_required_input_path_valid() {
+        let dir = tempdir().unwrap();
+        let path = dir.path();
+        let resolved = resolve_required_input_path(path);
+        assert!(resolved.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_required_input_path_nonexistent() {
+        let path = Path::new("nonexistent");
+        let resolved = resolve_required_input_path(path);
+        assert!(resolved.is_err());
+    }
+
+    #[test]
+    fn test_resolve_required_input_path_empty() {
+        let path = Path::new("");
+        let resolved = resolve_required_input_path(path);
+        assert!(resolved.is_err());
+        assert!(resolved.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_resolve_required_input_path_whitespace() {
+        let path = Path::new("  \n");
+        let resolved = resolve_required_input_path(path);
+        assert!(resolved.is_err());
+        assert!(resolved.unwrap_err().to_string().contains("cannot be empty"));
     }
 
     #[test]
