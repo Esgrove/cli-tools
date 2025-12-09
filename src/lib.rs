@@ -146,8 +146,32 @@ pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
 /// - Path canonicalization fails
 #[inline]
 pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
-    let input_path = path.map(|p| p.to_str().unwrap_or("")).unwrap_or_default().trim();
+    let input_path = path.map(|p| p.to_str().unwrap_or(""));
 
+    resolve_input_path_str(input_path)
+}
+
+/// Resolves the provided input path to a directory or file to an absolute path.
+///
+/// If `path` is `None` or an empty string, the current working directory is used.
+/// The function verifies that the provided path exists and is accessible,
+/// returning an error if it does not.
+///
+/// ```rust
+/// use std::path::PathBuf;
+/// use cli_tools::resolve_input_path_str;
+///
+/// let path = Some("src");
+/// let absolute_path = resolve_input_path_str(path).unwrap();
+/// ```
+/// # Errors
+/// Returns an error if:
+/// - The current working directory cannot be determined
+/// - The provided path does not exist or is not accessible
+/// - Path canonicalization fails
+#[inline]
+pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
+    let input_path = path.unwrap_or_default().trim();
     let filepath = if input_path.is_empty() {
         env::current_dir().context("Failed to get current working directory")?
     } else {
@@ -188,28 +212,9 @@ pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
 /// - The path does not exist or is not accessible
 /// - Path canonicalization fails
 pub fn resolve_required_input_path(path: &Path) -> Result<PathBuf> {
-    let input_path = path.to_str().unwrap_or("").trim();
+    let input_path = path.to_str().unwrap_or("");
 
-    if input_path.is_empty() {
-        anyhow::bail!("Input path cannot be empty");
-    }
-
-    let filepath = PathBuf::from(input_path);
-    if !filepath.exists() {
-        anyhow::bail!(
-            "Input path does not exist or is not accessible: '{}'",
-            filepath.display()
-        );
-    }
-
-    let absolute_input_path = dunce::canonicalize(&filepath)?;
-
-    // Canonicalize fails for network drives on Windows :(
-    if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
-        Ok(filepath)
-    } else {
-        Ok(absolute_input_path)
-    }
+    resolve_required_input_path_str(input_path)
 }
 
 /// Resolves a required input path to an absolute path.
@@ -236,49 +241,6 @@ pub fn resolve_required_input_path_str(path: &str) -> Result<PathBuf> {
     }
 
     let filepath = PathBuf::from(input_path);
-    if !filepath.exists() {
-        anyhow::bail!(
-            "Input path does not exist or is not accessible: '{}'",
-            filepath.display()
-        );
-    }
-
-    let absolute_input_path = dunce::canonicalize(&filepath)?;
-
-    // Canonicalize fails for network drives on Windows :(
-    if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
-        Ok(filepath)
-    } else {
-        Ok(absolute_input_path)
-    }
-}
-
-/// Resolves the provided input path to a directory or file to an absolute path.
-///
-/// If `path` is `None` or an empty string, the current working directory is used.
-/// The function verifies that the provided path exists and is accessible,
-/// returning an error if it does not.
-///
-/// ```rust
-/// use std::path::PathBuf;
-/// use cli_tools::resolve_input_path_str;
-///
-/// let path = Some("src");
-/// let absolute_path = resolve_input_path_str(path).unwrap();
-/// ```
-/// # Errors
-/// Returns an error if:
-/// - The current working directory cannot be determined
-/// - The provided path does not exist or is not accessible
-/// - Path canonicalization fails
-#[inline]
-pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
-    let input_path = path.unwrap_or_default().trim().to_string();
-    let filepath = if input_path.is_empty() {
-        env::current_dir().context("Failed to get current working directory")?
-    } else {
-        PathBuf::from(input_path)
-    };
     if !filepath.exists() {
         anyhow::bail!(
             "Input path does not exist or is not accessible: '{}'",
