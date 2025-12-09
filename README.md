@@ -105,7 +105,7 @@ Arguments:
   [PATHS]...  Input directories to search
 
 Options:
-  -a, --pattern <PATTERN>      Identifier patterns to search for (regex)
+  -g, --pattern <PATTERN>      Identifier patterns to search for (regex)
   -e, --extension <EXTENSION>  Video file extensions to include
   -m, --move-files             Move duplicates to a "Duplicates" directory
   -p, --print                  Only print changes without moving files
