@@ -106,7 +106,7 @@ Arguments:
 
 Options:
   -a, --pattern <PATTERN>      Identifier patterns to search for (regex)
-  -x, --extension <EXTENSION>  Video file extensions to include
+  -e, --extension <EXTENSION>  Video file extensions to include
   -m, --move-files             Move duplicates to a "Duplicates" directory
   -p, --print                  Only print changes without moving files
   -r, --recurse                Recurse into subdirectories
