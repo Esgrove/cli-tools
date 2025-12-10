@@ -73,3 +73,16 @@ replace = [
 # overwrite = false
 # recursive = false
 # verbose = false
+
+# Sort order for files to convert. Options:
+# - "bitrate" (highest first, default)
+# - "bitrate_asc" (lowest first)
+# - "size" (largest first)
+# - "size_asc" (smallest first)
+# - "duration" (longest first)
+# - "duration_asc" (shortest first)
+# - "resolution" (highest first)
+# - "resolution_asc" (lowest first)
+# - "name" (alphabetical)
+# - "name_desc" (reverse alphabetical)
+# sort = "bitrate"

@@ -14,10 +14,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::VideoConvertArgs;
 use crate::config::{Config, VideoConvertConfig};
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
+use crate::{SortOrder, VideoConvertArgs};
 
 const TARGET_EXTENSION: &str = "mp4";
 const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
@@ -911,14 +911,9 @@ impl VideoConvert {
             }
         }
 
-        if self.config.sort_by_bitrate {
-            // Sort by bitrate descending (highest first)
-            conversions.sort_unstable_by(|a, b| b.info.bitrate_kbps.cmp(&a.info.bitrate_kbps));
-        } else {
-            conversions.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
-        }
-
-        remuxes.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
+        // Sort conversions based on configured sort order
+        Self::sort_processable_files(&mut conversions, self.config.sort);
+        Self::sort_processable_files(&mut remuxes, self.config.sort);
 
         self.log_analysis_stats(&analysis_stats, total_files, start.elapsed());
         analysis_stats.print_summary();
@@ -927,6 +922,63 @@ impl VideoConvert {
             conversions,
             remuxes,
             renames,
+        }
+    }
+
+    /// Sort processable files according to the specified sort order.
+    #[inline]
+    fn sort_processable_files(files: &mut [ProcessableFile], sort_order: SortOrder) {
+        match sort_order {
+            SortOrder::Bitrate => {
+                files.sort_unstable_by(|a, b| b.info.bitrate_kbps.cmp(&a.info.bitrate_kbps));
+            }
+            SortOrder::BitrateAsc => {
+                files.sort_unstable_by(|a, b| a.info.bitrate_kbps.cmp(&b.info.bitrate_kbps));
+            }
+            SortOrder::Size => {
+                files.sort_unstable_by(|a, b| b.info.size_bytes.cmp(&a.info.size_bytes));
+            }
+            SortOrder::SizeAsc => {
+                files.sort_unstable_by(|a, b| a.info.size_bytes.cmp(&b.info.size_bytes));
+            }
+            SortOrder::Duration => {
+                files.sort_unstable_by(|a, b| {
+                    b.info
+                        .duration
+                        .partial_cmp(&a.info.duration)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::DurationAsc => {
+                files.sort_unstable_by(|a, b| {
+                    a.info
+                        .duration
+                        .partial_cmp(&b.info.duration)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::Resolution => {
+                // Sort by total pixels (width * height) descending
+                files.sort_unstable_by(|a, b| {
+                    let pixels_a = u64::from(a.info.width) * u64::from(a.info.height);
+                    let pixels_b = u64::from(b.info.width) * u64::from(b.info.height);
+                    pixels_b.cmp(&pixels_a)
+                });
+            }
+            SortOrder::ResolutionAsc => {
+                // Sort by total pixels (width * height) ascending
+                files.sort_unstable_by(|a, b| {
+                    let pixels_a = u64::from(a.info.width) * u64::from(a.info.height);
+                    let pixels_b = u64::from(b.info.width) * u64::from(b.info.height);
+                    pixels_a.cmp(&pixels_b)
+                });
+            }
+            SortOrder::Name => {
+                files.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
+            }
+            SortOrder::NameDesc => {
+                files.sort_unstable_by(|a, b| b.file.path.cmp(&a.file.path));
+            }
         }
     }
 
@@ -967,6 +1019,7 @@ impl VideoConvert {
     }
 
     /// Process all files that need remuxing.
+    #[inline]
     fn process_remuxes(
         &self,
         files: Vec<ProcessableFile>,
@@ -980,6 +1033,7 @@ impl VideoConvert {
     }
 
     /// Process all files that need conversion.
+    #[inline]
     fn process_conversions(
         &self,
         files: Vec<ProcessableFile>,
@@ -1068,26 +1122,31 @@ impl VideoConvert {
         true
     }
 
+    #[inline]
     fn log_init(&self) {
         self.logger.borrow_mut().log_init(&self.config);
     }
 
+    #[inline]
     fn log_gathered_files(&self, file_count: usize, duration: Duration) {
         self.logger.borrow_mut().log_gathered_files(file_count, duration);
     }
 
+    #[inline]
     fn log_analysis_stats(&self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
         self.logger
             .borrow_mut()
             .log_analysis_stats(stats, total_files, duration);
     }
 
+    #[inline]
     fn log_renames(&self, renamed_count: usize, total_count: usize, duration: Duration) {
         self.logger
             .borrow_mut()
             .log_renames(renamed_count, total_count, duration);
     }
 
+    #[inline]
     fn log_start(
         &self,
         file_path: &Path,
@@ -1101,6 +1160,7 @@ impl VideoConvert {
             .log_start(file_path, operation, file_index, info, quality_level);
     }
 
+    #[inline]
     fn log_success(
         &self,
         file_path: &Path,
@@ -1114,12 +1174,14 @@ impl VideoConvert {
             .log_success(file_path, operation, file_index, duration, stats);
     }
 
+    #[inline]
     fn log_failure(&self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
         self.logger
             .borrow_mut()
             .log_failure(file_path, operation, file_index, error);
     }
 
+    #[inline]
     fn log_stats(&self, stats: &RunStats) {
         self.logger.borrow_mut().log_stats(stats);
     }

@@ -6,7 +6,7 @@ use cli_tools::print_error;
 use itertools::Itertools;
 use serde::Deserialize;
 
-use crate::VideoConvertArgs;
+use crate::{SortOrder, VideoConvertArgs};
 
 /// Default video extensions
 const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];
@@ -41,7 +41,7 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     recurse: bool,
     #[serde(default)]
-    sort_by_bitrate: bool,
+    sort: Option<SortOrder>,
     #[serde(default)]
     verbose: bool,
 }
@@ -63,7 +63,7 @@ pub struct Config {
     pub(crate) recurse: bool,
     pub(crate) skip_convert: bool,
     pub(crate) skip_remux: bool,
-    pub(crate) sort_by_bitrate: bool,
+    pub(crate) sort: SortOrder,
     pub(crate) verbose: bool,
 }
 
@@ -137,7 +137,7 @@ impl Config {
             recurse: args.recurse || user_config.recurse,
             skip_convert: args.skip_convert,
             skip_remux: args.skip_remux,
-            sort_by_bitrate: args.sort_by_bitrate || user_config.sort_by_bitrate,
+            sort: user_config.sort.unwrap_or(args.sort),
             verbose: args.verbose || user_config.verbose,
         })
     }

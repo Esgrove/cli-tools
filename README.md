@@ -169,10 +169,10 @@ Options:
   -r, --recurse                Recurse into subdirectories
   -k, --skip-convert           Skip conversion
   -m, --skip-remux             Skip remuxing
-  -s, --sort-by-bitrate        Sort files by bitrate (highest first)
+  -s, --sort <ORDER>           Sort files [default: "name (alphabetical)"] [possible values: bitrate, bitrate-asc, size, size-asc, duration, duration-asc, resolution, resolution-asc, name, name-desc]
   -l, --completion <SHELL>     Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose                Print verbose output
-  -h, --help                   Print help
+  -h, --help                   Print help (see more with '--help')
   -V, --version                Print version
 ```
 
