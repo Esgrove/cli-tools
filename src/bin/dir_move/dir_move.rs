@@ -497,30 +497,36 @@ impl DirMove {
     fn find_best_prefix<'a>(file_name: &'a str, all_files: &[(PathBuf, String)]) -> Option<Cow<'a, str>> {
         let simple_prefix = file_name.split('.').next().filter(|p| !p.is_empty())?;
 
-        // If simple prefix is longer than 4 chars, use it directly
-        if simple_prefix.len() > 4 {
-            return Some(Cow::Borrowed(simple_prefix));
-        }
+        // Find all files that share the same simple prefix
+        let files_with_same_prefix: Vec<_> = all_files
+            .iter()
+            .filter(|(_, name)| name.split('.').next() == Some(simple_prefix))
+            .collect();
 
-        // For short prefixes, try to find shared longer prefixes
+        // Try to find a longer shared prefix (up to 3 parts) that ALL files with this simple prefix share
         // First try 3-part prefix
         if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
-            let has_matches = all_files
+            let all_share_three_part = files_with_same_prefix
                 .iter()
-                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 3) == Some(three_part));
-            if has_matches {
+                .all(|(_, name)| Self::get_n_part_prefix(name, 3) == Some(three_part));
+            if all_share_three_part && files_with_same_prefix.len() > 1 {
                 return Some(Cow::Borrowed(three_part));
             }
         }
 
         // Then try 2-part prefix
         if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
-            let has_matches = all_files
+            let all_share_two_part = files_with_same_prefix
                 .iter()
-                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 2) == Some(two_part));
-            if has_matches {
+                .all(|(_, name)| Self::get_n_part_prefix(name, 2) == Some(two_part));
+            if all_share_two_part && files_with_same_prefix.len() > 1 {
                 return Some(Cow::Borrowed(two_part));
             }
+        }
+
+        // For long simple prefixes (> 4 chars), use the simple prefix
+        if simple_prefix.len() > 4 {
+            return Some(Cow::Borrowed(simple_prefix));
         }
 
         // No shared longer prefix found for short simple prefix, skip this file
@@ -592,8 +598,8 @@ mod tests {
     }
 
     #[test]
-    fn test_find_best_prefix_long_simple_prefix() {
-        // Simple prefix > 4 chars should be used directly
+    fn test_find_best_prefix_long_simple_prefix_single_file() {
+        // Simple prefix > 4 chars with only one file matching should be used directly
         let files = make_test_files(&["LongName.v1.mp4", "Other.v2.mp4"]);
         assert_eq!(
             DirMove::find_best_prefix("LongName.v1.mp4", &files),
@@ -610,7 +616,22 @@ mod tests {
 
     #[test]
     fn test_find_best_prefix_short_prefix_with_three_part_match() {
-        // Files sharing 3-part prefix should be grouped by that
+        // All files with same simple prefix share 3-part prefix, so use 3-part
+        let files = make_test_files(&[
+            "Some.Name.Thing.v1.mp4",
+            "Some.Name.Thing.v2.mp4",
+            "Some.Name.Thing.v3.mp4",
+        ]);
+        assert_eq!(
+            DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
+            Some(Cow::Borrowed("Some.Name.Thing"))
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_short_prefix_mixed_three_part_uses_two_part() {
+        // Files share simple prefix "Some" but have different 3-part prefixes
+        // Should fall back to shared 2-part prefix "Some.Name"
         let files = make_test_files(&[
             "Some.Name.Thing.v1.mp4",
             "Some.Name.Thing.v2.mp4",
@@ -618,7 +639,7 @@ mod tests {
         ]);
         assert_eq!(
             DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
-            Some(Cow::Borrowed("Some.Name.Thing"))
+            Some(Cow::Borrowed("Some.Name"))
         );
     }
 
@@ -633,18 +654,19 @@ mod tests {
     }
 
     #[test]
-    fn test_find_best_prefix_prefers_three_part_over_two_part() {
-        // When both 3-part and 2-part matches exist, prefer 3-part
+    fn test_find_best_prefix_mixed_three_part_falls_back_to_two_part() {
+        // Files share simple prefix "Some" but have different 3-part prefixes
+        // Should fall back to shared 2-part prefix "Some.Name"
         let files = make_test_files(&[
             "Some.Name.Thing.v1.mp4",
             "Some.Name.Thing.v2.mp4",
             "Some.Name.Other.v1.mp4",
             "Some.Name.Other.v2.mp4",
         ]);
-        // Should match on 3-part, not fall back to 2-part
+        // All share 2-part "Some.Name", so use that
         assert_eq!(
             DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
-            Some(Cow::Borrowed("Some.Name.Thing"))
+            Some(Cow::Borrowed("Some.Name"))
         );
     }
 
@@ -659,9 +681,19 @@ mod tests {
     }
 
     #[test]
-    fn test_find_best_prefix_five_char_prefix_uses_simple() {
-        // 5-char prefix is "long", uses simple prefix directly
+    fn test_find_best_prefix_five_char_prefix_with_shared_two_part() {
+        // 5-char prefix is "long", but all files share 2-part prefix "ABCDE.Name"
         let files = make_test_files(&["ABCDE.Name.Thing.mp4", "ABCDE.Name.Other.mp4"]);
+        assert_eq!(
+            DirMove::find_best_prefix("ABCDE.Name.Thing.mp4", &files),
+            Some(Cow::Borrowed("ABCDE.Name"))
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_five_char_prefix_no_shared_longer() {
+        // 5-char prefix with different 2-part prefixes falls back to simple prefix
+        let files = make_test_files(&["ABCDE.Name.Thing.mp4", "ABCDE.Other.Thing.mp4"]);
         assert_eq!(
             DirMove::find_best_prefix("ABCDE.Name.Thing.mp4", &files),
             Some(Cow::Borrowed("ABCDE"))
@@ -1081,5 +1113,162 @@ mod tests {
     fn test_filter_numeric_parts_single_part() {
         assert_eq!(DirMove::filter_numeric_parts("filename"), "filename");
         assert_eq!(DirMove::filter_numeric_parts("2024"), "");
+    }
+
+    #[test]
+    fn test_find_best_prefix_with_filtered_numeric_parts() {
+        // Simulate the full flow: files are filtered before being passed to find_best_prefix
+        // Original filenames: ShowName.2024.S01E01.mp4, ShowName.2024.S01E02.mp4, ShowName.2024.S01E03.mp4
+        // After filtering: ShowName.S01E01.mp4, ShowName.S01E02.mp4, ShowName.S01E03.mp4
+        let filtered_files = make_test_files(&["ShowName.S01E01.mp4", "ShowName.S01E02.mp4", "ShowName.S01E03.mp4"]);
+
+        // All files should group under "ShowName" (8 chars > 4, so uses simple prefix)
+        assert_eq!(
+            DirMove::find_best_prefix("ShowName.S01E01.mp4", &filtered_files),
+            Some(Cow::Borrowed("ShowName"))
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_numeric_filtering_groups_correctly() {
+        // Files with years should group together after numeric filtering
+        // Original: ABC.2023.Thing.v1.mp4, ABC.2024.Thing.v2.mp4, ABC.2025.Thing.v3.mp4
+        // After filtering: ABC.Thing.v1.mp4, ABC.Thing.v2.mp4, ABC.Thing.v3.mp4
+        let filtered_files = make_test_files(&["ABC.Thing.v1.mp4", "ABC.Thing.v2.mp4", "ABC.Thing.v3.mp4"]);
+
+        // Short prefix "ABC" (3 chars) should find shared 2-part prefix "ABC.Thing"
+        assert_eq!(
+            DirMove::find_best_prefix("ABC.Thing.v1.mp4", &filtered_files),
+            Some(Cow::Borrowed("ABC.Thing"))
+        );
+    }
+
+    #[test]
+    fn test_find_best_prefix_mixed_years_without_filtering_no_group() {
+        // Without filtering, files with different years wouldn't group on short prefix
+        // These files have short prefix "ABC" but different 2-part prefixes
+        let unfiltered_files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
+
+        // No shared 3-part or 2-part prefix, so returns None for short prefix
+        assert_eq!(DirMove::find_best_prefix("ABC.2023.Thing.mp4", &unfiltered_files), None);
+    }
+
+    #[test]
+    fn test_find_best_prefix_after_filtering_groups_by_show_name() {
+        // Real-world scenario: TV show episodes with year in name
+        // Original: Series.Name.2024.S01E01.1080p.mp4, Series.Name.2024.S01E02.1080p.mp4, etc.
+        // After filtering: Series.Name.S01E01.1080p.mp4, Series.Name.S01E02.1080p.mp4, etc.
+        let filtered_files = make_test_files(&[
+            "Series.Name.S01E01.1080p.mp4",
+            "Series.Name.S01E02.1080p.mp4",
+            "Series.Name.S01E03.1080p.mp4",
+        ]);
+
+        // All files share "Series.Name" 2-part prefix, so use that instead of just "Series"
+        assert_eq!(
+            DirMove::find_best_prefix("Series.Name.S01E01.1080p.mp4", &filtered_files),
+            Some(Cow::Borrowed("Series.Name"))
+        );
+    }
+
+    #[test]
+    fn test_full_filtering_flow_simulation() {
+        // Simulate the complete flow in collect_files_by_prefix
+        // Use longer prefix names (> 4 chars) so they use simple prefix directly
+        let original_filenames = [
+            "ShowName.2024.S01E01.mp4",
+            "ShowName.2024.S01E02.mp4",
+            "ShowName.2024.S01E03.mp4",
+            "OtherShow.2023.Episode.mp4",
+        ];
+
+        // Apply filter_numeric_parts (simulating what collect_files_by_prefix does)
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        // Verify filtering worked correctly
+        assert_eq!(filtered[0].1, "ShowName.S01E01.mp4");
+        assert_eq!(filtered[1].1, "ShowName.S01E02.mp4");
+        assert_eq!(filtered[2].1, "ShowName.S01E03.mp4");
+        assert_eq!(filtered[3].1, "OtherShow.Episode.mp4");
+
+        // Now find_best_prefix should group the "ShowName" files together
+        let show_prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
+        assert_eq!(show_prefix, Some(Cow::Borrowed("ShowName")));
+
+        // The "OtherShow" file uses simple prefix (9 chars > 4) but has no other matches
+        // Since it's a long prefix, it returns the prefix even without matches
+        let other_prefix = DirMove::find_best_prefix(&filtered[3].1, &filtered);
+        assert_eq!(other_prefix, Some(Cow::Borrowed("OtherShow")));
+    }
+
+    #[test]
+    fn test_full_filtering_flow_with_resolution_numbers() {
+        // Files with resolution numbers that are purely numeric
+        let original_filenames = [
+            "MovieName.2024.720.rip.mp4",
+            "MovieName.2024.720.other.mp4",
+            "MovieName.2024.720.more.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        // All numeric parts (2024, 720) should be removed
+        assert_eq!(filtered[0].1, "MovieName.rip.mp4");
+        assert_eq!(filtered[1].1, "MovieName.other.mp4");
+        assert_eq!(filtered[2].1, "MovieName.more.mp4");
+
+        // Should group under "MovieName" (9 chars > 4, uses simple prefix)
+        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
+        assert_eq!(prefix, Some(Cow::Borrowed("MovieName")));
+    }
+
+    #[test]
+    fn test_full_filtering_flow_short_prefix_with_shared_parts() {
+        // Test with short prefix (≤4 chars) that requires shared multi-part prefix
+        // Without filtering, these files have different 2-part prefixes due to years
+        let original_filenames = [
+            "ABC.2023.Thing.v1.mp4",
+            "ABC.2024.Thing.v2.mp4",
+            "ABC.2025.Thing.v3.mp4",
+        ];
+
+        // Without filtering - different years mean no shared 2-part prefix
+        let unfiltered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| (PathBuf::from(*name), (*name).to_string()))
+            .collect();
+
+        // No match because 2-part prefixes are ABC.2023, ABC.2024, ABC.2025 (all different)
+        let prefix_unfiltered = DirMove::find_best_prefix(&unfiltered[0].1, &unfiltered);
+        assert_eq!(prefix_unfiltered, None);
+
+        // With filtering - years removed, shared 2-part prefix "ABC.Thing"
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "ABC.Thing.v1.mp4");
+        assert_eq!(filtered[1].1, "ABC.Thing.v2.mp4");
+        assert_eq!(filtered[2].1, "ABC.Thing.v3.mp4");
+
+        // Now they share 2-part prefix "ABC.Thing"
+        let prefix_filtered = DirMove::find_best_prefix(&filtered[0].1, &filtered);
+        assert_eq!(prefix_filtered, Some(Cow::Borrowed("ABC.Thing")));
     }
 }
