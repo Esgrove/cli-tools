@@ -261,6 +261,7 @@ struct Config {
     convert_case: bool,
     date_starts_with_year: bool,
     debug: bool,
+    deduplicate_patterns: Vec<(Regex, String)>,
     dryrun: bool,
     include: Vec<String>,
     exclude: Vec<String>,
@@ -366,7 +367,24 @@ impl Dots {
                     println!("Using directory prefix: {name}");
                 }
                 let regexes = Self::build_prefix_dir_regexes(&name)?;
-                self.config.prefix = Option::from(name);
+                // Add prefix to deduplication patterns to remove consecutive duplicates
+                let prefix_with_dot = if name.ends_with('.') {
+                    name.clone()
+                } else {
+                    format!("{name}.")
+                };
+                let already_exists = self
+                    .config
+                    .deduplicate_patterns
+                    .iter()
+                    .any(|(_, existing)| existing == &prefix_with_dot);
+                if !already_exists {
+                    let escaped = regex::escape(&prefix_with_dot);
+                    if let Ok(re) = Regex::new(&format!(r"({escaped}){{2,}}")) {
+                        self.config.deduplicate_patterns.push((re, prefix_with_dot));
+                    }
+                }
+                self.config.prefix = Some(name);
                 self.config.regex_replace_after.extend(regexes);
             } else if self.config.suffix_dir {
                 if self.config.verbose {
@@ -772,6 +790,11 @@ impl Dots {
             }
         }
 
+        // Remove consecutive duplicate patterns from substitutions and prefix_dir
+        if !self.config.deduplicate_patterns.is_empty() {
+            Self::remove_consecutive_duplicates(&mut new_name, &self.config.deduplicate_patterns);
+        }
+
         RE_DOTS
             .replace_all(&new_name, ".")
             .trim_start_matches('.')
@@ -966,6 +989,14 @@ impl Dots {
             .to_string();
     }
 
+    /// Remove consecutive duplicate occurrences of patterns from the name.
+    /// For example, "Some.Name.Some.Name.File" with pattern "Some.Name." becomes "Some.Name.File"
+    fn remove_consecutive_duplicates(name: &mut String, patterns: &[(Regex, String)]) {
+        for (regex, replacement) in patterns {
+            *name = regex.replace_all(name, replacement.as_str()).into_owned();
+        }
+    }
+
     /// Build regex patterns for prefix directory date reordering.
     fn build_prefix_dir_regexes(name: &str) -> Result<[(Regex, String); 4]> {
         let escaped_name = regex::escape(name);
@@ -1136,8 +1167,23 @@ impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: Args) -> Result<Self> {
         let user_config = DotsConfig::get_user_config();
-        let mut replace = args.parse_substitutes();
+        let substitutes = args.parse_substitutes();
         let removes = args.parse_removes();
+
+        // Compile regex patterns for deduplication (non-empty replacements from substitutes)
+        let mut seen_replacements = std::collections::HashSet::new();
+        let deduplicate_patterns: Vec<(Regex, String)> = substitutes
+            .iter()
+            .filter(|(_, replacement)| !replacement.is_empty() && seen_replacements.insert(replacement.as_str()))
+            .filter_map(|(_, replacement)| {
+                let escaped = regex::escape(replacement);
+                Regex::new(&format!(r"({escaped}){{2,}}"))
+                    .ok()
+                    .map(|re| (re, replacement.clone()))
+            })
+            .collect();
+
+        let mut replace = substitutes;
         let mut regex_replace = args.parse_regex_substitutes()?;
         let config_regex = Self::compile_regex_patterns(user_config.regex_replace)?;
 
@@ -1170,6 +1216,7 @@ impl Config {
             convert_case: args.case,
             date_starts_with_year: !args.year || user_config.date_starts_with_year,
             debug: args.debug || user_config.debug,
+            deduplicate_patterns,
             dryrun: args.print || user_config.dryrun,
             include,
             exclude: args.exclude,
@@ -1704,5 +1751,65 @@ mod test_remove_from_start {
     #[test]
     fn test_consecutive_patterns() {
         assert_eq!(DOTS.format_name("test.test.test.test"), "Test");
+    }
+}
+
+#[cfg(test)]
+mod test_deduplicate_patterns {
+    use super::*;
+
+    static DOTS: LazyLock<Dots> = LazyLock::new(|| Dots {
+        root: PathBuf::default(),
+        config: Config {
+            replace: vec![("SomeName.".to_string(), "Some.Name.".to_string())],
+            deduplicate_patterns: vec![(
+                Regex::new(r"(Some\.Name\.){2,}").expect("valid regex"),
+                "Some.Name.".to_string(),
+            )],
+            ..Default::default()
+        },
+        path_given: false,
+    });
+
+    #[test]
+    fn test_no_duplicates() {
+        assert_eq!(DOTS.format_name("Some.Name.File"), "Some.Name.File");
+    }
+
+    #[test]
+    fn test_double_duplicate() {
+        assert_eq!(DOTS.format_name("SomeName.SomeName.File"), "Some.Name.File");
+        assert_eq!(DOTS.format_name("SomeName.Some.Name.File"), "Some.Name.File");
+        assert_eq!(DOTS.format_name("Some.SomeName.Some.Name.File"), "Some.Some.Name.File");
+        assert_eq!(
+            DOTS.format_name("Something.SomeName.Some.Name.File"),
+            "Something.Some.Name.File"
+        );
+    }
+
+    #[test]
+    fn test_triple_duplicate() {
+        assert_eq!(DOTS.format_name("SomeName.SomeName.SomeName.File"), "Some.Name.File");
+        assert_eq!(DOTS.format_name("SomeName.SomeName.Some.Name.File"), "Some.Name.File");
+        assert_eq!(DOTS.format_name("SomeName.File"), "Some.Name.File");
+        assert_eq!(DOTS.format_name("Some.Name.File"), "Some.Name.File");
+    }
+
+    #[test]
+    fn test_substitute_creates_duplicate() {
+        assert_eq!(DOTS.format_name("Some.Name.SomeName.File"), "Some.Name.File");
+    }
+
+    #[test]
+    fn test_mixed_case_duplicates() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                deduplicate_patterns: vec![(Regex::new(r"(Test\.){2,}").expect("valid regex"), "Test.".to_string())],
+                ..Default::default()
+            },
+            path_given: false,
+        };
+        assert_eq!(dots.format_name("Test.Test.File"), "Test.File");
     }
 }
