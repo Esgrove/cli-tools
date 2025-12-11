@@ -196,6 +196,16 @@ impl DirMove {
 
     /// Strip ignored prefixes from a filename (dots as separators).
     /// Recursively removes any matching prefix from the start of the filename.
+    /// Filter out dot-separated parts that contain only numeric digits.
+    /// For example, "Show.2024.S01E01.mkv" becomes "Show.S01E01.mkv".
+    fn filter_numeric_parts(filename: &str) -> String {
+        filename
+            .split('.')
+            .filter(|part| !part.chars().all(|c| c.is_ascii_digit()) || part.is_empty())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     fn strip_ignored_dot_prefixes(&self, filename: &str) -> String {
         if self.config.prefix_ignores.is_empty() {
             return filename.to_string();
@@ -324,8 +334,9 @@ impl DirMove {
                 continue;
             }
 
-            // Strip ignored prefixes from filename for grouping purposes
+            // Strip ignored prefixes and numeric-only parts from filename for grouping purposes
             let file_name_for_grouping = self.strip_ignored_dot_prefixes(&file_name);
+            let file_name_for_grouping = Self::filter_numeric_parts(&file_name_for_grouping);
             files_with_names.push((file_path, file_name_for_grouping));
         }
 
@@ -1023,5 +1034,52 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&0));
+    }
+
+    #[test]
+    fn test_filter_numeric_parts_removes_year() {
+        assert_eq!(DirMove::filter_numeric_parts("Show.2024.S01E01.mkv"), "Show.S01E01.mkv");
+    }
+
+    #[test]
+    fn test_filter_numeric_parts_removes_multiple_numeric() {
+        assert_eq!(
+            DirMove::filter_numeric_parts("Show.2024.1080.S01E01.mkv"),
+            "Show.S01E01.mkv"
+        );
+    }
+
+    #[test]
+    fn test_filter_numeric_parts_keeps_mixed_alphanumeric() {
+        // Parts like "S01E01" or "1080p" contain letters, so they should be kept
+        assert_eq!(
+            DirMove::filter_numeric_parts("Show.1080p.S01E01.mkv"),
+            "Show.1080p.S01E01.mkv"
+        );
+    }
+
+    #[test]
+    fn test_filter_numeric_parts_no_numeric() {
+        assert_eq!(
+            DirMove::filter_numeric_parts("Some.Name.Thing.mp4"),
+            "Some.Name.Thing.mp4"
+        );
+    }
+
+    #[test]
+    fn test_filter_numeric_parts_all_numeric_except_extension() {
+        // Edge case: if all parts except extension are numeric
+        assert_eq!(DirMove::filter_numeric_parts("2024.1080.720.mp4"), "mp4");
+    }
+
+    #[test]
+    fn test_filter_numeric_parts_empty_string() {
+        assert_eq!(DirMove::filter_numeric_parts(""), "");
+    }
+
+    #[test]
+    fn test_filter_numeric_parts_single_part() {
+        assert_eq!(DirMove::filter_numeric_parts("filename"), "filename");
+        assert_eq!(DirMove::filter_numeric_parts("2024"), "");
     }
 }
