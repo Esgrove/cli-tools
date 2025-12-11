@@ -12,6 +12,11 @@ use regex::Regex;
 static RE_RESOLUTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
 
+/// Common glue words to filter out from grouping names.
+const GLUE_WORDS: &[&str] = &[
+    "a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with",
+];
+
 use cli_tools::{
     get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
     print_warning,
@@ -200,12 +205,11 @@ impl DirMove {
         matches
     }
 
-    /// Strip ignored prefixes from a filename (dots as separators).
-    /// Recursively removes any matching prefix from the start of the filename.
-    /// Filter out dot-separated parts that contain only numeric digits or are resolution patterns.
+    /// Filter out dot-separated parts that contain only numeric digits, resolution patterns, or glue words.
     /// For example, "Show.2024.S01E01.mkv" becomes "Show.S01E01.mkv".
     /// For example, "Show.1080p.S01E01.mkv" becomes "Show.S01E01.mkv".
-    fn filter_numeric_and_resolution_parts(filename: &str) -> String {
+    /// For example, "Show.and.Tell.mkv" becomes "Show.Tell.mkv".
+    fn filter_numeric_resolution_and_glue_parts(filename: &str) -> String {
         filename
             .split('.')
             .filter(|part| {
@@ -217,7 +221,11 @@ impl DirMove {
                     return false;
                 }
                 // Filter resolution patterns
-                !RE_RESOLUTION.is_match(part)
+                if RE_RESOLUTION.is_match(part) {
+                    return false;
+                }
+                // Filter glue words (case-insensitive)
+                !GLUE_WORDS.contains(&part.to_lowercase().as_str())
             })
             .collect::<Vec<_>>()
             .join(".")
@@ -351,9 +359,9 @@ impl DirMove {
                 continue;
             }
 
-            // Strip ignored prefixes, numeric-only parts, and resolution patterns from filename for grouping purposes
+            // Strip ignored prefixes, numeric-only parts, resolution patterns, and glue words from filename for grouping purposes
             let file_name_for_grouping = self.strip_ignored_dot_prefixes(&file_name);
-            let file_name_for_grouping = Self::filter_numeric_and_resolution_parts(&file_name_for_grouping);
+            let file_name_for_grouping = Self::filter_numeric_resolution_and_glue_parts(&file_name_for_grouping);
             files_with_names.push((file_path, file_name_for_grouping));
         }
 
@@ -1086,97 +1094,140 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_removes_year() {
+    fn test_filter_parts_removes_year() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Show.2024.S01E01.mkv"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.2024.S01E01.mkv"),
             "Show.S01E01.mkv"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_removes_multiple_numeric() {
+    fn test_filter_parts_removes_multiple_numeric() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Show.2024.720.thing.mp4"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.2024.720.thing.mp4"),
             "Show.thing.mp4"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_keeps_mixed_alphanumeric() {
+    fn test_filter_parts_keeps_mixed_alphanumeric() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Show.S01E02.2024.mp4"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.S01E02.2024.mp4"),
             "Show.S01E02.mp4"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_no_numeric() {
+    fn test_filter_parts_no_numeric() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Show.Episode.Title.mp4"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.Episode.Title.mp4"),
             "Show.Episode.Title.mp4"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_all_numeric_except_extension() {
-        assert_eq!(DirMove::filter_numeric_and_resolution_parts("2024.720.mp4"), "mp4");
+    fn test_filter_parts_all_numeric_except_extension() {
+        assert_eq!(DirMove::filter_numeric_resolution_and_glue_parts("2024.720.mp4"), "mp4");
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_empty_string() {
-        assert_eq!(DirMove::filter_numeric_and_resolution_parts(""), "");
+    fn test_filter_parts_empty_string() {
+        assert_eq!(DirMove::filter_numeric_resolution_and_glue_parts(""), "");
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_single_part() {
-        assert_eq!(DirMove::filter_numeric_and_resolution_parts("Show.mp4"), "Show.mp4");
-    }
-
-    #[test]
-    fn test_filter_numeric_and_resolution_parts_removes_1080p() {
+    fn test_filter_parts_single_part() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Show.1080p.S01E01.mkv"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.mp4"),
+            "Show.mp4"
+        );
+    }
+
+    #[test]
+    fn test_filter_parts_removes_1080p() {
+        assert_eq!(
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.1080p.S01E01.mkv"),
             "Show.S01E01.mkv"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_removes_2160p() {
+    fn test_filter_parts_removes_2160p() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Some.Video.2160p.part1.mp4"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Some.Video.2160p.part1.mp4"),
             "Some.Video.part1.mp4"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_removes_720p() {
+    fn test_filter_parts_removes_720p() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Movie.720p.rip.mp4"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Movie.720p.rip.mp4"),
             "Movie.rip.mp4"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_removes_dimension_format() {
+    fn test_filter_parts_removes_dimension_format() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Video.1920x1080.stuff.mp4"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Video.1920x1080.stuff.mp4"),
             "Video.stuff.mp4"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_removes_smaller_dimension() {
+    fn test_filter_parts_removes_smaller_dimension() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Video.640x480.stuff.mp4"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Video.640x480.stuff.mp4"),
             "Video.stuff.mp4"
         );
     }
 
     #[test]
-    fn test_filter_numeric_and_resolution_parts_case_insensitive() {
+    fn test_filter_parts_case_insensitive_resolution() {
         assert_eq!(
-            DirMove::filter_numeric_and_resolution_parts("Show.1080P.episode.mkv"),
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.1080P.episode.mkv"),
             "Show.episode.mkv"
+        );
+    }
+
+    #[test]
+    fn test_filter_parts_removes_and() {
+        assert_eq!(
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.and.Tell.mp4"),
+            "Show.Tell.mp4"
+        );
+    }
+
+    #[test]
+    fn test_filter_parts_removes_the() {
+        assert_eq!(
+            DirMove::filter_numeric_resolution_and_glue_parts("The.Big.Show.mp4"),
+            "Big.Show.mp4"
+        );
+    }
+
+    #[test]
+    fn test_filter_parts_removes_multiple_glue_words() {
+        assert_eq!(
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.of.the.Year.mp4"),
+            "Show.Year.mp4"
+        );
+    }
+
+    #[test]
+    fn test_filter_parts_glue_words_case_insensitive() {
+        assert_eq!(
+            DirMove::filter_numeric_resolution_and_glue_parts("Show.AND.Tell.mp4"),
+            "Show.Tell.mp4"
+        );
+    }
+
+    #[test]
+    fn test_filter_parts_removes_all_glue_words() {
+        assert_eq!(
+            DirMove::filter_numeric_resolution_and_glue_parts("A.Day.in.the.Life.of.Bob.mp4"),
+            "Day.Life.Bob.mp4"
         );
     }
 
@@ -1246,11 +1297,11 @@ mod tests {
             "OtherShow.2024.Special.mp4",
         ];
 
-        // Step 1: filter_numeric_and_resolution_parts (simulating what collect_files_by_prefix does)
+        // Step 1: filter_numeric_resolution_and_glue_parts (simulating what collect_files_by_prefix does)
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
             .map(|name| {
-                let filtered_name = DirMove::filter_numeric_and_resolution_parts(name);
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
                 (PathBuf::from(*name), filtered_name)
             })
             .collect();
@@ -1283,7 +1334,7 @@ mod tests {
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
             .map(|name| {
-                let filtered_name = DirMove::filter_numeric_and_resolution_parts(name);
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
                 (PathBuf::from(*name), filtered_name)
             })
             .collect();
@@ -1310,7 +1361,7 @@ mod tests {
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
             .map(|name| {
-                let filtered_name = DirMove::filter_numeric_and_resolution_parts(name);
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
                 (PathBuf::from(*name), filtered_name)
             })
             .collect();
@@ -1323,6 +1374,33 @@ mod tests {
         // Should group under "MovieName"
         let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
         assert_eq!(prefix, Some(Cow::Borrowed("MovieName")));
+    }
+
+    #[test]
+    fn test_full_filtering_flow_with_glue_words() {
+        // Files with glue words that should be filtered
+        let original_filenames = [
+            "Show.and.Tell.part1.mp4",
+            "Show.and.Tell.part2.mp4",
+            "Show.and.Tell.part3.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        // Glue word "and" should be removed
+        assert_eq!(filtered[0].1, "Show.Tell.part1.mp4");
+        assert_eq!(filtered[1].1, "Show.Tell.part2.mp4");
+        assert_eq!(filtered[2].1, "Show.Tell.part3.mp4");
+
+        // Should group under "Show.Tell"
+        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
+        assert_eq!(prefix, Some(Cow::Borrowed("Show.Tell")));
     }
 
     #[test]
@@ -1349,7 +1427,7 @@ mod tests {
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
             .map(|name| {
-                let filtered_name = DirMove::filter_numeric_and_resolution_parts(name);
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
                 (PathBuf::from(*name), filtered_name)
             })
             .collect();
@@ -1375,7 +1453,7 @@ mod tests {
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
             .map(|name| {
-                let filtered_name = DirMove::filter_numeric_and_resolution_parts(name);
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
                 (PathBuf::from(*name), filtered_name)
             })
             .collect();
@@ -1403,7 +1481,7 @@ mod tests {
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
             .map(|name| {
-                let filtered_name = DirMove::filter_numeric_and_resolution_parts(name);
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
                 (PathBuf::from(*name), filtered_name)
             })
             .collect();
@@ -1423,21 +1501,21 @@ mod tests {
     #[test]
     fn test_full_flow_files_with_dimension_resolution() {
         let original_filenames = [
-            "Cool.Stuff.1920x1080.a.mp4",
-            "Cool.Stuff.1920x1080.b.mp4",
-            "Cool.Stuff.1920x1080.c.mp4",
+            "Cool.Stuff.1920x1080.part1.mp4",
+            "Cool.Stuff.1920x1080.part2.mp4",
+            "Cool.Stuff.1920x1080.part3.mp4",
         ];
 
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
             .map(|name| {
-                let filtered_name = DirMove::filter_numeric_and_resolution_parts(name);
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
                 (PathBuf::from(*name), filtered_name)
             })
             .collect();
 
         // Resolution is filtered out
-        assert_eq!(filtered[0].1, "Cool.Stuff.a.mp4");
+        assert_eq!(filtered[0].1, "Cool.Stuff.part1.mp4");
 
         // Prefix without resolution
         let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
