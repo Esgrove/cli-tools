@@ -11,7 +11,7 @@ use cli_tools::{
     print_warning,
 };
 
-use crate::Args;
+use crate::DirMoveArgs;
 use crate::config::Config;
 
 #[derive(Debug)]
@@ -37,7 +37,7 @@ impl DirectoryInfo {
 }
 
 impl DirMove {
-    pub fn new(args: Args) -> anyhow::Result<Self> {
+    pub fn new(args: DirMoveArgs) -> anyhow::Result<Self> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args);
         if config.debug {

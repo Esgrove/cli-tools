@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use cli_tools::print_error;
 
-use crate::Args;
+use crate::DirMoveArgs;
 
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug)]
@@ -26,7 +26,7 @@ pub struct Config {
 
 /// Config from a config file
 #[derive(Debug, Default, Deserialize)]
-struct MoveConfig {
+struct DirMoveConfig {
     #[serde(default)]
     auto: bool,
     #[serde(default)]
@@ -57,10 +57,10 @@ struct MoveConfig {
 #[derive(Debug, Default, Deserialize)]
 struct UserConfig {
     #[serde(default)]
-    dirmove: MoveConfig,
+    dirmove: DirMoveConfig,
 }
 
-impl MoveConfig {
+impl DirMoveConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
     fn get_user_config() -> Self {
@@ -87,8 +87,8 @@ impl MoveConfig {
 
 impl Config {
     /// Create config from given command line args and user config file.
-    pub fn from_args(args: Args) -> Self {
-        let user_config = MoveConfig::get_user_config();
+    pub fn from_args(args: DirMoveArgs) -> Self {
+        let user_config = DirMoveConfig::get_user_config();
         let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
         let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
         let prefix_ignores: Vec<String> = user_config

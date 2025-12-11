@@ -10,17 +10,17 @@ use crate::dir_move::DirMove;
 
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
-struct Args {
+struct DirMoveArgs {
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
 
     /// Auto-confirm all prompts without asking
-    #[arg(short, long)]
+    #[arg(short = 'a', long)]
     auto: bool,
 
     /// Create directories for files with matching prefixes
-    #[arg(short, long)]
+    #[arg(short = 'c', long)]
     create: bool,
 
     /// Print debug information
@@ -28,7 +28,7 @@ struct Args {
     debug: bool,
 
     /// Overwrite existing files
-    #[arg(short, long)]
+    #[arg(short = 'f', long)]
     force: bool,
 
     /// Include files that match the given pattern
@@ -48,15 +48,15 @@ struct Args {
     prefix_override: Vec<String>,
 
     /// Minimum number of matching files needed to create a group
-    #[arg(short, long, name = "COUNT", default_value_t = 3)]
+    #[arg(short = 'g', long, name = "COUNT", default_value_t = 3)]
     group: usize,
 
     /// Only print changes without moving files
-    #[arg(short, long)]
+    #[arg(short = 'p', long)]
     print: bool,
 
     /// Recurse into subdirectories
-    #[arg(short, long)]
+    #[arg(short = 'r', long)]
     recurse: bool,
 
     /// Generate shell completion
@@ -64,14 +64,14 @@ struct Args {
     completion: Option<Shell>,
 
     /// Print verbose output
-    #[arg(short, long)]
+    #[arg(short = 'v', long)]
     verbose: bool,
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = DirMoveArgs::parse();
     if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
+        cli_tools::generate_shell_completion(*shell, DirMoveArgs::command(), true, env!("CARGO_BIN_NAME"))
     } else {
         DirMove::new(args)?.run()
     }
