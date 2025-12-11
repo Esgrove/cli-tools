@@ -138,7 +138,7 @@ impl RunStats {
 
             if self.total_original_size > 0 {
                 let saved = self.space_saved();
-                let ratio = saved.abs() as f64 / self.total_original_size as f64 * 100.0;
+                let ratio = saved as f64 / self.total_original_size as f64 * 100.0;
                 let saved_str = cli_tools::format_size(saved.unsigned_abs());
 
                 let max_width = original_str.len().max(converted_str.len()).max(saved_str.len());

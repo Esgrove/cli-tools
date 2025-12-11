@@ -39,7 +39,7 @@ struct DirMoveArgs {
     #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
     exclude: Vec<String>,
 
-    /// Ignore prefix when matching (strip from filename before matching)
+    /// Ignore prefix when matching filenames
     #[arg(short = 'i', long = "ignore", num_args = 1, action = clap::ArgAction::Append, name = "IGNORE")]
     prefix_ignore: Vec<String>,
 

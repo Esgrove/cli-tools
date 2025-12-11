@@ -45,15 +45,21 @@ Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -f, --force               Overwrite existing files
-  -n, --include <INCLUDE>   Include files that match the given pattern
-  -e, --exclude <EXCLUDE>   Exclude files that match the given pattern
-  -p, --print               Only print changes without renaming files
-  -r, --recurse             Recurse into subdirectories
-  -l, --completion <SHELL>  Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
-  -v, --verbose             Print verbose output
-  -h, --help                Print help
-  -V, --version             Print version
+  -a, --auto                 Auto-confirm all prompts without asking
+  -c, --create               Create directories for files with matching prefixes
+  -D, --debug                Print debug information
+  -f, --force                Overwrite existing files
+  -n, --include <INCLUDE>    Include files that match the given pattern
+  -e, --exclude <EXCLUDE>    Exclude files that match the given pattern
+  -i, --ignore <IGNORE>      Ignore prefix when matching filenames
+  -o, --override <OVERRIDE>  Override prefix to use for directory names
+  -g, --group <COUNT>        Minimum number of matching files needed to create a group [default: 3]
+  -p, --print                Only print changes without moving files
+  -r, --recurse              Recurse into subdirectories
+  -l, --completion <SHELL>   Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose              Print verbose output
+  -h, --help                 Print help
+  -V, --version              Print version
 ```
 
 ## Dots
