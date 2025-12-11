@@ -14,6 +14,12 @@ use cli_tools::{
 use crate::Args;
 use crate::config::Config;
 
+#[derive(Debug)]
+pub struct DirMove {
+    root: PathBuf,
+    config: Config,
+}
+
 /// Information about a directory used for matching files to move.
 #[derive(Debug)]
 struct DirectoryInfo {
@@ -21,12 +27,6 @@ struct DirectoryInfo {
     path: PathBuf,
     /// Normalized directory name (lowercase, dots replaced with spaces).
     name: String,
-}
-
-#[derive(Debug)]
-pub struct DirMove {
-    root: PathBuf,
-    config: Config,
 }
 
 impl DirectoryInfo {
@@ -194,38 +194,6 @@ impl DirMove {
         matches
     }
 
-    /// Strip ignored prefixes from a normalized filename (spaces as separators).
-    /// Recursively removes any matching prefix from the start of the filename.
-    fn strip_ignored_prefixes<'a>(&self, filename: &'a str) -> Cow<'a, str> {
-        if self.config.prefix_ignores.is_empty() {
-            return Cow::Borrowed(filename);
-        }
-
-        let mut result = filename;
-        let mut changed = true;
-
-        // Keep stripping prefixes until no more matches
-        while changed {
-            changed = false;
-            for ignore in &self.config.prefix_ignores {
-                let ignore_lower = ignore.to_lowercase();
-                // Check if filename starts with the ignored prefix followed by a space
-                let prefix_with_space = format!("{ignore_lower} ");
-                if result.starts_with(&prefix_with_space) {
-                    result = result.strip_prefix(&prefix_with_space).unwrap_or(result);
-                    changed = true;
-                    break;
-                }
-            }
-        }
-
-        if result == filename {
-            Cow::Borrowed(filename)
-        } else {
-            Cow::Owned(result.to_string())
-        }
-    }
-
     /// Strip ignored prefixes from a filename (dots as separators).
     /// Recursively removes any matching prefix from the start of the filename.
     fn strip_ignored_dot_prefixes(&self, filename: &str) -> String {
@@ -379,42 +347,6 @@ impl DirMove {
         Ok(prefix_groups)
     }
 
-    /// Find the best prefix for a file by checking if other files share the same prefix.
-    /// For short simple prefixes (≤4 chars), tries longer prefixes first.
-    /// Returns None if only a short prefix exists with no shared longer prefix.
-    fn find_best_prefix<'a>(file_name: &'a str, all_files: &[(PathBuf, String)]) -> Option<Cow<'a, str>> {
-        let simple_prefix = file_name.split('.').next().filter(|p| !p.is_empty())?;
-
-        // If simple prefix is longer than 4 chars, use it directly
-        if simple_prefix.len() > 4 {
-            return Some(Cow::Borrowed(simple_prefix));
-        }
-
-        // For short prefixes, try to find shared longer prefixes
-        // First try 3-part prefix
-        if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
-            let has_matches = all_files
-                .iter()
-                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 3) == Some(three_part));
-            if has_matches {
-                return Some(Cow::Borrowed(three_part));
-            }
-        }
-
-        // Then try 2-part prefix
-        if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
-            let has_matches = all_files
-                .iter()
-                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 2) == Some(two_part));
-            if has_matches {
-                return Some(Cow::Borrowed(two_part));
-            }
-        }
-
-        // No shared longer prefix found for short simple prefix, skip this file
-        None
-    }
-
     /// Create directories for files with matching prefixes and move files into them.
     /// Only considers files directly in the base path (not recursive).
     fn create_dirs_and_move_files(&self) -> anyhow::Result<()> {
@@ -514,6 +446,74 @@ impl DirMove {
         }
 
         result
+    }
+
+    /// Strip ignored prefixes from a normalized filename (spaces as separators).
+    /// Recursively removes any matching prefix from the start of the filename.
+    fn strip_ignored_prefixes<'a>(&self, filename: &'a str) -> Cow<'a, str> {
+        if self.config.prefix_ignores.is_empty() {
+            return Cow::Borrowed(filename);
+        }
+
+        let mut result = filename;
+        let mut changed = true;
+
+        // Keep stripping prefixes until no more matches
+        while changed {
+            changed = false;
+            for ignore in &self.config.prefix_ignores {
+                let ignore_lower = ignore.to_lowercase();
+                // Check if filename starts with the ignored prefix followed by a space
+                let prefix_with_space = format!("{ignore_lower} ");
+                if result.starts_with(&prefix_with_space) {
+                    result = result.strip_prefix(&prefix_with_space).unwrap_or(result);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        if result == filename {
+            Cow::Borrowed(filename)
+        } else {
+            Cow::Owned(result.to_string())
+        }
+    }
+
+    /// Find the best prefix for a file by checking if other files share the same prefix.
+    /// For short simple prefixes (≤4 chars), tries longer prefixes first.
+    /// Returns None if only a short prefix exists with no shared longer prefix.
+    fn find_best_prefix<'a>(file_name: &'a str, all_files: &[(PathBuf, String)]) -> Option<Cow<'a, str>> {
+        let simple_prefix = file_name.split('.').next().filter(|p| !p.is_empty())?;
+
+        // If simple prefix is longer than 4 chars, use it directly
+        if simple_prefix.len() > 4 {
+            return Some(Cow::Borrowed(simple_prefix));
+        }
+
+        // For short prefixes, try to find shared longer prefixes
+        // First try 3-part prefix
+        if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
+            let has_matches = all_files
+                .iter()
+                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 3) == Some(three_part));
+            if has_matches {
+                return Some(Cow::Borrowed(three_part));
+            }
+        }
+
+        // Then try 2-part prefix
+        if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
+            let has_matches = all_files
+                .iter()
+                .any(|(_, name)| name != file_name && Self::get_n_part_prefix(name, 2) == Some(two_part));
+            if has_matches {
+                return Some(Cow::Borrowed(two_part));
+            }
+        }
+
+        // No shared longer prefix found for short simple prefix, skip this file
+        None
     }
 
     /// Extract a prefix consisting of the first n dot-separated parts.
