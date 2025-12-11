@@ -9,6 +9,7 @@
 # exclude = []
 # min_group_size = 3
 # overwrite = false
+# prefix_ignores = ["Something", "Other.Prefix"]
 # prefix_overrides = ["longer.prefix", "some.name"]
 # recursive = false
 # verbose = false

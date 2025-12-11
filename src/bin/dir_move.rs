@@ -15,8 +15,6 @@ use cli_tools::{
     print_warning,
 };
 
-// TODO: add prefix ignore option ignore parts of filenames
-
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
 struct Args {
@@ -47,6 +45,10 @@ struct Args {
     /// Exclude files that match the given pattern
     #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
     exclude: Vec<String>,
+
+    /// Ignore prefix when matching (strip from filename before matching)
+    #[arg(short = 'i', long = "ignore", num_args = 1, action = clap::ArgAction::Append, name = "IGNORE")]
+    prefix_ignore: Vec<String>,
 
     /// Override prefix to use for directory names
     #[arg(short = 'o', long = "override", num_args = 1, action = clap::ArgAction::Append, name = "OVERRIDE")]
@@ -93,6 +95,8 @@ struct MoveConfig {
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
+    prefix_ignores: Vec<String>,
+    #[serde(default)]
     prefix_overrides: Vec<String>,
     #[serde(default)]
     recurse: bool,
@@ -118,6 +122,7 @@ struct Config {
     exclude: Vec<String>,
     min_group_size: usize,
     overwrite: bool,
+    prefix_ignores: Vec<String>,
     prefix_overrides: Vec<String>,
     recurse: bool,
     verbose: bool,
@@ -169,6 +174,12 @@ impl Config {
         let user_config = MoveConfig::get_user_config();
         let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
         let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
+        let prefix_ignores: Vec<String> = user_config
+            .prefix_ignores
+            .into_iter()
+            .chain(args.prefix_ignore)
+            .unique()
+            .collect();
         let prefix_overrides: Vec<String> = user_config
             .prefix_overrides
             .into_iter()
@@ -184,6 +195,7 @@ impl Config {
             exclude,
             min_group_size: user_config.min_group_size.unwrap_or(args.group),
             overwrite: args.force || user_config.overwrite,
+            prefix_ignores,
             prefix_overrides,
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
@@ -237,7 +249,7 @@ impl DirMove {
             return Ok(());
         }
 
-        let matches = Self::match_files_to_directories(&files_in_root, &directories);
+        let matches = self.match_files_to_directories(&files_in_root, &directories);
         if matches.is_empty() {
             if self.config.verbose {
                 println!("No files found matching any directory names.");
@@ -321,7 +333,10 @@ impl DirMove {
         Ok(files)
     }
 
-    fn match_files_to_directories(files: &[PathBuf], dirs: &[DirectoryInfo]) -> HashMap<usize, Vec<PathBuf>> {
+    /// Match files to directories based on normalized name matching.
+    /// Returns a map from directory index (into `dirs`) to the list of matching file paths.
+    /// Longer directory names are matched first to prefer more specific matches.
+    fn match_files_to_directories(&self, files: &[PathBuf], dirs: &[DirectoryInfo]) -> HashMap<usize, Vec<PathBuf>> {
         let mut matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
 
         // Sort directory indices by name length (longest first) to match more specific names first
@@ -332,8 +347,12 @@ impl DirMove {
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
+
             // Normalize: replace dots with spaces for matching
             let file_name_normalized = file_name.replace('.', " ").to_lowercase();
+
+            // Apply prefix ignores: strip ignored prefixes from the normalized filename
+            let file_name_normalized = self.strip_ignored_prefixes(&file_name_normalized);
 
             for &idx in &dir_indices {
                 // dir.name is already lowercase
@@ -347,6 +366,67 @@ impl DirMove {
         }
 
         matches
+    }
+
+    /// Strip ignored prefixes from a normalized filename (spaces as separators).
+    /// Recursively removes any matching prefix from the start of the filename.
+    fn strip_ignored_prefixes<'a>(&self, filename: &'a str) -> Cow<'a, str> {
+        if self.config.prefix_ignores.is_empty() {
+            return Cow::Borrowed(filename);
+        }
+
+        let mut result = filename;
+        let mut changed = true;
+
+        // Keep stripping prefixes until no more matches
+        while changed {
+            changed = false;
+            for ignore in &self.config.prefix_ignores {
+                let ignore_lower = ignore.to_lowercase();
+                // Check if filename starts with the ignored prefix followed by a space
+                let prefix_with_space = format!("{ignore_lower} ");
+                if result.starts_with(&prefix_with_space) {
+                    result = result.strip_prefix(&prefix_with_space).unwrap_or(result);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        if result == filename {
+            Cow::Borrowed(filename)
+        } else {
+            Cow::Owned(result.to_string())
+        }
+    }
+
+    /// Strip ignored prefixes from a filename (dots as separators).
+    /// Recursively removes any matching prefix from the start of the filename.
+    fn strip_ignored_dot_prefixes(&self, filename: &str) -> String {
+        if self.config.prefix_ignores.is_empty() {
+            return filename.to_string();
+        }
+
+        let mut result = filename.to_string();
+        let mut changed = true;
+
+        // Keep stripping prefixes until no more matches
+        while changed {
+            changed = false;
+            for ignore in &self.config.prefix_ignores {
+                let ignore_lower = ignore.to_lowercase();
+                let result_lower = result.to_lowercase();
+                // Check if filename starts with the ignored prefix followed by a dot
+                let prefix_with_dot = format!("{ignore_lower}.");
+                if result_lower.starts_with(&prefix_with_dot) {
+                    result = result[prefix_with_dot.len()..].to_string();
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        result
     }
 
     fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<()> {
@@ -422,7 +502,7 @@ impl DirMove {
 
     /// Collect files from base path and group them by prefix.
     fn collect_files_by_prefix(&self) -> anyhow::Result<HashMap<String, Vec<PathBuf>>> {
-        // First pass: collect all files with their filename
+        // First pass: collect all files with their filename (with ignored prefixes stripped)
         let mut files_with_names: Vec<(PathBuf, String)> = Vec::new();
 
         for entry in fs::read_dir(&self.root)? {
@@ -450,7 +530,9 @@ impl DirMove {
                 continue;
             }
 
-            files_with_names.push((file_path, file_name));
+            // Strip ignored prefixes from filename for grouping purposes
+            let file_name_for_grouping = self.strip_ignored_dot_prefixes(&file_name);
+            files_with_names.push((file_path, file_name_for_grouping));
         }
 
         // Second pass: determine best prefix for each file
@@ -756,7 +838,7 @@ mod tests {
         );
     }
 
-    fn make_test_config(prefix_overrides: Vec<String>) -> Config {
+    fn make_test_config_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> Config {
         Config {
             auto: false,
             create: false,
@@ -766,17 +848,22 @@ mod tests {
             exclude: Vec::new(),
             min_group_size: 3,
             overwrite: false,
+            prefix_ignores,
             prefix_overrides,
             recurse: false,
             verbose: false,
         }
     }
 
-    fn make_test_dirmove(prefix_overrides: Vec<String>) -> DirMove {
+    fn make_test_dirmove_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> DirMove {
         DirMove {
             root: PathBuf::from("."),
-            config: make_test_config(prefix_overrides),
+            config: make_test_config_with_ignores(prefix_overrides, prefix_ignores),
         }
+    }
+
+    fn make_test_dirmove(prefix_overrides: Vec<String>) -> DirMove {
+        make_test_dirmove_with_ignores(prefix_overrides, Vec::new())
     }
 
     #[test]
@@ -883,6 +970,7 @@ mod tests {
     #[test]
     fn test_match_files_to_directories_basic_match() {
         // Directory: "Certain Name", files with "Certain.Name" should match
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["Certain Name"]);
         let files = make_file_paths(&[
             "Something.else.Certain.Name.video.1.mp4",
@@ -893,7 +981,7 @@ mod tests {
             "Certain.Not.Example.video.mp4",
         ]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&0));
@@ -902,20 +990,22 @@ mod tests {
 
     #[test]
     fn test_match_files_to_directories_no_matches() {
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["Some Directory"]);
         let files = make_file_paths(&["unrelated.file.mp4", "another.file.txt"]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_match_files_to_directories_multiple_dirs() {
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["First Dir", "Second Dir"]);
         let files = make_file_paths(&["First.Dir.file1.mp4", "Second.Dir.file2.mp4", "First.Dir.file3.mp4"]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert_eq!(result.len(), 2);
         assert_eq!(result.get(&0).map(Vec::len), Some(2));
@@ -924,6 +1014,7 @@ mod tests {
 
     #[test]
     fn test_match_files_to_directories_case_insensitive() {
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["My Directory"]);
         let files = make_file_paths(&[
             "MY.DIRECTORY.file1.mp4",
@@ -931,7 +1022,7 @@ mod tests {
             "My.Directory.file3.mp4",
         ]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result.get(&0).map(Vec::len), Some(3));
@@ -942,10 +1033,11 @@ mod tests {
         // Directory "Test Name" should NOT match "Testing.Name.file.mp4"
         // because "testing name file mp4" does not contain "test name" as substring
         // ("testing" != "test ")
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["Test Name"]);
         let files = make_file_paths(&["Testing.Name.file.mp4", "Test.Name.file.mp4"]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert_eq!(result.len(), 1);
         // Only "Test.Name.file.mp4" matches because normalized is "test name file mp4"
@@ -959,10 +1051,11 @@ mod tests {
     fn test_match_files_to_directories_longer_match_wins() {
         // If a file could match multiple directories, longer/more specific name wins
         // e.g., "ProjectNew" should match before "Project"
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["Project", "ProjectNew"]);
         let files = make_file_paths(&["ProjectNew.2025.10.12.file.mp4", "Project.2025.10.05.file.mp4"]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         // Should have matches for both directories
         assert_eq!(result.len(), 2);
@@ -976,20 +1069,22 @@ mod tests {
 
     #[test]
     fn test_match_files_to_directories_empty_files() {
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["Some Dir"]);
         let files: Vec<PathBuf> = Vec::new();
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_match_files_to_directories_empty_dirs() {
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs: Vec<DirectoryInfo> = Vec::new();
         let files = make_file_paths(&["some.file.mp4"]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert!(result.is_empty());
     }
@@ -998,10 +1093,11 @@ mod tests {
     fn test_match_files_to_directories_dots_replaced_with_spaces() {
         // Verify that dots in filenames are replaced with spaces for matching
         // Directory "My Show" should match "My.Show.S01E01.mp4"
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["My Show"]);
         let files = make_file_paths(&["My.Show.S01E01.mp4", "My.Show.S01E02.mp4"]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result.get(&0).map(Vec::len), Some(2));
@@ -1010,6 +1106,7 @@ mod tests {
     #[test]
     fn test_match_files_to_directories_mixed_separators() {
         // Files with various separators in names
+        let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["Show Name"]);
         let files = make_file_paths(&[
             "Show.Name.episode.mp4",
@@ -1017,9 +1114,95 @@ mod tests {
             "prefix.Show.Name.suffix.mp4",
         ]);
 
-        let result = DirMove::match_files_to_directories(&files, &dirs);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result.get(&0).map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn test_strip_ignored_prefixes_no_ignores() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let result = dirmove.strip_ignored_prefixes("something other matching");
+        assert_eq!(result.as_ref(), "something other matching");
+    }
+
+    #[test]
+    fn test_strip_ignored_prefixes_single_ignore() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
+        let result = dirmove.strip_ignored_prefixes("something other matching");
+        assert_eq!(result.as_ref(), "other matching");
+    }
+
+    #[test]
+    fn test_strip_ignored_prefixes_multiple_ignores() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string(), "Other".to_string()]);
+        let result = dirmove.strip_ignored_prefixes("something other matching");
+        assert_eq!(result.as_ref(), "matching");
+    }
+
+    #[test]
+    fn test_strip_ignored_prefixes_no_match() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
+        let result = dirmove.strip_ignored_prefixes("something other matching");
+        assert_eq!(result.as_ref(), "something other matching");
+    }
+
+    #[test]
+    fn test_strip_ignored_dot_prefixes_single_ignore() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("Something.other.matching.mp4");
+        assert_eq!(result, "other.matching.mp4");
+    }
+
+    #[test]
+    fn test_strip_ignored_dot_prefixes_multiple_ignores() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string(), "other".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("Something.other.matching.mp4");
+        assert_eq!(result, "matching.mp4");
+    }
+
+    #[test]
+    fn test_match_files_to_directories_with_prefix_ignore() {
+        // File "Something.other.matching.mp4" should match "matching" dir when "Something" is ignored
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
+        let dirs = make_test_dirs(&["matching", "Something"]);
+        let files = make_file_paths(&["Something.other.matching.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        // Should match "matching" (index 0), not "Something" (index 1)
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+        assert!(!result.contains_key(&1));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_with_repeated_prefix_ignore() {
+        // File has the ignored prefix multiple times in the name, should only strip from start
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
+        let dirs = make_test_dirs(&["other Something", "Something"]);
+        let files = make_file_paths(&["Something.other.Something.matching.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        // Should match "other Something" (index 0) after stripping leading "Something"
+        // The second "Something" in the middle of the name should remain for matching
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+        assert!(!result.contains_key(&1));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_with_multiple_prefix_ignores() {
+        // File should match after stripping multiple ignored prefixes
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix1".to_string(), "Prefix2".to_string()]);
+        let dirs = make_test_dirs(&["Target Dir"]);
+        let files = make_file_paths(&["Prefix1.Prefix2.Target.Dir.file.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
     }
 }
