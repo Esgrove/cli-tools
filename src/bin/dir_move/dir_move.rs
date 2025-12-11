@@ -1,132 +1,18 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{CommandFactory, Parser};
-use clap_complete::Shell;
 use colored::Colorize;
 use itertools::Itertools;
-use serde::Deserialize;
 
 use cli_tools::{
     get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
     print_warning,
 };
 
-#[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
-struct Args {
-    /// Optional input directory or file
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
-    path: Option<PathBuf>,
-
-    /// Auto-confirm all prompts without asking
-    #[arg(short, long)]
-    auto: bool,
-
-    /// Create directories for files with matching prefixes
-    #[arg(short, long)]
-    create: bool,
-
-    /// Print debug information
-    #[arg(short = 'D', long)]
-    debug: bool,
-
-    /// Overwrite existing files
-    #[arg(short, long)]
-    force: bool,
-
-    /// Include files that match the given pattern
-    #[arg(short = 'n', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
-    include: Vec<String>,
-
-    /// Exclude files that match the given pattern
-    #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
-    exclude: Vec<String>,
-
-    /// Ignore prefix when matching (strip from filename before matching)
-    #[arg(short = 'i', long = "ignore", num_args = 1, action = clap::ArgAction::Append, name = "IGNORE")]
-    prefix_ignore: Vec<String>,
-
-    /// Override prefix to use for directory names
-    #[arg(short = 'o', long = "override", num_args = 1, action = clap::ArgAction::Append, name = "OVERRIDE")]
-    prefix_override: Vec<String>,
-
-    /// Minimum number of matching files needed to create a group
-    #[arg(short, long, name = "COUNT", default_value_t = 3)]
-    group: usize,
-
-    /// Only print changes without moving files
-    #[arg(short, long)]
-    print: bool,
-
-    /// Recurse into subdirectories
-    #[arg(short, long)]
-    recurse: bool,
-
-    /// Generate shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
-    /// Print verbose output
-    #[arg(short, long)]
-    verbose: bool,
-}
-
-/// Config from a config file
-#[derive(Debug, Default, Deserialize)]
-struct MoveConfig {
-    #[serde(default)]
-    auto: bool,
-    #[serde(default)]
-    create: bool,
-    #[serde(default)]
-    debug: bool,
-    #[serde(default)]
-    dryrun: bool,
-    #[serde(default)]
-    include: Vec<String>,
-    #[serde(default)]
-    exclude: Vec<String>,
-    #[serde(default)]
-    min_group_size: Option<usize>,
-    #[serde(default)]
-    overwrite: bool,
-    #[serde(default)]
-    prefix_ignores: Vec<String>,
-    #[serde(default)]
-    prefix_overrides: Vec<String>,
-    #[serde(default)]
-    recurse: bool,
-    #[serde(default)]
-    verbose: bool,
-}
-
-/// Wrapper needed for parsing the user config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    dirmove: MoveConfig,
-}
-
-/// Final config combined from CLI arguments and user config file.
-#[derive(Debug)]
-struct Config {
-    auto: bool,
-    create: bool,
-    debug: bool,
-    dryrun: bool,
-    include: Vec<String>,
-    exclude: Vec<String>,
-    min_group_size: usize,
-    overwrite: bool,
-    prefix_ignores: Vec<String>,
-    prefix_overrides: Vec<String>,
-    recurse: bool,
-    verbose: bool,
-}
+use crate::Args;
+use crate::config::Config;
 
 /// Information about a directory used for matching files to move.
 #[derive(Debug)]
@@ -138,69 +24,9 @@ struct DirectoryInfo {
 }
 
 #[derive(Debug)]
-struct DirMove {
+pub struct DirMove {
     root: PathBuf,
     config: Config,
-}
-
-impl MoveConfig {
-    /// Try to read user config from the file if it exists.
-    /// Otherwise, fall back to default config.
-    fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|e| {
-                        print_error!("Error reading config file {}: {e}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|e| {
-                        print_error!("Error reading config file: {e}");
-                    })
-                    .ok()
-            })
-            .map(|config| config.dirmove)
-            .unwrap_or_default()
-    }
-}
-
-impl Config {
-    /// Create config from given command line args and user config file.
-    pub fn from_args(args: Args) -> Self {
-        let user_config = MoveConfig::get_user_config();
-        let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
-        let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
-        let prefix_ignores: Vec<String> = user_config
-            .prefix_ignores
-            .into_iter()
-            .chain(args.prefix_ignore)
-            .unique()
-            .collect();
-        let prefix_overrides: Vec<String> = user_config
-            .prefix_overrides
-            .into_iter()
-            .chain(args.prefix_override)
-            .unique()
-            .collect();
-        Self {
-            auto: args.auto || user_config.auto,
-            create: args.create || user_config.create,
-            debug: args.debug || user_config.debug,
-            dryrun: args.print || user_config.dryrun,
-            include,
-            exclude,
-            min_group_size: user_config.min_group_size.unwrap_or(args.group),
-            overwrite: args.force || user_config.overwrite,
-            prefix_ignores,
-            prefix_overrides,
-            recurse: args.recurse || user_config.recurse,
-            verbose: args.verbose || user_config.verbose,
-        }
-    }
 }
 
 impl DirectoryInfo {
@@ -278,7 +104,7 @@ impl DirMove {
 
     fn collect_directories_in_root(&self) -> anyhow::Result<Vec<DirectoryInfo>> {
         let mut dirs = Vec::new();
-        for entry in fs::read_dir(&self.root)? {
+        for entry in std::fs::read_dir(&self.root)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 let dir_name = entry.file_name().to_string_lossy().to_lowercase();
@@ -302,7 +128,7 @@ impl DirMove {
 
     fn collect_files_in_root(&self) -> anyhow::Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        for entry in fs::read_dir(&self.root)? {
+        for entry in std::fs::read_dir(&self.root)? {
             let entry = entry?;
             if entry.file_type()?.is_file() {
                 let file_name = entry.file_name().to_string_lossy().to_lowercase();
@@ -444,10 +270,10 @@ impl DirMove {
                 true
             } else {
                 print!("{}", "Move files to this directory? (y/n): ".magenta());
-                io::stdout().flush()?;
+                std::io::stdout().flush()?;
 
                 let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
+                std::io::stdin().read_line(&mut input)?;
                 input.trim().eq_ignore_ascii_case("y")
             };
 
@@ -467,7 +293,7 @@ impl DirMove {
     /// Move files to the target directory, creating it if needed.
     fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
         if !dir_path.exists() {
-            fs::create_dir(dir_path)?;
+            std::fs::create_dir(dir_path)?;
             println!("  Created directory: {}", path_to_filename_string(dir_path));
         }
 
@@ -485,7 +311,7 @@ impl DirMove {
                 continue;
             }
 
-            match fs::rename(file_path, &new_path) {
+            match std::fs::rename(file_path, &new_path) {
                 Ok(()) => {
                     if self.config.verbose {
                         println!("  Moved: {file_name}");
@@ -505,7 +331,7 @@ impl DirMove {
         // First pass: collect all files with their filename (with ignored prefixes stripped)
         let mut files_with_names: Vec<(PathBuf, String)> = Vec::new();
 
-        for entry in fs::read_dir(&self.root)? {
+        for entry in std::fs::read_dir(&self.root)? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
@@ -635,10 +461,10 @@ impl DirMove {
                     true
                 } else {
                     print!("{}", "Create directory and move files? (y/n): ".magenta());
-                    io::stdout().flush()?;
+                    std::io::stdout().flush()?;
 
                     let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
+                    std::io::stdin().read_line(&mut input)?;
                     input.trim().eq_ignore_ascii_case("y")
                 };
 
@@ -718,18 +544,11 @@ impl DirMove {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
-    } else {
-        DirMove::new(args)?.run()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
+    use std::collections::HashMap;
 
     fn make_test_files(names: &[&str]) -> Vec<(PathBuf, String)> {
         names.iter().map(|n| (PathBuf::from(*n), (*n).to_string())).collect()
