@@ -34,19 +34,42 @@ const SCREENS_DIR_NAME: &str = "Screens";
 pub struct ThumbnailCreator {
     config: Config,
     root: PathBuf,
+    /// Pre-escaped font path for ffmpeg drawtext filter.
+    escaped_font: String,
+    /// Pre-computed quality string for ffmpeg.
+    quality_str: String,
+}
+
+/// Parameters for creating a thumbnail.
+#[derive(Debug)]
+struct ThumbnailParams {
+    /// Interval between frames in seconds.
+    interval: f64,
+    /// Number of columns in the grid.
+    cols: u32,
+    /// Number of rows in the grid.
+    rows: u32,
+    /// Padding between tiles in pixels.
+    padding: u32,
+    /// Font size for text overlays.
+    font_size: u32,
+    /// Metadata text to display.
+    metadata_text: String,
 }
 
 /// Information about a video file from ffprobe.
 #[derive(Debug)]
 struct VideoInfo {
     /// Video width in pixels.
-    width: u32,
+    width: Option<u32>,
     /// Video height in pixels.
-    height: u32,
+    height: Option<u32>,
     /// Duration in seconds.
-    duration: f64,
+    duration: Option<f64>,
     /// Video codec name.
-    codec: String,
+    codec: Option<String>,
+    /// Video bitrate in kbps.
+    bitrate_kbps: Option<u64>,
 }
 
 impl ThumbnailCreator {
@@ -56,10 +79,14 @@ impl ThumbnailCreator {
 
         let input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args);
+        let escaped_font = Self::escape_for_drawtext(DEFAULT_FONT_FILE);
+        let quality_str = config.quality.to_string();
 
         Ok(Self {
             config,
             root: input_path,
+            escaped_font,
+            quality_str,
         })
     }
 
@@ -198,16 +225,30 @@ impl ThumbnailCreator {
         let video_info = Self::get_video_info(video_path)?;
 
         if self.config.verbose {
-            println!(
-                "  resolution: {}x{}, duration: {:.2}s, codec: {}",
-                video_info.width, video_info.height, video_info.duration, video_info.codec
-            );
-        } else {
-            println!("  duration: {:.2} seconds", video_info.duration);
+            let mut info_parts = Vec::new();
+            if let (Some(width), Some(height)) = (video_info.width, video_info.height) {
+                info_parts.push(format!("resolution: {width}x{height}"));
+            }
+            if let Some(duration) = video_info.duration {
+                info_parts.push(format!("duration: {duration:.2}s"));
+            }
+            if let Some(ref codec) = video_info.codec {
+                info_parts.push(format!("codec: {codec}"));
+            }
+            if let Some(bitrate_kbps) = video_info.bitrate_kbps {
+                info_parts.push(format!("bitrate: {:.2} Mbps", bitrate_kbps as f64 / 1000.0));
+            }
+            if !info_parts.is_empty() {
+                println!("  {}", info_parts.join(", "));
+            }
         }
 
         // Determine layout based on aspect ratio
-        let is_landscape = video_info.width > video_info.height;
+        let is_landscape = match (video_info.width, video_info.height) {
+            (Some(width), Some(height)) => width > height,
+            // Default to landscape if dimensions unknown
+            _ => true,
+        };
         let (cols, rows, padding) = if is_landscape {
             (
                 self.config.cols_landscape,
@@ -223,14 +264,13 @@ impl ThumbnailCreator {
         };
 
         let num_shots = cols * rows;
-        let interval = if video_info.duration > 0.0 {
-            video_info.duration / f64::from(num_shots)
-        } else {
-            1.0
+        let interval = match video_info.duration {
+            Some(duration) if duration > 0.0 => duration / f64::from(num_shots),
+            _ => 1.0,
         };
 
         if self.config.verbose {
-            println!("  interval: {interval:.2} seconds");
+            println!("  interval: {interval:.2}s");
         }
 
         // Calculate font size based on aspect ratio
@@ -245,20 +285,15 @@ impl ThumbnailCreator {
         }
 
         // Build ffmpeg command
-        let filter = self.build_filter_string(interval, cols, rows, padding, font_size, &metadata_text);
-
-        let mut command = Command::new("ffmpeg");
-        command
-            .args(["-hide_banner", "-nostats", "-loglevel", "warning", "-nostdin", "-y"])
-            .arg("-i")
-            .arg(video_path)
-            .arg("-vf")
-            .arg(&filter)
-            .args(["-frames:v", "1"])
-            .arg("-q:v")
-            .arg(self.config.quality.to_string())
-            .args(["-update", "1"])
-            .arg(&output_path);
+        let params = ThumbnailParams {
+            interval,
+            cols,
+            rows,
+            padding,
+            font_size,
+            metadata_text,
+        };
+        let mut command = self.build_ffmpeg_command(video_path, &output_path, &params);
 
         if self.config.dryrun {
             println!("[DRYRUN] {command:#?}");
@@ -281,69 +316,98 @@ impl ThumbnailCreator {
 
     /// Get video information using ffprobe.
     fn get_video_info(video_path: &Path) -> Result<VideoInfo> {
-        // Get dimensions
-        let dimensions_output = Command::new("ffprobe")
+        let output = Command::new("ffprobe")
             .args([
                 "-v",
                 "error",
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=width,height,codec_name",
+                "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng:format=bit_rate,duration",
                 "-of",
-                "csv=s=x:p=0",
+                "default=nokey=0:noprint_wrappers=1",
             ])
             .arg(video_path)
             .output()
-            .context("Failed to execute ffprobe for dimensions")?;
+            .context("Failed to execute ffprobe")?;
 
-        let dimensions_str = String::from_utf8_lossy(&dimensions_output.stdout);
-        let dimensions_parts: Vec<&str> = dimensions_str.trim().split('x').collect();
+        let stdout = String::from_utf8_lossy(&output.stdout);
 
-        let (width, height, codec) = if dimensions_parts.len() >= 3 {
-            (
-                dimensions_parts[0].parse().unwrap_or(1920),
-                dimensions_parts[1].parse().unwrap_or(1080),
-                dimensions_parts[2].to_string(),
-            )
-        } else {
-            (1920, 1080, "unknown".to_string())
-        };
+        let mut codec: Option<String> = None;
+        let mut bitrate_kbps: Option<u64> = None;
+        let mut duration: Option<f64> = None;
+        let mut width: Option<u32> = None;
+        let mut height: Option<u32> = None;
 
-        // Get duration
-        let duration_output = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-            ])
-            .arg(video_path)
-            .output()
-            .context("Failed to execute ffprobe for duration")?;
+        for line in stdout.lines() {
+            let line = line.trim();
+            if let Some((key, value)) = line.split_once('=') {
+                match key {
+                    "codec_name" => codec = Some(value.to_lowercase()),
+                    "bit_rate" | "BPS" | "BPS-eng" => {
+                        if bitrate_kbps.is_none()
+                            && let Ok(bps) = value.parse::<u64>()
+                            && bps > 0
+                        {
+                            bitrate_kbps = Some(bps / 1000);
+                        }
+                    }
+                    "duration" => {
+                        if let Ok(seconds) = value.parse::<f64>() {
+                            duration = Some(seconds);
+                        }
+                    }
+                    "width" => {
+                        if let Ok(w) = value.parse::<u32>() {
+                            width = Some(w);
+                        }
+                    }
+                    "height" => {
+                        if let Ok(h) = value.parse::<u32>() {
+                            height = Some(h);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
 
-        let duration_str = String::from_utf8_lossy(&duration_output.stdout);
-        let duration: f64 = duration_str.trim().parse().unwrap_or(0.0);
+        // Print warnings for missing information
+        let filename = video_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+
+        if width.is_none() || height.is_none() {
+            print_warning!("Could not detect video resolution for: {filename}");
+        }
+        if duration.is_none() {
+            print_warning!("Could not detect duration for: {filename}");
+        }
+        if codec.is_none() {
+            print_warning!("Could not detect codec for: {filename}");
+        }
+        if bitrate_kbps.is_none() {
+            print_warning!("Could not detect bitrate for: {filename}");
+        }
 
         Ok(VideoInfo {
             width,
             height,
             duration,
             codec,
+            bitrate_kbps,
         })
     }
 
     /// Calculate appropriate font size based on video aspect ratio.
     fn calculate_font_size(&self, video_info: &VideoInfo) -> u32 {
-        if video_info.width == 0 || video_info.height == 0 {
+        let (Some(width), Some(height)) = (video_info.width, video_info.height) else {
+            return self.config.font_size;
+        };
+
+        if width == 0 || height == 0 {
             return self.config.font_size;
         }
 
-        let ratio = f64::from(video_info.width) / f64::from(video_info.height);
+        let ratio = f64::from(width) / f64::from(height);
 
         if ratio < 0.75 {
             // Very vertical video
@@ -359,13 +423,23 @@ impl ThumbnailCreator {
 
     /// Build metadata text for the thumbnail header.
     fn build_metadata_text(filename: &str, video_info: &VideoInfo) -> String {
-        let duration_formatted = Self::format_duration(video_info.duration);
-        let resolution = format!("{}x{}", video_info.width, video_info.height);
+        let mut parts = Vec::new();
 
-        let metadata = format!(
-            "{} | {} | {} | {}",
-            duration_formatted, resolution, video_info.codec, filename
-        );
+        if let Some(duration) = video_info.duration {
+            parts.push(cli_tools::format_duration_seconds(duration));
+        }
+        if let (Some(width), Some(height)) = (video_info.width, video_info.height) {
+            parts.push(format!("{width}x{height}"));
+        }
+        if let Some(ref codec) = video_info.codec {
+            parts.push(codec.clone());
+        }
+        if let Some(bitrate_kbps) = video_info.bitrate_kbps {
+            parts.push(format!("{:.1} Mbps", bitrate_kbps as f64 / 1000.0));
+        }
+        parts.push(filename.to_string());
+
+        let metadata = parts.join(" | ");
 
         // Crop if too long
         if metadata.len() > MAX_METADATA_LENGTH {
@@ -375,13 +449,42 @@ impl ThumbnailCreator {
         }
     }
 
-    /// Format duration as HH:MM:SS.
-    fn format_duration(seconds: f64) -> String {
-        let total_seconds = seconds as u64;
-        let hours = total_seconds / 3600;
-        let minutes = (total_seconds % 3600) / 60;
-        let secs = total_seconds % 60;
-        format!("{hours:02}:{minutes:02}:{secs:02}")
+    /// Build the ffmpeg command for creating a thumbnail.
+    fn build_ffmpeg_command(&self, input_path: &Path, output_path: &Path, params: &ThumbnailParams) -> Command {
+        let escaped_metadata = Self::escape_for_drawtext(&params.metadata_text);
+
+        let filter = format!(
+            "fps=1/{interval},\
+            scale={width}:-1,\
+            drawtext=fontfile='{font}':text='%{{pts\\:hms}}':x=10:y=h-th-10:\
+            fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5,\
+            tile={cols}x{rows}:margin=0:padding={padding},\
+            drawtext=fontfile='{font}':\
+            text='{metadata}':x=10:y=10:fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.9:boxborderw=5",
+            interval = params.interval,
+            width = self.config.scale_width,
+            font = self.escaped_font,
+            font_size = params.font_size,
+            cols = params.cols,
+            rows = params.rows,
+            padding = params.padding,
+            metadata = escaped_metadata,
+        );
+
+        let mut command = Command::new("ffmpeg");
+        command
+            .args(["-hide_banner", "-nostats", "-loglevel", "warning", "-nostdin", "-y"])
+            .arg("-i")
+            .arg(input_path)
+            .arg("-vf")
+            .arg(&filter)
+            .args(["-frames:v", "1"])
+            .arg("-q:v")
+            .arg(&self.quality_str)
+            .args(["-update", "1"])
+            .arg(output_path);
+
+        command
     }
 
     /// Escape text for ffmpeg drawtext filter.
@@ -390,32 +493,5 @@ impl ThumbnailCreator {
             .replace(':', "\\:")
             .replace('\'', "\\'")
             .replace('|', "\\|")
-    }
-
-    /// Build the ffmpeg filter string.
-    fn build_filter_string(
-        &self,
-        interval: f64,
-        cols: u32,
-        rows: u32,
-        padding: u32,
-        font_size: u32,
-        metadata_text: &str,
-    ) -> String {
-        let escaped_metadata = Self::escape_for_drawtext(metadata_text);
-        let escaped_font = Self::escape_for_drawtext(DEFAULT_FONT_FILE);
-
-        format!(
-            "fps=1/{interval},\
-            scale={width}:-1,\
-            drawtext=fontfile='{font}':text='%{{pts\\:hms}}':x=10:y=h-th-10:\
-            fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5,\
-            tile={cols}x{rows}:margin=0:padding={padding},\
-            drawtext=fontfile='{font}':\
-            text='{metadata}':x=10:y=10:fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.9:boxborderw=5",
-            width = self.config.scale_width,
-            font = escaped_font,
-            metadata = escaped_metadata,
-        )
     }
 }
