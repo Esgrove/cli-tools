@@ -87,3 +87,24 @@ replace = [
 # - "name" (alphabetical)
 # - "name_desc" (reverse alphabetical)
 # sort = "bitrate"
+
+[thumbnail]
+# dryrun = false
+# overwrite = false
+# recurse = false
+# verbose = false
+
+# Grid layout for landscape videos (width > height)
+# cols_landscape = 3
+# rows_landscape = 4
+# padding_landscape = 8
+
+# Grid layout for portrait videos (height > width)
+# cols_portrait = 4
+# rows_portrait = 3
+# padding_portrait = 16
+
+# Thumbnail scaling and quality
+# scale_width = 480
+# font_size = 20
+# quality = 2  # JPEG quality (1-31, lower is better)
