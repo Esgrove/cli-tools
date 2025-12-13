@@ -10,7 +10,7 @@ use clap_complete::Shell;
 use crate::thumbnail::ThumbnailCreator;
 
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create thumbnails for video files using ffmpeg")]
+#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create thumbnail sheets for video files using ffmpeg")]
 pub(crate) struct ThumbnailArgs {
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]

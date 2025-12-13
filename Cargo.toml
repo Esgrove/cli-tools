@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "6.2.0"
+version = "7.0.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -66,6 +66,10 @@ name = "flipdate"
 path = "src/bin/flip_date.rs"
 
 [[bin]]
+name = "thumbs"
+path = "src/bin/thumbnail/main.rs"
+
+[[bin]]
 name = "vres"
 path = "src/bin/resolution.rs"
 
@@ -80,10 +84,6 @@ path = "src/bin/visa_parse.rs"
 [[bin]]
 name = "vtag"
 path = "src/bin/version_tag.rs"
-
-[[bin]]
-name = "thumbnail"
-path = "src/bin/thumbnail/main.rs"
 
 [profile.dev]
 incremental = true
