@@ -81,6 +81,10 @@ path = "src/bin/visa_parse.rs"
 name = "vtag"
 path = "src/bin/version_tag.rs"
 
+[[bin]]
+name = "thumbnail"
+path = "src/bin/thumbnail/main.rs"
+
 [profile.dev]
 incremental = true
 
