@@ -100,8 +100,8 @@ pub(crate) struct VideoConvertArgs {
     skip_remux: bool,
 
     /// Sort files
-    #[arg(short = 's', long, name = "ORDER", default_value_t = SortOrder::Name)]
-    sort: SortOrder,
+    #[arg(short = 's', long, name = "ORDER", num_args = 0..=1, default_missing_value = "bitrate")]
+    sort: Option<SortOrder>,
 
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]

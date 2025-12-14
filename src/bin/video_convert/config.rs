@@ -137,7 +137,7 @@ impl Config {
             recurse: args.recurse || user_config.recurse,
             skip_convert: args.skip_convert,
             skip_remux: args.skip_remux,
-            sort: user_config.sort.unwrap_or(args.sort),
+            sort: args.sort.or(user_config.sort).unwrap_or(SortOrder::Name),
             verbose: args.verbose || user_config.verbose,
         })
     }
