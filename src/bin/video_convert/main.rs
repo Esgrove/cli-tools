@@ -40,44 +40,6 @@ pub enum SortOrder {
     NameDesc,
 }
 
-impl FromStr for SortOrder {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "bitrate" => Ok(Self::Bitrate),
-            "bitrate_asc" | "bitrate-asc" => Ok(Self::BitrateAsc),
-            "size" => Ok(Self::Size),
-            "size_asc" | "size-asc" => Ok(Self::SizeAsc),
-            "duration" => Ok(Self::Duration),
-            "duration_asc" | "duration-asc" => Ok(Self::DurationAsc),
-            "resolution" => Ok(Self::Resolution),
-            "resolution_asc" | "resolution-asc" => Ok(Self::ResolutionAsc),
-            "name" => Ok(Self::Name),
-            "name_desc" | "name-desc" => Ok(Self::NameDesc),
-            _ => Err(format!("Unknown sort order: {s}")),
-        }
-    }
-}
-
-impl std::fmt::Display for SortOrder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Self::Bitrate => "bitrate (highest first)",
-            Self::BitrateAsc => "bitrate (lowest first)",
-            Self::Size => "size (largest first)",
-            Self::SizeAsc => "size (smallest first)",
-            Self::Duration => "duration (longest first)",
-            Self::DurationAsc => "duration (shortest first)",
-            Self::Resolution => "resolution (highest first)",
-            Self::ResolutionAsc => "resolution (lowest first)",
-            Self::Name => "name (alphabetical)",
-            Self::NameDesc => "name (reverse alphabetical)",
-        };
-        write!(f, "{name}")
-    }
-}
-
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
 pub(crate) struct VideoConvertArgs {
@@ -148,6 +110,44 @@ pub(crate) struct VideoConvertArgs {
     /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
+}
+
+impl FromStr for SortOrder {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "bitrate" => Ok(Self::Bitrate),
+            "bitrate_asc" | "bitrate-asc" => Ok(Self::BitrateAsc),
+            "size" => Ok(Self::Size),
+            "size_asc" | "size-asc" => Ok(Self::SizeAsc),
+            "duration" => Ok(Self::Duration),
+            "duration_asc" | "duration-asc" => Ok(Self::DurationAsc),
+            "resolution" => Ok(Self::Resolution),
+            "resolution_asc" | "resolution-asc" => Ok(Self::ResolutionAsc),
+            "name" => Ok(Self::Name),
+            "name_desc" | "name-desc" => Ok(Self::NameDesc),
+            _ => Err(format!("Unknown sort order: {s}")),
+        }
+    }
+}
+
+impl std::fmt::Display for SortOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Bitrate => "bitrate",
+            Self::BitrateAsc => "bitrate-asc",
+            Self::Size => "size",
+            Self::SizeAsc => "size-asc",
+            Self::Duration => "duration",
+            Self::DurationAsc => "duration-asc",
+            Self::Resolution => "resolution",
+            Self::ResolutionAsc => "resolution-asc",
+            Self::Name => "name",
+            Self::NameDesc => "name-desc",
+        };
+        write!(f, "{name}")
+    }
 }
 
 fn main() -> Result<()> {
