@@ -685,6 +685,21 @@ pub const fn is_network_path(_path: &Path) -> bool {
     false
 }
 
+/// Delete a file, using trash when possible.
+///
+/// For network paths, uses direct deletion since trash doesn't work there.
+/// For local paths, moves the file to the system trash.
+///
+/// # Errors
+/// Returns an error if the file cannot be deleted or trashed.
+pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
+    if is_network_path(path) {
+        std::fs::remove_file(path)
+    } else {
+        trash::delete(path).map_err(std::io::Error::other)
+    }
+}
+
 /// Helper method to assert floating point equality in test cases.
 ///
 /// # Panics

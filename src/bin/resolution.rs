@@ -126,7 +126,7 @@ impl FFProbeResult {
             path_str.red()
         );
         if !dryrun {
-            std::fs::remove_file(&self.file)?;
+            cli_tools::trash_or_delete(&self.file)?;
         }
         Ok(())
     }
