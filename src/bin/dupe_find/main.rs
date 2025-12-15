@@ -257,10 +257,10 @@ impl DupeFind {
             let paths_display = self
                 .roots
                 .iter()
-                .map(|path| cli_tools::path_to_string_relative(path))
+                .map(|path| cli_tools::path_to_string(path))
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!("Scanning paths: {}...", paths_display.magenta());
+            println!("Scanning paths: {}", paths_display.magenta());
             println!("Extensions: {:?}", self.config.extensions);
             if !self.config.patterns.is_empty() {
                 println!(
