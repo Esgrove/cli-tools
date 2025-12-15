@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -12,6 +12,7 @@ use colored::Colorize;
 use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use regex::Regex;
 use walkdir::WalkDir;
 
 use crate::config::{Config, VideoConvertConfig};
@@ -26,6 +27,9 @@ const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {
 
 /// Minimum ratio of output duration to input duration for a conversion to be considered successful.
 const MIN_DURATION_RATIO: f64 = 0.85;
+
+/// Regex to match x265 codec identifier in filenames (case-insensitive, word boundary).
+static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b").expect("Invalid x265 regex"));
 
 /// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert {
@@ -118,7 +122,12 @@ impl VideoFile {
     /// Get the output path for the converted file.
     fn output_path(&self) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let new_name = format!("{}.x265.mp4", self.name);
+        // Only add .x265 suffix if filename doesn't already contain x265
+        let new_name = if RE_X265.is_match(&self.name) {
+            format!("{}.{TARGET_EXTENSION}", self.name)
+        } else {
+            format!("{}.x265.{TARGET_EXTENSION}", self.name)
+        };
         parent.join(new_name)
     }
 }
@@ -991,6 +1000,12 @@ impl VideoConvert {
 
         for (index, file) in files.iter().enumerate() {
             let file_index = format!("[{:>width$}/{total}]", index + 1, width = num_digits);
+
+            // Skip adding .x265 suffix if filename already contains x265
+            if RE_X265.is_match(&file.name) {
+                continue;
+            }
+
             let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
 
             if self.config.dryrun {
@@ -1097,7 +1112,7 @@ impl VideoConvert {
     /// Check if a file should be converted based on extension and include/exclude patterns.
     fn should_include_file(&self, file: &VideoFile) -> bool {
         // Skip files with "x265" in the filename (already converted)
-        if file.name.contains(".x265") && file.extension == TARGET_EXTENSION {
+        if RE_X265.is_match(&file.name) && file.extension == TARGET_EXTENSION {
             return false;
         }
 
@@ -1216,7 +1231,7 @@ impl VideoConvert {
 
         // Check if already converted (HEVC in MP4 with .x265 marker)
         if is_hevc && file.extension == TARGET_EXTENSION {
-            if !file.name.contains(".x265") {
+            if !RE_X265.is_match(&file.name) {
                 // Needs rename to add .x265 suffix
                 let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
                 if new_path.exists() && !overwrite {
