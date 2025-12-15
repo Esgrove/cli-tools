@@ -9,6 +9,45 @@ use crate::FileInfo;
 
 use cli_tools::print_warning;
 
+/// Score a file based on resolution and codec labels.
+/// Higher score = better quality. Returns (`resolution_score`, `has_x265`).
+fn score_file(file: &FileInfo) -> (u8, bool) {
+    let filename_lower = file.filename.to_lowercase();
+
+    // Resolution score: higher resolution = higher score
+    let resolution_score = if filename_lower.contains(".2160p") {
+        4
+    } else if filename_lower.contains(".1440p") {
+        3
+    } else if filename_lower.contains(".1080p") {
+        2
+    } else {
+        u8::from(filename_lower.contains(".720p"))
+    };
+
+    let has_x265 = filename_lower.contains(".x265");
+
+    (resolution_score, has_x265)
+}
+
+/// Find the index of the best file to preselect based on resolution and codec.
+fn find_best_file_index(files: &[&FileInfo]) -> usize {
+    files
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            let (res_a, x265_a) = score_file(a);
+            let (res_b, x265_b) = score_file(b);
+
+            // First compare by resolution (higher is better)
+            res_a.cmp(&res_b).then_with(|| {
+                // If resolution is equal, prefer x265
+                x265_a.cmp(&x265_b)
+            })
+        })
+        .map_or(0, |(idx, _)| idx)
+}
+
 /// Action to perform on a duplicate group
 #[derive(Debug, Clone)]
 enum DuplicateAction {
@@ -61,7 +100,7 @@ impl TuiState {
     fn start_editing(&mut self, initial: &str) {
         self.editing = true;
         self.edit_buffer = initial.to_string();
-        self.cursor_pos = self.edit_buffer.len();
+        self.cursor_pos = 0;
     }
 
     fn stop_editing(&mut self) {
@@ -161,9 +200,11 @@ fn handle_duplicate_group(
     current_group: usize,
     total_groups: usize,
 ) -> anyhow::Result<DuplicateAction> {
+    let best_index = find_best_file_index(files);
     let mut state = TuiState::new();
+    state.selected = best_index;
     let mut list_state = ListState::default();
-    list_state.select(Some(0));
+    list_state.select(Some(best_index));
 
     loop {
         terminal.draw(|frame| {
