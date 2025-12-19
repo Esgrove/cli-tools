@@ -1,4 +1,4 @@
-# CLAUDE.md
+# Agent instructions
 
 ## Project Overview
 

@@ -19,7 +19,7 @@ struct DirMoveArgs {
     #[arg(short = 'a', long)]
     auto: bool,
 
-    /// Create directories for files with matching prefixes
+    /// Create directories for files with matching prefixes (runs after normal move)
     #[arg(short = 'c', long)]
     create: bool,
 
@@ -46,6 +46,10 @@ struct DirMoveArgs {
     /// Override prefix to use for directory names
     #[arg(short = 'o', long = "override", num_args = 1, action = clap::ArgAction::Append, name = "OVERRIDE")]
     prefix_override: Vec<String>,
+
+    /// Directory name to "unpack" by moving its contents to the parent directory
+    #[arg(short = 'u', long = "unpack", num_args = 1, action = clap::ArgAction::Append, name = "NAME")]
+    unpack_directory: Vec<String>,
 
     /// Minimum number of matching files needed to create a group
     #[arg(short = 'g', long, name = "COUNT", default_value_t = 3)]

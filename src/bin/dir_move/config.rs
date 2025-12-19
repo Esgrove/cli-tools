@@ -22,9 +22,10 @@ pub struct Config {
     pub(crate) prefix_overrides: Vec<String>,
     pub(crate) recurse: bool,
     pub(crate) verbose: bool,
+    pub(crate) unpack_directory_names: Vec<String>,
 }
 
-/// Config from a config file
+/// Config from the user config file
 #[derive(Debug, Default, Deserialize)]
 struct DirMoveConfig {
     #[serde(default)]
@@ -51,6 +52,8 @@ struct DirMoveConfig {
     recurse: bool,
     #[serde(default)]
     verbose: bool,
+    #[serde(default)]
+    unpack_directories: Vec<String>,
 }
 
 /// Wrapper needed for parsing the user config file section.
@@ -91,18 +94,29 @@ impl Config {
         let user_config = DirMoveConfig::get_user_config();
         let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
         let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
+
         let prefix_ignores: Vec<String> = user_config
             .prefix_ignores
             .into_iter()
             .chain(args.prefix_ignore)
             .unique()
             .collect();
+
         let prefix_overrides: Vec<String> = user_config
             .prefix_overrides
             .into_iter()
             .chain(args.prefix_override)
             .unique()
             .collect();
+
+        let unpack_directory_names: Vec<String> = user_config
+            .unpack_directories
+            .into_iter()
+            .chain(args.unpack_directory)
+            .map(|s| s.to_lowercase())
+            .unique()
+            .collect();
+
         Self {
             auto: args.auto || user_config.auto,
             create: args.create || user_config.create,
@@ -116,6 +130,7 @@ impl Config {
             prefix_overrides,
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
+            unpack_directory_names,
         }
     }
 }
