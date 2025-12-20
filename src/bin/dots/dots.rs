@@ -424,11 +424,8 @@ impl Dots {
             self.remove_from_start(&mut new_name);
         }
 
-        RE_DOTS
-            .replace_all(&new_name, ".")
-            .trim_start_matches('.')
-            .trim_end_matches('.')
-            .to_string()
+        let result = RE_DOTS.replace_all(&new_name, ".");
+        result.trim_start_matches('.').trim_end_matches('.').to_string()
     }
 
     /// Get all directories that need to be renamed.
@@ -755,7 +752,7 @@ impl Dots {
 
             if !skip_reorder {
                 for (regex, replacement) in &self.config.regex_replace_after {
-                    new_name = regex.replace_all(&new_name, replacement).to_string();
+                    new_name = regex.replace_all(&new_name, replacement).into_owned();
                 }
             }
         }
@@ -765,11 +762,8 @@ impl Dots {
             Self::remove_consecutive_duplicates(&mut new_name, &self.config.deduplicate_patterns);
         }
 
-        RE_DOTS
-            .replace_all(&new_name, ".")
-            .trim_start_matches('.')
-            .trim_end_matches('.')
-            .to_string()
+        let result = RE_DOTS.replace_all(&new_name, ".");
+        result.trim_start_matches('.').trim_end_matches('.').to_string()
     }
 
     fn move_to_start(&self, name: &mut String) {
@@ -956,7 +950,7 @@ impl Dots {
                     matched_str.trim().to_string()
                 }
             })
-            .to_string();
+            .into_owned();
     }
 
     /// Remove consecutive duplicate occurrences of patterns from the name.
@@ -1048,7 +1042,7 @@ impl Dots {
                 let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
                 format!("{year}.{month}.{day}")
             })
-            .to_string();
+            .into_owned();
 
         // Replace Day.Month.Year
         *name = RE_WRITTEN_DATE_DMY
@@ -1059,7 +1053,7 @@ impl Dots {
                 let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
                 format!("{year}.{month}.{day}")
             })
-            .to_string();
+            .into_owned();
     }
 
     /// Create a progress bar that is hidden during tests.
