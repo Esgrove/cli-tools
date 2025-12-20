@@ -384,7 +384,7 @@ impl DupeFind {
 
             for file in files {
                 let target_dir = duplicates_dir.join(&group_name);
-                let target_path = get_unique_path(&target_dir, &file.filename, &file.stem, &file.extension);
+                let target_path = cli_tools::get_unique_path(&target_dir, &file.filename, &file.stem, &file.extension);
 
                 println!(
                     "{}: {}",
@@ -427,32 +427,11 @@ impl DupeFind {
     }
 }
 
-/// Get a unique file path, adding a counter if the file already exists
-fn get_unique_path(dir: &Path, filename: &str, stem: &str, extension: &str) -> PathBuf {
-    let mut path = dir.join(filename);
-
-    if !path.exists() {
-        return path;
-    }
-
-    let mut counter = 1;
-    while path.exists() {
-        let new_name = if extension.is_empty() {
-            format!("{stem}.{counter}")
-        } else {
-            format!("{stem}.{counter}.{extension}")
-        };
-        path = dir.join(new_name);
-        counter += 1;
-    }
-
-    path
-}
-
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
-    use crate::dupe_find::{DupeFind, FileInfo, get_unique_path};
+    use crate::dupe_find::{DupeFind, FileInfo};
+    use cli_tools::get_unique_path;
     use regex::Regex;
     use std::path::PathBuf;
 

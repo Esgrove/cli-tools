@@ -371,6 +371,61 @@ pub fn path_to_string_relative(path: &Path) -> String {
     path_to_string(&get_relative_path_from_current_working_directory(path))
 }
 
+/// Get a unique file path, adding a counter suffix if the file already exists.
+///
+/// Given a directory and filename components,
+/// this function returns a path that doesn't conflict with existing files.
+/// If the initial path exists,
+/// it appends an incrementing counter (`.1`, `.2`, etc.) before the extension until a unique path is found.
+///
+/// # Arguments
+///
+/// * `dir` - The directory where the file will be placed
+/// * `filename` - The complete filename including extension (e.g., "document.txt")
+/// * `stem` - The filename without extension (e.g., "document")
+/// * `extension` - The file extension without the leading dot (e.g., "txt"), or empty string if none
+///
+/// # Returns
+///
+/// A `PathBuf` that is guaranteed not to exist at the time of the call.
+///
+/// # Example
+///
+/// ```
+/// use std::path::Path;
+/// use cli_tools::get_unique_path;
+///
+/// let dir = Path::new("/tmp/output");
+/// let filename = "report.pdf";
+/// let stem = "report";
+/// let extension = "pdf";
+///
+/// // If "report.pdf" exists, returns "report.1.pdf"
+/// // If "report.1.pdf" also exists, returns "report.2.pdf", etc.
+/// let unique_path = get_unique_path(dir, filename, stem, extension);
+/// ```
+#[must_use]
+pub fn get_unique_path(dir: &Path, filename: &str, stem: &str, extension: &str) -> PathBuf {
+    let mut path = dir.join(filename);
+
+    if !path.exists() {
+        return path;
+    }
+
+    let mut counter = 1;
+    while path.exists() {
+        let new_name = if extension.is_empty() {
+            format!("{stem}.{counter}")
+        } else {
+            format!("{stem}.{counter}.{extension}")
+        };
+        path = dir.join(new_name);
+        counter += 1;
+    }
+
+    path
+}
+
 #[inline]
 pub fn print_error(message: &str) {
     eprintln!("{}", format!("Error: {message}").red());
