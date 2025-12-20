@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -6,7 +5,9 @@ use std::{fmt, fs};
 
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
+#[cfg(not(test))]
+use indicatif::ProgressStyle;
 use rayon::prelude::*;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
@@ -114,9 +115,11 @@ static REPLACE: [(&str, &str); 27] = [
     ("\"", "'"),
 ];
 
-const PROGRESS_BAR_CHARS: &str = "=>-";
-const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
-const RESOLUTIONS: [&str; 6] = ["540", "720", "1080", "1920", "2160", "3840"];
+#[cfg(not(test))]
+const PROGRESS_BAR_CHARS: &str = "=> ";
+#[cfg(not(test))]
+const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.cyan/blue} {pos}/{len} {percent}%";
+const RESOLUTIONS: [&str; 6] = ["2160", "1440", "1080", "720", "480", "360"];
 
 #[derive(Debug, Default)]
 pub struct Dots {
@@ -187,6 +190,12 @@ impl Dots {
 
     /// Get all files that need to be renamed.
     fn gather_files_to_rename(&mut self) -> Result<Vec<(PathBuf, PathBuf)>> {
+        // Handle recursive prefix/suffix separately - they compute per-file
+        if self.config.prefix_dir_recursive || self.config.suffix_dir_recursive {
+            return Ok(self.gather_files_with_recursive_prefix_suffix());
+        }
+
+        // Non-recursive prefix/suffix: use root directory name for all files
         if self.config.prefix_dir || self.config.suffix_dir {
             let formatted_dir = if self.root.is_dir() {
                 cli_tools::get_normalized_dir_name(&self.root)?
@@ -257,13 +266,7 @@ impl Dots {
             .map(walkdir::DirEntry::into_path)
             .collect();
 
-        let progress_bar = ProgressBar::new(paths.len() as u64);
-        progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template(PROGRESS_BAR_TEMPLATE)
-                .expect("Failed to set progress bar template")
-                .progress_chars(PROGRESS_BAR_CHARS),
-        );
+        let progress_bar = Self::create_progress_bar(paths.len() as u64);
 
         // Filter and format files in parallel
         let mut results: Vec<_> = paths
@@ -300,6 +303,134 @@ impl Dots {
         Ok(results)
     }
 
+    /// Get all files to rename using recursive prefix/suffix mode.
+    /// Each file uses its parent directory name as the prefix/suffix.
+    fn gather_files_with_recursive_prefix_suffix(&self) -> Vec<(PathBuf, PathBuf)> {
+        if self.config.verbose {
+            println!(
+                "{}",
+                format!(
+                    "Formatting files under {} with recursive parent prefix/suffix",
+                    self.root.display()
+                )
+                .bold()
+            );
+        }
+
+        let max_depth = if self.config.recurse { 100 } else { 1 };
+
+        // Collect all file paths first
+        let paths: Vec<PathBuf> = WalkDir::new(&self.root)
+            .max_depth(max_depth)
+            .into_iter()
+            .filter_entry(|e| !cli_tools::is_hidden(e))
+            .filter_map(Result::ok)
+            .map(walkdir::DirEntry::into_path)
+            .filter(|p| p.is_file())
+            .collect();
+
+        let progress_bar = Self::create_progress_bar(paths.len() as u64);
+
+        // Process files - cannot use parallel iteration since we need to modify prefix/suffix per file
+        let mut results: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+        for path in paths {
+            let path_str = cli_tools::path_to_string(&path);
+            let include = self.config.include.iter().all(|name| path_str.contains(name));
+            let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
+
+            if include
+                && exclude
+                && let Some(result) = self.format_file_with_parent_prefix_suffix(&path)
+                && path != result
+            {
+                results.push((path, result));
+            }
+            progress_bar.inc(1);
+        }
+
+        progress_bar.finish_and_clear();
+
+        // Sort results
+        results.sort_by(|(a, _), (b, _)| {
+            a.to_string_lossy()
+                .to_lowercase()
+                .cmp(&b.to_string_lossy().to_lowercase())
+        });
+
+        results
+    }
+
+    /// Format a single file using its parent directory name as prefix/suffix.
+    fn format_file_with_parent_prefix_suffix(&self, path: &Path) -> Option<PathBuf> {
+        let parent_dir = path.parent()?;
+        let parent_name = cli_tools::get_normalized_dir_name(parent_dir).ok()?;
+        let formatted_parent = self.format_name_without_prefix_suffix(&parent_name);
+
+        let (file_name, file_extension) = cli_tools::get_normalized_file_name_and_extension(path).ok()?;
+        let formatted_name = self.format_name_without_prefix_suffix(&file_name);
+
+        // Apply prefix or suffix based on config
+        let final_name = if self.config.prefix_dir_recursive {
+            Self::apply_prefix(&formatted_name, &formatted_parent)
+        } else {
+            self.apply_suffix(&formatted_name, &formatted_parent)
+        };
+
+        let new_file = format!("{}.{}", final_name, file_extension.to_lowercase());
+        Some(path.with_file_name(new_file))
+    }
+
+    /// Format name without applying prefix/suffix (used for recursive mode).
+    fn format_name_without_prefix_suffix(&self, file_name: &str) -> String {
+        let mut new_name = String::from(file_name);
+
+        self.apply_replacements(&mut new_name);
+        Self::remove_special_characters(&mut new_name);
+
+        if self.config.convert_case {
+            new_name = new_name.to_lowercase();
+        }
+
+        self.apply_config_replacements(&mut new_name);
+
+        if self.config.remove_random {
+            Self::remove_random_identifiers(&mut new_name);
+        }
+
+        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
+
+        Self::apply_titlecase(&mut new_name);
+        Self::convert_written_date_format(&mut new_name);
+
+        if let Some(date_flipped_name) = if self.config.rename_directories {
+            cli_tools::date::reorder_directory_date(&new_name)
+        } else {
+            cli_tools::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
+        } {
+            new_name = date_flipped_name;
+        }
+
+        if !self.config.move_to_start.is_empty() {
+            self.move_to_start(&mut new_name);
+        }
+        if !self.config.move_to_end.is_empty() {
+            self.move_to_end(&mut new_name);
+        }
+        if !self.config.move_date_after_prefix.is_empty() {
+            self.move_date_after_prefix(&mut new_name);
+        }
+        if !self.config.remove_from_start.is_empty() {
+            self.remove_from_start(&mut new_name);
+        }
+
+        RE_DOTS
+            .replace_all(&new_name, ".")
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_string()
+    }
+
     /// Get all directories that need to be renamed.
     fn gather_directories_to_rename(&self, path_specified: bool) -> Vec<(PathBuf, PathBuf)> {
         // If a directory was given as input, use that unless recurse mode is enabled
@@ -324,15 +455,8 @@ impl Dots {
             .map(walkdir::DirEntry::into_path)
             .collect();
 
-        let progress_bar = ProgressBar::new(paths.len() as u64);
-        progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template(PROGRESS_BAR_TEMPLATE)
-                .expect("Failed to set progress bar template")
-                .progress_chars(PROGRESS_BAR_CHARS),
-        );
+        let progress_bar = Self::create_progress_bar(paths.len() as u64);
 
-        // Filter and format directories in parallel
         let mut results: Vec<_> = paths
             .into_par_iter()
             .filter_map(|path| {
@@ -938,23 +1062,24 @@ impl Dots {
             .to_string();
     }
 
-    /// Convert to lowercase.
-    ///
-    /// Splits from dot and only converts parts longer than 3 characters.
-    #[allow(unused)]
-    fn convert_to_lowercase(name: &mut String) {
-        let parts: Vec<_> = name
-            .split('.')
-            .map(|s| {
-                if s.chars().count() > 3 {
-                    Cow::Owned(s.to_lowercase())
-                } else {
-                    Cow::Borrowed(s)
-                }
-            })
-            .collect();
-
-        *name = parts.join(".");
+    /// Create a progress bar that is hidden during tests.
+    fn create_progress_bar(len: u64) -> ProgressBar {
+        #[cfg(test)]
+        {
+            let _ = len;
+            ProgressBar::hidden()
+        }
+        #[cfg(not(test))]
+        {
+            let progress_bar = ProgressBar::new(len);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template(PROGRESS_BAR_TEMPLATE)
+                    .expect("Failed to set progress bar template")
+                    .progress_chars(PROGRESS_BAR_CHARS),
+            );
+            progress_bar
+        }
     }
 }
 
@@ -1530,5 +1655,825 @@ mod test_deduplicate_patterns {
             path_given: false,
         };
         assert_eq!(dots.format_name("Test.Test.File"), "Test.File");
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_suffix_options {
+    use super::*;
+    use std::fs::{self, File};
+    use tempfile::TempDir;
+
+    /// Helper to create a test file with given name.
+    fn create_test_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        File::create(&path).expect("Failed to create test file");
+        path
+    }
+
+    /// Helper to create a subdirectory.
+    fn create_subdir(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        fs::create_dir_all(&path).expect("Failed to create subdirectory");
+        path
+    }
+
+    #[test]
+    fn test_prefix_with_explicit_name() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("My.Prefix".to_string()),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        assert_eq!(dots.format_name("some file name"), "My.Prefix.Some.File.Name");
+        assert_eq!(dots.format_name("another_file"), "My.Prefix.Another.File");
+    }
+
+    #[test]
+    fn test_suffix_with_explicit_name() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                suffix: Some("My.Suffix".to_string()),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        assert_eq!(dots.format_name("some file name"), "Some.File.Name.My.Suffix");
+        assert_eq!(dots.format_name("another_file"), "Another.File.My.Suffix");
+    }
+
+    #[test]
+    fn test_prefix_dir_uses_root_directory_name() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Test Directory");
+        create_test_file(&root, "some_file.txt");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 1);
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            new_name.starts_with("Test.Directory."),
+            "Expected prefix 'Test.Directory.', got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_suffix_dir_uses_root_directory_name() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Test Directory");
+        create_test_file(&root, "some_file.txt");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                suffix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 1);
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            new_name.contains(".Test.Directory."),
+            "Expected suffix 'Test.Directory', got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_prefix_dir_recursive_uses_parent_directory_names() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root Dir");
+        let sub1 = create_subdir(&root, "Sub One");
+        let sub2 = create_subdir(&root, "Sub Two");
+
+        create_test_file(&sub1, "file_in_sub1.txt");
+        create_test_file(&sub2, "file_in_sub2.txt");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                prefix_dir_recursive: true,
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 2);
+
+        // Check that each file uses its parent directory name as prefix
+        for (old_path, new_path) in &files {
+            let parent_name = old_path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace(' ', ".");
+
+            let new_name = new_path.file_name().unwrap().to_string_lossy();
+            assert!(
+                new_name.starts_with(&parent_name),
+                "File in '{}' should have prefix '{}', got: {}",
+                old_path.parent().unwrap().display(),
+                parent_name,
+                new_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_suffix_dir_recursive_uses_parent_directory_names() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root Dir");
+        let sub1 = create_subdir(&root, "Sub One");
+        let sub2 = create_subdir(&root, "Sub Two");
+
+        create_test_file(&sub1, "file_in_sub1.txt");
+        create_test_file(&sub2, "file_in_sub2.txt");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                suffix_dir: true,
+                suffix_dir_recursive: true,
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 2);
+
+        // Check that each file uses its parent directory name as suffix
+        for (old_path, new_path) in &files {
+            let parent_name = old_path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace(' ', ".");
+
+            let new_name = new_path.file_stem().unwrap().to_string_lossy();
+            assert!(
+                new_name.ends_with(&parent_name),
+                "File in '{}' should have suffix '{}', got: {}",
+                old_path.parent().unwrap().display(),
+                parent_name,
+                new_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_prefix_dir_start_prevents_date_reordering() {
+        let dots_without_start = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Artist".to_string()),
+                regex_replace_after: Dots::build_prefix_dir_regexes("Artist").unwrap().to_vec(),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        let dots_with_start = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Artist".to_string()),
+                prefix_dir_start: true,
+                // No regex_replace_after when prefix_dir_start is true
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        // Without --start, date causes reordering (prefix moves after date)
+        // The regex requires: prefix.content.year. (with trailing content after year)
+        assert_eq!(
+            dots_without_start.format_name("song title 2024 extra"),
+            "Song.Title.2024.Artist.Extra"
+        );
+
+        // With --start, prefix stays at start
+        assert_eq!(
+            dots_with_start.format_name("song title 2024 extra"),
+            "Artist.Song.Title.2024.Extra"
+        );
+    }
+
+    #[test]
+    fn test_prefix_recursive_different_subdirs_get_different_prefixes() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Music");
+        let artist1 = create_subdir(&root, "Artist One");
+        let artist2 = create_subdir(&root, "Artist Two");
+
+        create_test_file(&artist1, "song1.mp3");
+        create_test_file(&artist1, "song2.mp3");
+        create_test_file(&artist2, "track1.mp3");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                prefix_dir_recursive: true,
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 3);
+
+        let artist1_files: Vec<_> = files
+            .iter()
+            .filter(|(old, _)| old.parent().unwrap().ends_with("Artist One"))
+            .collect();
+        let artist2_files: Vec<_> = files
+            .iter()
+            .filter(|(old, _)| old.parent().unwrap().ends_with("Artist Two"))
+            .collect();
+
+        assert_eq!(artist1_files.len(), 2);
+        assert_eq!(artist2_files.len(), 1);
+
+        // Artist One files should have "Artist.One" prefix
+        for (_, new_path) in artist1_files {
+            let name = new_path.file_name().unwrap().to_string_lossy();
+            assert!(
+                name.starts_with("Artist.One."),
+                "Expected 'Artist.One.' prefix, got: {name}"
+            );
+        }
+
+        // Artist Two files should have "Artist.Two" prefix
+        for (_, new_path) in artist2_files {
+            let name = new_path.file_name().unwrap().to_string_lossy();
+            assert!(
+                name.starts_with("Artist.Two."),
+                "Expected 'Artist.Two.' prefix, got: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_name_without_prefix_suffix() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config::default(),
+            path_given: false,
+        };
+
+        // This method should format the name but not apply any prefix/suffix
+        // Note: titlecase is applied, so first letter of each word is capitalized
+        assert_eq!(
+            dots.format_name_without_prefix_suffix("Some_File_Name"),
+            "Some.File.Name"
+        );
+        assert_eq!(
+            dots.format_name_without_prefix_suffix("test 2024-01-15 video"),
+            "Test.2024.01.15.Video"
+        );
+    }
+
+    #[test]
+    fn test_prefix_and_suffix_cannot_both_be_set() {
+        // This is enforced by clap conflicts_with, but test the behavior if both were set
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Prefix".to_string()),
+                suffix: Some("Suffix".to_string()),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        // Both should be applied (prefix first, then suffix)
+        let result = dots.format_name("file name");
+        assert_eq!(result, "Prefix.File.Name.Suffix");
+    }
+
+    #[test]
+    fn test_recursive_mode_includes_root_and_subdir_files() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root");
+        let sub = create_subdir(&root, "Subdir");
+
+        // File in root should use "Root" as parent
+        create_test_file(&root, "root_file.txt");
+        // File in subdir should use "Subdir" as parent
+        create_test_file(&sub, "sub_file.txt");
+
+        let dots = Dots {
+            root: root.clone(),
+            config: Config {
+                prefix_dir: true,
+                prefix_dir_recursive: true,
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 2);
+
+        // Find the root file and subdir file
+        let root_file = files.iter().find(|(old, _)| old.parent().unwrap() == root);
+        let sub_file = files.iter().find(|(old, _)| old.parent().unwrap() == sub);
+
+        assert!(root_file.is_some(), "Root file should be included");
+        assert!(sub_file.is_some(), "Subdir file should be included");
+
+        // Root file should have "Root" prefix
+        let (_, new_root) = root_file.unwrap();
+        assert!(
+            new_root.file_name().unwrap().to_string_lossy().starts_with("Root."),
+            "Root file should have 'Root.' prefix"
+        );
+
+        // Subdir file should have "Subdir" prefix
+        let (_, new_sub) = sub_file.unwrap();
+        assert!(
+            new_sub.file_name().unwrap().to_string_lossy().starts_with("Subdir."),
+            "Subdir file should have 'Subdir.' prefix"
+        );
+    }
+
+    #[test]
+    fn test_prefix_dir_with_deeply_nested_directories() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root");
+        let level1 = create_subdir(&root, "Level One");
+        let level2 = create_subdir(&level1, "Level Two");
+        let level3 = create_subdir(&level2, "Level Three");
+
+        create_test_file(&level3, "deep_file.txt");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                prefix_dir_recursive: true,
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 1);
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_name().unwrap().to_string_lossy();
+        // Should use immediate parent "Level Three", not root
+        assert!(
+            new_name.starts_with("Level.Three."),
+            "Expected 'Level.Three.' prefix for deeply nested file, got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_prefix_dir_non_recursive_uses_root_for_all() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root Dir");
+        let sub = create_subdir(&root, "Subdir");
+
+        create_test_file(&root, "file1.txt");
+        create_test_file(&sub, "file2.txt");
+
+        // Non-recursive prefix_dir should use root name for direct children only
+        let mut dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                recurse: false,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        // Only root level file should be included (non-recursive)
+        assert_eq!(files.len(), 1);
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            new_name.starts_with("Root.Dir."),
+            "Expected 'Root.Dir.' prefix, got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_prefix_with_special_characters_in_directory_name() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Test (2024) [Special]");
+        create_test_file(&root, "file.txt");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 1);
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_name().unwrap().to_string_lossy();
+        // Special characters should be normalized
+        assert!(
+            new_name.starts_with("Test.2024.Special."),
+            "Expected normalized prefix, got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_suffix_with_special_characters_in_directory_name() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Artist & Band");
+        create_test_file(&root, "song.mp3");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                suffix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 1);
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_stem().unwrap().to_string_lossy();
+        assert!(
+            new_name.ends_with("Artist.&.Band")
+                || new_name.ends_with("Artist.Band")
+                || new_name.ends_with("Artist.and.Band"),
+            "Expected normalized suffix, got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_prefix_already_present_in_filename() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Artist.Name".to_string()),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        // If filename already contains the prefix, it should not duplicate
+        assert_eq!(dots.format_name("Artist Name - Song Title"), "Artist.Name.Song.Title");
+        assert_eq!(dots.format_name("artist.name.song.title"), "Artist.Name.Song.Title");
+    }
+
+    #[test]
+    fn test_suffix_already_present_in_filename() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                suffix: Some("2024".to_string()),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        // If filename already ends with suffix, should not duplicate
+        assert_eq!(dots.format_name("song title 2024"), "Song.Title.2024");
+    }
+
+    #[test]
+    fn test_prefix_dir_with_numeric_directory_name() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "2024");
+        create_test_file(&root, "file.txt");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 1);
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            new_name.starts_with("2024."),
+            "Expected '2024.' prefix, got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_prefix_dir_start_with_5_digit_filename() {
+        let dots = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Prefix".to_string()),
+                regex_replace_after: Dots::build_prefix_dir_regexes("Prefix").unwrap().to_vec(),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        // 5+ digit ID at start should keep prefix at start (skip reordering)
+        assert_eq!(
+            dots.format_name("12345 content 2024 extra"),
+            "Prefix.12345.Content.2024.Extra"
+        );
+
+        // 4 digit number should allow reordering
+        assert_eq!(
+            dots.format_name("1234 content 2024 extra"),
+            "1234.Content.2024.Prefix.Extra"
+        );
+    }
+
+    #[test]
+    fn test_prefix_recursive_with_include_filter() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root");
+        let sub = create_subdir(&root, "Subdir");
+
+        create_test_file(&root, "include_this.txt");
+        create_test_file(&root, "exclude_this.txt");
+        create_test_file(&sub, "include_sub.txt");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                prefix_dir_recursive: true,
+                recurse: true,
+                include: vec!["include".to_string()],
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 2, "Should only include files matching filter");
+
+        for (old_path, _) in &files {
+            let name = old_path.file_name().unwrap().to_string_lossy();
+            assert!(
+                name.contains("include"),
+                "All files should match include filter, got: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prefix_recursive_with_exclude_filter() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root");
+
+        create_test_file(&root, "keep_this.txt");
+        create_test_file(&root, "exclude_this.txt");
+        create_test_file(&root, "also_keep.txt");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                prefix_dir_recursive: true,
+                recurse: true,
+                exclude: vec!["exclude".to_string()],
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 2, "Should exclude files matching filter");
+
+        for (old_path, _) in &files {
+            let name = old_path.file_name().unwrap().to_string_lossy();
+            assert!(
+                !name.contains("exclude"),
+                "No files should match exclude filter, got: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_suffix_recursive_different_subdirs() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Videos");
+        let cat1 = create_subdir(&root, "Category One");
+        let cat2 = create_subdir(&root, "Category Two");
+
+        create_test_file(&cat1, "video1.mp4");
+        create_test_file(&cat2, "video2.mp4");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                suffix_dir: true,
+                suffix_dir_recursive: true,
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 2);
+
+        let cat1_file = files
+            .iter()
+            .find(|(old, _)| old.parent().unwrap().ends_with("Category One"));
+        let cat2_file = files
+            .iter()
+            .find(|(old, _)| old.parent().unwrap().ends_with("Category Two"));
+
+        assert!(cat1_file.is_some());
+        assert!(cat2_file.is_some());
+
+        let (_, new_cat1) = cat1_file.unwrap();
+        let (_, new_cat2) = cat2_file.unwrap();
+
+        let name1 = new_cat1.file_stem().unwrap().to_string_lossy();
+        let name2 = new_cat2.file_stem().unwrap().to_string_lossy();
+
+        assert!(
+            name1.ends_with("Category.One"),
+            "Expected 'Category.One' suffix, got: {name1}"
+        );
+        assert!(
+            name2.ends_with("Category.Two"),
+            "Expected 'Category.Two' suffix, got: {name2}"
+        );
+    }
+
+    #[test]
+    fn test_prefix_with_date_reordering_full_date() {
+        let dots_without_start = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Show".to_string()),
+                regex_replace_after: Dots::build_prefix_dir_regexes("Show").unwrap().to_vec(),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        // Full date pattern: year.month.day
+        assert_eq!(
+            dots_without_start.format_name("episode title 2024.06.15 extra"),
+            "Episode.Title.2024.06.15.Show.Extra"
+        );
+    }
+
+    #[test]
+    fn test_prefix_dir_empty_directory() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Empty Dir");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert!(files.is_empty(), "Empty directory should have no files to rename");
+    }
+
+    #[test]
+    fn test_prefix_recursive_empty_subdirectories() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Root");
+        let _empty_sub = create_subdir(&root, "Empty Sub");
+        let has_files = create_subdir(&root, "Has Files");
+
+        create_test_file(&has_files, "file.txt");
+
+        let dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                prefix_dir_recursive: true,
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_with_recursive_prefix_suffix();
+        assert_eq!(files.len(), 1, "Only files from non-empty dirs should be included");
+
+        let (_, new_path) = &files[0];
+        let new_name = new_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            new_name.starts_with("Has.Files."),
+            "Expected 'Has.Files.' prefix, got: {new_name}"
+        );
+    }
+
+    #[test]
+    fn test_multiple_files_same_directory_get_same_prefix() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Album Name");
+
+        create_test_file(&root, "track01.mp3");
+        create_test_file(&root, "track02.mp3");
+        create_test_file(&root, "track03.mp3");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 3);
+
+        // All files should have the same prefix
+        for (_, new_path) in &files {
+            let new_name = new_path.file_name().unwrap().to_string_lossy();
+            assert!(
+                new_name.starts_with("Album.Name."),
+                "All files should have 'Album.Name.' prefix, got: {new_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prefix_preserves_file_extension() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Test");
+
+        create_test_file(&root, "file.TXT");
+        create_test_file(&root, "video.MP4");
+        create_test_file(&root, "image.JPEG");
+
+        let mut dots = Dots {
+            root,
+            config: Config {
+                prefix_dir: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 3);
+
+        for (_, new_path) in &files {
+            let ext = new_path.extension().unwrap().to_string_lossy();
+            // Extensions should be lowercased
+            assert!(
+                ext.chars().all(|c| c.is_lowercase() || c.is_numeric()),
+                "Extension should be lowercase, got: {ext}"
+            );
+        }
     }
 }
