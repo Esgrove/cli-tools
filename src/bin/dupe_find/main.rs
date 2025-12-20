@@ -863,6 +863,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)]
     fn test_find_duplicates_many_patterns_many_files() {
         // Stress test with multiple patterns and many files
         let finder = make_dupe_finder(vec![r"GRP[A-Z]", r"NUM\d+", r"TAG_\w+"]);

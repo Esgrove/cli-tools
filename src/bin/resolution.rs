@@ -1380,7 +1380,7 @@ mod tests {
         std::fs::File::create(&file_path).expect("Failed to create file");
 
         let result = FFProbeResult {
-            file: file_path.clone(),
+            file: file_path,
             resolution: Resolution {
                 width: 1920,
                 height: 1080,
