@@ -5,9 +5,9 @@ use itertools::Itertools;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use crate::FileInfo;
-
 use cli_tools::print_warning;
+
+use crate::dupe_find::FileInfo;
 
 /// Score a file based on resolution and codec labels.
 /// Higher score = better quality. Returns (`resolution_score`, `has_x265`).

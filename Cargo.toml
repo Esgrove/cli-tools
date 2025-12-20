@@ -55,7 +55,7 @@ path = "src/bin/dir_move/main.rs"
 
 [[bin]]
 name = "dots"
-path = "src/bin/dots.rs"
+path = "src/bin/dots/main.rs"
 
 [[bin]]
 name = "dupefind"
