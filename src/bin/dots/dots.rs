@@ -37,6 +37,9 @@ static RE_IDENTIFIER: LazyLock<Regex> =
 static RE_RESOLUTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d{3,4}x\d{3,4}\b").expect("Failed to compile resolution regex"));
 
+static RE_LEADING_DIGITS: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"^\d{5,}\b").expect("Invalid leading digits regex"));
+
 static RE_WRITTEN_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>\d{1,2})\.(?P<year>\d{4})\b",
@@ -196,7 +199,11 @@ impl Dots {
                 if self.config.verbose {
                     println!("Using directory prefix: {name}");
                 }
-                let regexes = Self::build_prefix_dir_regexes(&name)?;
+                // Only add reordering regexes if prefix_dir_start is not set
+                if !self.config.prefix_dir_start {
+                    let regexes = Self::build_prefix_dir_regexes(&name)?;
+                    self.config.regex_replace_after.extend(regexes);
+                }
                 // Add prefix to deduplication patterns to remove consecutive duplicates
                 let prefix_with_dot = if name.ends_with('.') {
                     name.clone()
@@ -215,7 +222,6 @@ impl Dots {
                     }
                 }
                 self.config.prefix = Some(name);
-                self.config.regex_replace_after.extend(regexes);
             } else if self.config.suffix_dir {
                 if self.config.verbose {
                     println!("Using directory suffix: {name}");
@@ -614,9 +620,19 @@ impl Dots {
         }
 
         // Apply regex replacements (workaround for prefix regex)
+        // Skip reordering if name (after prefix) starts with 5+ digits followed by a boundary
         if !self.config.regex_replace_after.is_empty() {
-            for (regex, replacement) in &self.config.regex_replace_after {
-                new_name = regex.replace_all(&new_name, replacement).to_string();
+            let skip_reorder = self.config.prefix.as_ref().is_some_and(|prefix| {
+                new_name
+                    .strip_prefix(prefix)
+                    .map(|s| s.strip_prefix('.').unwrap_or(s))
+                    .is_some_and(Self::starts_with_five_or_more_digits)
+            });
+
+            if !skip_reorder {
+                for (regex, replacement) in &self.config.regex_replace_after {
+                    new_name = regex.replace_all(&new_name, replacement).to_string();
+                }
             }
         }
 
@@ -857,6 +873,12 @@ impl Dots {
             (prefix_regex_middle_full_date, "$1.$3.$2.".to_string()),
             (prefix_regex_middle_year, "$1.$3.$2.".to_string()),
         ])
+    }
+
+    /// Check if the name starts with 5 or more digits followed by a boundary.
+    /// Used to skip `prefix_dir` reordering for filenames with leading numeric identifiers.
+    fn starts_with_five_or_more_digits(name: &str) -> bool {
+        RE_LEADING_DIGITS.is_match(name)
     }
 
     fn has_at_least_six_digits(s: &str) -> bool {
@@ -1189,6 +1211,108 @@ mod dots_tests {
         assert_eq!(dots.format_name("test.one.two"), "Test.One.Two");
         assert_eq!(dots.format_name(" test one two "), "Test.One.Two");
         assert_eq!(dots.format_name("Test.One.Two"), "Test.One.Two");
+    }
+
+    /// Test that prefix dir keeps prefix at start when filename starts with 5+ digits.
+    #[test]
+    fn test_prefix_dir_with_leading_digits() {
+        // Test the helper function directly
+        assert!(
+            Dots::starts_with_five_or_more_digits("12345 Content"),
+            "5 digits with a space should match"
+        );
+        assert!(
+            Dots::starts_with_five_or_more_digits("123456789.Content"),
+            "9 digits should match"
+        );
+        assert!(
+            Dots::starts_with_five_or_more_digits("37432195.Video"),
+            "8 digits should match"
+        );
+        assert!(
+            !Dots::starts_with_five_or_more_digits("1234.Content"),
+            "4 digits should not match"
+        );
+        assert!(
+            !Dots::starts_with_five_or_more_digits("Content.12345"),
+            "digits not at start should not match"
+        );
+        assert!(
+            !Dots::starts_with_five_or_more_digits("12345Content"),
+            "digits without a boundary should not match"
+        );
+
+        // Test full format_name with prefix_dir behavior
+        let dots_with_prefix = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Prefix".to_string()),
+                regex_replace_after: Dots::build_prefix_dir_regexes("Prefix").unwrap().to_vec(),
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        // 5+ digits at start should NOT be reordered (prefix stays at start)
+        assert_eq!(
+            dots_with_prefix.format_name("12345 content 2024.01.15 rest"),
+            "Prefix.12345.Content.2024.01.15.Rest",
+            "5+ digits should keep prefix at start"
+        );
+
+        // Real-world example: 8-digit ID with date should keep prefix at start
+        assert_eq!(
+            dots_with_prefix.format_name("37432195_video_2021-06-28_18-24"),
+            "Prefix.37432195.Video.2021.06.28.18.24",
+            "8-digit ID should keep prefix at start"
+        );
+
+        // 4 digits at start SHOULD be reordered (prefix moves after date)
+        assert_eq!(
+            dots_with_prefix.format_name("1234 content 2024.01.15 rest"),
+            "1234.Content.2024.01.15.Prefix.Rest",
+            "4 digits should allow reordering"
+        );
+
+        // Content without leading digits should be reordered
+        assert_eq!(
+            dots_with_prefix.format_name("content 2024.01.15 rest"),
+            "Content.2024.01.15.Prefix.Rest",
+            "No leading digits should allow reordering"
+        );
+    }
+
+    /// Test that `prefix_dir_start` option forces prefix to always stay at the start.
+    #[test]
+    fn test_prefix_dir_start_option() {
+        // With prefix_dir_start = true, no reordering regexes are added
+        let dots_with_prefix_start = Dots {
+            root: PathBuf::default(),
+            config: Config {
+                prefix: Some("Prefix".to_string()),
+                prefix_dir_start: true,
+                ..Default::default()
+            },
+            path_given: false,
+        };
+
+        assert_eq!(
+            dots_with_prefix_start.format_name("content 2024.01.15 rest"),
+            "Prefix.Content.2024.01.15.Rest",
+            "prefix_dir_start should keep prefix at start"
+        );
+
+        assert_eq!(
+            dots_with_prefix_start.format_name("1234 content 2024.01.15 rest"),
+            "Prefix.1234.Content.2024.01.15.Rest",
+            "prefix_dir_start should keep prefix at start even with 4 digits"
+        );
+
+        assert_eq!(
+            dots_with_prefix_start.format_name("37432195_video_2021-06-28_18-24"),
+            "Prefix.37432195.Video.2021.06.28.18.24",
+            "prefix_dir_start should keep prefix at start for numeric IDs"
+        );
     }
 }
 

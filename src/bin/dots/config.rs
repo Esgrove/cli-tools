@@ -34,6 +34,8 @@ struct DotsConfig {
     #[serde(default)]
     prefix_dir: bool,
     #[serde(default)]
+    prefix_dir_start: bool,
+    #[serde(default)]
     suffix_dir: bool,
     #[serde(default)]
     pre_replace: Vec<(String, String)>,
@@ -76,6 +78,7 @@ pub struct Config {
     pub(crate) pre_replace: Vec<(String, String)>,
     pub(crate) prefix: Option<String>,
     pub(crate) prefix_dir: bool,
+    pub(crate) prefix_dir_start: bool,
     pub(crate) recurse: bool,
     pub(crate) regex_replace: Vec<(Regex, String)>,
     pub(crate) regex_replace_after: Vec<(Regex, String)>,
@@ -152,7 +155,11 @@ impl Config {
             overwrite: args.force || user_config.overwrite,
             pre_replace: user_config.pre_replace,
             prefix: args.prefix,
-            prefix_dir: args.prefix_dir || user_config.prefix_dir,
+            prefix_dir: args.prefix_dir
+                || args.prefix_dir_start
+                || user_config.prefix_dir
+                || user_config.prefix_dir_start,
+            prefix_dir_start: args.prefix_dir_start || user_config.prefix_dir_start,
             recurse: args.recurse || user_config.recurse,
             regex_replace,
             regex_replace_after: Vec::default(),

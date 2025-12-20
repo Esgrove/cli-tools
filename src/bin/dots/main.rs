@@ -61,6 +61,10 @@ pub(crate) struct Args {
     #[arg(short = 'b', long, conflicts_with = "prefix")] // , value_hint = clap::ValueHint::DirPath
     prefix_dir: bool,
 
+    /// Force `prefix_dir` to always be at the start of the filename (implies --prefix-dir)
+    #[arg(short = 'B', long, conflicts_with = "prefix")]
+    prefix_dir_start: bool,
+
     /// Suffix files with directory name
     #[arg(short = 'j', long, conflicts_with = "suffix")] // , value_hint = clap::ValueHint::DirPath
     suffix_dir: bool,
