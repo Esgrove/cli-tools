@@ -19,7 +19,7 @@ struct DirMoveArgs {
     #[arg(short = 'a', long)]
     auto: bool,
 
-    /// Create directories for files with matching prefixes (runs after normal move)
+    /// Create directories for files with matching prefixes
     #[arg(short = 'c', long)]
     create: bool,
 
