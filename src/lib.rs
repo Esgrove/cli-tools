@@ -308,7 +308,7 @@ pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Re
 #[must_use]
 pub fn get_relative_path_or_filename(full_path: &Path, root: &Path) -> String {
     if full_path == root {
-        return full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        return os_str_to_string(full_path.file_name().unwrap_or_default());
     }
     full_path.strip_prefix(root).map_or_else(
         |_| {

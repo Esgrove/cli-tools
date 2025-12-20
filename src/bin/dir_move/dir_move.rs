@@ -20,7 +20,7 @@ const GLUE_WORDS: &[&str] = &[
 
 use cli_tools::{
     get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
-    print_warning,
+    print_magenta, print_warning,
 };
 
 use crate::DirMoveArgs;
@@ -208,29 +208,23 @@ impl DirMove {
     }
 
     /// Print summary of what will be unpacked.
-    fn print_unpack_summary(&self, vdir: &Path, info: &UnpackInfo) {
-        let dir_display = path_to_string_relative(vdir);
+    fn print_unpack_summary(&self, directory: &Path, info: &UnpackInfo) {
+        let dir_display = path_to_string_relative(directory);
         let file_count = info.file_moves.len();
         let dir_count = info.direct_dir_moves.len();
 
-        println!(
-            "{} Unpacking: {} ({} file(s), {} dir(s))",
-            "→".green(),
-            dir_display.cyan().bold(),
-            file_count,
-            dir_count
-        );
+        print_magenta!("Unpacking: {dir_display} ({dir_count} d, {file_count} f)");
 
+        for (input, output) in &info.direct_dir_moves {
+            let src_display = get_relative_path_or_filename(input, directory);
+            let dst_display = get_relative_path_or_filename(output, directory);
+            println!("  {src_display} -> {dst_display}");
+        }
         if self.config.verbose {
-            for (src, dst) in &info.file_moves {
-                let src_display = path_to_string_relative(src);
-                let dst_display = path_to_string_relative(dst);
+            for (input, output) in &info.file_moves {
+                let src_display = get_relative_path_or_filename(input, directory);
+                let dst_display = get_relative_path_or_filename(output, directory);
                 println!("  {src_display} -> {dst_display}");
-            }
-            for (src, dst) in &info.direct_dir_moves {
-                let src_display = path_to_string_relative(src);
-                let dst_display = path_to_string_relative(dst);
-                println!("  {src_display} -> {dst_display} (directory)");
             }
         }
     }
@@ -367,7 +361,7 @@ impl DirMove {
         let files_in_root = self.collect_files_in_root()?;
         if files_in_root.is_empty() {
             if self.config.verbose {
-                println!("No files found in current directory.");
+                println!("No files found in current directory");
             }
             return Ok(());
         }
