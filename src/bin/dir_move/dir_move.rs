@@ -352,25 +352,16 @@ impl DirMove {
 
         let directories = self.collect_directories_in_root()?;
         if directories.is_empty() {
-            if self.config.verbose {
-                println!("No directories found in current path.");
-            }
             return Ok(());
         }
 
         let files_in_root = self.collect_files_in_root()?;
         if files_in_root.is_empty() {
-            if self.config.verbose {
-                println!("No files found in current directory");
-            }
             return Ok(());
         }
 
         let matches = self.match_files_to_directories(&files_in_root, &directories);
         if matches.is_empty() {
-            if self.config.verbose {
-                println!("No files found matching any directory names.");
-            }
             return Ok(());
         }
 
@@ -381,10 +372,12 @@ impl DirMove {
             .sorted_by(|a, b| a.0.name.cmp(&b.0.name))
             .collect();
 
-        print_bold!(
-            "Found {} directory match(es) with files to move:\n",
-            groups_to_process.len()
-        );
+        if self.config.verbose {
+            print_bold!(
+                "Found {} directory match(es) with files to move:\n",
+                groups_to_process.len()
+            );
+        }
 
         for (dir, files) in groups_to_process {
             self.process_directory_match(dir, &files)?;
