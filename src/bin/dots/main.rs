@@ -13,6 +13,9 @@ use crate::dots::Dots;
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Rename files to use dot formatting")]
 pub(crate) struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath, global = true)]
     path: Option<PathBuf>,
@@ -108,9 +111,6 @@ pub(crate) struct Args {
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
-
-    #[command(subcommand)]
-    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
