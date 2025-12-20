@@ -64,11 +64,11 @@ pub(crate) struct Args {
     #[arg(short = 'b', long, conflicts_with = "prefix")]
     prefix_dir: bool,
 
-    /// Force `prefix_dir` to always be at the start of the filename (implies --prefix-dir)
+    /// Force prefix name to the start
     #[arg(short = 'B', long, conflicts_with = "prefix")]
     prefix_dir_start: bool,
 
-    /// Prefix files with their parent directory name (implies --prefix-dir --recurse)
+    /// Prefix files with their parent directory name
     #[arg(short = 'R', long, conflicts_with = "prefix")]
     prefix_dir_recursive: bool,
 
@@ -76,7 +76,7 @@ pub(crate) struct Args {
     #[arg(short = 'j', long, conflicts_with = "suffix")]
     suffix_dir: bool,
 
-    /// Suffix files with their parent directory name (implies --suffix-dir --recurse)
+    /// Suffix files with their parent directory name
     #[arg(short = 'J', long, conflicts_with = "suffix")]
     suffix_dir_recursive: bool,
 
@@ -130,7 +130,7 @@ pub(crate) enum Command {
         #[arg(short = 'S', long)]
         start: bool,
 
-        /// Use each file's parent directory name as prefix (implies --recurse)
+        /// Use each file's parent directory name as prefix
         #[arg(short = 'R', long)]
         recursive: bool,
     },
@@ -146,7 +146,7 @@ pub(crate) enum Command {
         #[arg(short = 'x', long)]
         name: Option<String>,
 
-        /// Use each file's parent directory name as suffix (implies --recurse)
+        /// Use each file's parent directory name as suffix
         #[arg(short = 'R', long)]
         recursive: bool,
     },
