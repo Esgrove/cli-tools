@@ -115,7 +115,7 @@ impl DirMove {
             };
 
             let unpack_info = self.collect_unpack_info(&vdir, &parent);
-            self.print_unpack_summary(&vdir, &unpack_info);
+            self.print_unpack_summary(&parent, &unpack_info);
 
             if self.config.dryrun {
                 continue;
@@ -166,10 +166,24 @@ impl DirMove {
             }
         }
 
-        // Deterministic ordering (deepest first helps avoid surprises, but we still preserve structure).
-        candidates.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        // Sort by depth (shallowest first) to find root unpack directories.
+        candidates.sort_by_key(|p| p.components().count());
 
-        candidates
+        // Filter to keep only "root" unpack directories - those without an ancestor
+        // that is also a candidate. This ensures we process the full move chain once
+        // from the topmost unpack directory rather than separately for each level.
+        let mut root_candidates = Vec::new();
+        for candidate in &candidates {
+            let has_ancestor_candidate = root_candidates.iter().any(|root: &PathBuf| candidate.starts_with(root));
+            if !has_ancestor_candidate {
+                root_candidates.push(candidate.clone());
+            }
+        }
+
+        // Sort deepest first for processing order.
+        root_candidates.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+
+        root_candidates
     }
 
     /// Information about what needs to be moved during an unpack operation.
@@ -192,13 +206,20 @@ impl DirMove {
                 info.file_moves.push((path, dst));
             } else if path.is_dir() {
                 // If subdirectory name matches an unpack directory name, recurse into it.
-                // Otherwise, move the entire directory directly (more efficient).
+                // Otherwise, check if it contains nested unpack directories.
                 if self.config.unpack_directory_names.contains(&name.to_lowercase()) {
                     // Recursively collect from nested matching directories.
                     let nested_info = self.collect_unpack_info(&path, parent);
                     info.file_moves.extend(nested_info.file_moves);
                     info.direct_dir_moves.extend(nested_info.direct_dir_moves);
+                } else if self.contains_unpack_directory(&path) {
+                    // Non-matching directory contains nested unpack dirs, recurse into it
+                    // with this directory as the new parent.
+                    let nested_info = self.collect_unpack_info(&path, &dst);
+                    info.file_moves.extend(nested_info.file_moves);
+                    info.direct_dir_moves.extend(nested_info.direct_dir_moves);
                 } else {
+                    // No nested unpack dirs, move the entire directory directly (more efficient).
                     info.direct_dir_moves.push((path, dst));
                 }
             }
@@ -207,23 +228,64 @@ impl DirMove {
         info
     }
 
+    /// Check if a directory contains any subdirectories matching unpack names (recursively).
+    fn contains_unpack_directory(&self, dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && self.config.unpack_directory_names.contains(&name.to_lowercase())
+            {
+                return true;
+            }
+
+            // Recursively check subdirectories.
+            if self.contains_unpack_directory(&path) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Print summary of what will be unpacked.
-    fn print_unpack_summary(&self, directory: &Path, info: &UnpackInfo) {
-        let dir_display = path_to_string_relative(directory);
+    fn print_unpack_summary(&self, target_dir: &Path, info: &UnpackInfo) {
+        let dir_display = path_to_string_relative(target_dir);
         let file_count = info.file_moves.len();
         let dir_count = info.direct_dir_moves.len();
 
-        print_magenta!("Unpacking: {dir_display} ({dir_count} d, {file_count} f)");
+        let mut counts = Vec::new();
+        if dir_count > 0 {
+            counts.push(format!("{dir_count} d"));
+        }
+        if file_count > 0 {
+            counts.push(format!("{file_count} f"));
+        }
+        let counts_str = if counts.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", counts.join(", "))
+        };
+        let header = format!("Unpacking: {dir_display}{counts_str}");
+
+        print_magenta!("{}", header.bold());
 
         for (input, output) in &info.direct_dir_moves {
-            let src_display = get_relative_path_or_filename(input, directory);
-            let dst_display = get_relative_path_or_filename(output, directory);
+            let src_display = get_relative_path_or_filename(input, target_dir);
+            let dst_display = get_relative_path_or_filename(output, target_dir);
             println!("  {src_display} -> {dst_display}");
         }
         if self.config.verbose {
             for (input, output) in &info.file_moves {
-                let src_display = get_relative_path_or_filename(input, directory);
-                let dst_display = get_relative_path_or_filename(output, directory);
+                let src_display = get_relative_path_or_filename(input, target_dir);
+                let dst_display = get_relative_path_or_filename(output, target_dir);
                 println!("  {src_display} -> {dst_display}");
             }
         }
@@ -2439,5 +2501,244 @@ mod tests {
         // Directory name
         let dir_name = prefix.unwrap().replace('.', " ");
         assert_eq!(dir_name, "Cool Stuff");
+    }
+
+    #[test]
+    fn test_unpack_nested_chain_single_summary() -> anyhow::Result<()> {
+        // Test that deeply nested unpack directories (Project\updates\1\videos) produce
+        // a single consolidated move chain, not separate summaries for each level.
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Project");
+        std::fs::create_dir_all(&root)?;
+
+        // Create: MYM/updates/1/videos/file.txt
+        // All of "updates", "1", and "videos" are unpack names.
+        let deep_path = root.join("updates").join("1").join("videos");
+        write_file(&deep_path.join("file.txt"), "content")?;
+        write_file(&deep_path.join("another.txt"), "more content")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = DirMove {
+            root,
+            config: make_unpack_config(vec!["updates", "1", "videos"], true, false, false),
+        };
+
+        dirmove.unpack_directories()?;
+
+        // Files should end up directly in Project (all unpack dirs flattened).
+        assert_exists(&root_for_asserts.join("file.txt"));
+        assert_exists(&root_for_asserts.join("another.txt"));
+        assert_not_exists(&root_for_asserts.join("updates"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unpack_nested_chain_with_non_matching_dir_between() -> anyhow::Result<()> {
+        // Test: Project/updates/KeepThis/videos/file.txt
+        // "updates" and "videos" match, but "KeepThis" doesn't.
+        // KeepThis should be preserved in the output structure.
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Project");
+        std::fs::create_dir_all(&root)?;
+
+        let path = root.join("updates").join("KeepThis").join("videos");
+        write_file(&path.join("file.txt"), "content")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = DirMove {
+            root,
+            config: make_unpack_config(vec!["updates", "videos"], true, false, false),
+        };
+
+        dirmove.unpack_directories()?;
+
+        // KeepThis should be preserved, file unpacked from videos into it.
+        assert_exists(&root_for_asserts.join("KeepThis").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("updates"));
+        assert_not_exists(&root_for_asserts.join("KeepThis").join("videos"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unpack_nested_chain_multiple_non_matching_dirs() -> anyhow::Result<()> {
+        // Test: Root/updates/A/videos/B/downloads/file.txt
+        // "updates", "videos", "downloads" match; "A" and "B" don't.
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let path = root
+            .join("updates")
+            .join("A")
+            .join("videos")
+            .join("B")
+            .join("downloads");
+        write_file(&path.join("file.txt"), "content")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = DirMove {
+            root,
+            config: make_unpack_config(vec!["updates", "videos", "downloads"], true, false, false),
+        };
+
+        dirmove.unpack_directories()?;
+
+        // A and B should be preserved in the hierarchy.
+        assert_exists(&root_for_asserts.join("A").join("B").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("updates"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unpack_collect_candidates_filters_nested() -> anyhow::Result<()> {
+        // Verify that collect_unpack_candidates only returns root unpack dirs.
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Test");
+        std::fs::create_dir_all(&root)?;
+
+        // Create nested structure where all dirs match.
+        let path = root.join("videos").join("updates").join("downloads");
+        std::fs::create_dir_all(&path)?;
+        write_file(&path.join("file.txt"), "x")?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec!["videos", "updates", "downloads"], true, false, false),
+        };
+
+        let candidates = dirmove.collect_unpack_candidates();
+
+        // Should only return the topmost "videos" directory, not the nested ones.
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], root.join("videos"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unpack_separate_trees_get_separate_processing() -> anyhow::Result<()> {
+        // Two separate unpack directory trees should each be processed.
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Tree 1: Root/DirA/videos/file1.txt
+        write_file(&root.join("DirA").join("videos").join("file1.txt"), "1")?;
+
+        // Tree 2: Root/DirB/videos/file2.txt
+        write_file(&root.join("DirB").join("videos").join("file2.txt"), "2")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = DirMove {
+            root,
+            config: make_unpack_config(vec!["videos"], true, false, false),
+        };
+
+        dirmove.unpack_directories()?;
+
+        // Each tree should be unpacked independently.
+        assert_exists(&root_for_asserts.join("DirA").join("file1.txt"));
+        assert_exists(&root_for_asserts.join("DirB").join("file2.txt"));
+        assert_not_exists(&root_for_asserts.join("DirA").join("videos"));
+        assert_not_exists(&root_for_asserts.join("DirB").join("videos"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unpack_chain_with_files_at_multiple_levels() -> anyhow::Result<()> {
+        // Files at different levels of the unpack chain should all end up in the target.
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create: Root/updates/file1.txt
+        //         Root/updates/videos/file2.txt
+        //         Root/updates/videos/downloads/file3.txt
+        let updates = root.join("updates");
+        write_file(&updates.join("file1.txt"), "1")?;
+        write_file(&updates.join("videos").join("file2.txt"), "2")?;
+        write_file(&updates.join("videos").join("downloads").join("file3.txt"), "3")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = DirMove {
+            root,
+            config: make_unpack_config(vec!["updates", "videos", "downloads"], true, false, false),
+        };
+
+        dirmove.unpack_directories()?;
+
+        // All files should end up directly in Root.
+        assert_exists(&root_for_asserts.join("file1.txt"));
+        assert_exists(&root_for_asserts.join("file2.txt"));
+        assert_exists(&root_for_asserts.join("file3.txt"));
+        assert_not_exists(&root_for_asserts.join("updates"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_unpack_chain_with_non_matching_subdirs_moved_directly() -> anyhow::Result<()> {
+        // Non-matching directories without nested unpack dirs should be moved directly.
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create: Root/updates/KeepMe/deep/file.txt (no unpack dirs inside KeepMe)
+        let keep_me = root.join("updates").join("KeepMe");
+        write_file(&keep_me.join("deep").join("file.txt"), "content")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = DirMove {
+            root,
+            config: make_unpack_config(vec!["updates"], true, false, false),
+        };
+
+        dirmove.unpack_directories()?;
+
+        // KeepMe should be moved directly with its structure intact.
+        assert_exists(&root_for_asserts.join("KeepMe").join("deep").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("updates"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_contains_unpack_directory_helper() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create: Root/A/B/videos/file.txt
+        let videos = root.join("A").join("B").join("videos");
+        write_file(&videos.join("file.txt"), "x")?;
+
+        // Create: Root/C/nothing_special/file.txt
+        write_file(&root.join("C").join("nothing_special").join("file.txt"), "y")?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec!["videos"], true, false, false),
+        };
+
+        // A contains videos (nested), should return true.
+        assert!(dirmove.contains_unpack_directory(&root.join("A")));
+
+        // B contains videos directly, should return true.
+        assert!(dirmove.contains_unpack_directory(&root.join("A").join("B")));
+
+        // C does not contain any unpack directory, should return false.
+        assert!(!dirmove.contains_unpack_directory(&root.join("C")));
+
+        Ok(())
     }
 }
