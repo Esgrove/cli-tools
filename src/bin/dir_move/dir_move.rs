@@ -18,6 +18,14 @@ const GLUE_WORDS: &[&str] = &[
     "a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with",
 ];
 
+/// Directory names that should be deleted when encountered.
+const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
+
+/// Check if a directory name is in the unwanted list.
+fn is_unwanted_directory(name: &str) -> bool {
+    UNWANTED_DIRECTORIES.iter().any(|u| name.eq_ignore_ascii_case(u))
+}
+
 use cli_tools::{
     get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
     print_magenta, print_warning,
@@ -69,12 +77,9 @@ impl DirMove {
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
-        // Optional: unpack configured directory names by moving their contents up one level.
-        // - If recurse is enabled, this searches recursively.
-        // - Otherwise, it only checks directories directly under root.
-        if !self.config.unpack_directory_names.is_empty() {
-            self.unpack_directories()?;
-        }
+        // Delete unwanted directories and unpack configured directory names.
+        // These are combined into a single directory walk for efficiency.
+        self.unpack_directories()?;
 
         // Normal directory matching/moving always runs first.
         self.move_files_to_dir()?;
@@ -87,7 +92,7 @@ impl DirMove {
         Ok(())
     }
 
-    /// Unpack directories with names matching config.
+    /// Delete unwanted directories and unpack directories with names matching config.
     ///
     /// For each matching directory `.../<match>/...`, move its entire contents to the parent directory,
     /// preserving the structure below `<match>`. For example:
@@ -96,11 +101,28 @@ impl DirMove {
     ///
     /// Prunes empty directories that were touched by this unpack operation or already empty directories that match.
     fn unpack_directories(&self) -> anyhow::Result<()> {
-        if self.config.unpack_directory_names.is_empty() {
-            return Ok(());
+        let (unwanted, candidates) = self.collect_unwanted_and_unpack_candidates();
+
+        // Delete unwanted directories first (deepest first for safe deletion).
+        for dir in unwanted {
+            let relative = path_to_string_relative(&dir);
+            if self.config.dryrun {
+                println!("{} {relative}", "Would delete unwanted:".yellow());
+            } else {
+                match std::fs::remove_dir_all(&dir) {
+                    Ok(()) => {
+                        println!("{} {relative}", "Deleted unwanted:".green());
+                    }
+                    Err(err) => {
+                        print_error!("Failed to delete {relative}: {err}");
+                    }
+                }
+            }
         }
 
-        let candidates = self.collect_unpack_candidates();
+        if candidates.is_empty() {
+            return Ok(());
+        }
 
         // Track directories we touched so we can prune empties safely.
         let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
@@ -140,7 +162,10 @@ impl DirMove {
         Ok(())
     }
 
-    fn collect_unpack_candidates(&self) -> Vec<PathBuf> {
+    /// Collect unwanted directories to delete and unpack candidates in a single walk.
+    /// Returns (`unwanted_dirs`, `unpack_candidates`) both sorted deepest first.
+    fn collect_unwanted_and_unpack_candidates(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let mut unwanted = Vec::new();
         let mut candidates = Vec::new();
 
         let walker = if self.config.recurse {
@@ -151,7 +176,11 @@ impl DirMove {
 
         for entry in walker
             .into_iter()
-            .filter_entry(|e| !cli_tools::should_skip_entry(e))
+            .filter_entry(|e| {
+                // Allow unwanted directories through so we can delete them,
+                // but skip other hidden/system directories
+                e.file_name().to_str().is_some_and(is_unwanted_directory) || !cli_tools::should_skip_entry(e)
+            })
             .filter_map(Result::ok)
         {
             if !entry.file_type().is_dir() {
@@ -165,10 +194,15 @@ impl DirMove {
                 continue;
             };
 
-            if self.config.unpack_directory_names.contains(&name.to_lowercase()) {
+            if is_unwanted_directory(name) {
+                unwanted.push(entry.path().to_path_buf());
+            } else if self.config.unpack_directory_names.contains(&name.to_lowercase()) {
                 candidates.push(entry.path().to_path_buf());
             }
         }
+
+        // Sort unwanted deepest first for safe deletion.
+        unwanted.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
 
         // Sort by depth (shallowest first) to find root unpack directories.
         candidates.sort_by_key(|p| p.components().count());
@@ -187,7 +221,7 @@ impl DirMove {
         // Sort deepest first for processing order.
         root_candidates.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
 
-        root_candidates
+        (unwanted, root_candidates)
     }
 
     /// Information about what needs to be moved during an unpack operation.
@@ -458,11 +492,16 @@ impl DirMove {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 let path = entry.path();
-                // Skip system directories like $RECYCLE.BIN
+                // Skip system directories like $RECYCLE.BIN and unwanted directories
                 if cli_tools::is_system_directory_path(&path) {
                     continue;
                 }
-                let dir_name = entry.file_name().to_string_lossy().to_lowercase();
+                let file_name = entry.file_name();
+                let dir_name = file_name.to_string_lossy();
+                if is_unwanted_directory(&dir_name) {
+                    continue;
+                }
+                let dir_name = dir_name.to_lowercase();
                 if !self.config.exclude.is_empty()
                     && self
                         .config
@@ -2621,7 +2660,7 @@ mod tests {
             config: make_unpack_config(vec!["videos", "updates", "downloads"], true, false, false),
         };
 
-        let candidates = dirmove.collect_unpack_candidates();
+        let (_, candidates) = dirmove.collect_unwanted_and_unpack_candidates();
 
         // Should only return the topmost "videos" directory, not the nested ones.
         assert_eq!(candidates.len(), 1);
@@ -2748,6 +2787,136 @@ mod tests {
         // C does not contain any unpack directory, should return false.
         assert!(!dirmove.contains_unpack_directory(&root.join("C")));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwanted_directory_deleted() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let unwanted = root.join(".unwanted");
+        std::fs::create_dir(&unwanted)?;
+        write_file(&unwanted.join("junk.txt"), "junk")?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec![], false, false, false),
+        };
+
+        dirmove.run()?;
+
+        assert_not_exists(&unwanted);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwanted_directory_deleted_recursive() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let subdir = root.join("subdir");
+        std::fs::create_dir(&subdir)?;
+        let unwanted = subdir.join(".unwanted");
+        std::fs::create_dir(&unwanted)?;
+        write_file(&unwanted.join("junk.txt"), "junk")?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec![], true, false, false),
+        };
+
+        dirmove.run()?;
+
+        assert_not_exists(&unwanted);
+        assert_exists(&subdir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwanted_directory_dryrun_preserves() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let unwanted = root.join(".unwanted");
+        std::fs::create_dir(&unwanted)?;
+        write_file(&unwanted.join("junk.txt"), "junk")?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec![], false, true, false),
+        };
+
+        dirmove.run()?;
+
+        assert_exists(&unwanted);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwanted_directory_case_insensitive() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let unwanted = root.join(".Unwanted");
+        std::fs::create_dir(&unwanted)?;
+        write_file(&unwanted.join("junk.txt"), "junk")?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec![], false, false, false),
+        };
+
+        dirmove.run()?;
+
+        assert_not_exists(&unwanted);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwanted_directory_skipped_in_collect_directories() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let unwanted = root.join(".unwanted");
+        std::fs::create_dir(&unwanted)?;
+        let normal = root.join("normal");
+        std::fs::create_dir(&normal)?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec![], false, true, false),
+        };
+
+        let dirs = dirmove.collect_directories_in_root()?;
+
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].path, normal);
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_unwanted_and_unpack_combined() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let unwanted = root.join(".unwanted");
+        std::fs::create_dir(&unwanted)?;
+        let videos = root.join("videos");
+        std::fs::create_dir(&videos)?;
+        write_file(&videos.join("file.txt"), "x")?;
+
+        let dirmove = DirMove {
+            root: root.clone(),
+            config: make_unpack_config(vec!["videos"], false, false, false),
+        };
+
+        let (unwanted_dirs, unpack_candidates) = dirmove.collect_unwanted_and_unpack_candidates();
+
+        assert_eq!(unwanted_dirs.len(), 1);
+        assert_eq!(unwanted_dirs[0], unwanted);
+        assert_eq!(unpack_candidates.len(), 1);
+        assert_eq!(unpack_candidates[0], videos);
         Ok(())
     }
 }
