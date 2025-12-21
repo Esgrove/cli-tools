@@ -261,7 +261,7 @@ impl Dots {
         let paths: Vec<PathBuf> = WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
-            .filter_entry(|e| !cli_tools::is_hidden(e))
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
             .filter_map(Result::ok)
             .map(walkdir::DirEntry::into_path)
             .collect();
@@ -323,7 +323,7 @@ impl Dots {
         let paths: Vec<PathBuf> = WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
-            .filter_entry(|e| !cli_tools::is_hidden(e))
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
             .filter_map(Result::ok)
             .map(walkdir::DirEntry::into_path)
             .filter(|p| p.is_file())
@@ -451,6 +451,7 @@ impl Dots {
         // Collect all directory paths first
         let paths: Vec<PathBuf> = walker
             .into_iter()
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
             .map(walkdir::DirEntry::into_path)

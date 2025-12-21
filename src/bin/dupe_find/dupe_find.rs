@@ -178,7 +178,7 @@ impl DupeFind {
 
         walker
             .into_iter()
-            .filter_entry(|e| !cli_tools::is_hidden(e))
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
             .filter_map(|entry| {

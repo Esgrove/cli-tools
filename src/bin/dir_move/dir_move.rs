@@ -149,7 +149,11 @@ impl DirMove {
             WalkDir::new(&self.root).max_depth(1)
         };
 
-        for entry in walker.into_iter().filter_map(Result::ok) {
+        for entry in walker
+            .into_iter()
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
+            .filter_map(Result::ok)
+        {
             if !entry.file_type().is_dir() {
                 continue;
             }
@@ -453,6 +457,11 @@ impl DirMove {
         for entry in std::fs::read_dir(&self.root)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
+                let path = entry.path();
+                // Skip system directories like $RECYCLE.BIN
+                if cli_tools::is_system_directory_path(&path) {
+                    continue;
+                }
                 let dir_name = entry.file_name().to_string_lossy().to_lowercase();
                 if !self.config.exclude.is_empty()
                     && self

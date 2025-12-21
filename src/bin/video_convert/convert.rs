@@ -485,7 +485,7 @@ impl VideoConvert {
         let mut files: Vec<VideoFile> = WalkDir::new(path)
             .max_depth(max_depth)
             .into_iter()
-            .filter_entry(|entry| !cli_tools::is_hidden(entry))
+            .filter_entry(|entry| !cli_tools::should_skip_entry(entry))
             .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_type().is_file())
             .map(VideoFile::from)

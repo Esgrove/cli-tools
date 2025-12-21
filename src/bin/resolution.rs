@@ -399,7 +399,7 @@ async fn gather_low_resolution_video_files(path: &Path, recurse: bool) -> anyhow
     if recurse {
         for entry in WalkDir::new(path)
             .into_iter()
-            .filter_entry(|e| !cli_tools::is_hidden(e))
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
         {
@@ -420,6 +420,7 @@ async fn gather_low_resolution_video_files(path: &Path, recurse: bool) -> anyhow
             let path = entry.path();
             if path.is_file()
                 && !cli_tools::is_hidden_tokio(entry)
+                && !cli_tools::is_system_directory_tokio(entry)
                 && let Some(ext) = path.extension().and_then(|s| s.to_str())
                 && FILE_EXTENSIONS.contains(&ext)
                 && path
@@ -441,8 +442,8 @@ async fn gather_files_without_resolution_label(path: &Path, recurse: bool) -> an
     if recurse {
         for entry in WalkDir::new(path)
             .into_iter()
-            // ignore hidden files (name starting with ".")
-            .filter_entry(|e| !cli_tools::is_hidden(e))
+            // ignore hidden files and system directories
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
         {
@@ -463,6 +464,7 @@ async fn gather_files_without_resolution_label(path: &Path, recurse: bool) -> an
             let path = entry.path();
             if path.is_file()
                 && !cli_tools::is_hidden_tokio(entry)
+                && !cli_tools::is_system_directory_tokio(entry)
                 && let Some(ext) = path.extension().and_then(|s| s.to_str())
                 && FILE_EXTENSIONS.contains(&ext)
                 && path

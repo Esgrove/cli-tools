@@ -159,6 +159,7 @@ impl ThumbnailCreator {
                 );
                 for entry in WalkDir::new(&self.root)
                     .into_iter()
+                    .filter_entry(|e| !cli_tools::should_skip_entry(e))
                     .filter_map(Result::ok)
                     .filter(|e| e.file_type().is_file())
                 {

@@ -14,6 +14,19 @@ use difference::{Changeset, Difference};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
+/// System directories that should be skipped when iterating files.
+const SYSTEM_DIRECTORIES: &[&str] = &[
+    // Windows
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    // macOS
+    ".Spotlight-V100",
+    ".fseventsd",
+    ".Trashes",
+    // Linux
+    "lost+found",
+];
+
 /// Append an extension to `PathBuf`, which is missing from the standard lib :(
 pub fn append_extension_to_path(path: PathBuf, extension: impl AsRef<OsStr>) -> PathBuf {
     let mut os_string: OsString = path.into();
@@ -72,6 +85,42 @@ pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
     let name = entry.file_name();
     let name_bytes = name.as_encoded_bytes();
     !name_bytes.is_empty() && name_bytes[0] == b'.'
+}
+
+/// Check if entry is a system directory that should be skipped.
+/// Returns true for OS-specific directories like `$RECYCLE.BIN`, `.Spotlight-V100`, or `lost+found`.
+#[must_use]
+pub fn is_system_directory(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    let name = entry.file_name().to_string_lossy();
+    SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir))
+}
+
+/// Check if entry is a system directory that should be skipped.
+/// Returns true for OS-specific directories like `$RECYCLE.BIN`, `.Spotlight-V100`, or `lost+found`.
+#[must_use]
+pub fn is_system_directory_tokio(entry: &tokio::fs::DirEntry) -> bool {
+    let file_name = entry.file_name();
+    let name = file_name.to_string_lossy();
+    SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir))
+}
+
+/// Check if a path is a system directory that should be skipped.
+/// Returns true for OS-specific directories like `$RECYCLE.BIN`, `.Spotlight-V100`, or `lost+found`.
+#[must_use]
+pub fn is_system_directory_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir)))
+}
+
+/// Check if entry should be skipped (hidden or system directory).
+/// Combines `is_hidden` and `is_system_directory` checks.
+#[must_use]
+pub fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
+    is_hidden(entry) || is_system_directory(entry)
 }
 
 /// Check if directory is empty (contains no files or subdirectories)
@@ -884,5 +933,91 @@ mod lib_tests {
         let output_path = resolve_output_path(None, dir.path());
         assert!(output_path.is_ok());
         assert_eq!(output_path.unwrap(), dunce::simplified(dir.path()));
+    }
+
+    #[test]
+    fn test_is_system_directory_path_recycle_bin() {
+        let path = Path::new("D:\\$RECYCLE.BIN");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    fn test_is_system_directory_path_recycle_bin_case_insensitive() {
+        let path = Path::new("E:\\$Recycle.Bin");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    fn test_is_system_directory_path_system_volume_information() {
+        let path = Path::new("C:\\System Volume Information");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    fn test_is_system_directory_path_normal_directory() {
+        let path = Path::new("C:\\Users\\Documents");
+        assert!(!is_system_directory_path(path));
+    }
+
+    #[test]
+    fn test_is_system_directory_path_similar_name() {
+        let path = Path::new("C:\\RECYCLE.BIN");
+        assert!(!is_system_directory_path(path));
+    }
+
+    #[test]
+    fn test_is_system_directory_walkdir() {
+        let dir = tempdir().unwrap();
+        let recycle_bin = dir.path().join("$RECYCLE.BIN");
+        std::fs::create_dir(&recycle_bin).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "$RECYCLE.BIN" {
+                assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn test_should_skip_entry_system_dir() {
+        let dir = tempdir().unwrap();
+        let recycle_bin = dir.path().join("$RECYCLE.BIN");
+        std::fs::create_dir(&recycle_bin).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "$RECYCLE.BIN" {
+                assert!(should_skip_entry(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn test_should_skip_entry_hidden_file() {
+        let dir = tempdir().unwrap();
+        let hidden = dir.path().join(".hidden");
+        File::create(&hidden).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == ".hidden" {
+                assert!(should_skip_entry(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn test_should_skip_entry_normal_file() {
+        let dir = tempdir().unwrap();
+        let normal = dir.path().join("normal.txt");
+        File::create(&normal).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "normal.txt" {
+                assert!(!should_skip_entry(&entry));
+            }
+        }
     }
 }

@@ -258,6 +258,7 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[String], recurse: bool) ->
             .min_depth(1)
             .max_depth(if recurse { usize::MAX } else { 1 })
             .into_iter()
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
             .filter_map(std::result::Result::ok)
             .map(walkdir::DirEntry::into_path)
             .filter(|path| {
@@ -282,7 +283,7 @@ fn directories_to_rename(path: PathBuf, recurse: bool) -> Result<Vec<RenameItem>
 
     let walker = WalkDir::new(path).min_depth(1).max_depth(if recurse { 100 } else { 1 });
 
-    for entry in walker {
+    for entry in walker.into_iter().filter_entry(|e| !cli_tools::should_skip_entry(e)) {
         let entry = entry.context("Failed to read directory entry")?;
         if entry.path().is_dir() {
             let filename = entry.file_name().to_string_lossy().into_owned();
