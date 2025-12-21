@@ -430,7 +430,7 @@ impl Dots {
 
     /// Get all directories that need to be renamed.
     fn gather_directories_to_rename(&self, path_specified: bool) -> Vec<(PathBuf, PathBuf)> {
-        // If a directory was given as input, use that unless recurse mode is enabled
+        // Path specified without recurse - rename only that specific directory
         if path_specified && !self.config.recurse {
             return self
                 .formatted_directory_path(&self.root)
@@ -441,11 +441,15 @@ impl Dots {
                 .collect();
         }
 
-        let max_depth = if self.config.recurse { 100 } else { 1 };
+        // No path specified, or recursing - rename directories inside root, not root itself
+        let walker = if self.config.recurse {
+            WalkDir::new(&self.root).min_depth(1)
+        } else {
+            WalkDir::new(&self.root).min_depth(1).max_depth(1)
+        };
 
         // Collect all directory paths first
-        let paths: Vec<PathBuf> = WalkDir::new(&self.root)
-            .max_depth(max_depth)
+        let paths: Vec<PathBuf> = walker
             .into_iter()
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
