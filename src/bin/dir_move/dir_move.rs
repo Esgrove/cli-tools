@@ -1732,8 +1732,7 @@ mod tests {
             config: make_unpack_config(vec!["videos"], true, false, false),
         };
 
-        let parent = root;
-        let info = dirmove.collect_unpack_info(&videos, &parent);
+        let info = dirmove.collect_unpack_info(&videos, &root);
 
         // Should have 3 files and 2 directories.
         assert_eq!(info.file_moves.len(), 3);
@@ -2800,7 +2799,7 @@ mod tests {
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
         let dirmove = DirMove {
-            root: root.clone(),
+            root,
             config: make_unpack_config(vec![], false, false, false),
         };
 
@@ -2822,7 +2821,7 @@ mod tests {
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
         let dirmove = DirMove {
-            root: root.clone(),
+            root,
             config: make_unpack_config(vec![], true, false, false),
         };
 
@@ -2843,7 +2842,7 @@ mod tests {
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
         let dirmove = DirMove {
-            root: root.clone(),
+            root,
             config: make_unpack_config(vec![], false, true, false),
         };
 
@@ -2863,7 +2862,7 @@ mod tests {
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
         let dirmove = DirMove {
-            root: root.clone(),
+            root,
             config: make_unpack_config(vec![], false, false, false),
         };
 
@@ -2884,7 +2883,7 @@ mod tests {
         std::fs::create_dir(&normal)?;
 
         let dirmove = DirMove {
-            root: root.clone(),
+            root,
             config: make_unpack_config(vec![], false, true, false),
         };
 
@@ -2907,7 +2906,7 @@ mod tests {
         write_file(&videos.join("file.txt"), "x")?;
 
         let dirmove = DirMove {
-            root: root.clone(),
+            root,
             config: make_unpack_config(vec!["videos"], false, false, false),
         };
 
