@@ -936,31 +936,73 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_is_system_directory_path_recycle_bin() {
+    #[cfg(unix)]
+    fn test_is_system_directory_path_recycle_bin_unix() {
+        let path = Path::new("/mnt/d/$RECYCLE.BIN");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_system_directory_path_recycle_bin_case_insensitive_unix() {
+        let path = Path::new("/mnt/e/$Recycle.Bin");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_system_directory_path_system_volume_information_unix() {
+        let path = Path::new("/mnt/c/System Volume Information");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_system_directory_path_normal_directory_unix() {
+        let path = Path::new("/home/user/Documents");
+        assert!(!is_system_directory_path(path));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_system_directory_path_similar_name_unix() {
+        // Without the $ prefix, this should NOT match $RECYCLE.BIN
+        let path = Path::new("/mnt/c/RECYCLE.BIN");
+        assert!(!is_system_directory_path(path));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_is_system_directory_path_recycle_bin_windows() {
         let path = Path::new("D:\\$RECYCLE.BIN");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
-    fn test_is_system_directory_path_recycle_bin_case_insensitive() {
+    #[cfg(windows)]
+    fn test_is_system_directory_path_recycle_bin_case_insensitive_windows() {
         let path = Path::new("E:\\$Recycle.Bin");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
-    fn test_is_system_directory_path_system_volume_information() {
+    #[cfg(windows)]
+    fn test_is_system_directory_path_system_volume_information_windows() {
         let path = Path::new("C:\\System Volume Information");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
-    fn test_is_system_directory_path_normal_directory() {
+    #[cfg(windows)]
+    fn test_is_system_directory_path_normal_directory_windows() {
         let path = Path::new("C:\\Users\\Documents");
         assert!(!is_system_directory_path(path));
     }
 
     #[test]
-    fn test_is_system_directory_path_similar_name() {
+    #[cfg(windows)]
+    fn test_is_system_directory_path_similar_name_windows() {
+        // Without the $ prefix, this should NOT match $RECYCLE.BIN
         let path = Path::new("C:\\RECYCLE.BIN");
         assert!(!is_system_directory_path(path));
     }
