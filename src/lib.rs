@@ -4,6 +4,7 @@ pub mod date;
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -801,6 +802,29 @@ pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)
     } else {
         trash::delete(path).map_err(std::io::Error::other)
+    }
+}
+
+/// Prompt the user for confirmation with a yes/no question.
+///
+/// Returns `true` if the user answers yes (y/Y), `false` otherwise.
+/// The default value is used when the user presses Enter without input.
+///
+/// # Errors
+/// Returns an error if reading from stdin fails.
+pub fn confirm_with_user(message: &str, default: bool) -> io::Result<bool> {
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("{message} {hint} ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let trimmed = input.trim().to_lowercase();
+    if trimmed.is_empty() {
+        Ok(default)
+    } else {
+        Ok(trimmed == "y" || trimmed == "yes")
     }
 }
 
