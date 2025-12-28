@@ -329,7 +329,10 @@ impl QTorrent {
         let size = cli_tools::format_size(info.torrent.total_size());
         let width = total.to_string().chars().count();
 
-        print_magenta_bold!("\n{} [{index:>width$}/{total}] {}", "Torrent:", info.path.display());
+        print_magenta_bold!(
+            "\n[{index:>width$}/{total}] {}",
+            cli_tools::path_to_string_relative(&info.path)
+        );
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
 
         if info.original_is_multi_file {

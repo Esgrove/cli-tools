@@ -243,20 +243,20 @@ impl<'a> FileFilter<'a> {
             }
         }
 
-        // Check minimum size
-        if let Some(min_size) = self.min_size_bytes
-            && let Some(min_size_mb) = self.min_size_mb
-            && file.size < min_size
-        {
-            return Some(format!("size {} < {min_size_mb} MB", cli_tools::format_size(file.size)));
-        }
-
         // Check extension
         if let Some(extension) = Path::new(file.path.as_ref()).extension() {
             let ext_lower = extension.to_string_lossy().to_lowercase();
             if self.skip_extensions.contains(&ext_lower) {
                 return Some(format!("extension: .{ext_lower}"));
             }
+        }
+
+        // Check minimum size
+        if let Some(min_size) = self.min_size_bytes
+            && let Some(min_size_mb) = self.min_size_mb
+            && file.size < min_size
+        {
+            return Some(format!("size {} < {min_size_mb} MB", cli_tools::format_size(file.size)));
         }
 
         None
