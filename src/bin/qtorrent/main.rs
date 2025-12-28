@@ -78,7 +78,7 @@ pub struct QtorrentArgs {
     #[arg(short = 'e', long = "skip-ext", name = "EXT", value_delimiter = ',')]
     skip_extensions: Vec<String>,
 
-    /// File or folder names to skip (case-insensitive partial match)
+    /// Directory names to skip (case-insensitive full name match)
     #[arg(short = 'k', long = "skip-name", name = "NAME", value_delimiter = ',')]
     skip_names: Vec<String>,
 

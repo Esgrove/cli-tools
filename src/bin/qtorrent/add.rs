@@ -15,7 +15,7 @@ use cli_tools::dot_rename::DotRename;
 use crate::QtorrentArgs;
 use crate::config::Config;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
-use crate::torrent::{FileFilter, FilteredFiles, Torrent};
+use crate::torrent::{FileFilter, FileInfo, FilteredFiles, Torrent};
 
 /// Main handler for adding torrents to qBittorrent.
 pub struct QTorrent {
@@ -321,7 +321,7 @@ impl QTorrent {
         // Always show file counts
         if excluded_count > 0 {
             println!(
-                "  {}          {} ({} included, {} skipped)",
+                "  {}         {} ({} included, {} skipped)",
                 "Files:".dimmed(),
                 total_count,
                 format!("{included_count}").green(),
@@ -349,37 +349,79 @@ impl QTorrent {
     }
 
     /// Print all files sorted by size (largest first), showing include/exclude status.
+    ///
+    /// Files excluded due to directory matching are grouped by directory name
+    /// instead of listing each file individually.
     fn print_all_files_sorted(filtered: &FilteredFiles<'_>) {
-        // Combine all files with their status
-        let mut all_files: Vec<_> = filtered
-            .included
-            .iter()
-            .map(|file| (file, true))
-            .chain(filtered.excluded.iter().map(|file| (file, false)))
-            .collect();
+        use std::collections::HashMap;
 
-        // Sort by size descending
-        all_files.sort_by(|a, b| b.0.size.cmp(&a.0.size));
+        // Group excluded files by directory if they were excluded due to directory matching
+        let mut skipped_directories: HashMap<String, (usize, u64)> = HashMap::new();
+        let mut other_excluded: Vec<&FileInfo<'_>> = Vec::new();
+
+        for file in &filtered.excluded {
+            if let Some(ref reason) = file.exclusion_reason {
+                if reason.starts_with("directory: ") {
+                    let dir_name = reason.trim_start_matches("directory: ").to_string();
+                    let entry = skipped_directories.entry(dir_name).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 += file.size;
+                } else {
+                    other_excluded.push(file);
+                }
+            } else {
+                other_excluded.push(file);
+            }
+        }
+
+        // Collect all items to display: included files, other excluded files, and directory summaries
+        // Sort included and other excluded files by size descending
+        let mut included_files: Vec<_> = filtered.included.iter().collect();
+        included_files.sort_by(|a, b| b.size.cmp(&a.size));
+
+        other_excluded.sort_by(|a, b| b.size.cmp(&a.size));
+
+        // Sort skipped directories by total size descending
+        let mut skipped_dirs_sorted: Vec<_> = skipped_directories.into_iter().collect();
+        skipped_dirs_sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1));
 
         println!("\n  {}", "Files:".bold());
-        for (file, included) in all_files {
-            if included {
-                println!(
-                    "    {} {} ({})",
-                    "✓".green(),
-                    file.path,
-                    cli_tools::format_size(file.size)
-                );
-            } else {
-                let reason = file.exclusion_reason.as_deref().unwrap_or("excluded");
-                println!(
-                    "    {} {} ({}) - {}",
-                    "✗".red(),
-                    file.path,
-                    cli_tools::format_size(file.size),
-                    reason.dimmed()
-                );
-            }
+
+        // Print included files
+        for file in included_files {
+            println!(
+                "    {} {} ({})",
+                "✓".green(),
+                file.path,
+                cli_tools::format_size(file.size)
+            );
+        }
+
+        // Print other excluded files (not from directory matching)
+        for file in other_excluded {
+            let reason = file.exclusion_reason.as_deref().unwrap_or("excluded");
+            println!(
+                "    {} {} ({}) - {}",
+                "✗".red(),
+                file.path,
+                cli_tools::format_size(file.size),
+                reason.dimmed()
+            );
+        }
+
+        // Print skipped directory summaries
+        for (dir_name, (count, size)) in skipped_dirs_sorted {
+            let files_word = if count == 1 { "file" } else { "files" };
+            println!(
+                "    {} {}/{} ({} {}, {}) - {}",
+                "✗".red(),
+                dir_name,
+                "...".dimmed(),
+                count,
+                files_word,
+                cli_tools::format_size(size),
+                format!("directory: {dir_name}").dimmed()
+            );
         }
     }
 

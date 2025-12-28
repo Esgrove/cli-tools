@@ -61,7 +61,7 @@ pub struct QtorrentConfig {
     /// File extensions to skip (without dot, e.g., "nfo", "txt", "jpg").
     #[serde(default)]
     skip_extensions: Vec<String>,
-    /// File or folder names to skip (case-insensitive partial match).
+    /// Directory names to skip (case-insensitive match
     #[serde(default)]
     skip_names: Vec<String>,
     /// Minimum file size in MB. Files smaller than this will be skipped.
@@ -106,7 +106,7 @@ pub struct Config {
     pub input_paths: Vec<PathBuf>,
     /// File extensions to skip (lowercase, without dot).
     pub skip_extensions: Vec<String>,
-    /// File or folder names to skip (lowercase for case-insensitive matching).
+    /// Directory names to skip (lowercase for case-insensitive full name matching).
     pub skip_names: Vec<String>,
     /// Minimum file size in bytes. Files smaller than this will be skipped.
     pub min_file_size_bytes: Option<u64>,

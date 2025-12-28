@@ -93,7 +93,7 @@ pub struct FileInfo<'a> {
 pub struct FileFilter<'a> {
     /// File extensions to skip (lowercase, without dot).
     pub skip_extensions: &'a [String],
-    /// File or folder names to skip (lowercase for case-insensitive matching).
+    /// Directory names to skip (lowercase for case-insensitive full name matching).
     pub skip_names: &'a [String],
     /// Minimum file size in bytes.
     pub min_size_bytes: Option<u64>,
@@ -229,6 +229,20 @@ impl<'a> FileFilter<'a> {
     pub fn should_exclude(&self, file: &FileInfo<'_>) -> Option<String> {
         let path_lower = file.path.to_lowercase();
 
+        // Check directory names (full match only, not the filename itself)
+        // Path format in torrents is "dir1/dir2/filename.ext"
+        let path = Path::new(path_lower.as_str());
+        if let Some(parent) = path.parent() {
+            for component in parent.components() {
+                if let std::path::Component::Normal(dir_name) = component {
+                    let dir_name_str = dir_name.to_string_lossy();
+                    if self.skip_names.iter().any(|skip| skip == dir_name_str.as_ref()) {
+                        return Some(format!("directory: {dir_name_str}"));
+                    }
+                }
+            }
+        }
+
         // Check minimum size
         if let Some(min_size) = self.min_size_bytes
             && let Some(min_size_mb) = self.min_size_mb
@@ -242,13 +256,6 @@ impl<'a> FileFilter<'a> {
             let ext_lower = extension.to_string_lossy().to_lowercase();
             if self.skip_extensions.contains(&ext_lower) {
                 return Some(format!("extension: .{ext_lower}"));
-            }
-        }
-
-        // Check file/folder names
-        for skip_name in self.skip_names {
-            if path_lower.contains(skip_name.as_str()) {
-                return Some(format!("name matches: {skip_name}"));
             }
         }
 
