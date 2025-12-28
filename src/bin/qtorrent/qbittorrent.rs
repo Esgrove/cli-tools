@@ -37,9 +37,7 @@ pub struct AddTorrentParams {
     /// Add torrent in paused state.
     pub paused: bool,
     /// Create root folder (false to avoid subfolder for single-file torrents).
-    pub root_folder: Option<bool>,
-    /// Automatic torrent management mode.
-    pub auto_tmm: Option<bool>,
+    pub root_folder: bool,
 }
 
 impl QBittorrentClient {
@@ -162,12 +160,10 @@ impl QBittorrentClient {
             form = form.text("paused", "true");
         }
 
-        if let Some(root_folder) = params.root_folder {
-            form = form.text("root_folder", root_folder.to_string());
-        }
-
-        if let Some(auto_tmm) = params.auto_tmm {
-            form = form.text("autoTMM", auto_tmm.to_string());
+        if params.root_folder {
+            form = form.text("root_folder", "true");
+        } else {
+            form = form.text("root_folder", "false");
         }
 
         let response = self

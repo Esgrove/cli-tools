@@ -27,12 +27,64 @@ struct TorrentInfo {
     torrent: Torrent,
     /// Raw torrent file bytes.
     bytes: Vec<u8>,
-    /// Suggested output name (derived from torrent filename).
-    suggested_name: String,
     /// Whether this is a multi-file torrent.
     is_multi_file: bool,
+    /// Custom name to rename to (None = use torrent's internal name).
+    rename_to: Option<String>,
     /// Filtered files for multi-file torrents.
     filtered_files: Option<FilteredFiles>,
+}
+
+impl TorrentInfo {
+    /// Get the display name for this torrent (`rename_to` or internal name).
+    fn display_name(&self) -> String {
+        self.rename_to
+            .clone()
+            .or_else(|| self.torrent.name().map(ToString::to_string))
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Get the suggested name derived from the torrent filename.
+    fn suggested_name(&self) -> String {
+        // Try to get name from torrent filename first
+        let torrent_filename = self
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToString::to_string);
+
+        // Get the internal name from the torrent
+        let internal_name = self.torrent.name().map(ToString::to_string);
+
+        // For multi-file torrents, this becomes the folder name
+        if self.is_multi_file {
+            // Prefer torrent filename over internal name
+            return torrent_filename
+                .or(internal_name)
+                .unwrap_or_else(|| "unknown".to_string());
+        }
+
+        // For single-file torrents, preserve the file extension
+        if let Some(filename) = torrent_filename {
+            // If internal name exists and has an extension, preserve that extension
+            if let Some(ref internal) = internal_name
+                && let Some(extension) = Path::new(internal).extension()
+            {
+                let extension_str = extension.to_string_lossy();
+                // Check if filename already has this extension
+                if !filename
+                    .to_lowercase()
+                    .ends_with(&format!(".{}", extension_str.to_lowercase()))
+                {
+                    return format!("{filename}.{extension_str}");
+                }
+            }
+            return filename;
+        }
+
+        // Fall back to internal name
+        internal_name.unwrap_or_else(|| "unknown".to_string())
+    }
 }
 
 impl TorrentAdder {
@@ -116,9 +168,6 @@ impl TorrentAdder {
 
         let is_multi_file = torrent.is_multi_file();
 
-        // Get suggested name from the torrent filename (without .torrent extension)
-        let suggested_name = Self::get_suggested_name(path, &torrent);
-
         // Filter files for multi-file torrents
         let filtered_files = if is_multi_file && !filter.is_empty() {
             Some(torrent.filter_files(filter))
@@ -130,48 +179,10 @@ impl TorrentAdder {
             path: path.to_path_buf(),
             torrent,
             bytes,
-            suggested_name,
             is_multi_file,
+            rename_to: None,
             filtered_files,
         })
-    }
-
-    /// Get the suggested output name based on the torrent filename.
-    fn get_suggested_name(path: &Path, torrent: &Torrent) -> String {
-        // Try to get name from torrent filename first
-        let torrent_filename = path.file_stem().and_then(|stem| stem.to_str()).map(ToString::to_string);
-
-        // Get the internal name from the torrent
-        let internal_name = torrent.name().map(ToString::to_string);
-
-        // For multi-file torrents, this becomes the folder name
-        if torrent.is_multi_file() {
-            // Prefer torrent filename over internal name
-            return torrent_filename
-                .or(internal_name)
-                .unwrap_or_else(|| "unknown".to_string());
-        }
-
-        // For single-file torrents, preserve the file extension
-        if let Some(filename) = torrent_filename {
-            // If internal name exists and has an extension, preserve that extension
-            if let Some(ref internal) = internal_name
-                && let Some(extension) = Path::new(internal).extension()
-            {
-                let extension_str = extension.to_string_lossy();
-                // Check if filename already has this extension
-                if !filename
-                    .to_lowercase()
-                    .ends_with(&format!(".{}", extension_str.to_lowercase()))
-                {
-                    return format!("{filename}.{extension_str}");
-                }
-            }
-            return filename;
-        }
-
-        // Fall back to internal name
-        internal_name.unwrap_or_else(|| "unknown".to_string())
     }
 
     /// Print dry-run summary of all torrents.
@@ -198,10 +209,10 @@ impl TorrentAdder {
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
 
         if info.is_multi_file {
-            println!("  {} {}", "Folder name:".dimmed(), info.suggested_name.green());
+            println!("  {} {}", "Folder name:".dimmed(), info.display_name().green());
             println!("  {} {} files", "Files:".dimmed(), info.torrent.file_count());
         } else {
-            println!("  {} {}", "Output name:".dimmed(), info.suggested_name.green());
+            println!("  {} {}", "Output name:".dimmed(), info.display_name().green());
         }
 
         println!("  {} {}", "Total size:".dimmed(), size);
@@ -329,11 +340,9 @@ impl TorrentAdder {
             println!("{} ({}/{})", "Torrent:".bold(), index + 1, total);
             self.print_torrent_info(&info);
 
-            // For multi-file torrents, offer to rename the folder
-            if info.is_multi_file
-                && let Some(new_name) = self.prompt_folder_rename(&info.suggested_name)?
-            {
-                info.suggested_name = new_name;
+            // Offer to rename the output name/folder
+            if let Some(new_name) = self.prompt_rename(&info)? {
+                info.rename_to = Some(new_name);
             }
 
             // Ask for confirmation unless --yes flag is set
@@ -380,17 +389,28 @@ impl TorrentAdder {
         Ok(())
     }
 
-    /// Prompt user to rename the folder for a multi-file torrent.
-    fn prompt_folder_rename(&self, _current_name: &str) -> Result<Option<String>> {
+    /// Prompt user to rename the output name for a torrent.
+    ///
+    /// Shows the suggested name and allows the user to modify it.
+    /// Returns `Some(new_name)` if the user wants to rename, `None` to keep original.
+    fn prompt_rename(&self, info: &TorrentInfo) -> Result<Option<String>> {
         if self.config.yes {
+            // With --yes flag, skip rename prompt
             return Ok(None);
         }
 
-        print!(
-            "  {} [{}]: ",
-            "Rename folder?".cyan(),
-            "press Enter to keep, or type new name".dimmed()
+        let label = if info.is_multi_file {
+            "Rename folder?"
+        } else {
+            "Rename file?"
+        };
+
+        println!(
+            "  {} [{}]",
+            label.cyan(),
+            "press Enter to skip, or type new name".dimmed()
         );
+        print!("  {} ", format!("({}):", info.suggested_name()).dimmed());
         io::stdout().flush().context("Failed to flush stdout")?;
 
         let mut input = String::new();
@@ -400,7 +420,12 @@ impl TorrentAdder {
         if input.is_empty() {
             Ok(None)
         } else {
-            println!("  {} {}", "New folder name:".dimmed(), input.green());
+            let new_name = if info.is_multi_file {
+                "New folder name:"
+            } else {
+                "New file name:"
+            };
+            println!("  {} {}", new_name.dimmed(), input.green());
             Ok(Some(input.to_string()))
         }
     }
@@ -408,6 +433,9 @@ impl TorrentAdder {
     /// Add a single torrent to qBittorrent.
     async fn add_single_torrent(&self, client: &QBittorrentClient, info: TorrentInfo) -> Result<()> {
         let info_hash = info.torrent.info_hash_hex()?;
+        let display_name = info.display_name();
+        let is_multi_file = info.is_multi_file;
+        let filtered_files = info.filtered_files;
 
         let params = AddTorrentParams {
             torrent_path: info.path.to_string_lossy().to_string(),
@@ -415,27 +443,22 @@ impl TorrentAdder {
             save_path: self.config.save_path.clone(),
             category: self.config.category.clone(),
             tags: self.config.tags.clone(),
-            rename: Some(info.suggested_name.clone()),
+            rename: info.rename_to.clone(),
             skip_checking: false,
             paused: self.config.paused,
-            root_folder: Some(!info.is_multi_file), // true for multi-file to keep folder structure
-            auto_tmm: None,
+            root_folder: info.is_multi_file, // true for multi-file to keep folder structure
         };
 
         client.add_torrent(params).await?;
 
-        if info.is_multi_file {
-            println!(
-                "  {} Added with folder name: {}",
-                "✓".green(),
-                info.suggested_name.green()
-            );
+        if is_multi_file {
+            println!("  {} Added with folder name: {}", "✓".green(), display_name.green());
         } else {
-            println!("  {} Added with name: {}", "✓".green(), info.suggested_name.green());
+            println!("  {} Added with name: {}", "✓".green(), display_name.green());
         }
 
         // Set file priorities to skip excluded files
-        if let Some(ref filtered) = info.filtered_files {
+        if let Some(ref filtered) = filtered_files {
             let excluded_indices = filtered.excluded_indices();
             if !excluded_indices.is_empty() {
                 // Wait a moment for the torrent to be fully added

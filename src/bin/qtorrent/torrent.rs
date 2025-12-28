@@ -11,6 +11,7 @@ use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
 
 const HEX_CHARS: &[u8] = b"0123456789abcdef";
+const BYTES_PER_MB: u64 = 1024 * 1024;
 
 /// Represents a parsed `.torrent` file.
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -95,6 +96,8 @@ pub struct FileFilter {
     pub skip_names: Vec<String>,
     /// Minimum file size in bytes.
     pub min_size_bytes: Option<u64>,
+    /// Minimum file size in MB (pre-calculated for display).
+    pub min_size_mb: Option<u64>,
 }
 
 /// Result of filtering files in a multi-file torrent.
@@ -173,10 +176,9 @@ impl Torrent {
     /// Filter files according to the given filter configuration.
     #[must_use]
     pub fn filter_files(&self, filter: &FileFilter) -> FilteredFiles {
-        let files = self.files();
         let mut result = FilteredFiles::default();
 
-        for mut file_info in files {
+        for mut file_info in self.files() {
             if let Some(reason) = filter.should_exclude(&file_info) {
                 file_info.exclusion_reason = Some(reason);
                 result.excluded.push(file_info);
@@ -211,11 +213,13 @@ impl Torrent {
 impl FileFilter {
     /// Create a new file filter from the given configuration.
     #[must_use]
-    pub const fn new(skip_extensions: Vec<String>, skip_names: Vec<String>, min_size_bytes: Option<u64>) -> Self {
+    pub fn new(skip_extensions: Vec<String>, skip_names: Vec<String>, min_size_bytes: Option<u64>) -> Self {
+        let min_size_mb = min_size_bytes.map(|bytes| bytes / BYTES_PER_MB);
         Self {
             skip_extensions,
             skip_names,
             min_size_bytes,
+            min_size_mb,
         }
     }
 
@@ -232,13 +236,10 @@ impl FileFilter {
 
         // Check minimum size
         if let Some(min_size) = self.min_size_bytes
+            && let Some(min_size_mb) = self.min_size_mb
             && file.size < min_size
         {
-            return Some(format!(
-                "size {} < {} MB",
-                cli_tools::format_size(file.size),
-                min_size / (1024 * 1024)
-            ));
+            return Some(format!("size {} < {min_size_mb} MB", cli_tools::format_size(file.size)));
         }
 
         // Check extension

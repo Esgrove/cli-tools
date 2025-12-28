@@ -43,7 +43,7 @@ pub struct QtorrentArgs {
     port: Option<u16>,
 
     /// qBittorrent `WebUI` username
-    #[arg(short, long, name = "USER")]
+    #[arg(short = 'u', long, name = "USER")]
     username: Option<String>,
 
     /// qBittorrent `WebUI` password
@@ -51,15 +51,15 @@ pub struct QtorrentArgs {
     password: Option<String>,
 
     /// Save path for downloaded files
-    #[arg(short, long, name = "PATH")]
+    #[arg(short = 's', long, name = "PATH")]
     save_path: Option<String>,
 
     /// Category for the torrent
-    #[arg(short, long, name = "CATEGORY")]
+    #[arg(short = 'c', long, name = "CATEGORY")]
     category: Option<String>,
 
     /// Tags for the torrent (comma-separated)
-    #[arg(short, long, name = "TAGS")]
+    #[arg(short = 't', long, name = "TAGS")]
     tags: Option<String>,
 
     /// Add torrent in paused state
@@ -67,16 +67,12 @@ pub struct QtorrentArgs {
     paused: bool,
 
     /// Print what would be done without actually adding torrents
-    #[arg(short = 'n', long)]
+    #[arg(short = 'p', long)]
     dryrun: bool,
 
     /// Skip confirmation prompts
-    #[arg(short, long)]
+    #[arg(short = 'y', long)]
     yes: bool,
-
-    /// Print verbose output
-    #[arg(short, long)]
-    verbose: bool,
 
     /// File extensions to skip (e.g., nfo, txt, jpg)
     #[arg(short = 'e', long = "skip-ext", name = "EXT", value_delimiter = ',')]
@@ -91,12 +87,16 @@ pub struct QtorrentArgs {
     min_file_size_mb: Option<f64>,
 
     /// Recurse into subdirectories when searching for torrent files
-    #[arg(short, long)]
+    #[arg(short = 'r', long)]
     pub recurse: bool,
 
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,
+
+    /// Print verbose output
+    #[arg(short = 'v', long)]
+    verbose: bool,
 }
 
 #[tokio::main]
