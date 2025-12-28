@@ -32,12 +32,18 @@ struct TorrentInfo {
     torrent: Torrent,
     /// Raw torrent file bytes.
     bytes: Vec<u8>,
-    /// Whether this is a multi-file torrent.
-    is_multi_file: bool,
+    /// Whether the original torrent has multiple files.
+    original_is_multi_file: bool,
+    /// Whether to treat this as multi-file after filtering (determines subdirectory creation).
+    /// This is true only if more than one file will be included after filtering.
+    effective_is_multi_file: bool,
     /// Custom name to rename to (None = use torrent's internal name).
     rename_to: Option<String>,
     /// Indices of files to exclude (for setting priority to 0).
     excluded_indices: Vec<usize>,
+    /// For originally multi-file torrents that become effectively single-file,
+    /// store the single included file's name to get the correct extension.
+    single_included_file: Option<String>,
 }
 
 impl TorrentInfo {
@@ -65,8 +71,8 @@ impl TorrentInfo {
         // Get the internal name from the torrent
         let internal_name = self.torrent.name();
 
-        // For multi-file torrents, this becomes the folder name
-        if self.is_multi_file {
+        // For effective multi-file torrents (after filtering), this becomes the folder name
+        if self.effective_is_multi_file {
             // Prefer torrent filename over internal name
             return if let Some(name) = torrent_filename {
                 Cow::Borrowed(name)
@@ -77,11 +83,19 @@ impl TorrentInfo {
             };
         }
 
-        // For single-file torrents, preserve the file extension
+        // For single-file torrents (or originally multi-file that became single after filtering),
+        // preserve the file extension
         if let Some(filename) = torrent_filename {
-            // If internal name exists and has an extension, preserve that extension
-            if let Some(internal) = internal_name
-                && let Some(extension) = Path::new(internal).extension()
+            // For originally multi-file torrents that became single-file after filtering,
+            // get the extension from the single included file
+            let extension_source = if self.original_is_multi_file {
+                self.single_included_file.as_deref()
+            } else {
+                internal_name
+            };
+
+            if let Some(source) = extension_source
+                && let Some(extension) = Path::new(source).extension()
             {
                 let extension_str = extension.to_string_lossy();
                 // Check if filename already has this extension
@@ -95,8 +109,10 @@ impl TorrentInfo {
             return Cow::Borrowed(filename);
         }
 
-        // Fall back to internal name
-        if let Some(name) = internal_name {
+        // Fall back to internal name or single included file
+        if let Some(ref file) = self.single_included_file {
+            Cow::Borrowed(file.as_str())
+        } else if let Some(name) = internal_name {
             Cow::Borrowed(name)
         } else {
             Cow::Borrowed("unknown")
@@ -119,8 +135,8 @@ impl QTorrent {
 
         // Apply dots formatting if enabled
         if let Some(ref dot_rename) = self.dot_rename {
-            // Multi-file torrents become directories, so use directory naming (spaces instead of dots)
-            if info.is_multi_file {
+            // Effective multi-file torrents become directories, so use directory naming (spaces instead of dots)
+            if info.effective_is_multi_file {
                 name = dot_rename.format_directory_name(&name);
             } else {
                 name = dot_rename.format_name(&name);
@@ -217,31 +233,43 @@ impl QTorrent {
     }
 
     /// Parse a single torrent file.
+    ///
+    /// Applies file filtering and determines whether to treat this as a multi-file torrent
+    /// based on how many files will actually be included after filtering.
     fn parse_torrent(path: &Path, filter: &FileFilter<'_>) -> Result<TorrentInfo> {
         let bytes = fs::read(path).context("Failed to read torrent file")?;
         let torrent = Torrent::from_buffer(&bytes)?;
 
-        let is_multi_file = torrent.is_multi_file();
+        let original_is_multi_file = torrent.is_multi_file();
 
-        // Filter files for multi-file torrents and collect excluded indices
-        let excluded_indices = if is_multi_file && !filter.is_empty() {
-            torrent
-                .filter_files(filter)
-                .excluded
-                .iter()
-                .map(|file| file.index)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Filter files and determine effective multi-file status based on included files
+        let (effective_is_multi_file, excluded_indices, single_included_file) =
+            if original_is_multi_file && !filter.is_empty() {
+                let filtered = torrent.filter_files(filter);
+                let excluded: Vec<usize> = filtered.excluded.iter().map(|file| file.index).collect();
+                // Treat as multi-file only if more than one file will be included
+                let effective_multi = filtered.included.len() > 1;
+                // If only one file remains, store its name for extension extraction
+                let single_file = if filtered.included.len() == 1 {
+                    Some(filtered.included[0].path.to_string())
+                } else {
+                    None
+                };
+                (effective_multi, excluded, single_file)
+            } else {
+                // No filtering applied - use original multi-file status
+                (original_is_multi_file, Vec::new(), None)
+            };
 
         Ok(TorrentInfo {
             path: path.to_path_buf(),
             torrent,
             bytes,
-            is_multi_file,
+            original_is_multi_file,
+            effective_is_multi_file,
             rename_to: None,
             excluded_indices,
+            single_included_file,
         })
     }
 
@@ -268,11 +296,16 @@ impl QTorrent {
         println!("\n{} {}", "File:".bold(), info.path.display());
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
 
-        if info.is_multi_file {
-            println!("  {}   {}", "Folder name:".dimmed(), info.display_name().green());
+        if info.original_is_multi_file {
+            // Show folder name only if we're effectively treating it as multi-file
+            if info.effective_is_multi_file {
+                println!("  {}   {}", "Folder name:".dimmed(), info.display_name().green());
+            } else {
+                println!("  {}   {}", "Output name:".dimmed(), info.display_name().green());
+            }
             self.print_multi_file_info(info);
         } else {
-            println!("  {}  {}", "Output name:".dimmed(), info.display_name().green());
+            println!("  {}   {}", "Output name:".dimmed(), info.display_name().green());
             println!("  {}    {}", "Total size:".dimmed(), size);
         }
     }
@@ -288,7 +321,7 @@ impl QTorrent {
         // Always show file counts
         if excluded_count > 0 {
             println!(
-                "  {} {} ({} included, {} skipped)",
+                "  {}          {} ({} included, {} skipped)",
                 "Files:".dimmed(),
                 total_count,
                 format!("{included_count}").green(),
@@ -466,7 +499,7 @@ impl QTorrent {
         println!();
         println!("  {}", "Will add with:".bold());
 
-        let name_label = if info.is_multi_file {
+        let name_label = if info.effective_is_multi_file {
             "Folder name:"
         } else {
             "Output name:"
@@ -505,7 +538,7 @@ impl QTorrent {
             return Ok(None);
         }
 
-        let label = if info.is_multi_file {
+        let label = if info.effective_is_multi_file {
             "Rename folder?"
         } else {
             "Rename file?"
@@ -528,7 +561,7 @@ impl QTorrent {
         if input.is_empty() {
             Ok(None)
         } else {
-            let new_name = if info.is_multi_file {
+            let new_name = if info.effective_is_multi_file {
                 "New folder name:"
             } else {
                 "New file name:"
@@ -542,7 +575,7 @@ impl QTorrent {
     async fn add_single_torrent(&self, client: &QBittorrentClient, info: TorrentInfo) -> Result<()> {
         let info_hash = info.torrent.info_hash_hex()?;
         let display_name = info.display_name().into_owned();
-        let is_multi_file = info.is_multi_file;
+        let effective_is_multi_file = info.effective_is_multi_file;
         let excluded_indices = info.excluded_indices;
 
         let params = AddTorrentParams {
@@ -554,12 +587,12 @@ impl QTorrent {
             rename: info.rename_to,
             skip_checking: false,
             paused: self.config.paused,
-            root_folder: is_multi_file,
+            root_folder: effective_is_multi_file,
         };
 
         client.add_torrent(params).await?;
 
-        if is_multi_file {
+        if effective_is_multi_file {
             println!("  {} Added with folder name: {}", "✓".green(), display_name.green());
         } else {
             println!("  {} Added with name: {}", "✓".green(), display_name.green());
