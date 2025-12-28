@@ -256,11 +256,11 @@ impl QTorrent {
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
 
         if info.is_multi_file {
-            println!("  {} {}", "Folder name:".dimmed(), info.display_name().green());
+            println!("  {}  {}", "Folder name:".dimmed(), info.display_name().green());
             self.print_multi_file_info(info);
         } else {
-            println!("  {} {}", "Output name:".dimmed(), info.display_name().green());
-            println!("  {} {}", "Total size:".dimmed(), size);
+            println!("  {}  {}", "Output name:".dimmed(), info.display_name().green());
+            println!("  {}   {}", "Total size:".dimmed(), size);
         }
     }
 
