@@ -140,7 +140,18 @@ impl QTorrent {
             if info.effective_is_multi_file {
                 name = dot_rename.format_directory_name(&name);
             } else {
-                name = dot_rename.format_name(&name);
+                // For single files, strip the extension before formatting and restore it after.
+                // DotRename expects names without extensions.
+                if let Ok((stem, extension)) = cli_tools::get_normalized_file_name_and_extension(Path::new(&name)) {
+                    let formatted_stem = dot_rename.format_name(&stem);
+                    if extension.is_empty() {
+                        name = formatted_stem;
+                    } else {
+                        name = format!("{formatted_stem}.{extension}");
+                    }
+                } else {
+                    name = dot_rename.format_name(&name);
+                }
             }
         }
 
