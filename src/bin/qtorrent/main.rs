@@ -14,7 +14,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 
-use crate::add::TorrentAdder;
+use crate::add::QTorrent;
 
 /// Add torrents to qBittorrent with automatic file renaming.
 ///
@@ -107,6 +107,6 @@ async fn main() -> Result<()> {
     if let Some(ref shell) = args.completion {
         cli_tools::generate_shell_completion(*shell, QtorrentArgs::command(), true, env!("CARGO_BIN_NAME"))
     } else {
-        TorrentAdder::new(args).run().await
+        QTorrent::new(args).run().await
     }
 }

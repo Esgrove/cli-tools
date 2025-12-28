@@ -2,6 +2,7 @@
 //!
 //! Handles the core workflow of parsing torrents and adding them to qBittorrent.
 
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
 use crate::torrent::{FileFilter, FilteredFiles, Torrent};
 
 /// Main handler for adding torrents to qBittorrent.
-pub struct TorrentAdder {
+pub struct QTorrent {
     config: Config,
 }
 
@@ -31,43 +32,48 @@ struct TorrentInfo {
     is_multi_file: bool,
     /// Custom name to rename to (None = use torrent's internal name).
     rename_to: Option<String>,
-    /// Filtered files for multi-file torrents.
-    filtered_files: Option<FilteredFiles>,
+    /// Indices of files to exclude (for setting priority to 0).
+    excluded_indices: Vec<usize>,
 }
 
 impl TorrentInfo {
     /// Get the display name for this torrent (`rename_to` or internal name).
-    fn display_name(&self) -> String {
-        self.rename_to
-            .clone()
-            .or_else(|| self.torrent.name().map(ToString::to_string))
-            .unwrap_or_else(|| "unknown".to_string())
+    #[allow(clippy::option_if_let_else)]
+    fn display_name(&self) -> Cow<'_, str> {
+        if let Some(ref name) = self.rename_to {
+            Cow::Borrowed(name.as_str())
+        } else if let Some(name) = self.torrent.name() {
+            Cow::Borrowed(name)
+        } else {
+            Cow::Borrowed("unknown")
+        }
     }
 
     /// Get the suggested name derived from the torrent filename.
-    fn suggested_name(&self) -> String {
+    #[allow(clippy::option_if_let_else)]
+    fn suggested_name(&self) -> Cow<'_, str> {
         // Try to get name from torrent filename first
-        let torrent_filename = self
-            .path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(ToString::to_string);
+        let torrent_filename = self.path.file_stem().and_then(|stem| stem.to_str());
 
         // Get the internal name from the torrent
-        let internal_name = self.torrent.name().map(ToString::to_string);
+        let internal_name = self.torrent.name();
 
         // For multi-file torrents, this becomes the folder name
         if self.is_multi_file {
             // Prefer torrent filename over internal name
-            return torrent_filename
-                .or(internal_name)
-                .unwrap_or_else(|| "unknown".to_string());
+            return if let Some(name) = torrent_filename {
+                Cow::Borrowed(name)
+            } else if let Some(name) = internal_name {
+                Cow::Borrowed(name)
+            } else {
+                Cow::Borrowed("unknown")
+            };
         }
 
         // For single-file torrents, preserve the file extension
         if let Some(filename) = torrent_filename {
             // If internal name exists and has an extension, preserve that extension
-            if let Some(ref internal) = internal_name
+            if let Some(internal) = internal_name
                 && let Some(extension) = Path::new(internal).extension()
             {
                 let extension_str = extension.to_string_lossy();
@@ -76,18 +82,22 @@ impl TorrentInfo {
                     .to_lowercase()
                     .ends_with(&format!(".{}", extension_str.to_lowercase()))
                 {
-                    return format!("{filename}.{extension_str}");
+                    return Cow::Owned(format!("{filename}.{extension_str}"));
                 }
             }
-            return filename;
+            return Cow::Borrowed(filename);
         }
 
         // Fall back to internal name
-        internal_name.unwrap_or_else(|| "unknown".to_string())
+        if let Some(name) = internal_name {
+            Cow::Borrowed(name)
+        } else {
+            Cow::Borrowed("unknown")
+        }
     }
 }
 
-impl TorrentAdder {
+impl QTorrent {
     /// Create a new `TorrentAdder` from command line arguments.
     ///
     /// Loads user configuration and merges it with CLI arguments.
@@ -136,10 +146,10 @@ impl TorrentAdder {
     }
 
     /// Create a file filter from the config.
-    fn create_file_filter(&self) -> FileFilter {
+    fn create_file_filter(&self) -> FileFilter<'_> {
         FileFilter::new(
-            self.config.skip_extensions.clone(),
-            self.config.skip_names.clone(),
+            &self.config.skip_extensions,
+            &self.config.skip_names,
             self.config.min_file_size_bytes,
         )
     }
@@ -162,17 +172,22 @@ impl TorrentAdder {
     }
 
     /// Parse a single torrent file.
-    fn parse_torrent(path: &Path, filter: &FileFilter) -> Result<TorrentInfo> {
+    fn parse_torrent(path: &Path, filter: &FileFilter<'_>) -> Result<TorrentInfo> {
         let bytes = fs::read(path).context("Failed to read torrent file")?;
         let torrent = Torrent::from_buffer(&bytes)?;
 
         let is_multi_file = torrent.is_multi_file();
 
-        // Filter files for multi-file torrents
-        let filtered_files = if is_multi_file && !filter.is_empty() {
-            Some(torrent.filter_files(filter))
+        // Filter files for multi-file torrents and collect excluded indices
+        let excluded_indices = if is_multi_file && !filter.is_empty() {
+            torrent
+                .filter_files(filter)
+                .excluded
+                .iter()
+                .map(|file| file.index)
+                .collect()
         } else {
-            None
+            Vec::new()
         };
 
         Ok(TorrentInfo {
@@ -181,7 +196,7 @@ impl TorrentAdder {
             bytes,
             is_multi_file,
             rename_to: None,
-            filtered_files,
+            excluded_indices,
         })
     }
 
@@ -218,27 +233,27 @@ impl TorrentAdder {
         println!("  {} {}", "Total size:".dimmed(), size);
 
         // Show file filtering info for multi-file torrents
-        if let Some(ref filtered) = info.filtered_files {
+        if !info.excluded_indices.is_empty() {
+            let filter = self.create_file_filter();
+            let filtered = info.torrent.filter_files(&filter);
             let included_count = filtered.included.len();
             let excluded_count = filtered.excluded.len();
 
-            if excluded_count > 0 {
-                println!(
-                    "  {} {} included, {} will be skipped",
-                    "Filtered:".dimmed(),
-                    format!("{included_count}").green(),
-                    format!("{excluded_count}").yellow()
-                );
-                println!(
-                    "  {} {} (skipping {})",
-                    "Download size:".dimmed(),
-                    cli_tools::format_size(filtered.included_size()).green(),
-                    cli_tools::format_size(filtered.excluded_size()).yellow()
-                );
+            println!(
+                "  {} {} included, {} will be skipped",
+                "Filtered:".dimmed(),
+                format!("{included_count}").green(),
+                format!("{excluded_count}").yellow()
+            );
+            println!(
+                "  {} {} (skipping {})",
+                "Download size:".dimmed(),
+                cli_tools::format_size(filtered.included_size()).green(),
+                cli_tools::format_size(filtered.excluded_size()).yellow()
+            );
 
-                if self.config.verbose {
-                    Self::print_file_details(filtered);
-                }
+            if self.config.verbose {
+                Self::print_file_details(&filtered);
             }
         }
 
@@ -253,7 +268,7 @@ impl TorrentAdder {
     }
 
     /// Print detailed file information for filtered files.
-    fn print_file_details(filtered: &FilteredFiles) {
+    fn print_file_details(filtered: &FilteredFiles<'_>) {
         if !filtered.excluded.is_empty() {
             println!("\n  {}", "Files to skip:".yellow());
             for file in &filtered.excluded {
@@ -433,9 +448,9 @@ impl TorrentAdder {
     /// Add a single torrent to qBittorrent.
     async fn add_single_torrent(&self, client: &QBittorrentClient, info: TorrentInfo) -> Result<()> {
         let info_hash = info.torrent.info_hash_hex()?;
-        let display_name = info.display_name();
+        let display_name = info.display_name().into_owned();
         let is_multi_file = info.is_multi_file;
-        let filtered_files = info.filtered_files;
+        let excluded_indices = info.excluded_indices;
 
         let params = AddTorrentParams {
             torrent_path: info.path.to_string_lossy().to_string(),
@@ -443,10 +458,10 @@ impl TorrentAdder {
             save_path: self.config.save_path.clone(),
             category: self.config.category.clone(),
             tags: self.config.tags.clone(),
-            rename: info.rename_to.clone(),
+            rename: info.rename_to,
             skip_checking: false,
             paused: self.config.paused,
-            root_folder: info.is_multi_file, // true for multi-file to keep folder structure
+            root_folder: is_multi_file,
         };
 
         client.add_torrent(params).await?;
@@ -458,26 +473,21 @@ impl TorrentAdder {
         }
 
         // Set file priorities to skip excluded files
-        if let Some(ref filtered) = filtered_files {
-            let excluded_indices = filtered.excluded_indices();
-            if !excluded_indices.is_empty() {
-                // Wait a moment for the torrent to be fully added
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        if !excluded_indices.is_empty() {
+            // Wait a moment for the torrent to be fully added
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-                match client.set_file_priorities(&info_hash, &excluded_indices, 0).await {
-                    Ok(()) => {
-                        println!("  {} Set {} file(s) to skip", "✓".green(), excluded_indices.len());
-                    }
-                    Err(error) => {
-                        cli_tools::print_warning!(
-                            "Could not set file priorities (torrent may still be loading): {error}"
-                        );
-                        println!(
-                            "  {} You may need to manually skip {} file(s) in qBittorrent",
-                            "⚠".yellow(),
-                            excluded_indices.len()
-                        );
-                    }
+            match client.set_file_priorities(&info_hash, &excluded_indices, 0).await {
+                Ok(()) => {
+                    println!("  {} Set {} file(s) to skip", "✓".green(), excluded_indices.len());
+                }
+                Err(error) => {
+                    cli_tools::print_warning!("Could not set file priorities (torrent may still be loading): {error}");
+                    println!(
+                        "  {} You may need to manually skip {} file(s) in qBittorrent",
+                        "⚠".yellow(),
+                        excluded_indices.len()
+                    );
                 }
             }
         }
