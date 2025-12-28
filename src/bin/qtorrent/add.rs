@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+use cli_tools::dot_rename::DotRename;
+
 use crate::QtorrentArgs;
 use crate::config::Config;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
@@ -18,6 +20,8 @@ use crate::torrent::{FileFilter, FilteredFiles, Torrent};
 /// Main handler for adding torrents to qBittorrent.
 pub struct QTorrent {
     config: Config,
+    /// Optional `DotRename` instance for formatting names (when `use_dots_formatting` is enabled).
+    dot_rename: Option<DotRename>,
 }
 
 /// Information about a torrent file to be added.
@@ -50,8 +54,11 @@ impl TorrentInfo {
     }
 
     /// Get the suggested name derived from the torrent filename.
+    ///
+    /// This returns the raw name without any filtering applied.
+    /// Use `clean_suggested_name` to apply `remove_from_name` filtering.
     #[allow(clippy::option_if_let_else)]
-    fn suggested_name(&self) -> Cow<'_, str> {
+    fn suggested_name_raw(&self) -> Cow<'_, str> {
         // Try to get name from torrent filename first
         let torrent_filename = self.path.file_stem().and_then(|stem| stem.to_str());
 
@@ -98,13 +105,38 @@ impl TorrentInfo {
 }
 
 impl QTorrent {
+    /// Get the suggested name with `remove_from_name` substrings removed and dots formatting applied.
+    fn clean_suggested_name(&self, info: &TorrentInfo) -> String {
+        let mut name = info.suggested_name_raw().into_owned();
+
+        // Remove configured substrings
+        for substring in &self.config.remove_from_name {
+            name = name.replace(substring, "");
+        }
+
+        // Trim any leading/trailing whitespace that might result from removal
+        name = name.trim().to_string();
+
+        // Apply dots formatting if enabled
+        if let Some(ref dot_rename) = self.dot_rename {
+            name = dot_rename.format_name(&name);
+        }
+
+        name
+    }
+
     /// Create a new `TorrentAdder` from command line arguments.
     ///
     /// Loads user configuration and merges it with CLI arguments.
     #[must_use]
     pub fn new(args: QtorrentArgs) -> Self {
         let config = Config::from_args(args);
-        Self { config }
+        let dot_rename = if config.use_dots_formatting {
+            Some(DotRename::for_name_formatting())
+        } else {
+            None
+        };
+        Self { config, dot_rename }
     }
 
     /// Run the main add workflow.
@@ -466,12 +498,14 @@ impl QTorrent {
             "Rename file?"
         };
 
+        let suggested = self.clean_suggested_name(info);
+
         println!(
             "  {} [{}]",
             label.cyan(),
             "press Enter to skip, or type new name".dimmed()
         );
-        print!("  {} ", format!("({}):", info.suggested_name()).dimmed());
+        print!("  {} ", format!("({suggested}):").dimmed());
         io::stdout().flush().context("Failed to flush stdout")?;
 
         let mut input = String::new();

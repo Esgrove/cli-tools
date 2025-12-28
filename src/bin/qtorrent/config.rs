@@ -67,6 +67,12 @@ pub struct QtorrentConfig {
     /// Minimum file size in MB. Files smaller than this will be skipped.
     #[serde(default)]
     min_file_size_mb: Option<f64>,
+    /// Substrings to remove from torrent filename when generating suggested name.
+    #[serde(default)]
+    remove_from_name: Vec<String>,
+    /// Apply dots formatting to suggested name (uses dots config from config file).
+    #[serde(default)]
+    use_dots_formatting: bool,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -104,6 +110,10 @@ pub struct Config {
     pub skip_names: Vec<String>,
     /// Minimum file size in bytes. Files smaller than this will be skipped.
     pub min_file_size_bytes: Option<u64>,
+    /// Substrings to remove from torrent filename when generating suggested name.
+    pub remove_from_name: Vec<String>,
+    /// Apply dots formatting to suggested name (uses dots config from config file).
+    pub use_dots_formatting: bool,
 }
 
 /// Wrapper needed for parsing the config file section.
@@ -199,6 +209,12 @@ impl Config {
             .or(user_config.min_file_size_mb)
             .map(|mb| (mb * 1024.0 * 1024.0) as u64);
 
+        // Substrings to remove from suggested name
+        let remove_from_name = user_config.remove_from_name;
+
+        // Dots formatting option
+        let use_dots_formatting = user_config.use_dots_formatting;
+
         Self {
             host,
             port,
@@ -216,6 +232,8 @@ impl Config {
             skip_extensions,
             skip_names,
             min_file_size_bytes,
+            remove_from_name,
+            use_dots_formatting,
         }
     }
 

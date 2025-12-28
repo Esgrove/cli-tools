@@ -139,3 +139,9 @@ replace = [
 # skip_names = ["sample", "proof", "screens"]
 # Minimum file size in MB (files smaller than this will be skipped)
 # min_file_size_mb = 10
+
+# Substrings to remove from torrent filename when generating suggested name
+# remove_from_name = ["[Example]", "Dummy"]
+
+# Apply dots formatting to suggested name (uses [dots] config settings)
+# use_dots_formatting = true

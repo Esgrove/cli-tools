@@ -1,5 +1,6 @@
 pub mod config;
 pub mod date;
+pub mod dot_rename;
 
 use std::cmp::Ordering;
 use std::env;
