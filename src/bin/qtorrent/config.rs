@@ -3,11 +3,13 @@
 //! Handles reading configuration from CLI arguments and the user config file.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use cli_tools::print_error;
+use anyhow::{Context, Result};
 use serde::Deserialize;
+use walkdir::WalkDir;
+
+use cli_tools::print_error;
 
 use crate::QtorrentArgs;
 
@@ -53,6 +55,9 @@ pub struct QtorrentConfig {
     /// Skip confirmation prompts by default.
     #[serde(default)]
     yes: bool,
+    /// Recurse into subdirectories when searching for torrent files.
+    #[serde(default)]
+    recurse: bool,
     /// File extensions to skip (without dot, e.g., "nfo", "txt", "jpg").
     #[serde(default)]
     skip_extensions: Vec<String>,
@@ -89,8 +94,10 @@ pub struct Config {
     pub dryrun: bool,
     /// Skip confirmation prompts.
     pub yes: bool,
-    /// Input torrent file paths.
-    pub torrent_paths: Vec<PathBuf>,
+    /// Recurse into subdirectories when searching for torrent files.
+    pub recurse: bool,
+    /// Input paths from command line arguments.
+    pub input_paths: Vec<PathBuf>,
     /// File extensions to skip (lowercase, without dot).
     pub skip_extensions: Vec<String>,
     /// File or folder names to skip (lowercase for case-insensitive matching).
@@ -133,16 +140,9 @@ impl QtorrentConfig {
 
 impl Config {
     /// Create config from given command line args and user config file.
-    ///
-    /// # Errors
-    /// Returns an error if required credentials are missing.
-    pub fn try_from_args(args: QtorrentArgs, user_config: QtorrentConfig) -> Result<Self> {
-        // Resolve torrent file paths
-        let mut torrent_paths = Vec::new();
-        for path in args.torrents {
-            let resolved = cli_tools::resolve_required_input_path(&path)?;
-            torrent_paths.push(resolved);
-        }
+    #[must_use]
+    pub fn from_args(args: QtorrentArgs) -> Self {
+        let user_config = QtorrentConfig::get_user_config();
 
         // Get credentials from args or config, with args taking priority
         let host = args
@@ -164,6 +164,10 @@ impl Config {
         let verbose = args.verbose || user_config.verbose;
         let dryrun = args.dryrun || user_config.dryrun;
         let yes = args.yes || user_config.yes;
+        let recurse = args.recurse || user_config.recurse;
+
+        // Resolve input paths
+        let input_paths = args.path;
 
         // File filtering options - merge CLI args with config, CLI takes priority
         let skip_extensions: Vec<String> = if args.skip_extensions.is_empty() {
@@ -195,7 +199,7 @@ impl Config {
             .or(user_config.min_file_size_mb)
             .map(|mb| (mb * 1024.0 * 1024.0) as i64);
 
-        Ok(Self {
+        Self {
             host,
             port,
             username,
@@ -207,11 +211,12 @@ impl Config {
             verbose,
             dryrun,
             yes,
-            torrent_paths,
+            recurse,
+            input_paths,
             skip_extensions,
             skip_names,
             min_file_size_bytes,
-        })
+        }
     }
 
     /// Check if credentials are provided.
@@ -224,5 +229,77 @@ impl Config {
     #[must_use]
     pub const fn has_file_filters(&self) -> bool {
         !self.skip_extensions.is_empty() || !self.skip_names.is_empty() || self.min_file_size_bytes.is_some()
+    }
+
+    /// Collect torrent file paths from the configured input paths.
+    ///
+    /// If no paths are provided, the current working directory is used.
+    /// If a path is a directory, it is searched for `.torrent` files.
+    /// If a path is a `.torrent` file, it is used directly.
+    /// If `recurse` is true, directories are searched recursively.
+    ///
+    /// # Errors
+    /// Returns an error if paths cannot be resolved or directories cannot be read.
+    pub fn collect_torrent_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut torrent_paths = Vec::new();
+
+        if self.input_paths.is_empty() {
+            // No paths provided, use current working directory
+            let current_directory = cli_tools::resolve_input_path(None)?;
+            Self::collect_torrents_from_directory(&current_directory, &mut torrent_paths, self.recurse)?;
+        } else {
+            for path in &self.input_paths {
+                let resolved = cli_tools::resolve_required_input_path(path)?;
+                if resolved.is_dir() {
+                    Self::collect_torrents_from_directory(&resolved, &mut torrent_paths, self.recurse)?;
+                } else if Self::is_torrent_file(&resolved) {
+                    torrent_paths.push(resolved);
+                }
+            }
+        }
+
+        torrent_paths.sort_unstable();
+        torrent_paths.dedup();
+
+        Ok(torrent_paths)
+    }
+
+    /// Collect all `.torrent` files from the given directory.
+    ///
+    /// If `recurse` is true, subdirectories are searched recursively.
+    fn collect_torrents_from_directory(
+        directory: &Path,
+        torrent_paths: &mut Vec<PathBuf>,
+        recurse: bool,
+    ) -> Result<()> {
+        if recurse {
+            for entry in WalkDir::new(directory)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                let path = entry.path();
+                if path.is_file() && Self::is_torrent_file(path) {
+                    torrent_paths.push(path.to_path_buf());
+                }
+            }
+        } else {
+            for entry in
+                fs::read_dir(directory).with_context(|| format!("Failed to read directory: {}", directory.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() && Self::is_torrent_file(&path) {
+                    torrent_paths.push(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check if the given path is a `.torrent` file.
+    fn is_torrent_file(path: &Path) -> bool {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
     }
 }

@@ -4,11 +4,12 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+use crate::QtorrentArgs;
 use crate::config::Config;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
 use crate::torrent::{FileFilter, FilteredFiles, Torrent, format_size};
@@ -35,9 +36,12 @@ struct TorrentInfo {
 }
 
 impl TorrentAdder {
-    /// Create a new `TorrentAdder` with the given configuration.
+    /// Create a new `TorrentAdder` from command line arguments.
+    ///
+    /// Loads user configuration and merges it with CLI arguments.
     #[must_use]
-    pub const fn new(config: Config) -> Self {
+    pub fn new(args: QtorrentArgs) -> Self {
+        let config = Config::from_args(args);
         Self { config }
     }
 
@@ -46,12 +50,14 @@ impl TorrentAdder {
     /// # Errors
     /// Returns an error if torrents cannot be parsed or added.
     pub async fn run(self) -> Result<()> {
-        if self.config.torrent_paths.is_empty() {
-            bail!("No torrent files specified");
+        // Collect torrent files from input paths
+        let torrent_paths = self.config.collect_torrent_paths()?;
+        if torrent_paths.is_empty() {
+            bail!("No torrent files found");
         }
 
         // Parse all torrent files first
-        let torrents = self.parse_torrents();
+        let torrents = self.parse_torrents(&torrent_paths);
 
         if torrents.is_empty() {
             println!("{}", "No valid torrents to add.".yellow());
@@ -87,11 +93,11 @@ impl TorrentAdder {
     }
 
     /// Parse all torrent files.
-    fn parse_torrents(&self) -> Vec<TorrentInfo> {
+    fn parse_torrents(&self, torrent_paths: &[PathBuf]) -> Vec<TorrentInfo> {
         let mut torrents = Vec::new();
         let filter = self.create_file_filter();
 
-        for path in &self.config.torrent_paths {
+        for path in torrent_paths {
             match Self::parse_torrent(path, &filter) {
                 Ok(info) => torrents.push(info),
                 Err(error) => {

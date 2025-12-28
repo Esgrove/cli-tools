@@ -130,6 +130,7 @@ replace = [
 # dryrun = false
 # verbose = false
 # yes = false
+# recurse = false
 
 # File filtering for multi-file torrents
 # File extensions to skip (without dot)

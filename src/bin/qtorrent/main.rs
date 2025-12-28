@@ -1,8 +1,7 @@
 //! qtorrent - Add torrents to qBittorrent with automatic file renaming.
 //!
-//! This CLI tool parses `.torrent` files and adds them to qBittorrent
-//! via the `WebUI` API, automatically renaming the output file based on
-//! the torrent filename.
+//! This CLI tool parses `.torrent` files and adds them to qBittorrent via the `WebUI` API,
+//! automatically renaming the output file based on the torrent filename.
 
 mod add;
 mod config;
@@ -16,14 +15,13 @@ use clap::{CommandFactory, Parser};
 use clap_complete::Shell;
 
 use crate::add::TorrentAdder;
-use crate::config::{Config, QtorrentConfig};
 
 /// Add torrents to qBittorrent with automatic file renaming.
 ///
-/// Parses `.torrent` files and adds them to qBittorrent, automatically
-/// setting the output filename or folder name based on the torrent filename.
-/// For multi-file torrents, offers to rename the root folder and supports
-/// filtering files by extension, name, or minimum size.
+/// Parses `.torrent` files and adds them to qBittorrent,
+/// automatically setting the output filename or folder name based on the torrent filename.
+/// For multi-file torrents,
+/// offers to rename the root folder and supports filtering files by extension, name, or minimum size.
 #[derive(Parser)]
 #[command(
     author,
@@ -32,9 +30,9 @@ use crate::config::{Config, QtorrentConfig};
     about = "Add torrents to qBittorrent with automatic file renaming"
 )]
 pub struct QtorrentArgs {
-    /// Torrent file(s) to add
-    #[arg(value_hint = clap::ValueHint::FilePath)]
-    torrents: Vec<PathBuf>,
+    /// Optional input path(s) with torrent files or directories
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    pub path: Vec<PathBuf>,
 
     /// qBittorrent `WebUI` host
     #[arg(short = 'H', long, name = "HOST")]
@@ -92,6 +90,10 @@ pub struct QtorrentArgs {
     #[arg(short = 'm', long = "min-size", name = "MB")]
     min_file_size_mb: Option<f64>,
 
+    /// Recurse into subdirectories when searching for torrent files
+    #[arg(short, long)]
+    pub recurse: bool,
+
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,
@@ -103,15 +105,8 @@ async fn main() -> Result<()> {
 
     // Handle shell completion generation
     if let Some(ref shell) = args.completion {
-        return cli_tools::generate_shell_completion(*shell, QtorrentArgs::command(), true, env!("CARGO_BIN_NAME"));
+        cli_tools::generate_shell_completion(*shell, QtorrentArgs::command(), true, env!("CARGO_BIN_NAME"))
+    } else {
+        TorrentAdder::new(args).run().await
     }
-
-    // Load user configuration
-    let user_config = QtorrentConfig::get_user_config();
-
-    // Merge CLI args with user config
-    let config = Config::try_from_args(args, user_config)?;
-
-    // Run the main logic
-    TorrentAdder::new(config).run().await
 }
