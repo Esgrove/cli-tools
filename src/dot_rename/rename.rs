@@ -699,10 +699,18 @@ impl DotRename {
         }
 
         let directory_name = crate::os_str_to_string(path.file_name().context("Failed to get directory name")?);
-
-        let formatted_name = self.format_name(&directory_name).replace('.', " ");
+        let formatted_name = self.format_directory_name(&directory_name);
 
         Ok(path.with_file_name(formatted_name))
+    }
+
+    /// Format a name for use as a directory name.
+    ///
+    /// This applies the same formatting as `format_name` but replaces dots with spaces,
+    /// which is the convention for directory names.
+    #[must_use]
+    pub fn format_directory_name(&self, name: &str) -> String {
+        self.format_name(name).replace('.', " ")
     }
 
     /// Format the file name without the file extension.

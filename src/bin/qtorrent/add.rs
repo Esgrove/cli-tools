@@ -119,7 +119,12 @@ impl QTorrent {
 
         // Apply dots formatting if enabled
         if let Some(ref dot_rename) = self.dot_rename {
-            name = dot_rename.format_name(&name);
+            // Multi-file torrents become directories, so use directory naming (spaces instead of dots)
+            if info.is_multi_file {
+                name = dot_rename.format_directory_name(&name);
+            } else {
+                name = dot_rename.format_name(&name);
+            }
         }
 
         name
@@ -154,13 +159,21 @@ impl QTorrent {
         let torrents = self.parse_torrents(&torrent_paths);
 
         if torrents.is_empty() {
-            println!("{}", "No valid torrents to add.".yellow());
+            println!("{}", "No valid torrents to add".yellow());
             return Ok(());
         }
 
         // Dry-run mode: just show what would be done
         if self.config.dryrun {
-            self.print_dryrun_summary(&torrents);
+            // Set suggested names on all torrents for display
+            let torrents_with_names: Vec<TorrentInfo> = torrents
+                .into_iter()
+                .map(|mut info| {
+                    info.rename_to = Some(self.clean_suggested_name(&info));
+                    info
+                })
+                .collect();
+            self.print_dryrun_summary(&torrents_with_names);
             return Ok(());
         }
 
@@ -256,11 +269,11 @@ impl QTorrent {
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
 
         if info.is_multi_file {
-            println!("  {}  {}", "Folder name:".dimmed(), info.display_name().green());
+            println!("  {}   {}", "Folder name:".dimmed(), info.display_name().green());
             self.print_multi_file_info(info);
         } else {
             println!("  {}  {}", "Output name:".dimmed(), info.display_name().green());
-            println!("  {}   {}", "Total size:".dimmed(), size);
+            println!("  {}    {}", "Total size:".dimmed(), size);
         }
     }
 
