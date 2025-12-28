@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
 use cli_tools::dot_rename::DotRename;
+use cli_tools::print_magenta_bold;
 
 use crate::QtorrentArgs;
 use crate::config::Config;
@@ -275,25 +276,30 @@ impl QTorrent {
 
     /// Print dry-run summary of all torrents.
     fn print_dryrun_summary(&self, torrents: &[TorrentInfo]) {
+        let total = torrents.len();
         println!("\n{}", "Torrents to add (dry-run):".bold());
         println!("{}", "─".repeat(60));
 
-        for info in torrents {
-            self.print_torrent_info(info);
+        for (index, info) in torrents.iter().enumerate() {
+            self.print_torrent_info(info, index + 1, total);
         }
 
         println!("\n{}", "─".repeat(60));
         println!("Total: {} torrent(s)", torrents.len());
         self.print_options();
-        println!("\n{}", "Dry-run mode: No torrents will be added.".cyan());
+        println!("\n{}", "Dry-run mode: No torrents will be added".cyan());
     }
 
     /// Print information about a single torrent.
-    fn print_torrent_info(&self, info: &TorrentInfo) {
+    ///
+    /// The index is displayed as `[index/total]` with the index right-aligned
+    /// to match the width of the total count.
+    fn print_torrent_info(&self, info: &TorrentInfo, index: usize, total: usize) {
         let internal_name = info.torrent.name().unwrap_or("Unknown");
         let size = cli_tools::format_size(info.torrent.total_size());
+        let width = total.to_string().chars().count();
 
-        println!("\n{} {}", "File:".bold(), info.path.display());
+        print_magenta_bold!("\n{} [{index:>width$}/{total}] {}", "Torrent:", info.path.display());
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
 
         if info.original_is_multi_file {
@@ -481,8 +487,7 @@ impl QTorrent {
 
         for (index, mut info) in torrents.into_iter().enumerate() {
             println!("{}", "─".repeat(60));
-            println!("{} ({}/{})", "Torrent:".bold(), index + 1, total);
-            self.print_torrent_info(&info);
+            self.print_torrent_info(&info, index + 1, total);
 
             // Offer to rename the output name/folder
             if let Some(new_name) = self.prompt_rename(&info)? {

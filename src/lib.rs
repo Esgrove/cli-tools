@@ -526,6 +526,18 @@ macro_rules! print_magenta {
 }
 
 #[inline]
+pub fn print_magenta_bold(message: &str) {
+    println!("{}", message.magenta().bold());
+}
+
+#[macro_export]
+macro_rules! print_magenta_bold {
+    ($($arg:tt)*) => {
+        $crate::print_magenta_bold(&format!($($arg)*))
+    };
+}
+
+#[inline]
 pub fn print_cyan(message: &str) {
     println!("{}", message.cyan());
 }
