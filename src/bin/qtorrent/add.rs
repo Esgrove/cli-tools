@@ -140,23 +140,42 @@ impl QTorrent {
             if info.effective_is_multi_file {
                 name = dot_rename.format_directory_name(&name);
             } else {
-                // For single files, strip the extension before formatting and restore it after.
-                // DotRename expects names without extensions.
-                if let Ok((stem, extension)) = cli_tools::get_normalized_file_name_and_extension(Path::new(&name)) {
-                    let formatted_stem = dot_rename.format_name(&stem);
-                    let formatted_stem = dot_rename.format_name(&formatted_stem);
-                    if extension.is_empty() {
-                        name = formatted_stem;
-                    } else {
-                        name = format!("{formatted_stem}.{extension}");
-                    }
-                } else {
-                    name = dot_rename.format_name(&name);
-                }
+                name = Self::format_single_file_name(dot_rename, &name);
             }
         }
 
         name
+    }
+
+    /// Format the internal torrent name with dots formatting applied.
+    fn clean_internal_name(&self, info: &TorrentInfo) -> Option<String> {
+        let internal_name = info.torrent.name()?;
+        let dot_rename = self.dot_rename.as_ref()?;
+
+        // Apply dots formatting
+        let name = if info.effective_is_multi_file {
+            dot_rename.format_directory_name(internal_name)
+        } else {
+            Self::format_single_file_name(dot_rename, internal_name)
+        };
+
+        Some(name)
+    }
+
+    /// Format a single file name, stripping extension before formatting and restoring it after.
+    fn format_single_file_name(dot_rename: &DotRename, name: &str) -> String {
+        // For single files, strip the extension before formatting and restore it after.
+        // DotRename expects names without extensions.
+        if let Ok((stem, extension)) = cli_tools::get_normalized_file_name_and_extension(Path::new(name)) {
+            let formatted_stem = dot_rename.format_name(&stem);
+            if extension.is_empty() {
+                formatted_stem
+            } else {
+                format!("{formatted_stem}.{extension}")
+            }
+        } else {
+            dot_rename.format_name(name)
+        }
     }
 
     /// Create a new `TorrentAdder` from command line arguments.
@@ -588,7 +607,8 @@ impl QTorrent {
 
     /// Prompt user to rename the output name for a torrent.
     ///
-    /// Shows the suggested name and allows the user to modify it.
+    /// Shows both the suggested name (from torrent filename) and the formatted internal name,
+    /// allowing the user to choose or enter a custom name.
     /// Returns `Some(new_name)` if the user wants to rename, `None` to keep original.
     fn prompt_rename(&self, info: &TorrentInfo) -> Result<Option<String>> {
         if self.config.yes {
@@ -603,13 +623,20 @@ impl QTorrent {
         };
 
         let suggested = self.clean_suggested_name(info);
+        let internal_formatted = self.clean_internal_name(info);
 
         println!(
             "  {} [{}]",
             label.cyan(),
             "press Enter to skip, or type new name".dimmed()
         );
-        print!("  {} ", format!("({suggested}):").dimmed());
+        println!("  {} {}", "1:".dimmed(), suggested.green());
+        if let Some(ref internal) = internal_formatted
+            && internal != &suggested
+        {
+            println!("  {} {}", "2:".dimmed(), internal.green());
+        }
+        print!("  {} ", "Choice or name:".dimmed());
         io::stdout().flush().context("Failed to flush stdout")?;
 
         let mut input = String::new();
@@ -619,13 +646,20 @@ impl QTorrent {
         if input.is_empty() {
             Ok(None)
         } else {
-            let new_name = if info.effective_is_multi_file {
+            // Check if user entered a number to select an option
+            let selected_name = match input {
+                "1" => suggested,
+                "2" if internal_formatted.is_some() => internal_formatted.expect("internal_formatted checked above"),
+                _ => input.to_string(),
+            };
+
+            let new_name_label = if info.effective_is_multi_file {
                 "New folder name:"
             } else {
                 "New file name:"
             };
-            println!("  {} {}", new_name.dimmed(), input.green());
-            Ok(Some(input.to_string()))
+            println!("  {} {}", new_name_label.dimmed(), selected_name.green());
+            Ok(Some(selected_name))
         }
     }
 
