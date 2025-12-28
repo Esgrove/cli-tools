@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
 use cli_tools::dot_rename::DotRename;
-use cli_tools::print_magenta_bold;
+use cli_tools::{print_bold, print_magenta_bold};
 
 use crate::QtorrentArgs;
 use crate::config::Config;
@@ -144,6 +144,7 @@ impl QTorrent {
                 // DotRename expects names without extensions.
                 if let Ok((stem, extension)) = cli_tools::get_normalized_file_name_and_extension(Path::new(&name)) {
                     let formatted_stem = dot_rename.format_name(&stem);
+                    let formatted_stem = dot_rename.format_name(&formatted_stem);
                     if extension.is_empty() {
                         name = formatted_stem;
                     } else {
@@ -201,6 +202,7 @@ impl QTorrent {
                     info
                 })
                 .collect();
+
             self.print_dryrun_summary(&torrents_with_names);
             return Ok(());
         }
@@ -288,17 +290,15 @@ impl QTorrent {
     /// Print dry-run summary of all torrents.
     fn print_dryrun_summary(&self, torrents: &[TorrentInfo]) {
         let total = torrents.len();
-        println!("\n{}", "Torrents to add (dry-run):".bold());
-        println!("{}", "─".repeat(60));
+        print_bold!("DRYRUN {} torrents to add:", torrents.len());
+
+        if self.config.verbose {
+            self.print_options();
+        }
 
         for (index, info) in torrents.iter().enumerate() {
             self.print_torrent_info(info, index + 1, total);
         }
-
-        println!("\n{}", "─".repeat(60));
-        println!("Total: {} torrent(s)", torrents.len());
-        self.print_options();
-        println!("\n{}", "Dry-run mode: No torrents will be added".cyan());
     }
 
     /// Print information about a single torrent.
