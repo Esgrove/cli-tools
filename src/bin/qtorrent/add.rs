@@ -12,7 +12,7 @@ use colored::Colorize;
 use crate::QtorrentArgs;
 use crate::config::Config;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
-use crate::torrent::{FileFilter, FilteredFiles, Torrent, format_size};
+use crate::torrent::{FileFilter, FilteredFiles, Torrent};
 
 /// Main handler for adding torrents to qBittorrent.
 pub struct TorrentAdder {
@@ -192,7 +192,7 @@ impl TorrentAdder {
     /// Print information about a single torrent.
     fn print_torrent_info(&self, info: &TorrentInfo) {
         let internal_name = info.torrent.name().unwrap_or("Unknown");
-        let size = format_size(info.torrent.total_size());
+        let size = cli_tools::format_size(info.torrent.total_size());
 
         println!("\n{} {}", "File:".bold(), info.path.display());
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
@@ -221,8 +221,8 @@ impl TorrentAdder {
                 println!(
                     "  {} {} (skipping {})",
                     "Download size:".dimmed(),
-                    format_size(filtered.included_size()).green(),
-                    format_size(filtered.excluded_size()).yellow()
+                    cli_tools::format_size(filtered.included_size()).green(),
+                    cli_tools::format_size(filtered.excluded_size()).yellow()
                 );
 
                 if self.config.verbose {
@@ -251,7 +251,7 @@ impl TorrentAdder {
                     "    {} {} ({}) - {}",
                     "✗".red(),
                     file.path,
-                    format_size(file.size),
+                    cli_tools::format_size(file.size),
                     reason.dimmed()
                 );
             }
@@ -260,7 +260,12 @@ impl TorrentAdder {
         if !filtered.included.is_empty() && filtered.included.len() <= 20 {
             println!("\n  {}", "Files to download:".green());
             for file in &filtered.included {
-                println!("    {} {} ({})", "✓".green(), file.path, format_size(file.size));
+                println!(
+                    "    {} {} ({})",
+                    "✓".green(),
+                    file.path,
+                    cli_tools::format_size(file.size)
+                );
             }
         }
     }

@@ -103,7 +103,7 @@ pub struct Config {
     /// File or folder names to skip (lowercase for case-insensitive matching).
     pub skip_names: Vec<String>,
     /// Minimum file size in bytes. Files smaller than this will be skipped.
-    pub min_file_size_bytes: Option<i64>,
+    pub min_file_size_bytes: Option<u64>,
 }
 
 /// Wrapper needed for parsing the config file section.
@@ -197,7 +197,7 @@ impl Config {
         let min_file_size_bytes = args
             .min_file_size_mb
             .or(user_config.min_file_size_mb)
-            .map(|mb| (mb * 1024.0 * 1024.0) as i64);
+            .map(|mb| (mb * 1024.0 * 1024.0) as u64);
 
         Self {
             host,

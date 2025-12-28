@@ -620,7 +620,7 @@ pub fn show_diff(old: &str, new: &str) {
     }
 }
 
-/// Format bytes as human-readable size
+/// Format bytes as human-readable size.
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -631,8 +631,10 @@ pub fn format_size(bytes: u64) -> String {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
         format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else {
+    } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 

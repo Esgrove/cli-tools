@@ -73,15 +73,6 @@ pub struct File {
 #[derive(Debug, Deserialize, Serialize)]
 struct Node(String, i64);
 
-/// Result of filtering files in a multi-file torrent.
-#[derive(Debug, Default)]
-pub struct FilteredFiles {
-    /// Files that will be downloaded.
-    pub included: Vec<FileInfo>,
-    /// Files that will be skipped.
-    pub excluded: Vec<FileInfo>,
-}
-
 /// Information about a single file in a torrent.
 #[derive(Debug, Clone)]
 pub struct FileInfo {
@@ -90,7 +81,7 @@ pub struct FileInfo {
     /// Full path within the torrent.
     pub path: String,
     /// File size in bytes.
-    pub size: i64,
+    pub size: u64,
     /// Reason for exclusion (if any).
     pub exclusion_reason: Option<String>,
 }
@@ -103,7 +94,16 @@ pub struct FileFilter {
     /// File or folder names to skip (lowercase for case-insensitive matching).
     pub skip_names: Vec<String>,
     /// Minimum file size in bytes.
-    pub min_size_bytes: Option<i64>,
+    pub min_size_bytes: Option<u64>,
+}
+
+/// Result of filtering files in a multi-file torrent.
+#[derive(Debug, Default)]
+pub struct FilteredFiles {
+    /// Files that will be downloaded.
+    pub included: Vec<FileInfo>,
+    /// Files that will be skipped.
+    pub excluded: Vec<FileInfo>,
 }
 
 impl Torrent {
@@ -129,10 +129,10 @@ impl Torrent {
 
     /// Get total size of all files in the torrent.
     #[must_use]
-    pub fn total_size(&self) -> i64 {
+    pub fn total_size(&self) -> u64 {
         self.info.files.as_ref().map_or_else(
-            || self.info.length.unwrap_or(0),
-            |files| files.iter().map(|file| file.length).sum(),
+            || self.info.length.unwrap_or(0) as u64,
+            |files| files.iter().map(|file| file.length as u64).sum(),
         )
     }
 
@@ -151,7 +151,7 @@ impl Torrent {
                 vec![FileInfo {
                     index: 0,
                     path: self.info.name.clone().unwrap_or_default(),
-                    size: self.info.length.unwrap_or(0),
+                    size: self.info.length.unwrap_or(0) as u64,
                     exclusion_reason: None,
                 }]
             },
@@ -162,7 +162,7 @@ impl Torrent {
                     .map(|(index, file)| FileInfo {
                         index,
                         path: file.path.join("/"),
-                        size: file.length,
+                        size: file.length as u64,
                         exclusion_reason: None,
                     })
                     .collect()
@@ -211,7 +211,7 @@ impl Torrent {
 impl FileFilter {
     /// Create a new file filter from the given configuration.
     #[must_use]
-    pub const fn new(skip_extensions: Vec<String>, skip_names: Vec<String>, min_size_bytes: Option<i64>) -> Self {
+    pub const fn new(skip_extensions: Vec<String>, skip_names: Vec<String>, min_size_bytes: Option<u64>) -> Self {
         Self {
             skip_extensions,
             skip_names,
@@ -236,7 +236,7 @@ impl FileFilter {
         {
             return Some(format!(
                 "size {} < {} MB",
-                format_size(file.size),
+                cli_tools::format_size(file.size),
                 min_size / (1024 * 1024)
             ));
         }
@@ -263,13 +263,13 @@ impl FileFilter {
 impl FilteredFiles {
     /// Get the total size of included files.
     #[must_use]
-    pub fn included_size(&self) -> i64 {
+    pub fn included_size(&self) -> u64 {
         self.included.iter().map(|file| file.size).sum()
     }
 
     /// Get the total size of excluded files.
     #[must_use]
-    pub fn excluded_size(&self) -> i64 {
+    pub fn excluded_size(&self) -> u64 {
         self.excluded.iter().map(|file| file.size).sum()
     }
 
@@ -289,22 +289,4 @@ pub fn to_hex(bytes: &[u8]) -> String {
         hex.push(HEX_CHARS[(byte & 0x0f) as usize]);
     }
     String::from_utf8(hex).expect("hex chars are valid UTF-8")
-}
-
-/// Format file size in human-readable format.
-#[must_use]
-pub fn format_size(size: i64) -> String {
-    const KB: i64 = 1024;
-    const MB: i64 = KB * 1024;
-    const GB: i64 = MB * 1024;
-
-    if size >= GB {
-        format!("{:.2} GB", size as f64 / GB as f64)
-    } else if size >= MB {
-        format!("{:.2} MB", size as f64 / MB as f64)
-    } else if size >= KB {
-        format!("{:.2} KB", size as f64 / KB as f64)
-    } else {
-        format!("{size} B")
-    }
 }
