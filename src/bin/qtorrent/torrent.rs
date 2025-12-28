@@ -140,12 +140,6 @@ impl Torrent {
         )
     }
 
-    /// Get the number of files in the torrent.
-    #[must_use]
-    pub fn file_count(&self) -> usize {
-        self.info.files.as_ref().map_or(1, Vec::len)
-    }
-
     /// Get the list of files in a multi-file torrent.
     #[must_use]
     pub fn files(&self) -> Vec<FileInfo<'_>> {

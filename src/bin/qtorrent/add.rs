@@ -225,23 +225,27 @@ impl QTorrent {
 
         if info.is_multi_file {
             println!("  {} {}", "Folder name:".dimmed(), info.display_name().green());
-            println!("  {} {} files", "Files:".dimmed(), info.torrent.file_count());
+            self.print_multi_file_info(info);
         } else {
             println!("  {} {}", "Output name:".dimmed(), info.display_name().green());
+            println!("  {} {}", "Total size:".dimmed(), size);
         }
+    }
 
-        println!("  {} {}", "Total size:".dimmed(), size);
+    /// Print file information for multi-file torrents.
+    fn print_multi_file_info(&self, info: &TorrentInfo) {
+        let filter = self.create_file_filter();
+        let filtered = info.torrent.filter_files(&filter);
+        let included_count = filtered.included.len();
+        let excluded_count = filtered.excluded.len();
+        let total_count = included_count + excluded_count;
 
-        // Show file filtering info for multi-file torrents
-        if !info.excluded_indices.is_empty() {
-            let filter = self.create_file_filter();
-            let filtered = info.torrent.filter_files(&filter);
-            let included_count = filtered.included.len();
-            let excluded_count = filtered.excluded.len();
-
+        // Always show file counts
+        if excluded_count > 0 {
             println!(
-                "  {} {} included, {} will be skipped",
-                "Filtered:".dimmed(),
+                "  {} {} ({} included, {} skipped)",
+                "Files:".dimmed(),
+                total_count,
                 format!("{included_count}").green(),
                 format!("{excluded_count}").yellow()
             );
@@ -251,46 +255,51 @@ impl QTorrent {
                 cli_tools::format_size(filtered.included_size()).green(),
                 cli_tools::format_size(filtered.excluded_size()).yellow()
             );
-
-            if self.config.verbose {
-                Self::print_file_details(&filtered);
-            }
+        } else {
+            println!("  {} {}", "Files:".dimmed(), total_count);
+            println!(
+                "  {} {}",
+                "Total size:".dimmed(),
+                cli_tools::format_size(filtered.included_size())
+            );
         }
 
+        // In verbose mode, show all files sorted by size (largest first)
         if self.config.verbose {
-            if let Ok(hash) = info.torrent.info_hash_hex() {
-                println!("  {} {}", "Info hash:".dimmed(), hash);
-            }
-            if let Some(ref announce) = info.torrent.announce {
-                println!("  {} {}", "Tracker:".dimmed(), announce);
-            }
+            Self::print_all_files_sorted(&filtered);
         }
     }
 
-    /// Print detailed file information for filtered files.
-    fn print_file_details(filtered: &FilteredFiles<'_>) {
-        if !filtered.excluded.is_empty() {
-            println!("\n  {}", "Files to skip:".yellow());
-            for file in &filtered.excluded {
-                let reason = file.exclusion_reason.as_deref().unwrap_or("unknown reason");
+    /// Print all files sorted by size (largest first), showing include/exclude status.
+    fn print_all_files_sorted(filtered: &FilteredFiles<'_>) {
+        // Combine all files with their status
+        let mut all_files: Vec<_> = filtered
+            .included
+            .iter()
+            .map(|file| (file, true))
+            .chain(filtered.excluded.iter().map(|file| (file, false)))
+            .collect();
+
+        // Sort by size descending
+        all_files.sort_by(|a, b| b.0.size.cmp(&a.0.size));
+
+        println!("\n  {}", "Files:".bold());
+        for (file, included) in all_files {
+            if included {
+                println!(
+                    "    {} {} ({})",
+                    "✓".green(),
+                    file.path,
+                    cli_tools::format_size(file.size)
+                );
+            } else {
+                let reason = file.exclusion_reason.as_deref().unwrap_or("excluded");
                 println!(
                     "    {} {} ({}) - {}",
                     "✗".red(),
                     file.path,
                     cli_tools::format_size(file.size),
                     reason.dimmed()
-                );
-            }
-        }
-
-        if !filtered.included.is_empty() && filtered.included.len() <= 20 {
-            println!("\n  {}", "Files to download:".green());
-            for file in &filtered.included {
-                println!(
-                    "    {} {} ({})",
-                    "✓".green(),
-                    file.path,
-                    cli_tools::format_size(file.size)
                 );
             }
         }
@@ -360,6 +369,9 @@ impl QTorrent {
                 info.rename_to = Some(new_name);
             }
 
+            // Print final details before confirmation
+            self.print_final_details(&info);
+
             // Ask for confirmation unless --yes flag is set
             let should_add = if self.config.yes {
                 true
@@ -402,6 +414,40 @@ impl QTorrent {
         }
 
         Ok(())
+    }
+
+    /// Print final details about the torrent before confirmation.
+    fn print_final_details(&self, info: &TorrentInfo) {
+        println!();
+        println!("  {}", "Will add with:".bold());
+
+        let name_label = if info.is_multi_file {
+            "Folder name:"
+        } else {
+            "Output name:"
+        };
+        println!("    {} {}", name_label.dimmed(), info.display_name().green());
+
+        if let Some(ref save_path) = self.config.save_path {
+            println!("    {} {}", "Save path:".dimmed(), save_path);
+        }
+        if let Some(ref category) = self.config.category {
+            println!("    {} {}", "Category:".dimmed(), category);
+        }
+        if let Some(ref tags) = self.config.tags {
+            println!("    {} {}", "Tags:".dimmed(), tags);
+        }
+        if self.config.paused {
+            println!("    {} {}", "State:".dimmed(), "paused".yellow());
+        }
+        if !info.excluded_indices.is_empty() {
+            println!(
+                "    {} {}",
+                "Files to skip:".dimmed(),
+                format!("{}", info.excluded_indices.len()).yellow()
+            );
+        }
+        println!();
     }
 
     /// Prompt user to rename the output name for a torrent.
