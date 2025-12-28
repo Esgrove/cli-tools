@@ -130,3 +130,11 @@ replace = [
 # dryrun = false
 # verbose = false
 # yes = false
+
+# File filtering for multi-file torrents
+# File extensions to skip (without dot)
+# skip_extensions = ["nfo", "txt", "jpg", "png", "sfv", "md5", "url"]
+# File or folder names to skip (case-insensitive partial match)
+# skip_names = ["sample", "proof", "screens"]
+# Minimum file size in MB (files smaller than this will be skipped)
+# min_file_size_mb = 10

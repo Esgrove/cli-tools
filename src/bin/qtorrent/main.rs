@@ -20,9 +20,10 @@ use crate::config::{Config, QtorrentConfig};
 
 /// Add torrents to qBittorrent with automatic file renaming.
 ///
-/// Parses single-file `.torrent` files and adds them to qBittorrent,
-/// automatically setting the output filename based on the torrent filename.
-/// Multi-file torrents are skipped.
+/// Parses `.torrent` files and adds them to qBittorrent, automatically
+/// setting the output filename or folder name based on the torrent filename.
+/// For multi-file torrents, offers to rename the root folder and supports
+/// filtering files by extension, name, or minimum size.
 #[derive(Parser)]
 #[command(
     author,
@@ -78,6 +79,18 @@ pub struct QtorrentArgs {
     /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// File extensions to skip (e.g., nfo, txt, jpg)
+    #[arg(short = 'e', long = "skip-ext", name = "EXT", value_delimiter = ',')]
+    skip_extensions: Vec<String>,
+
+    /// File or folder names to skip (case-insensitive partial match)
+    #[arg(short = 'k', long = "skip-name", name = "NAME", value_delimiter = ',')]
+    skip_names: Vec<String>,
+
+    /// Minimum file size in MB (files smaller than this will be skipped)
+    #[arg(short = 'm', long = "min-size", name = "MB")]
+    min_file_size_mb: Option<f64>,
 
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]

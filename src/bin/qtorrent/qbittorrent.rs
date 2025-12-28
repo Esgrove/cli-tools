@@ -260,4 +260,67 @@ impl QBittorrentClient {
         let path = response.text().await.context("Failed to read default save path")?;
         Ok(path)
     }
+
+    /// Set file priorities for a torrent.
+    ///
+    /// Priority values:
+    /// - 0: Do not download
+    /// - 1: Normal priority
+    /// - 6: High priority
+    /// - 7: Maximum priority
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or if not authenticated.
+    pub async fn set_file_priorities(&self, info_hash: &str, file_indices: &[usize], priority: u8) -> Result<()> {
+        if !self.authenticated {
+            bail!("Not authenticated. Call login() first.");
+        }
+
+        if file_indices.is_empty() {
+            return Ok(());
+        }
+
+        let url = format!("{}/api/v2/torrents/filePrio", self.base_url);
+
+        // Format file indices as pipe-separated list
+        let indices_str = file_indices
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|");
+
+        let response = self
+            .client
+            .post(&url)
+            .form(&[
+                ("hash", info_hash),
+                ("id", &indices_str),
+                ("priority", &priority.to_string()),
+            ])
+            .send()
+            .await
+            .context("Failed to send set file priorities request")?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => Ok(()),
+            StatusCode::BAD_REQUEST => {
+                bail!("Invalid priority value")
+            }
+            StatusCode::CONFLICT => {
+                bail!("Torrent metadata has not yet been downloaded")
+            }
+            StatusCode::FORBIDDEN => {
+                bail!("Authentication required or session expired")
+            }
+            StatusCode::NOT_FOUND => {
+                bail!("Torrent hash not found")
+            }
+            _ => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("Failed to set file priorities: HTTP {status} - {body}")
+            }
+        }
+    }
 }

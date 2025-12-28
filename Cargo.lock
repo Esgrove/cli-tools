@@ -285,7 +285,7 @@ checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
 name = "cli-tools"
-version = "7.3.1"
+version = "8.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -311,7 +311,7 @@ dependencies = [
  "serde",
  "serde_bencode",
  "serde_bytes",
- "sha-1",
+ "sha1",
  "tempfile",
  "titlecase",
  "tokio",
@@ -2465,10 +2465,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha-1"
-version = "0.10.1"
+name = "sha1"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5058ada175748e33390e40e872bd0fe59a19f265d0158daa551c5a88a76009c"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
 dependencies = [
  "cfg-if",
  "cpufeatures",

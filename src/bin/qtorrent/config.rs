@@ -53,6 +53,15 @@ pub struct QtorrentConfig {
     /// Skip confirmation prompts by default.
     #[serde(default)]
     yes: bool,
+    /// File extensions to skip (without dot, e.g., "nfo", "txt", "jpg").
+    #[serde(default)]
+    skip_extensions: Vec<String>,
+    /// File or folder names to skip (case-insensitive partial match).
+    #[serde(default)]
+    skip_names: Vec<String>,
+    /// Minimum file size in MB. Files smaller than this will be skipped.
+    #[serde(default)]
+    min_file_size_mb: Option<f64>,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -82,6 +91,12 @@ pub struct Config {
     pub yes: bool,
     /// Input torrent file paths.
     pub torrent_paths: Vec<PathBuf>,
+    /// File extensions to skip (lowercase, without dot).
+    pub skip_extensions: Vec<String>,
+    /// File or folder names to skip (lowercase for case-insensitive matching).
+    pub skip_names: Vec<String>,
+    /// Minimum file size in bytes. Files smaller than this will be skipped.
+    pub min_file_size_bytes: Option<i64>,
 }
 
 /// Wrapper needed for parsing the config file section.
@@ -150,6 +165,36 @@ impl Config {
         let dryrun = args.dryrun || user_config.dryrun;
         let yes = args.yes || user_config.yes;
 
+        // File filtering options - merge CLI args with config, CLI takes priority
+        let skip_extensions: Vec<String> = if args.skip_extensions.is_empty() {
+            user_config
+                .skip_extensions
+                .into_iter()
+                .map(|extension| extension.to_lowercase().trim_start_matches('.').to_string())
+                .collect()
+        } else {
+            args.skip_extensions
+                .into_iter()
+                .map(|extension| extension.to_lowercase().trim_start_matches('.').to_string())
+                .collect()
+        };
+
+        let skip_names: Vec<String> = if args.skip_names.is_empty() {
+            user_config
+                .skip_names
+                .into_iter()
+                .map(|name| name.to_lowercase())
+                .collect()
+        } else {
+            args.skip_names.into_iter().map(|name| name.to_lowercase()).collect()
+        };
+
+        // Convert MB to bytes for easier comparison
+        let min_file_size_bytes = args
+            .min_file_size_mb
+            .or(user_config.min_file_size_mb)
+            .map(|mb| (mb * 1024.0 * 1024.0) as i64);
+
         Ok(Self {
             host,
             port,
@@ -163,6 +208,9 @@ impl Config {
             dryrun,
             yes,
             torrent_paths,
+            skip_extensions,
+            skip_names,
+            min_file_size_bytes,
         })
     }
 
@@ -170,5 +218,11 @@ impl Config {
     #[must_use]
     pub const fn has_credentials(&self) -> bool {
         !self.username.is_empty() && !self.password.is_empty()
+    }
+
+    /// Check if any file filtering is configured.
+    #[must_use]
+    pub const fn has_file_filters(&self) -> bool {
+        !self.skip_extensions.is_empty() || !self.skip_names.is_empty() || self.min_file_size_bytes.is_some()
     }
 }
