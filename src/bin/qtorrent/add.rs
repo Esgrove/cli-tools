@@ -45,6 +45,10 @@ struct TorrentInfo {
     /// For originally multi-file torrents that become effectively single-file,
     /// store the single included file's name to get the correct extension.
     single_included_file: Option<String>,
+    /// Original name from torrent metadata (for file/folder renaming on disk).
+    /// For single-file torrents, this is the filename.
+    /// For multi-file torrents, this is the root folder name.
+    original_name: Option<String>,
 }
 
 impl TorrentInfo {
@@ -285,6 +289,7 @@ impl QTorrent {
         let torrent = Torrent::from_buffer(&bytes)?;
 
         let original_is_multi_file = torrent.is_multi_file();
+        let original_name = torrent.name().map(String::from);
 
         // Filter files and determine effective multi-file status based on included files
         let (effective_is_multi_file, excluded_indices, single_included_file) =
@@ -314,6 +319,7 @@ impl QTorrent {
             rename_to: None,
             excluded_indices,
             single_included_file,
+            original_name,
         })
     }
 
@@ -727,7 +733,9 @@ impl QTorrent {
         let info_hash = info.torrent.info_hash_hex()?;
         let display_name = info.display_name().into_owned();
         let effective_is_multi_file = info.effective_is_multi_file;
-        let excluded_indices = info.excluded_indices;
+        let excluded_indices = info.excluded_indices.clone();
+        let rename_to = info.rename_to.clone();
+        let original_name = info.original_name.clone();
 
         let params = AddTorrentParams {
             torrent_path: info.path.to_string_lossy().to_string(),
@@ -735,7 +743,7 @@ impl QTorrent {
             save_path: self.config.save_path.clone(),
             category: self.config.category.clone(),
             tags: self.config.tags.clone(),
-            rename: info.rename_to,
+            rename: rename_to.clone(),
             skip_checking: false,
             paused: self.config.paused,
             root_folder: effective_is_multi_file,
@@ -749,10 +757,49 @@ impl QTorrent {
             println!("  {} Added with name: {}", "✓".green(), display_name.green());
         }
 
-        // Set file priorities to skip excluded files
-        if !excluded_indices.is_empty() {
+        // Rename actual file/folder on disk if a custom name was specified
+        if let Some(ref new_name) = rename_to
+            && let Some(ref old_name) = original_name
+            && new_name != old_name
+        {
             // Wait a moment for the torrent to be fully added
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let rename_result = if effective_is_multi_file {
+                // For multi-file torrents, rename the root folder
+                client.rename_folder(&info_hash, old_name, new_name).await
+            } else {
+                // For single-file torrents, rename the file
+                client.rename_file(&info_hash, old_name, new_name).await
+            };
+
+            match rename_result {
+                Ok(()) => {
+                    println!(
+                        "  {} Renamed on disk: {} → {}",
+                        "✓".green(),
+                        old_name.dimmed(),
+                        new_name.green()
+                    );
+                }
+                Err(error) => {
+                    cli_tools::print_warning!("Could not rename file/folder (torrent may still be loading): {error}");
+                    println!(
+                        "  {} You may need to manually rename in qBittorrent: {} → {}",
+                        "⚠".yellow(),
+                        old_name,
+                        new_name
+                    );
+                }
+            }
+        }
+
+        // Set file priorities to skip excluded files
+        if !excluded_indices.is_empty() {
+            // Wait a moment for the torrent to be fully added (if we haven't already waited for rename)
+            if rename_to.is_none() || original_name.is_none() {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
 
             match client.set_file_priorities(&info_hash, &excluded_indices, 0).await {
                 Ok(()) => {

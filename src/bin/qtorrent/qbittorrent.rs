@@ -178,7 +178,9 @@ impl QBittorrentClient {
         }
 
         if params.paused {
+            // Use both "paused" (legacy) and "stopped" (qBittorrent 5.0+) for compatibility
             form = form.text("paused", "true");
+            form = form.text("stopped", "true");
         }
 
         if params.root_folder {
@@ -375,6 +377,97 @@ impl QBittorrentClient {
             .collect();
 
         Ok(map)
+    }
+
+    /// Rename a file within a torrent.
+    ///
+    /// This renames the actual file on disk, not just the display name.
+    /// For single-file torrents, `old_path` is the original filename and `new_path` is the new filename.
+    /// For multi-file torrents, paths are relative to the torrent's root folder.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or if not authenticated.
+    pub async fn rename_file(&self, info_hash: &str, old_path: &str, new_path: &str) -> Result<()> {
+        if !self.authenticated {
+            bail!("Not authenticated. Call login() first.");
+        }
+
+        let url = self.build_url("torrents/renameFile");
+
+        let response = self
+            .client
+            .post(&url)
+            .form(&[("hash", info_hash), ("oldPath", old_path), ("newPath", new_path)])
+            .send()
+            .await
+            .context("Failed to send rename file request")?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => Ok(()),
+            StatusCode::BAD_REQUEST => {
+                bail!("Missing or invalid parameters for file rename")
+            }
+            StatusCode::CONFLICT => {
+                bail!("Invalid new path or file name already in use")
+            }
+            StatusCode::FORBIDDEN => {
+                bail!("Authentication required or session expired")
+            }
+            StatusCode::NOT_FOUND => {
+                bail!("Torrent hash not found")
+            }
+            _ => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("Failed to rename file: HTTP {status} - {body}")
+            }
+        }
+    }
+
+    /// Rename a folder within a torrent.
+    ///
+    /// This renames the actual folder on disk.
+    /// For multi-file torrents, paths are relative to the save location.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or if not authenticated.
+    pub async fn rename_folder(&self, info_hash: &str, old_path: &str, new_path: &str) -> Result<()> {
+        if !self.authenticated {
+            bail!("Not authenticated. Call login() first.");
+        }
+
+        let url = self.build_url("torrents/renameFolder");
+
+        let response = self
+            .client
+            .post(&url)
+            .form(&[("hash", info_hash), ("oldPath", old_path), ("newPath", new_path)])
+            .send()
+            .await
+            .context("Failed to send rename folder request")?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => Ok(()),
+            StatusCode::BAD_REQUEST => {
+                bail!("Missing or invalid parameters for folder rename")
+            }
+            StatusCode::CONFLICT => {
+                bail!("Invalid new path or folder name already in use")
+            }
+            StatusCode::FORBIDDEN => {
+                bail!("Authentication required or session expired")
+            }
+            StatusCode::NOT_FOUND => {
+                bail!("Torrent hash not found")
+            }
+            _ => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("Failed to rename folder: HTTP {status} - {body}")
+            }
+        }
     }
 
     /// Build full API url from the base url and given endpoint.
