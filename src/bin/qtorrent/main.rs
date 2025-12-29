@@ -29,24 +29,25 @@ use crate::add::QTorrent;
     name = env!("CARGO_BIN_NAME"),
     about = "Add torrents to qBittorrent with automatic file renaming"
 )]
+#[allow(clippy::doc_markdown)]
 pub struct QtorrentArgs {
     /// Optional input path(s) with torrent files or directories
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub path: Vec<PathBuf>,
 
-    /// qBittorrent `WebUI` host
+    /// qBittorrent WebUI host
     #[arg(short = 'H', long, name = "HOST")]
     host: Option<String>,
 
-    /// qBittorrent `WebUI` port
+    /// qBittorrent WebUI port
     #[arg(short = 'P', long, name = "PORT")]
     port: Option<u16>,
 
-    /// qBittorrent `WebUI` username
+    /// qBittorrent WebUI username
     #[arg(short = 'u', long, name = "USER")]
     username: Option<String>,
 
-    /// qBittorrent `WebUI` password
+    /// qBittorrent WebUI password
     #[arg(short = 'w', long, name = "PASS")]
     password: Option<String>,
 
