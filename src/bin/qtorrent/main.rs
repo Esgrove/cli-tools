@@ -91,6 +91,10 @@ pub struct QtorrentArgs {
     #[arg(short = 'r', long)]
     pub recurse: bool,
 
+    /// Skip rename prompts for existing/duplicate torrents
+    #[arg(short = 'x', long)]
+    pub skip_existing: bool,
+
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,

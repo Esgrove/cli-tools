@@ -130,6 +130,7 @@ replace = [
 # dryrun = false
 # verbose = false
 # yes = false
+# skip_existing = false
 # recurse = false
 
 # File filtering for multi-file torrents

@@ -703,13 +703,21 @@ impl QTorrent {
         existing_name: &str,
         client: &QBittorrentClient,
     ) -> Result<bool> {
-        if self.config.yes {
-            // With --yes flag, skip rename prompt for existing torrents
+        if self.config.yes || self.config.skip_existing {
+            // With --yes or --skip-existing flag, skip rename prompt for existing torrents
             return Ok(false);
         }
 
         let suggested = self.clean_suggested_name(info);
         let internal_formatted = self.clean_internal_name(info);
+
+        // Skip if existing name already matches suggestion
+        let matches_suggested = existing_name == suggested;
+        let matches_internal = internal_formatted.as_ref().is_some_and(|name| existing_name == name);
+        if matches_suggested || matches_internal {
+            println!("  {}", "Name already matches suggestion.".dimmed());
+            return Ok(false);
+        }
 
         println!(
             "  {} [{}]",

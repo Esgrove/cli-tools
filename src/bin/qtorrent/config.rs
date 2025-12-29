@@ -55,6 +55,9 @@ pub struct QtorrentConfig {
     /// Skip confirmation prompts by default.
     #[serde(default)]
     yes: bool,
+    /// Skip rename prompts for existing/duplicate torrents.
+    #[serde(default)]
+    skip_existing: bool,
     /// Recurse into subdirectories when searching for torrent files.
     #[serde(default)]
     recurse: bool,
@@ -100,6 +103,8 @@ pub struct Config {
     pub dryrun: bool,
     /// Skip confirmation prompts.
     pub yes: bool,
+    /// Skip rename prompts for existing/duplicate torrents.
+    pub skip_existing: bool,
     /// Recurse into subdirectories when searching for torrent files.
     pub recurse: bool,
     /// Input paths from command line arguments.
@@ -174,6 +179,7 @@ impl Config {
         let verbose = args.verbose || user_config.verbose;
         let dryrun = args.dryrun || user_config.dryrun;
         let yes = args.yes || user_config.yes;
+        let skip_existing = args.skip_existing || user_config.skip_existing;
         let recurse = args.recurse || user_config.recurse;
 
         // Resolve input paths
@@ -227,6 +233,7 @@ impl Config {
             verbose,
             dryrun,
             yes,
+            skip_existing,
             recurse,
             input_paths,
             skip_extensions,
