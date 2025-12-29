@@ -482,9 +482,20 @@ impl QTorrent {
         if let Some(ref category) = self.config.category {
             println!("{} {}", "Category:".bold(), category);
         }
-        if self.config.paused {
-            println!("{} {}", "State:".bold(), "paused".yellow());
+        if let Some(ref tags) = self.config.tags {
+            println!("{} {}", "Tags:".bold(), tags);
         }
+
+        println!(
+            "{} {}",
+            "State:".bold(),
+            if self.config.paused {
+                "paused".yellow()
+            } else {
+                "active".green()
+            }
+        );
+
         if self.config.has_file_filters() {
             println!("{}", "File filters:".bold());
             if !self.config.skip_extensions.is_empty() {
