@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use walkdir::WalkDir;
 
-use crate::dot_rename::{DotFormatting, DotRenameConfig};
+use crate::dot_rename::{DotFormat, DotRenameConfig};
 
 #[cfg(not(test))]
 const PROGRESS_BAR_CHARS: &str = "=> ";
@@ -39,22 +39,8 @@ impl DotRename {
     }
 
     /// Create a formatter that borrows the config.
-    const fn formatter(&self) -> DotFormatting<'_> {
-        DotFormatting::new(&self.config)
-    }
-
-    /// Create a new instance for name formatting only (no file operations).
-    ///
-    /// This loads the user config from the config file and creates a minimal
-    /// instance suitable for calling `format_name`.
-    #[must_use]
-    pub fn for_name_formatting() -> Self {
-        let config = DotRenameConfig::for_name_formatting();
-        Self {
-            root: PathBuf::new(),
-            config,
-            path_given: false,
-        }
+    const fn formatter(&self) -> DotFormat<'_> {
+        DotFormat::new(&self.config)
     }
 
     /// Format a file name using the configured formatting rules.

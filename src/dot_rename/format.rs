@@ -109,11 +109,11 @@ const RESOLUTIONS: [&str; 7] = ["2160", "1440", "1080", "720", "540", "480", "36
 
 /// Formatter for applying dot-style formatting to file and directory names.
 #[derive(Debug)]
-pub struct DotFormatting<'a> {
+pub struct DotFormat<'a> {
     config: &'a DotRenameConfig,
 }
 
-impl<'a> DotFormatting<'a> {
+impl<'a> DotFormat<'a> {
     /// Create a new formatter with the given config reference.
     #[must_use]
     pub const fn new(config: &'a DotRenameConfig) -> Self {
@@ -121,7 +121,7 @@ impl<'a> DotFormatting<'a> {
     }
 }
 
-impl DotFormatting<'_> {
+impl DotFormat<'_> {
     /// Format the file name without the file extension.
     ///
     /// This is the main entry point for name formatting and applies all configured
@@ -542,8 +542,7 @@ mod tests {
 
     use super::*;
 
-    static FORMATTER: LazyLock<DotFormatting<'static>> =
-        LazyLock::new(|| DotFormatting::new(LazyLock::force(&DEFAULT_CONFIG)));
+    static FORMATTER: LazyLock<DotFormat<'static>> = LazyLock::new(|| DotFormat::new(LazyLock::force(&DEFAULT_CONFIG)));
 
     static DEFAULT_CONFIG: LazyLock<DotRenameConfig> = LazyLock::new(DotRenameConfig::default);
 
@@ -552,8 +551,8 @@ mod tests {
         ..Default::default()
     });
 
-    static FORMATTER_REMOVE_RANDOM: LazyLock<DotFormatting<'static>> =
-        LazyLock::new(|| DotFormatting::new(LazyLock::force(&REMOVE_RANDOM_CONFIG)));
+    static FORMATTER_REMOVE_RANDOM: LazyLock<DotFormat<'static>> =
+        LazyLock::new(|| DotFormat::new(LazyLock::force(&REMOVE_RANDOM_CONFIG)));
 
     #[test]
     fn test_format_basic() {
@@ -572,7 +571,7 @@ mod tests {
             convert_case: true,
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
         assert_eq!(formatter.format_name("CAP WORD GL"), "Cap.Word.Gl");
         assert_eq!(formatter.format_name("testCAP CAP WORD GL"), "Testcap.Cap.Word.Gl");
         assert_eq!(formatter.format_name("test CAP CAP WORD GL"), "Test.Cap.Cap.Word.Gl");
@@ -687,7 +686,7 @@ mod tests {
             move_to_start: vec!["Test".to_string()],
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
         assert_eq!(
             formatter.format_name("This is a test string test"),
             "Test.This.Is.a.String.Test"
@@ -711,7 +710,7 @@ mod tests {
             move_to_end: vec!["Test".to_string()],
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
         assert_eq!(
             formatter.format_name("This is a test string test"),
             "This.Is.a.String.Test"
@@ -760,7 +759,7 @@ mod tests {
             date_starts_with_year: true,
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         assert_eq!(
             formatter.format_name("This is a test string test 1.1.2014"),
@@ -786,7 +785,7 @@ mod tests {
             prefix: Some("Test.One.Two".to_string()),
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         assert_eq!(formatter.format_name("example"), "Test.One.Two.Example");
         assert_eq!(formatter.format_name("two example"), "Test.One.Two.Example");
@@ -801,27 +800,27 @@ mod tests {
     #[test]
     fn test_starts_with_five_or_more_digits() {
         assert!(
-            DotFormatting::starts_with_five_or_more_digits("12345 Content"),
+            DotFormat::starts_with_five_or_more_digits("12345 Content"),
             "5 digits with a space should match"
         );
         assert!(
-            DotFormatting::starts_with_five_or_more_digits("123456789.Content"),
+            DotFormat::starts_with_five_or_more_digits("123456789.Content"),
             "9 digits should match"
         );
         assert!(
-            DotFormatting::starts_with_five_or_more_digits("37432195.Video"),
+            DotFormat::starts_with_five_or_more_digits("37432195.Video"),
             "8 digits should match"
         );
         assert!(
-            !DotFormatting::starts_with_five_or_more_digits("1234.Content"),
+            !DotFormat::starts_with_five_or_more_digits("1234.Content"),
             "4 digits should not match"
         );
         assert!(
-            !DotFormatting::starts_with_five_or_more_digits("Content.12345"),
+            !DotFormat::starts_with_five_or_more_digits("Content.12345"),
             "digits not at start should not match"
         );
         assert!(
-            !DotFormatting::starts_with_five_or_more_digits("12345Content"),
+            !DotFormat::starts_with_five_or_more_digits("12345Content"),
             "digits without a boundary should not match"
         );
     }
@@ -862,7 +861,7 @@ mod tests {
             regex_replace_after: regexes,
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         // 5+ digits at start should NOT be reordered (prefix stays at start)
         assert_eq!(
@@ -901,7 +900,7 @@ mod tests {
             prefix_dir_start: true,
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         assert_eq!(
             formatter.format_name("content 2024.01.15 rest"),
@@ -928,7 +927,7 @@ mod tests {
             prefix: Some("My.Prefix".to_string()),
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         assert_eq!(formatter.format_name("some file name"), "My.Prefix.Some.File.Name");
         assert_eq!(formatter.format_name("another_file"), "My.Prefix.Another.File");
@@ -940,7 +939,7 @@ mod tests {
             suffix: Some("My.Suffix".to_string()),
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         assert_eq!(formatter.format_name("some file name"), "Some.File.Name.My.Suffix");
         assert_eq!(formatter.format_name("another_file"), "Another.File.My.Suffix");
@@ -948,7 +947,7 @@ mod tests {
 
     #[test]
     fn test_format_name_without_prefix_suffix() {
-        let formatter = DotFormatting::new(&DEFAULT_CONFIG);
+        let formatter = DotFormat::new(&DEFAULT_CONFIG);
 
         assert_eq!(
             formatter.format_name_without_prefix_suffix("Some_File_Name"),
@@ -967,7 +966,7 @@ mod tests {
             suffix: Some("Suffix".to_string()),
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         let result = formatter.format_name("file name");
         assert_eq!(result, "Prefix.File.Name.Suffix");
@@ -979,7 +978,7 @@ mod tests {
             prefix: Some("Artist.Name".to_string()),
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         assert_eq!(
             formatter.format_name("Artist Name - Song Title"),
@@ -997,7 +996,7 @@ mod tests {
             suffix: Some("2024".to_string()),
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
 
         assert_eq!(formatter.format_name("song title 2024"), "Song.Title.2024");
     }
@@ -1010,62 +1009,62 @@ mod written_date_tests {
     #[test]
     fn test_single_date() {
         let mut input = "Mar.23.2016".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2016.03.23");
 
         let mut input = "23.mar.2016".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2016.03.23");
 
         let mut input = "March.1.2011".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2011.03.01");
 
         let mut input = "1.March.2011".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2011.03.01");
 
         let mut input = "December.20.2023".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2023.12.20");
 
         let mut input = "20.December.2023".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2023.12.20");
     }
 
     #[test]
     fn test_multiple_dates() {
         let mut input = "Mar.23.2016 Jun.17.2015".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2016.03.23 2015.06.17");
     }
 
     #[test]
     fn test_mixed_text() {
         let mut input = "Event on Apr.5.2021 at noon".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "Event on 2021.04.05 at noon");
     }
 
     #[test]
     fn test_edge_case_single_digit_day() {
         let mut input = "Jan.03.2020".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "2020.01.03");
     }
 
     #[test]
     fn test_no_date_in_text() {
         let mut input = "This text has no date".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "This text has no date");
     }
 
     #[test]
     fn test_leading_and_trailing_spaces() {
         let mut input = "Something.Feb.Jun.09.2022".to_string();
-        DotFormatting::convert_written_date_format(&mut input);
+        DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "Something.Feb.2022.06.09");
     }
 }
@@ -1082,8 +1081,8 @@ mod move_date_tests {
         ..Default::default()
     });
 
-    static FORMATTER: LazyLock<DotFormatting<'static>> =
-        LazyLock::new(|| DotFormatting::new(LazyLock::force(&MOVE_DATE_CONFIG)));
+    static FORMATTER: LazyLock<DotFormat<'static>> =
+        LazyLock::new(|| DotFormat::new(LazyLock::force(&MOVE_DATE_CONFIG)));
 
     #[test]
     fn test_valid_date() {
@@ -1129,8 +1128,8 @@ mod test_remove_from_start {
         ..Default::default()
     });
 
-    static FORMATTER: LazyLock<DotFormatting<'static>> =
-        LazyLock::new(|| DotFormatting::new(LazyLock::force(&REMOVE_START_CONFIG)));
+    static FORMATTER: LazyLock<DotFormat<'static>> =
+        LazyLock::new(|| DotFormat::new(LazyLock::force(&REMOVE_START_CONFIG)));
 
     #[test]
     fn test_no_patterns() {
@@ -1179,8 +1178,7 @@ mod test_deduplicate_patterns {
         ..Default::default()
     });
 
-    static FORMATTER: LazyLock<DotFormatting<'static>> =
-        LazyLock::new(|| DotFormatting::new(LazyLock::force(&DEDUP_CONFIG)));
+    static FORMATTER: LazyLock<DotFormat<'static>> = LazyLock::new(|| DotFormat::new(LazyLock::force(&DEDUP_CONFIG)));
 
     #[test]
     fn test_no_duplicates() {
@@ -1226,7 +1224,7 @@ mod test_deduplicate_patterns {
             deduplicate_patterns: vec![(Regex::new(r"(Test\.){2,}").expect("valid regex"), "Test.".to_string())],
             ..Default::default()
         };
-        let formatter = DotFormatting::new(&config);
+        let formatter = DotFormat::new(&config);
         assert_eq!(formatter.format_name("Test.Test.File"), "Test.File");
     }
 }

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
-use cli_tools::dot_rename::DotRename;
+use cli_tools::dot_rename::{DotFormat, DotRenameConfig};
 use cli_tools::{print_bold, print_magenta_bold};
 
 use crate::QtorrentArgs;
@@ -21,8 +21,7 @@ use crate::torrent::{FileFilter, FileInfo, FilteredFiles, Torrent};
 /// Main handler for adding torrents to qBittorrent.
 pub struct QTorrent {
     config: Config,
-    /// Optional `DotRename` instance for formatting names (when `use_dots_formatting` is enabled).
-    dot_rename: Option<DotRename>,
+    dot_rename: Option<DotRenameConfig>,
 }
 
 /// Information about a torrent file to be added.
@@ -135,12 +134,12 @@ impl QTorrent {
         name = name.trim().to_string();
 
         // Apply dots formatting if enabled
-        if let Some(ref dot_rename) = self.dot_rename {
+        if let Some(dot_rename) = self.dot_formatter() {
             // Effective multi-file torrents become directories, so use directory naming (spaces instead of dots)
             if info.effective_is_multi_file {
                 name = dot_rename.format_directory_name(&name);
             } else {
-                name = Self::format_single_file_name(dot_rename, &name);
+                name = Self::format_single_file_name(&dot_rename, &name);
             }
         }
 
@@ -150,20 +149,31 @@ impl QTorrent {
     /// Format the internal torrent name with dots formatting applied.
     fn clean_internal_name(&self, info: &TorrentInfo) -> Option<String> {
         let internal_name = info.torrent.name()?;
-        let dot_rename = self.dot_rename.as_ref()?;
 
-        // Apply dots formatting
-        let name = if info.effective_is_multi_file {
-            dot_rename.format_directory_name(internal_name)
-        } else {
-            Self::format_single_file_name(dot_rename, internal_name)
-        };
+        let name = self.dot_formatter().map_or_else(
+            || internal_name.to_string(),
+            |dot_rename| {
+                if info.effective_is_multi_file {
+                    dot_rename.format_directory_name(internal_name)
+                } else {
+                    Self::format_single_file_name(&dot_rename, internal_name)
+                }
+            },
+        );
 
         Some(name)
     }
 
+    const fn dot_formatter(&self) -> Option<DotFormat<'_>> {
+        if let Some(dot_rename_config) = &self.dot_rename {
+            Some(DotFormat::new(dot_rename_config))
+        } else {
+            None
+        }
+    }
+
     /// Format a single file name, stripping extension before formatting and restoring it after.
-    fn format_single_file_name(dot_rename: &DotRename, name: &str) -> String {
+    fn format_single_file_name(dot_rename: &DotFormat, name: &str) -> String {
         // For single files, strip the extension before formatting and restore it after.
         // DotRename expects names without extensions.
         if let Ok((stem, extension)) = cli_tools::get_normalized_file_name_and_extension(Path::new(name)) {
@@ -185,7 +195,7 @@ impl QTorrent {
     pub fn new(args: QtorrentArgs) -> Self {
         let config = Config::from_args(args);
         let dot_rename = if config.use_dots_formatting {
-            Some(DotRename::for_name_formatting())
+            Some(DotRenameConfig::from_user_config())
         } else {
             None
         };

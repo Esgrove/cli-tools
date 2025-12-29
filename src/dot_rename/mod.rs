@@ -9,5 +9,5 @@ mod format;
 mod rename;
 
 pub use config::{DotRenameConfig, DotsConfig};
-pub use format::DotFormatting;
+pub use format::DotFormat;
 pub use rename::DotRename;

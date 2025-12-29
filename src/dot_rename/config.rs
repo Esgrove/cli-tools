@@ -207,7 +207,7 @@ impl DotRenameConfig {
     /// This loads the user config file but doesn't require CLI args.
     /// Useful when you just want to format names without running the full rename operation.
     #[must_use]
-    pub fn for_name_formatting() -> Self {
+    pub fn from_user_config() -> Self {
         let user_config = DotsConfig::get_user_config();
         let config_regex = DotsConfig::compile_regex_patterns(user_config.regex_replace).unwrap_or_default();
 
