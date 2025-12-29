@@ -226,6 +226,41 @@ Options:
   -V, --version               Print version
 ```
 
+## Qtorrent
+
+Add torrents to qBittorrent with automatic file renaming.
+Parses single-file `.torrent` files and adds them to qBittorrent,
+automatically setting the output filename based on the torrent filename.
+
+```console
+Add torrents to qBittorrent with automatic file renaming
+
+Usage: qtorrent [OPTIONS] [PATH]...
+
+Arguments:
+  [PATH]...  Optional input path(s) with torrent files or directories
+
+Options:
+  -H, --host <HOST>          qBittorrent WebUI host
+  -P, --port <PORT>          qBittorrent WebUI port
+  -u, --username <USER>      qBittorrent WebUI username
+  -w, --password <PASS>      qBittorrent WebUI password
+  -s, --save-path <PATH>     Save path for downloaded files
+  -c, --category <CATEGORY>  Category for the torrent
+  -t, --tags <TAGS>          Tags for the torrent (comma-separated)
+  -a, --paused               Add torrent in paused state
+  -p, --dryrun               Print what would be done without actually adding torrents
+  -y, --yes                  Skip confirmation prompts
+  -e, --skip-ext <EXT>       File extensions to skip (e.g., nfo, txt, jpg)
+  -k, --skip-name <NAME>     Directory names to skip (case-insensitive full name match)
+  -m, --min-size <MB>        Minimum file size in MB (files smaller than this will be skipped)
+  -r, --recurse              Recurse into subdirectories when searching for torrent files
+  -l, --completion <SHELL>   Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose              Print verbose output
+  -h, --help                 Print help (see more with '--help')
+  -V, --version              Print version
+```
+
 ## Vtag
 
 ```console

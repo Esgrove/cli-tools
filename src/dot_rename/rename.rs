@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+//! Dot rename implementation for formatting filenames with dot separators.
+
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::{fmt, fs};
 
 use anyhow::{Context, Result, anyhow};
@@ -10,144 +10,62 @@ use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use rayon::prelude::*;
 use regex::Regex;
-use unicode_segmentation::UnicodeSegmentation;
 use walkdir::WalkDir;
 
-use cli_tools::date::{CURRENT_YEAR, RE_CORRECT_DATE_FORMAT, RE_YEAR};
-
-use crate::Args;
-use crate::config::Config;
-
-static RE_BRACKETS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[\[({\]})]+").expect("Failed to create regex pattern for brackets"));
-
-static RE_WHITESPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s+").expect("Failed to compile whitespace regex"));
-
-static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Failed to compile dots regex"));
-
-static RE_EXCLAMATION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"!+").expect("Failed to compile exclamation regex"));
-
-static RE_DOTCOM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(\.com|\.net)\b").expect("Failed to compile .com regex"));
-
-static RE_IDENTIFIER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{9,20}").expect("Failed to compile id regex"));
-
-static RE_RESOLUTION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d{3,4}x\d{3,4}\b").expect("Failed to compile resolution regex"));
-
-static RE_LEADING_DIGITS: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^\d{5,}\b").expect("Invalid leading digits regex"));
-
-static RE_WRITTEN_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>\d{1,2})\.(?P<year>\d{4})\b",
-    )
-        .expect("Failed to compile MDY written date regex")
-});
-
-static RE_WRITTEN_DATE_DMY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b(?P<day>\d{1,2})\.(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<year>\d{4})\b",
-    )
-        .expect("Failed to compile DMY written date regex")
-});
-
-static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
-    [
-        ("jan", "01"),
-        ("january", "01"),
-        ("feb", "02"),
-        ("february", "02"),
-        ("mar", "03"),
-        ("march", "03"),
-        ("apr", "04"),
-        ("april", "04"),
-        ("may", "05"),
-        ("jun", "06"),
-        ("june", "06"),
-        ("jul", "07"),
-        ("july", "07"),
-        ("aug", "08"),
-        ("august", "08"),
-        ("sep", "09"),
-        ("september", "09"),
-        ("oct", "10"),
-        ("october", "10"),
-        ("nov", "11"),
-        ("november", "11"),
-        ("dec", "12"),
-        ("december", "12"),
-    ]
-    .into_iter()
-    .collect()
-});
-
-static REPLACE: [(&str, &str); 27] = [
-    (" ", "."),
-    (" - ", " "),
-    (", ", " "),
-    ("_", "."),
-    ("-", "."),
-    ("–", "."),
-    (".&.", ".and."),
-    ("*", "."),
-    ("~", "."),
-    ("¡", "."),
-    ("#", "."),
-    ("$", "."),
-    (";", "."),
-    ("@", "."),
-    ("+", "."),
-    ("=", "."),
-    (",.", "."),
-    (",", "."),
-    ("-=-", "."),
-    (".-.", "."),
-    (".rq", ""),
-    ("www.", ""),
-    ("^", ""),
-    ("｜", ""),
-    ("`", "'"),
-    ("’", "'"),
-    ("\"", "'"),
-];
+use crate::dot_rename::{DotFormat, DotRenameConfig};
 
 #[cfg(not(test))]
 const PROGRESS_BAR_CHARS: &str = "=> ";
 #[cfg(not(test))]
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.cyan/blue} {pos}/{len} {percent}%";
-const RESOLUTIONS: [&str; 6] = ["2160", "1440", "1080", "720", "480", "360"];
 
+/// Dot rename handler for formatting filenames with dot separators.
 #[derive(Debug, Default)]
-pub struct Dots {
+pub struct DotRename {
     root: PathBuf,
-    config: Config,
+    config: DotRenameConfig,
     path_given: bool,
 }
 
-impl Dots {
-    /// Init new instance with CLI args.
-    pub fn new(args: Args) -> Result<Self> {
-        let path_given = args.path.is_some();
-        let root = cli_tools::resolve_input_path(args.path.as_deref())?;
-        let config = Config::from_args(args)?;
-        Ok(Self {
+impl DotRename {
+    /// Create a new instance with CLI args.
+    #[must_use]
+    pub const fn new(root: PathBuf, config: DotRenameConfig, path_given: bool) -> Self {
+        Self {
             root,
             config,
             path_given,
-        })
+        }
     }
 
-    /// Run renaming with given args.
-    #[inline]
-    pub fn run_with_args(args: Args) -> Result<()> {
-        Self::new(args)?.run()
+    /// Create a formatter that borrows the config.
+    const fn formatter(&self) -> DotFormat<'_> {
+        DotFormat::new(&self.config)
+    }
+
+    /// Format a file name using the configured formatting rules.
+    #[must_use]
+    pub fn format_name(&self, name: &str) -> String {
+        self.formatter().format_name(name)
+    }
+
+    /// Format a directory name using the configured formatting rules.
+    #[must_use]
+    pub fn format_directory_name(&self, name: &str) -> String {
+        self.formatter().format_directory_name(name)
+    }
+
+    /// Format a file with prefix/suffix based on its parent directory.
+    #[must_use]
+    pub fn format_file_with_parent_prefix_suffix(&self, path: &Path) -> Option<PathBuf> {
+        self.formatter().format_file_with_parent_prefix_suffix(path)
     }
 
     /// Run renaming.
+    ///
+    /// # Errors
+    /// Returns an error if directory renaming is requested but a file was given,
+    /// or if file operations fail.
     pub fn run(&mut self) -> Result<()> {
         if self.config.rename_directories && self.root.is_file() {
             anyhow::bail!("Cannot rename directories when a file was given as input path");
@@ -198,10 +116,10 @@ impl Dots {
         // Non-recursive prefix/suffix: use root directory name for all files
         if self.config.prefix_dir || self.config.suffix_dir {
             let formatted_dir = if self.root.is_dir() {
-                cli_tools::get_normalized_dir_name(&self.root)?
+                crate::get_normalized_dir_name(&self.root)?
             } else {
                 let parent_dir = self.root.parent().context("Failed to get parent dir")?;
-                cli_tools::get_normalized_dir_name(parent_dir)?
+                crate::get_normalized_dir_name(parent_dir)?
             };
             let name = self.format_name(&formatted_dir);
             if self.config.prefix_dir {
@@ -261,7 +179,7 @@ impl Dots {
         let paths: Vec<PathBuf> = WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
-            .filter_entry(|e| !cli_tools::should_skip_entry(e))
+            .filter_entry(|e| !crate::should_skip_entry(e))
             .filter_map(Result::ok)
             .map(walkdir::DirEntry::into_path)
             .collect();
@@ -274,7 +192,7 @@ impl Dots {
             .filter_map(|path| {
                 let result = {
                     // Filter based on include and exclude lists
-                    let path_str = cli_tools::path_to_string(&path);
+                    let path_str = crate::path_to_string(&path);
                     let include = self.config.include.iter().all(|name| path_str.contains(name));
                     let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
                     if include && exclude {
@@ -323,7 +241,7 @@ impl Dots {
         let paths: Vec<PathBuf> = WalkDir::new(&self.root)
             .max_depth(max_depth)
             .into_iter()
-            .filter_entry(|e| !cli_tools::should_skip_entry(e))
+            .filter_entry(|e| !crate::should_skip_entry(e))
             .filter_map(Result::ok)
             .map(walkdir::DirEntry::into_path)
             .filter(|p| p.is_file())
@@ -335,7 +253,7 @@ impl Dots {
         let mut results: Vec<(PathBuf, PathBuf)> = Vec::new();
 
         for path in paths {
-            let path_str = cli_tools::path_to_string(&path);
+            let path_str = crate::path_to_string(&path);
             let include = self.config.include.iter().all(|name| path_str.contains(name));
             let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
 
@@ -361,73 +279,6 @@ impl Dots {
         results
     }
 
-    /// Format a single file using its parent directory name as prefix/suffix.
-    fn format_file_with_parent_prefix_suffix(&self, path: &Path) -> Option<PathBuf> {
-        let parent_dir = path.parent()?;
-        let parent_name = cli_tools::get_normalized_dir_name(parent_dir).ok()?;
-        let formatted_parent = self.format_name_without_prefix_suffix(&parent_name);
-
-        let (file_name, file_extension) = cli_tools::get_normalized_file_name_and_extension(path).ok()?;
-        let formatted_name = self.format_name_without_prefix_suffix(&file_name);
-
-        // Apply prefix or suffix based on config
-        let final_name = if self.config.prefix_dir_recursive {
-            Self::apply_prefix(&formatted_name, &formatted_parent)
-        } else {
-            self.apply_suffix(&formatted_name, &formatted_parent)
-        };
-
-        let new_file = format!("{}.{}", final_name, file_extension.to_lowercase());
-        Some(path.with_file_name(new_file))
-    }
-
-    /// Format name without applying prefix/suffix (used for recursive mode).
-    fn format_name_without_prefix_suffix(&self, file_name: &str) -> String {
-        let mut new_name = String::from(file_name);
-
-        self.apply_replacements(&mut new_name);
-        Self::remove_special_characters(&mut new_name);
-
-        if self.config.convert_case {
-            new_name = new_name.to_lowercase();
-        }
-
-        self.apply_config_replacements(&mut new_name);
-
-        if self.config.remove_random {
-            Self::remove_random_identifiers(&mut new_name);
-        }
-
-        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
-
-        Self::apply_titlecase(&mut new_name);
-        Self::convert_written_date_format(&mut new_name);
-
-        if let Some(date_flipped_name) = if self.config.rename_directories {
-            cli_tools::date::reorder_directory_date(&new_name)
-        } else {
-            cli_tools::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
-        } {
-            new_name = date_flipped_name;
-        }
-
-        if !self.config.move_to_start.is_empty() {
-            self.move_to_start(&mut new_name);
-        }
-        if !self.config.move_to_end.is_empty() {
-            self.move_to_end(&mut new_name);
-        }
-        if !self.config.move_date_after_prefix.is_empty() {
-            self.move_date_after_prefix(&mut new_name);
-        }
-        if !self.config.remove_from_start.is_empty() {
-            self.remove_from_start(&mut new_name);
-        }
-
-        let result = RE_DOTS.replace_all(&new_name, ".");
-        result.trim_start_matches('.').trim_end_matches('.').to_string()
-    }
-
     /// Get all directories that need to be renamed.
     fn gather_directories_to_rename(&self, path_specified: bool) -> Vec<(PathBuf, PathBuf)> {
         // Path specified without recurse - rename only that specific directory
@@ -451,7 +302,7 @@ impl Dots {
         // Collect all directory paths first
         let paths: Vec<PathBuf> = walker
             .into_iter()
-            .filter_entry(|e| !cli_tools::should_skip_entry(e))
+            .filter_entry(|e| !crate::should_skip_entry(e))
             .filter_map(Result::ok)
             .filter(|entry| entry.path().is_dir())
             .map(walkdir::DirEntry::into_path)
@@ -467,7 +318,7 @@ impl Dots {
                     let matches_filter = if self.config.include.is_empty() {
                         true
                     } else {
-                        let path_str = cli_tools::path_to_string(&path);
+                        let path_str = crate::path_to_string(&path);
                         self.config.include.iter().all(|name| path_str.contains(name))
                     };
                     if matches_filter {
@@ -547,7 +398,7 @@ impl Dots {
         // Process from deepest to shallowest
         {
             let dir_path = entry.path();
-            if dir_path != dir && cli_tools::is_directory_empty(dir_path) {
+            if dir_path != dir && crate::is_directory_empty(dir_path) {
                 if self.config.verbose {
                     println!("Removing empty directory: {}", dir_path.display());
                 }
@@ -556,7 +407,7 @@ impl Dots {
         }
 
         // Finally, try to remove the source directory itself
-        if cli_tools::is_directory_empty(dir) {
+        if crate::is_directory_empty(dir) {
             if self.config.verbose {
                 println!("Removing empty source directory: {}", dir.display());
             }
@@ -572,8 +423,8 @@ impl Dots {
         let max_items = paths.len();
         let max_chars = paths.len().checked_ilog10().map_or(1, |d| d as usize + 1);
         for (index, (path, mut new_path)) in paths.into_iter().enumerate() {
-            let old_str = cli_tools::get_relative_path_or_filename(&path, &self.root);
-            let mut new_str = cli_tools::get_relative_path_or_filename(&new_path, &self.root);
+            let old_str = crate::get_relative_path_or_filename(&path, &self.root);
+            let mut new_str = crate::get_relative_path_or_filename(&new_path, &self.root);
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
             let capitalization_change_only = if new_str.to_lowercase() == old_str.to_lowercase() {
@@ -593,7 +444,7 @@ impl Dots {
                 if self.config.increment_name {
                     match Self::get_incremented_path(&new_path) {
                         Ok(incremented_path) => {
-                            new_str = cli_tools::get_relative_path_or_filename(&incremented_path, &self.root);
+                            new_str = crate::get_relative_path_or_filename(&incremented_path, &self.root);
                             new_path = incremented_path;
                         }
                         Err(e) => {
@@ -608,7 +459,7 @@ impl Dots {
 
             if self.config.dryrun {
                 println!("{}", format!("Dryrun {number}:").bold().cyan());
-                cli_tools::show_diff(&old_str, &new_str);
+                crate::show_diff(&old_str, &new_str);
 
                 if is_directory_merge {
                     println!("Would merge directory: {old_str} -> {new_str}");
@@ -618,7 +469,7 @@ impl Dots {
             }
 
             println!("{}", format!("Rename {number}:").bold().magenta());
-            cli_tools::show_diff(&old_str, &new_str);
+            crate::show_diff(&old_str, &new_str);
 
             if is_directory_merge {
                 if self.config.verbose {
@@ -672,7 +523,7 @@ impl Dots {
             anyhow::bail!("Path is not a file")
         }
 
-        if let Ok((file_name, file_extension)) = cli_tools::get_normalized_file_name_and_extension(path) {
+        if let Ok((file_name, file_extension)) = crate::get_normalized_file_name_and_extension(path) {
             let new_file = format!("{}.{}", self.format_name(&file_name), file_extension.to_lowercase());
             let new_path = path.with_file_name(new_file);
             Ok(new_path)
@@ -687,283 +538,10 @@ impl Dots {
             anyhow::bail!("Path is not a directory")
         }
 
-        let directory_name = cli_tools::os_str_to_string(path.file_name().context("Failed to get directory name")?);
-
-        let formatted_name = self.format_name(&directory_name).replace('.', " ");
+        let directory_name = crate::os_str_to_string(path.file_name().context("Failed to get directory name")?);
+        let formatted_name = self.format_directory_name(&directory_name);
 
         Ok(path.with_file_name(formatted_name))
-    }
-
-    /// Format the file name without the file extension
-    fn format_name(&self, file_name: &str) -> String {
-        let mut new_name = String::from(file_name);
-
-        self.apply_replacements(&mut new_name);
-        Self::remove_special_characters(&mut new_name);
-
-        if self.config.convert_case {
-            new_name = new_name.to_lowercase();
-        }
-
-        self.apply_config_replacements(&mut new_name);
-
-        if self.config.remove_random {
-            Self::remove_random_identifiers(&mut new_name);
-        }
-
-        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
-
-        Self::apply_titlecase(&mut new_name);
-        Self::convert_written_date_format(&mut new_name);
-
-        if let Some(date_flipped_name) = if self.config.rename_directories {
-            cli_tools::date::reorder_directory_date(&new_name)
-        } else {
-            cli_tools::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
-        } {
-            new_name = date_flipped_name;
-        }
-
-        if let Some(ref prefix) = self.config.prefix {
-            new_name = Self::apply_prefix(&new_name, prefix);
-        }
-
-        if let Some(ref suffix) = self.config.suffix {
-            new_name = self.apply_suffix(&new_name, suffix);
-        }
-
-        if !self.config.move_to_start.is_empty() {
-            self.move_to_start(&mut new_name);
-        }
-        if !self.config.move_to_end.is_empty() {
-            self.move_to_end(&mut new_name);
-        }
-        if !self.config.move_date_after_prefix.is_empty() {
-            self.move_date_after_prefix(&mut new_name);
-        }
-        if !self.config.remove_from_start.is_empty() {
-            self.remove_from_start(&mut new_name);
-        }
-
-        // Apply regex replacements (workaround for prefix regex)
-        // Skip reordering if name (after prefix) starts with 5+ digits followed by a boundary
-        if !self.config.regex_replace_after.is_empty() {
-            let skip_reorder = self.config.prefix.as_ref().is_some_and(|prefix| {
-                new_name
-                    .strip_prefix(prefix)
-                    .map(|s| s.strip_prefix('.').unwrap_or(s))
-                    .is_some_and(Self::starts_with_five_or_more_digits)
-            });
-
-            if !skip_reorder {
-                for (regex, replacement) in &self.config.regex_replace_after {
-                    new_name = regex.replace_all(&new_name, replacement).into_owned();
-                }
-            }
-        }
-
-        // Remove consecutive duplicate patterns from substitutions and prefix_dir
-        if !self.config.deduplicate_patterns.is_empty() {
-            Self::remove_consecutive_duplicates(&mut new_name, &self.config.deduplicate_patterns);
-        }
-
-        let result = RE_DOTS.replace_all(&new_name, ".");
-        result.trim_start_matches('.').trim_end_matches('.').to_string()
-    }
-
-    fn move_to_start(&self, name: &mut String) {
-        for pattern in &self.config.move_to_start {
-            let re = Regex::new(&format!(r"\b{}\b", regex::escape(pattern))).expect("Failed to create regex pattern");
-
-            if re.is_match(name) {
-                *name = format!("{}.{}", pattern, re.replace(name, ""));
-            }
-        }
-    }
-
-    fn move_to_end(&self, name: &mut String) {
-        for sub in &self.config.move_to_end {
-            if name.contains(sub) {
-                *name = format!("{}.{}", name.replace(sub, ""), sub);
-            }
-        }
-    }
-
-    fn move_date_after_prefix(&self, name: &mut String) {
-        for prefix in &self.config.move_date_after_prefix {
-            if name.starts_with(prefix) {
-                if let Some(date_match) = RE_CORRECT_DATE_FORMAT.find(name) {
-                    let date = date_match.as_str();
-                    let mut new_name = name.clone();
-
-                    // Remove the date from its current location
-                    new_name.replace_range(date_match.range(), "");
-
-                    let insert_pos = prefix.len();
-                    new_name.insert_str(insert_pos, &format!(".{date}."));
-
-                    *name = new_name;
-                }
-                if let Some(date_match) = RE_YEAR.find(name) {
-                    let date = date_match.as_str().parse::<i32>().expect("Failed to parse year");
-                    if date <= *CURRENT_YEAR {
-                        let mut new_name = name.clone();
-
-                        new_name.replace_range(date_match.range(), "");
-
-                        let insert_pos = prefix.len();
-                        new_name.insert_str(insert_pos, &format!(".{date}."));
-
-                        *name = new_name;
-                    }
-                }
-            }
-        }
-    }
-
-    fn remove_from_start(&self, name: &mut String) {
-        for pattern in &self.config.remove_from_start {
-            let re = Regex::new(&format!(r"\b{}\b", regex::escape(pattern))).expect("Failed to create regex pattern");
-            if let Some(last_match) = re.find_iter(name).last() {
-                // Split the text into parts before the last regex match
-                let before_last = &name[..last_match.start()];
-                let after_last = &name[last_match.start()..];
-
-                // Remove all occurrences from the first part using regex
-                *name = format!("{}.{after_last}", re.replace_all(before_last, ""));
-            }
-        }
-    }
-
-    /// Only retain alphanumeric characters and a few common filename characters
-    fn remove_special_characters(name: &mut String) {
-        let cleaned: String = name
-            // Split the string into graphemes (for handling emojis and complex characters)
-            .graphemes(true)
-            .filter(|g| {
-                g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '\'' || c == '&')
-            })
-            .collect();
-
-        *name = cleaned;
-    }
-
-    /// Apply suffix to the filename, handling various matching scenarios.
-    fn apply_suffix(&self, name: &str, suffix: &str) -> String {
-        let mut new_name = name.to_string();
-
-        if new_name.starts_with(suffix) {
-            new_name = new_name.replacen(suffix, "", 1);
-        }
-
-        if new_name.contains(suffix) {
-            self.remove_from_start(&mut new_name);
-            return new_name;
-        }
-
-        let lower_name = new_name.to_lowercase();
-        let lower_suffix = suffix.to_lowercase();
-
-        if lower_name.ends_with(&lower_suffix) {
-            format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix)
-        } else {
-            format!("{new_name}.{suffix}")
-        }
-    }
-
-    /// Apply static and pre-configured replacements to a filename.
-    fn apply_replacements(&self, name: &mut String) {
-        for (pattern, replacement) in &self.config.pre_replace {
-            *name = name.replace(pattern, replacement);
-        }
-
-        // Apply static replacements
-        for (pattern, replacement) in REPLACE {
-            *name = name.replace(pattern, replacement);
-        }
-
-        *name = RE_BRACKETS.replace_all(name, ".").into_owned();
-        *name = RE_DOTCOM.replace_all(name, ".").into_owned();
-        *name = RE_EXCLAMATION.replace_all(name, ".").into_owned();
-        *name = RE_WHITESPACE.replace_all(name, ".").into_owned();
-        *name = RE_DOTS.replace_all(name, ".").into_owned();
-    }
-
-    /// Apply titlecase formatting.
-    fn apply_titlecase(name: &mut String) {
-        // Temporarily convert dots back to whitespace so titlecase works
-        *name = name.replace('.', " ");
-        *name = titlecase::titlecase(name);
-        *name = name.replace(' ', ".");
-        // Fix encoding capitalization
-        *name = name.replace("X265", "x265").replace("X264", "x264");
-    }
-
-    /// Apply user-configured replacements from args and config file.
-    fn apply_config_replacements(&self, name: &mut String) {
-        for (pattern, replacement) in &self.config.replace {
-            *name = name.replace(pattern, replacement);
-        }
-
-        for (regex, replacement) in &self.config.regex_replace {
-            *name = regex.replace_all(name, replacement).into_owned();
-        }
-    }
-
-    /// Apply prefix to the filename, handling various matching scenarios.
-    fn apply_prefix(name: &str, prefix: &str) -> String {
-        let mut new_name = name.to_string();
-
-        if !new_name.starts_with(prefix) && new_name.contains(prefix) {
-            new_name = new_name.replacen(prefix, "", 1);
-        }
-
-        let lower_name = new_name.to_lowercase();
-        let lower_prefix = prefix.to_lowercase();
-
-        if lower_name.starts_with(&lower_prefix) {
-            // Full prefix match - update capitalization
-            return format!("{}{}", prefix, &new_name[prefix.len()..]);
-        }
-
-        // Check if new_name starts with any suffix of the prefix
-        let prefix_parts: Vec<&str> = prefix.split('.').collect();
-        for i in 1..prefix_parts.len() {
-            let suffix = prefix_parts[i..].join(".");
-            let lower_suffix = suffix.to_lowercase();
-
-            if lower_name.starts_with(&lower_suffix) {
-                // Found a matching suffix, replace with full prefix
-                return format!("{}{}", prefix, &new_name[suffix.len()..]);
-            }
-        }
-
-        format!("{prefix}.{new_name}")
-    }
-
-    fn remove_random_identifiers(name: &mut String) {
-        *name = RE_IDENTIFIER
-            .replace_all(name, |caps: &regex::Captures| {
-                let matched_str = &caps[0];
-                if Self::has_at_least_six_digits(matched_str)
-                    && !RE_RESOLUTION.is_match(matched_str)
-                    && !RESOLUTIONS.iter().any(|&number| matched_str.contains(number))
-                    && !name.contains("hash2")
-                {
-                    String::new()
-                } else {
-                    matched_str.trim().to_string()
-                }
-            })
-            .into_owned();
-    }
-
-    /// Remove consecutive duplicate occurrences of patterns from the name.
-    /// For example, "Some.Name.Some.Name.File" with pattern "Some.Name." becomes "Some.Name.File"
-    fn remove_consecutive_duplicates(name: &mut String, patterns: &[(Regex, String)]) {
-        for (regex, replacement) in patterns {
-            *name = regex.replace_all(name, replacement.as_str()).into_owned();
-        }
     }
 
     /// Build regex patterns for prefix directory date reordering.
@@ -998,19 +576,9 @@ impl Dots {
         ])
     }
 
-    /// Check if the name starts with 5 or more digits followed by a boundary.
-    /// Used to skip `prefix_dir` reordering for filenames with leading numeric identifiers.
-    fn starts_with_five_or_more_digits(name: &str) -> bool {
-        RE_LEADING_DIGITS.is_match(name)
-    }
-
-    fn has_at_least_six_digits(s: &str) -> bool {
-        s.chars().filter(char::is_ascii_digit).count() >= 6
-    }
-
     /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
     fn rename_with_temp_file(path: &PathBuf, new_path: &PathBuf) -> std::io::Result<()> {
-        let temp_file = cli_tools::append_extension_to_path(new_path.clone(), ".tmp");
+        let temp_file = crate::append_extension_to_path(new_path.clone(), ".tmp");
         fs::rename(path, &temp_file)?;
         fs::rename(&temp_file, new_path)
     }
@@ -1018,7 +586,7 @@ impl Dots {
     fn get_incremented_path(original: &Path) -> Result<PathBuf> {
         let mut index = 2;
         let parent = original.parent().unwrap_or_else(|| Path::new(""));
-        let (name, extension) = cli_tools::get_normalized_file_name_and_extension(original)?;
+        let (name, extension) = crate::get_normalized_file_name_and_extension(original)?;
         loop {
             let file_name = format!("{name}.{index}.{extension}");
             let new_path = parent.join(file_name);
@@ -1027,38 +595,6 @@ impl Dots {
             }
             index += 1;
         }
-    }
-
-    /// Convert date with written month name to numeral date.
-    ///
-    /// For example:
-    /// ```not_rust
-    /// "Jan.3.2020" -> "2020.01.03"
-    /// "December.6.2023" -> "2023.12.06"
-    /// "23.May.2016" -> "2016.05.23"
-    /// ```
-    fn convert_written_date_format(name: &mut String) {
-        // Replace Month.Day.Year
-        *name = RE_WRITTEN_DATE_MDY
-            .replace_all(name, |caps: &regex::Captures| {
-                let year = &caps["year"];
-                let month_raw = &caps["month"].to_lowercase();
-                let month = WRITTEN_MONTHS_MAP.get(month_raw.as_str()).expect("Failed to map month");
-                let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
-                format!("{year}.{month}.{day}")
-            })
-            .into_owned();
-
-        // Replace Day.Month.Year
-        *name = RE_WRITTEN_DATE_DMY
-            .replace_all(name, |caps: &regex::Captures| {
-                let year = &caps["year"];
-                let month_raw = &caps["month"].to_lowercase();
-                let month = WRITTEN_MONTHS_MAP.get(month_raw.as_str()).expect("Failed to map month");
-                let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
-                format!("{year}.{month}.{day}")
-            })
-            .into_owned();
     }
 
     /// Create a progress bar that is hidden during tests.
@@ -1082,578 +618,10 @@ impl Dots {
     }
 }
 
-impl fmt::Display for Dots {
+impl fmt::Display for DotRename {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Root: {}", self.root.display())?;
         write!(f, "{}", self.config)
-    }
-}
-
-#[cfg(test)]
-mod dots_tests {
-    use super::*;
-
-    static DOTS: LazyLock<Dots> = LazyLock::new(Dots::default);
-    static DOTS_INCREMENT: LazyLock<Dots> = LazyLock::new(|| Dots {
-        root: PathBuf::default(),
-        config: Config {
-            remove_random: true,
-            ..Default::default()
-        },
-        path_given: false,
-    });
-
-    #[test]
-    fn test_format_basic() {
-        assert_eq!(DOTS.format_name("Some file"), "Some.File");
-        assert_eq!(DOTS.format_name("some file"), "Some.File");
-        assert_eq!(DOTS.format_name("word"), "Word");
-        assert_eq!(DOTS.format_name("__word__"), "Word");
-        assert_eq!(DOTS.format_name("testCAP CAP WORD GL"), "testCAP.CAP.WORD.GL");
-        assert_eq!(DOTS.format_name("test CAP CAP WORD GL"), "Test.CAP.CAP.WORD.GL");
-        assert_eq!(DOTS.format_name("CAP WORD GL"), "Cap.Word.Gl");
-    }
-
-    #[test]
-    fn test_format_convert_case() {
-        let dots_case = Dots {
-            root: PathBuf::default(),
-            config: Config {
-                convert_case: true,
-                ..Default::default()
-            },
-            path_given: false,
-        };
-        assert_eq!(dots_case.format_name("CAP WORD GL"), "Cap.Word.Gl");
-        assert_eq!(dots_case.format_name("testCAP CAP WORD GL"), "Testcap.Cap.Word.Gl");
-        assert_eq!(dots_case.format_name("test CAP CAP WORD GL"), "Test.Cap.Cap.Word.Gl");
-    }
-
-    #[test]
-    fn test_format_name_with_newlines() {
-        assert_eq!(
-            DOTS.format_name("Meeting \tNotes \n(2023) - Draft\r\n"),
-            "Meeting.Notes.2023.Draft"
-        );
-    }
-
-    #[test]
-    fn test_format_name_no_brackets() {
-        assert_eq!(DOTS.format_name("John Doe - Document"), "John.Doe.Document");
-    }
-
-    #[test]
-    fn test_format_name_with_brackets() {
-        assert_eq!(
-            DOTS.format_name("Project Report - [Final Version]"),
-            "Project.Report.Final.Version"
-        );
-        assert_eq!(DOTS.format_name("Code {Snippet} (example)"), "Code.Snippet.Example");
-    }
-
-    #[test]
-    fn test_format_name_with_parentheses() {
-        assert_eq!(
-            DOTS.format_name("Meeting Notes (2023) - Draft"),
-            "Meeting.Notes.2023.Draft"
-        );
-    }
-
-    #[test]
-    fn test_format_name_with_extra_dots() {
-        assert_eq!(DOTS.format_name("file..with...dots"), "File.With.Dots");
-        assert_eq!(
-            DOTS.format_name("...leading.and.trailing.dots..."),
-            "Leading.and.Trailing.Dots"
-        );
-    }
-
-    #[test]
-    fn test_format_name_with_exclamations() {
-        assert_eq!(DOTS.format_name("Exciting!Document!!"), "Exciting.Document");
-        assert_eq!(DOTS.format_name("Hello!!!World!!"), "Hello.World");
-    }
-
-    #[test]
-    fn test_format_name_with_dotcom() {
-        assert_eq!(
-            DOTS.format_name("visit.website.com.for.details"),
-            "Visit.Website.for.Details"
-        );
-        assert_eq!(
-            DOTS.format_name("Contact us at email@domain.net"),
-            "Contact.Us.at.Email.Domain"
-        );
-        assert_eq!(DOTS.format_name("Contact.company.test"), "Contact.Company.Test");
-    }
-
-    #[test]
-    fn test_format_name_with_combined_cases() {
-        assert_eq!(
-            DOTS.format_name("Amazing [Stuff]!! Visit my.site.com..now"),
-            "Amazing.Stuff.Visit.My.Site.Now"
-        );
-    }
-
-    #[test]
-    fn test_format_name_with_weird_characters() {
-        assert_eq!(
-            DOTS.format_name("Weird-Text-~File-Name-@Example#"),
-            "Weird.Text.File.Name.Example"
-        );
-    }
-
-    #[test]
-    fn test_format_name_empty_string() {
-        assert_eq!(DOTS.format_name(""), "");
-    }
-
-    #[test]
-    fn test_format_name_no_changes() {
-        assert_eq!(DOTS.format_name("SingleWord"), "SingleWord");
-    }
-
-    #[test]
-    fn test_format_name_full_resolution() {
-        assert_eq!(
-            DOTS_INCREMENT.format_name("test.string.with resolution. 1234x900"),
-            "Test.String.With.Resolution.1234x900"
-        );
-        assert_eq!(DOTS_INCREMENT.format_name("resolution 719x719"), "Resolution.719x719");
-        assert_eq!(DOTS_INCREMENT.format_name("resolution 122225x719"), "Resolution");
-    }
-
-    #[test]
-    fn test_move_to_start() {
-        let mut dots = Dots::default();
-        dots.config.move_to_start = vec!["Test".to_string()];
-        assert_eq!(
-            dots.format_name("This is a test string test"),
-            "Test.This.Is.a.String.Test"
-        );
-        assert_eq!(
-            dots.format_name("Test.This.Is.a.test.string.test"),
-            "Test.This.Is.a.Test.String.Test"
-        );
-        assert_eq!(dots.format_name("test"), "Test");
-        assert_eq!(dots.format_name("Test"), "Test");
-        assert_eq!(
-            dots.format_name("TestOther should not be broken"),
-            "TestOther.Should.Not.Be.Broken"
-        );
-        assert_eq!(dots.format_name("Test-Something-else"), "Test.Something.Else");
-    }
-
-    #[test]
-    fn test_move_to_end() {
-        let mut dots = Dots::default();
-        dots.config.move_to_end = vec!["Test".to_string()];
-        assert_eq!(dots.format_name("This is a test string test"), "This.Is.a.String.Test");
-        assert_eq!(
-            dots.format_name("Test.This.Is.a.test.string.test"),
-            "This.Is.a.String.Test"
-        );
-        assert_eq!(dots.format_name("test"), "Test");
-        assert_eq!(dots.format_name("Test"), "Test");
-    }
-
-    #[test]
-    fn test_remove_identifier() {
-        assert_eq!(
-            DOTS_INCREMENT.format_name("This is a string test ^[640e54a564228]"),
-            "This.Is.a.String.Test"
-        );
-        assert_eq!(
-            DOTS_INCREMENT.format_name("This.Is.a.test.string.65f09e4248e03..."),
-            "This.Is.a.Test.String"
-        );
-        assert_eq!(DOTS_INCREMENT.format_name("test Ph5d9473a841fe9"), "Test");
-        assert_eq!(DOTS_INCREMENT.format_name("Test-355989849"), "Test");
-    }
-
-    #[test]
-    fn test_format_date() {
-        assert_eq!(
-            DOTS.format_name("This is a test string test 1.1.2014"),
-            "This.Is.a.Test.String.Test.2014.01.01"
-        );
-        assert_eq!(
-            DOTS.format_name("Test.This.Is.a.test.string.test.30.05.2020"),
-            "Test.This.Is.a.Test.String.Test.2020.05.30"
-        );
-        assert_eq!(
-            DOTS.format_name("Testing date 30.05.2020 in the middle"),
-            "Testing.Date.2020.05.30.in.the.Middle"
-        );
-    }
-
-    #[test]
-    fn test_format_date_year_first() {
-        let dots = Dots {
-            root: PathBuf::default(),
-            config: Config {
-                date_starts_with_year: true,
-                ..Default::default()
-            },
-            path_given: false,
-        };
-
-        assert_eq!(
-            dots.format_name("This is a test string test 1.1.2014"),
-            "This.Is.a.Test.String.Test.2014.01.01"
-        );
-        assert_eq!(
-            dots.format_name("Test.This.Is.a.test.string.test.30.05.2020"),
-            "Test.This.Is.a.Test.String.Test.2020.05.30"
-        );
-        assert_eq!(
-            dots.format_name("Test.This.Is.a.test.string.test.24.02.20"),
-            "Test.This.Is.a.Test.String.Test.2024.02.20"
-        );
-        assert_eq!(
-            dots.format_name("Testing date 16.10.20 in the middle"),
-            "Testing.Date.2016.10.20.in.the.Middle"
-        );
-    }
-
-    #[test]
-    fn test_prefix_dir() {
-        let dots = Dots {
-            root: PathBuf::default(),
-            config: Config {
-                prefix: Some("Test.One.Two".to_string()),
-                ..Default::default()
-            },
-            path_given: false,
-        };
-
-        assert_eq!(dots.format_name("example"), "Test.One.Two.Example");
-        assert_eq!(dots.format_name("two example"), "Test.One.Two.Example");
-        assert_eq!(dots.format_name("1"), "Test.One.Two.1");
-        assert_eq!(dots.format_name("Test one  two three"), "Test.One.Two.Three");
-        assert_eq!(dots.format_name("three"), "Test.One.Two.Three");
-        assert_eq!(dots.format_name("test.one.two"), "Test.One.Two");
-        assert_eq!(dots.format_name(" test one two "), "Test.One.Two");
-        assert_eq!(dots.format_name("Test.One.Two"), "Test.One.Two");
-    }
-
-    /// Test that prefix dir keeps prefix at start when filename starts with 5+ digits.
-    #[test]
-    fn test_prefix_dir_with_leading_digits() {
-        // Test the helper function directly
-        assert!(
-            Dots::starts_with_five_or_more_digits("12345 Content"),
-            "5 digits with a space should match"
-        );
-        assert!(
-            Dots::starts_with_five_or_more_digits("123456789.Content"),
-            "9 digits should match"
-        );
-        assert!(
-            Dots::starts_with_five_or_more_digits("37432195.Video"),
-            "8 digits should match"
-        );
-        assert!(
-            !Dots::starts_with_five_or_more_digits("1234.Content"),
-            "4 digits should not match"
-        );
-        assert!(
-            !Dots::starts_with_five_or_more_digits("Content.12345"),
-            "digits not at start should not match"
-        );
-        assert!(
-            !Dots::starts_with_five_or_more_digits("12345Content"),
-            "digits without a boundary should not match"
-        );
-
-        // Test full format_name with prefix_dir behavior
-        let dots_with_prefix = Dots {
-            root: PathBuf::default(),
-            config: Config {
-                prefix: Some("Prefix".to_string()),
-                regex_replace_after: Dots::build_prefix_dir_regexes("Prefix").unwrap().to_vec(),
-                ..Default::default()
-            },
-            path_given: false,
-        };
-
-        // 5+ digits at start should NOT be reordered (prefix stays at start)
-        assert_eq!(
-            dots_with_prefix.format_name("12345 content 2024.01.15 rest"),
-            "Prefix.12345.Content.2024.01.15.Rest",
-            "5+ digits should keep prefix at start"
-        );
-
-        // Real-world example: 8-digit ID with date should keep prefix at start
-        assert_eq!(
-            dots_with_prefix.format_name("37432195_video_2021-06-28_18-24"),
-            "Prefix.37432195.Video.2021.06.28.18.24",
-            "8-digit ID should keep prefix at start"
-        );
-
-        // 4 digits at start SHOULD be reordered (prefix moves after date)
-        assert_eq!(
-            dots_with_prefix.format_name("1234 content 2024.01.15 rest"),
-            "1234.Content.2024.01.15.Prefix.Rest",
-            "4 digits should allow reordering"
-        );
-
-        // Content without leading digits should be reordered
-        assert_eq!(
-            dots_with_prefix.format_name("content 2024.01.15 rest"),
-            "Content.2024.01.15.Prefix.Rest",
-            "No leading digits should allow reordering"
-        );
-    }
-
-    /// Test that `prefix_dir_start` option forces prefix to always stay at the start.
-    #[test]
-    fn test_prefix_dir_start_option() {
-        // With prefix_dir_start = true, no reordering regexes are added
-        let dots_with_prefix_start = Dots {
-            root: PathBuf::default(),
-            config: Config {
-                prefix: Some("Prefix".to_string()),
-                prefix_dir_start: true,
-                ..Default::default()
-            },
-            path_given: false,
-        };
-
-        assert_eq!(
-            dots_with_prefix_start.format_name("content 2024.01.15 rest"),
-            "Prefix.Content.2024.01.15.Rest",
-            "prefix_dir_start should keep prefix at start"
-        );
-
-        assert_eq!(
-            dots_with_prefix_start.format_name("1234 content 2024.01.15 rest"),
-            "Prefix.1234.Content.2024.01.15.Rest",
-            "prefix_dir_start should keep prefix at start even with 4 digits"
-        );
-
-        assert_eq!(
-            dots_with_prefix_start.format_name("37432195_video_2021-06-28_18-24"),
-            "Prefix.37432195.Video.2021.06.28.18.24",
-            "prefix_dir_start should keep prefix at start for numeric IDs"
-        );
-    }
-}
-
-#[cfg(test)]
-mod written_date_tests {
-    use super::*;
-
-    #[test]
-    fn test_single_date() {
-        let mut input = "Mar.23.2016".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2016.03.23");
-
-        let mut input = "23.mar.2016".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2016.03.23");
-
-        let mut input = "March.1.2011".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2011.03.01");
-
-        let mut input = "1.March.2011".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2011.03.01");
-
-        let mut input = "December.20.2023".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2023.12.20");
-
-        let mut input = "20.December.2023".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2023.12.20");
-    }
-
-    #[test]
-    fn test_multiple_dates() {
-        let mut input = "Mar.23.2016 Jun.17.2015".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2016.03.23 2015.06.17");
-    }
-
-    #[test]
-    fn test_mixed_text() {
-        let mut input = "Event on Apr.5.2021 at noon".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "Event on 2021.04.05 at noon");
-    }
-
-    #[test]
-    fn test_edge_case_single_digit_day() {
-        let mut input = "Jan.03.2020".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "2020.01.03");
-    }
-
-    #[test]
-    fn test_no_date_in_text() {
-        let mut input = "This text has no date".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "This text has no date");
-    }
-
-    #[test]
-    fn test_leading_and_trailing_spaces() {
-        let mut input = "Something.Feb.Jun.09.2022".to_string();
-        Dots::convert_written_date_format(&mut input);
-        assert_eq!(input, "Something.Feb.2022.06.09");
-    }
-}
-
-#[cfg(test)]
-mod move_date_tests {
-    use super::*;
-
-    static DOTS: LazyLock<Dots> = LazyLock::new(|| Dots {
-        root: PathBuf::default(),
-        config: Config {
-            move_date_after_prefix: vec!["Test".to_string(), "Prefix".to_string()],
-            date_starts_with_year: true,
-            ..Default::default()
-        },
-        path_given: false,
-    });
-
-    #[test]
-    fn test_valid_date() {
-        assert_eq!(
-            DOTS.format_name("Test something 2010.11.16"),
-            "Test.2010.11.16.Something"
-        );
-        assert_eq!(
-            DOTS.format_name("Test something 1080p 2010.11.16"),
-            "Test.2010.11.16.Something.1080p"
-        );
-    }
-
-    #[test]
-    fn test_short_date() {
-        assert_eq!(
-            DOTS.format_name("Test something else 25.05.30"),
-            "Test.2025.05.30.Something.Else"
-        );
-    }
-
-    #[test]
-    fn test_no_match_with_valid_date() {
-        assert_eq!(
-            DOTS.format_name("something else 2024.01.01"),
-            "Something.Else.2024.01.01"
-        );
-        assert_eq!(
-            DOTS.format_name("something else 2160p 24.05.28"),
-            "Something.Else.2160p.2024.05.28"
-        );
-    }
-}
-
-#[cfg(test)]
-mod test_remove_from_start {
-    use super::*;
-
-    static DOTS: LazyLock<Dots> = LazyLock::new(|| Dots {
-        root: PathBuf::default(),
-        config: Config {
-            remove_from_start: vec!["Test".to_string(), "test".to_string()],
-            ..Default::default()
-        },
-        path_given: false,
-    });
-
-    #[test]
-    fn test_no_patterns() {
-        assert_eq!(DOTS.format_name("test.string.test"), "String.Test");
-    }
-
-    #[test]
-    fn test_single_occurrence() {
-        assert_eq!(DOTS.format_name("test.string"), "Test.String");
-    }
-
-    #[test]
-    fn test_multiple_occurrences() {
-        assert_eq!(DOTS.format_name("test.string.test.test"), "String.Test");
-        assert_eq!(
-            DOTS.format_name("test.string.test.something.test"),
-            "String.Something.Test"
-        );
-    }
-
-    #[test]
-    fn test_partial_word_match() {
-        assert_eq!(DOTS.format_name("testing.test.contest"), "Testing.Test.Contest");
-    }
-
-    #[test]
-    fn test_consecutive_patterns() {
-        assert_eq!(DOTS.format_name("test.test.test.test"), "Test");
-    }
-}
-
-#[cfg(test)]
-mod test_deduplicate_patterns {
-    use super::*;
-
-    static DOTS: LazyLock<Dots> = LazyLock::new(|| Dots {
-        root: PathBuf::default(),
-        config: Config {
-            replace: vec![("SomeName.".to_string(), "Some.Name.".to_string())],
-            deduplicate_patterns: vec![(
-                Regex::new(r"(Some\.Name\.){2,}").expect("valid regex"),
-                "Some.Name.".to_string(),
-            )],
-            ..Default::default()
-        },
-        path_given: false,
-    });
-
-    #[test]
-    fn test_no_duplicates() {
-        assert_eq!(DOTS.format_name("Some.Name.File"), "Some.Name.File");
-    }
-
-    #[test]
-    fn test_double_duplicate() {
-        assert_eq!(DOTS.format_name("SomeName.SomeName.File"), "Some.Name.File");
-        assert_eq!(DOTS.format_name("SomeName.Some.Name.File"), "Some.Name.File");
-        assert_eq!(DOTS.format_name("Some.SomeName.Some.Name.File"), "Some.Some.Name.File");
-        assert_eq!(
-            DOTS.format_name("Something.SomeName.Some.Name.File"),
-            "Something.Some.Name.File"
-        );
-    }
-
-    #[test]
-    fn test_triple_duplicate() {
-        assert_eq!(DOTS.format_name("SomeName.SomeName.SomeName.File"), "Some.Name.File");
-        assert_eq!(DOTS.format_name("SomeName.SomeName.Some.Name.File"), "Some.Name.File");
-        assert_eq!(DOTS.format_name("SomeName.File"), "Some.Name.File");
-        assert_eq!(DOTS.format_name("Some.Name.File"), "Some.Name.File");
-    }
-
-    #[test]
-    fn test_substitute_creates_duplicate() {
-        assert_eq!(DOTS.format_name("Some.Name.SomeName.File"), "Some.Name.File");
-    }
-
-    #[test]
-    fn test_mixed_case_duplicates() {
-        let dots = Dots {
-            root: PathBuf::default(),
-            config: Config {
-                deduplicate_patterns: vec![(Regex::new(r"(Test\.){2,}").expect("valid regex"), "Test.".to_string())],
-                ..Default::default()
-            },
-            path_given: false,
-        };
-        assert_eq!(dots.format_name("Test.Test.File"), "Test.File");
     }
 }
 
@@ -1679,9 +647,9 @@ mod test_prefix_suffix_options {
 
     #[test]
     fn test_prefix_with_explicit_name() {
-        let dots = Dots {
+        let dots = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix: Some("My.Prefix".to_string()),
                 ..Default::default()
             },
@@ -1694,9 +662,9 @@ mod test_prefix_suffix_options {
 
     #[test]
     fn test_suffix_with_explicit_name() {
-        let dots = Dots {
+        let dots = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 suffix: Some("My.Suffix".to_string()),
                 ..Default::default()
             },
@@ -1713,9 +681,9 @@ mod test_prefix_suffix_options {
         let root = create_subdir(temp_dir.path(), "Test Directory");
         create_test_file(&root, "some_file.txt");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 ..Default::default()
             },
@@ -1739,9 +707,9 @@ mod test_prefix_suffix_options {
         let root = create_subdir(temp_dir.path(), "Test Directory");
         create_test_file(&root, "some_file.txt");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 suffix_dir: true,
                 ..Default::default()
             },
@@ -1769,9 +737,9 @@ mod test_prefix_suffix_options {
         create_test_file(&sub1, "file_in_sub1.txt");
         create_test_file(&sub2, "file_in_sub2.txt");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 prefix_dir_recursive: true,
                 recurse: true,
@@ -1814,9 +782,9 @@ mod test_prefix_suffix_options {
         create_test_file(&sub1, "file_in_sub1.txt");
         create_test_file(&sub2, "file_in_sub2.txt");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 suffix_dir: true,
                 suffix_dir_recursive: true,
                 recurse: true,
@@ -1851,19 +819,19 @@ mod test_prefix_suffix_options {
 
     #[test]
     fn test_prefix_dir_start_prevents_date_reordering() {
-        let dots_without_start = Dots {
+        let dots_without_start = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix: Some("Artist".to_string()),
-                regex_replace_after: Dots::build_prefix_dir_regexes("Artist").unwrap().to_vec(),
+                regex_replace_after: DotRename::build_prefix_dir_regexes("Artist").unwrap().to_vec(),
                 ..Default::default()
             },
             path_given: false,
         };
 
-        let dots_with_start = Dots {
+        let dots_with_start = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix: Some("Artist".to_string()),
                 prefix_dir_start: true,
                 // No regex_replace_after when prefix_dir_start is true
@@ -1897,9 +865,9 @@ mod test_prefix_suffix_options {
         create_test_file(&artist1, "song2.mp3");
         create_test_file(&artist2, "track1.mp3");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 prefix_dir_recursive: true,
                 recurse: true,
@@ -1943,31 +911,11 @@ mod test_prefix_suffix_options {
     }
 
     #[test]
-    fn test_format_name_without_prefix_suffix() {
-        let dots = Dots {
-            root: PathBuf::default(),
-            config: Config::default(),
-            path_given: false,
-        };
-
-        // This method should format the name but not apply any prefix/suffix
-        // Note: titlecase is applied, so first letter of each word is capitalized
-        assert_eq!(
-            dots.format_name_without_prefix_suffix("Some_File_Name"),
-            "Some.File.Name"
-        );
-        assert_eq!(
-            dots.format_name_without_prefix_suffix("test 2024-01-15 video"),
-            "Test.2024.01.15.Video"
-        );
-    }
-
-    #[test]
     fn test_prefix_and_suffix_cannot_both_be_set() {
         // This is enforced by clap conflicts_with, but test the behavior if both were set
-        let dots = Dots {
+        let dots = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix: Some("Prefix".to_string()),
                 suffix: Some("Suffix".to_string()),
                 ..Default::default()
@@ -1991,9 +939,9 @@ mod test_prefix_suffix_options {
         // File in subdir should use "Subdir" as parent
         create_test_file(&sub, "sub_file.txt");
 
-        let dots = Dots {
+        let dots = DotRename {
             root: root.clone(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 prefix_dir_recursive: true,
                 recurse: true,
@@ -2037,9 +985,9 @@ mod test_prefix_suffix_options {
 
         create_test_file(&level3, "deep_file.txt");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 prefix_dir_recursive: true,
                 recurse: true,
@@ -2070,9 +1018,9 @@ mod test_prefix_suffix_options {
         create_test_file(&sub, "file2.txt");
 
         // Non-recursive prefix_dir should use root name for direct children only
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 recurse: false,
                 ..Default::default()
@@ -2098,9 +1046,9 @@ mod test_prefix_suffix_options {
         let root = create_subdir(temp_dir.path(), "Test (2024) [Special]");
         create_test_file(&root, "file.txt");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 ..Default::default()
             },
@@ -2125,9 +1073,9 @@ mod test_prefix_suffix_options {
         let root = create_subdir(temp_dir.path(), "Artist & Band");
         create_test_file(&root, "song.mp3");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 suffix_dir: true,
                 ..Default::default()
             },
@@ -2149,9 +1097,9 @@ mod test_prefix_suffix_options {
 
     #[test]
     fn test_prefix_already_present_in_filename() {
-        let dots = Dots {
+        let dots = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix: Some("Artist.Name".to_string()),
                 ..Default::default()
             },
@@ -2165,9 +1113,9 @@ mod test_prefix_suffix_options {
 
     #[test]
     fn test_suffix_already_present_in_filename() {
-        let dots = Dots {
+        let dots = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 suffix: Some("2024".to_string()),
                 ..Default::default()
             },
@@ -2184,9 +1132,9 @@ mod test_prefix_suffix_options {
         let root = create_subdir(temp_dir.path(), "2024");
         create_test_file(&root, "file.txt");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 ..Default::default()
             },
@@ -2206,11 +1154,11 @@ mod test_prefix_suffix_options {
 
     #[test]
     fn test_prefix_dir_start_with_5_digit_filename() {
-        let dots = Dots {
+        let dots = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix: Some("Prefix".to_string()),
-                regex_replace_after: Dots::build_prefix_dir_regexes("Prefix").unwrap().to_vec(),
+                regex_replace_after: DotRename::build_prefix_dir_regexes("Prefix").unwrap().to_vec(),
                 ..Default::default()
             },
             path_given: false,
@@ -2239,9 +1187,9 @@ mod test_prefix_suffix_options {
         create_test_file(&root, "exclude_this.txt");
         create_test_file(&sub, "include_sub.txt");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 prefix_dir_recursive: true,
                 recurse: true,
@@ -2272,9 +1220,9 @@ mod test_prefix_suffix_options {
         create_test_file(&root, "exclude_this.txt");
         create_test_file(&root, "also_keep.txt");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 prefix_dir_recursive: true,
                 recurse: true,
@@ -2306,9 +1254,9 @@ mod test_prefix_suffix_options {
         create_test_file(&cat1, "video1.mp4");
         create_test_file(&cat2, "video2.mp4");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 suffix_dir: true,
                 suffix_dir_recursive: true,
                 recurse: true,
@@ -2348,11 +1296,11 @@ mod test_prefix_suffix_options {
 
     #[test]
     fn test_prefix_with_date_reordering_full_date() {
-        let dots_without_start = Dots {
+        let dots_without_start = DotRename {
             root: PathBuf::default(),
-            config: Config {
+            config: DotRenameConfig {
                 prefix: Some("Show".to_string()),
-                regex_replace_after: Dots::build_prefix_dir_regexes("Show").unwrap().to_vec(),
+                regex_replace_after: DotRename::build_prefix_dir_regexes("Show").unwrap().to_vec(),
                 ..Default::default()
             },
             path_given: false,
@@ -2370,9 +1318,9 @@ mod test_prefix_suffix_options {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let root = create_subdir(temp_dir.path(), "Empty Dir");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 ..Default::default()
             },
@@ -2392,9 +1340,9 @@ mod test_prefix_suffix_options {
 
         create_test_file(&has_files, "file.txt");
 
-        let dots = Dots {
+        let dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 prefix_dir_recursive: true,
                 recurse: true,
@@ -2423,9 +1371,9 @@ mod test_prefix_suffix_options {
         create_test_file(&root, "track02.mp3");
         create_test_file(&root, "track03.mp3");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 ..Default::default()
             },
@@ -2454,9 +1402,9 @@ mod test_prefix_suffix_options {
         create_test_file(&root, "video.MP4");
         create_test_file(&root, "image.JPEG");
 
-        let mut dots = Dots {
+        let mut dots = DotRename {
             root,
-            config: Config {
+            config: DotRenameConfig {
                 prefix_dir: true,
                 ..Default::default()
             },

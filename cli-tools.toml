@@ -112,3 +112,36 @@ replace = [
 # scale_width = 480
 # font_size = 20
 # quality = 2  # JPEG quality (1-31, lower is better)
+
+[qtorrent]
+# qBittorrent WebUI connection settings
+# host = "localhost"
+# port = 8080
+# username = "admin"
+# password = "adminadmin"
+
+# Default options for added torrents
+# save_path = "/downloads"
+# category = ""
+# tags = ""
+# paused = false
+
+# CLI behavior
+# dryrun = false
+# verbose = false
+# yes = false
+# recurse = false
+
+# File filtering for multi-file torrents
+# File extensions to skip (without dot)
+# skip_extensions = ["nfo", "txt", "jpg", "png", "sfv", "md5", "url"]
+# Directory names to skip (case-insensitive full name match)
+# skip_names = ["sample", "proof", "screens"]
+# Minimum file size in MB (files smaller than this will be skipped)
+# min_file_size_mb = 10
+
+# Substrings to remove from torrent filename when generating suggested name
+# remove_from_name = ["[Example]", "Dummy"]
+
+# Apply dots formatting to suggested name (uses [dots] config settings)
+# use_dots_formatting = true

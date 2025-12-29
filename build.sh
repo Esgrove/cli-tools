@@ -27,6 +27,9 @@ while [ $# -gt 0 ]; do
         --verbose)
             set -x
             ;;
+        *)
+            print_error_and_exit "Unknown option: $1"
+            ;;
     esac
     shift
 done

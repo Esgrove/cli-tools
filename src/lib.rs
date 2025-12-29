@@ -1,9 +1,11 @@
 pub mod config;
 pub mod date;
+pub mod dot_rename;
 
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -524,6 +526,18 @@ macro_rules! print_magenta {
 }
 
 #[inline]
+pub fn print_magenta_bold(message: &str) {
+    println!("{}", message.magenta().bold());
+}
+
+#[macro_export]
+macro_rules! print_magenta_bold {
+    ($($arg:tt)*) => {
+        $crate::print_magenta_bold(&format!($($arg)*))
+    };
+}
+
+#[inline]
 pub fn print_cyan(message: &str) {
     println!("{}", message.cyan());
 }
@@ -619,7 +633,7 @@ pub fn show_diff(old: &str, new: &str) {
     }
 }
 
-/// Format bytes as human-readable size
+/// Format bytes as human-readable size.
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -630,8 +644,10 @@ pub fn format_size(bytes: u64) -> String {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
         format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else {
+    } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -801,6 +817,29 @@ pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)
     } else {
         trash::delete(path).map_err(std::io::Error::other)
+    }
+}
+
+/// Prompt the user for confirmation with a yes/no question.
+///
+/// Returns `true` if the user answers yes (y/Y), `false` otherwise.
+/// The default value is used when the user presses Enter without input.
+///
+/// # Errors
+/// Returns an error if reading from stdin fails.
+pub fn confirm_with_user(message: &str, default: bool) -> io::Result<bool> {
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("{message} {hint} ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let trimmed = input.trim().to_lowercase();
+    if trimmed.is_empty() {
+        Ok(default)
+    } else {
+        Ok(trimmed == "y" || trimmed == "yes")
     }
 }
 

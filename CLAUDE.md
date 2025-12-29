@@ -42,6 +42,7 @@ cargo fmt
     - `divider.rs` → `div` - Print divider comments
     - `dots.rs` → `dots` - Rename files to use dot formatting
     - `flip_date.rs` → `flipdate` - Flip dates in filenames
+    - `qtorrent` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming
     - `resolution.rs` → `vres` - Add video resolution to file names
     - `version_tag.rs` → `vtag` - Create git version tags for Rust projects
     - `video_convert` → `vconvert` - Video conversion to HEVC/MP4

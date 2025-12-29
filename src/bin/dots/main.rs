@@ -1,18 +1,22 @@
+//! dots - Rename files to use dot formatting.
+//!
+//! This CLI tool renames files using dot-separated formatting,
+//! with support for various transformations like date reordering,
+//! prefix/suffix addition, and pattern-based replacements.
+
 mod config;
-mod dots;
 
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use regex::Regex;
 
-use crate::dots::Dots;
+use cli_tools::dot_rename::DotRename;
 
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Rename files to use dot formatting")]
-pub(crate) struct Args {
+struct DotsCli {
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -104,17 +108,13 @@ pub(crate) struct Args {
     #[arg(short = 'y', long, global = true)]
     year: bool,
 
-    /// Create shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
 }
 
 #[derive(Subcommand)]
-pub(crate) enum Command {
+enum Command {
     /// Prefix files with a name or parent directory name
     #[command(name = "prefix")]
     Prefix {
@@ -150,9 +150,21 @@ pub(crate) enum Command {
         #[arg(short = 'R', long)]
         recursive: bool,
     },
+
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
 }
 
-impl Args {
+impl DotsCli {
     /// Apply subcommand options to the main args.
     fn apply_subcommand(&mut self) {
         match &self.command {
@@ -188,72 +200,26 @@ impl Args {
                     self.suffix_dir = true;
                 }
             }
-            None => {}
+            Some(Command::Completion { .. }) | None => {}
         }
     }
 
-    /// Collect substitutes to replace pairs.
-    fn parse_substitutes(&self) -> Vec<(String, String)> {
-        self.substitute
-            .chunks(2)
-            .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    let pattern = chunk[0].trim().to_string();
-                    let replace = chunk[1].trim().to_string();
-                    if pattern.is_empty() {
-                        eprintln!("Empty replace pattern: '{pattern}' -> '{replace}'");
-                        None
-                    } else {
-                        Some((pattern, replace))
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
+    /// Build the config and run the rename operation.
+    fn run(self) -> Result<()> {
+        let path_given = self.path.is_some();
+        let root = cli_tools::resolve_input_path(self.path.as_deref())?;
+        let config = crate::config::build_config(&self)?;
 
-    /// Collect removes to replace pairs.
-    fn parse_removes(&self) -> Vec<(String, String)> {
-        self.remove
-            .iter()
-            .filter_map(|remove| {
-                let pattern = remove.trim().to_string();
-                let replace = String::new();
-                if pattern.is_empty() {
-                    eprintln!("Empty remove pattern: '{pattern}'");
-                    None
-                } else {
-                    Some((pattern, replace))
-                }
-            })
-            .collect()
-    }
-
-    /// Collect and compile regex substitutes to replace pairs.
-    fn parse_regex_substitutes(&self) -> anyhow::Result<Vec<(Regex, String)>> {
-        self.regex
-            .chunks(2)
-            .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    match Regex::new(&chunk[0]).with_context(|| format!("Invalid regex: '{}'", chunk[0])) {
-                        Ok(regex) => Some(Ok((regex, chunk[1].clone()))),
-                        Err(e) => Some(Err(e)),
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect()
+        DotRename::new(root, config, path_given).run()
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let mut args = Args::parse();
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
+fn main() -> Result<()> {
+    let mut cli = DotsCli::parse();
+    cli.apply_subcommand();
+    if let Some(Command::Completion { shell, install }) = &cli.command {
+        cli_tools::generate_shell_completion(*shell, DotsCli::command(), *install, env!("CARGO_BIN_NAME"))
     } else {
-        args.apply_subcommand();
-        Dots::run_with_args(args)
+        cli.run()
     }
 }
