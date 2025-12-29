@@ -297,22 +297,24 @@ impl QTorrent {
         let original_name = torrent.name().map(String::from);
 
         // Filter files and determine effective multi-file status based on included files
-        let (effective_is_multi_file, excluded_indices, single_included_file) =
+        let (effective_is_multi_file, excluded_indices, single_included_file, effective_original_name) =
             if original_is_multi_file && !filter.is_empty() {
                 let filtered = torrent.filter_files(filter);
                 let excluded: Vec<usize> = filtered.excluded.iter().map(|file| file.index).collect();
                 // Treat as multi-file only if more than one file will be included
                 let effective_multi = filtered.included.len() > 1;
                 // If only one file remains, store its name for extension extraction
-                let single_file = if filtered.included.len() == 1 {
-                    Some(filtered.included[0].path.to_string())
+                // and use its path as the original name for renaming (since NoSubfolder is used)
+                let (single_file, eff_name) = if filtered.included.len() == 1 {
+                    let file_path = filtered.included[0].path.to_string();
+                    (Some(file_path.clone()), Some(file_path))
                 } else {
-                    None
+                    (None, original_name)
                 };
-                (effective_multi, excluded, single_file)
+                (effective_multi, excluded, single_file, eff_name)
             } else {
                 // No filtering applied - use original multi-file status
-                (original_is_multi_file, Vec::new(), None)
+                (original_is_multi_file, Vec::new(), None, original_name)
             };
 
         Ok(TorrentInfo {
@@ -325,7 +327,7 @@ impl QTorrent {
             rename_to: None,
             excluded_indices,
             single_included_file,
-            original_name,
+            original_name: effective_original_name,
         })
     }
 
