@@ -5,9 +5,8 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_bencode::ser;
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
 
@@ -119,6 +118,28 @@ impl Torrent {
         serde_bencode::from_bytes(buffer).context("Failed to parse torrent file")
     }
 
+    /// Calculate SHA-1 info hash directly from raw torrent bytes.
+    ///
+    /// This extracts the original `info` dictionary bytes and hashes them,
+    /// which is more reliable than re-serializing the parsed struct.
+    ///
+    /// # Errors
+    /// Returns an error if the info dictionary cannot be found.
+    pub fn info_hash_from_bytes(buffer: &[u8]) -> Result<Vec<u8>> {
+        let info_bytes = extract_info_dict_bytes(buffer)?;
+        let hash: Vec<u8> = Sha1::digest(info_bytes).to_vec();
+        Ok(hash)
+    }
+
+    /// Get the info hash as a hex string from raw torrent bytes.
+    ///
+    /// # Errors
+    /// Returns an error if the info hash cannot be calculated.
+    pub fn info_hash_hex_from_bytes(buffer: &[u8]) -> Result<String> {
+        let hash = Self::info_hash_from_bytes(buffer)?;
+        Ok(to_hex(&hash))
+    }
+
     /// Check if this is a multi-file torrent.
     #[must_use]
     pub const fn is_multi_file(&self) -> bool {
@@ -183,25 +204,6 @@ impl Torrent {
         }
 
         result
-    }
-
-    /// Calculate SHA-1 info hash.
-    ///
-    /// # Errors
-    /// Returns an error if serialization fails.
-    pub fn info_hash(&self) -> Result<Vec<u8>> {
-        let info = ser::to_bytes(&self.info).context("Failed to serialize info dictionary")?;
-        let info_hash: Vec<u8> = Sha1::digest(&info).to_vec();
-        Ok(info_hash)
-    }
-
-    /// Get the info hash as a hex string.
-    ///
-    /// # Errors
-    /// Returns an error if the info hash cannot be calculated.
-    pub fn info_hash_hex(&self) -> Result<String> {
-        let hash = self.info_hash()?;
-        Ok(to_hex(&hash))
     }
 }
 
@@ -286,4 +288,97 @@ pub fn to_hex(bytes: &[u8]) -> String {
         hex.push(HEX_CHARS[(byte & 0x0f) as usize]);
     }
     String::from_utf8(hex).expect("hex chars are valid UTF-8")
+}
+
+/// Extract the raw `info` dictionary bytes from a torrent file.
+///
+/// This finds the `info` key in the top-level dictionary and returns
+/// the raw bytes of the value (the info dictionary), which can then
+/// be hashed to get the correct info hash.
+///
+/// # Errors
+/// Returns an error if the info dictionary cannot be found.
+fn extract_info_dict_bytes(buffer: &[u8]) -> Result<&[u8]> {
+    // Torrent files are bencoded. The top level is a dictionary.
+    // We need to find "4:info" key and extract its value bytes.
+
+    // Find "4:info" in the buffer
+    let info_key = b"4:info";
+    let info_pos = find_subsequence(buffer, info_key).context("Could not find 'info' key in torrent file")?;
+
+    // The info dictionary starts right after "4:info"
+    let info_start = info_pos + info_key.len();
+
+    if info_start >= buffer.len() {
+        bail!("Torrent file truncated after 'info' key");
+    }
+
+    // Parse the bencode value to find its end
+    let info_len = bencode_value_length(&buffer[info_start..])?;
+    let info_end = info_start + info_len;
+
+    if info_end > buffer.len() {
+        bail!("Info dictionary extends beyond end of file");
+    }
+
+    Ok(&buffer[info_start..info_end])
+}
+
+/// Find the position of a subsequence in a byte slice.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+/// Calculate the length of a bencoded value starting at the given position.
+///
+/// # Errors
+/// Returns an error if the bencode is malformed.
+fn bencode_value_length(data: &[u8]) -> Result<usize> {
+    if data.is_empty() {
+        bail!("Empty bencode value");
+    }
+
+    match data[0] {
+        // Integer: i<number>e
+        b'i' => {
+            let end = find_subsequence(data, b"e").context("Malformed bencode integer")?;
+            Ok(end + 1)
+        }
+        // List: l<items>e
+        b'l' => {
+            let mut pos = 1;
+            while pos < data.len() && data[pos] != b'e' {
+                let item_len = bencode_value_length(&data[pos..])?;
+                pos += item_len;
+            }
+            if pos >= data.len() {
+                bail!("Malformed bencode list");
+            }
+            Ok(pos + 1) // +1 for the 'e'
+        }
+        // Dictionary: d<key><value>...e
+        b'd' => {
+            let mut pos = 1;
+            while pos < data.len() && data[pos] != b'e' {
+                // Key (must be a string)
+                let key_len = bencode_value_length(&data[pos..])?;
+                pos += key_len;
+                // Value
+                let value_len = bencode_value_length(&data[pos..])?;
+                pos += value_len;
+            }
+            if pos >= data.len() {
+                bail!("Malformed bencode dictionary");
+            }
+            Ok(pos + 1) // +1 for the 'e'
+        }
+        // String: <length>:<content>
+        b'0'..=b'9' => {
+            let colon_pos = find_subsequence(data, b":").context("Malformed bencode string")?;
+            let len_str = std::str::from_utf8(&data[..colon_pos]).context("Invalid length in bencode string")?;
+            let str_len: usize = len_str.parse().context("Invalid length number in bencode string")?;
+            Ok(colon_pos + 1 + str_len)
+        }
+        other => bail!("Unknown bencode type: {}", other as char),
+    }
 }

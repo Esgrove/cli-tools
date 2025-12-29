@@ -33,6 +33,8 @@ struct TorrentInfo {
     torrent: Torrent,
     /// Raw torrent file bytes.
     bytes: Vec<u8>,
+    /// Info hash calculated from raw bytes (lowercase hex).
+    info_hash: String,
     /// Whether the original torrent has multiple files.
     original_is_multi_file: bool,
     /// Whether to treat this as multi-file after filtering (determines subdirectory creation).
@@ -288,6 +290,9 @@ impl QTorrent {
         let bytes = fs::read(path).context("Failed to read torrent file")?;
         let torrent = Torrent::from_buffer(&bytes)?;
 
+        // Calculate info hash from raw bytes (not re-serialized) for correct hash
+        let info_hash = Torrent::info_hash_hex_from_bytes(&bytes)?;
+
         let original_is_multi_file = torrent.is_multi_file();
         let original_name = torrent.name().map(String::from);
 
@@ -314,6 +319,7 @@ impl QTorrent {
             path: path.to_path_buf(),
             torrent,
             bytes,
+            info_hash,
             original_is_multi_file,
             effective_is_multi_file,
             rename_to: None,
@@ -363,6 +369,10 @@ impl QTorrent {
         } else {
             println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
             println!("  {}    {}", "Total size:".dimmed(), size);
+        }
+
+        if self.config.verbose {
+            println!("  {}    {}", "Info hash:".dimmed(), info.info_hash);
         }
     }
 
@@ -631,8 +641,7 @@ impl QTorrent {
         info: &TorrentInfo,
         existing_torrents: &'a HashMap<String, String>,
     ) -> Option<&'a String> {
-        let info_hash = info.torrent.info_hash_hex().ok()?;
-        let hash_lower = info_hash.to_lowercase();
+        let hash_lower = info.info_hash.to_lowercase();
         existing_torrents.get(&hash_lower)
     }
 
@@ -730,7 +739,7 @@ impl QTorrent {
 
     /// Add a single torrent to qBittorrent.
     async fn add_single_torrent(&self, client: &QBittorrentClient, info: TorrentInfo) -> Result<()> {
-        let info_hash = info.torrent.info_hash_hex()?;
+        let info_hash = info.info_hash.clone();
         let display_name = info.display_name().into_owned();
         let effective_is_multi_file = info.effective_is_multi_file;
         let excluded_indices = info.excluded_indices.clone();
