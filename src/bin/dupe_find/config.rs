@@ -1,3 +1,7 @@
+//! Configuration for `DupeFind`.
+//!
+//! Handles reading configuration from CLI arguments and the user config file.
+
 use std::fs;
 use std::path::PathBuf;
 

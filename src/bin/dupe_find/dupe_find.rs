@@ -17,6 +17,22 @@ use cli_tools::{print_error, print_warning};
 use crate::Args;
 use crate::config::{Config, DupeConfig};
 
+/// Regex to match resolution patterns like 720p, 1080p, or 1234x5678
+static RE_RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
+
+/// Regex to match codec patterns
+static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
+    let pattern = format!(r"(?i)\b({})\b", CODEC_PATTERNS.join("|"));
+    Regex::new(&pattern).expect("Invalid codec regex")
+});
+
+/// Regex to match two or more consecutive dots
+static RE_MULTI_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Invalid dots regex"));
+
+/// Regex to match two or more consecutive whitespace characters
+static RE_MULTI_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}").expect("Invalid spaces regex"));
+
 /// Common codec patterns to remove when normalizing
 const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
 #[cfg(not(test))]
@@ -25,18 +41,6 @@ const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 /// All video extensions
 pub const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
-/// Regex to match resolution patterns like 720p, 1080p, or 1234x5678
-static RE_RESOLUTION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
-/// Regex to match codec patterns
-static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
-    let pattern = format!(r"(?i)\b({})\b", CODEC_PATTERNS.join("|"));
-    Regex::new(&pattern).expect("Invalid codec regex")
-});
-/// Regex to match two or more consecutive dots
-static RE_MULTI_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Invalid dots regex"));
-/// Regex to match two or more consecutive whitespace characters
-static RE_MULTI_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}").expect("Invalid spaces regex"));
 
 /// Information about a found file
 #[derive(Debug, Clone)]
@@ -50,8 +54,8 @@ pub struct FileInfo {
 }
 
 pub struct DupeFind {
-    roots: Vec<PathBuf>,
     config: Config,
+    roots: Vec<PathBuf>,
 }
 
 impl FileInfo {
@@ -98,7 +102,7 @@ impl DupeFind {
 
         let config = Config::from_args(args)?;
 
-        Ok(Self { roots, config })
+        Ok(Self { config, roots })
     }
 
     pub fn run(&self) -> anyhow::Result<()> {

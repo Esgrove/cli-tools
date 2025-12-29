@@ -9,45 +9,6 @@ use cli_tools::print_warning;
 
 use crate::dupe_find::FileInfo;
 
-/// Score a file based on resolution and codec labels.
-/// Higher score = better quality. Returns (`resolution_score`, `has_x265`).
-fn score_file(file: &FileInfo) -> (u8, bool) {
-    let filename_lower = file.filename.to_lowercase();
-
-    // Resolution score: higher resolution = higher score
-    let resolution_score = if filename_lower.contains(".2160p") {
-        4
-    } else if filename_lower.contains(".1440p") {
-        3
-    } else if filename_lower.contains(".1080p") {
-        2
-    } else {
-        u8::from(filename_lower.contains(".720p"))
-    };
-
-    let has_x265 = filename_lower.contains(".x265");
-
-    (resolution_score, has_x265)
-}
-
-/// Find the index of the best file to preselect based on resolution and codec.
-fn find_best_file_index(files: &[&FileInfo]) -> usize {
-    files
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| {
-            let (res_a, x265_a) = score_file(a);
-            let (res_b, x265_b) = score_file(b);
-
-            // First compare by resolution (higher is better)
-            res_a.cmp(&res_b).then_with(|| {
-                // If resolution is equal, prefer x265
-                x265_a.cmp(&x265_b)
-            })
-        })
-        .map_or(0, |(idx, _)| idx)
-}
-
 /// Action to perform on a duplicate group
 #[derive(Debug, Clone)]
 enum DuplicateAction {
@@ -378,6 +339,7 @@ fn render_ui(
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL).title("Help"));
+
     frame.render_widget(help, chunks[3]);
 }
 
@@ -425,4 +387,43 @@ fn apply_actions(duplicates: &[(String, Vec<FileInfo>)], actions: &[(usize, Dupl
     }
 
     Ok(())
+}
+
+/// Find the index of the best file to preselect based on resolution and codec.
+fn find_best_file_index(files: &[&FileInfo]) -> usize {
+    files
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            let (res_a, x265_a) = score_file(a);
+            let (res_b, x265_b) = score_file(b);
+
+            // First compare by resolution (higher is better)
+            res_a.cmp(&res_b).then_with(|| {
+                // If resolution is equal, prefer x265
+                x265_a.cmp(&x265_b)
+            })
+        })
+        .map_or(0, |(idx, _)| idx)
+}
+
+/// Score a file based on resolution and codec labels.
+/// Higher score = better quality. Returns (`resolution_score`, `has_x265`).
+fn score_file(file: &FileInfo) -> (u8, bool) {
+    let filename_lower = file.filename.to_lowercase();
+
+    // Resolution score: higher resolution = higher score
+    let resolution_score = if filename_lower.contains(".2160p") {
+        4
+    } else if filename_lower.contains(".1440p") {
+        3
+    } else if filename_lower.contains(".1080p") {
+        2
+    } else {
+        u8::from(filename_lower.contains(".720p"))
+    };
+
+    let has_x265 = filename_lower.contains(".x265");
+
+    (resolution_score, has_x265)
 }

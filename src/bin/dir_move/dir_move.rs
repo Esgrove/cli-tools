@@ -9,6 +9,14 @@ use itertools::Itertools;
 use regex::Regex;
 use walkdir::WalkDir;
 
+use cli_tools::{
+    get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
+    print_magenta, print_warning,
+};
+
+use crate::DirMoveArgs;
+use crate::config::Config;
+
 /// Regex to match video resolutions like 1080p, 2160p, or 1920x1080.
 static RE_RESOLUTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
@@ -20,19 +28,6 @@ const GLUE_WORDS: &[&str] = &[
 
 /// Directory names that should be deleted when encountered.
 const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
-
-/// Check if a directory name is in the unwanted list.
-fn is_unwanted_directory(name: &str) -> bool {
-    UNWANTED_DIRECTORIES.iter().any(|u| name.eq_ignore_ascii_case(u))
-}
-
-use cli_tools::{
-    get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
-    print_magenta, print_warning,
-};
-
-use crate::DirMoveArgs;
-use crate::config::Config;
 
 #[derive(Debug)]
 pub struct DirMove {
@@ -49,13 +44,25 @@ struct DirectoryInfo {
     name: String,
 }
 
+#[derive(Debug)]
+struct MoveInfo {
+    source: PathBuf,
+    target: PathBuf,
+}
+
 /// Information about what needs to be moved during an unpack operation.
 #[derive(Debug, Default)]
 struct UnpackInfo {
-    /// Files to move: (source, destination).
-    file_moves: Vec<(PathBuf, PathBuf)>,
-    /// Directories to move directly: (source, destination).
-    direct_dir_moves: Vec<(PathBuf, PathBuf)>,
+    /// Files to move.
+    file_moves: Vec<MoveInfo>,
+    /// Directories to move directly.
+    directory_moves: Vec<MoveInfo>,
+}
+
+impl MoveInfo {
+    const fn new(source: PathBuf, target: PathBuf) -> Self {
+        Self { source, target }
+    }
 }
 
 impl DirectoryInfo {
@@ -66,14 +73,18 @@ impl DirectoryInfo {
 }
 
 impl DirMove {
-    pub fn new(args: DirMoveArgs) -> anyhow::Result<Self> {
+    pub const fn new(root: PathBuf, config: Config) -> Self {
+        Self { root, config }
+    }
+
+    pub fn try_from_args(args: DirMoveArgs) -> anyhow::Result<Self> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args);
         if config.debug {
             eprintln!("Config: {config:#?}");
             eprintln!("Root: {}", root.display());
         }
-        Ok(Self { root, config })
+        Ok(Self::new(root, config))
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
@@ -81,10 +92,10 @@ impl DirMove {
         // These are combined into a single directory walk for efficiency.
         self.unpack_directories()?;
 
-        // Normal directory matching/moving always runs first.
+        // Normal directory matching and moving
         self.move_files_to_dir()?;
 
-        // Optional: after the normal move (and optional unpack), create dirs by prefix and move.
+        // Create dirs by common filename prefix and move files
         if self.config.create {
             self.create_dirs_and_move_files()?;
         }
@@ -111,7 +122,7 @@ impl DirMove {
             } else {
                 match std::fs::remove_dir_all(&dir) {
                     Ok(()) => {
-                        println!("{} {relative}", "Deleted unwanted:".green());
+                        println!("{} {relative}", "Deleted unwanted:".yellow());
                     }
                     Err(err) => {
                         print_error!("Failed to delete {relative}: {err}");
@@ -127,16 +138,16 @@ impl DirMove {
         // Track directories we touched so we can prune empties safely.
         let mut touched_dirs: HashSet<PathBuf> = HashSet::new();
 
-        for vdir in candidates {
-            if !vdir.exists() {
+        for directory in candidates {
+            if !directory.exists() {
                 continue;
             }
 
-            let Some(parent) = vdir.parent().map(Path::to_path_buf) else {
+            let Some(parent) = directory.parent().map(Path::to_path_buf) else {
                 continue;
             };
 
-            let unpack_info = self.collect_unpack_info(&vdir, &parent);
+            let unpack_info = self.collect_unpack_info(&directory, &parent);
             self.print_unpack_summary(&parent, &unpack_info);
 
             if self.config.dryrun {
@@ -144,19 +155,19 @@ impl DirMove {
             }
 
             // Move directories that don't match unpack names directly (more efficient).
-            for dir_move in &unpack_info.direct_dir_moves {
-                self.move_directory(&dir_move.0, &dir_move.1, &mut touched_dirs)?;
+            for MoveInfo { source, target } in &unpack_info.directory_moves {
+                self.move_directory(source, target, &mut touched_dirs)?;
             }
 
             // Move individual files.
-            for (src, dst) in &unpack_info.file_moves {
-                self.unpack_move_one_file(src, dst, &mut touched_dirs)?;
+            for MoveInfo { source, target } in &unpack_info.file_moves {
+                self.unpack_move_one_file(source, target, &mut touched_dirs)?;
             }
 
-            touched_dirs.insert(vdir.clone());
+            touched_dirs.insert(directory.clone());
             touched_dirs.insert(parent);
 
-            self.prune_empty_dirs_under(&vdir, &mut touched_dirs)?;
+            self.prune_empty_dirs_under(&directory, &mut touched_dirs)?;
         }
 
         Ok(())
@@ -179,7 +190,7 @@ impl DirMove {
             .filter_entry(|e| {
                 // Allow unwanted directories through so we can delete them,
                 // but skip other hidden/system directories
-                e.file_name().to_str().is_some_and(is_unwanted_directory) || !cli_tools::should_skip_entry(e)
+                e.file_name().to_str().is_some_and(Self::is_unwanted_directory) || !cli_tools::should_skip_entry(e)
             })
             .filter_map(Result::ok)
         {
@@ -194,7 +205,7 @@ impl DirMove {
                 continue;
             };
 
-            if is_unwanted_directory(name) {
+            if Self::is_unwanted_directory(name) {
                 unwanted.push(entry.path().to_path_buf());
             } else if self.config.unpack_directory_names.contains(&name.to_lowercase()) {
                 candidates.push(entry.path().to_path_buf());
@@ -225,10 +236,10 @@ impl DirMove {
     }
 
     /// Information about what needs to be moved during an unpack operation.
-    fn collect_unpack_info(&self, vdir: &Path, parent: &Path) -> UnpackInfo {
+    fn collect_unpack_info(&self, directory: &Path, parent: &Path) -> UnpackInfo {
         let mut info = UnpackInfo::default();
 
-        let Ok(entries) = std::fs::read_dir(vdir) else {
+        let Ok(entries) = std::fs::read_dir(directory) else {
             return info;
         };
 
@@ -238,10 +249,10 @@ impl DirMove {
                 continue;
             };
 
-            let dst = parent.join(name);
+            let target = parent.join(name);
 
             if path.is_file() {
-                info.file_moves.push((path, dst));
+                info.file_moves.push(MoveInfo::new(path, target));
             } else if path.is_dir() {
                 // If subdirectory name matches an unpack directory name, recurse into it.
                 // Otherwise, check if it contains nested unpack directories.
@@ -249,16 +260,16 @@ impl DirMove {
                     // Recursively collect from nested matching directories.
                     let nested_info = self.collect_unpack_info(&path, parent);
                     info.file_moves.extend(nested_info.file_moves);
-                    info.direct_dir_moves.extend(nested_info.direct_dir_moves);
+                    info.directory_moves.extend(nested_info.directory_moves);
                 } else if self.contains_unpack_directory(&path) {
                     // Non-matching directory contains nested unpack dirs, recurse into it
                     // with this directory as the new parent.
-                    let nested_info = self.collect_unpack_info(&path, &dst);
+                    let nested_info = self.collect_unpack_info(&path, &target);
                     info.file_moves.extend(nested_info.file_moves);
-                    info.direct_dir_moves.extend(nested_info.direct_dir_moves);
+                    info.directory_moves.extend(nested_info.directory_moves);
                 } else {
                     // No nested unpack dirs, move the entire directory directly (more efficient).
-                    info.direct_dir_moves.push((path, dst));
+                    info.directory_moves.push(MoveInfo::new(path, target));
                 }
             }
         }
@@ -297,7 +308,7 @@ impl DirMove {
     fn print_unpack_summary(&self, target_dir: &Path, info: &UnpackInfo) {
         let dir_display = path_to_string_relative(target_dir);
         let file_count = info.file_moves.len();
-        let dir_count = info.direct_dir_moves.len();
+        let dir_count = info.directory_moves.len();
 
         let mut counts = Vec::new();
         if dir_count > 0 {
@@ -315,48 +326,48 @@ impl DirMove {
 
         print_magenta!("{}", header.bold());
 
-        for (input, output) in &info.direct_dir_moves {
-            let src_display = get_relative_path_or_filename(input, target_dir);
-            let dst_display = get_relative_path_or_filename(output, target_dir);
+        for MoveInfo { source, target } in &info.directory_moves {
+            let src_display = get_relative_path_or_filename(source, target_dir);
+            let dst_display = get_relative_path_or_filename(target, target_dir);
             println!("  {src_display} -> {dst_display}");
         }
         if self.config.verbose {
-            for (input, output) in &info.file_moves {
-                let src_display = get_relative_path_or_filename(input, target_dir);
-                let dst_display = get_relative_path_or_filename(output, target_dir);
+            for MoveInfo { source, target } in &info.file_moves {
+                let src_display = get_relative_path_or_filename(source, target_dir);
+                let dst_display = get_relative_path_or_filename(target, target_dir);
                 println!("  {src_display} -> {dst_display}");
             }
         }
     }
 
     /// Move an entire directory to a new location.
-    fn move_directory(&self, src: &Path, dst: &Path, touched_dirs: &mut HashSet<PathBuf>) -> anyhow::Result<()> {
-        if dst.exists() && !self.config.overwrite {
-            print_warning!("Skipping existing directory: {}", dst.display());
+    fn move_directory(&self, source: &Path, target: &Path, touched_dirs: &mut HashSet<PathBuf>) -> anyhow::Result<()> {
+        if target.exists() && !self.config.overwrite {
+            print_warning!("Skipping existing directory: {}", target.display());
             return Ok(());
         }
 
-        if let Some(src_parent) = src.parent() {
-            touched_dirs.insert(src_parent.to_path_buf());
+        if let Some(parent) = source.parent() {
+            touched_dirs.insert(parent.to_path_buf());
         }
 
         // Try rename first (fast, same filesystem).
         // Fall back to recursive copy + remove for cross-device moves.
-        if std::fs::rename(src, dst).is_err() {
-            Self::copy_dir_recursive(src, dst)?;
-            std::fs::remove_dir_all(src)?;
+        if std::fs::rename(source, target).is_err() {
+            Self::copy_dir_recursive(source, target)?;
+            std::fs::remove_dir_all(source)?;
         }
 
         Ok(())
     }
 
     /// Recursively copy a directory and its contents.
-    fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(dst)?;
+    fn copy_dir_recursive(source: &Path, target: &Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(target)?;
 
-        for entry in std::fs::read_dir(src)?.filter_map(Result::ok) {
+        for entry in std::fs::read_dir(source)?.filter_map(Result::ok) {
             let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
+            let dst_path = target.join(entry.file_name());
 
             if src_path.is_dir() {
                 Self::copy_dir_recursive(&src_path, &dst_path)?;
@@ -368,27 +379,32 @@ impl DirMove {
         Ok(())
     }
 
-    fn unpack_move_one_file(&self, src: &Path, dst: &Path, touched_dirs: &mut HashSet<PathBuf>) -> anyhow::Result<()> {
-        if dst.exists() && !self.config.overwrite {
-            print_warning!("Skipping existing file: {}", dst.display());
+    fn unpack_move_one_file(
+        &self,
+        source: &Path,
+        target: &Path,
+        touched_dirs: &mut HashSet<PathBuf>,
+    ) -> anyhow::Result<()> {
+        if target.exists() && !self.config.overwrite {
+            print_warning!("Skipping existing file: {}", target.display());
             return Ok(());
         }
 
-        if let Some(dst_parent) = dst.parent() {
+        if let Some(dst_parent) = target.parent() {
             if !dst_parent.exists() {
                 std::fs::create_dir_all(dst_parent)?;
             }
             touched_dirs.insert(dst_parent.to_path_buf());
         }
 
-        if let Some(src_parent) = src.parent() {
+        if let Some(src_parent) = source.parent() {
             touched_dirs.insert(src_parent.to_path_buf());
         }
 
         // Rename is preferred; if it fails (e.g. cross-device), fall back to copy+remove.
-        if std::fs::rename(src, dst).is_err() {
-            std::fs::copy(src, dst)?;
-            std::fs::remove_file(src)?;
+        if std::fs::rename(source, target).is_err() {
+            std::fs::copy(source, target)?;
+            std::fs::remove_file(source)?;
         }
 
         Ok(())
@@ -498,7 +514,7 @@ impl DirMove {
                 }
                 let file_name = entry.file_name();
                 let dir_name = file_name.to_string_lossy();
-                if is_unwanted_directory(&dir_name) {
+                if Self::is_unwanted_directory(&dir_name) {
                     continue;
                 }
                 let dir_name = dir_name.to_lowercase();
@@ -966,6 +982,11 @@ impl DirMove {
 
         // Not enough parts
         None
+    }
+
+    /// Check if a directory name is in the unwanted list.
+    fn is_unwanted_directory(name: &str) -> bool {
+        UNWANTED_DIRECTORIES.iter().any(|u| name.eq_ignore_ascii_case(u))
     }
 }
 
@@ -1736,7 +1757,7 @@ mod tests {
 
         // Should have 3 files and 2 directories.
         assert_eq!(info.file_moves.len(), 3);
-        assert_eq!(info.direct_dir_moves.len(), 2);
+        assert_eq!(info.directory_moves.len(), 2);
 
         Ok(())
     }

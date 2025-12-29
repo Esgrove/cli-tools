@@ -77,6 +77,6 @@ fn main() -> anyhow::Result<()> {
     if let Some(ref shell) = args.completion {
         cli_tools::generate_shell_completion(*shell, DirMoveArgs::command(), true, env!("CARGO_BIN_NAME"))
     } else {
-        DirMove::new(args)?.run()
+        DirMove::try_from_args(args)?.run()
     }
 }
