@@ -749,12 +749,8 @@ impl QTorrent {
             .await
             .context("Failed to set torrent name")?;
 
-        println!(
-            "  {} Renamed: {} → {}",
-            "✓".green(),
-            existing_name.dimmed(),
-            new_name.green()
-        );
+        println!("  {} Renamed:", "✓".green());
+        cli_tools::show_diff(existing_name, &new_name);
 
         // Also try to rename the actual file/folder on disk
         if let Some(ref original_name) = info.original_name
@@ -897,12 +893,8 @@ impl QTorrent {
 
                 match rename_result {
                     Ok(()) => {
-                        println!(
-                            "  {} Renamed on disk: {} → {}",
-                            "✓".green(),
-                            old_name.dimmed(),
-                            new_name.green()
-                        );
+                        println!("  {} Renamed on disk:", "✓".green(),);
+                        cli_tools::show_diff(old_name, new_name);
                         rename_success = true;
                         break;
                     }
