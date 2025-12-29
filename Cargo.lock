@@ -258,9 +258,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.5.62"
+version = "4.5.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "004eef6b14ce34759aa7de4aea3217e368f463f46a3ed3764ca4b5a4404003b4"
+checksum = "90ef1fcbbf16b486489d0df91725ccc653c07115dd61f46363162535b74c6bc3"
 dependencies = [
  "clap",
 ]
@@ -285,7 +285,7 @@ checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
 name = "cli-tools"
-version = "8.1.0"
+version = "8.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -311,6 +311,7 @@ dependencies = [
  "serde",
  "serde_bencode",
  "serde_bytes",
+ "serde_json",
  "sha1",
  "tempfile",
  "titlecase",

@@ -3,6 +3,7 @@
 //! Handles the core workflow of parsing torrents and adding them to qBittorrent.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -534,15 +535,33 @@ impl QTorrent {
 
         println!("{}\n", "Connected successfully".green());
 
+        // Get list of existing torrents to check for duplicates
+        let existing_torrents = client.get_torrent_list().await?;
+        if self.config.verbose {
+            println!(
+                "  {} {}",
+                "Existing torrents in qBittorrent:".dimmed(),
+                existing_torrents.len()
+            );
+        }
+
         // Process each torrent individually
         let mut success_count = 0;
         let mut skipped_count = 0;
+        let mut duplicate_count = 0;
         let mut error_count = 0;
         let total = torrents.len();
 
         for (index, mut info) in torrents.into_iter().enumerate() {
             println!("{}", "─".repeat(60));
             self.print_torrent_info(&info, index + 1, total);
+
+            // Check if torrent already exists in qBittorrent
+            if let Some(name) = Self::check_existing_torrent(&info, &existing_torrents) {
+                println!("  {} Already exists in qBittorrent as: {}", "⊘".yellow(), name.cyan());
+                duplicate_count += 1;
+                continue;
+            }
 
             // Offer to rename the output name/folder
             if let Some(new_name) = self.prompt_rename(&info)? {
@@ -586,6 +605,9 @@ impl QTorrent {
         if success_count > 0 {
             println!("  {} {}", "Added:".green(), success_count);
         }
+        if duplicate_count > 0 {
+            println!("  {} {}", "Duplicates:".cyan(), duplicate_count);
+        }
         if skipped_count > 0 {
             println!("  {} {}", "Skipped:".yellow(), skipped_count);
         }
@@ -594,6 +616,18 @@ impl QTorrent {
         }
 
         Ok(())
+    }
+
+    /// Check if a torrent already exists in qBittorrent by comparing info hashes.
+    ///
+    /// Returns the existing torrent name if found, None otherwise.
+    fn check_existing_torrent<'a>(
+        info: &TorrentInfo,
+        existing_torrents: &'a HashMap<String, String>,
+    ) -> Option<&'a String> {
+        let info_hash = info.torrent.info_hash_hex().ok()?;
+        let hash_lower = info_hash.to_lowercase();
+        existing_torrents.get(&hash_lower)
     }
 
     /// Print final details about the torrent before confirmation.

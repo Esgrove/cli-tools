@@ -6,11 +6,13 @@
 //! Documentation:
 //! <https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0)>
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Client, StatusCode};
+use serde::Deserialize;
 
 /// qBittorrent `WebUI` API client.
 #[derive(Debug)]
@@ -41,6 +43,15 @@ pub struct AddTorrentParams {
     pub paused: bool,
     /// Create root folder (false to avoid subfolder for single-file torrents).
     pub root_folder: bool,
+}
+
+/// Torrent info from the qBittorrent API `/torrents/info` endpoint.
+#[derive(Debug, Deserialize)]
+struct TorrentListItem {
+    /// Torrent hash.
+    hash: String,
+    /// Torrent name.
+    name: String,
 }
 
 impl QBittorrentClient {
@@ -323,6 +334,50 @@ impl QBittorrentClient {
         }
     }
 
+    /// Get the list of all torrents in qBittorrent.
+    ///
+    /// Returns a map from torrent hash (lowercase) to torrent name.
+    /// The list is sorted by name.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or if not authenticated.
+    pub async fn get_torrent_list(&self) -> Result<HashMap<String, String>> {
+        if !self.authenticated {
+            bail!("Not authenticated. Call login() first.");
+        }
+
+        let url = self.build_url("torrents/info?sort=name");
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to get torrent list")?;
+
+        let status = response.status();
+
+        if status == StatusCode::FORBIDDEN {
+            bail!("Authentication required or session expired");
+        }
+
+        let body = response.text().await.context("Failed to read torrent list response")?;
+
+        let torrents: Vec<TorrentListItem> =
+            serde_json::from_str(&body).context("Failed to parse torrent list JSON")?;
+
+        let map = torrents
+            .into_iter()
+            .map(|item| {
+                let hash = item.hash.to_lowercase();
+                (hash, item.name)
+            })
+            .collect();
+
+        Ok(map)
+    }
+
+    /// Build full API url from the base url and given endpoint.
     fn build_url(&self, url: &str) -> String {
         format!("{}/api/v2/{url}", self.base_url)
     }
