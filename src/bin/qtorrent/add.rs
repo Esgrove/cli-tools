@@ -544,7 +544,7 @@ impl QTorrent {
             let should_add = if self.config.yes {
                 true
             } else {
-                cli_tools::confirm_with_user("Add this torrent?", true)
+                cli_tools::get_user_confirmation("Add this torrent?", true)
                     .map_err(|error| anyhow::anyhow!("Failed to get confirmation: {error}"))?
             };
 

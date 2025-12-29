@@ -578,7 +578,7 @@ impl DotRename {
 
     /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
     fn rename_with_temp_file(path: &PathBuf, new_path: &PathBuf) -> std::io::Result<()> {
-        let temp_file = crate::append_extension_to_path(new_path.clone(), ".tmp");
+        let temp_file = crate::append_extension_to_path(new_path, ".tmp");
         fs::rename(path, &temp_file)?;
         fs::rename(&temp_file, new_path)
     }

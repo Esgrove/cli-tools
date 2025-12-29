@@ -7,6 +7,8 @@ use colored::Colorize;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
+use cli_tools::date::Date;
+
 static FILE_EXTENSIONS: [&str; 9] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "mkv", "mov", "avi"];
 
 #[derive(Parser)]
@@ -172,7 +174,7 @@ fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
             .into_owned();
 
         if let Some(new_name) =
-            cli_tools::date::reorder_filename_date(&filename, config.year_first, config.swap_year, config.verbose)
+            Date::reorder_filename_date(&filename, config.year_first, config.swap_year, config.verbose)
             && new_name.to_lowercase() != filename.to_lowercase()
         {
             files_to_rename.push(RenameItem {
@@ -287,7 +289,7 @@ fn directories_to_rename(path: PathBuf, recurse: bool) -> Result<Vec<RenameItem>
         let entry = entry.context("Failed to read directory entry")?;
         if entry.path().is_dir() {
             let filename = entry.file_name().to_string_lossy().into_owned();
-            if let Some(new_name) = cli_tools::date::reorder_directory_date(&filename) {
+            if let Some(new_name) = Date::reorder_directory_date(&filename) {
                 directories_to_rename.push(RenameItem {
                     path: entry.path().to_path_buf(),
                     filename,

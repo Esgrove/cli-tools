@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::date::Date;
 use crate::date::{CURRENT_YEAR, RE_CORRECT_DATE_FORMAT, RE_YEAR};
 use crate::dot_rename::DotRenameConfig;
 
@@ -122,8 +123,9 @@ impl<'a> DotFormat<'a> {
 }
 
 impl DotFormat<'_> {
-    /// Format the file name without the file extension.
+    /// Format a file or directory name.
     ///
+    /// Filenames should be given without the file extension.
     /// This is the main entry point for name formatting and applies all configured
     /// transformations including replacements, date reordering, prefix/suffix, etc.
     #[must_use]
@@ -147,15 +149,13 @@ impl DotFormat<'_> {
             Self::remove_random_identifiers(&mut new_name);
         }
 
-        new_name = new_name.trim_start_matches('.').trim_end_matches('.').to_string();
-
         Self::apply_titlecase(&mut new_name);
         Self::convert_written_date_format(&mut new_name);
 
         if let Some(date_flipped_name) = if self.config.rename_directories {
-            crate::date::reorder_directory_date(&new_name)
+            Date::reorder_directory_date(&new_name)
         } else {
-            crate::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
+            Date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
         } {
             new_name = date_flipped_name;
         }
@@ -234,9 +234,9 @@ impl DotFormat<'_> {
         Self::convert_written_date_format(&mut new_name);
 
         if let Some(date_flipped_name) = if self.config.rename_directories {
-            crate::date::reorder_directory_date(&new_name)
+            Date::reorder_directory_date(&new_name)
         } else {
-            crate::date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
+            Date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
         } {
             new_name = date_flipped_name;
         }
@@ -265,7 +265,8 @@ impl DotFormat<'_> {
     /// which is the convention for directory names.
     #[must_use]
     pub fn format_directory_name(&self, name: &str) -> String {
-        self.format_name(name).replace('.', " ")
+        let name = self.format_name(name);
+        Date::replace_file_date_with_directory_date(&name).replace('.', " ")
     }
 
     /// Format a single file using its parent directory name as prefix/suffix.

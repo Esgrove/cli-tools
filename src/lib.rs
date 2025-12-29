@@ -30,17 +30,243 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
 ];
 
 /// Append an extension to `PathBuf`, which is missing from the standard lib :(
-pub fn append_extension_to_path(path: PathBuf, extension: impl AsRef<OsStr>) -> PathBuf {
+#[must_use]
+pub fn append_extension_to_path(path: &Path, extension: impl AsRef<OsStr>) -> PathBuf {
     let mut os_string: OsString = path.into();
     os_string.push(".");
     os_string.push(extension);
     os_string.into()
 }
 
+/// Helper method to assert floating point equality in test cases.
+///
+/// # Panics
+/// Panics if the absolute difference between `a` and `b` exceeds `f64::EPSILON`.
+#[inline]
+pub fn assert_f64_eq(a: f64, b: f64) {
+    let epsilon = f64::EPSILON;
+    assert!(
+        (a - b).abs() <= epsilon,
+        "Values are not equal: {a} and {b} (epsilon = {epsilon})"
+    );
+}
+
 /// Format bool value as a coloured string.
 #[must_use]
 pub fn colorize_bool(value: bool) -> ColoredString {
     if value { "true".green() } else { "false".red() }
+}
+
+/// Create a coloured diff for the given strings.
+pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
+    let changeset = Changeset::new(old, new, "");
+    let mut old_diff = String::new();
+    let mut new_diff = String::new();
+
+    if stacked {
+        // Find the starting index of the first matching sequence for a nicer visual alignment.
+        // For example:
+        //   Constantine - Onde As Satisfaction (Club Tool).aif
+        //        Darude - Onde As Satisfaction (Constantine Club Tool).aif
+        // Instead of:
+        //   Constantine - Onde As Satisfaction (Club Tool).aif
+        //   Darude - Onde As Satisfaction (Constantine Club Tool).aif
+        for diff in &changeset.diffs {
+            if let Difference::Same(x) = diff {
+                if x.chars().all(char::is_whitespace) || x.chars().count() < 3 {
+                    continue;
+                }
+
+                // Add leading whitespace so that the first matching sequence lines up.
+                if let (Some(old_index), Some(new_index)) = (old.find(x), new.find(x)) {
+                    match old_index.cmp(&new_index) {
+                        Ordering::Greater => {
+                            new_diff = " ".repeat(old_index.saturating_sub(new_index));
+                        }
+                        Ordering::Less => {
+                            old_diff = " ".repeat(new_index.saturating_sub(old_index));
+                        }
+                        Ordering::Equal => {}
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    for diff in changeset.diffs {
+        match diff {
+            Difference::Same(ref x) => {
+                old_diff.push_str(x);
+                new_diff.push_str(x);
+            }
+            Difference::Add(ref x) => {
+                if x.chars().all(char::is_whitespace) {
+                    new_diff.push_str(&x.on_green().to_string());
+                } else {
+                    new_diff.push_str(&x.green().to_string());
+                }
+            }
+            Difference::Rem(ref x) => {
+                if x.chars().all(char::is_whitespace) {
+                    old_diff.push_str(&x.on_red().to_string());
+                } else {
+                    old_diff.push_str(&x.red().to_string());
+                }
+            }
+        }
+    }
+
+    (old_diff, new_diff)
+}
+
+/// Format bytes as human-readable size.
+#[must_use]
+pub fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Format duration as a human-readable string
+#[must_use]
+pub fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Format duration from seconds as a human-readable string.
+/// Negative values are treated as zero.
+#[must_use]
+pub fn format_duration_seconds(seconds: f64) -> String {
+    // Ensure non-negative value before converting to avoid sign loss
+    let seconds = seconds.max(0.0);
+    // Values larger than u64::MAX will saturate, which is acceptable for duration display
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let secs = seconds as u64;
+    if secs >= 3600 {
+        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{seconds:.1}s")
+    }
+}
+
+/// Determine the appropriate directory for storing shell completions.
+///
+/// First checks if the user-specific directory exists,
+/// then checks for the global directory.
+/// If neither exist, creates and uses the user-specific dir.
+fn get_shell_completion_dir(shell: Shell, name: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().expect("Failed to get home directory");
+
+    // Special handling for oh-my-zsh.
+    // Create custom "plugin", which will then have to be loaded in .zshrc
+    if shell == Shell::Zsh {
+        let omz_plugins = home.join(".oh-my-zsh/custom/plugins");
+        if omz_plugins.exists() {
+            let plugin_dir = omz_plugins.join(name);
+            std::fs::create_dir_all(&plugin_dir)?;
+            return Ok(plugin_dir);
+        }
+    }
+
+    let user_dir = match shell {
+        Shell::PowerShell => {
+            if cfg!(windows) {
+                home.join(r"Documents\PowerShell\completions")
+            } else {
+                home.join(".config/powershell/completions")
+            }
+        }
+        Shell::Bash => home.join(".bash_completion.d"),
+        Shell::Elvish => home.join(".elvish"),
+        Shell::Fish => home.join(".config/fish/completions"),
+        Shell::Zsh => home.join(".zsh/completions"),
+        _ => anyhow::bail!("Unsupported shell"),
+    };
+
+    if user_dir.exists() {
+        return Ok(user_dir);
+    }
+
+    let global_dir = match shell {
+        Shell::PowerShell => {
+            if cfg!(windows) {
+                home.join(r"Documents\PowerShell\completions")
+            } else {
+                home.join(".config/powershell/completions")
+            }
+        }
+        Shell::Bash => PathBuf::from("/etc/bash_completion.d"),
+        Shell::Fish => PathBuf::from("/usr/share/fish/completions"),
+        Shell::Zsh => PathBuf::from("/usr/share/zsh/site-functions"),
+        _ => anyhow::bail!("Unsupported shell"),
+    };
+
+    if global_dir.exists() {
+        return Ok(global_dir);
+    }
+
+    std::fs::create_dir_all(&user_dir)?;
+    Ok(user_dir)
+}
+
+/// Generate a shell completion script for the given shell.
+///
+/// # Errors
+/// Returns an error if:
+/// - The shell completion directory cannot be determined or created
+/// - The completion file cannot be generated or written
+pub fn generate_shell_completion(shell: Shell, mut command: Command, install: bool, command_name: &str) -> Result<()> {
+    if install {
+        let out_dir = get_shell_completion_dir(shell, command_name)?;
+        let path = clap_complete::generate_to(shell, &mut command, command_name, out_dir)?;
+        println!("Completion file generated to: {}", path.display());
+    } else {
+        clap_complete::generate(shell, &mut command, command_name, &mut std::io::stdout());
+    }
+    Ok(())
+}
+
+/// Prompt the user for confirmation with a yes/no question.
+///
+/// Returns `true` if the user answers yes (y/Y), `false` otherwise.
+/// The default value is used when the user presses Enter without input.
+///
+/// # Errors
+/// Returns an error if reading from stdin fails.
+pub fn get_user_confirmation(message: &str, default: bool) -> io::Result<bool> {
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("{message} {hint} ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let trimmed = input.trim().to_lowercase();
+    if trimmed.is_empty() {
+        Ok(default)
+    } else {
+        Ok(trimmed == "y" || trimmed == "yes")
+    }
 }
 
 /// Get filename from Path with special characters retained instead of decomposed.
@@ -116,6 +342,52 @@ pub fn is_system_directory_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir)))
+}
+
+/// Check if a path is on a network drive.
+/// On Windows, detects mapped network drives and UNC paths.
+/// On other platforms, always returns false.
+#[cfg(windows)]
+#[must_use]
+pub fn is_network_path(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+    const DRIVE_REMOTE: u32 = 4;
+
+    // Check for UNC paths (\\server\share)
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with(r"\\") {
+        return true;
+    }
+
+    // Check drive type for mapped network drives
+    if let Some(prefix) = path.components().next() {
+        let prefix_str = prefix.as_os_str();
+        // Create a root path like "X:\"
+        let mut root: Vec<u16> = prefix_str.encode_wide().collect();
+        if root.len() >= 2 && root[1] == u16::from(b':') {
+            root.push(u16::from(b'\\'));
+            root.push(0); // null terminator
+
+            // SAFETY: GetDriveTypeW is a safe Windows API call that only reads
+            // the null-terminated string to determine drive type
+            #[allow(unsafe_code)]
+            let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
+            return drive_type == DRIVE_REMOTE;
+        }
+    }
+
+    false
+}
+
+/// Check if a path is on a network drive.
+/// On Windows, detects mapped network drives and UNC paths.
+/// On other platforms, always returns false.
+#[cfg(not(windows))]
+#[must_use]
+pub const fn is_network_path(_path: &Path) -> bool {
+    false
 }
 
 /// Check if entry should be skipped (hidden or system directory).
@@ -382,46 +654,6 @@ pub fn get_relative_path_from_current_working_directory(path: &Path) -> PathBuf 
     )
 }
 
-/// Convert `OsStr` to String with invalid Unicode handling.
-pub fn os_str_to_string(name: &OsStr) -> String {
-    name.to_str().map_or_else(
-        || name.to_string_lossy().replace('\u{FFFD}', ""),
-        std::string::ToString::to_string,
-    )
-}
-
-/// Convert given path to string with invalid Unicode handling.
-pub fn path_to_string(path: &Path) -> String {
-    path.to_str().map_or_else(
-        || path.to_string_lossy().to_string().replace('\u{FFFD}', ""),
-        std::string::ToString::to_string,
-    )
-}
-
-/// Convert given path to filename string with invalid Unicode handling.
-#[must_use]
-pub fn path_to_filename_string(path: &Path) -> String {
-    os_str_to_string(path.file_name().unwrap_or_default())
-}
-
-/// Convert given path to file stem string with invalid Unicode handling.
-#[must_use]
-pub fn path_to_file_stem_string(path: &Path) -> String {
-    os_str_to_string(path.file_stem().unwrap_or_default())
-}
-
-/// Convert given path to file extension lowercase string with invalid Unicode handling.
-#[must_use]
-pub fn path_to_file_extension_string(path: &Path) -> String {
-    os_str_to_string(path.extension().unwrap_or_default()).to_lowercase()
-}
-
-/// Get relative path and convert to string with invalid unicode handling.
-#[must_use]
-pub fn path_to_string_relative(path: &Path) -> String {
-    path_to_string(&get_relative_path_from_current_working_directory(path))
-}
-
 /// Get a unique file path, adding a counter suffix if the file already exists.
 ///
 /// Given a directory and filename components,
@@ -475,6 +707,46 @@ pub fn get_unique_path(dir: &Path, filename: &str, stem: &str, extension: &str) 
     }
 
     path
+}
+
+/// Convert `OsStr` to String with invalid Unicode handling.
+pub fn os_str_to_string(name: &OsStr) -> String {
+    name.to_str().map_or_else(
+        || name.to_string_lossy().replace('\u{FFFD}', ""),
+        std::string::ToString::to_string,
+    )
+}
+
+/// Convert given path to string with invalid Unicode handling.
+pub fn path_to_string(path: &Path) -> String {
+    path.to_str().map_or_else(
+        || path.to_string_lossy().to_string().replace('\u{FFFD}', ""),
+        std::string::ToString::to_string,
+    )
+}
+
+/// Convert given path to filename string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_filename_string(path: &Path) -> String {
+    os_str_to_string(path.file_name().unwrap_or_default())
+}
+
+/// Convert given path to file stem string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_file_stem_string(path: &Path) -> String {
+    os_str_to_string(path.file_stem().unwrap_or_default())
+}
+
+/// Convert given path to file extension lowercase string with invalid Unicode handling.
+#[must_use]
+pub fn path_to_file_extension_string(path: &Path) -> String {
+    os_str_to_string(path.extension().unwrap_or_default()).to_lowercase()
+}
+
+/// Get relative path and convert to string with invalid unicode handling.
+#[must_use]
+pub fn path_to_string_relative(path: &Path) -> String {
+    path_to_string(&get_relative_path_from_current_working_directory(path))
 }
 
 #[inline]
@@ -561,69 +833,6 @@ macro_rules! print_bold {
     };
 }
 
-/// Create a coloured diff for the given strings.
-pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
-    let changeset = Changeset::new(old, new, "");
-    let mut old_diff = String::new();
-    let mut new_diff = String::new();
-
-    if stacked {
-        // Find the starting index of the first matching sequence for a nicer visual alignment.
-        // For example:
-        //   Constantine - Onde As Satisfaction (Club Tool).aif
-        //        Darude - Onde As Satisfaction (Constantine Club Tool).aif
-        // Instead of:
-        //   Constantine - Onde As Satisfaction (Club Tool).aif
-        //   Darude - Onde As Satisfaction (Constantine Club Tool).aif
-        for diff in &changeset.diffs {
-            if let Difference::Same(x) = diff {
-                if x.chars().all(char::is_whitespace) || x.chars().count() < 3 {
-                    continue;
-                }
-
-                // Add leading whitespace so that the first matching sequence lines up.
-                if let (Some(old_index), Some(new_index)) = (old.find(x), new.find(x)) {
-                    match old_index.cmp(&new_index) {
-                        Ordering::Greater => {
-                            new_diff = " ".repeat(old_index.saturating_sub(new_index));
-                        }
-                        Ordering::Less => {
-                            old_diff = " ".repeat(new_index.saturating_sub(old_index));
-                        }
-                        Ordering::Equal => {}
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    for diff in changeset.diffs {
-        match diff {
-            Difference::Same(ref x) => {
-                old_diff.push_str(x);
-                new_diff.push_str(x);
-            }
-            Difference::Add(ref x) => {
-                if x.chars().all(char::is_whitespace) {
-                    new_diff.push_str(&x.on_green().to_string());
-                } else {
-                    new_diff.push_str(&x.green().to_string());
-                }
-            }
-            Difference::Rem(ref x) => {
-                if x.chars().all(char::is_whitespace) {
-                    old_diff.push_str(&x.on_red().to_string());
-                } else {
-                    old_diff.push_str(&x.red().to_string());
-                }
-            }
-        }
-    }
-
-    (old_diff, new_diff)
-}
-
 /// Print a stacked diff of the changes.
 pub fn show_diff(old: &str, new: &str) {
     let (old_diff, new_diff) = color_diff(old, new, true);
@@ -633,181 +842,9 @@ pub fn show_diff(old: &str, new: &str) {
     }
 }
 
-/// Format bytes as human-readable size.
-#[must_use]
-pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-/// Format duration as a human-readable string
-#[must_use]
-pub fn format_duration(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs();
-    if secs >= 3600 {
-        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else if secs >= 60 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
-/// Format duration from seconds as a human-readable string.
-/// Negative values are treated as zero.
-#[must_use]
-pub fn format_duration_seconds(seconds: f64) -> String {
-    // Ensure non-negative value before converting to avoid sign loss
-    let seconds = seconds.max(0.0);
-    // Values larger than u64::MAX will saturate, which is acceptable for duration display
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let secs = seconds as u64;
-    if secs >= 3600 {
-        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else if secs >= 60 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{seconds:.1}s")
-    }
-}
-
-/// Generate a shell completion script for the given shell.
+/// Delete a file, moving to trash when possible.
 ///
-/// # Errors
-/// Returns an error if:
-/// - The shell completion directory cannot be determined or created
-/// - The completion file cannot be generated or written
-pub fn generate_shell_completion(shell: Shell, mut command: Command, install: bool, command_name: &str) -> Result<()> {
-    if install {
-        let out_dir = get_shell_completion_dir(shell, command_name)?;
-        let path = clap_complete::generate_to(shell, &mut command, command_name, out_dir)?;
-        println!("Completion file generated to: {}", path.display());
-    } else {
-        clap_complete::generate(shell, &mut command, command_name, &mut std::io::stdout());
-    }
-    Ok(())
-}
-
-/// Determine the appropriate directory for storing shell completions.
-///
-/// First checks if the user-specific directory exists,
-/// then checks for the global directory.
-/// If neither exist, creates and uses the user-specific dir.
-fn get_shell_completion_dir(shell: Shell, name: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().expect("Failed to get home directory");
-
-    // Special handling for oh-my-zsh.
-    // Create custom "plugin", which will then have to be loaded in .zshrc
-    if shell == Shell::Zsh {
-        let omz_plugins = home.join(".oh-my-zsh/custom/plugins");
-        if omz_plugins.exists() {
-            let plugin_dir = omz_plugins.join(name);
-            std::fs::create_dir_all(&plugin_dir)?;
-            return Ok(plugin_dir);
-        }
-    }
-
-    let user_dir = match shell {
-        Shell::PowerShell => {
-            if cfg!(windows) {
-                home.join(r"Documents\PowerShell\completions")
-            } else {
-                home.join(".config/powershell/completions")
-            }
-        }
-        Shell::Bash => home.join(".bash_completion.d"),
-        Shell::Elvish => home.join(".elvish"),
-        Shell::Fish => home.join(".config/fish/completions"),
-        Shell::Zsh => home.join(".zsh/completions"),
-        _ => anyhow::bail!("Unsupported shell"),
-    };
-
-    if user_dir.exists() {
-        return Ok(user_dir);
-    }
-
-    let global_dir = match shell {
-        Shell::PowerShell => {
-            if cfg!(windows) {
-                home.join(r"Documents\PowerShell\completions")
-            } else {
-                home.join(".config/powershell/completions")
-            }
-        }
-        Shell::Bash => PathBuf::from("/etc/bash_completion.d"),
-        Shell::Fish => PathBuf::from("/usr/share/fish/completions"),
-        Shell::Zsh => PathBuf::from("/usr/share/zsh/site-functions"),
-        _ => anyhow::bail!("Unsupported shell"),
-    };
-
-    if global_dir.exists() {
-        return Ok(global_dir);
-    }
-
-    std::fs::create_dir_all(&user_dir)?;
-    Ok(user_dir)
-}
-
-/// Check if a path is on a network drive.
-/// On Windows, detects mapped network drives and UNC paths.
-/// On other platforms, always returns false.
-#[cfg(windows)]
-#[must_use]
-pub fn is_network_path(path: &Path) -> bool {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
-
-    const DRIVE_REMOTE: u32 = 4;
-
-    // Check for UNC paths (\\server\share)
-    let path_str = path.to_string_lossy();
-    if path_str.starts_with(r"\\") {
-        return true;
-    }
-
-    // Check drive type for mapped network drives
-    if let Some(prefix) = path.components().next() {
-        let prefix_str = prefix.as_os_str();
-        // Create a root path like "X:\"
-        let mut root: Vec<u16> = prefix_str.encode_wide().collect();
-        if root.len() >= 2 && root[1] == u16::from(b':') {
-            root.push(u16::from(b'\\'));
-            root.push(0); // null terminator
-
-            // SAFETY: GetDriveTypeW is a safe Windows API call that only reads
-            // the null-terminated string to determine drive type
-            #[allow(unsafe_code)]
-            let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
-            return drive_type == DRIVE_REMOTE;
-        }
-    }
-
-    false
-}
-
-/// Check if a path is on a network drive.
-/// On Windows, detects mapped network drives and UNC paths.
-/// On other platforms, always returns false.
-#[cfg(not(windows))]
-#[must_use]
-pub const fn is_network_path(_path: &Path) -> bool {
-    false
-}
-
-/// Delete a file, using trash when possible.
-///
-/// For network paths, uses direct deletion since trash doesn't work there.
+/// For Windows network paths, uses direct deletion since trash doesn't work there.
 /// For local paths, moves the file to the system trash.
 ///
 /// # Errors
@@ -818,42 +855,6 @@ pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
     } else {
         trash::delete(path).map_err(std::io::Error::other)
     }
-}
-
-/// Prompt the user for confirmation with a yes/no question.
-///
-/// Returns `true` if the user answers yes (y/Y), `false` otherwise.
-/// The default value is used when the user presses Enter without input.
-///
-/// # Errors
-/// Returns an error if reading from stdin fails.
-pub fn confirm_with_user(message: &str, default: bool) -> io::Result<bool> {
-    let hint = if default { "[Y/n]" } else { "[y/N]" };
-    print!("{message} {hint} ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    let trimmed = input.trim().to_lowercase();
-    if trimmed.is_empty() {
-        Ok(default)
-    } else {
-        Ok(trimmed == "y" || trimmed == "yes")
-    }
-}
-
-/// Helper method to assert floating point equality in test cases.
-///
-/// # Panics
-/// Panics if the absolute difference between `a` and `b` exceeds `f64::EPSILON`.
-#[inline]
-pub fn assert_f64_eq(a: f64, b: f64) {
-    let epsilon = f64::EPSILON;
-    assert!(
-        (a - b).abs() <= epsilon,
-        "Values are not equal: {a} and {b} (epsilon = {epsilon})"
-    );
 }
 
 #[cfg(test)]
