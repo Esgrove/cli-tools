@@ -565,6 +565,7 @@ impl QTorrent {
         let mut success_count = 0;
         let mut skipped_count = 0;
         let mut duplicate_count = 0;
+        let mut renamed_count = 0;
         let mut error_count = 0;
         let total = torrents.len();
 
@@ -573,9 +574,22 @@ impl QTorrent {
             self.print_torrent_info(&info, index + 1, total);
 
             // Check if torrent already exists in qBittorrent
-            if let Some(name) = Self::check_existing_torrent(&info, &existing_torrents) {
-                println!("  {} Already exists in qBittorrent as: {}", "⊘".yellow(), name.cyan());
-                duplicate_count += 1;
+            if let Some(existing_name) = Self::check_existing_torrent(&info, &existing_torrents) {
+                println!(
+                    "  {} Already exists in qBittorrent as: {}",
+                    "⊘".yellow(),
+                    existing_name.cyan()
+                );
+
+                // Offer to rename the existing torrent
+                match self.prompt_rename_existing(&info, existing_name, &client).await {
+                    Ok(true) => renamed_count += 1,
+                    Ok(false) => duplicate_count += 1,
+                    Err(error) => {
+                        cli_tools::print_error!("Failed to rename: {error}");
+                        duplicate_count += 1;
+                    }
+                }
                 continue;
             }
 
@@ -621,8 +635,11 @@ impl QTorrent {
         if success_count > 0 {
             println!("  {} {}", "Added:".green(), success_count);
         }
+        if renamed_count > 0 {
+            println!("  {} {}", "Renamed:".cyan(), renamed_count);
+        }
         if duplicate_count > 0 {
-            println!("  {} {}", "Duplicates:".cyan(), duplicate_count);
+            println!("  {} {}", "Already added:".dimmed(), duplicate_count);
         }
         if skipped_count > 0 {
             println!("  {} {}", "Skipped:".yellow(), skipped_count);
@@ -677,6 +694,97 @@ impl QTorrent {
             );
         }
         println!();
+    }
+
+    /// Prompt user to rename an existing torrent in qBittorrent.
+    ///
+    /// Returns `true` if the torrent was renamed, `false` if skipped.
+    async fn prompt_rename_existing(
+        &self,
+        info: &TorrentInfo,
+        existing_name: &str,
+        client: &QBittorrentClient,
+    ) -> Result<bool> {
+        if self.config.yes {
+            // With --yes flag, skip rename prompt for existing torrents
+            return Ok(false);
+        }
+
+        let suggested = self.clean_suggested_name(info);
+        let internal_formatted = self.clean_internal_name(info);
+
+        println!(
+            "  {} [{}]",
+            "Rename existing?".cyan(),
+            "press Enter to skip, or type new name".dimmed()
+        );
+        println!("  {} {}", "1:".dimmed(), suggested.green());
+        if let Some(ref internal) = internal_formatted
+            && internal != &suggested
+        {
+            println!("  {} {}", "2:".dimmed(), internal.green());
+        }
+        print!("  {} ", "Choice or name:".dimmed());
+        io::stdout().flush().context("Failed to flush stdout")?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).context("Failed to read input")?;
+
+        let input = input.trim();
+        if input.is_empty() {
+            println!("  {}", "Skipped.".dimmed());
+            return Ok(false);
+        }
+
+        // Check if user entered a number to select an option
+        let new_name = match input {
+            "1" => suggested,
+            "2" if internal_formatted.is_some() => internal_formatted.expect("internal_formatted checked above"),
+            _ => input.to_string(),
+        };
+
+        // Rename the existing torrent
+        client
+            .set_torrent_name(&info.info_hash, &new_name)
+            .await
+            .context("Failed to set torrent name")?;
+
+        println!(
+            "  {} Renamed: {} → {}",
+            "✓".green(),
+            existing_name.dimmed(),
+            new_name.green()
+        );
+
+        // Also try to rename the actual file/folder on disk
+        if let Some(ref original_name) = info.original_name
+            && original_name != &new_name
+        {
+            // Wait a moment for the rename to take effect
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let rename_result = if info.effective_is_multi_file {
+                client.rename_folder(&info.info_hash, original_name, &new_name).await
+            } else {
+                client.rename_file(&info.info_hash, original_name, &new_name).await
+            };
+
+            match rename_result {
+                Ok(()) => {
+                    println!(
+                        "  {} Renamed on disk: {} → {}",
+                        "✓".green(),
+                        original_name.dimmed(),
+                        new_name.green()
+                    );
+                }
+                Err(error) => {
+                    cli_tools::print_warning!("Could not rename file/folder on disk: {error}");
+                }
+            }
+        }
+
+        Ok(true)
     }
 
     /// Prompt user to rename the output name for a torrent.

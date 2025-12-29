@@ -470,6 +470,48 @@ impl QBittorrentClient {
         }
     }
 
+    /// Set the name of a torrent (display name in qBittorrent).
+    ///
+    /// This changes the torrent's name as shown in the UI, not the actual file/folder name on disk.
+    /// Use `rename_file` or `rename_folder` to change the actual content name.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or if not authenticated.
+    pub async fn set_torrent_name(&self, info_hash: &str, name: &str) -> Result<()> {
+        if !self.authenticated {
+            bail!("Not authenticated. Call login() first.");
+        }
+
+        let url = self.build_url("torrents/rename");
+
+        let response = self
+            .client
+            .post(&url)
+            .form(&[("hash", info_hash), ("name", name)])
+            .send()
+            .await
+            .context("Failed to send rename torrent request")?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => Ok(()),
+            StatusCode::NOT_FOUND => {
+                bail!("Torrent hash not found")
+            }
+            StatusCode::CONFLICT => {
+                bail!("Torrent name is empty")
+            }
+            StatusCode::FORBIDDEN => {
+                bail!("Authentication required or session expired")
+            }
+            _ => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("Failed to rename torrent: HTTP {status} - {body}")
+            }
+        }
+    }
+
     /// Build full API url from the base url and given endpoint.
     fn build_url(&self, url: &str) -> String {
         format!("{}/api/v2/{url}", self.base_url)
