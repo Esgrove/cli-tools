@@ -5,7 +5,9 @@
 //! and pattern-based replacements.
 
 mod config;
+mod format;
 mod rename;
 
 pub use config::{DotRenameConfig, DotsConfig};
+pub use format::DotFormatting;
 pub use rename::DotRename;
