@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+use cli_tools::date::RE_CORRECT_DATE_FORMAT;
 use cli_tools::dot_rename::{DotFormat, DotRenameConfig};
 use cli_tools::{print_bold, print_magenta_bold};
 
@@ -811,14 +812,23 @@ impl QTorrent {
         let suggested = self.clean_suggested_name(info);
         let internal_formatted = self.clean_internal_name(info);
 
+        // Normalize the two options to check if they're effectively the same
+        let (normalized_suggested, normalized_internal) =
+            Self::normalize_rename_options(&suggested, internal_formatted.as_deref());
+
+        // Determine if we should show the second option
+        let show_internal = normalized_internal
+            .as_ref()
+            .is_some_and(|internal| internal != &normalized_suggested);
+
         println!(
             "  {} [{}]",
             label.cyan(),
             "press Enter to skip, or type new name".dimmed()
         );
-        println!("  {} {}", "1:".dimmed(), suggested.green());
-        if let Some(ref internal) = internal_formatted
-            && internal != &suggested
+        println!("  {} {}", "1:".dimmed(), normalized_suggested.green());
+        if let Some(ref internal) = normalized_internal
+            && show_internal
         {
             println!("  {} {}", "2:".dimmed(), internal.green());
         }
@@ -834,8 +844,10 @@ impl QTorrent {
         } else {
             // Check if user entered a number to select an option
             let selected_name = match input {
-                "1" => suggested,
-                "2" if internal_formatted.is_some() => internal_formatted.expect("internal_formatted checked above"),
+                "1" => normalized_suggested,
+                "2" if show_internal && normalized_internal.is_some() => {
+                    normalized_internal.expect("normalized_internal checked above")
+                }
                 _ => input.to_string(),
             };
 
@@ -847,6 +859,86 @@ impl QTorrent {
             println!("  {} {}", new_name_label.dimmed(), selected_name.green());
             Ok(Some(selected_name))
         }
+    }
+
+    /// Normalize two rename options by ensuring both have the same date and extension if applicable.
+    ///
+    /// If one option has a file extension and the other doesn't, the extension is added.
+    /// If one option has a date (yyyy.mm.dd format) and the other doesn't, the date is added.
+    ///
+    /// Extensions are checked first to avoid date parts (like `.15`) being mistaken for extensions.
+    fn normalize_rename_options(suggested: &str, internal: Option<&str>) -> (String, Option<String>) {
+        let Some(internal) = internal else {
+            return (suggested.to_string(), None);
+        };
+
+        let mut normalized_suggested = suggested.to_string();
+        let mut normalized_internal = internal.to_string();
+
+        // Extract extensions from both options FIRST (before adding dates)
+        // This avoids date parts like ".15" being mistaken for extensions
+        let suggested_ext = Self::extract_file_extension(&normalized_suggested);
+        let internal_ext = Self::extract_file_extension(&normalized_internal);
+
+        // If one has an extension and the other doesn't, add the extension
+        match (&suggested_ext, &internal_ext) {
+            (Some(ext), None) => {
+                normalized_internal = format!("{normalized_internal}.{ext}");
+            }
+            (None, Some(ext)) => {
+                normalized_suggested = format!("{normalized_suggested}.{ext}");
+            }
+            _ => {}
+        }
+
+        // Extract dates from both options
+        let suggested_date = RE_CORRECT_DATE_FORMAT
+            .find(&normalized_suggested)
+            .map(|m| m.as_str().to_string());
+        let internal_date = RE_CORRECT_DATE_FORMAT
+            .find(&normalized_internal)
+            .map(|m| m.as_str().to_string());
+
+        // If one has a date and the other doesn't, add the date to the one missing it
+        match (&suggested_date, &internal_date) {
+            (Some(date), None) => {
+                // Add date from suggested to internal (insert before extension if present)
+                normalized_internal = Self::insert_date_before_extension(&normalized_internal, date);
+            }
+            (None, Some(date)) => {
+                // Add date from internal to suggested (insert before extension if present)
+                normalized_suggested = Self::insert_date_before_extension(&normalized_suggested, date);
+            }
+            _ => {}
+        }
+
+        (normalized_suggested, Some(normalized_internal))
+    }
+
+    /// Extract a file extension if it looks like a real file extension (not a number from a date).
+    ///
+    /// Returns `None` if the extension is purely numeric (like `.15` from a date).
+    fn extract_file_extension(name: &str) -> Option<String> {
+        let ext = Path::new(name).extension()?.to_string_lossy().to_string();
+
+        // If the extension is purely numeric, it's likely part of a date, not a real extension
+        if ext.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+
+        Some(ext)
+    }
+
+    /// Insert a date before the file extension, or at the end if no extension.
+    fn insert_date_before_extension(name: &str, date: &str) -> String {
+        let path = Path::new(name);
+        path.extension().map_or_else(
+            || format!("{name}.{date}"),
+            |ext| {
+                let stem = path.file_stem().map_or(name, |s| s.to_str().unwrap_or(name));
+                format!("{stem}.{date}.{}", ext.to_string_lossy())
+            },
+        )
     }
 
     /// Add a single torrent to qBittorrent.
@@ -955,5 +1047,108 @@ impl QTorrent {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod normalize_rename_options {
+        use super::*;
+
+        #[test]
+        fn both_same_returns_equal() {
+            let (suggested, internal) =
+                QTorrent::normalize_rename_options("Name.2024.01.15.mp4", Some("Name.2024.01.15.mp4"));
+            assert_eq!(suggested, "Name.2024.01.15.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.2024.01.15.mp4"));
+        }
+
+        #[test]
+        fn no_internal_returns_suggested_only() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Name.2024.01.15.mp4", None);
+            assert_eq!(suggested, "Name.2024.01.15.mp4");
+            assert!(internal.is_none());
+        }
+
+        #[test]
+        fn date_added_to_internal_when_missing() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Name.2024.01.15.mp4", Some("Name.mp4"));
+            assert_eq!(suggested, "Name.2024.01.15.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.2024.01.15.mp4"));
+        }
+
+        #[test]
+        fn date_added_to_suggested_when_missing() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Name.mp4", Some("Name.2024.01.15.mp4"));
+            assert_eq!(suggested, "Name.2024.01.15.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.2024.01.15.mp4"));
+        }
+
+        #[test]
+        fn extension_added_to_internal_when_missing() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Name.mp4", Some("Name"));
+            assert_eq!(suggested, "Name.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.mp4"));
+        }
+
+        #[test]
+        fn extension_added_to_suggested_when_missing() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Name", Some("Name.mp4"));
+            assert_eq!(suggested, "Name.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.mp4"));
+        }
+
+        #[test]
+        fn both_date_and_extension_added() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Name.2024.01.15.mp4", Some("Name"));
+            assert_eq!(suggested, "Name.2024.01.15.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.2024.01.15.mp4"));
+        }
+
+        #[test]
+        fn different_dates_remain_different() {
+            let (suggested, internal) =
+                QTorrent::normalize_rename_options("Name.2024.01.15.mp4", Some("Name.2023.12.25.mp4"));
+            assert_eq!(suggested, "Name.2024.01.15.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.2023.12.25.mp4"));
+        }
+
+        #[test]
+        fn different_extensions_remain_different() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Name.mp4", Some("Name.mkv"));
+            assert_eq!(suggested, "Name.mp4");
+            assert_eq!(internal.as_deref(), Some("Name.mkv"));
+        }
+
+        #[test]
+        fn directory_names_without_extension() {
+            let (suggested, internal) = QTorrent::normalize_rename_options("Show Name 2024.01.15", Some("Show Name"));
+            assert_eq!(suggested, "Show Name 2024.01.15");
+            assert_eq!(internal.as_deref(), Some("Show Name.2024.01.15"));
+        }
+    }
+
+    mod insert_date_before_extension {
+        use super::*;
+
+        #[test]
+        fn inserts_date_before_extension() {
+            let result = QTorrent::insert_date_before_extension("Name.mp4", "2024.01.15");
+            assert_eq!(result, "Name.2024.01.15.mp4");
+        }
+
+        #[test]
+        fn appends_date_when_no_extension() {
+            let result = QTorrent::insert_date_before_extension("Name", "2024.01.15");
+            assert_eq!(result, "Name.2024.01.15");
+        }
+
+        #[test]
+        fn handles_multiple_dots_in_name() {
+            let result = QTorrent::insert_date_before_extension("Some.Name.Here.mp4", "2024.01.15");
+            assert_eq!(result, "Some.Name.Here.2024.01.15.mp4");
+        }
     }
 }
