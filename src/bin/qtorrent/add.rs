@@ -762,35 +762,49 @@ impl QTorrent {
             && let Some(ref old_name) = original_name
             && new_name != old_name
         {
-            // Wait a moment for the torrent to be fully added
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            // Retry with increasing delays - qBittorrent needs time to fully register the torrent
+            let delays_ms = [250, 500, 1000];
+            let mut rename_success = false;
+            let mut last_error = None;
 
-            let rename_result = if effective_is_multi_file {
-                // For multi-file torrents, rename the root folder
-                client.rename_folder(&info_hash, old_name, new_name).await
-            } else {
-                // For single-file torrents, rename the file
-                client.rename_file(&info_hash, old_name, new_name).await
-            };
+            for delay in &delays_ms {
+                tokio::time::sleep(tokio::time::Duration::from_millis(*delay)).await;
 
-            match rename_result {
-                Ok(()) => {
-                    println!(
-                        "  {} Renamed on disk: {} → {}",
-                        "✓".green(),
-                        old_name.dimmed(),
-                        new_name.green()
-                    );
+                let rename_result = if effective_is_multi_file {
+                    // For multi-file torrents, rename the root folder
+                    client.rename_folder(&info_hash, old_name, new_name).await
+                } else {
+                    // For single-file torrents, rename the file
+                    client.rename_file(&info_hash, old_name, new_name).await
+                };
+
+                match rename_result {
+                    Ok(()) => {
+                        println!(
+                            "  {} Renamed on disk: {} → {}",
+                            "✓".green(),
+                            old_name.dimmed(),
+                            new_name.green()
+                        );
+                        rename_success = true;
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                    }
                 }
-                Err(error) => {
-                    cli_tools::print_warning!("Could not rename file/folder (torrent may still be loading): {error}");
-                    println!(
-                        "  {} You may need to manually rename in qBittorrent: {} → {}",
-                        "⚠".yellow(),
-                        old_name,
-                        new_name
-                    );
+            }
+
+            if !rename_success {
+                if let Some(error) = last_error {
+                    cli_tools::print_warning!("Could not rename file/folder after retries: {error}");
                 }
+                println!(
+                    "  {} You may need to manually rename in qBittorrent: {} → {}",
+                    "⚠".yellow(),
+                    old_name,
+                    new_name
+                );
             }
         }
 
