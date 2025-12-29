@@ -35,14 +35,15 @@ pub struct AddTorrentParams {
     pub category: Option<String>,
     /// Tags for the torrent (comma-separated).
     pub tags: Option<String>,
-    /// Rename the torrent (sets the output filename for single-file torrents).
+    /// Rename the torrent (sets the display name, not the actual file/folder name).
     pub rename: Option<String>,
     /// Skip hash checking.
     pub skip_checking: bool,
     /// Add torrent in paused state.
     pub paused: bool,
-    /// Create root folder (false to avoid subfolder for single-file torrents).
-    pub root_folder: bool,
+    /// Content layout: "Original", "Subfolder", or "`NoSubfolder`".
+    /// Controls whether to create a subfolder for multi-file torrents.
+    pub content_layout: Option<String>,
 }
 
 /// Torrent info from the qBittorrent API `/torrents/info` endpoint.
@@ -183,10 +184,8 @@ impl QBittorrentClient {
             form = form.text("stopped", "true");
         }
 
-        if params.root_folder {
-            form = form.text("root_folder", "true");
-        } else {
-            form = form.text("root_folder", "false");
+        if let Some(ref layout) = params.content_layout {
+            form = form.text("contentLayout", layout.clone());
         }
 
         let response = self

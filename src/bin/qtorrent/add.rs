@@ -357,7 +357,9 @@ impl QTorrent {
             cli_tools::path_to_string_relative(&info.path)
         );
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
-
+        if self.config.verbose {
+            println!("  {}     {}", "Info hash:".dimmed(), info.info_hash);
+        }
         if info.original_is_multi_file {
             // Show folder name only if treating it as multi-file
             if info.effective_is_multi_file {
@@ -369,10 +371,6 @@ impl QTorrent {
         } else {
             println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
             println!("  {}    {}", "Total size:".dimmed(), size);
-        }
-
-        if self.config.verbose {
-            println!("  {}    {}", "Info hash:".dimmed(), info.info_hash);
         }
     }
 
@@ -850,6 +848,13 @@ impl QTorrent {
         let rename_to = info.rename_to.clone();
         let original_name = info.original_name.clone();
 
+        // Use "Original" to preserve torrent structure, or "NoSubfolder" for single files
+        let content_layout = if effective_is_multi_file {
+            Some("Original".to_string())
+        } else {
+            Some("NoSubfolder".to_string())
+        };
+
         let params = AddTorrentParams {
             torrent_path: info.path.to_string_lossy().to_string(),
             torrent_bytes: info.bytes,
@@ -859,7 +864,7 @@ impl QTorrent {
             rename: rename_to.clone(),
             skip_checking: false,
             paused: self.config.paused,
-            root_folder: effective_is_multi_file,
+            content_layout,
         };
 
         client.add_torrent(params).await?;
