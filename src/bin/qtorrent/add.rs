@@ -346,15 +346,15 @@ impl QTorrent {
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
 
         if info.original_is_multi_file {
-            // Show folder name only if we're effectively treating it as multi-file
+            // Show folder name only if treating it as multi-file
             if info.effective_is_multi_file {
                 println!("  {}   {}", "Folder name:".dimmed(), info.display_name().green());
             } else {
-                println!("  {}   {}", "Output name:".dimmed(), info.display_name().green());
+                println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
             }
             self.print_multi_file_info(info);
         } else {
-            println!("  {}   {}", "Output name:".dimmed(), info.display_name().green());
+            println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
             println!("  {}    {}", "Total size:".dimmed(), size);
         }
     }
@@ -515,6 +515,7 @@ impl QTorrent {
     }
 
     /// Connect to qBittorrent and add torrents one by one with individual confirmation.
+    #[allow(clippy::similar_names)]
     async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<()> {
         // Connect to qBittorrent
         println!("{}", "Connecting to qBittorrent...".cyan());
@@ -522,16 +523,16 @@ impl QTorrent {
 
         client.login(&self.config.username, &self.config.password).await?;
 
+        // Check connection works by getting app and api version numbers
+        let app_version = client.get_app_version().await?;
+        let api_version = client.get_api_version().await?;
+
         if self.config.verbose {
-            if let Ok(version) = client.get_app_version().await {
-                println!("  {} {}", "qBittorrent version:".dimmed(), version);
-            }
-            if let Ok(api_version) = client.get_api_version().await {
-                println!("  {} {}", "API version:".dimmed(), api_version);
-            }
+            println!("  {} {app_version}", "qBittorrent app version:".dimmed());
+            println!("  {} {api_version}", "qBittorrent API version:".dimmed());
         }
 
-        println!("{}\n", "Connected successfully.".green());
+        println!("{}\n", "Connected successfully".green());
 
         // Process each torrent individually
         let mut success_count = 0;

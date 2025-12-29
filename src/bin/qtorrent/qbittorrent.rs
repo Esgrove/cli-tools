@@ -2,6 +2,9 @@
 //!
 //! Provides functions to interact with the qBittorrent `WebUI` API
 //! for authentication and adding torrents.
+//!
+//! Documentation:
+//! <https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0)>
 
 use std::path::Path;
 
@@ -61,12 +64,19 @@ impl QBittorrentClient {
         }
     }
 
+    /// Check if the client is authenticated.
+    #[allow(dead_code)]
+    #[must_use]
+    pub const fn is_authenticated(&self) -> bool {
+        self.authenticated
+    }
+
     /// Authenticate with the qBittorrent `WebUI`.
     ///
     /// # Errors
     /// Returns an error if authentication fails.
     pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
-        let url = format!("{}/api/v2/auth/login", self.base_url);
+        let url = self.build_url("auth/login");
 
         let response = self
             .client
@@ -98,7 +108,7 @@ impl QBittorrentClient {
             return Ok(());
         }
 
-        let url = format!("{}/api/v2/auth/logout", self.base_url);
+        let url = self.build_url("auth/logout");
 
         self.client
             .post(&url)
@@ -119,7 +129,7 @@ impl QBittorrentClient {
             bail!("Not authenticated. Call login() first.");
         }
 
-        let url = format!("{}/api/v2/torrents/add", self.base_url);
+        let url = self.build_url("torrents/add");
 
         // Extract filename from path
         let filename = Path::new(&params.torrent_path).file_name().map_or_else(
@@ -191,19 +201,12 @@ impl QBittorrentClient {
         }
     }
 
-    /// Check if the client is authenticated.
-    #[allow(dead_code)]
-    #[must_use]
-    pub const fn is_authenticated(&self) -> bool {
-        self.authenticated
-    }
-
     /// Get the API version from qBittorrent.
     ///
     /// # Errors
     /// Returns an error if the request fails.
     pub async fn get_api_version(&self) -> Result<String> {
-        let url = format!("{}/api/v2/app/webapiVersion", self.base_url);
+        let url = self.build_url("app/webapiVersion");
 
         let response = self
             .client
@@ -221,7 +224,7 @@ impl QBittorrentClient {
     /// # Errors
     /// Returns an error if the request fails.
     pub async fn get_app_version(&self) -> Result<String> {
-        let url = format!("{}/api/v2/app/version", self.base_url);
+        let url = self.build_url("app/version");
 
         let response = self
             .client
@@ -244,7 +247,7 @@ impl QBittorrentClient {
             bail!("Not authenticated. Call login() first.");
         }
 
-        let url = format!("{}/api/v2/app/defaultSavePath", self.base_url);
+        let url = self.build_url("app/defaultSavePath");
 
         let response = self
             .client
@@ -276,7 +279,7 @@ impl QBittorrentClient {
             return Ok(());
         }
 
-        let url = format!("{}/api/v2/torrents/filePrio", self.base_url);
+        let url = self.build_url("torrents/filePrio");
 
         // Format file indices as pipe-separated list
         let indices_str = file_indices
@@ -318,5 +321,9 @@ impl QBittorrentClient {
                 bail!("Failed to set file priorities: HTTP {status} - {body}")
             }
         }
+    }
+
+    fn build_url(&self, url: &str) -> String {
+        format!("{}/api/v2/{url}", self.base_url)
     }
 }
