@@ -49,7 +49,7 @@ impl Date {
     /// Check that date is valid
     #[must_use]
     pub fn try_from(year: i32, month: i32, day: i32) -> Option<Self> {
-        if year <= *CURRENT_YEAR && year > 1900 && month > 0 && month <= 12 && day > 0 && day <= 31 {
+        if year <= *CURRENT_YEAR && year > 1990 && month > 0 && month <= 12 && day > 0 && day <= 31 {
             Some(Self { year, month, day })
         } else {
             None
