@@ -588,12 +588,28 @@ impl DirMove {
             let file_name_normalized = file_name.replace('.', " ").to_lowercase();
 
             // Apply prefix ignores: strip ignored prefixes from the normalized filename
-            let file_name_normalized = self.strip_ignored_prefixes(&file_name_normalized);
+            let file_name_stripped = self.strip_ignored_prefixes(&file_name_normalized);
 
             for &idx in &dir_indices {
                 // dir.name is already lowercase
-                // Check if the normalized filename contains the directory name
-                if file_name_normalized.contains(&dirs[idx].name) {
+                // Also strip ignored prefixes from directory name for matching
+                let dir_name_stripped = self.strip_ignored_prefixes(&dirs[idx].name);
+
+                // Skip directories whose name is exactly an ignored prefix
+                // (after stripping, the directory name would be empty or unchanged if it's just the prefix)
+                if self.is_ignored_prefix(&dirs[idx].name) {
+                    continue;
+                }
+
+                // Check if:
+                // 1. Stripped filename contains stripped directory name (both have prefix removed)
+                // 2. Original filename contains stripped directory name (dir has prefix, file doesn't)
+                // 3. Stripped filename contains original directory name (file has prefix, dir doesn't)
+                let is_match = file_name_stripped.contains(&*dir_name_stripped)
+                    || file_name_normalized.contains(&*dir_name_stripped)
+                    || file_name_stripped.contains(&dirs[idx].name);
+
+                if is_match {
                     matches.entry(idx).or_default().push(file_path.clone());
                     // Only match to first directory found
                     break;
@@ -913,6 +929,14 @@ impl DirMove {
         } else {
             Cow::Owned(result.to_string())
         }
+    }
+
+    /// Check if a name exactly matches one of the ignored prefixes.
+    fn is_ignored_prefix(&self, name: &str) -> bool {
+        self.config
+            .prefix_ignores
+            .iter()
+            .any(|ignore| ignore.eq_ignore_ascii_case(name))
     }
 
     /// Find the best prefix for a file by checking if other files share the same prefix.
@@ -2134,6 +2158,50 @@ mod tests {
 
         let result = dirmove.match_files_to_directories(&files, &dirs);
 
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_prefix_ignore_applied_to_both() {
+        // Both file and directory have the ignored prefix - should still match after stripping
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
+        let dirs = make_test_dirs(&["Prefix Show Name", "Other Dir"]);
+        let files = make_file_paths(&["Prefix.Show.Name.S01E01.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        // File "Prefix.Show.Name.S01E01.mp4" should match "Prefix Show Name" directory
+        // after stripping "prefix " from both, leaving "show name" to match
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_file_has_prefix_dir_does_not() {
+        // File has prefix but directory doesn't - should match the stripped filename to dir
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
+        let dirs = make_test_dirs(&["Show Name", "Other"]);
+        let files = make_file_paths(&["Prefix.Show.Name.S01E01.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        // After stripping "prefix " from filename, "show name s01e01 mp4" contains "show name"
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&0));
+    }
+
+    #[test]
+    fn test_match_files_to_directories_dir_has_prefix_file_does_not() {
+        // Directory has prefix but file doesn't - should match filename to stripped dir name
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
+        let dirs = make_test_dirs(&["Prefix Show Name", "Other"]);
+        let files = make_file_paths(&["Show.Name.S01E01.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        // Directory "prefix show name" stripped becomes "show name"
+        // Filename "show name s01e01 mp4" contains "show name"
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&0));
     }
