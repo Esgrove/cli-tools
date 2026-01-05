@@ -40,7 +40,7 @@ serde_bytes = "0.11.19"
 sha1 = "0.10.6"
 tempfile = "3.23.0"
 titlecase = "3.6.0"
-tokio = { version = "1.48.0", features = ["full"] }
+tokio = { version = "1.49.0", features = ["full"] }
 toml = "0.9.8"
 trash = "5.2.5"
 unicode-normalization = "0.1.25"
