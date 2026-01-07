@@ -32,7 +32,7 @@ ratatui = "0.30.0"
 rayon = "1.10.0"
 regex = "1.12.2"
 reqwest = { version = "0.13.1", features = ["cookies", "form", "multipart"] }
-rust_xlsxwriter = { version = "0.92.2", features = ["chrono", "serde"] }
+rust_xlsxwriter = { version = "0.92.3", features = ["chrono", "serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bencode = "0.2.4"
 serde_json = "1.0"
