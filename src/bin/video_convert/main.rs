@@ -155,6 +155,10 @@ pub(crate) struct VideoConvertArgs {
     /// Maximum duration in seconds
     #[arg(short = 'U', long = "max-duration", name = "MAX_DURATION")]
     max_duration: Option<f64>,
+
+    /// Maximum number of files to display (0 = show all)
+    #[arg(short = 'L', long = "display-limit", name = "DISPLAY_LIMIT")]
+    display_limit: Option<usize>,
 }
 
 impl VideoConvertArgs {
@@ -307,7 +311,12 @@ fn show_database_contents(args: VideoConvertArgs) -> Result<()> {
         println!("{}", "Pending files:".bold());
 
         let files = database.get_pending_files(&config.db_filter)?;
-        for file in &files {
+        let total_matching = files.len();
+        let display_count = config
+            .display_limit
+            .map_or(total_matching, |limit| total_matching.min(limit));
+
+        for file in files.iter().take(display_count) {
             let size_str = cli_tools::format_size(file.size_bytes);
             let bitrate_str = format!("{:.1} Mbps", file.bitrate_kbps as f64 / 1000.0);
             let duration_str = cli_tools::format_duration(std::time::Duration::from_secs_f64(file.duration));
@@ -329,7 +338,12 @@ fn show_database_contents(args: VideoConvertArgs) -> Result<()> {
             println!("  (no files match the current filter)");
         } else {
             println!();
-            println!("Showing {} of {} files", files.len(), stats.total_files);
+            let remaining = total_matching - display_count;
+            if remaining > 0 {
+                println!("Showing {display_count} of {total_matching} matching files ({remaining} more)...");
+            } else {
+                println!("Showing {total_matching} of {} files", stats.total_files);
+            }
         }
     }
     Ok(())

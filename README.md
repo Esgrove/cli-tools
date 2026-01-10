@@ -181,6 +181,7 @@ Options:
   -r, --recurse                      Recurse into subdirectories
   -s, --sort <ORDER>                 Sort files [possible values: bitrate, bitrate-asc, size, size-asc, duration, duration-asc, resolution, resolution-asc, name, name-desc]
   -E, --list-extensions              List file extension counts in the database
+  -L, --display-limit <LIMIT>        Maximum files to display (0 = all) [default: 100]
   -S, --show-db                      Show database statistics and contents
   -t, --extension <EXTENSION>        Filter by file extension (can be repeated)
   -u, --min-duration <SECONDS>       Minimum duration filter (seconds)
@@ -235,6 +236,7 @@ max_duration = 7200      # Maximum duration (seconds)
 count = 10               # Limit number of files to process
 sort = "bitrate"         # Sort order (highest bitrate first)
 recurse = true           # Recurse into subdirectories
+display_limit = 100      # Max files to display (0 = all)
 ```
 
 CLI arguments take priority over config file values.

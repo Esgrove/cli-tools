@@ -37,6 +37,8 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     delete: bool,
     #[serde(default)]
+    display_limit: Option<usize>,
+    #[serde(default)]
     exclude: Vec<String>,
     #[serde(default)]
     extensions: Vec<String>,
@@ -54,6 +56,9 @@ pub struct VideoConvertConfig {
     verbose: bool,
 }
 
+/// Default display limit for showing pending files.
+const DEFAULT_DISPLAY_LIMIT: usize = 100;
+
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug, Default)]
 pub struct Config {
@@ -63,6 +68,7 @@ pub struct Config {
     pub(crate) count: Option<usize>,
     pub(crate) db_filter: PendingFileFilter,
     pub(crate) delete: bool,
+    pub(crate) display_limit: Option<usize>,
     pub(crate) dryrun: bool,
     pub(crate) exclude: Vec<String>,
     pub(crate) extensions: Vec<String>,
@@ -142,6 +148,13 @@ impl Config {
         let count = args.count.or(user_config.count);
         let sort = args.sort.or(user_config.sort).unwrap_or(SortOrder::Name);
 
+        // Display limit: CLI overrides config, default is 100, 0 means no limit
+        let display_limit = match args.display_limit.or(user_config.display_limit) {
+            Some(0) => None,
+            Some(limit) => Some(limit),
+            None => Some(DEFAULT_DISPLAY_LIMIT),
+        };
+
         // Build db_filter with merged values
         let db_filter = PendingFileFilter {
             action: None,
@@ -161,6 +174,7 @@ impl Config {
             count,
             db_filter,
             delete: args.delete || user_config.delete,
+            display_limit,
             dryrun: args.print,
             exclude,
             extensions,
