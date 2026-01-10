@@ -694,12 +694,19 @@ impl QTorrent {
         if self.config.paused {
             println!("    {} {}", "State:".dimmed(), "paused".yellow());
         }
-        if !info.excluded_indices.is_empty() {
-            println!(
-                "    {} {}",
-                "Files to skip:".dimmed(),
-                format!("{}", info.excluded_indices.len()).yellow()
-            );
+        let total_count = info.torrent.files().len();
+        let skipped_count = info.excluded_indices.len();
+        let included_count = total_count - skipped_count;
+        if included_count > 1 {
+            if skipped_count > 0 {
+                println!(
+                    "    {} {included_count} / {total_count} ({} skipped)",
+                    "Files:".dimmed(),
+                    format!("{skipped_count}").yellow()
+                );
+            } else {
+                println!("    {} {total_count}", "Files:".dimmed());
+            }
         }
         println!();
     }
