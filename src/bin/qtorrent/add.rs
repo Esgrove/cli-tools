@@ -367,6 +367,11 @@ impl QTorrent {
             cli_tools::path_to_string_relative(&info.path)
         );
         println!("  {} {}", "Internal name:".dimmed(), internal_name);
+        if let Some(comment) = &info.torrent.comment
+            && !comment.is_empty()
+        {
+            println!("  {}       {}", "Comment:".dimmed(), comment);
+        }
         if self.config.verbose {
             println!("  {}     {}", "Info hash:".dimmed(), info.info_hash);
         }
