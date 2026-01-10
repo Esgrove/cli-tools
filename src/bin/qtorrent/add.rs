@@ -966,6 +966,7 @@ impl QTorrent {
     }
 
     /// Add a single torrent to qBittorrent.
+    #[allow(clippy::too_many_lines)]
     async fn add_single_torrent(&self, client: &QBittorrentClient, info: TorrentInfo) -> Result<()> {
         let info_hash = info.info_hash.clone();
         let display_name = info.display_name().into_owned();
@@ -1055,18 +1056,36 @@ impl QTorrent {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
 
-            match client.set_file_priorities(&info_hash, &excluded_indices, 0).await {
-                Ok(()) => {
-                    println!("  {} Set {} file(s) to skip", "✓".green(), excluded_indices.len());
+            let mut priority_success = false;
+            let mut last_error = None;
+
+            // Try twice with a delay between attempts
+            for attempt in 0..2 {
+                if attempt > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                 }
-                Err(error) => {
+
+                match client.set_file_priorities(&info_hash, &excluded_indices, 0).await {
+                    Ok(()) => {
+                        println!("  {} Set {} file(s) to skip", "✓".green(), excluded_indices.len());
+                        priority_success = true;
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                    }
+                }
+            }
+
+            if !priority_success {
+                if let Some(error) = last_error {
                     cli_tools::print_warning!("Could not set file priorities (torrent may still be loading): {error}");
-                    println!(
-                        "  {} You may need to manually skip {} file(s) in qBittorrent",
-                        "⚠".yellow(),
-                        excluded_indices.len()
-                    );
                 }
+                println!(
+                    "  {} You may need to manually skip {} file(s) in qBittorrent",
+                    "⚠".yellow(),
+                    excluded_indices.len()
+                );
             }
         }
 
