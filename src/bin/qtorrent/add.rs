@@ -20,6 +20,13 @@ use crate::config::Config;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
 use crate::torrent::{FileFilter, FileInfo, FilteredFiles, Torrent};
 
+// List of known media file extensions
+const KNOWN_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "ts", "mp3", "flac", "wav", "aac", "ogg",
+    "wma", "m4a", "opus", "alac", "rar", "zip", "7z", "tar", "gz", "bz2", "xz", "srt", "sub", "jpg", "jpeg", "png",
+    "gif", "bmp", "webp", "tiff", "tif", "pdf", "epub", "mobi",
+];
+
 /// Main handler for adding torrents to qBittorrent.
 pub struct QTorrent {
     config: Config,
@@ -915,18 +922,23 @@ impl QTorrent {
         (normalized_suggested, Some(normalized_internal))
     }
 
-    /// Extract a file extension if it looks like a real file extension (not a number from a date).
+    /// Extract a file extension if it looks like a real media file extension.
     ///
-    /// Returns `None` if the extension is purely numeric (like `.15` from a date).
+    /// Only recognizes known media extensions to avoid treating names like "Show.Name" as having extension "Name".
+    /// Also filters out purely numeric extensions (like `.15` from dates).
     fn extract_file_extension(name: &str) -> Option<String> {
-        let ext = Path::new(name).extension()?.to_string_lossy().to_string();
+        let ext = Path::new(name).extension()?.to_string_lossy().to_lowercase();
 
         // If the extension is purely numeric, it's likely part of a date, not a real extension
         if ext.chars().all(|c| c.is_ascii_digit()) {
             return None;
         }
 
-        Some(ext)
+        if KNOWN_EXTENSIONS.contains(&ext.as_str()) {
+            Some(ext)
+        } else {
+            None
+        }
     }
 
     /// Insert a date before the file extension, or at the end if no extension.
@@ -1127,6 +1139,31 @@ mod tests {
             let (suggested, internal) = QTorrent::normalize_rename_options("Show Name 2024.01.15", Some("Show Name"));
             assert_eq!(suggested, "Show Name 2024.01.15");
             assert_eq!(internal.as_deref(), Some("Show Name.2024.01.15"));
+        }
+
+        #[test]
+        fn extension_added_when_names_differ() {
+            // When one has extension and names are different, extension should be added to the other
+            let (suggested, internal) =
+                QTorrent::normalize_rename_options("Different.Name.2024.01.15.mp4", Some("Other.Name"));
+            assert_eq!(suggested, "Different.Name.2024.01.15.mp4");
+            assert_eq!(internal.as_deref(), Some("Other.Name.2024.01.15.mp4"));
+        }
+
+        #[test]
+        fn non_extension_dots_not_treated_as_extension() {
+            // "Show.Name" should not have "Name" treated as an extension
+            let (suggested, internal) = QTorrent::normalize_rename_options("Show.Name.mp4", Some("Show.Name"));
+            assert_eq!(suggested, "Show.Name.mp4");
+            assert_eq!(internal.as_deref(), Some("Show.Name.mp4"));
+        }
+
+        #[test]
+        fn both_without_extension_different_names() {
+            // Neither has a real extension, names differ - no extension added
+            let (suggested, internal) = QTorrent::normalize_rename_options("Show.Name.One", Some("Show.Name.Two"));
+            assert_eq!(suggested, "Show.Name.One");
+            assert_eq!(internal.as_deref(), Some("Show.Name.Two"));
         }
     }
 

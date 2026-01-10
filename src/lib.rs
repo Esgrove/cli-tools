@@ -16,6 +16,17 @@ use difference::{Changeset, Difference};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
+/// Bytes per kilobyte.
+const KB: u64 = 1024;
+/// Bytes per megabyte.
+const MB: u64 = KB * 1024;
+/// Bytes per gigabyte.
+const GB: u64 = MB * 1024;
+
+/// Windows API constant for remote/network drive type.
+#[cfg(windows)]
+const DRIVE_REMOTE: u32 = 4;
+
 /// System directories that should be skipped when iterating files.
 const SYSTEM_DIRECTORIES: &[&str] = &[
     // Windows
@@ -123,10 +134,6 @@ pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
 /// Format bytes as human-readable size.
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
     if bytes >= GB {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
@@ -352,8 +359,6 @@ pub fn is_system_directory_path(path: &Path) -> bool {
 pub fn is_network_path(path: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
-
-    const DRIVE_REMOTE: u32 = 4;
 
     // Check for UNC paths (\\server\share)
     let path_str = path.to_string_lossy();

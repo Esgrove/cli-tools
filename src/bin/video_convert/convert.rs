@@ -28,6 +28,10 @@ const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {
 /// Minimum ratio of output duration to input duration for a conversion to be considered successful.
 const MIN_DURATION_RATIO: f64 = 0.85;
 
+/// Windows API constant for creating a new process group.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
 /// Regex to match x265 codec identifier in filenames (case-insensitive, word boundary).
 static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b").expect("Invalid x265 regex"));
 
@@ -1312,7 +1316,6 @@ impl VideoConvert {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
         }
         #[cfg(unix)]
