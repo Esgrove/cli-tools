@@ -152,6 +152,7 @@ Options:
 ## Vconvert
 
 Convert video files to HEVC (H.265) format using ffmpeg and NVENC.
+Tracks files needing conversion in a local SQLite database for efficient processing.
 
 ```console
 Convert video files to HEVC (H.265) format using ffmpeg and NVENC
@@ -162,25 +163,81 @@ Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -a, --all                    Convert all known video file types (default is only .mp4 and .mkv)
-  -b, --bitrate <LIMIT>        Skip files with bitrate lower than LIMIT kbps [default: 8000]
-  -c, --count <COUNT>          Limit the number of files to convert
-  -d, --delete                 Delete input files immediately instead of moving to trash
-  -p, --print                  Print commands without running them
-  -f, --force                  Overwrite existing output files
-  -n, --include <INCLUDE>      Include files that match the given pattern
-  -e, --exclude <EXCLUDE>      Exclude files that match the given pattern
-  -t, --extension <EXTENSION>  Override file extensions to convert
-  -o, --other                  Convert all known video file types except MP4 files
-  -r, --recurse                Recurse into subdirectories
-  -k, --skip-convert           Skip conversion
-  -m, --skip-remux             Skip remuxing
-  -s, --sort <ORDER>           Sort files [default: "name (alphabetical)"] [possible values: bitrate, bitrate-asc, size, size-asc, duration, duration-asc, resolution, resolution-asc, name, name-desc]
-  -l, --completion <SHELL>     Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
-  -v, --verbose                Print verbose output
-  -h, --help                   Print help (see more with '--help')
-  -V, --version                Print version
+  -a, --all                          Convert all known video file types (default is only .mp4 and .mkv)
+  -b, --bitrate <LIMIT>              Minimum bitrate threshold in kbps [default: 8000]
+  -B, --max-bitrate <MAX_BITRATE>    Maximum bitrate filter (kbps)
+  -c, --count <COUNT>                Limit the number of files to process
+  -C, --clear-db                     Clear all entries from the database
+  -d, --delete                       Delete input files immediately instead of moving to trash
+  -D, --from-db                      Process files from database instead of scanning
+  -e, --exclude <EXCLUDE>            Exclude files that match the given pattern
+  -f, --force                        Overwrite existing output files
+  -k, --skip-convert                 Skip conversion
+  -l, --completion <SHELL>           Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -m, --skip-remux                   Skip remuxing
+  -n, --include <INCLUDE>            Include files that match the given pattern
+  -o, --other                        Convert all known video file types except MP4 files
+  -p, --print                        Print commands without running them
+  -r, --recurse                      Recurse into subdirectories
+  -s, --sort <ORDER>                 Sort files [possible values: bitrate, bitrate-asc, size, size-asc, duration, duration-asc, resolution, resolution-asc, name, name-desc]
+  -E, --list-extensions              List file extension counts in the database
+  -S, --show-db                      Show database statistics and contents
+  -t, --extension <EXTENSION>        Filter by file extension (can be repeated)
+  -u, --min-duration <SECONDS>       Minimum duration filter (seconds)
+  -U, --max-duration <SECONDS>       Maximum duration filter (seconds)
+  -v, --verbose                      Print verbose output
+  -h, --help                         Print help (see more with '--help')
+  -V, --version                      Print version
 ```
+
+### Filter Options
+
+The filter options (`-b`/`--bitrate`, `-B`/`--max-bitrate`, `-u`/`--min-duration`, `-U`/`--max-duration`, `-t`/`--extension`, `-c`/`--count`) work for both normal scanning mode and database mode (`-D`/`--from-db`, `-S`/`--show-db`).
+
+### Database Commands
+
+```shell
+# Normal scan and convert (updates database automatically)
+vconvert /path/to/videos --recurse
+
+# Show database contents and statistics
+vconvert --show-db
+
+# List file extension counts in database
+vconvert --list-extensions
+
+# Show only mkv files in database
+vconvert --show-db --extension mkv
+
+# Process files from database (skip rescanning)
+vconvert --from-db
+
+# Process only files between 8-20 Mbps from database
+vconvert --from-db --bitrate 8000 --max-bitrate 20000
+
+# Process files sorted by bitrate (highest first)
+vconvert --from-db --sort bitrate
+
+# Clear the database
+vconvert --clear-db
+```
+
+### Configuration
+
+Filter options can also be set in the config file (`~/.config/cli-tools.toml`):
+
+```toml
+[video_convert]
+bitrate = 8000           # Minimum bitrate threshold (kbps)
+max_bitrate = 50000      # Maximum bitrate threshold (kbps)
+min_duration = 60        # Minimum duration (seconds)
+max_duration = 7200      # Maximum duration (seconds)
+count = 10               # Limit number of files to process
+sort = "bitrate"         # Sort order (highest bitrate first)
+recurse = true           # Recurse into subdirectories
+```
+
+CLI arguments take priority over config file values.
 
 ## Vres
 

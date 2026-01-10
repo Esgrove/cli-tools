@@ -6,7 +6,9 @@ use cli_tools::print_error;
 use itertools::Itertools;
 use serde::Deserialize;
 
-use crate::{SortOrder, VideoConvertArgs};
+use crate::SortOrder;
+use crate::VideoConvertArgs;
+use crate::database::PendingFileFilter;
 
 /// Default video extensions
 const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];
@@ -26,6 +28,12 @@ pub struct VideoConvertConfig {
     count: Option<usize>,
     #[serde(default)]
     bitrate: Option<u64>,
+    #[serde(default)]
+    max_bitrate: Option<u64>,
+    #[serde(default)]
+    min_duration: Option<f64>,
+    #[serde(default)]
+    max_duration: Option<f64>,
     #[serde(default)]
     delete: bool,
     #[serde(default)]
@@ -53,11 +61,15 @@ pub struct Config {
     pub(crate) convert_all: bool,
     pub(crate) convert_other: bool,
     pub(crate) count: Option<usize>,
+    pub(crate) db_filter: PendingFileFilter,
     pub(crate) delete: bool,
     pub(crate) dryrun: bool,
     pub(crate) exclude: Vec<String>,
     pub(crate) extensions: Vec<String>,
     pub(crate) include: Vec<String>,
+    pub(crate) max_bitrate: Option<u64>,
+    pub(crate) max_duration: Option<f64>,
+    pub(crate) min_duration: Option<f64>,
     pub(crate) overwrite: bool,
     pub(crate) path: PathBuf,
     pub(crate) recurse: bool,
@@ -77,7 +89,7 @@ struct UserConfig {
 impl VideoConvertConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    pub(crate) fn get_user_config() -> Self {
+    pub fn get_user_config() -> Self {
         cli_tools::config::CONFIG_PATH
             .as_deref()
             .and_then(|path| {
@@ -122,22 +134,46 @@ impl Config {
             Self::lowercase_vec(DEFAULT_EXTENSIONS)
         };
 
+        // Merge filter values: CLI args take priority over user config
+        let bitrate_limit = user_config.bitrate.unwrap_or(args.bitrate);
+        let max_bitrate = args.max_bitrate.or(user_config.max_bitrate);
+        let min_duration = args.min_duration.or(user_config.min_duration);
+        let max_duration = args.max_duration.or(user_config.max_duration);
+        let count = args.count.or(user_config.count);
+        let sort = args.sort.or(user_config.sort).unwrap_or(SortOrder::Name);
+
+        // Build db_filter with merged values
+        let db_filter = PendingFileFilter {
+            action: None,
+            extensions: extensions.clone(),
+            min_bitrate: Some(bitrate_limit),
+            max_bitrate,
+            min_duration,
+            max_duration,
+            limit: count,
+            sort: Some(sort),
+        };
+
         Ok(Self {
-            bitrate_limit: user_config.bitrate.unwrap_or(args.bitrate),
+            bitrate_limit,
             convert_all,
             convert_other,
-            count: args.count.or(user_config.count),
+            count,
+            db_filter,
             delete: args.delete || user_config.delete,
             dryrun: args.print,
             exclude,
             extensions,
             include,
+            max_bitrate,
+            max_duration,
+            min_duration,
             overwrite: args.force || user_config.overwrite,
             path,
             recurse: args.recurse || user_config.recurse,
             skip_convert: args.skip_convert,
             skip_remux: args.skip_remux,
-            sort: args.sort.or(user_config.sort).unwrap_or(SortOrder::Name),
+            sort,
             verbose: args.verbose || user_config.verbose,
         })
     }

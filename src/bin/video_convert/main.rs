@@ -1,5 +1,6 @@
 mod config;
 mod convert;
+mod database;
 mod logger;
 mod stats;
 
@@ -9,9 +10,12 @@ use std::str::FromStr;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, ValueEnum};
 use clap_complete::Shell;
+use colored::Colorize;
 use serde::Deserialize;
 
+use crate::config::{Config, VideoConvertConfig};
 use crate::convert::VideoConvert;
+use crate::database::Database;
 
 /// Sort order options for video files.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
@@ -40,6 +44,19 @@ pub enum SortOrder {
     NameDesc,
 }
 
+/// Database operation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseMode {
+    /// Process files from database instead of scanning.
+    Process,
+    /// Clear all entries from the database.
+    Clear,
+    /// Show database statistics and contents.
+    Show,
+    /// List file extension counts in the database.
+    ListExtensions,
+}
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
 pub(crate) struct VideoConvertArgs {
@@ -47,7 +64,7 @@ pub(crate) struct VideoConvertArgs {
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
 
-    /// Convert all known video file types (default is only .mp4 and .mkv)
+    /// Convert all known video file types
     #[arg(short, long)]
     all: bool,
 
@@ -110,6 +127,51 @@ pub(crate) struct VideoConvertArgs {
     /// Print verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Process files from database instead of scanning
+    #[arg(short = 'D', long = "from-db", group = "db_mode")]
+    from_db: bool,
+
+    /// Clear all entries from the database
+    #[arg(short = 'C', long = "clear-db", group = "db_mode")]
+    clear_db: bool,
+
+    /// Show database statistics and contents
+    #[arg(short = 'S', long = "show-db", group = "db_mode")]
+    show_db: bool,
+
+    /// List file extension counts in the database
+    #[arg(short = 'E', long = "list-extensions", group = "db_mode")]
+    list_extensions: bool,
+
+    /// Maximum bitrate in kbps
+    #[arg(short = 'B', long = "max-bitrate", name = "MAX_BITRATE")]
+    max_bitrate: Option<u64>,
+
+    /// Minimum duration in seconds
+    #[arg(short = 'u', long = "min-duration", name = "MIN_DURATION")]
+    min_duration: Option<f64>,
+
+    /// Maximum duration in seconds
+    #[arg(short = 'U', long = "max-duration", name = "MAX_DURATION")]
+    max_duration: Option<f64>,
+}
+
+impl VideoConvertArgs {
+    /// Get the database operation mode if any database flag is set.
+    pub const fn database_mode(&self) -> Option<DatabaseMode> {
+        if self.from_db {
+            Some(DatabaseMode::Process)
+        } else if self.clear_db {
+            Some(DatabaseMode::Clear)
+        } else if self.show_db {
+            Some(DatabaseMode::Show)
+        } else if self.list_extensions {
+            Some(DatabaseMode::ListExtensions)
+        } else {
+            None
+        }
+    }
 }
 
 impl FromStr for SortOrder {
@@ -154,7 +216,121 @@ fn main() -> Result<()> {
     let args = VideoConvertArgs::parse();
     if let Some(ref shell) = args.completion {
         cli_tools::generate_shell_completion(*shell, VideoConvertArgs::command(), true, env!("CARGO_BIN_NAME"))
+    } else if let Some(db_mode) = args.database_mode() {
+        handle_database_mode(db_mode, args)
     } else {
         VideoConvert::new(args)?.run()
     }
+}
+
+/// Handle database-specific operations.
+fn handle_database_mode(mode: DatabaseMode, args: VideoConvertArgs) -> Result<()> {
+    match mode {
+        DatabaseMode::Clear => {
+            let database = Database::open_default()?;
+            let cleared = database.clear()?;
+            println!("{}", format!("Cleared {cleared} entries from database").green());
+            Ok(())
+        }
+        DatabaseMode::Show => show_database_contents(args),
+        DatabaseMode::ListExtensions => list_extensions(args.verbose),
+        DatabaseMode::Process => VideoConvert::new(args)?.run_from_database(),
+    }
+}
+
+/// List file extension counts in the database.
+fn list_extensions(verbose: bool) -> Result<()> {
+    let database = Database::open_default()?;
+    if verbose {
+        println!("{}", format!("Database: {}", Database::path().display()).bold());
+        println!();
+    }
+
+    let ext_stats = database.get_extension_stats()?;
+    if ext_stats.is_empty() {
+        println!("No files in database");
+    } else {
+        // Calculate column widths for right-alignment
+        let max_count_width = ext_stats.iter().map(|e| e.count.to_string().len()).max().unwrap_or(1);
+        let max_size_width = ext_stats
+            .iter()
+            .map(|e| cli_tools::format_size(e.total_size).len())
+            .max()
+            .unwrap_or(1);
+
+        for ext in &ext_stats {
+            let size_str = cli_tools::format_size(ext.total_size);
+            println!(
+                ".{:<4} {:>max_count_width$} files  {:>max_size_width$}",
+                ext.extension, ext.count, size_str
+            );
+        }
+        println!();
+        let total_files: u64 = ext_stats.iter().map(|e| e.count).sum();
+        let total_size: u64 = ext_stats.iter().map(|e| e.total_size).sum();
+        println!(
+            "{:<5} {:>max_count_width$} files  {:>max_size_width$}",
+            "Total",
+            total_files,
+            cli_tools::format_size(total_size)
+        );
+    }
+    Ok(())
+}
+
+/// Show database statistics and contents.
+fn show_database_contents(args: VideoConvertArgs) -> Result<()> {
+    let verbose = args.verbose;
+    let user_config = VideoConvertConfig::get_user_config();
+    let config = Config::try_from_args(args, user_config)?;
+    let database = Database::open_default()?;
+    if verbose {
+        println!("{}", format!("Database: {}", Database::path().display()).bold());
+        println!();
+    }
+
+    let stats = database.get_stats()?;
+    println!("{stats}");
+
+    if stats.total_files > 0 {
+        // Show extension statistics
+        let ext_stats = database.get_extension_stats()?;
+        if !ext_stats.is_empty() {
+            println!();
+            println!("{}", "By extension:".bold());
+            for ext in &ext_stats {
+                println!("  {ext}");
+            }
+        }
+
+        println!();
+        println!("{}", "Pending files:".bold());
+
+        let files = database.get_pending_files(&config.db_filter)?;
+        for file in &files {
+            let size_str = cli_tools::format_size(file.size_bytes);
+            let bitrate_str = format!("{:.1} Mbps", file.bitrate_kbps as f64 / 1000.0);
+            let duration_str = cli_tools::format_duration(std::time::Duration::from_secs_f64(file.duration));
+            let action_str = match file.action {
+                database::PendingAction::Convert => "CONVERT".yellow(),
+                database::PendingAction::Remux => "REMUX".cyan(),
+            };
+            println!(
+                "  [{action_str}] .{} {} {} {} - {}",
+                file.extension,
+                size_str,
+                bitrate_str,
+                duration_str,
+                file.full_path.display()
+            );
+        }
+
+        if files.is_empty() {
+            println!("  (no files match the current filter)");
+        } else {
+            println!();
+            println!("Showing {} of {} files", files.len(), stats.total_files);
+        }
+    }
+    Ok(())
 }

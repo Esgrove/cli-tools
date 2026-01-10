@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "8.2.0"
+version = "8.3.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -32,11 +32,12 @@ ratatui = "0.30.0"
 rayon = "1.10.0"
 regex = "1.12.2"
 reqwest = { version = "0.13.1", features = ["cookies", "form", "multipart"] }
+rusqlite = { version = "0.35", features = ["bundled"] }
 rust_xlsxwriter = { version = "0.92.3", features = ["chrono", "serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bencode = "0.2.4"
-serde_json = "1.0"
 serde_bytes = "0.11.19"
+serde_json = "1.0"
 sha1 = "0.10.6"
 tempfile = "3.23.0"
 titlecase = "3.6.0"

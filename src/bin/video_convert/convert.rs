@@ -16,6 +16,7 @@ use regex::Regex;
 use walkdir::WalkDir;
 
 use crate::config::{Config, VideoConvertConfig};
+use crate::database::{Database, PendingAction};
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 use crate::{SortOrder, VideoConvertArgs};
@@ -39,6 +40,21 @@ static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b").e
 pub struct VideoConvert {
     config: Config,
     logger: RefCell<FileLogger>,
+}
+
+/// Filter options for video file analysis.
+#[derive(Debug, Clone, Copy)]
+struct AnalysisFilter {
+    /// Minimum bitrate threshold in kbps.
+    min_bitrate: u64,
+    /// Maximum bitrate threshold in kbps.
+    max_bitrate: Option<u64>,
+    /// Minimum duration threshold in seconds.
+    min_duration: Option<f64>,
+    /// Maximum duration threshold in seconds.
+    max_duration: Option<f64>,
+    /// Whether to overwrite existing output files.
+    overwrite: bool,
 }
 
 /// A video file with its path and parsed name components.
@@ -75,8 +91,14 @@ pub struct VideoInfo {
 pub enum SkipReason {
     /// File is already HEVC in MP4 container
     AlreadyConverted,
-    /// File bitrate is below the threshold
+    /// File bitrate is below the minimum threshold
     BitrateBelowThreshold { bitrate: u64, threshold: u64 },
+    /// File bitrate is above the maximum threshold
+    BitrateAboveThreshold { bitrate: u64, threshold: u64 },
+    /// File duration is below the minimum threshold
+    DurationBelowThreshold { duration: f64, threshold: f64 },
+    /// File duration is above the maximum threshold
+    DurationAboveThreshold { duration: f64, threshold: f64 },
     /// Output file already exists
     OutputExists { path: PathBuf },
     /// Failed to get video info
@@ -305,6 +327,15 @@ impl std::fmt::Display for SkipReason {
             Self::BitrateBelowThreshold { bitrate, threshold } => {
                 write!(f, "Bitrate {bitrate} kbps is below threshold {threshold} kbps")
             }
+            Self::BitrateAboveThreshold { bitrate, threshold } => {
+                write!(f, "Bitrate {bitrate} kbps is above threshold {threshold} kbps")
+            }
+            Self::DurationBelowThreshold { duration, threshold } => {
+                write!(f, "Duration {duration:.1}s is below threshold {threshold:.1}s")
+            }
+            Self::DurationAboveThreshold { duration, threshold } => {
+                write!(f, "Duration {duration:.1}s is above threshold {threshold:.1}s")
+            }
             Self::OutputExists { path } => {
                 write!(f, "Output file already exists: \"{}\"", path.display())
             }
@@ -371,8 +402,18 @@ impl VideoConvert {
     }
 
     /// Run the video conversion process.
+    ///
+    /// This scans for files, analyzes them, updates the database, processes renames immediately,
+    /// and then converts/remuxes the remaining files.
+    #[allow(clippy::too_many_lines)]
     pub fn run(&self) -> Result<()> {
         self.log_init();
+
+        // Open database for tracking
+        let database = Database::open_default()?;
+        if self.config.verbose {
+            println!("Database: {}", Database::path().display());
+        }
 
         // Set up Ctrl+C handler for graceful abort
         let abort_flag = Arc::new(AtomicBool::new(false));
@@ -410,6 +451,33 @@ impl VideoConvert {
             stats.files_renamed = self.process_renames(&analysis_output.renames);
         }
 
+        // Update database with files that need processing
+        let mut db_added = 0;
+        for file in &analysis_output.remuxes {
+            if database
+                .upsert_pending_file(&file.file.path, &file.file.extension, &file.info, PendingAction::Remux)
+                .is_ok()
+            {
+                db_added += 1;
+            }
+        }
+        for file in &analysis_output.conversions {
+            if database
+                .upsert_pending_file(
+                    &file.file.path,
+                    &file.file.extension,
+                    &file.info,
+                    PendingAction::Convert,
+                )
+                .is_ok()
+            {
+                db_added += 1;
+            }
+        }
+        if self.config.verbose && db_added > 0 {
+            println!("Updated {db_added} files in database");
+        }
+
         // Calculate total files to process and truncate lists to respect config limit
         let remux_count = if self.config.skip_remux {
             0
@@ -436,19 +504,27 @@ impl VideoConvert {
 
         // Process remuxes
         if !self.config.skip_remux && !analysis_output.remuxes.is_empty() {
-            let (remux_stats, was_aborted) =
-                self.process_remuxes(analysis_output.remuxes, &abort_flag, &mut processed_count, total_limit);
+            let (remux_stats, was_aborted) = self.process_files_with_db_cleanup(
+                analysis_output.remuxes,
+                &abort_flag,
+                &mut processed_count,
+                total_limit,
+                &database,
+                Self::remux_to_mp4,
+            );
             stats += remux_stats;
             aborted = was_aborted;
         }
 
         // Process conversions
         if !self.config.skip_convert && !analysis_output.conversions.is_empty() && !aborted {
-            let (convert_stats, was_aborted) = self.process_conversions(
+            let (convert_stats, was_aborted) = self.process_files_with_db_cleanup(
                 analysis_output.conversions,
                 &abort_flag,
                 &mut processed_count,
                 total_limit,
+                &database,
+                Self::convert_to_hevc,
             );
             stats += convert_stats;
             aborted = was_aborted;
@@ -503,13 +579,14 @@ impl VideoConvert {
         Ok(files)
     }
 
-    /// Generic file processing loop.
-    fn process_files<F>(
+    /// Process files and remove them from the database after successful processing.
+    fn process_files_with_db_cleanup<F>(
         &self,
         files: Vec<ProcessableFile>,
         abort_flag: &AtomicBool,
         processed_count: &mut usize,
         total_limit: usize,
+        database: &Database,
         process_fn: F,
     ) -> (RunStats, bool)
     where
@@ -531,22 +608,172 @@ impl VideoConvert {
                 break;
             }
 
+            // Check if file still exists
+            if !file.file.path.exists() {
+                print_warning!("File no longer exists: {}", file.file.path.display());
+                let _ = database.remove_pending_file(&file.file.path);
+                continue;
+            }
+
             let file_index = format!("[{:>width$}/{total_limit}]", *processed_count + 1, width = num_digits);
 
             let start = Instant::now();
             let result = process_fn(self, &file, &file_index);
             let duration = start.elapsed();
 
-            if let ProcessResult::Failed { ref error } = result {
-                print_error!("{}: {error}", cli_tools::path_to_string_relative(&file.file.path));
-            } else {
-                *processed_count += 1;
+            match &result {
+                ProcessResult::Failed { error } => {
+                    print_error!("{}: {error}", cli_tools::path_to_string_relative(&file.file.path));
+                }
+                ProcessResult::Converted { .. } | ProcessResult::Remuxed {} => {
+                    *processed_count += 1;
+                    // Remove from database after successful processing
+                    let _ = database.remove_pending_file(&file.file.path);
+                }
             }
 
             stats.add_result(&result, duration);
         }
 
         (stats, aborted)
+    }
+
+    /// Run video conversion from files stored in the database.
+    ///
+    /// This skips the scanning/analysis phase and processes files directly from the database.
+    /// Supports filtering by extension, bitrate, and duration via CLI arguments.
+    #[allow(clippy::too_many_lines)]
+    pub fn run_from_database(&self) -> Result<()> {
+        self.log_init();
+
+        let mut database = Database::open_default()?;
+        println!("{}", format!("Database: {}", Database::path().display()).bold());
+
+        // Remove files that no longer exist
+        let removed = database.remove_missing_files()?;
+        if removed > 0 {
+            println!("{}", format!("Removed {removed} missing files from database").yellow());
+        }
+
+        // Build filter from config
+        let filter = self.config.db_filter.clone();
+
+        // Get pending files from database with filters applied
+        let pending_files = database.get_pending_files(&filter)?;
+        if pending_files.is_empty() {
+            println!("No pending files in database matching filters");
+            return Ok(());
+        }
+
+        println!("Found {} pending file(s) in database", pending_files.len());
+
+        // Set up Ctrl+C handler for graceful abort
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let abort_flag_handler = Arc::clone(&abort_flag);
+
+        ctrlc::set_handler(move || {
+            if abort_flag_handler.load(Ordering::SeqCst) {
+                std::process::exit(130);
+            }
+            println!("\n{}", "Received Ctrl+C, finishing current file...".yellow().bold());
+            abort_flag_handler.store(true, Ordering::SeqCst);
+        })
+        .expect("Failed to set Ctrl+C handler");
+
+        let mut stats = RunStats::default();
+        let mut aborted = false;
+        let mut processed_count: usize = 0;
+
+        // Separate files by action type
+        let (remuxes, conversions): (Vec<_>, Vec<_>) = pending_files
+            .into_iter()
+            .partition(|f| f.action == PendingAction::Remux);
+
+        // Calculate limits
+        let remux_count = if self.config.skip_remux { 0 } else { remuxes.len() };
+        let convert_count = if self.config.skip_convert { 0 } else { conversions.len() };
+        let total_available = remux_count + convert_count;
+        let total_limit = self.config.count.map_or(total_available, |c| total_available.min(c));
+
+        // Convert to processable files
+        let mut remux_files: Vec<ProcessableFile> = remuxes
+            .into_iter()
+            .filter(|f| f.full_path.exists())
+            .map(|f| ProcessableFile {
+                file: VideoFile::new(&f.full_path),
+                info: f.to_video_info(),
+                output_path: VideoFile::new(&f.full_path).output_path(),
+            })
+            .collect();
+
+        let mut conversion_files: Vec<ProcessableFile> = conversions
+            .into_iter()
+            .filter(|f| f.full_path.exists())
+            .map(|f| ProcessableFile {
+                file: VideoFile::new(&f.full_path),
+                info: f.to_video_info(),
+                output_path: VideoFile::new(&f.full_path).output_path(),
+            })
+            .collect();
+
+        // Sort files
+        Self::sort_processable_files(&mut remux_files, self.config.sort);
+        Self::sort_processable_files(&mut conversion_files, self.config.sort);
+
+        // Truncate lists if they exceed the limit
+        if let Some(count) = self.config.count
+            && total_available > count
+        {
+            let remux_limit = remux_files.len().min(count);
+            remux_files.truncate(remux_limit);
+            let remaining = count.saturating_sub(remux_limit);
+            conversion_files.truncate(remaining);
+        }
+
+        // Process remuxes
+        if !self.config.skip_remux && !remux_files.is_empty() {
+            let (remux_stats, was_aborted) = self.process_files_with_db_cleanup(
+                remux_files,
+                &abort_flag,
+                &mut processed_count,
+                total_limit,
+                &database,
+                Self::remux_to_mp4,
+            );
+            stats += remux_stats;
+            aborted = was_aborted;
+        }
+
+        // Process conversions
+        if !self.config.skip_convert && !conversion_files.is_empty() && !aborted {
+            let (convert_stats, was_aborted) = self.process_files_with_db_cleanup(
+                conversion_files,
+                &abort_flag,
+                &mut processed_count,
+                total_limit,
+                &database,
+                Self::convert_to_hevc,
+            );
+            stats += convert_stats;
+            aborted = was_aborted;
+        }
+
+        self.log_stats(&stats);
+
+        if aborted {
+            println!("\n{}", "Aborted by user".bold().red());
+        }
+
+        stats.print_summary();
+
+        // Show remaining database stats
+        let db_stats = database.get_stats()?;
+        if db_stats.total_files > 0 {
+            println!("\n{}", "Remaining in database:".bold());
+            println!("{db_stats}");
+        }
+
+        Ok(())
     }
 
     /// Get video information using ffprobe.
@@ -855,13 +1082,18 @@ impl VideoConvert {
         );
 
         // Extract config values needed for analysis to avoid borrowing self in parallel context
-        let bitrate_limit = self.config.bitrate_limit;
-        let overwrite = self.config.overwrite;
+        let filter = AnalysisFilter {
+            min_bitrate: self.config.bitrate_limit,
+            max_bitrate: self.config.max_bitrate,
+            min_duration: self.config.min_duration,
+            max_duration: self.config.max_duration,
+            overwrite: self.config.overwrite,
+        };
 
         let results: Vec<AnalysisResult> = files
             .into_par_iter()
             .progress_with(progress_bar)
-            .map(|file| Self::analyze_video_file(file, bitrate_limit, overwrite))
+            .map(|file| Self::analyze_video_file(file, &filter))
             .collect();
 
         // Collect files into separate vectors
@@ -906,7 +1138,16 @@ impl VideoConvert {
                             analysis_stats.skipped_converted += 1;
                         }
                         SkipReason::BitrateBelowThreshold { .. } => {
-                            analysis_stats.skipped_bitrate += 1;
+                            analysis_stats.skipped_bitrate_low += 1;
+                        }
+                        SkipReason::BitrateAboveThreshold { .. } => {
+                            analysis_stats.skipped_bitrate_high += 1;
+                        }
+                        SkipReason::DurationBelowThreshold { .. } => {
+                            analysis_stats.skipped_duration_short += 1;
+                        }
+                        SkipReason::DurationAboveThreshold { .. } => {
+                            analysis_stats.skipped_duration_long += 1;
                         }
                         SkipReason::OutputExists { .. } => {
                             analysis_stats.skipped_duplicate += 1;
@@ -1035,34 +1276,6 @@ impl VideoConvert {
 
         self.log_renames(renamed_count, total, start.elapsed());
         renamed_count
-    }
-
-    /// Process all files that need remuxing.
-    #[inline]
-    fn process_remuxes(
-        &self,
-        files: Vec<ProcessableFile>,
-        abort_flag: &AtomicBool,
-        processed_count: &mut usize,
-        total_limit: usize,
-    ) -> (RunStats, bool) {
-        self.process_files(files, abort_flag, processed_count, total_limit, |this, file, index| {
-            this.remux_to_mp4(file, index)
-        })
-    }
-
-    /// Process all files that need conversion.
-    #[inline]
-    fn process_conversions(
-        &self,
-        files: Vec<ProcessableFile>,
-        abort_flag: &AtomicBool,
-        processed_count: &mut usize,
-        total_limit: usize,
-    ) -> (RunStats, bool) {
-        self.process_files(files, abort_flag, processed_count, total_limit, |this, file, index| {
-            this.convert_to_hevc(file, index)
-        })
     }
 
     /// Build the ffmpeg command for HEVC conversion.
@@ -1219,7 +1432,7 @@ impl VideoConvert {
 
     /// Analyze a single file to determine what action to take.
     /// This is a standalone function to allow parallel execution without borrowing `VideoConvert`.
-    fn analyze_video_file(file: VideoFile, bitrate_limit: u64, overwrite: bool) -> AnalysisResult {
+    fn analyze_video_file(file: VideoFile, filter: &AnalysisFilter) -> AnalysisResult {
         // Get video info using ffprobe
         let info = match Self::get_video_info(&file.path) {
             Ok(info) => info,
@@ -1238,7 +1451,7 @@ impl VideoConvert {
             if !RE_X265.is_match(&file.name) {
                 // Needs rename to add .x265 suffix
                 let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
-                if new_path.exists() && !overwrite {
+                if new_path.exists() && !filter.overwrite {
                     return AnalysisResult::Skip {
                         file,
                         reason: SkipReason::OutputExists { path: new_path },
@@ -1252,13 +1465,52 @@ impl VideoConvert {
             };
         }
 
-        // Check bitrate threshold
-        if info.bitrate_kbps < bitrate_limit {
+        // Check minimum bitrate threshold
+        if info.bitrate_kbps < filter.min_bitrate {
             return AnalysisResult::Skip {
                 file,
                 reason: SkipReason::BitrateBelowThreshold {
                     bitrate: info.bitrate_kbps,
-                    threshold: bitrate_limit,
+                    threshold: filter.min_bitrate,
+                },
+            };
+        }
+
+        // Check maximum bitrate threshold
+        if let Some(max_bitrate) = filter.max_bitrate
+            && info.bitrate_kbps > max_bitrate
+        {
+            return AnalysisResult::Skip {
+                file,
+                reason: SkipReason::BitrateAboveThreshold {
+                    bitrate: info.bitrate_kbps,
+                    threshold: max_bitrate,
+                },
+            };
+        }
+
+        // Check minimum duration threshold
+        if let Some(min_duration) = filter.min_duration
+            && info.duration < min_duration
+        {
+            return AnalysisResult::Skip {
+                file,
+                reason: SkipReason::DurationBelowThreshold {
+                    duration: info.duration,
+                    threshold: min_duration,
+                },
+            };
+        }
+
+        // Check maximum duration threshold
+        if let Some(max_duration) = filter.max_duration
+            && info.duration > max_duration
+        {
+            return AnalysisResult::Skip {
+                file,
+                reason: SkipReason::DurationAboveThreshold {
+                    duration: info.duration,
+                    threshold: max_duration,
                 },
             };
         }
@@ -1266,7 +1518,7 @@ impl VideoConvert {
         let output_path = file.output_path();
 
         // Check if output already exists
-        if output_path.exists() && !overwrite {
+        if output_path.exists() && !filter.overwrite {
             return AnalysisResult::Skip {
                 file,
                 reason: SkipReason::OutputExists { path: output_path },

@@ -12,7 +12,10 @@ pub struct AnalysisStats {
     pub(crate) to_remux: usize,
     pub(crate) to_convert: usize,
     pub(crate) skipped_converted: usize,
-    pub(crate) skipped_bitrate: usize,
+    pub(crate) skipped_bitrate_low: usize,
+    pub(crate) skipped_bitrate_high: usize,
+    pub(crate) skipped_duration_short: usize,
+    pub(crate) skipped_duration_long: usize,
     pub(crate) skipped_duplicate: usize,
     pub(crate) analysis_failed: usize,
 }
@@ -41,7 +44,12 @@ pub struct ConversionStats {
 impl AnalysisStats {
     /// Get the total number of skipped files.
     pub(crate) const fn total_skipped(&self) -> usize {
-        self.skipped_converted + self.skipped_bitrate + self.skipped_duplicate
+        self.skipped_converted
+            + self.skipped_bitrate_low
+            + self.skipped_bitrate_high
+            + self.skipped_duration_short
+            + self.skipped_duration_long
+            + self.skipped_duplicate
     }
 
     /// Print analysis summary.
@@ -52,8 +60,21 @@ impl AnalysisStats {
         if self.total_skipped() > 0 {
             println!("Skipped:                 {}", self.total_skipped());
             println!(" - Already converted:    {}", self.skipped_converted);
-            println!(" - Below bitrate limit:  {}", self.skipped_bitrate);
-            println!(" - Output exists:        {}", self.skipped_duplicate);
+            if self.skipped_bitrate_low > 0 {
+                println!(" - Below bitrate limit:  {}", self.skipped_bitrate_low);
+            }
+            if self.skipped_bitrate_high > 0 {
+                println!(" - Above bitrate limit:  {}", self.skipped_bitrate_high);
+            }
+            if self.skipped_duration_short > 0 {
+                println!(" - Below duration limit: {}", self.skipped_duration_short);
+            }
+            if self.skipped_duration_long > 0 {
+                println!(" - Above duration limit: {}", self.skipped_duration_long);
+            }
+            if self.skipped_duplicate > 0 {
+                println!(" - Output exists:        {}", self.skipped_duplicate);
+            }
         }
         if self.analysis_failed > 0 {
             println!("{}", format!("Analysis failed:         {}", self.analysis_failed).red());

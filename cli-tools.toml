@@ -67,16 +67,27 @@ replace = [
 # year_first = false
 
 [video_convert]
+# Minimum bitrate threshold in kbps (files below this are skipped)
 # bitrate = 8000
+
+# Maximum bitrate threshold in kbps (files above this are skipped)
+# max_bitrate = 50000
+
+# Minimum duration threshold in seconds (files shorter than this are skipped)
+# min_duration = 60
+
+# Maximum duration threshold in seconds (files longer than this are skipped)
+# max_duration = 7200
+
 # convert_all_types = false
 # convert_other_types = false
+# count = 10
 # delete = false
 # exclude = []
 # include = []
 # extensions = []
-# number = 0
 # overwrite = false
-# recursive = false
+# recurse = false
 # verbose = false
 
 # Sort order for files to convert. Options:

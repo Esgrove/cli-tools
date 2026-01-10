@@ -167,7 +167,10 @@ impl FileLogger {
         let _ = writeln!(self.writer, "  Files skipped:         {}", stats.total_skipped());
         if stats.total_skipped() > 0 {
             let _ = writeln!(self.writer, "    - Already converted: {}", stats.skipped_converted);
-            let _ = writeln!(self.writer, "    - Below bitrate:     {}", stats.skipped_bitrate);
+            let _ = writeln!(self.writer, "    - Below bitrate:     {}", stats.skipped_bitrate_low);
+            let _ = writeln!(self.writer, "    - Above bitrate:     {}", stats.skipped_bitrate_high);
+            let _ = writeln!(self.writer, "    - Below duration:    {}", stats.skipped_duration_short);
+            let _ = writeln!(self.writer, "    - Above duration:    {}", stats.skipped_duration_long);
             let _ = writeln!(self.writer, "    - Output exists:     {}", stats.skipped_duplicate);
         }
         if stats.analysis_failed > 0 {
