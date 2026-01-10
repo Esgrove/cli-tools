@@ -22,6 +22,8 @@ const KB: u64 = 1024;
 const MB: u64 = KB * 1024;
 /// Bytes per gigabyte.
 const GB: u64 = MB * 1024;
+/// Bytes per terabyte.
+const TB: u64 = GB * 1024;
 
 /// Windows API constant for remote/network drive type.
 #[cfg(windows)]
@@ -134,7 +136,9 @@ pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
 /// Format bytes as human-readable size.
 #[must_use]
 pub fn format_size(bytes: u64) -> String {
-    if bytes >= GB {
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
         format!("{:.2} MB", bytes as f64 / MB as f64)
@@ -145,7 +149,7 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Format duration as a human-readable string
+/// Format duration as a human-readable string.
 #[must_use]
 pub fn format_duration(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();

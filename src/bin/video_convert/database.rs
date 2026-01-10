@@ -608,7 +608,7 @@ impl std::fmt::Display for ExtensionStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            ".{}: {} files ({})",
+            ".{:<3} {:>4} files  {}",
             self.extension,
             self.count,
             cli_tools::format_size(self.total_size)
