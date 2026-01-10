@@ -647,7 +647,6 @@ impl VideoConvert {
         self.log_init();
 
         let mut database = Database::open_default()?;
-        println!("{}", format!("Database: {}", Database::path().display()).bold());
 
         // Remove files that no longer exist
         let removed = database.remove_missing_files()?;
@@ -665,7 +664,9 @@ impl VideoConvert {
             return Ok(());
         }
 
-        println!("Found {} pending file(s) in database", pending_files.len());
+        if self.config.verbose {
+            println!("Processing {} pending file(s) from database", pending_files.len());
+        }
 
         // Set up Ctrl+C handler for graceful abort
         let abort_flag = Arc::new(AtomicBool::new(false));
