@@ -24,8 +24,6 @@ pub enum SortOrder {
     /// Sort by bitrate (highest first)
     #[default]
     Bitrate,
-    /// Sort by bitrate (lowest first)
-    BitrateAsc,
     /// Sort by file size (largest first)
     Size,
     /// Sort by file size (smallest first)
@@ -38,10 +36,10 @@ pub enum SortOrder {
     Resolution,
     /// Sort by resolution (lowest first)
     ResolutionAsc,
+    /// Sort by potential savings (bitrate / fps * duration, highest first)
+    Impact,
     /// Sort alphabetically by file name
     Name,
-    /// Sort reverse alphabetically by file name
-    NameDesc,
 }
 
 /// Database operation mode.
@@ -184,15 +182,14 @@ impl FromStr for SortOrder {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "bitrate" => Ok(Self::Bitrate),
-            "bitrate_asc" | "bitrate-asc" => Ok(Self::BitrateAsc),
             "size" => Ok(Self::Size),
             "size_asc" | "size-asc" => Ok(Self::SizeAsc),
             "duration" => Ok(Self::Duration),
             "duration_asc" | "duration-asc" => Ok(Self::DurationAsc),
             "resolution" => Ok(Self::Resolution),
             "resolution_asc" | "resolution-asc" => Ok(Self::ResolutionAsc),
+            "impact" => Ok(Self::Impact),
             "name" => Ok(Self::Name),
-            "name_desc" | "name-desc" => Ok(Self::NameDesc),
             _ => Err(format!("Unknown sort order: {s}")),
         }
     }
@@ -202,15 +199,14 @@ impl std::fmt::Display for SortOrder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::Bitrate => "bitrate",
-            Self::BitrateAsc => "bitrate-asc",
             Self::Size => "size",
             Self::SizeAsc => "size-asc",
             Self::Duration => "duration",
             Self::DurationAsc => "duration-asc",
             Self::Resolution => "resolution",
             Self::ResolutionAsc => "resolution-asc",
+            Self::Impact => "impact",
             Self::Name => "name",
-            Self::NameDesc => "name-desc",
         };
         write!(f, "{name}")
     }

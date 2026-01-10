@@ -1187,9 +1187,6 @@ impl VideoConvert {
             SortOrder::Bitrate => {
                 files.sort_unstable_by(|a, b| b.info.bitrate_kbps.cmp(&a.info.bitrate_kbps));
             }
-            SortOrder::BitrateAsc => {
-                files.sort_unstable_by(|a, b| a.info.bitrate_kbps.cmp(&b.info.bitrate_kbps));
-            }
             SortOrder::Size => {
                 files.sort_unstable_by(|a, b| b.info.size_bytes.cmp(&a.info.size_bytes));
             }
@@ -1228,11 +1225,16 @@ impl VideoConvert {
                     pixels_a.cmp(&pixels_b)
                 });
             }
+            SortOrder::Impact => {
+                // Sort by potential savings (bitrate / fps * duration) descending
+                files.sort_unstable_by(|a, b| {
+                    let impact_a = (a.info.bitrate_kbps as f64 / a.info.frames_per_second) * a.info.duration;
+                    let impact_b = (b.info.bitrate_kbps as f64 / b.info.frames_per_second) * b.info.duration;
+                    impact_b.partial_cmp(&impact_a).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
             SortOrder::Name => {
                 files.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
-            }
-            SortOrder::NameDesc => {
-                files.sort_unstable_by(|a, b| b.file.path.cmp(&a.file.path));
             }
         }
     }

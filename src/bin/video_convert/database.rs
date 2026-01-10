@@ -351,15 +351,14 @@ impl Database {
             |sort| {
                 let order = match sort {
                     SortOrder::Bitrate => "bitrate_kbps DESC",
-                    SortOrder::BitrateAsc => "bitrate_kbps ASC",
                     SortOrder::Size => "size_bytes DESC",
                     SortOrder::SizeAsc => "size_bytes ASC",
                     SortOrder::Duration => "duration DESC",
                     SortOrder::DurationAsc => "duration ASC",
                     SortOrder::Resolution => "width * height DESC",
                     SortOrder::ResolutionAsc => "width * height ASC",
+                    SortOrder::Impact => "(bitrate_kbps / frames_per_second) * duration DESC",
                     SortOrder::Name => "full_path ASC",
-                    SortOrder::NameDesc => "full_path DESC",
                 };
                 format!("ORDER BY {order}")
             },
@@ -1189,18 +1188,6 @@ mod tests {
         assert_eq!(sorted_desc[0].bitrate_kbps, 15000);
         assert_eq!(sorted_desc[1].bitrate_kbps, 8000);
         assert_eq!(sorted_desc[2].bitrate_kbps, 2000);
-
-        // Sort by bitrate ascending (lowest first)
-        let sorted_asc = database
-            .get_pending_files(&PendingFileFilter {
-                sort: Some(SortOrder::BitrateAsc),
-                ..Default::default()
-            })
-            .expect("Failed to get files");
-        assert_eq!(sorted_asc.len(), 3);
-        assert_eq!(sorted_asc[0].bitrate_kbps, 2000);
-        assert_eq!(sorted_asc[1].bitrate_kbps, 8000);
-        assert_eq!(sorted_asc[2].bitrate_kbps, 15000);
     }
 
     #[test]
@@ -1224,27 +1211,96 @@ mod tests {
             .expect("Failed to insert");
 
         // Sort by name ascending (alphabetical)
-        let sorted_asc = database
+        let sorted = database
             .get_pending_files(&PendingFileFilter {
                 sort: Some(SortOrder::Name),
                 ..Default::default()
             })
             .expect("Failed to get files");
-        assert_eq!(sorted_asc.len(), 3);
-        assert!(sorted_asc[0].full_path.to_string_lossy().contains("alpha"));
-        assert!(sorted_asc[1].full_path.to_string_lossy().contains("bravo"));
-        assert!(sorted_asc[2].full_path.to_string_lossy().contains("charlie"));
+        assert_eq!(sorted.len(), 3);
+        assert!(sorted[0].full_path.to_string_lossy().contains("alpha"));
+        assert!(sorted[1].full_path.to_string_lossy().contains("bravo"));
+        assert!(sorted[2].full_path.to_string_lossy().contains("charlie"));
+    }
 
-        // Sort by name descending (reverse alphabetical)
-        let sorted_desc = database
+    #[test]
+    fn test_sort_by_impact() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        // Low impact: low bitrate, short duration, high fps
+        // Impact = (2000 / 60) * 600 = 20,000
+        let info_low = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 2000,
+            size_bytes: 150_000_000,
+            duration: 600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 60.0,
+            warning: None,
+        };
+
+        // Medium impact: medium bitrate, medium duration, normal fps
+        // Impact = (8000 / 30) * 1800 = 480,000
+        let info_mid = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_800_000_000,
+            duration: 1800.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+
+        // High impact: high bitrate, long duration, low fps
+        // Impact = (15000 / 24) * 7200 = 4,500,000
+        let info_high = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 13_500_000_000,
+            duration: 7200.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/low_impact.mp4"),
+                "mp4",
+                &info_low,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/mid_impact.mp4"),
+                "mp4",
+                &info_mid,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/high_impact.mp4"),
+                "mp4",
+                &info_high,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Sort by impact descending (highest potential savings first)
+        let sorted = database
             .get_pending_files(&PendingFileFilter {
-                sort: Some(SortOrder::NameDesc),
+                sort: Some(SortOrder::Impact),
                 ..Default::default()
             })
             .expect("Failed to get files");
-        assert_eq!(sorted_desc.len(), 3);
-        assert!(sorted_desc[0].full_path.to_string_lossy().contains("charlie"));
-        assert!(sorted_desc[1].full_path.to_string_lossy().contains("bravo"));
-        assert!(sorted_desc[2].full_path.to_string_lossy().contains("alpha"));
+        assert_eq!(sorted.len(), 3);
+        assert!(sorted[0].full_path.to_string_lossy().contains("high_impact"));
+        assert!(sorted[1].full_path.to_string_lossy().contains("mid_impact"));
+        assert!(sorted[2].full_path.to_string_lossy().contains("low_impact"));
     }
 }
