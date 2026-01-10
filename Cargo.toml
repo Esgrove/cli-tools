@@ -17,29 +17,29 @@ chrono = "0.4.42"
 clap = { version = "4.5.54", features = ["derive"] }
 clap_complete = "4.5.65"
 colored = "3.0.0"
-crossterm = "0.28.1"
+crossterm = "0.29.0"
 ctrlc = "3.4.7"
 difference = "2.0.0"
 dirs = "6.0.0"
 dunce = "1.0.5"
 encoding_rs = "0.8.35"
 futures = "0.3.31"
-git2 = "0.20.2"
+git2 = "0.20.3"
 indicatif = { version = "0.18.3", features = ["tokio", "futures", "rayon"] }
 itertools = "0.14.0"
 num_cpus = "1.17.0"
 ratatui = "0.30.0"
-rayon = "1.10.0"
+rayon = "1.11.0"
 regex = "1.12.2"
 reqwest = { version = "0.13.1", features = ["cookies", "form", "multipart"] }
-rusqlite = { version = "0.35", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 rust_xlsxwriter = { version = "0.92.3", features = ["chrono", "serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bencode = "0.2.4"
 serde_bytes = "0.11.19"
 serde_json = "1.0"
 sha1 = "0.10.6"
-tempfile = "3.23.0"
+tempfile = "3.24.0"
 titlecase = "3.6.0"
 tokio = { version = "1.49.0", features = ["full"] }
 toml = "0.9.11"
