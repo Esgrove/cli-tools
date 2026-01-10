@@ -168,6 +168,12 @@ impl Database {
         let connection =
             Connection::open(&path).with_context(|| format!("Failed to open database: {}", path.display()))?;
 
+        // Set busy timeout for concurrent access (5 seconds)
+        // WAL mode allows concurrent reads, but writes need to wait for each other
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("Failed to set busy timeout")?;
+
         let database = Self { connection };
         database.initialize()?;
 
