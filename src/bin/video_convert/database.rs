@@ -882,7 +882,7 @@ mod tests {
             })
             .expect("Failed to get files");
         assert_eq!(long_videos.len(), 1);
-        assert_eq!(long_videos[0].duration, 7200.0);
+        cli_tools::assert_f64_eq(long_videos[0].duration, 7200.0);
     }
 
     #[test]
