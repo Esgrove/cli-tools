@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use chrono::Local;
 
 use crate::config::Config;
-use crate::convert::VideoInfo;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
+use crate::types::VideoInfo;
 
 /// Simple file logger for conversion operations.
 /// Creates a new file for each run.

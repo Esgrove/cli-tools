@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use colored::Colorize;
 
-use crate::convert::ProcessResult;
+use crate::types::ProcessResult;
 
 /// Statistics from the video file analysis.
 #[derive(Debug, Default)]

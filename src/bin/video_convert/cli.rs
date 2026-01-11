@@ -35,6 +35,19 @@ pub enum SortOrder {
     Name,
 }
 
+/// Database operation mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseMode {
+    /// Process files from database instead of scanning.
+    Process,
+    /// Clear all entries from the database.
+    Clear,
+    /// Show database statistics and contents.
+    Show,
+    /// List file extension counts in the database.
+    ListExtensions,
+}
+
 impl SortOrder {
     /// Returns the SQL ORDER BY clause for this sort order.
     #[must_use]
@@ -87,19 +100,6 @@ impl std::fmt::Display for SortOrder {
         };
         write!(f, "{name}")
     }
-}
-
-/// Database operation mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DatabaseMode {
-    /// Process files from database instead of scanning.
-    Process,
-    /// Clear all entries from the database.
-    Clear,
-    /// Show database statistics and contents.
-    Show,
-    /// List file extension counts in the database.
-    ListExtensions,
 }
 
 /// Clear all entries from the database.

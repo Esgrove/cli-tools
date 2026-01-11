@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SortOrder;
-use crate::convert::VideoInfo;
+use crate::types::VideoInfo;
 
 /// Default database filename.
 const DATABASE_FILENAME: &str = "vconvert.db";

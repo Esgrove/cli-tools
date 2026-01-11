@@ -4,6 +4,7 @@ mod convert;
 mod database;
 mod logger;
 mod stats;
+mod types;
 
 use std::path::PathBuf;
 
@@ -22,27 +23,27 @@ pub(crate) struct VideoConvertArgs {
     path: Option<PathBuf>,
 
     /// Convert all known video file types
-    #[arg(short, long)]
+    #[arg(short = 'a', long)]
     all: bool,
 
     /// Skip files with bitrate lower than LIMIT kbps
-    #[arg(short, long, name = "LIMIT", default_value_t = 8000)]
+    #[arg(short = 'b', long, name = "LIMIT", default_value_t = 8000)]
     bitrate: u64,
 
     /// Limit the number of files to convert
-    #[arg(short, long)]
+    #[arg(short = 'c', long)]
     count: Option<usize>,
 
     /// Delete input files immediately instead of moving to trash
-    #[arg(short, long)]
+    #[arg(short = 'd', long)]
     delete: bool,
 
     /// Print commands without running them
-    #[arg(short, long)]
+    #[arg(short = 'p', long)]
     print: bool,
 
     /// Overwrite existing output files
-    #[arg(short, long)]
+    #[arg(short = 'f', long)]
     force: bool,
 
     /// Include files that match the given pattern
@@ -58,11 +59,11 @@ pub(crate) struct VideoConvertArgs {
     extension: Vec<String>,
 
     /// Convert all known video file types except MP4 files
-    #[arg(short, long, conflicts_with = "all")]
+    #[arg(short = 'o', long, conflicts_with = "all")]
     other: bool,
 
     /// Recurse into subdirectories
-    #[arg(short, long)]
+    #[arg(short = 'r', long)]
     recurse: bool,
 
     /// Skip conversion
@@ -82,7 +83,7 @@ pub(crate) struct VideoConvertArgs {
     completion: Option<Shell>,
 
     /// Print verbose output
-    #[arg(short, long)]
+    #[arg(short = 'v', long)]
     verbose: bool,
 
     /// Process files from database instead of scanning
