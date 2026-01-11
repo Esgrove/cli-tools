@@ -6,6 +6,7 @@ use cli_tools::print_error;
 use itertools::Itertools;
 use serde::Deserialize;
 
+use crate::DatabaseMode;
 use crate::SortOrder;
 use crate::VideoConvertArgs;
 use crate::database::PendingFileFilter;
@@ -66,6 +67,7 @@ pub struct Config {
     pub(crate) convert_all: bool,
     pub(crate) convert_other: bool,
     pub(crate) count: Option<usize>,
+    pub(crate) database_mode: Option<DatabaseMode>,
     pub(crate) db_filter: PendingFileFilter,
     pub(crate) delete: bool,
     pub(crate) display_limit: Option<usize>,
@@ -120,6 +122,9 @@ impl VideoConvertConfig {
 impl Config {
     /// Create config from given command line args and user config file.
     pub(crate) fn try_from_args(args: VideoConvertArgs, user_config: VideoConvertConfig) -> Result<Self> {
+        // Get database_mode before moving args fields
+        let database_mode = args.database_mode();
+
         let include: Vec<String> = args.include.into_iter().chain(user_config.include).unique().collect();
         let exclude: Vec<String> = args.exclude.into_iter().chain(user_config.exclude).unique().collect();
 
@@ -172,6 +177,7 @@ impl Config {
             convert_all,
             convert_other,
             count,
+            database_mode,
             db_filter,
             delete: args.delete || user_config.delete,
             display_limit,

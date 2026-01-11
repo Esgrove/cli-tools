@@ -15,6 +15,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use walkdir::WalkDir;
 
+use crate::cli::{DatabaseMode, clear_database, list_extensions, show_database_contents};
 use crate::config::{Config, VideoConvertConfig};
 use crate::database::{Database, PendingAction};
 use crate::logger::FileLogger;
@@ -403,11 +404,22 @@ impl VideoConvert {
 
     /// Run the video conversion process.
     ///
-    /// This scans for files, analyzes them, updates the database, processes renames immediately,
-    /// and then converts/remuxes the remaining files.
+    /// This handles database modes if specified, otherwise scans for files, analyzes them,
+    /// updates the database, processes renames immediately, and then converts/remuxes the
+    /// remaining files.
     #[allow(clippy::too_many_lines)]
-    pub fn run(&self) -> Result<()> {
+    pub fn run(self) -> Result<()> {
         self.log_init();
+
+        // Handle database modes
+        if let Some(db_mode) = self.config.database_mode {
+            return match db_mode {
+                DatabaseMode::Clear => clear_database(),
+                DatabaseMode::Show => show_database_contents(&self.config),
+                DatabaseMode::ListExtensions => list_extensions(self.config.verbose),
+                DatabaseMode::Process => self.run_from_database(),
+            };
+        }
 
         // Open database for tracking
         let database = Database::open_default()?;
