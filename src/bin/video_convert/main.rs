@@ -42,6 +42,24 @@ pub enum SortOrder {
     Name,
 }
 
+impl SortOrder {
+    /// Returns the SQL ORDER BY clause for this sort order.
+    #[must_use]
+    pub const fn sql_order_clause(self) -> &'static str {
+        match self {
+            Self::Bitrate => "bitrate_kbps DESC",
+            Self::Size => "size_bytes DESC",
+            Self::SizeAsc => "size_bytes ASC",
+            Self::Duration => "duration DESC",
+            Self::DurationAsc => "duration ASC",
+            Self::Resolution => "width * height DESC",
+            Self::ResolutionAsc => "width * height ASC",
+            Self::Impact => "(bitrate_kbps / frames_per_second) * duration DESC",
+            Self::Name => "full_path ASC",
+        }
+    }
+}
+
 /// Database operation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseMode {

@@ -348,20 +348,7 @@ impl Database {
 
         let order_clause = filter.sort.map_or_else(
             || "ORDER BY action, size_bytes DESC".to_string(),
-            |sort| {
-                let order = match sort {
-                    SortOrder::Bitrate => "bitrate_kbps DESC",
-                    SortOrder::Size => "size_bytes DESC",
-                    SortOrder::SizeAsc => "size_bytes ASC",
-                    SortOrder::Duration => "duration DESC",
-                    SortOrder::DurationAsc => "duration ASC",
-                    SortOrder::Resolution => "width * height DESC",
-                    SortOrder::ResolutionAsc => "width * height ASC",
-                    SortOrder::Impact => "(bitrate_kbps / frames_per_second) * duration DESC",
-                    SortOrder::Name => "full_path ASC",
-                };
-                format!("ORDER BY {order}")
-            },
+            |sort| format!("ORDER BY {}", sort.sql_order_clause()),
         );
 
         let sql = format!(
