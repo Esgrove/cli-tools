@@ -755,6 +755,40 @@ mod tests {
     }
 
     #[test]
+    fn test_format_date_mm_dd_yyyy() {
+        // MM.DD.YYYY format where day > 12 (unambiguous American date format)
+        assert_eq!(FORMATTER.format_name("01.26.2019.2160p.x264"), "2019.01.26.2160p.x264");
+        assert_eq!(
+            FORMATTER.format_name("video 03.15.2020 1080p"),
+            "Video.2020.03.15.1080p"
+        );
+        assert_eq!(
+            FORMATTER.format_name("12.25.2021.holiday.video"),
+            "2021.12.25.Holiday.Video"
+        );
+        assert_eq!(
+            FORMATTER.format_name("clip 06.30.2022 720p x265"),
+            "Clip.2022.06.30.720p.x265"
+        );
+        // Day 31 with resolution
+        assert_eq!(FORMATTER.format_name("file 07.31.2019 480p"), "File.2019.07.31.480p");
+        // Day 13 (minimum unambiguous day)
+        assert_eq!(FORMATTER.format_name("test 01.13.2023"), "Test.2023.01.13");
+    }
+
+    #[test]
+    fn test_format_date_with_adjacent_resolution() {
+        // Resolution labels adjacent to dates should not interfere with date parsing
+        assert_eq!(FORMATTER.format_name("01.26.2019.2160p.x264"), "2019.01.26.2160p.x264");
+        assert_eq!(FORMATTER.format_name("02.14.2020.1440p.hevc"), "2020.02.14.1440p.Hevc");
+        assert_eq!(
+            FORMATTER.format_name("11.22.2018.1080p.bluray"),
+            "2018.11.22.1080p.Bluray"
+        );
+        assert_eq!(FORMATTER.format_name("04.28.2017.360p.web"), "2017.04.28.360p.Web");
+    }
+
+    #[test]
     fn test_format_date_year_first() {
         let config = DotRenameConfig {
             date_starts_with_year: true,

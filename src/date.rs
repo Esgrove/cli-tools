@@ -29,6 +29,13 @@ static RE_FULL_DATE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Failed to create regex pattern for full date")
 });
 
+/// Regex for MM.DD.YYYY format where day > 12 (unambiguous cases).
+/// Only matches when the day component is 13-31, making it clearly MM.DD.YYYY format.
+static RE_FULL_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:\b|\D)(?P<date>(?:0?[1-9]|1[0-2])\.(?:1[3-9]|2\d|3[01])\.\d{4})(?:\b|\D)")
+        .expect("Failed to create regex pattern for MM.DD.YYYY full date")
+});
+
 static RE_SHORT_DATE_DAY_FIRST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:\b|\D)(?P<date>(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.\d{2})(?:\b|\D)")
         .expect("Failed to create regex pattern for short date")
@@ -111,7 +118,30 @@ impl Date {
             return None;
         }
 
-        // Check for full dates
+        // Check for full dates in MM.DD.YYYY format (unambiguous when day > 12)
+        let mut best_match = None;
+        for caps in RE_FULL_DATE_MDY.captures_iter(filename) {
+            if let Some(date_match) = caps.name("date") {
+                let date_str = date_match.as_str();
+
+                let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
+                if numbers.len() != 3 {
+                    continue;
+                }
+
+                // MM.DD.YYYY format: numbers[0]=month, numbers[1]=day, numbers[2]=year
+                if let Some(date) = Self::parse_date_from_mm_dd_yyyy(numbers[0], numbers[1], numbers[2]) {
+                    best_match = Some((date_str.to_string(), date.to_string()));
+                }
+            }
+        }
+
+        if let Some((original_date, flip_date)) = best_match {
+            let new_name = filename.replacen(&original_date, &flip_date, 1);
+            return Some(new_name);
+        }
+
+        // Check for full dates in DD.MM.YYYY format (European style)
         let mut best_match = None;
         for caps in RE_FULL_DATE.captures_iter(filename) {
             if let Some(date_match) = caps.name("date") {
@@ -242,6 +272,24 @@ impl Date {
 
     #[must_use]
     pub fn parse_date_from_dd_mm_yyyy(day: &str, month: &str, year: &str) -> Option<Self> {
+        let Ok(year) = year.parse::<i32>() else {
+            eprintln!("{}", format!("Failed to parse year from '{year}'").red());
+            return None;
+        };
+        let Ok(month) = month.parse::<i32>() else {
+            eprintln!("{}", format!("Failed to parse month from '{month}'").red());
+            return None;
+        };
+        let Ok(day) = day.parse::<i32>() else {
+            eprintln!("{}", format!("Failed to parse day from '{day}'").red());
+            return None;
+        };
+        Self::try_from(year, month, day)
+    }
+
+    /// Parse a date from MM.DD.YYYY format.
+    #[must_use]
+    pub fn parse_date_from_mm_dd_yyyy(month: &str, day: &str, year: &str) -> Option<Self> {
         let Ok(year) = year.parse::<i32>() else {
             eprintln!("{}", format!("Failed to parse year from '{year}'").red());
             return None;
@@ -537,6 +585,92 @@ mod filename_tests {
     fn swap_year_does_not_trigger_without_flag() {
         let filename = "photo_2023.12.05.jpg";
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+    }
+
+    #[test]
+    fn date_format_mm_dd_yyyy() {
+        // MM.DD.YYYY format where day > 12 (unambiguous)
+        let filename = "01.26.2019.2160p.x264.mp4";
+        let correct = "2019.01.26.2160p.x264.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // MM.DD.YYYY with different resolution
+        let filename = "video.03.15.2020.1080p.mp4";
+        let correct = "video.2020.03.15.1080p.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // MM.DD.YYYY at the start of filename
+        let filename = "12.25.2021.holiday.video.mp4";
+        let correct = "2021.12.25.holiday.video.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // MM.DD.YYYY with 720p resolution
+        let filename = "clip.06.30.2022.720p.x265.mkv";
+        let correct = "clip.2022.06.30.720p.x265.mkv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // MM.DD.YYYY where day is 13 (minimum unambiguous day)
+        let filename = "test.01.13.2023.mp4";
+        let correct = "test.2023.01.13.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // MM.DD.YYYY where day is 31
+        let filename = "file.07.31.2019.480p.avi";
+        let correct = "file.2019.07.31.480p.avi";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
+    fn date_format_mm_dd_yyyy_with_various_resolutions() {
+        // Test with 2160p (4K) resolution adjacent to year
+        let filename = "01.26.2019.2160p.x264.mp4";
+        let correct = "2019.01.26.2160p.x264.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Test with 1440p resolution
+        let filename = "02.14.2020.1440p.hevc.mp4";
+        let correct = "2020.02.14.1440p.hevc.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Test with 1080p resolution
+        let filename = "11.22.2018.1080p.bluray.mkv";
+        let correct = "2018.11.22.1080p.bluray.mkv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Test with 360p resolution
+        let filename = "04.28.2017.360p.web.mp4";
+        let correct = "2017.04.28.360p.web.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
 }
 
