@@ -78,10 +78,18 @@ impl TorrentInfo {
     ///
     /// This returns the raw name without any filtering applied.
     /// Use `clean_suggested_name` to apply `remove_from_name` filtering.
+    ///
+    /// If `ignore_filename_patterns` is provided and the torrent filename contains any of these
+    /// strings, the filename is ignored and the internal name is used instead.
     #[allow(clippy::option_if_let_else)]
-    fn suggested_name_raw(&self) -> Cow<'_, str> {
-        // Try to get name from torrent filename first
-        let torrent_filename = self.path.file_stem().and_then(|stem| stem.to_str());
+    fn suggested_name_raw(&self, ignore_filename_patterns: &[String]) -> Cow<'_, str> {
+        // Try to get name from torrent filename first, unless it matches ignore patterns
+        let torrent_filename = self.path.file_stem().and_then(|stem| stem.to_str()).filter(|filename| {
+            // Skip filename if it contains any of the ignore patterns
+            !ignore_filename_patterns
+                .iter()
+                .any(|pattern| filename.contains(pattern))
+        });
 
         // Get the internal name from the torrent
         let internal_name = self.torrent.name();
@@ -138,7 +146,7 @@ impl TorrentInfo {
 impl QTorrent {
     /// Get the suggested name with `remove_from_name` substrings removed and dots formatting applied.
     fn clean_suggested_name(&self, info: &TorrentInfo) -> String {
-        let mut name = info.suggested_name_raw().into_owned();
+        let mut name = info.suggested_name_raw(&self.config.ignore_torrent_names).into_owned();
 
         // Remove configured substrings
         for substring in &self.config.remove_from_name {

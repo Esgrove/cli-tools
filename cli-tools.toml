@@ -158,3 +158,6 @@ replace = [
 
 # Apply dots formatting to suggested name (uses [dots] config settings)
 # use_dots_formatting = true
+
+# If torrent filename contains any of these strings, ignore it and use internal name instead
+# ignore_torrent_names = []

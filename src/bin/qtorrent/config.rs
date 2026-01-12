@@ -76,6 +76,9 @@ pub struct QtorrentConfig {
     /// Apply dots formatting to suggested name (uses dots config from config file).
     #[serde(default)]
     use_dots_formatting: bool,
+    /// If torrent filename contains any of these strings, ignore it and use internal name instead.
+    #[serde(default)]
+    ignore_torrent_names: Vec<String>,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -119,6 +122,8 @@ pub struct Config {
     pub remove_from_name: Vec<String>,
     /// Apply dots formatting to suggested name (uses dots config from config file).
     pub use_dots_formatting: bool,
+    /// If torrent filename contains any of these strings, ignore it and use internal name instead.
+    pub ignore_torrent_names: Vec<String>,
 }
 
 /// Wrapper needed for parsing the config file section.
@@ -221,6 +226,9 @@ impl Config {
         // Dots formatting option
         let use_dots_formatting = user_config.use_dots_formatting;
 
+        // Filename ignore patterns
+        let ignore_torrent_names = user_config.ignore_torrent_names;
+
         Self {
             host,
             port,
@@ -241,6 +249,7 @@ impl Config {
             min_file_size_bytes,
             remove_from_name,
             use_dots_formatting,
+            ignore_torrent_names,
         }
     }
 
