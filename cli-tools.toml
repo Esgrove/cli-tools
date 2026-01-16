@@ -83,6 +83,7 @@ replace = [
 # convert_other_types = false
 # count = 10
 # delete = false
+# delete_duplicates = false
 # display_limit = 100
 # exclude = []
 # include = []

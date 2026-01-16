@@ -38,6 +38,8 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     delete: bool,
     #[serde(default)]
+    delete_duplicates: bool,
+    #[serde(default)]
     display_limit: Option<usize>,
     #[serde(default)]
     exclude: Vec<String>,
@@ -70,6 +72,7 @@ pub struct Config {
     pub(crate) database_mode: Option<DatabaseMode>,
     pub(crate) db_filter: PendingFileFilter,
     pub(crate) delete: bool,
+    pub(crate) delete_duplicates: bool,
     pub(crate) display_limit: Option<usize>,
     pub(crate) dryrun: bool,
     pub(crate) exclude: Vec<String>,
@@ -180,6 +183,7 @@ impl Config {
             database_mode,
             db_filter,
             delete: args.delete || user_config.delete,
+            delete_duplicates: args.delete_duplicates || user_config.delete_duplicates,
             display_limit,
             dryrun: args.print,
             exclude,

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -739,6 +739,7 @@ impl VideoConvert {
 
     /// Analyze files in parallel to determine which need processing.
     /// Runs ffprobe on each file concurrently and filters based on video information.
+    #[allow(clippy::too_many_lines)]
     fn analyze_files(&self, files: Vec<VideoFile>) -> AnalysisOutput {
         let start = Instant::now();
         let total_files = files.len();
@@ -770,6 +771,8 @@ impl VideoConvert {
         let mut remuxes = Vec::new();
         let mut renames = Vec::new();
         let mut analysis_stats = AnalysisStats::default();
+        // Collect duplicate pairs for verbose output when not deleting
+        let mut duplicate_pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
 
         for result in results {
             match result {
@@ -818,19 +821,104 @@ impl VideoConvert {
                         SkipReason::DurationAboveThreshold { .. } => {
                             analysis_stats.skipped_duration_long += 1;
                         }
-                        SkipReason::OutputExists { .. } => {
-                            analysis_stats.skipped_duplicate += 1;
+                        SkipReason::OutputExists {
+                            path: target_path,
+                            source_duration,
+                        } => {
+                            if self.config.delete_duplicates {
+                                // Check target duration and delete source if within 10%
+                                match Self::get_video_info(target_path) {
+                                    Ok(target_info) => {
+                                        let duration_ratio = if *source_duration > 0.0 {
+                                            (target_info.duration - source_duration).abs() / source_duration
+                                        } else {
+                                            1.0
+                                        };
+                                        if duration_ratio <= 0.1 {
+                                            // Duration within 10%, safe to delete source
+                                            if self.config.dryrun {
+                                                println!(
+                                                    "{} (duration match: {:.1}s vs {:.1}s)",
+                                                    format!(
+                                                        "Would delete duplicate: {}",
+                                                        cli_tools::path_to_string_relative(&file.path)
+                                                    )
+                                                    .yellow(),
+                                                    source_duration,
+                                                    target_info.duration
+                                                );
+                                                analysis_stats.duplicates_deleted += 1;
+                                            } else if let Err(error) = self.delete_file(&file.path) {
+                                                print_error!(
+                                                    "Failed to delete duplicate {}: {error}",
+                                                    cli_tools::path_to_string_relative(&file.path)
+                                                );
+                                                analysis_stats.duplicate_delete_failed += 1;
+                                            } else {
+                                                println!(
+                                                    "{} (duration match: {:.1}s vs {:.1}s)",
+                                                    format!(
+                                                        "Deleted duplicate: {}",
+                                                        cli_tools::path_to_string_relative(&file.path)
+                                                    )
+                                                    .green(),
+                                                    source_duration,
+                                                    target_info.duration
+                                                );
+                                                analysis_stats.duplicates_deleted += 1;
+                                            }
+                                        } else {
+                                            // Duration mismatch, log error
+                                            print_error!(
+                                                "Duration mismatch for duplicate - source: {:.1}s, target: {:.1}s ({:.1}% difference)\n  Source: {}\n  Target: {}",
+                                                source_duration,
+                                                target_info.duration,
+                                                duration_ratio * 100.0,
+                                                cli_tools::path_to_string_relative(&file.path),
+                                                cli_tools::path_to_string_relative(target_path)
+                                            );
+                                            analysis_stats.duplicate_delete_failed += 1;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        print_error!(
+                                            "Failed to get duration of target file {}: {error}",
+                                            cli_tools::path_to_string_relative(target_path)
+                                        );
+                                        analysis_stats.duplicate_delete_failed += 1;
+                                    }
+                                }
+                            } else {
+                                analysis_stats.skipped_duplicate += 1;
+                                if self.config.verbose {
+                                    duplicate_pairs.push((file.path.clone(), target_path.clone()));
+                                }
+                            }
                         }
                         SkipReason::AnalysisFailed { error } => {
                             analysis_stats.analysis_failed += 1;
                             print_error!("{}: {error}", cli_tools::path_to_string_relative(&file.path));
                         }
                     }
-                    // Print skipped files
-                    if self.config.verbose && !matches!(reason, SkipReason::AnalysisFailed { .. }) {
+                    // Print skipped files (except OutputExists which is handled above, and AnalysisFailed)
+                    if self.config.verbose
+                        && !matches!(reason, SkipReason::AnalysisFailed { .. })
+                        && !matches!(reason, SkipReason::OutputExists { .. })
+                    {
                         print_warning!("{}: {reason}", cli_tools::path_to_string_relative(&file.path));
                     }
                 }
+            }
+        }
+
+        // Print duplicate pairs if verbose and not deleting duplicates
+        if self.config.verbose && !self.config.delete_duplicates && !duplicate_pairs.is_empty() {
+            println!();
+            println!("{}", "Duplicate pairs:".bold());
+            for (source, target) in &duplicate_pairs {
+                println!("  {}", cli_tools::path_to_string_relative(source));
+                println!("  {}", cli_tools::path_to_string_relative(target));
+                println!();
             }
         }
 
@@ -1125,7 +1213,10 @@ impl VideoConvert {
                 if new_path.exists() && !filter.overwrite {
                     return AnalysisResult::Skip {
                         file,
-                        reason: SkipReason::OutputExists { path: new_path },
+                        reason: SkipReason::OutputExists {
+                            path: new_path,
+                            source_duration: info.duration,
+                        },
                     };
                 }
                 return AnalysisResult::NeedsRename { file };
@@ -1192,7 +1283,10 @@ impl VideoConvert {
         if output_path.exists() && !filter.overwrite {
             return AnalysisResult::Skip {
                 file,
-                reason: SkipReason::OutputExists { path: output_path },
+                reason: SkipReason::OutputExists {
+                    path: output_path,
+                    source_duration: info.duration,
+                },
             };
         }
 

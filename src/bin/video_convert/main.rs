@@ -70,6 +70,10 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'k', long)]
     skip_convert: bool,
 
+    /// Delete source file if converted x265 file already exists
+    #[arg(short = 'x', long)]
+    delete_duplicates: bool,
+
     /// Skip remuxing
     #[arg(short = 'm', long)]
     skip_remux: bool,

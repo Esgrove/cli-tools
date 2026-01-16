@@ -81,7 +81,7 @@ pub enum SkipReason {
     /// File duration is above the maximum threshold
     DurationAboveThreshold { duration: f64, threshold: f64 },
     /// Output file already exists
-    OutputExists { path: PathBuf },
+    OutputExists { path: PathBuf, source_duration: f64 },
     /// Failed to get video info
     AnalysisFailed { error: String },
 }
@@ -338,7 +338,7 @@ impl std::fmt::Display for SkipReason {
             Self::DurationAboveThreshold { duration, threshold } => {
                 write!(f, "Duration {duration:.1}s is above threshold {threshold:.1}s")
             }
-            Self::OutputExists { path } => {
+            Self::OutputExists { path, .. } => {
                 write!(f, "Output file already exists: \"{}\"", path.display())
             }
             Self::AnalysisFailed { error } => {

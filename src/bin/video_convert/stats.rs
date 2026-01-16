@@ -17,6 +17,8 @@ pub struct AnalysisStats {
     pub(crate) skipped_duration_short: usize,
     pub(crate) skipped_duration_long: usize,
     pub(crate) skipped_duplicate: usize,
+    pub(crate) duplicates_deleted: usize,
+    pub(crate) duplicate_delete_failed: usize,
     pub(crate) analysis_failed: usize,
 }
 
@@ -50,6 +52,8 @@ impl AnalysisStats {
             + self.skipped_duration_short
             + self.skipped_duration_long
             + self.skipped_duplicate
+            + self.duplicates_deleted
+            + self.duplicate_delete_failed
     }
 
     /// Print analysis summary.
@@ -74,6 +78,15 @@ impl AnalysisStats {
             }
             if self.skipped_duplicate > 0 {
                 println!(" - Output exists:        {}", self.skipped_duplicate);
+            }
+            if self.duplicates_deleted > 0 {
+                println!(" - Duplicates deleted:   {}", self.duplicates_deleted);
+            }
+            if self.duplicate_delete_failed > 0 {
+                println!(
+                    "{}",
+                    format!(" - Delete failed:        {}", self.duplicate_delete_failed).red()
+                );
             }
         }
         if self.analysis_failed > 0 {
