@@ -77,7 +77,7 @@ path = "src/bin/thumbnail/main.rs"
 
 [[bin]]
 name = "vres"
-path = "src/bin/resolution.rs"
+path = "src/bin/video_resolution/main.rs"
 
 [[bin]]
 name = "vconvert"

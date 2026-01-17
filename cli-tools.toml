@@ -162,3 +162,13 @@ replace = [
 
 # If torrent filename contains any of these strings, ignore it and use internal name instead
 # ignore_torrent_names = []
+
+[resolution]
+# debug = false
+# dryrun = false
+# overwrite = false
+# recurse = false
+# verbose = false
+
+# Default resolution limit for delete mode (files smaller than this are deleted)
+# delete_limit = 500
