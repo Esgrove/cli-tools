@@ -224,9 +224,8 @@ const fn compute_bounds(res: u32) -> (u32, u32) {
 }
 
 #[cfg(test)]
-mod tests {
+mod label_tests {
     use super::*;
-    use crate::cli::parse_ffprobe_output;
 
     #[test]
     fn exact_matches() {
@@ -406,124 +405,6 @@ mod tests {
             .label(),
             "1250x790"
         );
-    }
-
-    #[test]
-    fn parse_ffprobe_output_1080p() {
-        let output = b"width=1920\nheight=1080\n";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 1920);
-        assert_eq!(result.height, 1080);
-    }
-
-    #[test]
-    fn parse_ffprobe_output_4k() {
-        let output = b"width=3840\nheight=2160\n";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 3840);
-        assert_eq!(result.height, 2160);
-    }
-
-    #[test]
-    fn parse_ffprobe_output_720p() {
-        let output = b"width=1280\nheight=720\n";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 1280);
-        assert_eq!(result.height, 720);
-    }
-
-    #[test]
-    fn parse_ffprobe_output_vertical() {
-        let output = b"width=1080\nheight=1920\n";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 1080);
-        assert_eq!(result.height, 1920);
-    }
-
-    #[test]
-    fn parse_ffprobe_output_no_trailing_newline() {
-        let output = b"width=1920\nheight=1080";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 1920);
-        assert_eq!(result.height, 1080);
-    }
-
-    #[test]
-    fn parse_ffprobe_output_zero_dimensions() {
-        let output = b"width=0\nheight=0\n";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 0);
-        assert_eq!(result.height, 0);
-    }
-
-    #[test]
-    fn parse_ffprobe_output_square() {
-        let output = b"width=1080\nheight=1080\n";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 1080);
-        assert_eq!(result.height, 1080);
-    }
-
-    #[test]
-    fn parse_ffprobe_output_single_digit() {
-        let output = b"width=1\nheight=1\n";
-        let result = parse_ffprobe_output(output).unwrap();
-        assert_eq!(result.width, 1);
-        assert_eq!(result.height, 1);
-    }
-
-    #[test]
-    fn is_smaller_than_width_below_limit() {
-        let res = Resolution {
-            width: 400,
-            height: 720,
-        };
-        assert!(res.is_smaller_than(480));
-    }
-
-    #[test]
-    fn is_smaller_than_height_below_limit() {
-        let res = Resolution {
-            width: 720,
-            height: 400,
-        };
-        assert!(res.is_smaller_than(480));
-    }
-
-    #[test]
-    fn is_smaller_than_both_below_limit() {
-        let res = Resolution {
-            width: 320,
-            height: 240,
-        };
-        assert!(res.is_smaller_than(480));
-    }
-
-    #[test]
-    fn is_smaller_than_both_above_limit() {
-        let res = Resolution {
-            width: 1920,
-            height: 1080,
-        };
-        assert!(!res.is_smaller_than(480));
-    }
-
-    #[test]
-    fn is_smaller_than_at_exact_limit() {
-        let res = Resolution {
-            width: 480,
-            height: 480,
-        };
-        assert!(!res.is_smaller_than(480));
-    }
-
-    #[test]
-    fn is_smaller_than_one_at_limit_one_below() {
-        let res = Resolution {
-            width: 480,
-            height: 479,
-        };
-        assert!(res.is_smaller_than(480));
     }
 
     #[test]
@@ -761,6 +642,220 @@ mod tests {
     }
 
     #[test]
+    fn label_544p_vertical() {
+        assert_eq!(
+            Resolution {
+                width: 544,
+                height: 720
+            }
+            .label(),
+            "Vertical.544p"
+        );
+    }
+
+    #[test]
+    fn label_unknown_resolution_horizontal() {
+        let res = Resolution {
+            width: 1234,
+            height: 567,
+        };
+        assert_eq!(res.label(), "1234x567");
+    }
+
+    #[test]
+    fn label_unknown_resolution_vertical() {
+        let res = Resolution {
+            width: 567,
+            height: 1234,
+        };
+        assert_eq!(res.label(), "Vertical.567x1234");
+    }
+
+    #[test]
+    fn label_square_treated_as_horizontal() {
+        let res = Resolution {
+            width: 500,
+            height: 500,
+        };
+        // Square (width == height) should be treated as horizontal
+        assert_eq!(res.label(), "500x500");
+        assert!(!res.label().contains("Vertical"));
+    }
+
+    #[test]
+    fn label_8k_horizontal() {
+        let res = Resolution {
+            width: 7680,
+            height: 4320,
+        };
+        // 8K is not a known resolution, should return full dimensions
+        assert_eq!(res.label(), "7680x4320");
+    }
+
+    #[test]
+    fn label_8k_vertical() {
+        let res = Resolution {
+            width: 4320,
+            height: 7680,
+        };
+        assert_eq!(res.label(), "Vertical.4320x7680");
+    }
+
+    #[test]
+    fn label_ultrawide_1440p() {
+        // Ultrawide 1440p (3440x1440) should not match standard 1440p
+        let res = Resolution {
+            width: 3440,
+            height: 1440,
+        };
+        assert_eq!(res.label(), "3440x1440");
+    }
+
+    #[test]
+    fn label_near_720p_within_tolerance() {
+        // Within 2.5% tolerance of 720p
+        let res = Resolution {
+            width: 1270,
+            height: 715,
+        };
+        assert_eq!(res.label(), "720p");
+    }
+
+    #[test]
+    fn label_near_720p_outside_tolerance() {
+        // Outside 2.5% tolerance of 720p
+        let res = Resolution {
+            width: 1200,
+            height: 680,
+        };
+        assert_eq!(res.label(), "1200x680");
+    }
+
+    #[test]
+    fn label_1080p_slightly_cropped() {
+        // Common scenario: 1920x1072 (slightly cropped 1080p)
+        let res = Resolution {
+            width: 1920,
+            height: 1072,
+        };
+        assert_eq!(res.label(), "1080p");
+    }
+
+    #[test]
+    fn label_4k_dci() {
+        // DCI 4K (4096x2160) should not match UHD 4K
+        let res = Resolution {
+            width: 4096,
+            height: 2160,
+        };
+        // Width is outside tolerance for 3840
+        assert_eq!(res.label(), "4096x2160");
+    }
+
+    #[test]
+    fn label_vertical_1080p_slightly_off() {
+        let res = Resolution {
+            width: 1078,
+            height: 1918,
+        };
+        assert_eq!(res.label(), "Vertical.1080p");
+    }
+
+    #[test]
+    fn label_1440p_exact() {
+        let res = Resolution {
+            width: 2560,
+            height: 1440,
+        };
+        assert_eq!(res.label(), "1440p");
+    }
+
+    #[test]
+    fn label_vertical_1440p_exact() {
+        let res = Resolution {
+            width: 1440,
+            height: 2560,
+        };
+        assert_eq!(res.label(), "Vertical.1440p");
+    }
+
+    #[test]
+    fn label_sd_resolutions() {
+        assert_eq!(
+            Resolution {
+                width: 640,
+                height: 480
+            }
+            .label(),
+            "480p"
+        );
+        assert_eq!(
+            Resolution {
+                width: 720,
+                height: 576
+            }
+            .label(),
+            "576p"
+        );
+    }
+
+    #[test]
+    fn label_very_small_resolution() {
+        let res = Resolution { width: 64, height: 64 };
+        assert_eq!(res.label(), "64x64");
+    }
+
+    #[test]
+    fn label_single_pixel() {
+        let res = Resolution { width: 1, height: 1 };
+        assert_eq!(res.label(), "1x1");
+    }
+
+    #[test]
+    fn label_zero_dimensions() {
+        let res = Resolution { width: 0, height: 0 };
+        assert_eq!(res.label(), "0x0");
+    }
+}
+
+#[cfg(test)]
+mod resolution_new_tests {
+    use super::*;
+
+    #[test]
+    fn new_creates_resolution_with_correct_dimensions() {
+        let res = Resolution::new(1920, 1080);
+        assert_eq!(res.width, 1920);
+        assert_eq!(res.height, 1080);
+    }
+
+    #[test]
+    fn new_with_zero_dimensions() {
+        let res = Resolution::new(0, 0);
+        assert_eq!(res.width, 0);
+        assert_eq!(res.height, 0);
+    }
+
+    #[test]
+    fn new_with_max_u32() {
+        let res = Resolution::new(u32::MAX, u32::MAX);
+        assert_eq!(res.width, u32::MAX);
+        assert_eq!(res.height, u32::MAX);
+    }
+
+    #[test]
+    fn new_with_asymmetric_dimensions() {
+        let res = Resolution::new(7680, 4320);
+        assert_eq!(res.width, 7680);
+        assert_eq!(res.height, 4320);
+    }
+}
+
+#[cfg(test)]
+mod resolution_struct_tests {
+    use super::*;
+
+    #[test]
     fn display_horizontal_resolution() {
         let res = Resolution {
             width: 1920,
@@ -828,6 +923,232 @@ mod tests {
     }
 
     #[test]
+    fn resolution_ordering_by_width_first() {
+        let res1 = Resolution {
+            width: 1280,
+            height: 1080,
+        };
+        let res2 = Resolution {
+            width: 1920,
+            height: 720,
+        };
+        // Ordering is by width first, then height
+        assert!(res1 < res2);
+    }
+
+    #[test]
+    fn resolution_ordering_same_width_different_height() {
+        let res1 = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        let res2 = Resolution {
+            width: 1920,
+            height: 1440,
+        };
+        assert!(res1 < res2);
+    }
+
+    #[test]
+    fn resolution_ordering_vertical_vs_horizontal() {
+        let vertical = Resolution {
+            width: 1080,
+            height: 1920,
+        };
+        let horizontal = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        // Width is compared first, so vertical (1080) < horizontal (1920)
+        assert!(vertical < horizontal);
+    }
+
+    #[test]
+    fn display_small_resolution() {
+        let res = Resolution {
+            width: 320,
+            height: 240,
+        };
+        assert_eq!(format!("{res}"), "320x240");
+    }
+
+    #[test]
+    fn display_4k_resolution() {
+        let res = Resolution {
+            width: 3840,
+            height: 2160,
+        };
+        assert_eq!(format!("{res}"), "3840x2160");
+    }
+
+    #[test]
+    fn display_8k_resolution() {
+        let res = Resolution {
+            width: 7680,
+            height: 4320,
+        };
+        assert_eq!(format!("{res}"), "7680x4320");
+    }
+
+    #[test]
+    fn display_ultrawide_resolution() {
+        let res = Resolution {
+            width: 3440,
+            height: 1440,
+        };
+        assert_eq!(format!("{res}"), "3440x1440");
+    }
+
+    #[test]
+    fn display_vertical_4k() {
+        let res = Resolution {
+            width: 2160,
+            height: 3840,
+        };
+        assert_eq!(format!("{res}"), "Vertical.2160x3840");
+    }
+
+    #[test]
+    fn resolution_debug_format() {
+        let res = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        let debug_str = format!("{res:?}");
+        assert!(debug_str.contains("Resolution"));
+        assert!(debug_str.contains("1920"));
+        assert!(debug_str.contains("1080"));
+    }
+}
+
+#[cfg(test)]
+mod is_smaller_than_tests {
+    use super::*;
+
+    #[test]
+    fn width_below_limit() {
+        let res = Resolution {
+            width: 400,
+            height: 720,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn height_below_limit() {
+        let res = Resolution {
+            width: 720,
+            height: 400,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn both_below_limit() {
+        let res = Resolution {
+            width: 320,
+            height: 240,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn both_above_limit() {
+        let res = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        assert!(!res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn at_exact_limit() {
+        let res = Resolution {
+            width: 480,
+            height: 480,
+        };
+        assert!(!res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn one_at_limit_one_below() {
+        let res = Resolution {
+            width: 480,
+            height: 479,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn zero_limit() {
+        let res = Resolution {
+            width: 100,
+            height: 100,
+        };
+        assert!(!res.is_smaller_than(0));
+    }
+
+    #[test]
+    fn zero_resolution() {
+        let res = Resolution { width: 0, height: 0 };
+        assert!(res.is_smaller_than(1));
+        assert!(!res.is_smaller_than(0));
+    }
+
+    #[test]
+    fn large_limit() {
+        let res = Resolution {
+            width: 3840,
+            height: 2160,
+        };
+        assert!(res.is_smaller_than(4000));
+        assert!(!res.is_smaller_than(2160));
+    }
+
+    #[test]
+    fn vertical_video_width_below() {
+        let res = Resolution {
+            width: 360,
+            height: 640,
+        };
+        assert!(res.is_smaller_than(480));
+    }
+
+    #[test]
+    fn vertical_video_both_above() {
+        let res = Resolution {
+            width: 1080,
+            height: 1920,
+        };
+        assert!(!res.is_smaller_than(720));
+    }
+
+    #[test]
+    fn max_u32_limit() {
+        let res = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        // Both dimensions are smaller than u32::MAX, so this returns true
+        assert!(res.is_smaller_than(u32::MAX));
+    }
+
+    #[test]
+    fn one_dimension_at_limit() {
+        let res = Resolution {
+            width: 720,
+            height: 480,
+        };
+        // Width is at 720, height at 480 - neither below 480
+        assert!(!res.is_smaller_than(480));
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_resolution_tests {
+    use super::*;
+
+    #[test]
     fn fuzzy_resolutions_count_matches_known() {
         assert_eq!(FUZZY_RESOLUTIONS.len(), KNOWN_RESOLUTIONS.len());
     }
@@ -866,7 +1187,106 @@ mod tests {
     }
 
     #[test]
-    fn compute_bounds_standard_resolution() {
+    fn resolution_match_display() {
+        let res_match = ResolutionMatch {
+            label_height: 1080,
+            width_range: (1872, 1968),
+            height_range: (1053, 1107),
+        };
+        let display = format!("{res_match}");
+        assert!(display.contains("1080p"));
+        assert!(display.contains("width"));
+        assert!(display.contains("height"));
+    }
+
+    #[test]
+    fn fuzzy_resolution_480p_bounds() {
+        let res_480p = FUZZY_RESOLUTIONS
+            .iter()
+            .find(|r| r.label_height == 480)
+            .expect("480p should exist in fuzzy resolutions");
+
+        assert!(res_480p.height_range.0 < 480);
+        assert!(res_480p.height_range.1 > 480);
+    }
+
+    #[test]
+    fn fuzzy_resolution_2160p_bounds() {
+        let res_2160p = FUZZY_RESOLUTIONS
+            .iter()
+            .find(|r| r.label_height == 2160)
+            .expect("2160p should exist in fuzzy resolutions");
+
+        assert!(res_2160p.width_range.0 < 3840);
+        assert!(res_2160p.width_range.1 > 3840);
+        assert!(res_2160p.height_range.0 < 2160);
+        assert!(res_2160p.height_range.1 > 2160);
+    }
+
+    #[test]
+    fn fuzzy_resolutions_no_overlapping_height_ranges() {
+        for i in 0..FUZZY_RESOLUTIONS.len() {
+            for j in (i + 1)..FUZZY_RESOLUTIONS.len() {
+                let a = &FUZZY_RESOLUTIONS[i];
+                let b = &FUZZY_RESOLUTIONS[j];
+                // Check height ranges don't overlap (unless they're for same height like 480p variants)
+                if a.label_height != b.label_height {
+                    let a_overlaps_b = a.height_range.0 <= b.height_range.1 && a.height_range.1 >= b.height_range.0;
+                    // Some overlap is expected for close resolutions, just ensure they're different labels
+                    if a_overlaps_b {
+                        assert_ne!(
+                            a.label_height, b.label_height,
+                            "Different resolutions should have different labels"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_known_resolutions_have_fuzzy_match() {
+        for (width, height) in KNOWN_RESOLUTIONS {
+            let res = Resolution {
+                width: *width,
+                height: *height,
+            };
+            let label = res.label();
+            assert!(
+                label.ends_with("p"),
+                "Known resolution {width}x{height} should have a standard label, got {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn fuzzy_match_just_inside_tolerance_1080p() {
+        // 2.5% of 1920 = 48, so 1872-1968 is valid width range
+        // 2.5% of 1080 = 27, so 1053-1107 is valid height range
+        let res = Resolution {
+            width: 1872,
+            height: 1053,
+        };
+        assert_eq!(res.label(), "1080p");
+    }
+
+    #[test]
+    fn fuzzy_match_just_outside_tolerance_1080p() {
+        // Just outside the tolerance should not match
+        let res = Resolution {
+            width: 1800,
+            height: 1000,
+        };
+        assert_eq!(res.label(), "1800x1000");
+    }
+}
+
+#[cfg(test)]
+mod compute_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn standard_resolution() {
         let bounds = compute_bounds(1080);
         // 2.5% tolerance = 27 pixels
         assert_eq!(bounds.0, 1053); // 1080 - 27
@@ -874,13 +1294,13 @@ mod tests {
     }
 
     #[test]
-    fn compute_bounds_zero() {
+    fn zero() {
         let bounds = compute_bounds(0);
         assert_eq!(bounds, (0, 0));
     }
 
     #[test]
-    fn compute_bounds_small_value() {
+    fn small_value() {
         let bounds = compute_bounds(100);
         // 2.5% of 100 = 2.5, truncated to 2
         assert_eq!(bounds.0, 98);
@@ -888,33 +1308,62 @@ mod tests {
     }
 
     #[test]
-    fn is_smaller_than_zero_limit() {
-        let res = Resolution {
-            width: 100,
-            height: 100,
-        };
-        assert!(!res.is_smaller_than(0));
+    fn bounds_720p() {
+        let bounds = compute_bounds(720);
+        // 2.5% of 720 = 18
+        assert_eq!(bounds.0, 702);
+        assert_eq!(bounds.1, 738);
     }
 
     #[test]
-    fn is_smaller_than_zero_resolution() {
-        let res = Resolution { width: 0, height: 0 };
-        assert!(res.is_smaller_than(1));
-        assert!(!res.is_smaller_than(0));
+    fn bounds_4k_height() {
+        let bounds = compute_bounds(2160);
+        // 2.5% of 2160 = 54
+        assert_eq!(bounds.0, 2106);
+        assert_eq!(bounds.1, 2214);
     }
 
     #[test]
-    fn is_smaller_than_large_limit() {
-        let res = Resolution {
-            width: 3840,
-            height: 2160,
-        };
-        assert!(res.is_smaller_than(4000));
-        assert!(!res.is_smaller_than(2160));
+    fn bounds_4k_width() {
+        let bounds = compute_bounds(3840);
+        // 2.5% of 3840 = 96
+        assert_eq!(bounds.0, 3744);
+        assert_eq!(bounds.1, 3936);
     }
 
     #[test]
-    fn ffprobe_result_new_path_if_needed_no_label() {
+    fn bounds_very_small_value() {
+        let bounds = compute_bounds(10);
+        // 2.5% of 10 = 0.25, truncated to 0
+        assert_eq!(bounds.0, 10);
+        assert_eq!(bounds.1, 10);
+    }
+
+    #[test]
+    fn bounds_one() {
+        let bounds = compute_bounds(1);
+        // 2.5% of 1 = 0.025, truncated to 0
+        assert_eq!(bounds.0, 1);
+        assert_eq!(bounds.1, 1);
+    }
+
+    #[test]
+    fn bounds_large_value() {
+        let bounds = compute_bounds(7680);
+        // 2.5% of 7680 = 192
+        assert_eq!(bounds.0, 7488);
+        assert_eq!(bounds.1, 7872);
+    }
+}
+
+#[cfg(test)]
+mod ffprobe_result_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn new_path_if_needed_no_label() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("video.mp4");
         std::fs::File::create(&file_path).expect("Failed to create file");
@@ -934,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_new_path_if_needed_already_has_label() {
+    fn new_path_if_needed_already_has_label() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("video.1080p.mp4");
         std::fs::File::create(&file_path).expect("Failed to create file");
@@ -952,7 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_new_path_if_needed_replaces_full_resolution() {
+    fn new_path_if_needed_replaces_full_resolution() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("video.1920x1080.mp4");
         std::fs::File::create(&file_path).expect("Failed to create file");
@@ -974,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_new_path_if_needed_vertical() {
+    fn new_path_if_needed_vertical() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("video.mp4");
         std::fs::File::create(&file_path).expect("Failed to create file");
@@ -994,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_delete_dryrun() {
+    fn delete_dryrun() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("to_delete.mp4");
         std::fs::File::create(&file_path).expect("Failed to create file");
@@ -1013,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_delete_actual() {
+    fn delete_actual() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("to_delete.mp4");
         std::fs::File::create(&file_path).expect("Failed to create file");
@@ -1032,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_rename_dryrun() {
+    fn rename_dryrun() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("original.mp4");
         let new_path = temp_dir.path().join("renamed.1080p.mp4");
@@ -1053,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_rename_actual() {
+    fn rename_actual() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("original.mp4");
         let new_path = temp_dir.path().join("renamed.1080p.mp4");
@@ -1074,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_rename_no_overwrite() {
+    fn rename_no_overwrite() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("original.mp4");
         let new_path = temp_dir.path().join("existing.mp4");
@@ -1095,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_rename_with_overwrite() {
+    fn rename_with_overwrite() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("original.mp4");
         let new_path = temp_dir.path().join("existing.mp4");
@@ -1117,20 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_match_display() {
-        let res_match = ResolutionMatch {
-            label_height: 1080,
-            width_range: (1872, 1968),
-            height_range: (1053, 1107),
-        };
-        let display = format!("{res_match}");
-        assert!(display.contains("1080p"));
-        assert!(display.contains("width"));
-        assert!(display.contains("height"));
-    }
-
-    #[test]
-    fn ffprobe_result_ordering_by_resolution() {
+    fn ordering_by_resolution() {
         let result1 = FFProbeResult {
             file: PathBuf::from("a.mp4"),
             resolution: Resolution {
@@ -1149,7 +1585,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_ordering_same_resolution_by_file() {
+    fn ordering_same_resolution_by_file() {
         let result1 = FFProbeResult {
             file: PathBuf::from("a.mp4"),
             resolution: Resolution {
@@ -1168,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn ffprobe_result_equality() {
+    fn equality() {
         let result1 = FFProbeResult {
             file: PathBuf::from("video.mp4"),
             resolution: Resolution {
@@ -1187,43 +1623,210 @@ mod tests {
     }
 
     #[test]
-    fn label_544p_vertical() {
-        assert_eq!(
-            Resolution {
-                width: 544,
-                height: 720
-            }
-            .label(),
-            "Vertical.544p"
-        );
+    fn inequality_different_file() {
+        let result1 = FFProbeResult {
+            file: PathBuf::from("video1.mp4"),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+        let result2 = FFProbeResult {
+            file: PathBuf::from("video2.mp4"),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+        assert_ne!(result1, result2);
     }
 
     #[test]
-    fn label_unknown_resolution_horizontal() {
-        let res = Resolution {
-            width: 1234,
-            height: 567,
+    fn inequality_different_resolution() {
+        let result1 = FFProbeResult {
+            file: PathBuf::from("video.mp4"),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
         };
-        assert_eq!(res.label(), "1234x567");
+        let result2 = FFProbeResult {
+            file: PathBuf::from("video.mp4"),
+            resolution: Resolution {
+                width: 1280,
+                height: 720,
+            },
+        };
+        assert_ne!(result1, result2);
     }
 
     #[test]
-    fn label_unknown_resolution_vertical() {
-        let res = Resolution {
-            width: 567,
-            height: 1234,
+    fn new_path_if_needed_with_dots_in_name() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.2024.01.15.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
         };
-        assert_eq!(res.label(), "Vertical.567x1234");
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(new_path.to_string_lossy().contains("1080p"));
     }
 
     #[test]
-    fn label_square_treated_as_horizontal() {
-        let res = Resolution {
-            width: 500,
-            height: 500,
+    fn new_path_if_needed_unknown_resolution() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1600,
+                height: 900,
+            },
         };
-        // Square (width == height) should be treated as horizontal
-        assert_eq!(res.label(), "500x500");
-        assert!(!res.label().contains("Vertical"));
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(new_path.to_string_lossy().contains("1600x900"));
+    }
+
+    #[test]
+    fn new_path_if_needed_720p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1280,
+                height: 720,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(new_path.to_string_lossy().contains("720p"));
+    }
+
+    #[test]
+    fn new_path_if_needed_4k() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 3840,
+                height: 2160,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(new_path.to_string_lossy().contains("2160p"));
+    }
+
+    #[test]
+    fn new_path_if_needed_already_has_720p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.720p.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1280,
+                height: 720,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_none());
+    }
+
+    #[test]
+    fn new_path_if_needed_replaces_720x480_with_480p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.720x480.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 720,
+                height: 480,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(new_path.to_string_lossy().contains("480p"));
+        assert!(!new_path.to_string_lossy().contains("720x480"));
+    }
+
+    #[test]
+    fn ordering_multiple_results() {
+        // FFProbeResult derives Ord which sorts by file path first, then resolution
+        let mut results = vec![
+            FFProbeResult {
+                file: PathBuf::from("c.mp4"),
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+            },
+            FFProbeResult {
+                file: PathBuf::from("a.mp4"),
+                resolution: Resolution {
+                    width: 1280,
+                    height: 720,
+                },
+            },
+            FFProbeResult {
+                file: PathBuf::from("b.mp4"),
+                resolution: Resolution {
+                    width: 3840,
+                    height: 2160,
+                },
+            },
+        ];
+
+        results.sort();
+
+        // Sorted alphabetically by file path
+        assert_eq!(results[0].file, PathBuf::from("a.mp4"));
+        assert_eq!(results[1].file, PathBuf::from("b.mp4"));
+        assert_eq!(results[2].file, PathBuf::from("c.mp4"));
+    }
+
+    #[test]
+    fn debug_format() {
+        let result = FFProbeResult {
+            file: PathBuf::from("video.mp4"),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+        let debug_str = format!("{result:?}");
+        assert!(debug_str.contains("FFProbeResult"));
+        assert!(debug_str.contains("video.mp4"));
+        assert!(debug_str.contains("1920"));
+        assert!(debug_str.contains("1080"));
     }
 }

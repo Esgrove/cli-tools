@@ -867,42 +867,13 @@ pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod lib_tests {
+mod resolve_path_tests {
     use super::*;
-
     use std::fs::File;
-
     use tempfile::tempdir;
-    use walkdir::WalkDir;
 
     #[test]
-    fn test_is_hidden_file() {
-        let dir = tempdir().unwrap();
-        let hidden_file_path = dir.path().join(".hidden");
-        File::create(hidden_file_path).unwrap();
-
-        let entry = WalkDir::new(dir.path())
-            .into_iter()
-            .filter_map(Result::ok)
-            .find(|e| e.file_name().to_string_lossy().eq(".hidden"))
-            .unwrap();
-
-        assert!(is_hidden(&entry));
-
-        let normal_file_path = dir.path().join("visible");
-        File::create(normal_file_path).unwrap();
-
-        let entry = WalkDir::new(dir.path())
-            .into_iter()
-            .filter_map(Result::ok)
-            .find(|e| e.file_name().to_string_lossy().eq("visible"))
-            .unwrap();
-
-        assert!(!is_hidden(&entry));
-    }
-
-    #[test]
-    fn test_resolve_input_path_valid() {
+    fn resolve_input_path_valid() {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let resolved = resolve_input_path(Some(path));
@@ -910,14 +881,14 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_resolve_input_path_nonexistent() {
+    fn resolve_input_path_nonexistent() {
         let path = Path::new("nonexistent");
         let resolved = resolve_input_path(Some(path));
         assert!(resolved.is_err());
     }
 
     #[test]
-    fn test_resolve_input_path_empty() {
+    fn resolve_input_path_empty() {
         let path = Path::new("  \n");
         let resolved = resolve_input_path(Some(path));
         assert!(resolved.is_ok());
@@ -925,14 +896,14 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_resolve_input_path_default() {
+    fn resolve_input_path_default() {
         let resolved = resolve_input_path(None);
         assert!(resolved.is_ok());
         assert_eq!(resolved.unwrap(), env::current_dir().unwrap());
     }
 
     #[test]
-    fn test_resolve_required_input_path_valid() {
+    fn resolve_required_input_path_valid() {
         let dir = tempdir().unwrap();
         let path = dir.path();
         let resolved = resolve_required_input_path(path);
@@ -940,14 +911,14 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_resolve_required_input_path_nonexistent() {
+    fn resolve_required_input_path_nonexistent() {
         let path = Path::new("nonexistent");
         let resolved = resolve_required_input_path(path);
         assert!(resolved.is_err());
     }
 
     #[test]
-    fn test_resolve_required_input_path_empty() {
+    fn resolve_required_input_path_empty() {
         let path = Path::new("");
         let resolved = resolve_required_input_path(path);
         assert!(resolved.is_err());
@@ -955,7 +926,7 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_resolve_required_input_path_whitespace() {
+    fn resolve_required_input_path_whitespace() {
         let path = Path::new("  \n");
         let resolved = resolve_required_input_path(path);
         assert!(resolved.is_err());
@@ -963,7 +934,7 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_resolve_output_path_with_file() {
+    fn resolve_output_path_with_file() {
         let input_dir = tempdir().unwrap();
         let output_dir = tempdir().unwrap();
         let output_string = output_dir.path().to_str().unwrap().to_string();
@@ -977,44 +948,52 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_resolve_output_path_default() {
+    fn resolve_output_path_default() {
         let dir = tempdir().unwrap();
         let output_path = resolve_output_path(None, dir.path());
         assert!(output_path.is_ok());
         assert_eq!(output_path.unwrap(), dunce::simplified(dir.path()));
     }
+}
+
+#[cfg(test)]
+mod system_directory_tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+    use walkdir::WalkDir;
 
     #[test]
     #[cfg(unix)]
-    fn test_is_system_directory_path_recycle_bin_unix() {
+    fn is_system_directory_path_recycle_bin_unix() {
         let path = Path::new("/mnt/d/$RECYCLE.BIN");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_is_system_directory_path_recycle_bin_case_insensitive_unix() {
+    fn is_system_directory_path_recycle_bin_case_insensitive_unix() {
         let path = Path::new("/mnt/e/$Recycle.Bin");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_is_system_directory_path_system_volume_information_unix() {
+    fn is_system_directory_path_system_volume_information_unix() {
         let path = Path::new("/mnt/c/System Volume Information");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_is_system_directory_path_normal_directory_unix() {
+    fn is_system_directory_path_normal_directory_unix() {
         let path = Path::new("/home/user/Documents");
         assert!(!is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_is_system_directory_path_similar_name_unix() {
+    fn is_system_directory_path_similar_name_unix() {
         // Without the $ prefix, this should NOT match $RECYCLE.BIN
         let path = Path::new("/mnt/c/RECYCLE.BIN");
         assert!(!is_system_directory_path(path));
@@ -1022,42 +1001,42 @@ mod lib_tests {
 
     #[test]
     #[cfg(windows)]
-    fn test_is_system_directory_path_recycle_bin_windows() {
+    fn is_system_directory_path_recycle_bin_windows() {
         let path = Path::new("D:\\$RECYCLE.BIN");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(windows)]
-    fn test_is_system_directory_path_recycle_bin_case_insensitive_windows() {
+    fn is_system_directory_path_recycle_bin_case_insensitive_windows() {
         let path = Path::new("E:\\$Recycle.Bin");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(windows)]
-    fn test_is_system_directory_path_system_volume_information_windows() {
+    fn is_system_directory_path_system_volume_information_windows() {
         let path = Path::new("C:\\System Volume Information");
         assert!(is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(windows)]
-    fn test_is_system_directory_path_normal_directory_windows() {
+    fn is_system_directory_path_normal_directory_windows() {
         let path = Path::new("C:\\Users\\Documents");
         assert!(!is_system_directory_path(path));
     }
 
     #[test]
     #[cfg(windows)]
-    fn test_is_system_directory_path_similar_name_windows() {
+    fn is_system_directory_path_similar_name_windows() {
         // Without the $ prefix, this should NOT match $RECYCLE.BIN
         let path = Path::new("C:\\RECYCLE.BIN");
         assert!(!is_system_directory_path(path));
     }
 
     #[test]
-    fn test_is_system_directory_walkdir() {
+    fn is_system_directory_walkdir() {
         let dir = tempdir().unwrap();
         let recycle_bin = dir.path().join("$RECYCLE.BIN");
         std::fs::create_dir(&recycle_bin).unwrap();
@@ -1071,7 +1050,7 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_should_skip_entry_system_dir() {
+    fn should_skip_entry_system_dir() {
         let dir = tempdir().unwrap();
         let recycle_bin = dir.path().join("$RECYCLE.BIN");
         std::fs::create_dir(&recycle_bin).unwrap();
@@ -1085,7 +1064,7 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_should_skip_entry_hidden_file() {
+    fn should_skip_entry_hidden_file() {
         let dir = tempdir().unwrap();
         let hidden = dir.path().join(".hidden");
         File::create(&hidden).unwrap();
@@ -1099,7 +1078,7 @@ mod lib_tests {
     }
 
     #[test]
-    fn test_should_skip_entry_normal_file() {
+    fn should_skip_entry_normal_file() {
         let dir = tempdir().unwrap();
         let normal = dir.path().join("normal.txt");
         File::create(&normal).unwrap();
@@ -1110,5 +1089,477 @@ mod lib_tests {
                 assert!(!should_skip_entry(&entry));
             }
         }
+    }
+
+    #[test]
+    fn is_system_directory_macos_spotlight() {
+        let dir = tempdir().unwrap();
+        let spotlight = dir.path().join(".Spotlight-V100");
+        std::fs::create_dir(&spotlight).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == ".Spotlight-V100" {
+                assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn is_system_directory_macos_trashes() {
+        let dir = tempdir().unwrap();
+        let trashes = dir.path().join(".Trashes");
+        std::fs::create_dir(&trashes).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == ".Trashes" {
+                assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn is_system_directory_linux_lost_found() {
+        let dir = tempdir().unwrap();
+        let lost_found = dir.path().join("lost+found");
+        std::fs::create_dir(&lost_found).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "lost+found" {
+                assert!(is_system_directory(&entry));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod format_size_tests {
+    use super::*;
+
+    #[test]
+    fn bytes_only() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1), "1 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn kilobytes() {
+        assert_eq!(format_size(1024), "1.00 KB");
+        assert_eq!(format_size(1536), "1.50 KB");
+        assert_eq!(format_size(10240), "10.00 KB");
+    }
+
+    #[test]
+    fn megabytes() {
+        assert_eq!(format_size(1024 * 1024), "1.00 MB");
+        assert_eq!(format_size(1024 * 1024 + 512 * 1024), "1.50 MB");
+        assert_eq!(format_size(100 * 1024 * 1024), "100.00 MB");
+    }
+
+    #[test]
+    fn gigabytes() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.00 GB");
+    }
+
+    #[test]
+    fn terabytes() {
+        assert_eq!(format_size(1024 * 1024 * 1024 * 1024), "1.00 TB");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024 * 1024), "2.00 TB");
+    }
+}
+
+#[cfg(test)]
+mod format_duration_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn seconds_only() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+        assert_eq!(format_duration(Duration::from_secs(1)), "1s");
+        assert_eq!(format_duration(Duration::from_secs(59)), "59s");
+    }
+
+    #[test]
+    fn minutes_and_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(60)), "1m 00s");
+        assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59m 59s");
+    }
+
+    #[test]
+    fn hours_minutes_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h 00m 00s");
+        assert_eq!(format_duration(Duration::from_secs(3661)), "1h 01m 01s");
+        assert_eq!(format_duration(Duration::from_secs(7325)), "2h 02m 05s");
+    }
+
+    #[test]
+    fn format_duration_seconds_basic() {
+        assert_eq!(format_duration_seconds(0.0), "0.0s");
+        assert_eq!(format_duration_seconds(1.5), "1.5s");
+        assert_eq!(format_duration_seconds(59.9), "59.9s");
+    }
+
+    #[test]
+    fn format_duration_seconds_minutes() {
+        assert_eq!(format_duration_seconds(60.0), "1m 00s");
+        assert_eq!(format_duration_seconds(90.0), "1m 30s");
+    }
+
+    #[test]
+    fn format_duration_seconds_hours() {
+        assert_eq!(format_duration_seconds(3600.0), "1h 00m 00s");
+        assert_eq!(format_duration_seconds(3661.0), "1h 01m 01s");
+    }
+
+    #[test]
+    fn format_duration_seconds_negative() {
+        assert_eq!(format_duration_seconds(-10.0), "0.0s");
+    }
+}
+
+#[cfg(test)]
+mod path_utility_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn append_extension_to_path_basic() {
+        let path = Path::new("file.txt");
+        let result = append_extension_to_path(path, "bak");
+        assert_eq!(result, PathBuf::from("file.txt.bak"));
+    }
+
+    #[test]
+    fn append_extension_to_path_no_extension() {
+        let path = Path::new("README");
+        let result = append_extension_to_path(path, "md");
+        assert_eq!(result, PathBuf::from("README.md"));
+    }
+
+    #[test]
+    fn append_extension_to_path_with_directory() {
+        let path = Path::new("dir/subdir/file.txt");
+        let result = append_extension_to_path(path, "backup");
+        assert_eq!(result, PathBuf::from("dir/subdir/file.txt.backup"));
+    }
+
+    #[test]
+    fn insert_suffix_before_extension_basic() {
+        let path = Path::new("video.mp4");
+        let result = insert_suffix_before_extension(path, ".x265");
+        assert_eq!(result, PathBuf::from("video.x265.mp4"));
+    }
+
+    #[test]
+    fn insert_suffix_before_extension_no_extension() {
+        let path = Path::new("README");
+        let result = insert_suffix_before_extension(path, ".backup");
+        assert_eq!(result, PathBuf::from("README.backup"));
+    }
+
+    #[test]
+    fn insert_suffix_before_extension_with_directory() {
+        let path = Path::new("subdir/video.mp4");
+        let result = insert_suffix_before_extension(path, ".converted");
+        assert_eq!(result, PathBuf::from("subdir/video.converted.mp4"));
+    }
+
+    #[test]
+    fn insert_suffix_before_extension_multiple_dots() {
+        let path = Path::new("video.1080p.mp4");
+        let result = insert_suffix_before_extension(path, ".x265");
+        assert_eq!(result, PathBuf::from("video.1080p.x265.mp4"));
+    }
+
+    #[test]
+    fn get_unique_path_no_conflict() {
+        let dir = tempdir().unwrap();
+        let result = get_unique_path(dir.path(), "test.txt", "test", "txt");
+        assert_eq!(result, dir.path().join("test.txt"));
+    }
+
+    #[test]
+    fn get_unique_path_with_conflict() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("test.txt")).unwrap();
+
+        let result = get_unique_path(dir.path(), "test.txt", "test", "txt");
+        assert_eq!(result, dir.path().join("test.1.txt"));
+    }
+
+    #[test]
+    fn get_unique_path_multiple_conflicts() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("test.txt")).unwrap();
+        File::create(dir.path().join("test.1.txt")).unwrap();
+        File::create(dir.path().join("test.2.txt")).unwrap();
+
+        let result = get_unique_path(dir.path(), "test.txt", "test", "txt");
+        assert_eq!(result, dir.path().join("test.3.txt"));
+    }
+
+    #[test]
+    fn get_unique_path_no_extension() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("README")).unwrap();
+
+        let result = get_unique_path(dir.path(), "README", "README", "");
+        assert_eq!(result, dir.path().join("README.1"));
+    }
+
+    #[test]
+    fn path_to_string_basic() {
+        let path = Path::new("test/path/file.txt");
+        assert_eq!(path_to_string(path), "test/path/file.txt");
+    }
+
+    #[test]
+    fn path_to_filename_string_basic() {
+        let path = Path::new("test/path/file.txt");
+        assert_eq!(path_to_filename_string(path), "file.txt");
+    }
+
+    #[test]
+    fn path_to_file_stem_string_basic() {
+        let path = Path::new("test/path/file.txt");
+        assert_eq!(path_to_file_stem_string(path), "file");
+    }
+
+    #[test]
+    fn path_to_file_extension_string_basic() {
+        let path = Path::new("test/path/file.TXT");
+        assert_eq!(path_to_file_extension_string(path), "txt");
+    }
+
+    #[test]
+    fn path_to_file_extension_string_no_extension() {
+        let path = Path::new("README");
+        assert_eq!(path_to_file_extension_string(path), "");
+    }
+
+    #[test]
+    fn os_str_to_string_basic() {
+        let os_str = OsStr::new("test.txt");
+        assert_eq!(os_str_to_string(os_str), "test.txt");
+    }
+
+    #[test]
+    fn get_relative_path_or_filename_within_root() {
+        let root = Path::new("/root/dir");
+        let full_path = root.join("subdir/file.txt");
+        let result = get_relative_path_or_filename(&full_path, root);
+        assert_eq!(result, "subdir/file.txt");
+    }
+
+    #[test]
+    fn get_relative_path_or_filename_same_as_root() {
+        let root = Path::new("/root/dir");
+        let result = get_relative_path_or_filename(root, root);
+        assert_eq!(result, "dir");
+    }
+
+    #[test]
+    fn get_normalized_file_name_and_extension_basic() {
+        let path = Path::new("test/file.txt");
+        let (stem, ext) = get_normalized_file_name_and_extension(path).unwrap();
+        assert_eq!(stem, "file");
+        assert_eq!(ext, "txt");
+    }
+
+    #[test]
+    fn get_normalized_file_name_and_extension_no_extension() {
+        let path = Path::new("README");
+        let (stem, ext) = get_normalized_file_name_and_extension(path).unwrap();
+        assert_eq!(stem, "README");
+        assert_eq!(ext, "");
+    }
+
+    #[test]
+    fn get_normalized_dir_name_basic() {
+        let path = Path::new("parent/subdir");
+        let name = get_normalized_dir_name(path).unwrap();
+        assert_eq!(name, "subdir");
+    }
+}
+
+#[cfg(test)]
+mod directory_utility_tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn is_directory_empty_true() {
+        let dir = tempdir().unwrap();
+        assert!(is_directory_empty(dir.path()));
+    }
+
+    #[test]
+    fn is_directory_empty_with_file() {
+        let dir = tempdir().unwrap();
+        File::create(dir.path().join("file.txt")).unwrap();
+        assert!(!is_directory_empty(dir.path()));
+    }
+
+    #[test]
+    fn is_directory_empty_with_subdir() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        assert!(!is_directory_empty(dir.path()));
+    }
+}
+
+#[cfg(test)]
+mod color_diff_tests {
+    use super::*;
+
+    #[test]
+    fn identical_strings() {
+        let (old, new) = color_diff("hello", "hello", false);
+        assert_eq!(old, "hello");
+        assert_eq!(new, "hello");
+    }
+
+    #[test]
+    fn completely_different_strings() {
+        let (old, new) = color_diff("abc", "xyz", false);
+        assert!(old.contains("abc"));
+        assert!(new.contains("xyz"));
+    }
+
+    #[test]
+    fn partial_change() {
+        let (old, new) = color_diff("hello world", "hello there", false);
+        assert!(old.contains("hello"));
+        assert!(new.contains("hello"));
+    }
+
+    #[test]
+    fn stacked_mode() {
+        let (old, new) = color_diff("prefix.name", "different.name", true);
+        assert!(old.contains("name"));
+        assert!(new.contains("name"));
+    }
+
+    #[test]
+    fn empty_strings() {
+        let (old, new) = color_diff("", "", false);
+        assert_eq!(old, "");
+        assert_eq!(new, "");
+    }
+
+    #[test]
+    fn addition_only() {
+        let (old, new) = color_diff("test", "testing", false);
+        assert!(old.contains("test"));
+        assert!(new.contains("test"));
+    }
+
+    #[test]
+    fn removal_only() {
+        let (old, new) = color_diff("testing", "test", false);
+        assert!(old.contains("test"));
+        assert!(new.contains("test"));
+    }
+}
+
+#[cfg(test)]
+mod colorize_bool_tests {
+    use super::*;
+
+    #[test]
+    fn colorize_true() {
+        let result = colorize_bool(true);
+        assert!(result.to_string().contains("true"));
+    }
+
+    #[test]
+    fn colorize_false() {
+        let result = colorize_bool(false);
+        assert!(result.to_string().contains("false"));
+    }
+}
+
+#[cfg(test)]
+mod assert_f64_eq_tests {
+    use super::*;
+
+    #[test]
+    fn equal_values() {
+        assert_f64_eq(1.0, 1.0);
+        assert_f64_eq(0.0, 0.0);
+        assert_f64_eq(-1.0, -1.0);
+    }
+
+    #[test]
+    fn very_close_values() {
+        assert_f64_eq(1.0, 1.0 + f64::EPSILON / 2.0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn different_values() {
+        assert_f64_eq(1.0, 2.0);
+    }
+}
+
+#[cfg(test)]
+mod hidden_file_tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+    use walkdir::WalkDir;
+
+    #[test]
+    fn is_hidden_file() {
+        let dir = tempdir().unwrap();
+        let hidden_file_path = dir.path().join(".hidden");
+        File::create(hidden_file_path).unwrap();
+
+        let entry = WalkDir::new(dir.path())
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|e| e.file_name().to_string_lossy().eq(".hidden"))
+            .unwrap();
+
+        assert!(is_hidden(&entry));
+    }
+
+    #[test]
+    fn is_not_hidden_file() {
+        let dir = tempdir().unwrap();
+        let normal_file_path = dir.path().join("visible");
+        File::create(normal_file_path).unwrap();
+
+        let entry = WalkDir::new(dir.path())
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|e| e.file_name().to_string_lossy().eq("visible"))
+            .unwrap();
+
+        assert!(!is_hidden(&entry));
+    }
+
+    #[test]
+    fn is_hidden_directory() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".hidden_dir")).unwrap();
+
+        let entry = WalkDir::new(dir.path())
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|e| e.file_name().to_string_lossy().eq(".hidden_dir"))
+            .unwrap();
+
+        assert!(is_hidden(&entry));
     }
 }
