@@ -16,7 +16,7 @@ anyhow = "1.0.100"
 chrono = "0.4.43"
 clap = { version = "4.5.54", features = ["derive"] }
 clap_complete = "4.5.65"
-colored = "3.0.0"
+colored = "3.1.1"
 crossterm = "0.29.0"
 ctrlc = "3.5.1"
 difference = "2.0.0"
