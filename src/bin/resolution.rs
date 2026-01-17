@@ -254,21 +254,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if let Some(limit) = args.delete {
-        if args.verbose || args.debug {
-            println!("Deleting low resolution files...");
-        }
-        return delete_low_resolution_files(
-            &absolute_input_path,
-            args.recurse,
-            limit.unwrap_or(500),
-            args.print,
-            args.verbose,
-        )
-        .await;
-    }
-
-    let files = gather_files_without_resolution_label(&absolute_input_path, args.recurse).await?;
+    let files = gather_video_files(&absolute_input_path, args.recurse, args.delete.is_some()).await?;
 
     if files.is_empty() {
         if args.verbose {
@@ -282,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Keep successfully processed files, print errors for ffprobe command
-    let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = get_resolutions(files)
+    let mut results: Vec<FFProbeResult> = get_resolutions(files)
         .await?
         .into_iter()
         .filter_map(|res| match res {
@@ -292,6 +278,19 @@ async fn main() -> anyhow::Result<()> {
                 None
             }
         })
+        .collect();
+
+    results.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
+
+    // Delete low resolution files if requested
+    if let Some(limit) = args.delete {
+        let limit = limit.unwrap_or(500);
+        results = delete_low_resolution_files(results, limit, args.print, args.verbose);
+    }
+
+    // Rename remaining files to add resolution labels
+    let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = results
+        .into_iter()
         .filter_map(|result| match result.new_path_if_needed() {
             Ok(Some(new_path)) => Some((result, new_path)),
             Ok(None) => None,
@@ -331,113 +330,55 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn delete_low_resolution_files(
-    path: &Path,
-    recurse: bool,
+/// Gathers video files for processing.
+/// If `delete_mode` is true, excludes only files with high resolution labels (720p+).
+/// Otherwise, excludes files with any resolution label.
+/// Deletes files with resolution smaller than the given limit.
+/// Returns the remaining files that were not deleted.
+fn delete_low_resolution_files(
+    results: Vec<FFProbeResult>,
     limit: u32,
     dryrun: bool,
     verbose: bool,
-) -> anyhow::Result<()> {
-    let files = gather_low_resolution_video_files(path, recurse).await?;
-
-    if files.is_empty() {
-        if verbose {
-            println!("No video files to process");
-        }
-        return Ok(());
-    }
-
-    let results: Vec<FFProbeResult> = get_resolutions(files)
-        .await?
+) -> Vec<FFProbeResult> {
+    let (to_delete, to_keep): (Vec<_>, Vec<_>) = results
         .into_iter()
-        .filter_map(|res| match res {
-            Ok(val) => Some(val),
-            Err(err) => {
-                eprintln!("Error: {err}");
-                None
+        .partition(|result| result.resolution.is_smaller_than(limit));
+
+    if !to_delete.is_empty() {
+        let num_delete = to_delete.len();
+        if dryrun {
+            print_bold!("DRYRUN: Would delete {num_delete} file(s) smaller than {limit}:");
+        } else if verbose {
+            print_bold!("Deleting {num_delete} file(s) smaller than {limit}:");
+        }
+
+        for result in to_delete {
+            if let Err(error) = result.delete(dryrun) {
+                cli_tools::print_error!("{error}");
             }
-        })
-        .collect();
-
-    let mut files_to_delete: Vec<FFProbeResult> = results
-        .into_iter()
-        .filter(|result| result.resolution.is_smaller_than(limit))
-        .collect();
-
-    files_to_delete.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
-
-    if files_to_delete.is_empty() {
-        if verbose {
-            println!("No files smaller than {limit}");
         }
-        return Ok(());
-    }
 
-    let num_files = files_to_delete.len();
-    if dryrun {
-        print_bold!("DRYRUN: Would delete {num_files} file(s) smaller than {limit}:");
+        if verbose {
+            print_green!("Deleted {num_delete} files");
+        }
     } else if verbose {
-        print_bold!("Deleting {num_files} file(s) smaller than {limit}:");
+        println!("No files smaller than {limit}");
     }
 
-    for result in files_to_delete {
-        if let Err(error) = result.delete(dryrun) {
-            cli_tools::print_error!("{error}");
-        }
-    }
-
-    if verbose {
-        print_green!("Deleted {num_files} files");
-    }
-
-    Ok(())
+    to_keep
 }
 
-async fn gather_low_resolution_video_files(path: &Path, recurse: bool) -> anyhow::Result<Vec<PathBuf>> {
+/// Gathers video files for processing.
+/// If `delete_mode` is true, excludes only files with high resolution labels (720p+).
+/// Otherwise, excludes files with any resolution label.
+async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-
-    if recurse {
-        for entry in WalkDir::new(path)
-            .into_iter()
-            .filter_entry(|e| !cli_tools::should_skip_entry(e))
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path();
-            if let Some(ext) = path.extension().and_then(|s| s.to_str())
-                && FILE_EXTENSIONS.contains(&ext)
-                && path
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !RE_HIGH_RESOLUTIONS.is_match(filename))
-            {
-                files.push(path.to_path_buf());
-            }
-        }
+    let exclude_regex = if delete_mode {
+        &*RE_HIGH_RESOLUTIONS
     } else {
-        let mut dir_entries = tokio::fs::read_dir(&path).await?;
-        while let Some(ref entry) = dir_entries.next_entry().await? {
-            let path = entry.path();
-            if path.is_file()
-                && !cli_tools::is_hidden_tokio(entry)
-                && !cli_tools::is_system_directory_tokio(entry)
-                && let Some(ext) = path.extension().and_then(|s| s.to_str())
-                && FILE_EXTENSIONS.contains(&ext)
-                && path
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !RE_HIGH_RESOLUTIONS.is_match(filename))
-            {
-                files.push(path);
-            }
-        }
-    }
-
-    Ok(files)
-}
-
-async fn gather_files_without_resolution_label(path: &Path, recurse: bool) -> anyhow::Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
+        &*RE_RESOLUTIONS
+    };
 
     if recurse {
         for entry in WalkDir::new(path)
@@ -453,7 +394,7 @@ async fn gather_files_without_resolution_label(path: &Path, recurse: bool) -> an
                 && path
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !RE_RESOLUTIONS.is_match(filename))
+                    .is_some_and(|filename| !exclude_regex.is_match(filename))
             {
                 files.push(path.to_path_buf());
             }
@@ -470,7 +411,7 @@ async fn gather_files_without_resolution_label(path: &Path, recurse: bool) -> an
                 && path
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !RE_RESOLUTIONS.is_match(filename))
+                    .is_some_and(|filename| !exclude_regex.is_match(filename))
             {
                 files.push(path);
             }
@@ -583,10 +524,10 @@ fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
     Ok(Resolution { width, height })
 }
 
-/// Create a Semaphore sized for I/O-bound work (4x physical CPU cores).
+/// Create a Semaphore for I/O-bound work.
 #[inline]
 fn create_semaphore_for_io_bound() -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(num_cpus::get_physical() * 4))
+    Arc::new(Semaphore::new(num_cpus::get_physical() * 2))
 }
 
 const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
@@ -917,8 +858,6 @@ mod tests {
         assert!(res.is_smaller_than(480));
     }
 
-    // ==================== Additional exact match tests ====================
-
     #[test]
     fn exact_matches_480p() {
         assert_eq!(
@@ -1043,8 +982,6 @@ mod tests {
         );
     }
 
-    // ==================== Fuzzy matching tests ====================
-
     #[test]
     fn fuzzy_matches_horizontal_near_boundaries() {
         // Just inside lower tolerance for 1080p
@@ -1099,8 +1036,6 @@ mod tests {
             "2160p"
         );
     }
-
-    // ==================== Out of range / fallback tests ====================
 
     #[test]
     fn out_of_range_small_resolutions() {
@@ -1157,8 +1092,6 @@ mod tests {
         );
     }
 
-    // ==================== Display trait tests ====================
-
     #[test]
     fn display_horizontal_resolution() {
         let res = Resolution {
@@ -1186,8 +1119,6 @@ mod tests {
         // Square is treated as horizontal (width >= height)
         assert_eq!(format!("{res}"), "1080x1080");
     }
-
-    // ==================== Parse ffprobe error cases ====================
 
     #[test]
     fn parse_ffprobe_output_windows_crlf() {
@@ -1240,8 +1171,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ==================== Resolution comparison tests ====================
-
     #[test]
     fn resolution_ordering() {
         let res_720p = Resolution {
@@ -1281,8 +1210,6 @@ mod tests {
         assert_ne!(res1, res2);
     }
 
-    // ==================== Precalculated fuzzy resolution tests ====================
-
     #[test]
     fn fuzzy_resolutions_count_matches_known() {
         assert_eq!(FUZZY_RESOLUTIONS.len(), KNOWN_RESOLUTIONS.len());
@@ -1321,8 +1248,6 @@ mod tests {
         assert!(res_720p.height_range.1 > 720);
     }
 
-    // ==================== Compute bounds tests ====================
-
     #[test]
     fn compute_bounds_standard_resolution() {
         let bounds = compute_bounds(1080);
@@ -1344,8 +1269,6 @@ mod tests {
         assert_eq!(bounds.0, 98);
         assert_eq!(bounds.1, 102);
     }
-
-    // ==================== is_smaller_than edge cases ====================
 
     #[test]
     fn is_smaller_than_zero_limit() {
@@ -1372,8 +1295,6 @@ mod tests {
         assert!(res.is_smaller_than(4000));
         assert!(!res.is_smaller_than(2160));
     }
-
-    // ==================== FFProbeResult tests ====================
 
     #[test]
     fn ffprobe_result_new_path_if_needed_no_label() {
@@ -1578,8 +1499,6 @@ mod tests {
         assert!(new_path.exists());
     }
 
-    // ==================== Regex pattern tests ====================
-
     #[test]
     fn regex_resolutions_matches_standard() {
         assert!(RE_RESOLUTIONS.is_match("video.480p.mp4"));
@@ -1638,8 +1557,6 @@ mod tests {
         assert_eq!(FILE_EXTENSIONS.len(), 11);
     }
 
-    // ==================== ResolutionMatch Display tests ====================
-
     #[test]
     fn resolution_match_display() {
         let res_match = ResolutionMatch {
@@ -1652,8 +1569,6 @@ mod tests {
         assert!(display.contains("width"));
         assert!(display.contains("height"));
     }
-
-    // ==================== FFProbeResult ordering tests ====================
 
     #[test]
     fn ffprobe_result_ordering_by_resolution() {
@@ -1711,8 +1626,6 @@ mod tests {
         };
         assert_eq!(result1, result2);
     }
-
-    // ==================== Label edge cases ====================
 
     #[test]
     fn label_544p_vertical() {
