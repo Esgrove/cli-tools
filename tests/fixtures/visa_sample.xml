@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="ISO-8859-15"?>
+<?xml-stylesheet type='text/xsl' href='Finvoice.xsl'?>
+<Finvoice Version="2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="Finvoice.xsd">
+  <SellerPartyDetails>
+    <SellerPartyIdentifier>1234567-8</SellerPartyIdentifier>
+    <SellerOrganisationName>Test Bank Oyj</SellerOrganisationName>
+    <SellerOrganisationTaxCode>1234567-8</SellerOrganisationTaxCode>
+  </SellerPartyDetails>
+  <SellerOrganisationUnitNumber>003712345678</SellerOrganisationUnitNumber>
+  <InvoiceRecipientPartyDetails>
+    <InvoiceRecipientPartyIdentifier></InvoiceRecipientPartyIdentifier>
+    <InvoiceRecipientOrganisationName>Test Customer</InvoiceRecipientOrganisationName>
+    <InvoiceRecipientPostalAddressDetails>
+      <InvoiceRecipientStreetName>TESTIKATU 1 A 1</InvoiceRecipientStreetName>
+      <InvoiceRecipientTownName>HELSINKI</InvoiceRecipientTownName>
+      <InvoiceRecipientPostCodeIdentifier>00100</InvoiceRecipientPostCodeIdentifier>
+    </InvoiceRecipientPostalAddressDetails>
+  </InvoiceRecipientPartyDetails>
+  <BuyerPartyDetails>
+    <BuyerOrganisationName>Test Customer</BuyerOrganisationName>
+    <BuyerPostalAddressDetails>
+      <BuyerStreetName>TESTIKATU 1 A 1</BuyerStreetName>
+      <BuyerTownName>HELSINKI</BuyerTownName>
+      <BuyerPostCodeIdentifier>00100</BuyerPostCodeIdentifier>
+      <CountryCode>FI</CountryCode>
+    </BuyerPostalAddressDetails>
+  </BuyerPartyDetails>
+  <DeliveryDetails>
+    <DeliveryPeriodDetails>
+      <StartDate Format="CCYYMMDD">20240201</StartDate>
+      <EndDate Format="CCYYMMDD">20240301</EndDate>
+    </DeliveryPeriodDetails>
+  </DeliveryDetails>
+  <InvoiceDetails>
+    <InvoiceTypeCode>INV01</InvoiceTypeCode>
+    <InvoiceTypeText>LASKU</InvoiceTypeText>
+    <OriginCode>Original</OriginCode>
+    <InvoiceNumber>12345678901</InvoiceNumber>
+    <InvoiceDate Format="CCYYMMDD">20240301</InvoiceDate>
+    <InvoicingPeriodStartDate Format="CCYYMMDD">20240201</InvoicingPeriodStartDate>
+    <InvoicingPeriodEndDate Format="CCYYMMDD">20240301</InvoicingPeriodEndDate>
+    <InvoiceTotalVatExcludedAmount AmountCurrencyIdentifier="EUR">261,83</InvoiceTotalVatExcludedAmount>
+    <InvoiceTotalVatAmount AmountCurrencyIdentifier="EUR">0,00</InvoiceTotalVatAmount>
+    <InvoiceTotalVatIncludedAmount AmountCurrencyIdentifier="EUR">261,83</InvoiceTotalVatIncludedAmount>
+  </InvoiceDetails>
+  <InvoiceRow>
+    <ArticleName>Visa Gold</ArticleName>
+  </InvoiceRow>
+  <SpecificationDetails>
+    <SpecificationFreeText></SpecificationFreeText>
+    <SpecificationFreeText>Laskutuskausi 01.02.2024 - 01.03.2024</SpecificationFreeText>
+    <SpecificationFreeText></SpecificationFreeText>
+    <SpecificationFreeText>Velkasaldo edellisella laskulla                                           100,00</SpecificationFreeText>
+    <SpecificationFreeText>Suoritus 01.02.                                                          -100,00</SpecificationFreeText>
+    <SpecificationFreeText>Laskutuskauden tapahtumat yhteensa                                         261,83</SpecificationFreeText>
+    <SpecificationFreeText>                                                                      ----------</SpecificationFreeText>
+    <SpecificationFreeText>Velkasaldo yhteensa                                                        261,83</SpecificationFreeText>
+    <SpecificationFreeText>                                                                      ----------</SpecificationFreeText>
+    <SpecificationFreeText>Maksettava vahintaan                                                        30,00</SpecificationFreeText>
+    <SpecificationFreeText>--------------------------------------------------------------------------------</SpecificationFreeText>
+    <SpecificationFreeText></SpecificationFreeText>
+    <SpecificationFreeText>Tapahtumaerittely 01.02.2024 - 01.03.2024</SpecificationFreeText>
+    <SpecificationFreeText></SpecificationFreeText>
+    <SpecificationFreeText></SpecificationFreeText>
+    <SpecificationFreeText>4010 12** **** 3456 TEST CUSTOMER</SpecificationFreeText>
+    <SpecificationFreeText></SpecificationFreeText>
+    <SpecificationFreeText>05.02. Osto K-MARKET KAMPPI HELSINKI                                        25,50</SpecificationFreeText>
+    <SpecificationFreeText>08.02. Osto ALEPA MANNERHEIMINTIE HELSINKI                                  12,95</SpecificationFreeText>
+    <SpecificationFreeText>12.02. Osto Wolt Oy Finland                                                 18,90</SpecificationFreeText>
+    <SpecificationFreeText>15.02. Osto SPOTIFY AB STOCKHOLM                                             9,99</SpecificationFreeText>
+    <SpecificationFreeText>18.02. Osto TC*VERKKOKAUPPA.COM OY HELSINKI                                149,00</SpecificationFreeText>
+    <SpecificationFreeText>22.02. Osto PAYPAL *BANDCAMP 4029357733                                      7,50</SpecificationFreeText>
+    <SpecificationFreeText>25.02. Osto APPLE.COM/BILL ITUNES.COM                                        2,99</SpecificationFreeText>
+    <SpecificationFreeText>28.02. Osto WWW.EXAMPLE.COM INTERNET                                        35,00</SpecificationFreeText>
+    <SpecificationFreeText>                                                                      ----------</SpecificationFreeText>
+    <SpecificationFreeText>Tapahtumat yhteensa                                                        261,83</SpecificationFreeText>
+    <SpecificationFreeText>--------------------------------------------------------------------------------</SpecificationFreeText>
+    <SpecificationFreeText>KAIKKI TAPAHTUMAT YHTEENSA                                                 261,83</SpecificationFreeText>
+    <SpecificationFreeText>--------------------------------------------------------------------------------</SpecificationFreeText>
+  </SpecificationDetails>
+  <EpiDetails>
+    <EpiIdentificationDetails>
+      <EpiDate Format="CCYYMMDD">20240301</EpiDate>
+      <EpiReference>12345678901234</EpiReference>
+    </EpiIdentificationDetails>
+  </EpiDetails>
+</Finvoice>

@@ -1019,3 +1019,277 @@ mod test_visa_item {
         assert_eq!(item1.partial_cmp(&item2), Some(item1.cmp(&item2)));
     }
 }
+
+#[cfg(test)]
+mod test_read_xml_file {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn reads_sample_xml_file() {
+        let path = Path::new("tests/fixtures/visa_sample.xml");
+        let (lines, year) = read_xml_file(path);
+
+        assert_eq!(year, 2024);
+        assert_eq!(lines.len(), 8);
+
+        // Check that lines contain expected transaction patterns
+        assert!(lines[0].contains("05.02."));
+        assert!(lines[0].contains("K-MARKET"));
+        assert!(lines[0].contains("25,50"));
+    }
+
+    #[test]
+    fn reads_year_transition_xml_file() {
+        let path = Path::new("tests/fixtures/visa_year_transition.xml");
+        let (lines, year) = read_xml_file(path);
+
+        // Year should be extracted from StartDate (2025 from 20250101)
+        assert_eq!(year, 2025);
+        assert_eq!(lines.len(), 6);
+
+        // Check December and January transactions are present
+        assert!(lines.iter().any(|line| line.contains("15.12.")));
+        assert!(lines.iter().any(|line| line.contains("02.01.")));
+    }
+
+    #[test]
+    fn handles_nonexistent_file() {
+        let path = Path::new("tests/fixtures/nonexistent.xml");
+        let (lines, _year) = read_xml_file(path);
+
+        assert!(lines.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_extract_items {
+    use super::*;
+
+    #[test]
+    fn extracts_items_from_raw_lines() {
+        let lines = vec![
+            "05.02. Osto K-MARKET KAMPPI HELSINKI                                        25,50".to_string(),
+            "08.02. Osto ALEPA MANNERHEIMINTIE HELSINKI                                  12,95".to_string(),
+        ];
+        let year = 2024;
+
+        let items = extract_items(&lines, year).expect("should parse items");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].date, NaiveDate::from_ymd_opt(2024, 2, 5).unwrap());
+        assert_eq!(items[0].name, "K-MARKET");
+        assert!((items[0].sum - 25.50).abs() < 0.01);
+
+        assert_eq!(items[1].date, NaiveDate::from_ymd_opt(2024, 2, 8).unwrap());
+        assert_eq!(items[1].name, "ALEPA");
+        assert!((items[1].sum - 12.95).abs() < 0.01);
+    }
+
+    #[test]
+    fn handles_year_transition_december_to_january() {
+        let lines = vec![
+            "15.12. Osto K-MARKET KAMPPI HELSINKI                                        25,50".to_string(),
+            "28.12. Osto WOLT HELSINKI                                                   18,90".to_string(),
+            "02.01. Osto SPOTIFY AB STOCKHOLM                                             9,99".to_string(),
+            "15.01. Osto ALEPA HELSINKI                                                  12,00".to_string(),
+        ];
+        // Year from StartDate is 2025 (the new year)
+        let year = 2025;
+
+        let items = extract_items(&lines, year).expect("should parse items");
+
+        assert_eq!(items.len(), 4);
+
+        // December items should be assigned to previous year (2024)
+        assert_eq!(items[0].date, NaiveDate::from_ymd_opt(2024, 12, 15).unwrap());
+        assert_eq!(items[1].date, NaiveDate::from_ymd_opt(2024, 12, 28).unwrap());
+
+        // January items should be assigned to the current year (2025)
+        assert_eq!(items[2].date, NaiveDate::from_ymd_opt(2025, 1, 2).unwrap());
+        assert_eq!(items[3].date, NaiveDate::from_ymd_opt(2025, 1, 15).unwrap());
+    }
+
+    #[test]
+    fn no_year_transition_when_all_same_year() {
+        let lines = vec![
+            "05.02. Osto K-MARKET HELSINKI                                               25,50".to_string(),
+            "15.02. Osto ALEPA HELSINKI                                                  12,95".to_string(),
+            "28.02. Osto WOLT HELSINKI                                                   18,90".to_string(),
+        ];
+        let year = 2024;
+
+        let items = extract_items(&lines, year).expect("should parse items");
+
+        assert_eq!(items.len(), 3);
+        // All items should be in 2024
+        for item in &items {
+            assert_eq!(item.date.year(), 2024);
+        }
+    }
+
+    #[test]
+    fn handles_empty_lines() {
+        let lines: Vec<String> = vec![];
+        let year = 2024;
+
+        let items = extract_items(&lines, year).expect("should handle empty");
+
+        assert!(items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_calculate_totals {
+    use super::*;
+
+    #[test]
+    fn calculates_totals_for_each_name() {
+        let items = vec![
+            VisaItem {
+                date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+                name: "STORE A".to_string(),
+                sum: 10.0,
+            },
+            VisaItem {
+                date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+                name: "STORE A".to_string(),
+                sum: 20.0,
+            },
+            VisaItem {
+                date: NaiveDate::from_ymd_opt(2024, 1, 3).expect("valid date"),
+                name: "STORE B".to_string(),
+                sum: 15.0,
+            },
+        ];
+
+        let totals = calculate_totals_for_each_name(&items);
+
+        assert_eq!(totals.len(), 2);
+        // Should be sorted by sum descending
+        assert_eq!(totals[0].0, "STORE A");
+        assert!((totals[0].1 - 30.0).abs() < 0.01);
+        assert_eq!(totals[1].0, "STORE B");
+        assert!((totals[1].1 - 15.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn handles_empty_items() {
+        let items: Vec<VisaItem> = vec![];
+        let totals = calculate_totals_for_each_name(&items);
+        assert!(totals.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_integration_xml_parsing {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn parses_sample_xml_end_to_end() {
+        let path = Path::new("tests/fixtures/visa_sample.xml");
+        let (lines, year) = read_xml_file(path);
+        let items = extract_items(&lines, year).expect("should parse items");
+
+        assert_eq!(items.len(), 8);
+
+        // Check specific items
+        let k_market_items: Vec<_> = items.iter().filter(|item| item.name == "K-MARKET").collect();
+        assert_eq!(k_market_items.len(), 1);
+        assert!((k_market_items[0].sum - 25.50).abs() < 0.01);
+
+        let wolt_items: Vec<_> = items.iter().filter(|item| item.name == "WOLT").collect();
+        assert_eq!(wolt_items.len(), 1);
+        assert!((wolt_items[0].sum - 18.90).abs() < 0.01);
+
+        // Check name transformations
+        let verkkokauppa_items: Vec<_> = items.iter().filter(|item| item.name == "VERKKOKAUPPA.COM").collect();
+        assert_eq!(verkkokauppa_items.len(), 1);
+
+        let itunes_items: Vec<_> = items.iter().filter(|item| item.name == "APPLE ITUNES").collect();
+        assert_eq!(itunes_items.len(), 1);
+
+        let bandcamp_items: Vec<_> = items.iter().filter(|item| item.name == "PAYPAL BANDCAMP").collect();
+        assert_eq!(bandcamp_items.len(), 1);
+    }
+
+    #[test]
+    fn parses_year_transition_xml_end_to_end() {
+        let path = Path::new("tests/fixtures/visa_year_transition.xml");
+        let (lines, year) = read_xml_file(path);
+        let items = extract_items(&lines, year).expect("should parse items");
+
+        assert_eq!(items.len(), 6);
+
+        // Check that December items got previous year
+        let december_items: Vec<_> = items.iter().filter(|item| item.date.month() == 12).collect();
+        assert_eq!(december_items.len(), 3);
+        for item in december_items {
+            assert_eq!(item.date.year(), 2024);
+        }
+
+        // Check that January items got current year
+        let january_items: Vec<_> = items.iter().filter(|item| item.date.month() == 1).collect();
+        assert_eq!(january_items.len(), 3);
+        for item in january_items {
+            assert_eq!(item.date.year(), 2025);
+        }
+    }
+
+    #[test]
+    fn calculates_correct_totals_from_sample() {
+        let path = Path::new("tests/fixtures/visa_sample.xml");
+        let (lines, year) = read_xml_file(path);
+        let items = extract_items(&lines, year).expect("should parse items");
+        let totals = calculate_totals_for_each_name(&items);
+
+        // Total sum should match the expected value
+        let total_sum: f64 = items.iter().map(|item| item.sum).sum();
+        assert!((total_sum - 261.83).abs() < 0.01);
+
+        // Check that totals are sorted descending by sum
+        for window in totals.windows(2) {
+            assert!(window[0].1 >= window[1].1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_get_xml_files {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn finds_xml_files_in_fixtures_directory() {
+        let files = get_xml_files(Path::new("tests/fixtures"));
+
+        assert!(files.len() >= 2);
+        assert!(
+            files
+                .iter()
+                .all(|path| path.extension().map_or(false, |ext| ext == "xml"))
+        );
+    }
+
+    #[test]
+    fn returns_empty_for_nonexistent_directory() {
+        let files = get_xml_files(Path::new("tests/nonexistent"));
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn returns_sorted_files() {
+        let files = get_xml_files(Path::new("tests/fixtures"));
+
+        let file_names: Vec<_> = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_lowercase())
+            .collect();
+
+        let mut sorted = file_names.clone();
+        sorted.sort();
+        assert_eq!(file_names, sorted);
+    }
+}
