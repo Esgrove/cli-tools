@@ -9,14 +9,14 @@ use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{Datelike, Local, NaiveDate};
-use clap::Parser;
 use colored::Colorize;
 use encoding_rs::Encoding;
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, RowNum, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
-
 use walkdir::WalkDir;
+
+use crate::config::Config;
 
 static RE_BRACKETS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets"));
@@ -174,35 +174,6 @@ static FILTER_PREFIXES: [&str; 82] = [
     "WOLT",
 ];
 
-#[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    name = env!("CARGO_BIN_NAME"),
-    about = "Parse Finvoice XML credit card statement files"
-)]
-struct Args {
-    /// Optional input directory or XML file path
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
-    path: Option<PathBuf>,
-
-    /// Optional output path (default is the input directory)
-    #[arg(short, long, name = "OUTPUT_PATH")]
-    output: Option<String>,
-
-    /// Only print information without writing to file
-    #[arg(short, long)]
-    print: bool,
-
-    /// How many total sums to print with verbose output
-    #[arg(short, long, default_value_t = 20)]
-    number: usize,
-
-    /// Print verbose output
-    #[arg(short, long)]
-    verbose: bool,
-}
-
 /// Represents one credit card purchase.
 #[derive(Debug, Clone, PartialEq)]
 struct VisaItem {
@@ -211,28 +182,78 @@ struct VisaItem {
     sum: f64,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    let input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
-    let output_path = cli_tools::resolve_output_path(args.output.as_deref(), &input_path)?;
-    visa_parse(&input_path, &output_path, args.verbose, args.print, args.number)
+impl VisaItem {
+    /// Float value formatted with a comma as the decimal separator.
+    pub fn finnish_sum(&self) -> String {
+        format!("{:.2}", self.sum).replace('.', ",")
+    }
+
+    /// Date in format "yyyy.mm.dd"
+    pub fn finnish_date(&self) -> String {
+        self.date.format("%Y.%m.%d").to_string()
+    }
+}
+
+impl fmt::Display for VisaItem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}   {:>7}€   {}",
+            self.finnish_date(),
+            self.finnish_sum(),
+            self.name
+        )
+    }
+}
+
+// f64 does not have Eq so this way it uses PartialEq
+impl Eq for VisaItem {}
+
+impl PartialOrd for VisaItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VisaItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.date
+            .cmp(&other.date)
+            .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| self.sum.partial_cmp(&other.sum).unwrap_or(Ordering::Equal))
+    }
+}
+
+impl Serialize for VisaItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("VisaItem", 3)?;
+
+        state.serialize_field("Date", &self.finnish_date())?;
+        state.serialize_field("Name", &self.name)?;
+        state.serialize_field("Sum", &self.finnish_sum())?;
+
+        state.end()
+    }
 }
 
 /// Parse data from files and write formatted items to CSV and Excel.
-fn visa_parse(input: &PathBuf, output: &Path, verbose: bool, dryrun: bool, num_totals: usize) -> Result<()> {
-    let (root, files) = get_xml_file_list(input)?;
+pub fn visa_parse(config: &Config) -> Result<()> {
+    let (root, files) = get_xml_file_list(&config.input_path)?;
     if files.is_empty() {
         anyhow::bail!("No XML files to parse".red());
     }
 
     let num_files = files.len();
-    let items = parse_files(&root, files, verbose)?;
+    let items = parse_files(&root, files, config.verbose)?;
     let totals = calculate_totals_for_each_name(&items);
-    print_statistics(&items, &totals, num_files, verbose, num_totals);
+    print_statistics(&items, &totals, num_files, config.verbose, config.number);
 
-    if !dryrun {
-        write_to_csv(&items, output)?;
-        write_to_excel(&items, &totals, output)?;
+    if !config.print {
+        write_to_csv(&items, &config.output_path)?;
+        write_to_excel(&items, &totals, &config.output_path)?;
     }
 
     Ok(())
@@ -631,63 +652,6 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     }
     workbook.save(output_file)?;
     Ok(())
-}
-
-impl VisaItem {
-    /// Float value formatted with a comma as the decimal separator.
-    pub fn finnish_sum(&self) -> String {
-        format!("{:.2}", self.sum).replace('.', ",")
-    }
-
-    /// Date in format "yyyy.mm.dd"
-    pub fn finnish_date(&self) -> String {
-        self.date.format("%Y.%m.%d").to_string()
-    }
-}
-
-impl fmt::Display for VisaItem {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}   {:>7}€   {}",
-            self.finnish_date(),
-            self.finnish_sum(),
-            self.name
-        )
-    }
-}
-
-// f64 does not have Eq so this way it uses PartialEq
-impl Eq for VisaItem {}
-
-impl PartialOrd for VisaItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for VisaItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.date
-            .cmp(&other.date)
-            .then_with(|| self.name.cmp(&other.name))
-            .then_with(|| self.sum.partial_cmp(&other.sum).unwrap_or(Ordering::Equal))
-    }
-}
-
-impl Serialize for VisaItem {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("VisaItem", 3)?;
-
-        state.serialize_field("Date", &self.finnish_date())?;
-        state.serialize_field("Name", &self.name)?;
-        state.serialize_field("Sum", &self.finnish_sum())?;
-
-        state.end()
-    }
 }
 
 #[cfg(test)]
@@ -1246,14 +1210,11 @@ mod test_integration_xml_parsing {
         assert!((wolt_items[0].sum - 18.90).abs() < 0.01);
 
         // Check name transformations
-        let verkkokauppa_items: Vec<_> = items.iter().filter(|item| item.name == "VERKKOKAUPPA.COM").collect();
-        assert_eq!(verkkokauppa_items.len(), 1);
+        assert_eq!(items.iter().filter(|item| item.name == "VERKKOKAUPPA.COM").count(), 1);
 
-        let itunes_items: Vec<_> = items.iter().filter(|item| item.name == "APPLE ITUNES").collect();
-        assert_eq!(itunes_items.len(), 1);
+        assert_eq!(items.iter().filter(|item| item.name == "APPLE ITUNES").count(), 1);
 
-        let bandcamp_items: Vec<_> = items.iter().filter(|item| item.name == "PAYPAL BANDCAMP").collect();
-        assert_eq!(bandcamp_items.len(), 1);
+        assert_eq!(items.iter().filter(|item| item.name == "PAYPAL BANDCAMP").count(), 1);
     }
 
     #[test]
@@ -1310,7 +1271,7 @@ mod test_get_xml_files {
         assert!(
             files
                 .iter()
-                .all(|path| path.extension().map_or(false, |ext| ext == "xml"))
+                .all(|path| path.extension().is_some_and(|ext| ext == "xml"))
         );
     }
 

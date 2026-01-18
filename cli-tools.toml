@@ -172,3 +172,13 @@ replace = [
 
 # Default resolution limit for delete mode (files smaller than this are deleted)
 # delete_limit = 500
+
+[visaparse]
+# How many total sums to print with verbose output
+# number = 20
+
+# Only print information without writing to file
+# print = false
+
+# Print verbose output
+# verbose = false

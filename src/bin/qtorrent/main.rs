@@ -119,7 +119,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod cli_args_tests {
     use super::*;
-    use crate::config::Config;
 
     #[test]
     fn parses_multiple_paths() {

@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "8.5.0"
+version = "8.6.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities."
@@ -85,7 +85,7 @@ path = "src/bin/video_convert/main.rs"
 
 [[bin]]
 name = "visaparse"
-path = "src/bin/visa_parse.rs"
+path = "src/bin/visa_parse/main.rs"
 
 [[bin]]
 name = "vtag"
