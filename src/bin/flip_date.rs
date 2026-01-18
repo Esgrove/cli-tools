@@ -65,6 +65,7 @@ struct DateConfig {
     dryrun: bool,
     #[serde(default)]
     file_extensions: Vec<String>,
+    #[serde(default)]
     overwrite: bool,
     #[serde(default)]
     recurse: bool,
@@ -110,9 +111,18 @@ impl DateConfig {
         cli_tools::config::CONFIG_PATH
             .as_deref()
             .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|config_string| toml::from_str::<UserConfig>(&config_string).ok())
-            .map(|config| config.flip_date)
+            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse config from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    fn from_toml_str(toml_str: &str) -> Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.flip_date)
+            .context("Failed to parse flip_date config TOML")
     }
 }
 
@@ -552,5 +562,149 @@ mod tests {
         assert!(FILE_EXTENSIONS.contains(&"txt"));
         assert!(FILE_EXTENSIONS.contains(&"mkv"));
         assert_eq!(FILE_EXTENSIONS.len(), 9);
+    }
+}
+
+#[cfg(test)]
+mod date_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_str_parses_empty_config() {
+        let toml = "";
+        let config = DateConfig::from_toml_str(toml).unwrap();
+        assert!(!config.directory);
+        assert!(!config.dryrun);
+        assert!(!config.verbose);
+    }
+
+    #[test]
+    fn from_toml_str_parses_flip_date_section() {
+        let toml = r"
+[flip_date]
+directory = true
+dryrun = true
+verbose = true
+recurse = true
+";
+        let config = DateConfig::from_toml_str(toml).unwrap();
+        assert!(config.directory);
+        assert!(config.dryrun);
+        assert!(config.verbose);
+        assert!(config.recurse);
+    }
+
+    #[test]
+    fn from_toml_str_parses_file_extensions() {
+        let toml = r#"
+[flip_date]
+file_extensions = ["mp4", "mkv", "avi"]
+"#;
+        let config = DateConfig::from_toml_str(toml).unwrap();
+        assert_eq!(config.file_extensions, vec!["mp4", "mkv", "avi"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_overwrite_and_swap() {
+        let toml = r"
+[flip_date]
+overwrite = true
+swap_year = true
+year_first = true
+";
+        let config = DateConfig::from_toml_str(toml).unwrap();
+        assert!(config.overwrite);
+        assert!(config.swap_year);
+        assert!(config.year_first);
+    }
+
+    #[test]
+    fn from_toml_str_invalid_toml_returns_error() {
+        let toml = "this is not valid toml {{{";
+        let result = DateConfig::from_toml_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_toml_str_ignores_other_sections() {
+        let toml = r"
+[other_section]
+some_value = true
+
+[flip_date]
+verbose = true
+";
+        let config = DateConfig::from_toml_str(toml).unwrap();
+        assert!(config.verbose);
+        assert!(!config.directory);
+    }
+
+    #[test]
+    fn default_values_are_correct() {
+        let config = DateConfig::default();
+        assert!(!config.directory);
+        assert!(!config.dryrun);
+        assert!(!config.overwrite);
+        assert!(!config.recurse);
+        assert!(!config.swap_year);
+        assert!(!config.verbose);
+        assert!(!config.year_first);
+        assert!(config.file_extensions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod config_from_args_tests {
+    use super::*;
+
+    fn default_args() -> Args {
+        Args {
+            path: None,
+            dir: false,
+            force: false,
+            extensions: None,
+            year: false,
+            print: false,
+            recurse: false,
+            swap: false,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn from_args_uses_default_extensions() {
+        let args = default_args();
+        let config = Config::from_args(args);
+        assert_eq!(config.file_extensions.len(), FILE_EXTENSIONS.len());
+    }
+
+    #[test]
+    fn from_args_cli_overrides_defaults() {
+        let mut args = default_args();
+        args.dir = true;
+        args.force = true;
+        args.print = true;
+        args.recurse = true;
+        args.swap = true;
+        args.verbose = true;
+        args.year = true;
+
+        let config = Config::from_args(args);
+        assert!(config.directory_mode);
+        assert!(config.overwrite);
+        assert!(config.dryrun);
+        assert!(config.recurse);
+        assert!(config.swap_year);
+        assert!(config.verbose);
+        assert!(config.year_first);
+    }
+
+    #[test]
+    fn from_args_uses_cli_extensions() {
+        let mut args = default_args();
+        args.extensions = Some(vec!["mp4".to_string(), "mkv".to_string()]);
+
+        let config = Config::from_args(args);
+        assert_eq!(config.file_extensions, vec!["mp4", "mkv"]);
     }
 }

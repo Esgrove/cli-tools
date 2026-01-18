@@ -114,15 +114,18 @@ impl DotsConfig {
                     })
                     .ok()
             })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|e| {
-                        eprintln!("{}", format!("Error reading config file: {e}").red());
-                    })
-                    .ok()
-            })
-            .map(|config| config.dots)
+            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse config from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    pub fn from_toml_str(toml_str: &str) -> anyhow::Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.dots)
+            .with_context(|| "Failed to parse config TOML")
     }
 
     /// Collect substitutes to replace pairs from a list of pattern-replacement pairs.
@@ -304,4 +307,307 @@ impl fmt::Display for DotRenameConfig {
 
 const fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod dots_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_str_parses_empty_config() {
+        let toml = "";
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert!(config.replace.is_empty());
+        assert!(config.include.is_empty());
+        assert!(!config.debug);
+    }
+
+    #[test]
+    fn from_toml_str_parses_dots_section() {
+        let toml = r"
+[dots]
+debug = true
+dryrun = true
+verbose = true
+";
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert!(config.debug);
+        assert!(config.dryrun);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn from_toml_str_parses_replace_pairs() {
+        let toml = r#"
+[dots]
+replace = [
+    [".WEBDL", ""],
+    [".HEVC", ".x265"],
+]
+"#;
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert_eq!(config.replace.len(), 2);
+        assert_eq!(config.replace[0], (".WEBDL".to_string(), String::new()));
+        assert_eq!(config.replace[1], (".HEVC".to_string(), ".x265".to_string()));
+    }
+
+    #[test]
+    fn from_toml_str_parses_regex_replace() {
+        let toml = r#"
+[dots]
+regex_replace = [
+    ["\\d{4}", "YEAR"],
+]
+"#;
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert_eq!(config.regex_replace.len(), 1);
+        assert_eq!(config.regex_replace[0].0, "\\d{4}");
+        assert_eq!(config.regex_replace[0].1, "YEAR");
+    }
+
+    #[test]
+    fn from_toml_str_parses_include_list() {
+        let toml = r#"
+[dots]
+include = ["pattern1", "pattern2", "pattern3"]
+"#;
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert_eq!(config.include, vec!["pattern1", "pattern2", "pattern3"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_move_lists() {
+        let toml = r#"
+[dots]
+move_to_start = ["PREFIX"]
+move_to_end = ["SUFFIX"]
+move_date_after_prefix = ["Artist"]
+"#;
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert_eq!(config.move_to_start, vec!["PREFIX"]);
+        assert_eq!(config.move_to_end, vec!["SUFFIX"]);
+        assert_eq!(config.move_date_after_prefix, vec!["Artist"]);
+    }
+
+    #[test]
+    fn from_toml_str_default_date_starts_with_year_is_true() {
+        let toml = "[dots]";
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert!(config.date_starts_with_year);
+    }
+
+    #[test]
+    fn from_toml_str_can_override_date_starts_with_year() {
+        let toml = r"
+[dots]
+date_starts_with_year = false
+";
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert!(!config.date_starts_with_year);
+    }
+
+    #[test]
+    fn from_toml_str_parses_prefix_dir_options() {
+        let toml = r"
+[dots]
+prefix_dir = true
+prefix_dir_recursive = true
+prefix_dir_start = true
+";
+        let config = DotsConfig::from_toml_str(toml).unwrap();
+        assert!(config.prefix_dir);
+        assert!(config.prefix_dir_recursive);
+        assert!(config.prefix_dir_start);
+    }
+
+    #[test]
+    fn from_toml_str_invalid_toml_returns_error() {
+        let toml = "this is not valid toml {{{";
+        let result = DotsConfig::from_toml_str(toml);
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod parse_substitutes_tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_pairs() {
+        let input = vec![
+            "old1".to_string(),
+            "new1".to_string(),
+            "old2".to_string(),
+            "new2".to_string(),
+        ];
+        let result = DotsConfig::parse_substitutes(&input);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], ("old1".to_string(), "new1".to_string()));
+        assert_eq!(result[1], ("old2".to_string(), "new2".to_string()));
+    }
+
+    #[test]
+    fn ignores_incomplete_pair() {
+        let input = vec!["old1".to_string(), "new1".to_string(), "orphan".to_string()];
+        let result = DotsConfig::parse_substitutes(&input);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn skips_empty_pattern() {
+        let input = vec![String::new(), "replacement".to_string()];
+        let result = DotsConfig::parse_substitutes(&input);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        let input = vec!["  pattern  ".to_string(), "  replacement  ".to_string()];
+        let result = DotsConfig::parse_substitutes(&input);
+        assert_eq!(result[0], ("pattern".to_string(), "replacement".to_string()));
+    }
+
+    #[test]
+    fn handles_empty_input() {
+        let input: Vec<String> = vec![];
+        let result = DotsConfig::parse_substitutes(&input);
+        assert!(result.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod parse_removes_tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_removes() {
+        let input = vec!["pattern1".to_string(), "pattern2".to_string()];
+        let result = DotsConfig::parse_removes(&input);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], ("pattern1".to_string(), String::new()));
+        assert_eq!(result[1], ("pattern2".to_string(), String::new()));
+    }
+
+    #[test]
+    fn skips_empty_patterns() {
+        let input = vec!["valid".to_string(), String::new(), "  ".to_string()];
+        let result = DotsConfig::parse_removes(&input);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "valid");
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        let input = vec!["  pattern  ".to_string()];
+        let result = DotsConfig::parse_removes(&input);
+        assert_eq!(result[0].0, "pattern");
+    }
+}
+
+#[cfg(test)]
+mod parse_regex_substitutes_tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_regex_pairs() {
+        let input = vec![
+            r"\d+".to_string(),
+            "NUMBER".to_string(),
+            r"[a-z]+".to_string(),
+            "LETTERS".to_string(),
+        ];
+        let result = DotsConfig::parse_regex_substitutes(&input).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result[0].0.is_match("123"));
+        assert_eq!(result[0].1, "NUMBER");
+    }
+
+    #[test]
+    fn returns_error_for_invalid_regex() {
+        let input = vec!["[invalid".to_string(), "replacement".to_string()];
+        let result = DotsConfig::parse_regex_substitutes(&input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ignores_incomplete_pairs() {
+        let input = vec![r"\d+".to_string()];
+        let result = DotsConfig::parse_regex_substitutes(&input).unwrap();
+        assert!(result.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod compile_regex_patterns_tests {
+    use super::*;
+
+    #[test]
+    fn compiles_valid_patterns() {
+        let input = vec![
+            (r"\d{4}".to_string(), "YEAR".to_string()),
+            (r"[A-Z]+".to_string(), "UPPER".to_string()),
+        ];
+        let result = DotsConfig::compile_regex_patterns(input).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result[0].0.is_match("2024"));
+        assert!(result[1].0.is_match("ABC"));
+    }
+
+    #[test]
+    fn returns_error_for_invalid_pattern() {
+        let input = vec![("[invalid".to_string(), "replacement".to_string())];
+        let result = DotsConfig::compile_regex_patterns(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn handles_empty_input() {
+        let input: Vec<(String, String)> = vec![];
+        let result = DotsConfig::compile_regex_patterns(input).unwrap();
+        assert!(result.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod dot_rename_config_display_tests {
+    use super::*;
+
+    #[test]
+    fn display_formats_config() {
+        let config = DotRenameConfig {
+            debug: true,
+            dryrun: false,
+            verbose: true,
+            prefix: Some("PREFIX".to_string()),
+            suffix: None,
+            ..Default::default()
+        };
+        let display = format!("{config}");
+        assert!(display.contains("Config:"));
+        assert!(display.contains("debug:"));
+        assert!(display.contains("dryrun:"));
+        assert!(display.contains("PREFIX"));
+    }
+
+    #[test]
+    fn display_shows_include_exclude() {
+        let config = DotRenameConfig {
+            include: vec!["inc1".to_string(), "inc2".to_string()],
+            exclude: vec!["exc1".to_string()],
+            ..Default::default()
+        };
+        let display = format!("{config}");
+        assert!(display.contains("inc1"));
+        assert!(display.contains("inc2"));
+        assert!(display.contains("exc1"));
+    }
+
+    #[test]
+    fn display_shows_empty_lists() {
+        let config = DotRenameConfig::default();
+        let display = format!("{config}");
+        assert!(display.contains("include: []"));
+        assert!(display.contains("exclude: []"));
+        assert!(display.contains("replace:   []"));
+    }
 }

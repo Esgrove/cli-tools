@@ -151,6 +151,9 @@ pub fn list_extensions(verbose: bool) -> Result<()> {
 }
 
 /// Show database statistics and contents.
+///
+/// # Errors
+/// Returns an error if the database cannot be opened or queried.
 pub fn show_database_contents(config: &Config) -> Result<()> {
     let database = Database::open_default()?;
     if config.verbose {
@@ -223,4 +226,112 @@ pub fn show_database_contents(config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sort_order_tests {
+    use super::*;
+
+    fn parse(s: &str) -> Result<SortOrder, String> {
+        <SortOrder as std::str::FromStr>::from_str(s)
+    }
+
+    #[test]
+    fn from_str_parses_bitrate() {
+        assert_eq!(parse("bitrate").unwrap(), SortOrder::Bitrate);
+        assert_eq!(parse("BITRATE").unwrap(), SortOrder::Bitrate);
+    }
+
+    #[test]
+    fn from_str_parses_size() {
+        assert_eq!(parse("size").unwrap(), SortOrder::Size);
+        assert_eq!(parse("size_asc").unwrap(), SortOrder::SizeAsc);
+        assert_eq!(parse("size-asc").unwrap(), SortOrder::SizeAsc);
+    }
+
+    #[test]
+    fn from_str_parses_duration() {
+        assert_eq!(parse("duration").unwrap(), SortOrder::Duration);
+        assert_eq!(parse("duration_asc").unwrap(), SortOrder::DurationAsc);
+        assert_eq!(parse("duration-asc").unwrap(), SortOrder::DurationAsc);
+    }
+
+    #[test]
+    fn from_str_parses_resolution() {
+        assert_eq!(parse("resolution").unwrap(), SortOrder::Resolution);
+        assert_eq!(parse("resolution_asc").unwrap(), SortOrder::ResolutionAsc);
+        assert_eq!(parse("resolution-asc").unwrap(), SortOrder::ResolutionAsc);
+    }
+
+    #[test]
+    fn from_str_parses_impact() {
+        assert_eq!(parse("impact").unwrap(), SortOrder::Impact);
+    }
+
+    #[test]
+    fn from_str_parses_name() {
+        assert_eq!(parse("name").unwrap(), SortOrder::Name);
+    }
+
+    #[test]
+    fn from_str_returns_error_for_unknown() {
+        let result = parse("unknown");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown sort order"));
+    }
+
+    #[test]
+    fn display_formats_correctly() {
+        assert_eq!(format!("{}", SortOrder::Bitrate), "bitrate");
+        assert_eq!(format!("{}", SortOrder::Size), "size");
+        assert_eq!(format!("{}", SortOrder::SizeAsc), "size-asc");
+        assert_eq!(format!("{}", SortOrder::Duration), "duration");
+        assert_eq!(format!("{}", SortOrder::DurationAsc), "duration-asc");
+        assert_eq!(format!("{}", SortOrder::Resolution), "resolution");
+        assert_eq!(format!("{}", SortOrder::ResolutionAsc), "resolution-asc");
+        assert_eq!(format!("{}", SortOrder::Impact), "impact");
+        assert_eq!(format!("{}", SortOrder::Name), "name");
+    }
+
+    #[test]
+    fn sql_order_clause_returns_valid_sql() {
+        assert_eq!(SortOrder::Bitrate.sql_order_clause(), "bitrate_kbps DESC");
+        assert_eq!(SortOrder::Size.sql_order_clause(), "size_bytes DESC");
+        assert_eq!(SortOrder::SizeAsc.sql_order_clause(), "size_bytes ASC");
+        assert_eq!(SortOrder::Duration.sql_order_clause(), "duration DESC");
+        assert_eq!(SortOrder::DurationAsc.sql_order_clause(), "duration ASC");
+        assert_eq!(SortOrder::Resolution.sql_order_clause(), "width * height DESC");
+        assert_eq!(SortOrder::ResolutionAsc.sql_order_clause(), "width * height ASC");
+        assert_eq!(
+            SortOrder::Impact.sql_order_clause(),
+            "(bitrate_kbps / frames_per_second) * duration DESC"
+        );
+        assert_eq!(SortOrder::Name.sql_order_clause(), "full_path ASC");
+    }
+
+    #[test]
+    fn default_is_bitrate() {
+        assert_eq!(SortOrder::default(), SortOrder::Bitrate);
+    }
+}
+
+#[cfg(test)]
+mod database_mode_tests {
+    use super::*;
+
+    #[test]
+    fn database_mode_equality() {
+        assert_eq!(DatabaseMode::Process, DatabaseMode::Process);
+        assert_eq!(DatabaseMode::Clear, DatabaseMode::Clear);
+        assert_eq!(DatabaseMode::Show, DatabaseMode::Show);
+        assert_eq!(DatabaseMode::ListExtensions, DatabaseMode::ListExtensions);
+        assert_ne!(DatabaseMode::Process, DatabaseMode::Clear);
+    }
+
+    #[test]
+    fn database_mode_debug() {
+        let mode = DatabaseMode::Process;
+        let debug = format!("{mode:?}");
+        assert!(debug.contains("Process"));
+    }
 }
