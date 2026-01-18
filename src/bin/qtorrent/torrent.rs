@@ -382,3 +382,302 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
         other => bail!("Unknown bencode type: {}", other as char),
     }
 }
+
+#[cfg(test)]
+mod test_to_hex {
+    use super::*;
+
+    #[test]
+    fn empty_bytes() {
+        assert_eq!(to_hex(&[]), "");
+    }
+
+    #[test]
+    fn single_byte_zero() {
+        assert_eq!(to_hex(&[0x00]), "00");
+    }
+
+    #[test]
+    fn single_byte_max() {
+        assert_eq!(to_hex(&[0xff]), "ff");
+    }
+
+    #[test]
+    fn multiple_bytes() {
+        assert_eq!(
+            to_hex(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]),
+            "0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn sha1_hash_length() {
+        // SHA-1 produces 20 bytes = 40 hex characters
+        let hash = vec![
+            0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18, 0x90, 0xaf, 0xd8,
+            0x07, 0x09,
+        ];
+        let hex = to_hex(&hash);
+        assert_eq!(hex.len(), 40);
+        assert_eq!(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    }
+}
+
+#[cfg(test)]
+mod test_find_subsequence {
+    use super::*;
+
+    #[test]
+    fn finds_at_start() {
+        let haystack = b"hello world";
+        let needle = b"hello";
+        assert_eq!(find_subsequence(haystack, needle), Some(0));
+    }
+
+    #[test]
+    fn finds_at_end() {
+        let haystack = b"hello world";
+        let needle = b"world";
+        assert_eq!(find_subsequence(haystack, needle), Some(6));
+    }
+
+    #[test]
+    fn finds_in_middle() {
+        let haystack = b"hello world";
+        let needle = b"lo wo";
+        assert_eq!(find_subsequence(haystack, needle), Some(3));
+    }
+
+    #[test]
+    fn not_found() {
+        let haystack = b"hello world";
+        let needle = b"xyz";
+        assert_eq!(find_subsequence(haystack, needle), None);
+    }
+
+    #[test]
+    fn empty_haystack() {
+        let haystack = b"";
+        let needle = b"hello";
+        assert_eq!(find_subsequence(haystack, needle), None);
+    }
+
+    #[test]
+    fn finds_bencode_info_key() {
+        let data = b"d8:announce35:http://tracker.example.com/announce4:infod4:name4:test12:piece lengthi16384eee";
+        assert_eq!(find_subsequence(data, b"4:info"), Some(49));
+    }
+}
+
+#[cfg(test)]
+mod test_bencode_value_length {
+    use super::*;
+
+    #[test]
+    fn integer_positive() {
+        let data = b"i42e";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 4);
+    }
+
+    #[test]
+    fn integer_negative() {
+        let data = b"i-123e";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 6);
+    }
+
+    #[test]
+    fn integer_zero() {
+        let data = b"i0e";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 3);
+    }
+
+    #[test]
+    fn string_simple() {
+        let data = b"4:test";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 6);
+    }
+
+    #[test]
+    fn string_empty() {
+        let data = b"0:";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 2);
+    }
+
+    #[test]
+    fn string_longer() {
+        let data = b"11:hello world";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 14);
+    }
+
+    #[test]
+    fn list_empty() {
+        let data = b"le";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 2);
+    }
+
+    #[test]
+    fn list_with_items() {
+        let data = b"l4:spam4:eggse";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 14);
+    }
+
+    #[test]
+    fn list_nested() {
+        let data = b"ll4:testee";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 10);
+    }
+
+    #[test]
+    fn dict_empty() {
+        let data = b"de";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 2);
+    }
+
+    #[test]
+    fn dict_with_items() {
+        let data = b"d3:cow3:moo4:spam4:eggse";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 24);
+    }
+
+    #[test]
+    fn dict_nested() {
+        let data = b"d4:infod4:name4:testee";
+        assert_eq!(bencode_value_length(data).expect("should parse"), 22);
+    }
+
+    #[test]
+    fn error_on_empty() {
+        let data = b"";
+        assert!(bencode_value_length(data).is_err());
+    }
+
+    #[test]
+    fn error_on_unknown_type() {
+        let data = b"x";
+        assert!(bencode_value_length(data).is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_file_filter {
+    use super::*;
+
+    fn make_file_info(path: &str, size: u64) -> FileInfo<'static> {
+        FileInfo {
+            index: 0,
+            path: Cow::Owned(path.to_string()),
+            size,
+            exclusion_reason: None,
+        }
+    }
+
+    #[test]
+    fn excludes_by_extension() {
+        let skip_extensions = vec!["txt".to_string(), "nfo".to_string()];
+        let filter = FileFilter::new(&skip_extensions, &[], None);
+
+        let file = make_file_info("movie/sample.txt", 1000);
+        let reason = filter.should_exclude(&file);
+
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("extension"));
+    }
+
+    #[test]
+    fn excludes_by_directory_name() {
+        let skip_names = vec!["sample".to_string()];
+        let filter = FileFilter::new(&[], &skip_names, None);
+
+        let file = make_file_info("movie/sample/video.mp4", 1_000_000);
+        let reason = filter.should_exclude(&file);
+
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("directory"));
+    }
+
+    #[test]
+    fn excludes_by_size() {
+        let min_size = 10 * 1024 * 1024; // 10 MB
+        let filter = FileFilter::new(&[], &[], Some(min_size));
+
+        let file = make_file_info("movie/small.mp4", 1_000_000); // 1 MB
+        let reason = filter.should_exclude(&file);
+
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("size"));
+    }
+
+    #[test]
+    fn includes_when_no_filter_matches() {
+        let skip_extensions = vec!["txt".to_string()];
+        let skip_names = vec!["sample".to_string()];
+        let min_size = 1024;
+        let filter = FileFilter::new(&skip_extensions, &skip_names, Some(min_size));
+
+        let file = make_file_info("movie/video.mp4", 1_000_000);
+        let reason = filter.should_exclude(&file);
+
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn is_empty_returns_true_for_no_filters() {
+        let filter = FileFilter::new(&[], &[], None);
+        assert!(filter.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_false_with_extension_filter() {
+        let skip_extensions = vec!["txt".to_string()];
+        let filter = FileFilter::new(&skip_extensions, &[], None);
+        assert!(!filter.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_false_with_size_filter() {
+        let filter = FileFilter::new(&[], &[], Some(1024));
+        assert!(!filter.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_filtered_files {
+    use super::*;
+
+    fn make_file_info(path: &str, size: u64) -> FileInfo<'static> {
+        FileInfo {
+            index: 0,
+            path: Cow::Owned(path.to_string()),
+            size,
+            exclusion_reason: None,
+        }
+    }
+
+    #[test]
+    fn calculates_included_size() {
+        let filtered = FilteredFiles {
+            included: vec![make_file_info("a.mp4", 1000), make_file_info("b.mp4", 2000)],
+            excluded: vec![make_file_info("c.txt", 500)],
+        };
+
+        assert_eq!(filtered.included_size(), 3000);
+    }
+
+    #[test]
+    fn calculates_excluded_size() {
+        let filtered = FilteredFiles {
+            included: vec![make_file_info("a.mp4", 1000)],
+            excluded: vec![make_file_info("b.txt", 500), make_file_info("c.nfo", 300)],
+        };
+
+        assert_eq!(filtered.excluded_size(), 800);
+    }
+
+    #[test]
+    fn handles_empty_lists() {
+        let filtered = FilteredFiles::default();
+
+        assert_eq!(filtered.included_size(), 0);
+        assert_eq!(filtered.excluded_size(), 0);
+    }
+}
