@@ -1506,9 +1506,15 @@ mod assert_f64_eq_tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Values are not equal")]
     fn different_values() {
         assert_f64_eq(1.0, 2.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Values are not equal")]
+    fn close_values() {
+        assert_f64_eq(1.0, 1.0 + f64::EPSILON + f64::EPSILON);
     }
 }
 
@@ -1561,5 +1567,216 @@ mod hidden_file_tests {
             .unwrap();
 
         assert!(is_hidden(&entry));
+    }
+}
+
+#[cfg(test)]
+mod trash_or_delete_tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn deletes_local_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_file.txt");
+        File::create(&file_path).unwrap();
+
+        assert!(file_path.exists());
+        trash_or_delete(&file_path).unwrap();
+        assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn returns_error_for_nonexistent_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("nonexistent.txt");
+
+        let result = trash_or_delete(&file_path);
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod show_diff_tests {
+    use super::*;
+
+    #[test]
+    fn show_diff_does_not_panic_on_identical() {
+        // Just ensure it doesn't panic
+        show_diff("same text", "same text");
+    }
+
+    #[test]
+    fn show_diff_does_not_panic_on_different() {
+        show_diff("old text", "new text");
+    }
+
+    #[test]
+    fn show_diff_does_not_panic_on_empty() {
+        show_diff("", "");
+        show_diff("text", "");
+        show_diff("", "text");
+    }
+}
+
+#[cfg(test)]
+mod network_path_tests {
+    use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn detects_unc_path() {
+        let path = Path::new(r"\\server\share\file.txt");
+        assert!(is_network_path(path));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn local_path_is_not_network() {
+        let path = Path::new(r"C:\Users\test\file.txt");
+        // Local drives should not be detected as network paths
+        // (unless they are actually mapped network drives)
+        assert!(!is_network_path(path));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn non_windows_always_false() {
+        let path = Path::new("/home/user/file.txt");
+        assert!(!is_network_path(path));
+    }
+}
+
+#[cfg(test)]
+mod relative_path_tests {
+    use super::*;
+
+    #[test]
+    fn get_relative_path_from_cwd_returns_path() {
+        let path = Path::new("some/relative/path.txt");
+        let result = get_relative_path_from_current_working_directory(path);
+        // Should return the same path since it's already relative
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn path_to_string_relative_converts() {
+        let path = Path::new("test/file.txt");
+        let result = path_to_string_relative(path);
+        assert!(result.contains("file.txt"));
+    }
+}
+
+#[cfg(test)]
+mod additional_path_utility_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn get_unique_path_returns_original_when_no_conflict() {
+        let dir = tempdir().unwrap();
+        let result = get_unique_path(dir.path(), "newfile.txt", "newfile", "txt");
+        assert_eq!(result, dir.path().join("newfile.txt"));
+    }
+
+    #[test]
+    fn get_unique_path_increments_counter() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "content").unwrap();
+
+        let result = get_unique_path(dir.path(), "file.txt", "file", "txt");
+        assert_eq!(result, dir.path().join("file.1.txt"));
+    }
+
+    #[test]
+    fn get_unique_path_increments_multiple_times() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "content").unwrap();
+        std::fs::write(dir.path().join("file.1.txt"), "content").unwrap();
+        std::fs::write(dir.path().join("file.2.txt"), "content").unwrap();
+
+        let result = get_unique_path(dir.path(), "file.txt", "file", "txt");
+        assert_eq!(result, dir.path().join("file.3.txt"));
+    }
+
+    #[test]
+    fn get_unique_path_handles_no_extension() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file"), "content").unwrap();
+
+        let result = get_unique_path(dir.path(), "file", "file", "");
+        assert_eq!(result, dir.path().join("file.1"));
+    }
+
+    #[test]
+    fn get_relative_path_or_filename_outside_root() {
+        let root = Path::new("/some/root");
+        let path = Path::new("/different/path/file.txt");
+        let result = get_relative_path_or_filename(path, root);
+        assert_eq!(result, "file.txt");
+    }
+
+    #[test]
+    fn get_relative_path_or_filename_no_filename() {
+        let root = Path::new("/some/root");
+        let path = Path::new("/");
+        let result = get_relative_path_or_filename(path, root);
+        // Should return the full path display when no filename
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn append_extension_preserves_directory() {
+        let path = Path::new("/dir/subdir/file.txt");
+        let result = append_extension_to_path(path, "bak");
+        assert_eq!(result, PathBuf::from("/dir/subdir/file.txt.bak"));
+    }
+
+    #[test]
+    fn insert_suffix_preserves_directory() {
+        let path = Path::new("/dir/subdir/file.txt");
+        let result = insert_suffix_before_extension(path, ".backup");
+        assert_eq!(result, PathBuf::from("/dir/subdir/file.backup.txt"));
+    }
+}
+
+#[cfg(test)]
+mod print_function_tests {
+    use super::*;
+
+    #[test]
+    fn print_error_does_not_panic() {
+        print_error("test error message");
+    }
+
+    #[test]
+    fn print_warning_does_not_panic() {
+        print_warning("test warning message");
+    }
+
+    #[test]
+    fn print_green_does_not_panic() {
+        print_green("test green message");
+    }
+
+    #[test]
+    fn print_magenta_does_not_panic() {
+        print_magenta("test magenta message");
+    }
+
+    #[test]
+    fn print_magenta_bold_does_not_panic() {
+        print_magenta_bold("test magenta bold message");
+    }
+
+    #[test]
+    fn print_cyan_does_not_panic() {
+        print_cyan("test cyan message");
+    }
+
+    #[test]
+    fn print_bold_does_not_panic() {
+        print_bold("test bold message");
     }
 }

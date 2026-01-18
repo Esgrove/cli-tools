@@ -772,3 +772,250 @@ mod test_item_parse {
         assert_eq!(three, "443,44");
     }
 }
+
+#[cfg(test)]
+mod test_clean_whitespaces {
+    use super::*;
+
+    #[test]
+    fn removes_multiple_spaces() {
+        assert_eq!(clean_whitespaces("hello    world"), "hello world");
+    }
+
+    #[test]
+    fn removes_tabs_and_newlines() {
+        assert_eq!(clean_whitespaces("hello\t\nworld"), "hello world");
+    }
+
+    #[test]
+    fn handles_mixed_whitespace() {
+        assert_eq!(clean_whitespaces("hello\r\n\t   world"), "hello world");
+    }
+
+    #[test]
+    fn preserves_single_spaces() {
+        assert_eq!(clean_whitespaces("hello world"), "hello world");
+    }
+
+    #[test]
+    fn handles_empty_string() {
+        assert_eq!(clean_whitespaces(""), "");
+    }
+}
+
+#[cfg(test)]
+mod test_format_name {
+    use super::*;
+
+    #[test]
+    fn removes_osto_prefix() {
+        let result = format_name("Osto STORE NAME");
+        assert!(!result.contains("OSTO"));
+        assert!(result.contains("STORE NAME"));
+    }
+
+    #[test]
+    fn removes_tc_prefix() {
+        let result = format_name("TC*STORE NAME");
+        assert!(!result.contains("TC*"));
+    }
+
+    #[test]
+    fn converts_to_uppercase() {
+        let result = format_name("store name");
+        assert_eq!(result, "STORE NAME");
+    }
+
+    #[test]
+    fn replaces_special_characters_with_spaces() {
+        let result = format_name("store*name/test_here");
+        assert!(!result.contains('*'));
+        assert!(!result.contains('/'));
+        assert!(!result.contains('_'));
+    }
+
+    #[test]
+    fn removes_brackets() {
+        let result = format_name("STORE (NAME) [TEST]");
+        assert!(!result.contains('('));
+        assert!(!result.contains(')'));
+        assert!(!result.contains('['));
+        assert!(!result.contains(']'));
+    }
+
+    #[test]
+    fn replaces_html_ampersand() {
+        let result = format_name("STORE &amp; NAME");
+        assert!(result.contains('&'));
+        assert!(!result.contains("&amp;"));
+    }
+
+    #[test]
+    fn replaces_known_patterns() {
+        let result = format_name("K-CITYMARKET STORE");
+        assert_eq!(result, "K-MARKET");
+    }
+
+    #[test]
+    fn handles_wolt() {
+        let result = format_name("WOLT DELIVERY SERVICE");
+        assert_eq!(result, "WOLT");
+    }
+
+    #[test]
+    fn handles_itunes() {
+        let result = format_name("ITUNES.COM/BILL");
+        assert_eq!(result, "APPLE ITUNES");
+    }
+
+    #[test]
+    fn removes_www_prefix() {
+        let result = format_name("WWW.EXAMPLE.COM");
+        assert!(!result.starts_with("WWW."));
+    }
+
+    #[test]
+    fn handles_mobilepay() {
+        let result = format_name("MOB.PAY TRANSACTION");
+        assert!(result.starts_with("MOBILEPAY"));
+    }
+}
+
+#[cfg(test)]
+mod test_split_from_last_whitespaces {
+    use super::*;
+
+    #[test]
+    fn splits_on_double_space() {
+        let (before, after) = split_from_last_whitespaces("hello world  123");
+        assert_eq!(before, "hello world");
+        assert_eq!(after, "123");
+    }
+
+    #[test]
+    fn handles_no_double_space() {
+        let (before, after) = split_from_last_whitespaces("hello world");
+        assert_eq!(before, "");
+        assert_eq!(after, "hello world");
+    }
+
+    #[test]
+    fn handles_multiple_double_spaces() {
+        let (before, after) = split_from_last_whitespaces("one  two  three");
+        assert_eq!(before, "one  two");
+        assert_eq!(after, "three");
+    }
+
+    #[test]
+    fn handles_empty_string() {
+        let (before, after) = split_from_last_whitespaces("");
+        assert_eq!(before, "");
+        assert_eq!(after, "");
+    }
+
+    #[test]
+    fn trims_whitespace_from_parts() {
+        // Input: "  hello  world  " splits on last "  " (double space)
+        // rsplitn(2, "  ") from right: ["world  ", "  hello"]
+        // After trim: before="hello  world", after="" (splits on trailing double space)
+        let (before, after) = split_from_last_whitespaces("hello  world");
+        assert_eq!(before, "hello");
+        assert_eq!(after, "world");
+    }
+
+    #[test]
+    fn handles_trailing_double_space() {
+        let (before, after) = split_from_last_whitespaces("hello world  ");
+        assert_eq!(before, "hello world");
+        assert_eq!(after, "");
+    }
+}
+
+#[cfg(test)]
+mod test_visa_item {
+    use super::*;
+
+    #[test]
+    fn finnish_sum_formats_correctly() {
+        let item = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            name: "TEST".to_string(),
+            sum: 123.45,
+        };
+        assert_eq!(item.finnish_sum(), "123,45");
+    }
+
+    #[test]
+    fn finnish_sum_handles_whole_numbers() {
+        let item = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            name: "TEST".to_string(),
+            sum: 100.0,
+        };
+        assert_eq!(item.finnish_sum(), "100,00");
+    }
+
+    #[test]
+    fn finnish_date_formats_correctly() {
+        let item = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            name: "TEST".to_string(),
+            sum: 10.0,
+        };
+        assert_eq!(item.finnish_date(), "2024.06.15");
+    }
+
+    #[test]
+    fn display_formats_correctly() {
+        let item = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 5).expect("valid date"),
+            name: "STORE NAME".to_string(),
+            sum: 99.99,
+        };
+        let display = format!("{item}");
+        assert!(display.contains("2024.01.05"));
+        assert!(display.contains("STORE NAME"));
+        assert!(display.contains("99,99"));
+    }
+
+    #[test]
+    fn ordering_by_date_then_name() {
+        let item1 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "AAA".to_string(),
+            sum: 10.0,
+        };
+        let item2 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "BBB".to_string(),
+            sum: 20.0,
+        };
+        let item3 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+            name: "AAA".to_string(),
+            sum: 30.0,
+        };
+
+        // Same date, different names: ordered by name
+        assert!(item1 < item2);
+        // Different dates: ordered by date first
+        assert!(item1 < item3);
+        assert!(item2 < item3);
+    }
+
+    #[test]
+    fn partial_ord_matches_ord() {
+        let item1 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "AAA".to_string(),
+            sum: 10.0,
+        };
+        let item2 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+            name: "BBB".to_string(),
+            sum: 20.0,
+        };
+
+        assert_eq!(item1.partial_cmp(&item2), Some(item1.cmp(&item2)));
+    }
+}

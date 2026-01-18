@@ -1225,10 +1225,8 @@ mod fuzzy_resolution_tests {
 
     #[test]
     fn fuzzy_resolutions_no_overlapping_height_ranges() {
-        for i in 0..FUZZY_RESOLUTIONS.len() {
-            for j in (i + 1)..FUZZY_RESOLUTIONS.len() {
-                let a = &FUZZY_RESOLUTIONS[i];
-                let b = &FUZZY_RESOLUTIONS[j];
+        for (i, a) in FUZZY_RESOLUTIONS.iter().enumerate() {
+            for b in &FUZZY_RESOLUTIONS[(i + 1)..] {
                 // Check height ranges don't overlap (unless they're for same height like 480p variants)
                 if a.label_height != b.label_height {
                     let a_overlaps_b = a.height_range.0 <= b.height_range.1 && a.height_range.1 >= b.height_range.0;

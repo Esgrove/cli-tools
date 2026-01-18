@@ -242,3 +242,240 @@ impl AddAssign<&Self> for RunStats {
         self.total_duration += other.total_duration;
     }
 }
+
+#[cfg(test)]
+mod conversion_stats_tests {
+    use super::*;
+
+    #[test]
+    fn new_creates_stats_with_values() {
+        let stats = ConversionStats::new(1_000_000, 8000, 500_000, 4000);
+        assert_eq!(stats.original_size, 1_000_000);
+        assert_eq!(stats.original_bitrate_kbps, 8000);
+        assert_eq!(stats.converted_size, 500_000);
+        assert_eq!(stats.converted_bitrate_kbps, 4000);
+    }
+
+    #[test]
+    fn size_difference_positive_when_larger() {
+        let stats = ConversionStats::new(500_000, 4000, 1_000_000, 8000);
+        assert_eq!(stats.size_difference(), 500_000);
+    }
+
+    #[test]
+    fn size_difference_negative_when_smaller() {
+        let stats = ConversionStats::new(1_000_000, 8000, 500_000, 4000);
+        assert_eq!(stats.size_difference(), -500_000);
+    }
+
+    #[test]
+    fn change_percentage_calculates_reduction() {
+        let stats = ConversionStats::new(1_000_000, 8000, 500_000, 4000);
+        let percentage = stats.change_percentage();
+        assert!((percentage - (-50.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn change_percentage_calculates_increase() {
+        let stats = ConversionStats::new(500_000, 4000, 750_000, 6000);
+        let percentage = stats.change_percentage();
+        assert!((percentage - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn change_percentage_zero_when_original_zero() {
+        let stats = ConversionStats::new(0, 0, 500_000, 4000);
+        assert!((stats.change_percentage() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn change_percentage_zero_when_converted_zero() {
+        let stats = ConversionStats::new(500_000, 4000, 0, 0);
+        assert!((stats.change_percentage() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn display_formats_correctly() {
+        let stats = ConversionStats::new(1_048_576, 8000, 524_288, 4000);
+        let display = format!("{stats}");
+        assert!(display.contains("1.00 MB"));
+        assert!(display.contains("512.00 KB"));
+        assert!(display.contains("8.00 Mbps"));
+        assert!(display.contains("4.00 Mbps"));
+        assert!(display.contains("-50.0%"));
+    }
+}
+
+#[cfg(test)]
+mod analysis_stats_tests {
+    use super::*;
+
+    #[test]
+    fn default_values_are_zero() {
+        let stats = AnalysisStats::default();
+        assert_eq!(stats.to_rename, 0);
+        assert_eq!(stats.to_remux, 0);
+        assert_eq!(stats.to_convert, 0);
+        assert_eq!(stats.total_skipped(), 0);
+    }
+
+    #[test]
+    fn total_skipped_sums_all_skip_reasons() {
+        let stats = AnalysisStats {
+            to_rename: 0,
+            to_remux: 0,
+            to_convert: 0,
+            skipped_converted: 5,
+            skipped_bitrate_low: 3,
+            skipped_bitrate_high: 2,
+            skipped_duration_short: 4,
+            skipped_duration_long: 1,
+            skipped_duplicate: 6,
+            duplicates_deleted: 2,
+            duplicate_delete_failed: 1,
+            analysis_failed: 0,
+        };
+        assert_eq!(stats.total_skipped(), 24);
+    }
+
+    #[test]
+    fn total_skipped_excludes_analysis_failed() {
+        let stats = AnalysisStats {
+            analysis_failed: 10,
+            ..Default::default()
+        };
+        assert_eq!(stats.total_skipped(), 0);
+    }
+}
+
+#[cfg(test)]
+mod run_stats_tests {
+    use super::*;
+
+    #[test]
+    fn default_values_are_zero() {
+        let stats = RunStats::default();
+        assert_eq!(stats.files_renamed, 0);
+        assert_eq!(stats.files_remuxed, 0);
+        assert_eq!(stats.files_converted, 0);
+        assert_eq!(stats.files_failed, 0);
+        assert_eq!(stats.total_original_size, 0);
+        assert_eq!(stats.total_converted_size, 0);
+        assert_eq!(stats.total_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn space_saved_positive_when_smaller() {
+        let stats = RunStats {
+            total_original_size: 1_000_000,
+            total_converted_size: 500_000,
+            ..Default::default()
+        };
+        assert_eq!(stats.space_saved(), 500_000);
+    }
+
+    #[test]
+    fn space_saved_negative_when_larger() {
+        let stats = RunStats {
+            total_original_size: 500_000,
+            total_converted_size: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(stats.space_saved(), -500_000);
+    }
+
+    #[test]
+    fn add_result_increments_converted() {
+        let mut stats = RunStats::default();
+        let result = ProcessResult::Converted {
+            stats: ConversionStats::new(1_000_000, 8000, 500_000, 4000),
+        };
+        stats.add_result(&result, Duration::from_secs(10));
+
+        assert_eq!(stats.files_converted, 1);
+        assert_eq!(stats.total_original_size, 1_000_000);
+        assert_eq!(stats.total_converted_size, 500_000);
+        assert_eq!(stats.total_duration, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn add_result_increments_remuxed() {
+        let mut stats = RunStats::default();
+        let result = ProcessResult::Remuxed {};
+        stats.add_result(&result, Duration::from_secs(5));
+
+        assert_eq!(stats.files_remuxed, 1);
+        assert_eq!(stats.total_duration, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn add_result_increments_failed() {
+        let mut stats = RunStats::default();
+        let result = ProcessResult::Failed {
+            error: "test error".to_string(),
+        };
+        stats.add_result(&result, Duration::from_secs(1));
+
+        assert_eq!(stats.files_failed, 1);
+        assert_eq!(stats.total_duration, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn add_assign_conversion_stats() {
+        let mut run_stats = RunStats::default();
+        let conv_stats = ConversionStats::new(1_000_000, 8000, 500_000, 4000);
+        run_stats += conv_stats;
+
+        assert_eq!(run_stats.total_original_size, 1_000_000);
+        assert_eq!(run_stats.total_converted_size, 500_000);
+    }
+
+    #[test]
+    fn add_assign_run_stats() {
+        let mut stats1 = RunStats {
+            files_converted: 5,
+            files_remuxed: 3,
+            files_renamed: 2,
+            files_failed: 1,
+            total_original_size: 1_000_000,
+            total_converted_size: 500_000,
+            total_duration: Duration::from_secs(100),
+        };
+        let stats2 = RunStats {
+            files_converted: 3,
+            files_remuxed: 2,
+            files_renamed: 1,
+            files_failed: 0,
+            total_original_size: 500_000,
+            total_converted_size: 250_000,
+            total_duration: Duration::from_secs(50),
+        };
+        stats1 += stats2;
+
+        assert_eq!(stats1.files_converted, 8);
+        assert_eq!(stats1.files_remuxed, 5);
+        assert_eq!(stats1.files_renamed, 3);
+        assert_eq!(stats1.files_failed, 1);
+        assert_eq!(stats1.total_original_size, 1_500_000);
+        assert_eq!(stats1.total_converted_size, 750_000);
+        assert_eq!(stats1.total_duration, Duration::from_secs(150));
+    }
+
+    #[test]
+    fn add_assign_run_stats_ref() {
+        let mut stats1 = RunStats {
+            files_converted: 5,
+            total_original_size: 1_000_000,
+            ..Default::default()
+        };
+        let stats2 = RunStats {
+            files_converted: 3,
+            total_original_size: 500_000,
+            ..Default::default()
+        };
+        stats1 += &stats2;
+
+        assert_eq!(stats1.files_converted, 8);
+        assert_eq!(stats1.total_original_size, 1_500_000);
+    }
+}

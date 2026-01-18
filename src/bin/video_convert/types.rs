@@ -353,3 +353,324 @@ impl From<walkdir::DirEntry> for VideoFile {
         Self::new(entry.path())
     }
 }
+
+#[cfg(test)]
+mod video_file_tests {
+    use super::*;
+
+    #[test]
+    fn new_extracts_name_and_extension() {
+        let file = VideoFile::new(Path::new("/path/to/video.mp4"));
+        assert_eq!(file.name, "video");
+        assert_eq!(file.extension, "mp4");
+    }
+
+    #[test]
+    fn new_handles_no_extension() {
+        let file = VideoFile::new(Path::new("/path/to/video"));
+        assert_eq!(file.name, "video");
+        assert_eq!(file.extension, "");
+    }
+
+    #[test]
+    fn output_path_adds_x265_suffix() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"));
+        let output = file.output_path();
+        assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
+    }
+
+    #[test]
+    fn output_path_preserves_existing_x265() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"));
+        let output = file.output_path();
+        assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
+    }
+
+    #[test]
+    fn display_shows_path() {
+        let file = VideoFile::new(Path::new("/path/to/video.mp4"));
+        assert_eq!(format!("{file}"), "/path/to/video.mp4");
+    }
+}
+
+#[cfg(test)]
+mod video_info_tests {
+    use super::*;
+
+    fn sample_ffprobe_output() -> &'static str {
+        "codec_name=h264\n\
+         bit_rate=7345573\n\
+         duration=120.5\n\
+         size=110000000\n\
+         width=1920\n\
+         height=1080\n\
+         r_frame_rate=30/1\n"
+    }
+
+    #[test]
+    fn from_ffprobe_output_parses_correctly() {
+        let info = VideoInfo::from_ffprobe_output(sample_ffprobe_output(), "", Path::new("test.mp4")).unwrap();
+        assert_eq!(info.codec, "h264");
+        assert_eq!(info.bitrate_kbps, 7345);
+        assert!((info.duration - 120.5).abs() < 0.01);
+        assert_eq!(info.size_bytes, 110_000_000);
+        assert_eq!(info.width, 1920);
+        assert_eq!(info.height, 1080);
+        assert!((info.frames_per_second - 30.0).abs() < 0.01);
+        assert!(info.warning.is_none());
+    }
+
+    #[test]
+    fn from_ffprobe_output_captures_warning() {
+        let info =
+            VideoInfo::from_ffprobe_output(sample_ffprobe_output(), "some warning", Path::new("test.mp4")).unwrap();
+        assert_eq!(info.warning, Some("some warning".to_string()));
+    }
+
+    #[test]
+    fn from_ffprobe_output_fails_without_codec() {
+        let output = "bit_rate=7345573\nduration=120.5\nwidth=1920\nheight=1080\nr_frame_rate=30/1\n";
+        let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("codec"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_fails_without_bitrate() {
+        let output = "codec_name=h264\nduration=120.5\nwidth=1920\nheight=1080\nr_frame_rate=30/1\n";
+        let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("bitrate"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_fails_without_duration() {
+        let output = "codec_name=h264\nbit_rate=7345573\nwidth=1920\nheight=1080\nr_frame_rate=30/1\n";
+        let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("duration"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_parses_fractional_framerate() {
+        let output = "codec_name=h264\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      r_frame_rate=30000/1001\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4")).unwrap();
+        assert!((info.frames_per_second - 29.97).abs() < 0.01);
+    }
+
+    #[test]
+    fn quality_level_4k_high_bitrate() {
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 28000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 3840,
+            height: 2160,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        assert_eq!(info.quality_level(), 30);
+    }
+
+    #[test]
+    fn quality_level_4k_medium_bitrate() {
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 20000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 3840,
+            height: 2160,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        assert_eq!(info.quality_level(), 31);
+    }
+
+    #[test]
+    fn quality_level_4k_low_bitrate() {
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 3840,
+            height: 2160,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        assert_eq!(info.quality_level(), 33);
+    }
+
+    #[test]
+    fn quality_level_1080p_high_bitrate() {
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 18000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        assert_eq!(info.quality_level(), 28);
+    }
+
+    #[test]
+    fn quality_level_1080p_low_bitrate() {
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        assert_eq!(info.quality_level(), 31);
+    }
+
+    #[test]
+    fn display_formats_correctly() {
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_073_741_824,
+            duration: 3661.5,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let display = format!("{info}");
+        assert!(display.contains("hevc"));
+        assert!(display.contains("1.00 GB"));
+        assert!(display.contains("8.00 Mbps"));
+        assert!(display.contains("1920x1080"));
+        assert!(display.contains("1h 01m 01s"));
+    }
+}
+
+#[cfg(test)]
+mod skip_reason_tests {
+    use super::*;
+
+    #[test]
+    fn display_already_converted() {
+        let reason = SkipReason::AlreadyConverted;
+        assert_eq!(format!("{reason}"), "Already HEVC in MP4 container");
+    }
+
+    #[test]
+    fn display_bitrate_below_threshold() {
+        let reason = SkipReason::BitrateBelowThreshold {
+            bitrate: 5000,
+            threshold: 8000,
+        };
+        let display = format!("{reason}");
+        assert!(display.contains("5000"));
+        assert!(display.contains("8000"));
+        assert!(display.contains("below"));
+    }
+
+    #[test]
+    fn display_bitrate_above_threshold() {
+        let reason = SkipReason::BitrateAboveThreshold {
+            bitrate: 50000,
+            threshold: 40000,
+        };
+        let display = format!("{reason}");
+        assert!(display.contains("50000"));
+        assert!(display.contains("40000"));
+        assert!(display.contains("above"));
+    }
+
+    #[test]
+    fn display_duration_below_threshold() {
+        let reason = SkipReason::DurationBelowThreshold {
+            duration: 30.0,
+            threshold: 60.0,
+        };
+        let display = format!("{reason}");
+        assert!(display.contains("30.0"));
+        assert!(display.contains("60.0"));
+    }
+
+    #[test]
+    fn display_duration_above_threshold() {
+        let reason = SkipReason::DurationAboveThreshold {
+            duration: 7200.0,
+            threshold: 3600.0,
+        };
+        let display = format!("{reason}");
+        assert!(display.contains("7200.0"));
+        assert!(display.contains("3600.0"));
+    }
+
+    #[test]
+    fn display_output_exists() {
+        let reason = SkipReason::OutputExists {
+            path: PathBuf::from("/path/to/output.mp4"),
+            source_duration: 120.0,
+        };
+        let display = format!("{reason}");
+        assert!(display.contains("output.mp4"));
+        assert!(display.contains("already exists"));
+    }
+
+    #[test]
+    fn display_analysis_failed() {
+        let reason = SkipReason::AnalysisFailed {
+            error: "ffprobe failed".to_string(),
+        };
+        let display = format!("{reason}");
+        assert!(display.contains("ffprobe failed"));
+    }
+}
+
+#[cfg(test)]
+mod process_result_tests {
+    use super::*;
+
+    #[test]
+    fn converted_creates_stats() {
+        let result = ProcessResult::converted(1_000_000, 8000, 500_000, 4000);
+        match result {
+            ProcessResult::Converted { stats } => {
+                let display = format!("{stats}");
+                assert!(display.contains("8.00 Mbps"));
+                assert!(display.contains("4.00 Mbps"));
+            }
+            _ => panic!("Expected Converted variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod analysis_filter_tests {
+    use super::*;
+
+    #[test]
+    fn filter_debug_format() {
+        let filter = AnalysisFilter {
+            min_bitrate: 8000,
+            max_bitrate: Some(50000),
+            min_duration: Some(60.0),
+            max_duration: Some(7200.0),
+            overwrite: false,
+        };
+        let debug = format!("{filter:?}");
+        assert!(debug.contains("8000"));
+        assert!(debug.contains("50000"));
+        assert!(debug.contains("60.0"));
+        assert!(debug.contains("7200.0"));
+    }
+}
