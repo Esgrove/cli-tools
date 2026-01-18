@@ -617,6 +617,20 @@ impl DirMove {
             }
         }
 
+        // Debug: print match groups with file counts, sorted by count descending
+        if self.config.debug {
+            eprintln!("Directory match groups:");
+            let mut sorted_matches: Vec<_> = matches.iter().collect();
+            sorted_matches.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            for (&idx, matched_files) in sorted_matches {
+                eprintln!("  {} -> {} file(s)", dirs[idx].name, matched_files.len());
+            }
+            if matches.is_empty() {
+                eprintln!("  (no matches found)");
+            }
+            eprintln!();
+        }
+
         matches
     }
 
@@ -1000,10 +1014,14 @@ impl DirMove {
         let mut candidates: Vec<(Cow<'a, str>, usize)> = Vec::new();
 
         // Count matches for 3-part prefix (highest priority)
+        // Use case-insensitive matching to group files with different casing
         if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
+            let three_part_normalized = Self::normalize_prefix(three_part);
             let count = all_files
                 .iter()
-                .filter(|(_, name)| Self::get_n_part_prefix(name, 3) == Some(three_part))
+                .filter(|(_, name)| {
+                    Self::get_n_part_prefix(name, 3).is_some_and(|p| Self::normalize_prefix(p) == three_part_normalized)
+                })
                 .count();
             if count >= min_group_size {
                 candidates.push((Cow::Borrowed(three_part), count));
@@ -1012,9 +1030,12 @@ impl DirMove {
 
         // Count matches for 2-part prefix (second priority)
         if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
+            let two_part_normalized = Self::normalize_prefix(two_part);
             let count = all_files
                 .iter()
-                .filter(|(_, name)| Self::get_n_part_prefix(name, 2) == Some(two_part))
+                .filter(|(_, name)| {
+                    Self::get_n_part_prefix(name, 2).is_some_and(|p| Self::normalize_prefix(p) == two_part_normalized)
+                })
                 .count();
             if count >= min_group_size {
                 candidates.push((Cow::Borrowed(two_part), count));
@@ -1022,9 +1043,12 @@ impl DirMove {
         }
 
         // Count matches for 1-part (simple) prefix (lowest priority - fallback)
+        // Use case-insensitive matching and normalization
+        // Also check if dot-separated parts combine to match (e.g., "Show.TV" matches "ShowTV")
+        let simple_prefix_normalized = Self::normalize_prefix(simple_prefix);
         let simple_count = all_files
             .iter()
-            .filter(|(_, name)| name.split('.').next() == Some(simple_prefix))
+            .filter(|(_, name)| Self::prefixes_match_normalized(name, &simple_prefix_normalized))
             .count();
         if simple_count >= min_group_size {
             candidates.push((Cow::Borrowed(simple_prefix), simple_count));
@@ -1033,6 +1057,44 @@ impl DirMove {
         // Candidates are already in order: 3-part, 2-part, 1-part (longest first)
         // No need to sort - we prefer longer prefixes for better grouping
         candidates
+    }
+
+    /// Check if a filename's prefix matches the given normalized prefix.
+    /// Checks 1-part, 2-part, and 3-part prefixes to handle cases like
+    /// "Show.TV.Name" matching "`ShowTV`" (when first two parts combine to match).
+    fn prefixes_match_normalized(file_name: &str, target_normalized: &str) -> bool {
+        let parts: Vec<&str> = file_name.split('.').collect();
+
+        // Check 1-part prefix
+        if let Some(first) = parts.first()
+            && first.to_lowercase() == *target_normalized
+        {
+            return true;
+        }
+
+        // Check 2-part prefix combined (e.g., "Show.TV" -> "showtv")
+        if parts.len() >= 2 {
+            let two_part_combined = format!("{}{}", parts[0], parts[1]).to_lowercase();
+            if two_part_combined == *target_normalized {
+                return true;
+            }
+        }
+
+        // Check 3-part prefix combined (e.g., "Show.T.V" -> "showtv")
+        if parts.len() >= 3 {
+            let three_part_combined = format!("{}{}{}", parts[0], parts[1], parts[2]).to_lowercase();
+            if three_part_combined == *target_normalized {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Normalize a prefix for comparison by removing dots and lowercasing.
+    /// This allows "Show.TV" and "`ShowTV`" to be treated as equivalent.
+    fn normalize_prefix(prefix: &str) -> String {
+        prefix.replace('.', "").to_lowercase()
     }
 
     /// Extract a prefix consisting of the first n dot-separated parts.
@@ -1371,10 +1433,77 @@ mod test_prefix_candidates {
     }
 
     #[test]
-    fn case_sensitive_prefix_matching() {
+    fn case_insensitive_prefix_matching() {
         let files = make_test_files(&["Show.Name.v1.mp4", "show.name.v2.mp4", "SHOW.NAME.v3.mp4"]);
         let candidates = DirMove::find_prefix_candidates("Show.Name.v1.mp4", &files, 2);
-        assert!(candidates.is_empty());
+        // Case-insensitive matching should group all three files
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Show.Name"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 3));
+    }
+
+    #[test]
+    fn dot_separated_matches_concatenated() {
+        // "Studio.TV" and "StudioTV" should be treated as equivalent
+        let files = make_test_files(&[
+            "Studio.TV.First.Episode.mp4",
+            "StudioTV.Second.Episode.mp4",
+            "StudioTV.Third.Episode.mp4",
+            "Studiotv.Fourth.Episode.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("StudioTV.Second.Episode.mp4", &files, 2);
+        // All files should match on the single-part prefix (StudioTV = Studio.TV = Studiotv)
+        assert!(!candidates.is_empty());
+        // The 1-part prefix should match all 4 files
+        let one_part = candidates.iter().find(|(p, _)| !p.contains('.'));
+        assert!(one_part.is_some());
+        assert_eq!(one_part.unwrap().1, 4);
+    }
+
+    #[test]
+    fn dot_separated_three_parts_matches_concatenated() {
+        // "Show.T.V" and "ShowTV" should be treated as equivalent
+        let files = make_test_files(&[
+            "Show.T.V.First.Episode.mp4",
+            "ShowTV.Second.Episode.mp4",
+            "Showtv.Third.Episode.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("ShowTV.Second.Episode.mp4", &files, 2);
+        assert!(!candidates.is_empty());
+        let one_part = candidates.iter().find(|(p, _)| !p.contains('.'));
+        assert!(one_part.is_some());
+        assert_eq!(one_part.unwrap().1, 3);
+    }
+
+    #[test]
+    fn normalize_prefix_removes_dots_and_lowercases() {
+        assert_eq!(DirMove::normalize_prefix("StudioTV"), "studiotv");
+        assert_eq!(DirMove::normalize_prefix("Studio.TV"), "studiotv");
+        assert_eq!(DirMove::normalize_prefix("studio.tv"), "studiotv");
+        assert_eq!(DirMove::normalize_prefix("Show.Name.Here"), "shownamehere");
+    }
+
+    #[test]
+    fn prefixes_match_normalized_single_part() {
+        assert!(DirMove::prefixes_match_normalized("ShowTV.Episode.mp4", "showtv"));
+        assert!(DirMove::prefixes_match_normalized("SHOWTV.Episode.mp4", "showtv"));
+    }
+
+    #[test]
+    fn prefixes_match_normalized_two_parts() {
+        assert!(DirMove::prefixes_match_normalized("Show.TV.Episode.mp4", "showtv"));
+        assert!(DirMove::prefixes_match_normalized("show.tv.Episode.mp4", "showtv"));
+    }
+
+    #[test]
+    fn prefixes_match_normalized_three_parts() {
+        assert!(DirMove::prefixes_match_normalized("Sh.ow.TV.Episode.mp4", "showtv"));
+    }
+
+    #[test]
+    fn prefixes_match_normalized_no_match() {
+        assert!(!DirMove::prefixes_match_normalized("Other.Show.mp4", "showtv"));
+        assert!(!DirMove::prefixes_match_normalized("ShowTVX.Episode.mp4", "showtv"));
     }
 
     #[test]
