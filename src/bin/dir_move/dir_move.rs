@@ -744,9 +744,9 @@ impl DirMove {
         Ok(())
     }
 
-    /// Collect files from base path and group them by prefix.
-    fn collect_files_by_prefix(&self) -> anyhow::Result<HashMap<String, Vec<PathBuf>>> {
-        // First pass: collect all files with their filename (with ignored prefixes stripped)
+    /// Collect files with their processed names for grouping.
+    /// Returns a list of (`file_path`, `processed_name`) pairs.
+    fn collect_files_with_names(&self) -> anyhow::Result<Vec<(PathBuf, String)>> {
         let mut files_with_names: Vec<(PathBuf, String)> = Vec::new();
 
         for entry in std::fs::read_dir(&self.root)? {
@@ -780,56 +780,96 @@ impl DirMove {
             files_with_names.push((file_path, file_name_for_grouping));
         }
 
-        // Second pass: determine best prefix for each file
+        // Debug: print unique processed names
+        if self.config.debug {
+            let unique_names: HashSet<_> = files_with_names.iter().map(|(_, name)| name.as_str()).collect();
+            let mut sorted_names: Vec<_> = unique_names.into_iter().collect();
+            sorted_names.sort_unstable();
+            eprintln!("Unique processed names for grouping:");
+            for name in sorted_names {
+                eprintln!("  {name}");
+            }
+        }
+
+        Ok(files_with_names)
+    }
+
+    /// Collect all possible prefix groups for files.
+    /// Files can appear in multiple groups - they are only excluded once actually moved.
+    fn collect_all_prefix_groups(&self, files_with_names: &[(PathBuf, String)]) -> HashMap<String, Vec<PathBuf>> {
         let mut prefix_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
-        for (file_path, file_name) in &files_with_names {
-            if let Some(prefix) = Self::find_best_prefix(file_name, &files_with_names) {
-                prefix_groups
-                    .entry(prefix.into_owned())
-                    .or_default()
-                    .push(file_path.clone());
+        for (file_path, file_name) in files_with_names {
+            let prefix_candidates =
+                Self::find_prefix_candidates(file_name, files_with_names, self.config.min_group_size);
+
+            // Add file to ALL matching prefix groups, not just the best one
+            for (prefix, _count) in prefix_candidates {
+                // Use get_mut to avoid allocation when key already exists
+                let key: &str = prefix.as_ref();
+                if let Some(files) = prefix_groups.get_mut(key) {
+                    files.push(file_path.clone());
+                } else {
+                    prefix_groups.insert(prefix.into_owned(), vec![file_path.clone()]);
+                }
             }
         }
 
         // Apply prefix overrides: if a group's prefix starts with an override, use the override
-        let prefix_groups = self.apply_prefix_overrides(prefix_groups);
-
-        Ok(prefix_groups)
+        self.apply_prefix_overrides(prefix_groups)
     }
 
     /// Create directories for files with matching prefixes and move files into them.
     /// Only considers files directly in the base path (not recursive).
+    /// Files can match multiple groups - they remain available until actually moved.
     fn create_dirs_and_move_files(&self) -> anyhow::Result<()> {
-        let prefix_groups = self.collect_files_by_prefix()?;
+        let files_with_names = self.collect_files_with_names()?;
+        let prefix_groups = self.collect_all_prefix_groups(&files_with_names);
 
-        // Filter to only groups with 3+ files
-        let groups_to_process: Vec<_> = prefix_groups
+        // Sort groups by prefix length (longest first) for better grouping, then alphabetically
+        let mut groups_to_process: Vec<_> = prefix_groups
             .into_iter()
             .filter(|(_, files)| files.len() >= self.config.min_group_size)
-            .sorted_by(|a, b| a.0.cmp(&b.0))
+            .sorted_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)))
             .collect();
 
         if groups_to_process.is_empty() {
             if self.config.verbose {
-                println!("No file groups with 3 or more matching prefixes found.");
+                println!(
+                    "No file groups with {} or more matching prefixes found.",
+                    self.config.min_group_size
+                );
             }
             return Ok(());
         }
 
+        // Track files that have been moved to avoid offering them again
+        let mut moved_files: HashSet<PathBuf> = HashSet::new();
+
+        // Count initial groups for display (before filtering by moved files)
+        let initial_group_count = groups_to_process.len();
         print_bold!(
             "Found {} group(s) with {}+ files sharing the same prefix:\n",
-            groups_to_process.len(),
+            initial_group_count,
             self.config.min_group_size
         );
 
-        for (prefix, files) in groups_to_process {
+        while !groups_to_process.is_empty() {
+            let (prefix, files) = groups_to_process.remove(0);
+
+            // Filter out already moved files
+            let available_files: Vec<_> = files.into_iter().filter(|f| !moved_files.contains(f)).collect();
+
+            if available_files.len() < self.config.min_group_size {
+                continue;
+            }
+
             let dir_name = prefix.replace('.', " ");
             let dir_path = self.root.join(&dir_name);
             let dir_exists = dir_path.exists();
 
-            println!("{}: {} files", dir_name.cyan().bold(), files.len());
-            for file_path in &files {
+            println!("{}: {} files", dir_name.cyan().bold(), available_files.len());
+            for file_path in &available_files {
                 println!("  {}", path_to_filename_string(file_path));
             }
 
@@ -852,11 +892,15 @@ impl DirMove {
                 };
 
                 if confirmed {
-                    if let Err(e) = self.move_files_to_target_dir(&dir_path, &files) {
+                    if let Err(e) = self.move_files_to_target_dir(&dir_path, &available_files) {
                         print_error!("Failed to process {}: {e}", dir_name);
+                    } else {
+                        // Mark files as moved
+                        moved_files.extend(available_files);
                     }
                 } else {
                     println!("  Skipped");
+                    // Files remain available for other groups since they weren't moved
                 }
             }
             println!();
@@ -939,46 +983,56 @@ impl DirMove {
             .any(|ignore| ignore.eq_ignore_ascii_case(name))
     }
 
-    /// Find the best prefix for a file by checking if other files share the same prefix.
-    /// For short simple prefixes (≤4 chars), tries longer prefixes first.
-    /// Returns None if only a short prefix exists with no shared longer prefix.
-    fn find_best_prefix<'a>(file_name: &'a str, all_files: &[(PathBuf, String)]) -> Option<Cow<'a, str>> {
-        let simple_prefix = file_name.split('.').next().filter(|p| !p.is_empty())?;
+    /// Find prefix candidates for a file, sorted by prefix length (descending).
+    /// Returns a list of (prefix, `match_count`) pairs.
+    /// Considers 3-part, 2-part, and 1-part prefixes.
+    /// Prioritizes longer prefixes over single-word matches since longer prefixes
+    /// provide better grouping even with fewer matches.
+    fn find_prefix_candidates<'a>(
+        file_name: &'a str,
+        all_files: &[(PathBuf, String)],
+        min_group_size: usize,
+    ) -> Vec<(Cow<'a, str>, usize)> {
+        let Some(simple_prefix) = file_name.split('.').next().filter(|p| !p.is_empty()) else {
+            return Vec::new();
+        };
 
-        // Find all files that share the same simple prefix
-        let files_with_same_prefix: Vec<_> = all_files
+        let mut candidates: Vec<(Cow<'a, str>, usize)> = Vec::new();
+
+        // Count matches for 3-part prefix (highest priority)
+        if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
+            let count = all_files
+                .iter()
+                .filter(|(_, name)| Self::get_n_part_prefix(name, 3) == Some(three_part))
+                .count();
+            if count >= min_group_size {
+                candidates.push((Cow::Borrowed(three_part), count));
+            }
+        }
+
+        // Count matches for 2-part prefix (second priority)
+        if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
+            let count = all_files
+                .iter()
+                .filter(|(_, name)| Self::get_n_part_prefix(name, 2) == Some(two_part))
+                .count();
+            if count >= min_group_size {
+                candidates.push((Cow::Borrowed(two_part), count));
+            }
+        }
+
+        // Count matches for 1-part (simple) prefix (lowest priority - fallback)
+        let simple_count = all_files
             .iter()
             .filter(|(_, name)| name.split('.').next() == Some(simple_prefix))
-            .collect();
-
-        // Try to find a longer shared prefix (up to 3 parts) that ALL files with this simple prefix share
-        // First try 3-part prefix
-        if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
-            let all_share_three_part = files_with_same_prefix
-                .iter()
-                .all(|(_, name)| Self::get_n_part_prefix(name, 3) == Some(three_part));
-            if all_share_three_part && files_with_same_prefix.len() > 1 {
-                return Some(Cow::Borrowed(three_part));
-            }
+            .count();
+        if simple_count >= min_group_size {
+            candidates.push((Cow::Borrowed(simple_prefix), simple_count));
         }
 
-        // Then try 2-part prefix
-        if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
-            let all_share_two_part = files_with_same_prefix
-                .iter()
-                .all(|(_, name)| Self::get_n_part_prefix(name, 2) == Some(two_part));
-            if all_share_two_part && files_with_same_prefix.len() > 1 {
-                return Some(Cow::Borrowed(two_part));
-            }
-        }
-
-        // For long simple prefixes (> 4 chars), use the simple prefix
-        if simple_prefix.len() > 4 {
-            return Some(Cow::Borrowed(simple_prefix));
-        }
-
-        // No shared longer prefix found for short simple prefix, skip this file
-        None
+        // Candidates are already in order: 3-part, 2-part, 1-part (longest first)
+        // No need to sort - we prefer longer prefixes for better grouping
+        candidates
     }
 
     /// Extract a prefix consisting of the first n dot-separated parts.
@@ -1015,17 +1069,14 @@ impl DirMove {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_helpers {
     use super::*;
-    use std::borrow::Cow;
-    use std::collections::HashMap;
-    use tempfile::TempDir;
 
-    fn make_test_files(names: &[&str]) -> Vec<(PathBuf, String)> {
+    pub fn make_test_files(names: &[&str]) -> Vec<(PathBuf, String)> {
         names.iter().map(|n| (PathBuf::from(*n), (*n).to_string())).collect()
     }
 
-    fn write_file(path: &Path, contents: &str) -> anyhow::Result<()> {
+    pub fn write_file(path: &Path, contents: &str) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1033,144 +1084,15 @@ mod tests {
         Ok(())
     }
 
-    fn assert_exists(path: &Path) {
+    pub fn assert_exists(path: &Path) {
         assert!(path.exists(), "Expected path to exist: {}", path.display());
     }
 
-    fn assert_not_exists(path: &Path) {
+    pub fn assert_not_exists(path: &Path) {
         assert!(!path.exists(), "Expected path to NOT exist: {}", path.display());
     }
 
-    #[test]
-    fn test_get_n_part_prefix_three_parts() {
-        assert_eq!(
-            DirMove::get_n_part_prefix("Some.Name.Thing.v1.mp4", 3),
-            Some("Some.Name.Thing")
-        );
-    }
-
-    #[test]
-    fn test_get_n_part_prefix_two_parts() {
-        assert_eq!(DirMove::get_n_part_prefix("Some.Name.Thing.mp4", 2), Some("Some.Name"));
-    }
-
-    #[test]
-    fn test_get_n_part_prefix_not_enough_parts() {
-        // Need n+1 parts minimum (n for prefix, 1 for extension)
-        assert_eq!(DirMove::get_n_part_prefix("Some.Name.mp4", 3), None);
-        assert_eq!(DirMove::get_n_part_prefix("Some.mp4", 2), None);
-    }
-
-    #[test]
-    fn test_get_n_part_prefix_exact_parts() {
-        // 3 parts total, asking for 2-part prefix should work
-        assert_eq!(DirMove::get_n_part_prefix("Some.Name.mp4", 2), Some("Some.Name"));
-    }
-
-    #[test]
-    fn test_find_best_prefix_long_simple_prefix_single_file() {
-        // Simple prefix > 4 chars with only one file matching should be used directly
-        let files = make_test_files(&["LongName.v1.mp4", "Other.v2.mp4"]);
-        assert_eq!(
-            DirMove::find_best_prefix("LongName.v1.mp4", &files),
-            Some(Cow::Borrowed("LongName"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_short_prefix_no_matches() {
-        // Short prefix with no shared longer prefix should return None
-        let files = make_test_files(&["ABC.random.mp4", "XYZ.other.mp4"]);
-        assert_eq!(DirMove::find_best_prefix("ABC.random.mp4", &files), None);
-    }
-
-    #[test]
-    fn test_find_best_prefix_short_prefix_with_three_part_match() {
-        // All files with same simple prefix share 3-part prefix, so use 3-part
-        let files = make_test_files(&[
-            "Some.Name.Thing.v1.mp4",
-            "Some.Name.Thing.v2.mp4",
-            "Some.Name.Thing.v3.mp4",
-        ]);
-        assert_eq!(
-            DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
-            Some(Cow::Borrowed("Some.Name.Thing"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_short_prefix_mixed_three_part_uses_two_part() {
-        // Files share simple prefix "Some" but have different 3-part prefixes
-        // Should fall back to shared 2-part prefix "Some.Name"
-        let files = make_test_files(&[
-            "Some.Name.Thing.v1.mp4",
-            "Some.Name.Thing.v2.mp4",
-            "Some.Name.Other.v1.mp4",
-        ]);
-        assert_eq!(
-            DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
-            Some(Cow::Borrowed("Some.Name"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_short_prefix_fallback_to_two_part() {
-        // No 3-part matches, but 2-part matches exist
-        let files = make_test_files(&["Some.Name.Thing.mp4", "Some.Name.Other.mp4", "Some.Name.More.mp4"]);
-        assert_eq!(
-            DirMove::find_best_prefix("Some.Name.Thing.mp4", &files),
-            Some(Cow::Borrowed("Some.Name"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_mixed_three_part_falls_back_to_two_part() {
-        // Files share simple prefix "Some" but have different 3-part prefixes
-        // Should fall back to shared 2-part prefix "Some.Name"
-        let files = make_test_files(&[
-            "Some.Name.Thing.v1.mp4",
-            "Some.Name.Thing.v2.mp4",
-            "Some.Name.Other.v1.mp4",
-            "Some.Name.Other.v2.mp4",
-        ]);
-        // All share 2-part "Some.Name", so use that
-        assert_eq!(
-            DirMove::find_best_prefix("Some.Name.Thing.v1.mp4", &files),
-            Some(Cow::Borrowed("Some.Name"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_exactly_four_char_prefix() {
-        // 4-char prefix is still "short", needs longer match
-        let files = make_test_files(&["ABCD.Name.Thing.mp4", "ABCD.Name.Other.mp4"]);
-        assert_eq!(
-            DirMove::find_best_prefix("ABCD.Name.Thing.mp4", &files),
-            Some(Cow::Borrowed("ABCD.Name"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_five_char_prefix_with_shared_two_part() {
-        // 5-char prefix is "long", but all files share 2-part prefix "ABCDE.Name"
-        let files = make_test_files(&["ABCDE.Name.Thing.mp4", "ABCDE.Name.Other.mp4"]);
-        assert_eq!(
-            DirMove::find_best_prefix("ABCDE.Name.Thing.mp4", &files),
-            Some(Cow::Borrowed("ABCDE.Name"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_five_char_prefix_no_shared_longer() {
-        // 5-char prefix with different 2-part prefixes falls back to simple prefix
-        let files = make_test_files(&["ABCDE.Name.Thing.mp4", "ABCDE.Other.Thing.mp4"]);
-        assert_eq!(
-            DirMove::find_best_prefix("ABCDE.Name.Thing.mp4", &files),
-            Some(Cow::Borrowed("ABCDE"))
-        );
-    }
-
-    fn make_test_config_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> Config {
+    pub fn make_test_config_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> Config {
         Config {
             auto: false,
             create: false,
@@ -1188,8 +1110,7 @@ mod tests {
         }
     }
 
-    /// Helper to create a config for unpack tests.
-    fn make_unpack_config(unpack_names: Vec<&str>, recurse: bool, dryrun: bool, overwrite: bool) -> Config {
+    pub fn make_unpack_config(unpack_names: Vec<&str>, recurse: bool, dryrun: bool, overwrite: bool) -> Config {
         Config {
             auto: true,
             create: false,
@@ -1207,14 +1128,1551 @@ mod tests {
         }
     }
 
+    pub fn make_test_dirmove_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> DirMove {
+        DirMove {
+            root: PathBuf::from("."),
+            config: make_test_config_with_ignores(prefix_overrides, prefix_ignores),
+        }
+    }
+
+    pub fn make_test_dirmove(prefix_overrides: Vec<String>) -> DirMove {
+        make_test_dirmove_with_ignores(prefix_overrides, Vec::new())
+    }
+
+    pub fn make_test_dirs(names: &[&str]) -> Vec<DirectoryInfo> {
+        names
+            .iter()
+            .map(|n| DirectoryInfo {
+                path: PathBuf::from(*n),
+                name: n.to_lowercase(),
+            })
+            .collect()
+    }
+
+    pub fn make_file_paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| PathBuf::from(*n)).collect()
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_extraction {
+    use super::*;
+
     #[test]
-    fn test_unpack_basic_preserves_structure_and_removes_matched_dir() -> anyhow::Result<()> {
+    fn three_parts_from_long_name() {
+        assert_eq!(
+            DirMove::get_n_part_prefix("Some.Name.Thing.v1.mp4", 3),
+            Some("Some.Name.Thing")
+        );
+    }
+
+    #[test]
+    fn two_parts_from_name() {
+        assert_eq!(DirMove::get_n_part_prefix("Some.Name.Thing.mp4", 2), Some("Some.Name"));
+    }
+
+    #[test]
+    fn not_enough_parts_for_three() {
+        assert_eq!(DirMove::get_n_part_prefix("Some.Name.mp4", 3), None);
+    }
+
+    #[test]
+    fn not_enough_parts_for_two() {
+        assert_eq!(DirMove::get_n_part_prefix("Some.mp4", 2), None);
+    }
+
+    #[test]
+    fn exact_parts_for_two() {
+        assert_eq!(DirMove::get_n_part_prefix("Some.Name.mp4", 2), Some("Some.Name"));
+    }
+
+    #[test]
+    fn single_part_name() {
+        assert_eq!(DirMove::get_n_part_prefix("file.mp4", 1), Some("file"));
+    }
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(DirMove::get_n_part_prefix("", 1), None);
+    }
+
+    #[test]
+    fn no_extension() {
+        assert_eq!(DirMove::get_n_part_prefix("Some.Name", 1), Some("Some"));
+    }
+
+    #[test]
+    fn many_parts() {
+        assert_eq!(DirMove::get_n_part_prefix("A.B.C.D.E.F.mp4", 3), Some("A.B.C"));
+    }
+
+    #[test]
+    fn with_numbers_in_name() {
+        assert_eq!(DirMove::get_n_part_prefix("Show.2024.S01E01.mp4", 2), Some("Show.2024"));
+    }
+
+    #[test]
+    fn with_special_characters() {
+        assert_eq!(
+            DirMove::get_n_part_prefix("Show-Name.Part.One.mp4", 2),
+            Some("Show-Name.Part")
+        );
+    }
+
+    #[test]
+    fn with_underscores() {
+        assert_eq!(
+            DirMove::get_n_part_prefix("Show_Name.Part_One.Episode.mp4", 2),
+            Some("Show_Name.Part_One")
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_candidates {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn single_file_no_match() {
+        let files = make_test_files(&["LongName.v1.mp4", "Other.v2.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("LongName.v1.mp4", &files, 2);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn simple_prefix_multiple_files() {
+        let files = make_test_files(&["LongName.v1.mp4", "LongName.v2.mp4", "Other.v2.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("LongName.v1.mp4", &files, 2);
+        assert_eq!(candidates, vec![(Cow::Borrowed("LongName"), 2)]);
+    }
+
+    #[test]
+    fn prioritizes_longer_prefix() {
+        let files = make_test_files(&[
+            "Some.Name.Thing.v1.mp4",
+            "Some.Name.Thing.v2.mp4",
+            "Some.Name.Thing.v3.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 2);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name.Thing"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some.Name"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Some"), 3));
+    }
+
+    #[test]
+    fn mixed_prefixes_different_third_parts() {
+        let files = make_test_files(&[
+            "Some.Name.Thing.v1.mp4",
+            "Some.Name.Thing.v2.mp4",
+            "Some.Name.Other.v1.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 2);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name.Thing"), 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some.Name"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Some"), 3));
+    }
+
+    #[test]
+    fn fallback_to_two_part_when_no_three_part_matches() {
+        let files = make_test_files(&["Some.Name.Thing.mp4", "Some.Name.Other.mp4", "Some.Name.More.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.mp4", &files, 2);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some"), 3));
+    }
+
+    #[test]
+    fn single_word_fallback() {
+        let files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("ABC.2023.Thing.mp4", &files, 3);
+        assert_eq!(candidates, vec![(Cow::Borrowed("ABC"), 3)]);
+    }
+
+    #[test]
+    fn respects_min_group_size() {
+        let files = make_test_files(&[
+            "Some.Name.Thing.v1.mp4",
+            "Some.Name.Thing.v2.mp4",
+            "Some.Name.Other.v1.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some"), 3));
+    }
+
+    #[test]
+    fn no_matches_below_threshold() {
+        let files = make_test_files(&["ABC.random.mp4", "XYZ.other.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("ABC.random.mp4", &files, 2);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn returns_all_viable_options_for_alternatives() {
+        let files = make_test_files(&[
+            "Show.Name.S01E01.mp4",
+            "Show.Name.S01E02.mp4",
+            "Show.Name.S01E03.mp4",
+            "Show.Other.S01E01.mp4",
+            "Show.Other.S01E02.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Show.Name.S01E01.mp4", &files, 2);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Show.Name"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 5));
+    }
+
+    #[test]
+    fn empty_file_list() {
+        let files: Vec<(PathBuf, String)> = Vec::new();
+        let candidates = DirMove::find_prefix_candidates("Some.Name.mp4", &files, 2);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn file_not_in_list() {
+        let files = make_test_files(&["Other.Name.mp4", "Different.File.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("Some.Name.mp4", &files, 2);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn min_group_size_one() {
+        let files = make_test_files(&["Unique.Name.v1.mp4", "Other.v2.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("Unique.Name.v1.mp4", &files, 1);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Unique.Name.v1"), 1));
+        assert_eq!(candidates[1], (Cow::Borrowed("Unique.Name"), 1));
+        assert_eq!(candidates[2], (Cow::Borrowed("Unique"), 1));
+    }
+
+    #[test]
+    fn many_files_same_prefix() {
+        let files = make_test_files(&[
+            "Series.Episode.01.mp4",
+            "Series.Episode.02.mp4",
+            "Series.Episode.03.mp4",
+            "Series.Episode.04.mp4",
+            "Series.Episode.05.mp4",
+            "Series.Episode.06.mp4",
+            "Series.Episode.07.mp4",
+            "Series.Episode.08.mp4",
+            "Series.Episode.09.mp4",
+            "Series.Episode.10.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Series.Episode.01.mp4", &files, 5);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Series.Episode"), 10));
+        assert_eq!(candidates[1], (Cow::Borrowed("Series"), 10));
+    }
+
+    #[test]
+    fn case_sensitive_prefix_matching() {
+        let files = make_test_files(&["Show.Name.v1.mp4", "show.name.v2.mp4", "SHOW.NAME.v3.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("Show.Name.v1.mp4", &files, 2);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn tv_show_season_episodes() {
+        let files = make_test_files(&[
+            "Drama.Series.S01E01.mp4",
+            "Drama.Series.S01E02.mp4",
+            "Drama.Series.S01E03.mp4",
+            "Drama.Series.S02E01.mp4",
+            "Drama.Series.S02E02.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Drama.Series.S01E01.mp4", &files, 2);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Drama.Series"), 5));
+        assert_eq!(candidates[1], (Cow::Borrowed("Drama"), 5));
+    }
+
+    #[test]
+    fn movie_series_with_years() {
+        let files = make_test_files(&[
+            "Studio.Action.2012.BluRay.mp4",
+            "Studio.Action.2015.BluRay.mp4",
+            "Studio.Comedy.2014.BluRay.mp4",
+            "Studio.Comedy.2017.BluRay.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Studio.Action.2012.BluRay.mp4", &files, 2);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Studio.Action"), 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Studio"), 4));
+    }
+
+    #[test]
+    fn long_name_with_year_after_prefix() {
+        let files = make_test_files(&[
+            "Drama.Series.Name.2020.S01E01.Pilot.1080p.mp4",
+            "Drama.Series.Name.2020.S01E02.Awakening.1080p.mp4",
+            "Drama.Series.Name.2020.S01E03.Revelation.1080p.mp4",
+            "Drama.Series.Name.2021.S02E01.Return.1080p.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Drama.Series.Name.2020.S01E01.Pilot.1080p.mp4", &files, 2);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Drama.Series.Name"), 4));
+        assert_eq!(candidates[1], (Cow::Borrowed("Drama.Series"), 4));
+        assert_eq!(candidates[2], (Cow::Borrowed("Drama"), 4));
+    }
+
+    #[test]
+    fn long_name_with_only_year_after_prefix() {
+        let files = make_test_files(&[
+            "Action.Movie.Title.2019.Directors.Cut.mp4",
+            "Action.Movie.Title.2020.Extended.Edition.mp4",
+            "Action.Movie.Title.2021.Remastered.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Action.Movie.Title.2019.Directors.Cut.mp4", &files, 2);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Action.Movie.Title"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Action.Movie"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Action"), 3));
+    }
+
+    #[test]
+    fn long_name_with_date_after_prefix() {
+        let files = make_test_files(&[
+            "Daily.News.Show.2024.01.15.Morning.Report.mp4",
+            "Daily.News.Show.2024.01.16.Evening.Edition.mp4",
+            "Daily.News.Show.2024.01.17.Special.Coverage.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Daily.News.Show.2024.01.15.Morning.Report.mp4", &files, 3);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Daily.News.Show"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Daily.News"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Daily"), 3));
+    }
+
+    #[test]
+    fn long_name_franchise_with_year_variations() {
+        let files = make_test_files(&[
+            "Epic.Adventure.Saga.Part.One.2018.BluRay.Remux.mp4",
+            "Epic.Adventure.Saga.Part.Two.2020.BluRay.Remux.mp4",
+            "Epic.Adventure.Saga.Part.Three.2022.BluRay.Remux.mp4",
+            "Epic.Adventure.Origins.Prequel.2015.BluRay.mp4",
+        ]);
+        let candidates =
+            DirMove::find_prefix_candidates("Epic.Adventure.Saga.Part.One.2018.BluRay.Remux.mp4", &files, 2);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Epic.Adventure.Saga"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Epic.Adventure"), 4));
+        assert_eq!(candidates[2], (Cow::Borrowed("Epic"), 4));
+    }
+
+    #[test]
+    fn long_name_season_with_year_in_name() {
+        let files = make_test_files(&[
+            "Anthology.Series.Collection.S01E01.Genesis.1080p.WEB.mp4",
+            "Anthology.Series.Collection.S01E02.Exodus.1080p.WEB.mp4",
+            "Anthology.Series.Collection.S02E01.Revival.1080p.WEB.mp4",
+            "Anthology.Series.Collection.S02E02.Finale.1080p.WEB.mp4",
+        ]);
+        let candidates =
+            DirMove::find_prefix_candidates("Anthology.Series.Collection.S01E01.Genesis.1080p.WEB.mp4", &files, 2);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Anthology.Series.Collection"), 4));
+        assert_eq!(candidates[1], (Cow::Borrowed("Anthology.Series"), 4));
+        assert_eq!(candidates[2], (Cow::Borrowed("Anthology"), 4));
+    }
+
+    #[test]
+    fn long_name_documentary_with_regions() {
+        let files = make_test_files(&[
+            "Nature.Wildlife.Documentary.Africa.Savanna.2019.4K.mp4",
+            "Nature.Wildlife.Documentary.Asia.Jungle.2020.4K.mp4",
+            "Nature.Wildlife.Documentary.Europe.Alps.2021.4K.mp4",
+        ]);
+        let candidates =
+            DirMove::find_prefix_candidates("Nature.Wildlife.Documentary.Africa.Savanna.2019.4K.mp4", &files, 3);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Nature.Wildlife.Documentary"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Nature.Wildlife"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Nature"), 3));
+    }
+
+    #[test]
+    fn long_name_with_version_and_year() {
+        let files = make_test_files(&[
+            "Software.Tutorial.Guide.v2.2023.Intro.Basics.mp4",
+            "Software.Tutorial.Guide.v2.2023.Advanced.Topics.mp4",
+            "Software.Tutorial.Guide.v2.2023.Expert.Masterclass.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Software.Tutorial.Guide.v2.2023.Intro.Basics.mp4", &files, 3);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Software.Tutorial.Guide"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Software.Tutorial"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Software"), 3));
+    }
+
+    #[test]
+    fn short_names_with_extensions() {
+        let files = make_test_files(&["A.B.mp4", "A.C.mp4", "A.D.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("A.B.mp4", &files, 3);
+        assert_eq!(candidates, vec![(Cow::Borrowed("A"), 3)]);
+    }
+
+    #[test]
+    fn with_filtered_numeric_parts() {
+        let filtered_files = make_test_files(&["ShowName.S01E01.mp4", "ShowName.S01E02.mp4", "ShowName.S01E03.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("ShowName.S01E01.mp4", &filtered_files, 3);
+        assert_eq!(candidates, vec![(Cow::Borrowed("ShowName"), 3)]);
+    }
+
+    #[test]
+    fn numeric_filtering_groups_correctly() {
+        let filtered_files = make_test_files(&["ABC.Thing.v1.mp4", "ABC.Thing.v2.mp4", "ABC.Thing.v3.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("ABC.Thing.v1.mp4", &filtered_files, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("ABC.Thing"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("ABC"), 3));
+    }
+
+    #[test]
+    fn mixed_years_without_filtering() {
+        let unfiltered_files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("ABC.2023.Thing.mp4", &unfiltered_files, 3);
+        assert_eq!(candidates, vec![(Cow::Borrowed("ABC"), 3)]);
+    }
+
+    #[test]
+    fn tv_show_generic_scenario() {
+        let filtered_files = make_test_files(&[
+            "Series.Name.S01E01.1080p.mp4",
+            "Series.Name.S01E02.1080p.mp4",
+            "Series.Name.S01E03.1080p.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Series.Name.S01E01.1080p.mp4", &filtered_files, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Series.Name"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Series"), 3));
+    }
+
+    #[test]
+    fn long_name_mixed_year_positions() {
+        let files = make_test_files(&[
+            "Studio.Franchise.Title.Original.2020.Remastered.2023.HDR.mp4",
+            "Studio.Franchise.Title.Original.2020.Remastered.2024.HDR.mp4",
+            "Studio.Franchise.Other.Sequel.2021.Remastered.2023.HDR.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates(
+            "Studio.Franchise.Title.Original.2020.Remastered.2023.HDR.mp4",
+            &files,
+            2,
+        );
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Studio.Franchise.Title"), 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Studio.Franchise"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Studio"), 3));
+    }
+
+    #[test]
+    fn long_name_decade_in_title() {
+        let files = make_test_files(&[
+            "Retro.Eighties.Collection.Vol1.Greatest.Hits.mp4",
+            "Retro.Eighties.Collection.Vol2.Classic.Cuts.mp4",
+            "Retro.Eighties.Collection.Vol3.Deep.Tracks.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Retro.Eighties.Collection.Vol1.Greatest.Hits.mp4", &files, 3);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Retro.Eighties.Collection"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Retro.Eighties"), 3));
+        assert_eq!(candidates[2], (Cow::Borrowed("Retro"), 3));
+    }
+
+    #[test]
+    fn three_part_prefix_with_mixed_fourth_parts() {
+        let files = make_test_files(&[
+            "Alpha.Beta.Gamma.One.mp4",
+            "Alpha.Beta.Gamma.Two.mp4",
+            "Alpha.Beta.Gamma.Three.mp4",
+            "Alpha.Beta.Delta.One.mp4",
+        ]);
+        let candidates = DirMove::find_prefix_candidates("Alpha.Beta.Gamma.One.mp4", &files, 2);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Alpha.Beta.Gamma"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Alpha.Beta"), 4));
+        assert_eq!(candidates[2], (Cow::Borrowed("Alpha"), 4));
+    }
+
+    #[test]
+    fn only_two_files_high_threshold() {
+        let files = make_test_files(&["Show.Name.v1.mp4", "Show.Name.v2.mp4"]);
+        let candidates = DirMove::find_prefix_candidates("Show.Name.v1.mp4", &files, 5);
+        assert!(candidates.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_groups {
+    use super::*;
+
+    #[test]
+    fn files_appear_in_multiple_groups() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Show.Name.S01E01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Name.S01E02.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Name.S01E03.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Other.S01E01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Other.S01E02.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.contains_key("Show.Name"), "Should have Show.Name group");
+        assert!(groups.contains_key("Show.Other"), "Should have Show.Other group");
+        assert!(groups.contains_key("Show"), "Should have Show group");
+        assert_eq!(groups.get("Show.Name").unwrap().len(), 3);
+        assert_eq!(groups.get("Show.Other").unwrap().len(), 2);
+        assert_eq!(groups.get("Show").unwrap().len(), 5);
+    }
+
+    #[test]
+    fn order_by_prefix_length() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Alpha.Beta.Gamma.part1.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Beta.Gamma.part2.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Beta.Delta.part1.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Beta.Delta.part2.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.contains_key("Alpha.Beta.Gamma"));
+        assert!(groups.contains_key("Alpha.Beta.Delta"));
+        assert!(groups.contains_key("Alpha.Beta"));
+        assert!(groups.contains_key("Alpha"));
+        assert_eq!(groups.get("Alpha.Beta.Gamma").unwrap().len(), 2);
+        assert_eq!(groups.get("Alpha.Beta.Delta").unwrap().len(), 2);
+        assert_eq!(groups.get("Alpha.Beta").unwrap().len(), 4);
+        assert_eq!(groups.get("Alpha").unwrap().len(), 4);
+    }
+
+    #[test]
+    fn no_files_no_groups() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn single_file_no_group() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Lonely.File.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn files_with_completely_different_prefixes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Alpha.One.mp4"), "").unwrap();
+        std::fs::write(root.join("Beta.Two.mp4"), "").unwrap();
+        std::fs::write(root.join("Gamma.Three.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn large_file_set_multiple_series() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        for episode in 1..=10 {
+            std::fs::write(root.join(format!("SeriesA.Season1.E{episode:02}.mp4")), "").unwrap();
+        }
+        for episode in 1..=8 {
+            std::fs::write(root.join(format!("SeriesA.Season2.E{episode:02}.mp4")), "").unwrap();
+        }
+        for episode in 1..=5 {
+            std::fs::write(root.join(format!("SeriesB.Season1.E{episode:02}.mp4")), "").unwrap();
+        }
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 3,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.contains_key("SeriesA.Season1"));
+        assert!(groups.contains_key("SeriesA.Season2"));
+        assert!(groups.contains_key("SeriesA"));
+        assert!(groups.contains_key("SeriesB.Season1"));
+        assert!(groups.contains_key("SeriesB"));
+        assert_eq!(groups.get("SeriesA.Season1").unwrap().len(), 10);
+        assert_eq!(groups.get("SeriesA.Season2").unwrap().len(), 8);
+        assert_eq!(groups.get("SeriesA").unwrap().len(), 18);
+        assert_eq!(groups.get("SeriesB.Season1").unwrap().len(), 5);
+        assert_eq!(groups.get("SeriesB").unwrap().len(), 5);
+    }
+
+    #[test]
+    fn min_group_size_affects_grouping() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Show.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Episode.02.mp4"), "").unwrap();
+
+        let config_low = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove_low = DirMove::new(root.clone(), config_low);
+        let files_with_names = dirmove_low.collect_files_with_names().unwrap();
+        let groups_low = dirmove_low.collect_all_prefix_groups(&files_with_names);
+        assert!(groups_low.contains_key("Show.Episode"));
+        assert!(groups_low.contains_key("Show"));
+
+        let config_high = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 5,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove_high = DirMove::new(root, config_high);
+        let files_with_names = dirmove_high.collect_files_with_names().unwrap();
+        let groups_high = dirmove_high.collect_all_prefix_groups(&files_with_names);
+        assert!(groups_high.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_filtering {
+    use super::*;
+
+    #[test]
+    fn removes_year() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Show.2024.Episode.mp4");
+        assert_eq!(result, "Show.Episode.mp4");
+    }
+
+    #[test]
+    fn removes_multiple_numeric() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Show.2024.01.Episode.mp4");
+        assert_eq!(result, "Show.Episode.mp4");
+    }
+
+    #[test]
+    fn keeps_mixed_alphanumeric() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Show.S01E02.Episode.mp4");
+        assert_eq!(result, "Show.S01E02.Episode.mp4");
+    }
+
+    #[test]
+    fn no_numeric_parts() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Show.Name.Episode.mp4");
+        assert_eq!(result, "Show.Name.Episode.mp4");
+    }
+
+    #[test]
+    fn all_numeric_except_extension() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("2024.01.15.mp4");
+        assert_eq!(result, "mp4");
+    }
+
+    #[test]
+    fn empty_string() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn single_part() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("file.mp4");
+        assert_eq!(result, "file.mp4");
+    }
+
+    #[test]
+    fn removes_1080p() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Movie.Name.1080p.BluRay.mp4");
+        assert_eq!(result, "Movie.Name.BluRay.mp4");
+    }
+
+    #[test]
+    fn removes_2160p() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Movie.Name.2160p.UHD.mp4");
+        assert_eq!(result, "Movie.Name.UHD.mp4");
+    }
+
+    #[test]
+    fn removes_720p() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Movie.Name.720p.WEB.mp4");
+        assert_eq!(result, "Movie.Name.WEB.mp4");
+    }
+
+    #[test]
+    fn removes_dimension_format() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Video.1920x1080.Sample.mp4");
+        assert_eq!(result, "Video.Sample.mp4");
+    }
+
+    #[test]
+    fn removes_smaller_dimension() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Video.640x480.Old.mp4");
+        assert_eq!(result, "Video.Old.mp4");
+    }
+
+    #[test]
+    fn case_insensitive_resolution() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Movie.Name.1080P.BluRay.mp4");
+        assert_eq!(result, "Movie.Name.BluRay.mp4");
+    }
+
+    #[test]
+    fn removes_and_glue_word() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Show.and.Tell.mp4");
+        assert_eq!(result, "Show.Tell.mp4");
+    }
+
+    #[test]
+    fn removes_the_glue_word() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("The.Movie.Name.mp4");
+        assert_eq!(result, "Movie.Name.mp4");
+    }
+
+    #[test]
+    fn removes_multiple_glue_words() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("The.Show.and.The.Tell.mp4");
+        assert_eq!(result, "Show.Tell.mp4");
+    }
+
+    #[test]
+    fn glue_words_case_insensitive() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("THE.Show.AND.Tell.mp4");
+        assert_eq!(result, "Show.Tell.mp4");
+    }
+
+    #[test]
+    fn removes_all_glue_words() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("a.an.the.and.of.mp4");
+        assert_eq!(result, "mp4");
+    }
+
+    #[test]
+    fn complex_filtering_year_resolution_glue() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("The.Movie.2024.1080p.and.More.mp4");
+        assert_eq!(result, "Movie.More.mp4");
+    }
+
+    #[test]
+    fn preserves_episode_codes() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Show.S01E01.2024.1080p.mp4");
+        assert_eq!(result, "Show.S01E01.mp4");
+    }
+
+    #[test]
+    fn keeps_4k_not_matched_by_resolution_regex() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Movie.4K.HDR.mp4");
+        assert_eq!(result, "Movie.4K.HDR.mp4");
+    }
+
+    #[test]
+    fn multiple_resolutions() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Movie.1080p.2160p.720p.mp4");
+        assert_eq!(result, "Movie.mp4");
+    }
+
+    #[test]
+    fn only_extension_left() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("2024.1080p.the.mp4");
+        assert_eq!(result, "mp4");
+    }
+
+    #[test]
+    fn no_dots_in_name() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("filename");
+        assert_eq!(result, "filename");
+    }
+
+    #[test]
+    fn consecutive_dots() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Show..Name..mp4");
+        assert_eq!(result, "Show..Name..mp4");
+    }
+
+    #[test]
+    fn generic_movie_name() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts(
+            "The.Action.Film.1999.Remastered.2160p.UHD.BluRay.x265.mp4",
+        );
+        assert_eq!(result, "Action.Film.Remastered.UHD.BluRay.x265.mp4");
+    }
+
+    #[test]
+    fn generic_tv_show() {
+        let result = DirMove::filter_numeric_resolution_and_glue_parts("Drama.Series.S05E16.2013.1080p.BluRay.mp4");
+        assert_eq!(result, "Drama.Series.S05E16.BluRay.mp4");
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_overrides {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn no_overrides() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Some.Name.Thing"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn matching_override() {
+        let dirmove = make_test_dirmove(vec!["longer.prefix".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert(
+            "longer.prefix.name".to_string(),
+            vec![PathBuf::from("longer.prefix.name.file.mp4")],
+        );
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("longer.prefix"));
+        assert!(!result.contains_key("longer.prefix.name"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn merges_groups() {
+        let dirmove = make_test_dirmove(vec!["Some.Name".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+        groups.insert("Some.Name.Other".to_string(), vec![PathBuf::from("file2.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Some.Name"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("Some.Name").map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn non_matching() {
+        let dirmove = make_test_dirmove(vec!["Other.Prefix".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Some.Name.Thing"));
+        assert!(!result.contains_key("Other.Prefix"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn partial_match_only() {
+        let dirmove = make_test_dirmove(vec!["Some".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Something.Else".to_string(), vec![PathBuf::from("file1.mp4")]);
+        groups.insert("Some.Name".to_string(), vec![PathBuf::from("file2.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Some"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn override_more_specific_than_prefix() {
+        let dirmove = make_test_dirmove(vec!["Example.Name".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert(
+            "Example".to_string(),
+            vec![
+                PathBuf::from("Example.Name.Video1.mp4"),
+                PathBuf::from("Example.Name.Video2.mp4"),
+                PathBuf::from("Example.Name.Video3.mp4"),
+            ],
+        );
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Example.Name"));
+        assert!(!result.contains_key("Example"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("Example.Name").map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn multiple_overrides() {
+        let dirmove = make_test_dirmove(vec!["Show.A".to_string(), "Show.B".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Show.A.Season1".to_string(), vec![PathBuf::from("file1.mp4")]);
+        groups.insert("Show.B.Season1".to_string(), vec![PathBuf::from("file2.mp4")]);
+        groups.insert("Show.C.Season1".to_string(), vec![PathBuf::from("file3.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Show.A"));
+        assert!(result.contains_key("Show.B"));
+        assert!(result.contains_key("Show.C.Season1"));
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn empty_groups() {
+        let dirmove = make_test_dirmove(vec!["Some".to_string()]);
+        let groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn override_with_case_sensitivity() {
+        let dirmove = make_test_dirmove(vec!["show.name".to_string()]);
+        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        groups.insert("Show.Name.Season1".to_string(), vec![PathBuf::from("file1.mp4")]);
+
+        let result = dirmove.apply_prefix_overrides(groups);
+        assert!(result.contains_key("Show.Name.Season1"));
+        assert_eq!(result.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_ignores {
+    use super::test_helpers::*;
+
+    #[test]
+    fn no_ignores() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), Vec::new());
+        let result = dirmove.strip_ignored_prefixes("www example com test");
+        assert_eq!(result, "www example com test");
+    }
+
+    #[test]
+    fn single_ignore() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let result = dirmove.strip_ignored_prefixes("www example com test");
+        assert_eq!(result, "example com test");
+    }
+
+    #[test]
+    fn multiple_ignores() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string(), "example".to_string()]);
+        let result = dirmove.strip_ignored_prefixes("www example com test");
+        assert_eq!(result, "com test");
+    }
+
+    #[test]
+    fn no_match() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["xyz".to_string()]);
+        let result = dirmove.strip_ignored_prefixes("www example com test");
+        assert_eq!(result, "www example com test");
+    }
+
+    #[test]
+    fn dot_prefix_single_ignore() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("www.example.com.test");
+        assert_eq!(result, "example.com.test");
+    }
+
+    #[test]
+    fn dot_prefix_multiple_ignores() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string(), "example".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("www.example.com.test");
+        assert_eq!(result, "com.test");
+    }
+
+    #[test]
+    fn case_insensitive_ignore() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["WWW".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("www.example.com");
+        assert_eq!(result, "example.com");
+    }
+
+    #[test]
+    fn ignore_in_middle_not_stripped() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["example".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("www.example.com");
+        assert_eq!(result, "www.example.com");
+    }
+
+    #[test]
+    fn is_ignored_prefix_exact_match() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        assert!(dirmove.is_ignored_prefix("www"));
+        assert!(dirmove.is_ignored_prefix("WWW"));
+        assert!(!dirmove.is_ignored_prefix("www2"));
+    }
+
+    #[test]
+    fn repeated_prefix_in_name() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("prefix.prefix.name.mp4");
+        assert_eq!(result, "name.mp4");
+    }
+
+    #[test]
+    fn all_parts_are_ignored() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["a".to_string(), "b".to_string()]);
+        let result = dirmove.strip_ignored_dot_prefixes("a.b.c");
+        assert_eq!(result, "c");
+    }
+}
+
+#[cfg(test)]
+mod test_directory_matching {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn basic_match() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Certain Name"]);
+        let files = make_file_paths(&[
+            "Something.else.Certain.Name.video.1.mp4",
+            "Certain.Name.Example.video.2.mp4",
+            "Another.Certain.Name.Example.video.3.mp4",
+            "Another.Name.Example.video.3.mp4",
+            "Cert.Name.Example.video.3.mp4",
+        ]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn no_matches() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Unknown Dir"]);
+        let files = make_file_paths(&["Some.File.mp4", "Other.File.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn multiple_dirs() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Show A", "Show B"]);
+        let files = make_file_paths(&["Show.A.ep1.mp4", "Show.B.ep1.mp4", "Show.A.ep2.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn case_insensitive() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Movie Name"]);
+        let files = make_file_paths(&["MOVIE.NAME.part1.mp4", "movie.name.part2.mp4", "Movie.Name.part3.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn partial_match() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Show Name", "Show"]);
+        let files = make_file_paths(&["Show.Name.ep1.mp4", "Show.Other.ep1.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn longer_match_wins() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Show", "Show Name"]);
+        let files = make_file_paths(&["Show.Name.Episode.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&1));
+    }
+
+    #[test]
+    fn empty_files() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Show Name"]);
+        let files: Vec<PathBuf> = Vec::new();
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn empty_dirs() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs: Vec<DirectoryInfo> = Vec::new();
+        let files = make_file_paths(&["Show.Name.ep1.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dots_replaced_with_spaces() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["my show name"]);
+        let files = make_file_paths(&["my.show.name.ep1.mp4", "my.show.name.ep2.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn mixed_separators() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["show name"]);
+        let files = make_file_paths(&["Show.Name.ep1.mp4", "show_name_ep2.mp4", "Show-Name-ep3.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn with_prefix_ignore() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirs = make_test_dirs(&["example"]);
+        let files = make_file_paths(&["www.example.file.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn with_repeated_prefix_ignore() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix".to_string()]);
+        let dirs = make_test_dirs(&["name"]);
+        let files = make_file_paths(&["prefix.prefix.name.file.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn with_multiple_prefix_ignores() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string(), "ftp".to_string()]);
+        let dirs = make_test_dirs(&["example"]);
+        let files = make_file_paths(&["www.ftp.example.file.mp4", "ftp.example.other.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn prefix_ignore_applied_to_both() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["release".to_string()]);
+        let dirs = make_test_dirs(&["release show name"]);
+        let files = make_file_paths(&["release.show.name.ep1.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn file_has_prefix_dir_does_not() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirs = make_test_dirs(&["example"]);
+        let files = make_file_paths(&["www.example.file.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn dir_has_prefix_file_does_not() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirs = make_test_dirs(&["www example"]);
+        let files = make_file_paths(&["example.file.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn special_characters_in_names() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["show's name"]);
+        let files = make_file_paths(&["show's.name.ep1.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn numbers_in_directory_name() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["2024 show", "show 2024"]);
+        let files = make_file_paths(&["2024.show.ep1.mp4", "show.2024.ep1.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod test_full_flow {
+    use super::*;
+
+    #[test]
+    fn simulation_with_filtering() {
+        let original_filenames = [
+            "ShowName.2023.S01E01.720p.mp4",
+            "ShowName.2024.S01E02.720p.mp4",
+            "ShowName.2025.S01E03.720p.mp4",
+            "OtherShow.2024.Special.mp4",
+            "OtherShow.2024.Episode.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "ShowName.S01E01.mp4");
+        assert_eq!(filtered[1].1, "ShowName.S01E02.mp4");
+        assert_eq!(filtered[2].1, "ShowName.S01E03.mp4");
+        assert_eq!(filtered[3].1, "OtherShow.Special.mp4");
+        assert_eq!(filtered[4].1, "OtherShow.Episode.mp4");
+
+        let show_candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(show_candidates, vec![(Cow::Borrowed("ShowName"), 3)]);
+
+        let other_candidates = DirMove::find_prefix_candidates(&filtered[3].1, &filtered, 2);
+        assert_eq!(other_candidates, vec![(Cow::Borrowed("OtherShow"), 2)]);
+    }
+
+    #[test]
+    fn with_resolution_numbers() {
+        let original_filenames = [
+            "MovieName.2024.720.rip.mp4",
+            "MovieName.2024.720.other.mp4",
+            "MovieName.2024.720.more.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "MovieName.rip.mp4");
+        assert_eq!(filtered[1].1, "MovieName.other.mp4");
+        assert_eq!(filtered[2].1, "MovieName.more.mp4");
+
+        let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(candidates, vec![(Cow::Borrowed("MovieName"), 3)]);
+    }
+
+    #[test]
+    fn with_resolution_pattern() {
+        let original_filenames = [
+            "MovieName.2024.1080p.rip.mp4",
+            "MovieName.2024.1080p.other.mp4",
+            "MovieName.2024.1080p.more.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "MovieName.rip.mp4");
+        assert_eq!(filtered[1].1, "MovieName.other.mp4");
+        assert_eq!(filtered[2].1, "MovieName.more.mp4");
+
+        let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(candidates, vec![(Cow::Borrowed("MovieName"), 3)]);
+    }
+
+    #[test]
+    fn with_glue_words() {
+        let original_filenames = [
+            "Show.and.Tell.part1.mp4",
+            "Show.and.Tell.part2.mp4",
+            "Show.and.Tell.part3.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "Show.Tell.part1.mp4");
+        assert_eq!(filtered[1].1, "Show.Tell.part2.mp4");
+        assert_eq!(filtered[2].1, "Show.Tell.part3.mp4");
+
+        let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Show.Tell"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 3));
+    }
+
+    #[test]
+    fn short_prefix_with_shared_parts() {
+        let original_filenames = [
+            "ABC.2023.Thing.v1.mp4",
+            "ABC.2024.Thing.v2.mp4",
+            "ABC.2025.Thing.v3.mp4",
+        ];
+
+        let unfiltered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| (PathBuf::from(*name), (*name).to_string()))
+            .collect();
+
+        let candidates_unfiltered = DirMove::find_prefix_candidates(&unfiltered[0].1, &unfiltered, 3);
+        assert_eq!(candidates_unfiltered, vec![(Cow::Borrowed("ABC"), 3)]);
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "ABC.Thing.v1.mp4");
+        assert_eq!(filtered[1].1, "ABC.Thing.v2.mp4");
+        assert_eq!(filtered[2].1, "ABC.Thing.v3.mp4");
+
+        let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("ABC.Thing"), 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("ABC"), 3));
+    }
+
+    #[test]
+    fn files_with_resolution_grouped_correctly() {
+        let original_filenames = [
+            "Some.Video.1080p.part1.mp4",
+            "Some.Video.1080p.part2.mp4",
+            "Some.Video.1080p.part3.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "Some.Video.part1.mp4");
+
+        let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Video"), 3));
+
+        let dir_name = candidates[0].0.replace('.', " ");
+        assert_eq!(dir_name, "Some Video");
+    }
+
+    #[test]
+    fn files_with_2160p_resolution() {
+        let original_filenames = [
+            "Movie.Name.2160p.file1.mp4",
+            "Movie.Name.2160p.file2.mp4",
+            "Movie.Name.2160p.file3.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "Movie.Name.file1.mp4");
+
+        let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Movie.Name"), 3));
+
+        let dir_name = candidates[0].0.replace('.', " ");
+        assert_eq!(dir_name, "Movie Name");
+    }
+
+    #[test]
+    fn files_with_dimension_resolution() {
+        let original_filenames = [
+            "Cool.Stuff.1920x1080.part1.mp4",
+            "Cool.Stuff.1920x1080.part2.mp4",
+            "Cool.Stuff.1920x1080.part3.mp4",
+        ];
+
+        let filtered: Vec<(PathBuf, String)> = original_filenames
+            .iter()
+            .map(|name| {
+                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
+                (PathBuf::from(*name), filtered_name)
+            })
+            .collect();
+
+        assert_eq!(filtered[0].1, "Cool.Stuff.part1.mp4");
+
+        let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Cool.Stuff"), 3));
+
+        let dir_name = candidates[0].0.replace('.', " ");
+        assert_eq!(dir_name, "Cool Stuff");
+    }
+}
+
+#[cfg(test)]
+mod test_unpack {
+    use super::test_helpers::*;
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn basic_preserves_structure_and_removes_matched_dir() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Example/Videos/Name/file2.txt
-        // Example/Videos/file1.txt
         let videos = root.join("Videos");
         write_file(&videos.join("Name").join("file2.txt"), "file2")?;
         write_file(&videos.join("file1.txt"), "file1")?;
@@ -1228,20 +2686,15 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // End result should be:
-        // Example/Name/file2.txt
-        // Example/file1.txt
         assert_exists(&root_for_asserts.join("Name").join("file2.txt"));
         assert_exists(&root_for_asserts.join("file1.txt"));
-
-        // Videos dir should be removed when empty
         assert_not_exists(&root_for_asserts.join("Videos"));
 
         Ok(())
     }
 
     #[test]
-    fn test_unpack_case_insensitive_dirname_match() -> anyhow::Result<()> {
+    fn case_insensitive_dirname_match() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1265,16 +2718,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_does_not_prune_unrelated_empty_dirs() -> anyhow::Result<()> {
+    fn does_not_prune_unrelated_empty_dirs() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // An unrelated empty directory should not be removed just because it is empty.
         let unrelated_empty = root.join("EmptyUnrelated");
         std::fs::create_dir_all(&unrelated_empty)?;
 
-        // A matched directory that is already empty should be removed.
         let matched_empty = root.join("Videos");
         std::fs::create_dir_all(&matched_empty)?;
 
@@ -1294,13 +2745,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_moves_non_matching_dirs_directly() -> anyhow::Result<()> {
+    fn moves_non_matching_dirs_directly() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Example/Videos/SubDir/nested/deep.txt
-        // SubDir does NOT match "videos", so it should be moved directly.
         let videos = root.join("Videos");
         let subdir = videos.join("SubDir");
         write_file(&subdir.join("nested").join("deep.txt"), "deep content")?;
@@ -1315,18 +2764,15 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // SubDir should be moved directly to Example/SubDir with its contents intact.
         assert_exists(&root_for_asserts.join("SubDir").join("nested").join("deep.txt"));
         assert_exists(&root_for_asserts.join("SubDir").join("file.txt"));
-
-        // Videos dir should be removed.
         assert_not_exists(&root_for_asserts.join("Videos"));
 
         Ok(())
     }
 
     #[test]
-    fn test_unpack_dryrun_does_not_modify_files() -> anyhow::Result<()> {
+    fn dryrun_does_not_modify_files() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1344,11 +2790,8 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Files should NOT have been moved in dryrun mode.
         assert_exists(&root_for_asserts.join("Videos").join("file1.txt"));
         assert_exists(&root_for_asserts.join("Videos").join("SubDir").join("file2.txt"));
-
-        // Destination files should NOT exist.
         assert_not_exists(&root_for_asserts.join("file1.txt"));
         assert_not_exists(&root_for_asserts.join("SubDir"));
 
@@ -1356,13 +2799,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_nested_matching_dirs_are_flattened() -> anyhow::Result<()> {
+    fn nested_matching_dirs_are_flattened() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Example/Videos/Videos/file.txt
-        // Both "Videos" directories match, so contents should be moved to Example.
         let outer_videos = root.join("Videos");
         let inner_videos = outer_videos.join("Videos");
         write_file(&inner_videos.join("file.txt"), "nested content")?;
@@ -1376,7 +2817,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // File should end up at Example/file.txt since both Videos dirs are flattened.
         assert_exists(&root_for_asserts.join("file.txt"));
         assert_not_exists(&root_for_asserts.join("Videos"));
 
@@ -1384,12 +2824,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_multiple_unpack_names() -> anyhow::Result<()> {
+    fn multiple_unpack_names() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create directories matching different unpack names.
         let videos = root.join("Videos");
         let extras = root.join("Extras");
         write_file(&videos.join("video.mp4"), "video")?;
@@ -1404,7 +2843,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Both directories should be unpacked.
         assert_exists(&root_for_asserts.join("video.mp4"));
         assert_exists(&root_for_asserts.join("extra.txt"));
         assert_not_exists(&root_for_asserts.join("Videos"));
@@ -1414,12 +2852,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_skips_existing_file_without_overwrite() -> anyhow::Result<()> {
+    fn skips_existing_file_without_overwrite() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create a file in Videos and a conflicting file in root.
         let videos = root.join("Videos");
         write_file(&videos.join("conflict.txt"), "from videos")?;
         write_file(&root.join("conflict.txt"), "original")?;
@@ -1433,7 +2870,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Original file should be preserved.
         let content = std::fs::read_to_string(root_for_asserts.join("conflict.txt"))?;
         assert_eq!(content, "original");
 
@@ -1441,12 +2877,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_overwrites_existing_file_with_overwrite() -> anyhow::Result<()> {
+    fn overwrites_existing_file_with_overwrite() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create a file in Videos and a conflicting file in root.
         let videos = root.join("Videos");
         write_file(&videos.join("conflict.txt"), "from videos")?;
         write_file(&root.join("conflict.txt"), "original")?;
@@ -1460,7 +2895,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // File should be overwritten.
         let content = std::fs::read_to_string(root_for_asserts.join("conflict.txt"))?;
         assert_eq!(content, "from videos");
 
@@ -1468,12 +2902,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_skips_existing_directory_without_overwrite() -> anyhow::Result<()> {
+    fn skips_existing_directory_without_overwrite() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create a subdir in Videos and a conflicting directory in root.
         let videos = root.join("Videos");
         write_file(&videos.join("SubDir").join("new.txt"), "new content")?;
         write_file(&root.join("SubDir").join("existing.txt"), "existing content")?;
@@ -1487,25 +2920,21 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Original directory should be preserved with its content.
         assert_exists(&root_for_asserts.join("SubDir").join("existing.txt"));
-        // New file should NOT have been added (directory move was skipped).
         assert_not_exists(&root_for_asserts.join("SubDir").join("new.txt"));
 
         Ok(())
     }
 
     #[test]
-    fn test_unpack_non_recursive_only_checks_root_level() -> anyhow::Result<()> {
+    fn non_recursive_only_checks_root_level() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create nested Videos directory (should NOT be unpacked with recurse=false).
         let nested = root.join("Parent").join("Videos");
         write_file(&nested.join("file.txt"), "nested")?;
 
-        // Create root-level Videos (should be unpacked).
         let root_videos = root.join("Videos");
         write_file(&root_videos.join("root_file.txt"), "root")?;
 
@@ -1518,23 +2947,19 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Root-level Videos should be unpacked.
         assert_exists(&root_for_asserts.join("root_file.txt"));
         assert_not_exists(&root_for_asserts.join("Videos"));
-
-        // Nested Videos should NOT be unpacked.
         assert_exists(&root_for_asserts.join("Parent").join("Videos").join("file.txt"));
 
         Ok(())
     }
 
     #[test]
-    fn test_unpack_deeply_nested_structure() -> anyhow::Result<()> {
+    fn deeply_nested_structure() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Example/Videos/A/B/C/deep.txt
         let videos = root.join("Videos");
         write_file(&videos.join("A").join("B").join("C").join("deep.txt"), "deep")?;
         write_file(&videos.join("A").join("shallow.txt"), "shallow")?;
@@ -1548,7 +2973,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Directory A should be moved directly with all its nested contents.
         assert_exists(&root_for_asserts.join("A").join("B").join("C").join("deep.txt"));
         assert_exists(&root_for_asserts.join("A").join("shallow.txt"));
         assert_not_exists(&root_for_asserts.join("Videos"));
@@ -1557,12 +2981,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_mixed_files_and_directories() -> anyhow::Result<()> {
+    fn mixed_files_and_directories() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create a mix of files and directories in Videos.
         let videos = root.join("Videos");
         write_file(&videos.join("file1.txt"), "file1")?;
         write_file(&videos.join("file2.txt"), "file2")?;
@@ -1578,10 +3001,8 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Files should be moved individually.
         assert_exists(&root_for_asserts.join("file1.txt"));
         assert_exists(&root_for_asserts.join("file2.txt"));
-        // Directories should be moved directly.
         assert_exists(&root_for_asserts.join("Dir1").join("nested1.txt"));
         assert_exists(&root_for_asserts.join("Dir2").join("nested2.txt"));
         assert_not_exists(&root_for_asserts.join("Videos"));
@@ -1590,7 +3011,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_empty_unpack_names_does_nothing() -> anyhow::Result<()> {
+    fn empty_unpack_names_does_nothing() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1607,7 +3028,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Nothing should be unpacked.
         assert_exists(&root_for_asserts.join("Videos").join("file.txt"));
         assert_not_exists(&root_for_asserts.join("file.txt"));
 
@@ -1615,12 +3035,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_no_matching_directories() -> anyhow::Result<()> {
+    fn no_matching_directories() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create directories that don't match the unpack names.
         let other = root.join("Other");
         write_file(&other.join("file.txt"), "content")?;
 
@@ -1633,20 +3052,17 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Nothing should be unpacked.
         assert_exists(&root_for_asserts.join("Other").join("file.txt"));
 
         Ok(())
     }
 
     #[test]
-    fn test_unpack_multiple_matching_dirs_at_different_levels() -> anyhow::Result<()> {
+    fn multiple_matching_dirs_at_different_levels() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Example/Videos/file1.txt
-        // Create: Example/Parent/Videos/file2.txt
         let root_videos = root.join("Videos");
         write_file(&root_videos.join("file1.txt"), "file1")?;
 
@@ -1662,7 +3078,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Both should be unpacked to their respective parents.
         assert_exists(&root_for_asserts.join("file1.txt"));
         assert_exists(&root_for_asserts.join("Parent").join("file2.txt"));
         assert_not_exists(&root_for_asserts.join("Videos"));
@@ -1672,7 +3087,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_preserves_file_content() -> anyhow::Result<()> {
+    fn preserves_file_content() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1690,7 +3105,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // File content should be preserved exactly.
         let moved_content = std::fs::read_to_string(root_for_asserts.join("content.txt"))?;
         assert_eq!(moved_content, original_content);
 
@@ -1698,7 +3112,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_handles_special_characters_in_names() -> anyhow::Result<()> {
+    fn handles_special_characters_in_names() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1728,16 +3142,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_alternating_match_non_match_dirs() -> anyhow::Result<()> {
+    fn alternating_match_non_match_dirs() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Example/Videos/Other/Videos/file.txt
-        // Outer Videos matches, Other doesn't, inner Videos matches.
-        // Processing order (deepest first):
-        // 1. Inner Videos is unpacked: Videos/Other/Videos/file.txt -> Videos/Other/file.txt
-        // 2. Outer Videos is unpacked: Videos/Other (non-matching) moved directly -> Other
         let path = root.join("Videos").join("Other").join("Videos");
         write_file(&path.join("file.txt"), "deep")?;
 
@@ -1750,8 +3159,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Inner Videos was unpacked first, then Other was moved directly.
-        // Final result: Example/Other/file.txt
         assert_exists(&root_for_asserts.join("Other").join("file.txt"));
         assert_not_exists(&root_for_asserts.join("Videos"));
         assert_not_exists(&root_for_asserts.join("Other").join("Videos"));
@@ -1760,7 +3167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_collect_info_counts_correctly() -> anyhow::Result<()> {
+    fn collect_info_counts_correctly() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1779,7 +3186,6 @@ mod tests {
 
         let info = dirmove.collect_unpack_info(&videos, &root);
 
-        // Should have 3 files and 2 directories.
         assert_eq!(info.file_moves.len(), 3);
         assert_eq!(info.directory_moves.len(), 2);
 
@@ -1787,12 +3193,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_dryrun_preserves_empty_matched_directory() -> anyhow::Result<()> {
+    fn dryrun_preserves_empty_matched_directory() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
 
-        // Create an empty matched directory.
         let videos = root.join("Videos");
         std::fs::create_dir_all(&videos)?;
 
@@ -1805,850 +3210,17 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // In dryrun mode, even empty matched directories should NOT be removed.
         assert_exists(&root_for_asserts.join("Videos"));
 
         Ok(())
     }
 
-    fn make_test_dirmove_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> DirMove {
-        DirMove {
-            root: PathBuf::from("."),
-            config: make_test_config_with_ignores(prefix_overrides, prefix_ignores),
-        }
-    }
-
-    fn make_test_dirmove(prefix_overrides: Vec<String>) -> DirMove {
-        make_test_dirmove_with_ignores(prefix_overrides, Vec::new())
-    }
-
     #[test]
-    fn test_apply_prefix_overrides_no_overrides() {
-        let dirmove = make_test_dirmove(Vec::new());
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
-
-        let result = dirmove.apply_prefix_overrides(groups);
-        assert!(result.contains_key("Some.Name.Thing"));
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_apply_prefix_overrides_matching_override() {
-        let dirmove = make_test_dirmove(vec!["longer.prefix".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert(
-            "longer.prefix.name".to_string(),
-            vec![PathBuf::from("longer.prefix.name.file.mp4")],
-        );
-
-        let result = dirmove.apply_prefix_overrides(groups);
-        assert!(result.contains_key("longer.prefix"));
-        assert!(!result.contains_key("longer.prefix.name"));
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_apply_prefix_overrides_merges_groups() {
-        let dirmove = make_test_dirmove(vec!["Some.Name".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
-        groups.insert("Some.Name.Other".to_string(), vec![PathBuf::from("file2.mp4")]);
-
-        let result = dirmove.apply_prefix_overrides(groups);
-        assert!(result.contains_key("Some.Name"));
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Some.Name").map(Vec::len), Some(2));
-    }
-
-    #[test]
-    fn test_apply_prefix_overrides_non_matching() {
-        let dirmove = make_test_dirmove(vec!["Other.Prefix".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
-
-        let result = dirmove.apply_prefix_overrides(groups);
-        assert!(result.contains_key("Some.Name.Thing"));
-        assert!(!result.contains_key("Other.Prefix"));
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_apply_prefix_overrides_partial_match_only() {
-        let dirmove = make_test_dirmove(vec!["Some".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Something.Else".to_string(), vec![PathBuf::from("file1.mp4")]);
-        groups.insert("Some.Name".to_string(), vec![PathBuf::from("file2.mp4")]);
-
-        let result = dirmove.apply_prefix_overrides(groups);
-        // "Something.Else" starts with "Some" so it gets merged
-        // "Some.Name" also starts with "Some" so it gets merged
-        assert!(result.contains_key("Some"));
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_apply_prefix_overrides_override_more_specific_than_prefix() {
-        // Override "Example.Name" is more specific than computed prefix "Example"
-        // Files start with "Example.Name" so override should apply
-        let dirmove = make_test_dirmove(vec!["Example.Name".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert(
-            "Example".to_string(),
-            vec![
-                PathBuf::from("Example.Name.Video1.mp4"),
-                PathBuf::from("Example.Name.Video2.mp4"),
-                PathBuf::from("Example.Name.Video3.mp4"),
-            ],
-        );
-
-        let result = dirmove.apply_prefix_overrides(groups);
-        assert!(result.contains_key("Example.Name"));
-        assert!(!result.contains_key("Example"));
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Example.Name").map(Vec::len), Some(3));
-    }
-
-    fn make_test_dirs(names: &[&str]) -> Vec<DirectoryInfo> {
-        names
-            .iter()
-            .map(|n| DirectoryInfo {
-                path: PathBuf::from(*n),
-                name: n.to_lowercase(),
-            })
-            .collect()
-    }
-
-    fn make_file_paths(names: &[&str]) -> Vec<PathBuf> {
-        names.iter().map(|n| PathBuf::from(*n)).collect()
-    }
-
-    #[test]
-    fn test_match_files_to_directories_basic_match() {
-        // Directory: "Certain Name", files with "Certain.Name" should match
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["Certain Name"]);
-        let files = make_file_paths(&[
-            "Something.else.Certain.Name.video.1.mp4",
-            "Certain.Name.Example.video.2.mp4",
-            "Another.Certain.Name.Example.video.3.mp4",
-            "Another.Name.Example.video.3.mp4",
-            "Cert.Name.Example.video.3.mp4",
-            "Certain.Not.Example.video.mp4",
-        ]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&0));
-        assert_eq!(result.get(&0).map(Vec::len), Some(3));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_no_matches() {
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["Some Directory"]);
-        let files = make_file_paths(&["unrelated.file.mp4", "another.file.txt"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_match_files_to_directories_multiple_dirs() {
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["First Dir", "Second Dir"]);
-        let files = make_file_paths(&["First.Dir.file1.mp4", "Second.Dir.file2.mp4", "First.Dir.file3.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert_eq!(result.len(), 2);
-        assert_eq!(result.get(&0).map(Vec::len), Some(2));
-        assert_eq!(result.get(&1).map(Vec::len), Some(1));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_case_insensitive() {
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["My Directory"]);
-        let files = make_file_paths(&[
-            "MY.DIRECTORY.file1.mp4",
-            "my.directory.file2.mp4",
-            "My.Directory.file3.mp4",
-        ]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get(&0).map(Vec::len), Some(3));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_partial_match() {
-        // Directory "Test Name" should NOT match "Testing.Name.file.mp4"
-        // because "testing name file mp4" does not contain "test name" as substring
-        // ("testing" != "test ")
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["Test Name"]);
-        let files = make_file_paths(&["Testing.Name.file.mp4", "Test.Name.file.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert_eq!(result.len(), 1);
-        // Only "Test.Name.file.mp4" matches because normalized is "test name file mp4"
-        // which contains "test name"
-        // "Testing.Name.file.mp4" normalized is "testing name file mp4" which does NOT
-        // contain "test name" (it has "testing name" not "test name")
-        assert_eq!(result.get(&0).map(Vec::len), Some(1));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_longer_match_wins() {
-        // If a file could match multiple directories, longer/more specific name wins
-        // e.g., "ProjectNew" should match before "Project"
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["Project", "ProjectNew"]);
-        let files = make_file_paths(&["ProjectNew.2025.10.12.file.mp4", "Project.2025.10.05.file.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        // Should have matches for both directories
-        assert_eq!(result.len(), 2);
-        // "ProjectNew" file should match "ProjectNew" directory (index 1), not "Project"
-        assert!(result.contains_key(&1));
-        assert_eq!(result.get(&1).map(Vec::len), Some(1));
-        // "Project" file should match "Project" directory (index 0)
-        assert!(result.contains_key(&0));
-        assert_eq!(result.get(&0).map(Vec::len), Some(1));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_empty_files() {
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["Some Dir"]);
-        let files: Vec<PathBuf> = Vec::new();
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_match_files_to_directories_empty_dirs() {
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs: Vec<DirectoryInfo> = Vec::new();
-        let files = make_file_paths(&["some.file.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_match_files_to_directories_dots_replaced_with_spaces() {
-        // Verify that dots in filenames are replaced with spaces for matching
-        // Directory "My Show" should match "My.Show.S01E01.mp4"
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["My Show"]);
-        let files = make_file_paths(&["My.Show.S01E01.mp4", "My.Show.S01E02.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get(&0).map(Vec::len), Some(2));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_mixed_separators() {
-        // Files with various separators in names
-        let dirmove = make_test_dirmove(Vec::new());
-        let dirs = make_test_dirs(&["Show Name"]);
-        let files = make_file_paths(&[
-            "Show.Name.episode.mp4",
-            "Other.Show.Name.here.mp4",
-            "prefix.Show.Name.suffix.mp4",
-        ]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get(&0).map(Vec::len), Some(3));
-    }
-
-    #[test]
-    fn test_strip_ignored_prefixes_no_ignores() {
-        let dirmove = make_test_dirmove(Vec::new());
-        let result = dirmove.strip_ignored_prefixes("something other matching");
-        assert_eq!(result.as_ref(), "something other matching");
-    }
-
-    #[test]
-    fn test_strip_ignored_prefixes_single_ignore() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
-        let result = dirmove.strip_ignored_prefixes("something other matching");
-        assert_eq!(result.as_ref(), "other matching");
-    }
-
-    #[test]
-    fn test_strip_ignored_prefixes_multiple_ignores() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string(), "Other".to_string()]);
-        let result = dirmove.strip_ignored_prefixes("something other matching");
-        assert_eq!(result.as_ref(), "matching");
-    }
-
-    #[test]
-    fn test_strip_ignored_prefixes_no_match() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
-        let result = dirmove.strip_ignored_prefixes("something other matching");
-        assert_eq!(result.as_ref(), "something other matching");
-    }
-
-    #[test]
-    fn test_strip_ignored_dot_prefixes_single_ignore() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
-        let result = dirmove.strip_ignored_dot_prefixes("Something.other.matching.mp4");
-        assert_eq!(result, "other.matching.mp4");
-    }
-
-    #[test]
-    fn test_strip_ignored_dot_prefixes_multiple_ignores() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string(), "other".to_string()]);
-        let result = dirmove.strip_ignored_dot_prefixes("Something.other.matching.mp4");
-        assert_eq!(result, "matching.mp4");
-    }
-
-    #[test]
-    fn test_match_files_to_directories_with_prefix_ignore() {
-        // File "Something.other.matching.mp4" should match "matching" dir when "Something" is ignored
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
-        let dirs = make_test_dirs(&["matching", "Something"]);
-        let files = make_file_paths(&["Something.other.matching.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        // Should match "matching" (index 0), not "Something" (index 1)
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&0));
-        assert!(!result.contains_key(&1));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_with_repeated_prefix_ignore() {
-        // File has the ignored prefix multiple times in the name, should only strip from start
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Something".to_string()]);
-        let dirs = make_test_dirs(&["other Something", "Something"]);
-        let files = make_file_paths(&["Something.other.Something.matching.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        // Should match "other Something" (index 0) after stripping leading "Something"
-        // The second "Something" in the middle of the name should remain for matching
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&0));
-        assert!(!result.contains_key(&1));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_with_multiple_prefix_ignores() {
-        // File should match after stripping multiple ignored prefixes
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix1".to_string(), "Prefix2".to_string()]);
-        let dirs = make_test_dirs(&["Target Dir"]);
-        let files = make_file_paths(&["Prefix1.Prefix2.Target.Dir.file.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&0));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_prefix_ignore_applied_to_both() {
-        // Both file and directory have the ignored prefix - should still match after stripping
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
-        let dirs = make_test_dirs(&["Prefix Show Name", "Other Dir"]);
-        let files = make_file_paths(&["Prefix.Show.Name.S01E01.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        // File "Prefix.Show.Name.S01E01.mp4" should match "Prefix Show Name" directory
-        // after stripping "prefix " from both, leaving "show name" to match
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&0));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_file_has_prefix_dir_does_not() {
-        // File has prefix but directory doesn't - should match the stripped filename to dir
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
-        let dirs = make_test_dirs(&["Show Name", "Other"]);
-        let files = make_file_paths(&["Prefix.Show.Name.S01E01.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        // After stripping "prefix " from filename, "show name s01e01 mp4" contains "show name"
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&0));
-    }
-
-    #[test]
-    fn test_match_files_to_directories_dir_has_prefix_file_does_not() {
-        // Directory has prefix but file doesn't - should match filename to stripped dir name
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["Prefix".to_string()]);
-        let dirs = make_test_dirs(&["Prefix Show Name", "Other"]);
-        let files = make_file_paths(&["Show.Name.S01E01.mp4"]);
-
-        let result = dirmove.match_files_to_directories(&files, &dirs);
-
-        // Directory "prefix show name" stripped becomes "show name"
-        // Filename "show name s01e01 mp4" contains "show name"
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&0));
-    }
-
-    #[test]
-    fn test_filter_parts_removes_year() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.2024.S01E01.mkv"),
-            "Show.S01E01.mkv"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_multiple_numeric() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.2024.720.thing.mp4"),
-            "Show.thing.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_keeps_mixed_alphanumeric() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.S01E02.2024.mp4"),
-            "Show.S01E02.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_no_numeric() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.Episode.Title.mp4"),
-            "Show.Episode.Title.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_all_numeric_except_extension() {
-        assert_eq!(DirMove::filter_numeric_resolution_and_glue_parts("2024.720.mp4"), "mp4");
-    }
-
-    #[test]
-    fn test_filter_parts_empty_string() {
-        assert_eq!(DirMove::filter_numeric_resolution_and_glue_parts(""), "");
-    }
-
-    #[test]
-    fn test_filter_parts_single_part() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.mp4"),
-            "Show.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_1080p() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.1080p.S01E01.mkv"),
-            "Show.S01E01.mkv"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_2160p() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Some.Video.2160p.part1.mp4"),
-            "Some.Video.part1.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_720p() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Movie.720p.rip.mp4"),
-            "Movie.rip.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_dimension_format() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Video.1920x1080.stuff.mp4"),
-            "Video.stuff.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_smaller_dimension() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Video.640x480.stuff.mp4"),
-            "Video.stuff.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_case_insensitive_resolution() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.1080P.episode.mkv"),
-            "Show.episode.mkv"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_and() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.and.Tell.mp4"),
-            "Show.Tell.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_the() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("The.Big.Show.mp4"),
-            "Big.Show.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_multiple_glue_words() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.of.the.Year.mp4"),
-            "Show.Year.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_glue_words_case_insensitive() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("Show.AND.Tell.mp4"),
-            "Show.Tell.mp4"
-        );
-    }
-
-    #[test]
-    fn test_filter_parts_removes_all_glue_words() {
-        assert_eq!(
-            DirMove::filter_numeric_resolution_and_glue_parts("A.Day.in.the.Life.of.Bob.mp4"),
-            "Day.Life.Bob.mp4"
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_with_filtered_numeric_parts() {
-        // Simulate the full flow: files are filtered before being passed to find_best_prefix
-        // Original filenames: ShowName.2024.S01E01.mp4, ShowName.2024.S01E02.mp4, ShowName.2024.S01E03.mp4
-        // After filtering: ShowName.S01E01.mp4, ShowName.S01E02.mp4, ShowName.S01E03.mp4
-        let filtered_files = make_test_files(&["ShowName.S01E01.mp4", "ShowName.S01E02.mp4", "ShowName.S01E03.mp4"]);
-
-        // All files should group under "ShowName" (8 chars > 4, so uses simple prefix)
-        assert_eq!(
-            DirMove::find_best_prefix("ShowName.S01E01.mp4", &filtered_files),
-            Some(Cow::Borrowed("ShowName"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_numeric_filtering_groups_correctly() {
-        // Files with years should group together after numeric filtering
-        // Original: ABC.2023.Thing.v1.mp4, ABC.2024.Thing.v2.mp4, ABC.2025.Thing.v3.mp4
-        // After filtering: ABC.Thing.v1.mp4, ABC.Thing.v2.mp4, ABC.Thing.v3.mp4
-        let filtered_files = make_test_files(&["ABC.Thing.v1.mp4", "ABC.Thing.v2.mp4", "ABC.Thing.v3.mp4"]);
-
-        // Short prefix "ABC" (3 chars) should find shared 2-part prefix "ABC.Thing"
-        assert_eq!(
-            DirMove::find_best_prefix("ABC.Thing.v1.mp4", &filtered_files),
-            Some(Cow::Borrowed("ABC.Thing"))
-        );
-    }
-
-    #[test]
-    fn test_find_best_prefix_mixed_years_without_filtering_no_group() {
-        // Without filtering, files with different years wouldn't group on short prefix
-        // These files have short prefix "ABC" but different 2-part prefixes
-        let unfiltered_files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
-
-        // No shared 3-part or 2-part prefix, so returns None for short prefix
-        assert_eq!(DirMove::find_best_prefix("ABC.2023.Thing.mp4", &unfiltered_files), None);
-    }
-
-    #[test]
-    fn test_find_best_prefix_after_filtering_groups_by_show_name() {
-        // Real-world scenario: TV show episodes with year in name
-        // Original: Series.Name.2024.S01E01.1080p.mp4, Series.Name.2024.S01E02.1080p.mp4, etc.
-        // After filtering: Series.Name.S01E01.1080p.mp4, Series.Name.S01E02.1080p.mp4, etc.
-        let filtered_files = make_test_files(&[
-            "Series.Name.S01E01.1080p.mp4",
-            "Series.Name.S01E02.1080p.mp4",
-            "Series.Name.S01E03.1080p.mp4",
-        ]);
-
-        // All files share "Series.Name" 2-part prefix, so use that instead of just "Series"
-        assert_eq!(
-            DirMove::find_best_prefix("Series.Name.S01E01.1080p.mp4", &filtered_files),
-            Some(Cow::Borrowed("Series.Name"))
-        );
-    }
-
-    #[test]
-    fn test_full_filtering_flow_simulation() {
-        // Simulate the full flow from collect_files_by_prefix
-        let original_filenames = [
-            "ShowName.2023.S01E01.720p.mp4",
-            "ShowName.2024.S01E02.720p.mp4",
-            "ShowName.2025.S01E03.720p.mp4",
-            "OtherShow.2024.Special.mp4",
-        ];
-
-        // Step 1: filter_numeric_resolution_and_glue_parts (simulating what collect_files_by_prefix does)
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        // Verify filtering worked - both years and resolutions are removed
-        assert_eq!(filtered[0].1, "ShowName.S01E01.mp4");
-        assert_eq!(filtered[1].1, "ShowName.S01E02.mp4");
-        assert_eq!(filtered[2].1, "ShowName.S01E03.mp4");
-        assert_eq!(filtered[3].1, "OtherShow.Special.mp4");
-
-        // Now find_best_prefix should group the "ShowName" files together
-        let show_prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(show_prefix, Some(Cow::Borrowed("ShowName")));
-
-        // The "OtherShow" file uses simple prefix (9 chars > 4) but has no other matches
-        // Since it's a long prefix, it returns the prefix even without matches
-        let other_prefix = DirMove::find_best_prefix(&filtered[3].1, &filtered);
-        assert_eq!(other_prefix, Some(Cow::Borrowed("OtherShow")));
-    }
-
-    #[test]
-    fn test_full_filtering_flow_with_resolution_numbers() {
-        // Files with resolution numbers that are purely numeric
-        let original_filenames = [
-            "MovieName.2024.720.rip.mp4",
-            "MovieName.2024.720.other.mp4",
-            "MovieName.2024.720.more.mp4",
-        ];
-
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        // All numeric parts (2024, 720) should be removed
-        assert_eq!(filtered[0].1, "MovieName.rip.mp4");
-        assert_eq!(filtered[1].1, "MovieName.other.mp4");
-        assert_eq!(filtered[2].1, "MovieName.more.mp4");
-
-        // Should group under "MovieName" (9 chars > 4, uses simple prefix)
-        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(prefix, Some(Cow::Borrowed("MovieName")));
-    }
-
-    #[test]
-    fn test_full_filtering_flow_with_resolution_pattern() {
-        // Files with resolution patterns like 1080p, 2160p
-        let original_filenames = [
-            "MovieName.2024.1080p.rip.mp4",
-            "MovieName.2024.1080p.other.mp4",
-            "MovieName.2024.1080p.more.mp4",
-        ];
-
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        // Both year (2024) and resolution (1080p) should be removed
-        assert_eq!(filtered[0].1, "MovieName.rip.mp4");
-        assert_eq!(filtered[1].1, "MovieName.other.mp4");
-        assert_eq!(filtered[2].1, "MovieName.more.mp4");
-
-        // Should group under "MovieName"
-        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(prefix, Some(Cow::Borrowed("MovieName")));
-    }
-
-    #[test]
-    fn test_full_filtering_flow_with_glue_words() {
-        // Files with glue words that should be filtered
-        let original_filenames = [
-            "Show.and.Tell.part1.mp4",
-            "Show.and.Tell.part2.mp4",
-            "Show.and.Tell.part3.mp4",
-        ];
-
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        // Glue word "and" should be removed
-        assert_eq!(filtered[0].1, "Show.Tell.part1.mp4");
-        assert_eq!(filtered[1].1, "Show.Tell.part2.mp4");
-        assert_eq!(filtered[2].1, "Show.Tell.part3.mp4");
-
-        // Should group under "Show.Tell"
-        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(prefix, Some(Cow::Borrowed("Show.Tell")));
-    }
-
-    #[test]
-    fn test_full_filtering_flow_short_prefix_with_shared_parts() {
-        // Test with short prefix (≤4 chars) that requires shared multi-part prefix
-        // Without filtering, these files have different 2-part prefixes due to years
-        let original_filenames = [
-            "ABC.2023.Thing.v1.mp4",
-            "ABC.2024.Thing.v2.mp4",
-            "ABC.2025.Thing.v3.mp4",
-        ];
-
-        // Without filtering - different years mean no shared 2-part prefix
-        let unfiltered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| (PathBuf::from(*name), (*name).to_string()))
-            .collect();
-
-        // No match because 2-part prefixes are ABC.2023, ABC.2024, ABC.2025 (all different)
-        let prefix_unfiltered = DirMove::find_best_prefix(&unfiltered[0].1, &unfiltered);
-        assert_eq!(prefix_unfiltered, None);
-
-        // With filtering - years removed, shared 2-part prefix "ABC.Thing"
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        assert_eq!(filtered[0].1, "ABC.Thing.v1.mp4");
-        assert_eq!(filtered[1].1, "ABC.Thing.v2.mp4");
-        assert_eq!(filtered[2].1, "ABC.Thing.v3.mp4");
-
-        // Now they share 2-part prefix "ABC.Thing"
-        let prefix_filtered = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(prefix_filtered, Some(Cow::Borrowed("ABC.Thing")));
-    }
-
-    #[test]
-    fn test_full_flow_files_with_resolution_grouped_correctly() {
-        // Files with resolution - resolution is filtered during prefix finding
-        let original_filenames = [
-            "Some.Video.1080p.part1.mp4",
-            "Some.Video.1080p.part2.mp4",
-            "Some.Video.1080p.part3.mp4",
-        ];
-
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        // Resolution is filtered out before prefix finding
-        assert_eq!(filtered[0].1, "Some.Video.part1.mp4");
-
-        // Find prefix - resolution already stripped
-        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(prefix, Some(Cow::Borrowed("Some.Video")));
-
-        // Directory name is just prefix with dots replaced by spaces
-        let dir_name = prefix.unwrap().replace('.', " ");
-        assert_eq!(dir_name, "Some Video");
-    }
-
-    #[test]
-    fn test_full_flow_files_with_2160p_resolution() {
-        let original_filenames = [
-            "Movie.Name.2160p.file1.mp4",
-            "Movie.Name.2160p.file2.mp4",
-            "Movie.Name.2160p.file3.mp4",
-        ];
-
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        // Resolution is filtered out
-        assert_eq!(filtered[0].1, "Movie.Name.file1.mp4");
-
-        // Prefix without resolution
-        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(prefix, Some(Cow::Borrowed("Movie.Name")));
-
-        // Directory name
-        let dir_name = prefix.unwrap().replace('.', " ");
-        assert_eq!(dir_name, "Movie Name");
-    }
-
-    #[test]
-    fn test_full_flow_files_with_dimension_resolution() {
-        let original_filenames = [
-            "Cool.Stuff.1920x1080.part1.mp4",
-            "Cool.Stuff.1920x1080.part2.mp4",
-            "Cool.Stuff.1920x1080.part3.mp4",
-        ];
-
-        let filtered: Vec<(PathBuf, String)> = original_filenames
-            .iter()
-            .map(|name| {
-                let filtered_name = DirMove::filter_numeric_resolution_and_glue_parts(name);
-                (PathBuf::from(*name), filtered_name)
-            })
-            .collect();
-
-        // Resolution is filtered out
-        assert_eq!(filtered[0].1, "Cool.Stuff.part1.mp4");
-
-        // Prefix without resolution
-        let prefix = DirMove::find_best_prefix(&filtered[0].1, &filtered);
-        assert_eq!(prefix, Some(Cow::Borrowed("Cool.Stuff")));
-
-        // Directory name
-        let dir_name = prefix.unwrap().replace('.', " ");
-        assert_eq!(dir_name, "Cool Stuff");
-    }
-
-    #[test]
-    fn test_unpack_nested_chain_single_summary() -> anyhow::Result<()> {
-        // Test that deeply nested unpack directories (Project\updates\1\videos) produce
-        // a single consolidated move chain, not separate summaries for each level.
+    fn nested_chain_single_summary() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Project");
         std::fs::create_dir_all(&root)?;
 
-        // Create: MYM/updates/1/videos/file.txt
-        // All of "updates", "1", and "videos" are unpack names.
         let deep_path = root.join("updates").join("1").join("videos");
         write_file(&deep_path.join("file.txt"), "content")?;
         write_file(&deep_path.join("another.txt"), "more content")?;
@@ -2662,7 +3234,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Files should end up directly in Project (all unpack dirs flattened).
         assert_exists(&root_for_asserts.join("file.txt"));
         assert_exists(&root_for_asserts.join("another.txt"));
         assert_not_exists(&root_for_asserts.join("updates"));
@@ -2671,10 +3242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_nested_chain_with_non_matching_dir_between() -> anyhow::Result<()> {
-        // Test: Project/updates/KeepThis/videos/file.txt
-        // "updates" and "videos" match, but "KeepThis" doesn't.
-        // KeepThis should be preserved in the output structure.
+    fn nested_chain_with_non_matching_dir_between() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Project");
         std::fs::create_dir_all(&root)?;
@@ -2691,7 +3259,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // KeepThis should be preserved, file unpacked from videos into it.
         assert_exists(&root_for_asserts.join("KeepThis").join("file.txt"));
         assert_not_exists(&root_for_asserts.join("updates"));
         assert_not_exists(&root_for_asserts.join("KeepThis").join("videos"));
@@ -2700,9 +3267,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_nested_chain_multiple_non_matching_dirs() -> anyhow::Result<()> {
-        // Test: Root/updates/A/videos/B/downloads/file.txt
-        // "updates", "videos", "downloads" match; "A" and "B" don't.
+    fn nested_chain_multiple_non_matching_dirs() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Root");
         std::fs::create_dir_all(&root)?;
@@ -2724,7 +3289,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // A and B should be preserved in the hierarchy.
         assert_exists(&root_for_asserts.join("A").join("B").join("file.txt"));
         assert_not_exists(&root_for_asserts.join("updates"));
 
@@ -2732,13 +3296,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_collect_candidates_filters_nested() -> anyhow::Result<()> {
-        // Verify that collect_unpack_candidates only returns root unpack dirs.
+    fn collect_candidates_filters_nested() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Test");
         std::fs::create_dir_all(&root)?;
 
-        // Create nested structure where all dirs match.
         let path = root.join("videos").join("updates").join("downloads");
         std::fs::create_dir_all(&path)?;
         write_file(&path.join("file.txt"), "x")?;
@@ -2750,7 +3312,6 @@ mod tests {
 
         let (_, candidates) = dirmove.collect_unwanted_and_unpack_candidates();
 
-        // Should only return the topmost "videos" directory, not the nested ones.
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0], root.join("videos"));
 
@@ -2758,16 +3319,12 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_separate_trees_get_separate_processing() -> anyhow::Result<()> {
-        // Two separate unpack directory trees should each be processed.
+    fn separate_trees_get_separate_processing() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Root");
         std::fs::create_dir_all(&root)?;
 
-        // Tree 1: Root/DirA/videos/file1.txt
         write_file(&root.join("DirA").join("videos").join("file1.txt"), "1")?;
-
-        // Tree 2: Root/DirB/videos/file2.txt
         write_file(&root.join("DirB").join("videos").join("file2.txt"), "2")?;
 
         let root_for_asserts = root.clone();
@@ -2779,7 +3336,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // Each tree should be unpacked independently.
         assert_exists(&root_for_asserts.join("DirA").join("file1.txt"));
         assert_exists(&root_for_asserts.join("DirB").join("file2.txt"));
         assert_not_exists(&root_for_asserts.join("DirA").join("videos"));
@@ -2789,15 +3345,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_chain_with_files_at_multiple_levels() -> anyhow::Result<()> {
-        // Files at different levels of the unpack chain should all end up in the target.
+    fn chain_with_files_at_multiple_levels() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Root");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Root/updates/file1.txt
-        //         Root/updates/videos/file2.txt
-        //         Root/updates/videos/downloads/file3.txt
         let updates = root.join("updates");
         write_file(&updates.join("file1.txt"), "1")?;
         write_file(&updates.join("videos").join("file2.txt"), "2")?;
@@ -2812,7 +3364,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // All files should end up directly in Root.
         assert_exists(&root_for_asserts.join("file1.txt"));
         assert_exists(&root_for_asserts.join("file2.txt"));
         assert_exists(&root_for_asserts.join("file3.txt"));
@@ -2822,13 +3373,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_chain_with_non_matching_subdirs_moved_directly() -> anyhow::Result<()> {
-        // Non-matching directories without nested unpack dirs should be moved directly.
+    fn chain_with_non_matching_subdirs_moved_directly() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Root");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Root/updates/KeepMe/deep/file.txt (no unpack dirs inside KeepMe)
         let keep_me = root.join("updates").join("KeepMe");
         write_file(&keep_me.join("deep").join("file.txt"), "content")?;
 
@@ -2841,7 +3390,6 @@ mod tests {
 
         dirmove.unpack_directories()?;
 
-        // KeepMe should be moved directly with its structure intact.
         assert_exists(&root_for_asserts.join("KeepMe").join("deep").join("file.txt"));
         assert_not_exists(&root_for_asserts.join("updates"));
 
@@ -2849,16 +3397,13 @@ mod tests {
     }
 
     #[test]
-    fn test_contains_unpack_directory_helper() -> anyhow::Result<()> {
+    fn contains_unpack_directory_helper() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Root");
         std::fs::create_dir_all(&root)?;
 
-        // Create: Root/A/B/videos/file.txt
         let videos = root.join("A").join("B").join("videos");
         write_file(&videos.join("file.txt"), "x")?;
-
-        // Create: Root/C/nothing_special/file.txt
         write_file(&root.join("C").join("nothing_special").join("file.txt"), "y")?;
 
         let dirmove = DirMove {
@@ -2866,20 +3411,22 @@ mod tests {
             config: make_unpack_config(vec!["videos"], true, false, false),
         };
 
-        // A contains videos (nested), should return true.
         assert!(dirmove.contains_unpack_directory(&root.join("A")));
-
-        // B contains videos directly, should return true.
         assert!(dirmove.contains_unpack_directory(&root.join("A").join("B")));
-
-        // C does not contain any unpack directory, should return false.
         assert!(!dirmove.contains_unpack_directory(&root.join("C")));
 
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod test_unwanted_directories {
+    use super::test_helpers::*;
+    use super::*;
+    use tempfile::TempDir;
 
     #[test]
-    fn test_unwanted_directory_deleted() -> anyhow::Result<()> {
+    fn deleted() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -2899,7 +3446,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unwanted_directory_deleted_recursive() -> anyhow::Result<()> {
+    fn deleted_recursive() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -2922,7 +3469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unwanted_directory_dryrun_preserves() -> anyhow::Result<()> {
+    fn dryrun_preserves() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -2942,7 +3489,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unwanted_directory_case_insensitive() -> anyhow::Result<()> {
+    fn case_insensitive() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -2962,7 +3509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unwanted_directory_skipped_in_collect_directories() -> anyhow::Result<()> {
+    fn skipped_in_collect_directories() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -2984,7 +3531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_unwanted_and_unpack_combined() -> anyhow::Result<()> {
+    fn collect_unwanted_and_unpack_combined() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;

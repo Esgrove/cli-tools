@@ -69,6 +69,46 @@ cargo fmt
 - Create docstrings for structs and functions.
 - Avoid trailing comments.
 
+## Testing
+
+- **NEVER use nested modules inside test modules** - all test modules must be separate root-level `#[cfg(test)]` modules
+- Do NOT wrap test modules in a single parent `mod tests` module
+
+### Test module structure example
+
+```rust
+#[cfg(test)]
+mod test_prefix_extraction {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn extracts_three_parts() { ... }
+}
+
+#[cfg(test)]
+mod test_filtering {
+    use super::*;
+
+    #[test]
+    fn removes_year() { ... }
+}
+```
+
+## Git Commands
+
+**NEVER run destructive git commands** including but not limited to:
+
+- `git checkout -- <file>` (discards working directory changes)
+- `git restore --staged <file>` (unstages changes)
+- `git restore <file>` (discards changes)
+- `git reset --hard`
+- `git clean`
+- `git stash drop`
+
+These commands can permanently destroy uncommitted work.
+If you need to undo changes, ask the user to do it manually.
+
 ## Configuration
 
 User configuration is read from `~/.config/cli-tools.toml` with sections for each binary.
