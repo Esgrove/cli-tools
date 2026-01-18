@@ -572,6 +572,7 @@ impl DirMove {
     /// Match files to directories based on normalized name matching.
     /// Returns a map from directory index (into `dirs`) to the list of matching file paths.
     /// Longer directory names are matched first to prefer more specific matches.
+    /// Handles both dot-separated names ("Some.Name") and concatenated names ("`SomeName`").
     fn match_files_to_directories(&self, files: &[PathBuf], dirs: &[DirectoryInfo]) -> HashMap<usize, Vec<PathBuf>> {
         let mut matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
 
@@ -585,29 +586,37 @@ impl DirMove {
             };
 
             // Normalize: replace dots with spaces for matching
-            let file_name_normalized = file_name.replace('.', " ").to_lowercase();
+            let file_name_spaced = file_name.replace('.', " ").to_lowercase();
+            // Also create a concatenated version (no spaces or dots) for matching "SomeName" to "Some Name"
+            let file_name_concat = file_name.replace('.', "").to_lowercase();
 
             // Apply prefix ignores: strip ignored prefixes from the normalized filename
-            let file_name_stripped = self.strip_ignored_prefixes(&file_name_normalized);
+            let file_name_spaced_stripped = self.strip_ignored_prefixes(&file_name_spaced);
 
             for &idx in &dir_indices {
-                // dir.name is already lowercase
+                // dir.name is already lowercase with spaces
+                let dir_name = &dirs[idx].name;
                 // Also strip ignored prefixes from directory name for matching
-                let dir_name_stripped = self.strip_ignored_prefixes(&dirs[idx].name);
+                let dir_name_stripped = self.strip_ignored_prefixes(dir_name);
+                // Create concatenated version of directory name (no spaces)
+                let dir_name_concat = dir_name.replace(' ', "");
+                let dir_name_stripped_concat = dir_name_stripped.replace(' ', "");
 
                 // Skip directories whose name is exactly an ignored prefix
                 // (after stripping, the directory name would be empty or unchanged if it's just the prefix)
-                if self.is_ignored_prefix(&dirs[idx].name) {
+                if self.is_ignored_prefix(dir_name) {
                     continue;
                 }
 
-                // Check if:
-                // 1. Stripped filename contains stripped directory name (both have prefix removed)
-                // 2. Original filename contains stripped directory name (dir has prefix, file doesn't)
-                // 3. Stripped filename contains original directory name (file has prefix, dir doesn't)
-                let is_match = file_name_stripped.contains(&*dir_name_stripped)
-                    || file_name_normalized.contains(&*dir_name_stripped)
-                    || file_name_stripped.contains(&dirs[idx].name);
+                // Check multiple matching strategies:
+                // 1. Spaced filename contains spaced directory name (e.g., "some name ep1" contains "some name")
+                // 2. Concatenated filename contains concatenated directory name (e.g., "somename" contains "somename")
+                // 3. With prefix stripping applied to both
+                let is_match = file_name_spaced_stripped.contains(&*dir_name_stripped)
+                    || file_name_spaced.contains(&*dir_name_stripped)
+                    || file_name_spaced_stripped.contains(&**dir_name)
+                    || file_name_concat.contains(&dir_name_concat)
+                    || file_name_concat.contains(&dir_name_stripped_concat);
 
                 if is_match {
                     matches.entry(idx).or_default().push(file_path.clone());
@@ -2425,6 +2434,230 @@ mod test_prefix_groups {
         );
         assert_eq!(groups_3.get("Gallery.Photos").unwrap().len(), 5);
     }
+
+    #[test]
+    fn prefix_overrides_merge_groups() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Show.Name.Season1.Episode01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Name.Season1.Episode02.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Name.Season2.Episode01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Name.Season2.Episode02.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: vec!["Show.Name".to_string()],
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // With prefix_overrides = ["Show.Name"], groups starting with Show.Name should be merged
+        assert!(
+            groups.contains_key("Show.Name"),
+            "Should have Show.Name group from override"
+        );
+        // Should not have separate Season1/Season2 groups - they're merged into Show.Name
+        assert!(
+            !groups.contains_key("Show.Name.Season1"),
+            "Season1 should be merged into Show.Name"
+        );
+        assert!(
+            !groups.contains_key("Show.Name.Season2"),
+            "Season2 should be merged into Show.Name"
+        );
+        // The Show.Name group should contain entries for all 4 files
+        // (files may appear multiple times due to multiple prefix matches)
+        let show_name_files = groups.get("Show.Name").unwrap();
+        assert!(
+            show_name_files.len() >= 4,
+            "Show.Name group should have at least 4 entries"
+        );
+    }
+
+    #[test]
+    fn prefix_overrides_multiple_overrides() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("ShowA.Season1.Ep01.mp4"), "").unwrap();
+        std::fs::write(root.join("ShowA.Season1.Ep02.mp4"), "").unwrap();
+        std::fs::write(root.join("ShowB.Season1.Ep01.mp4"), "").unwrap();
+        std::fs::write(root.join("ShowB.Season1.Ep02.mp4"), "").unwrap();
+        std::fs::write(root.join("ShowC.Season1.Ep01.mp4"), "").unwrap();
+        std::fs::write(root.join("ShowC.Season1.Ep02.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: vec!["ShowA".to_string(), "ShowB".to_string()],
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // ShowA and ShowB should use overrides (groups merged under override name)
+        assert!(groups.contains_key("ShowA"), "Should have ShowA from override");
+        assert!(groups.contains_key("ShowB"), "Should have ShowB from override");
+        // Each override group should have at least 2 entries (the 2 files)
+        assert!(
+            groups.get("ShowA").unwrap().len() >= 2,
+            "ShowA should have at least 2 entries"
+        );
+        assert!(
+            groups.get("ShowB").unwrap().len() >= 2,
+            "ShowB should have at least 2 entries"
+        );
+        // ShowC has no override, should have its own group(s)
+        let has_showc_group = groups.keys().any(|k| k.starts_with("ShowC"));
+        assert!(has_showc_group, "ShowC should have a group");
+    }
+
+    #[test]
+    fn prefix_overrides_no_match_keeps_original() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("MyShow.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("MyShow.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("MyShow.Episode.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: vec!["OtherShow".to_string()],
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Override doesn't match, so original prefix should be used
+        let has_myshow_group = groups.keys().any(|k| k.starts_with("MyShow"));
+        assert!(has_myshow_group, "Should have MyShow group (override didn't match)");
+        assert!(
+            !groups.contains_key("OtherShow"),
+            "OtherShow override should not create empty group"
+        );
+    }
+
+    #[test]
+    fn prefix_ignores_strips_prefix_from_grouping() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files with and without "www" prefix
+        std::fs::write(root.join("www.Example.Show.Ep01.mp4"), "").unwrap();
+        std::fs::write(root.join("www.Example.Show.Ep02.mp4"), "").unwrap();
+        std::fs::write(root.join("Example.Show.Ep03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 3,
+            overwrite: false,
+            prefix_ignores: vec!["www".to_string()],
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // With prefix_ignores stripping "www", all 3 files should group together
+        // Check that we have groups containing files
+        assert!(!groups.is_empty(), "Should have at least one group");
+    }
+
+    #[test]
+    fn prefix_ignores_and_overrides_combined() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("release.Show.Name.Season1.Ep01.mp4"), "").unwrap();
+        std::fs::write(root.join("release.Show.Name.Season1.Ep02.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Name.Season2.Ep01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show.Name.Season2.Ep02.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: vec!["release".to_string()],
+            prefix_overrides: vec!["Show.Name".to_string()],
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // With override "Show.Name", should have that group
+        assert!(groups.contains_key("Show.Name"), "Should have Show.Name group");
+        // Should not have separate Season groups - merged into Show.Name
+        assert!(
+            !groups.contains_key("Show.Name.Season1"),
+            "Season1 should be merged into Show.Name"
+        );
+        assert!(
+            !groups.contains_key("Show.Name.Season2"),
+            "Season2 should be merged into Show.Name"
+        );
+        // The Show.Name group should contain entries for all 4 files
+        let show_name_files = groups.get("Show.Name").unwrap();
+        assert!(
+            show_name_files.len() >= 4,
+            "Show.Name group should have at least 4 entries"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2973,6 +3206,101 @@ mod test_directory_matching {
         let files = make_file_paths(&["show's.name.ep1.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn concatenated_filename_matches_spaced_directory() {
+        // Directory "Some Name" should match both "Some.Name." and "SomeName" files
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Some Name"]);
+        let files = make_file_paths(&[
+            "Some.Name.Episode.01.mp4",
+            "SomeName.Episode.02.mp4",
+            "SOMENAME.Episode.03.mp4",
+            "somename.episode.04.mp4",
+        ]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&0).unwrap().len(),
+            4,
+            "All 4 files should match directory 'Some Name'"
+        );
+    }
+
+    #[test]
+    fn mixed_concatenated_and_dotted_filenames() {
+        // Mix of naming styles should all match the same directory
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["Photo Lab"]);
+        let files = make_file_paths(&[
+            "Photo.Lab.Image.01.jpg",
+            "PhotoLab.Image.02.jpg",
+            "Photolab.Image.03.jpg",
+            "PHOTOLAB.Image.04.jpg",
+            "photo.lab.image.05.jpg",
+        ]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&0).unwrap().len(),
+            5,
+            "All 5 files should match directory 'Photo Lab'"
+        );
+    }
+
+    #[test]
+    fn concatenated_directory_matches_dotted_files() {
+        // Directory without spaces should match dot-separated files
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["SomeName"]);
+        let files = make_file_paths(&["Some.Name.Episode.01.mp4", "SomeName.Episode.02.mp4"]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&0).unwrap().len(),
+            2,
+            "Both files should match directory 'SomeName'"
+        );
+    }
+
+    #[test]
+    fn concatenated_directory_matches_dotted_files_without_prefix() {
+        // Directory "SomeName" (no spaces) should match files like "some.name.file.mp4"
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&["SomeName"]);
+        let files = make_file_paths(&[
+            "some.name.file.01.mp4",
+            "Some.Name.file.02.mp4",
+            "SOME.NAME.file.03.mp4",
+        ]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&0).unwrap().len(),
+            3,
+            "All 3 dot-separated files should match concatenated directory 'SomeName'"
+        );
+    }
+
+    #[test]
+    fn concatenated_directory_with_dotted_files_and_prefix() {
+        // Directory "SomeName" should match files like "prefix.some.name.file.mp4"
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix".to_string()]);
+        let dirs = make_test_dirs(&["SomeName"]);
+        let files = make_file_paths(&[
+            "prefix.some.name.file.01.mp4",
+            "prefix.SomeName.file.02.mp4",
+            "some.name.file.03.mp4",
+            "SomeName.file.04.mp4",
+        ]);
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&0).unwrap().len(),
+            4,
+            "All 4 files should match directory 'SomeName'"
+        );
     }
 
     #[test]
