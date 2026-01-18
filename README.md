@@ -8,6 +8,44 @@ Produces separate binaries for each tool.
 ./install.sh
 ```
 
+## Development
+
+### Testing
+
+This project uses [cargo-nextest](https://nexte.st/) for faster test execution with better output.
+
+```shell
+# Run tests with nextest (recommended)
+cargo nextest run
+
+# Run tests with standard cargo test
+cargo test
+```
+
+### Code Coverage
+
+Code coverage is generated using [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov).
+
+```shell
+# Run tests with coverage (text output)
+cargo llvm-cov nextest
+
+# Generate HTML coverage report
+cargo llvm-cov nextest --html
+
+# Generate and open HTML report in browser
+cargo llvm-cov nextest --html --open
+```
+
+The HTML report is generated in `target/llvm-cov/html/`.
+
+### Required Tools
+
+```shell
+cargo install cargo-nextest
+cargo install cargo-llvm-cov
+```
+
 ## Configuration
 
 The CLI binaries can be configured with a user config file in addition to the CLI arguments.
