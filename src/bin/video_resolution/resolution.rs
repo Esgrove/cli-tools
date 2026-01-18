@@ -1253,7 +1253,7 @@ mod fuzzy_resolution_tests {
             };
             let label = res.label();
             assert!(
-                label.ends_with("p"),
+                label.ends_with('p'),
                 "Known resolution {width}x{height} should have a standard label, got {label}"
             );
         }
@@ -1782,7 +1782,7 @@ mod ffprobe_result_tests {
     #[test]
     fn ordering_multiple_results() {
         // FFProbeResult derives Ord which sorts by file path first, then resolution
-        let mut results = vec![
+        let mut results = [
             FFProbeResult {
                 file: PathBuf::from("c.mp4"),
                 resolution: Resolution {
