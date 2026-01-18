@@ -681,3 +681,240 @@ mod test_filtered_files {
         assert_eq!(filtered.excluded_size(), 0);
     }
 }
+
+#[cfg(test)]
+mod test_torrent_parsing_from_file {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    fn read_dummy_torrent() -> Vec<u8> {
+        fs::read(Path::new("tests/fixtures/dummy.torrent")).expect("Failed to read dummy.torrent")
+    }
+
+    #[test]
+    fn parses_dummy_torrent_file() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(torrent.info.name.is_some());
+        assert_eq!(torrent.info.name.as_deref(), Some("dummy.txt"));
+    }
+
+    #[test]
+    fn extracts_announce_url() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(torrent.announce.is_some());
+        assert!(torrent.announce.as_ref().unwrap().contains("tracker.opentrackr.org"));
+    }
+
+    #[test]
+    fn extracts_announce_list() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(torrent.announce_list.is_some());
+        let announce_list = torrent.announce_list.as_ref().unwrap();
+        assert!(!announce_list.is_empty());
+    }
+
+    #[test]
+    fn extracts_comment() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(torrent.comment.is_some());
+        assert!(torrent.comment.as_ref().unwrap().contains("example.com"));
+    }
+
+    #[test]
+    fn extracts_created_by() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(torrent.created_by.is_some());
+        assert!(torrent.created_by.as_ref().unwrap().contains("torrent-creator"));
+    }
+
+    #[test]
+    fn extracts_creation_date() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(torrent.creation_date.is_some());
+        assert!(torrent.creation_date.unwrap() > 0);
+    }
+
+    #[test]
+    fn extracts_file_length() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        // Single file torrent has length in info
+        assert!(torrent.info.length.is_some());
+        assert_eq!(torrent.info.length, Some(7));
+    }
+
+    #[test]
+    fn extracts_piece_length() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert_eq!(torrent.info.piece_length, 16384);
+    }
+
+    #[test]
+    fn extracts_private_flag() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(torrent.info.private.is_some());
+        assert_eq!(torrent.info.private, Some(1));
+    }
+
+    #[test]
+    fn is_single_file_torrent() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert!(!torrent.is_multi_file());
+    }
+
+    #[test]
+    fn calculates_total_size() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert_eq!(torrent.total_size(), 7);
+    }
+
+    #[test]
+    fn gets_torrent_name() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        assert_eq!(torrent.name(), Some("dummy.txt"));
+    }
+
+    #[test]
+    fn gets_files_list_for_single_file() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        let files = torrent.files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path.as_ref(), "dummy.txt");
+        assert_eq!(files[0].size, 7);
+        assert_eq!(files[0].index, 0);
+    }
+
+    #[test]
+    fn calculates_info_hash() {
+        let buffer = read_dummy_torrent();
+        let hash = Torrent::info_hash_from_bytes(&buffer).expect("should calculate hash");
+
+        // SHA-1 hash is 20 bytes
+        assert_eq!(hash.len(), 20);
+    }
+
+    #[test]
+    fn calculates_info_hash_hex() {
+        let buffer = read_dummy_torrent();
+        let hex = Torrent::info_hash_hex_from_bytes(&buffer).expect("should calculate hash");
+
+        // SHA-1 hex is 40 characters
+        assert_eq!(hex.len(), 40);
+        // Should only contain hex characters
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn filter_files_with_no_filters() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        let filter = FileFilter::new(&[], &[], None);
+        let result = torrent.filter_files(&filter);
+
+        assert_eq!(result.included.len(), 1);
+        assert_eq!(result.excluded.len(), 0);
+    }
+
+    #[test]
+    fn filter_files_excludes_by_extension() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        let skip_extensions = vec!["txt".to_string()];
+        let filter = FileFilter::new(&skip_extensions, &[], None);
+        let result = torrent.filter_files(&filter);
+
+        assert_eq!(result.included.len(), 0);
+        assert_eq!(result.excluded.len(), 1);
+        assert!(
+            result.excluded[0]
+                .exclusion_reason
+                .as_ref()
+                .unwrap()
+                .contains("extension")
+        );
+    }
+
+    #[test]
+    fn filter_files_excludes_by_size() {
+        let buffer = read_dummy_torrent();
+        let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
+
+        // File is 7 bytes, set minimum to 1MB
+        let min_size = 1024 * 1024;
+        let filter = FileFilter::new(&[], &[], Some(min_size));
+        let result = torrent.filter_files(&filter);
+
+        assert_eq!(result.included.len(), 0);
+        assert_eq!(result.excluded.len(), 1);
+        assert!(result.excluded[0].exclusion_reason.as_ref().unwrap().contains("size"));
+    }
+}
+
+#[cfg(test)]
+mod test_torrent_struct_methods {
+    use super::*;
+
+    #[test]
+    fn from_buffer_fails_on_invalid_data() {
+        let invalid_data = b"not a valid torrent";
+        let result = Torrent::from_buffer(invalid_data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn info_hash_from_bytes_fails_without_info_dict() {
+        let invalid_data = b"d8:announce5:test1e";
+        let result = Torrent::info_hash_from_bytes(invalid_data);
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_extract_info_dict_bytes {
+    use super::*;
+
+    #[test]
+    fn extracts_info_dict_from_valid_torrent() {
+        let buffer = std::fs::read("tests/fixtures/dummy.torrent").expect("should read file");
+        let result = extract_info_dict_bytes(&buffer);
+        assert!(result.is_ok());
+        let info_bytes = result.unwrap();
+        // Info dict should start with 'd' (dictionary)
+        assert_eq!(info_bytes[0], b'd');
+    }
+
+    #[test]
+    fn fails_on_missing_info_key() {
+        let data = b"d8:announce5:test1e";
+        let result = extract_info_dict_bytes(data);
+        assert!(result.is_err());
+    }
+}

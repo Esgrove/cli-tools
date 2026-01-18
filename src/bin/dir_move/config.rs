@@ -1,5 +1,6 @@
 use std::fs;
 
+use anyhow::Result;
 use itertools::Itertools;
 use serde::Deserialize;
 
@@ -76,15 +77,18 @@ impl DirMoveConfig {
                     })
                     .ok()
             })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|e| {
-                        print_error!("Error reading config file: {e}");
-                    })
-                    .ok()
-            })
-            .map(|config| config.dirmove)
+            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse configuration from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.dirmove)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
     }
 }
 
@@ -132,5 +136,112 @@ impl Config {
             verbose: args.verbose || user_config.verbose,
             unpack_directory_names,
         }
+    }
+}
+
+#[cfg(test)]
+mod dirmove_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_str_parses_empty_config() {
+        let toml = "";
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse empty config");
+        assert!(!config.auto);
+        assert!(!config.create);
+        assert!(!config.debug);
+        assert!(!config.dryrun);
+        assert!(!config.overwrite);
+        assert!(!config.recurse);
+        assert!(!config.verbose);
+        assert!(config.include.is_empty());
+        assert!(config.exclude.is_empty());
+    }
+
+    #[test]
+    fn from_toml_str_parses_dirmove_section() {
+        let toml = r"
+[dirmove]
+auto = true
+create = true
+debug = true
+dryrun = true
+overwrite = true
+recurse = true
+verbose = true
+";
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.auto);
+        assert!(config.create);
+        assert!(config.debug);
+        assert!(config.dryrun);
+        assert!(config.overwrite);
+        assert!(config.recurse);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn from_toml_str_parses_include_exclude() {
+        let toml = r#"
+[dirmove]
+include = ["*.mp4", "*.mkv"]
+exclude = ["*.txt", "*.nfo"]
+"#;
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.include, vec!["*.mp4", "*.mkv"]);
+        assert_eq!(config.exclude, vec!["*.txt", "*.nfo"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_prefix_options() {
+        let toml = r#"
+[dirmove]
+prefix_ignores = ["the", "a"]
+prefix_overrides = ["special"]
+"#;
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.prefix_ignores, vec!["the", "a"]);
+        assert_eq!(config.prefix_overrides, vec!["special"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_min_group_size() {
+        let toml = r"
+[dirmove]
+min_group_size = 5
+";
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.min_group_size, Some(5));
+    }
+
+    #[test]
+    fn from_toml_str_parses_unpack_directories() {
+        let toml = r#"
+[dirmove]
+unpack_directories = ["subs", "sample"]
+"#;
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.unpack_directories, vec!["subs", "sample"]);
+    }
+
+    #[test]
+    fn from_toml_str_invalid_toml_returns_error() {
+        let toml = "this is not valid toml {{{";
+        let result = DirMoveConfig::from_toml_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_toml_str_ignores_other_sections() {
+        let toml = r"
+[other_section]
+some_value = true
+
+[dirmove]
+verbose = true
+";
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.verbose);
+        assert!(!config.auto);
     }
 }

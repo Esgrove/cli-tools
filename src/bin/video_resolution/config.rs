@@ -19,7 +19,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
 use cli_tools::print_error;
@@ -113,15 +113,18 @@ impl ResolutionConfig {
                     })
                     .ok()
             })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|error| {
-                        print_error!("Error parsing config file: {error}");
-                    })
-                    .ok()
-            })
-            .map(|config| config.resolution)
+            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse configuration from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.resolution)
+            .map_err(|e| anyhow!("Failed to parse config: {e}"))
     }
 }
 
@@ -154,5 +157,71 @@ impl Config {
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
         })
+    }
+}
+
+#[cfg(test)]
+mod resolution_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_str_parses_empty_config() {
+        let toml = "";
+        let config = ResolutionConfig::from_toml_str(toml).expect("should parse empty config");
+        assert!(!config.debug);
+        assert!(!config.dryrun);
+        assert!(!config.overwrite);
+        assert!(!config.recurse);
+        assert!(!config.verbose);
+        assert!(config.delete_limit.is_none());
+    }
+
+    #[test]
+    fn from_toml_str_parses_resolution_section() {
+        let toml = r"
+[resolution]
+debug = true
+dryrun = true
+overwrite = true
+recurse = true
+verbose = true
+";
+        let config = ResolutionConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.debug);
+        assert!(config.dryrun);
+        assert!(config.overwrite);
+        assert!(config.recurse);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn from_toml_str_parses_delete_limit() {
+        let toml = r"
+[resolution]
+delete_limit = 720
+";
+        let config = ResolutionConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.delete_limit, Some(720));
+    }
+
+    #[test]
+    fn from_toml_str_invalid_toml_returns_error() {
+        let toml = "this is not valid toml {{{";
+        let result = ResolutionConfig::from_toml_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_toml_str_ignores_other_sections() {
+        let toml = r"
+[other_section]
+some_value = true
+
+[resolution]
+verbose = true
+";
+        let config = ResolutionConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.verbose);
+        assert!(!config.debug);
     }
 }

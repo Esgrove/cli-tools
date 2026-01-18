@@ -1,0 +1,112 @@
+# Sample configuration file for testing cli-tools config parsing
+# This file contains all sections with various options for testing
+
+[dots]
+# Dot rename tool configuration
+date_starts_with_year = true
+move_to_start = ["REPACK", "PROPER"]
+move_to_end = ["READNFO"]
+include = ["*.mkv", "*.mp4"]
+exclude = ["*.txt", "*.nfo"]
+
+[dots.replace]
+"SAMPLE.TEXT" = "REPLACED"
+"OLD.NAME" = "NEW.NAME"
+
+[dots.regex_replace]
+"\\d{4}\\.\\d{2}\\.\\d{2}" = "DATE"
+
+[flip_date]
+directory = false
+dryrun = false
+verbose = false
+recurse = false
+overwrite = false
+swap_year = false
+year_first = false
+file_extensions = ["mp4", "mkv", "avi", "mov"]
+
+[dirmove]
+auto = false
+create = false
+debug = false
+dryrun = false
+overwrite = false
+recurse = false
+verbose = false
+include = ["*.mp4", "*.mkv"]
+exclude = ["*.txt", "*.nfo"]
+min_group_size = 3
+prefix_ignores = ["the", "a", "an"]
+prefix_overrides = ["special"]
+unpack_directories = ["subs", "sample", "screens"]
+
+[dupefind]
+dryrun = false
+move_files = false
+recurse = false
+verbose = false
+extensions = ["mp4", "mkv", "avi"]
+patterns = ["pattern1", "pattern2"]
+paths = ["/videos", "/movies"]
+default_paths = ["/default/path"]
+
+[qtorrent]
+host = "localhost"
+port = 8080
+username = "admin"
+password = "password123"
+save_path = "/downloads/torrents"
+category = "movies"
+tags = "hd,new"
+paused = false
+verbose = false
+dryrun = false
+yes = false
+skip_existing = false
+recurse = false
+skip_extensions = ["nfo", "txt", "jpg", "png"]
+skip_names = ["sample", "subs", "screens"]
+min_file_size_mb = 50.0
+remove_from_name = ["-RELEASE", ".WEB."]
+use_dots_formatting = true
+ignore_torrent_names = ["unknown", "noname"]
+
+[video_convert]
+convert_all_types = false
+delete = false
+verbose = false
+recurse = false
+bitrate = 8000
+max_bitrate = 50000
+min_duration = 60.0
+max_duration = 7200.0
+count = 10
+display_limit = 50
+include = ["pattern1", "pattern2"]
+exclude = ["skip1", "skip2"]
+extensions = ["mp4", "mkv", "avi"]
+sort = "bitrate"
+
+[resolution]
+debug = false
+delete_limit = 500
+dryrun = false
+overwrite = false
+recurse = false
+verbose = false
+
+[thumbnail]
+cols_landscape = 3
+rows_landscape = 4
+cols_portrait = 4
+rows_portrait = 3
+padding_landscape = 8
+padding_portrait = 16
+font_size = 20
+quality = 2
+scale_width = 480
+dryrun = false
+overwrite = false
+recurse = false
+verbose = false

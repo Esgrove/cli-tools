@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -146,15 +146,18 @@ impl QtorrentConfig {
                     })
                     .ok()
             })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|error| {
-                        print_error!("Error parsing config file: {error}");
-                    })
-                    .ok()
-            })
-            .map(|config| config.qtorrent)
+            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse configuration from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.qtorrent)
+            .map_err(|e| anyhow!("Failed to parse config: {e}"))
     }
 }
 
@@ -335,5 +338,122 @@ impl Config {
     fn is_torrent_file(path: &Path) -> bool {
         path.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
+    }
+}
+
+#[cfg(test)]
+mod qtorrent_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_str_parses_empty_config() {
+        let toml = "";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse empty config");
+        assert!(config.host.is_none());
+        assert!(config.port.is_none());
+        assert!(config.username.is_none());
+        assert!(config.password.is_none());
+        assert!(!config.paused);
+        assert!(!config.verbose);
+        assert!(!config.dryrun);
+    }
+
+    #[test]
+    fn from_toml_str_parses_qtorrent_section() {
+        let toml = r#"
+[qtorrent]
+host = "192.168.1.100"
+port = 9090
+username = "admin"
+password = "secret"
+paused = true
+verbose = true
+dryrun = true
+yes = true
+"#;
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.host, Some("192.168.1.100".to_string()));
+        assert_eq!(config.port, Some(9090));
+        assert_eq!(config.username, Some("admin".to_string()));
+        assert_eq!(config.password, Some("secret".to_string()));
+        assert!(config.paused);
+        assert!(config.verbose);
+        assert!(config.dryrun);
+        assert!(config.yes);
+    }
+
+    #[test]
+    fn from_toml_str_parses_save_path_and_category() {
+        let toml = r#"
+[qtorrent]
+save_path = "/downloads/torrents"
+category = "movies"
+tags = "hd,new"
+"#;
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.save_path, Some("/downloads/torrents".to_string()));
+        assert_eq!(config.category, Some("movies".to_string()));
+        assert_eq!(config.tags, Some("hd,new".to_string()));
+    }
+
+    #[test]
+    fn from_toml_str_parses_file_filtering_options() {
+        let toml = r#"
+[qtorrent]
+skip_extensions = ["nfo", "txt", "jpg"]
+skip_names = ["sample", "subs"]
+min_file_size_mb = 50.0
+"#;
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.skip_extensions, vec!["nfo", "txt", "jpg"]);
+        assert_eq!(config.skip_names, vec!["sample", "subs"]);
+        assert_eq!(config.min_file_size_mb, Some(50.0));
+    }
+
+    #[test]
+    fn from_toml_str_parses_name_processing_options() {
+        let toml = r#"
+[qtorrent]
+remove_from_name = ["-RELEASE", ".WEB."]
+use_dots_formatting = true
+ignore_torrent_names = ["unknown", "noname"]
+"#;
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.remove_from_name, vec!["-RELEASE", ".WEB."]);
+        assert!(config.use_dots_formatting);
+        assert_eq!(config.ignore_torrent_names, vec!["unknown", "noname"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_recurse_and_skip_existing() {
+        let toml = r"
+[qtorrent]
+recurse = true
+skip_existing = true
+";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.recurse);
+        assert!(config.skip_existing);
+    }
+
+    #[test]
+    fn from_toml_str_invalid_toml_returns_error() {
+        let toml = "this is not valid toml {{{";
+        let result = QtorrentConfig::from_toml_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_toml_str_ignores_other_sections() {
+        let toml = r"
+[other_section]
+some_value = true
+
+[qtorrent]
+verbose = true
+";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.verbose);
+        assert!(!config.dryrun);
     }
 }

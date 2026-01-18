@@ -1144,7 +1144,7 @@ mod test_calculate_totals {
     use super::*;
 
     #[test]
-    fn calculates_totals_for_each_name() {
+    fn groups_by_name_and_sums() {
         let items = vec![
             VisaItem {
                 date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
@@ -1174,10 +1174,52 @@ mod test_calculate_totals {
     }
 
     #[test]
-    fn handles_empty_items() {
+    fn sorts_by_sum_descending() {
+        let items = vec![
+            VisaItem {
+                date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+                name: "SMALL".to_string(),
+                sum: 10.0,
+            },
+            VisaItem {
+                date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+                name: "LARGE".to_string(),
+                sum: 100.0,
+            },
+            VisaItem {
+                date: NaiveDate::from_ymd_opt(2024, 1, 3).expect("valid date"),
+                name: "MEDIUM".to_string(),
+                sum: 50.0,
+            },
+        ];
+
+        let totals = calculate_totals_for_each_name(&items);
+
+        assert_eq!(totals[0].0, "LARGE");
+        assert_eq!(totals[1].0, "MEDIUM");
+        assert_eq!(totals[2].0, "SMALL");
+    }
+
+    #[test]
+    fn handles_empty_input() {
         let items: Vec<VisaItem> = vec![];
         let totals = calculate_totals_for_each_name(&items);
         assert!(totals.is_empty());
+    }
+
+    #[test]
+    fn handles_single_item() {
+        let items = vec![VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "ONLY".to_string(),
+            sum: 42.0,
+        }];
+
+        let totals = calculate_totals_for_each_name(&items);
+
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].0, "ONLY");
+        assert!((totals[0].1 - 42.0).abs() < 0.01);
     }
 }
 
@@ -1291,5 +1333,589 @@ mod test_get_xml_files {
         let mut sorted = file_names.clone();
         sorted.sort();
         assert_eq!(file_names, sorted);
+    }
+}
+
+#[cfg(test)]
+mod test_get_xml_file_list {
+    use super::*;
+
+    #[test]
+    fn handles_single_xml_file() {
+        let path = PathBuf::from("tests/fixtures/visa_sample.xml");
+        let result = get_xml_file_list(&path);
+
+        assert!(result.is_ok());
+        let (root, files) = result.unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(root.ends_with("fixtures"));
+    }
+
+    #[test]
+    fn handles_directory() {
+        let path = PathBuf::from("tests/fixtures");
+        let result = get_xml_file_list(&path);
+
+        assert!(result.is_ok());
+        let (root, files) = result.unwrap();
+        assert!(files.len() >= 2);
+        assert_eq!(root, path);
+    }
+
+    #[test]
+    fn rejects_non_xml_file() {
+        let path = PathBuf::from("tests/fixtures/sample_config.toml");
+        let result = get_xml_file_list(&path);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not an XML file"));
+    }
+}
+
+#[cfg(test)]
+mod test_format_name_comprehensive {
+    use super::*;
+
+    #[test]
+    fn removes_osto_prefix_with_space() {
+        assert_eq!(format_name("Osto K-MARKET HELSINKI"), "K-MARKET");
+    }
+
+    #[test]
+    fn removes_tc_star_prefix() {
+        assert_eq!(format_name("TC*VERKKOKAUPPA.COM"), "VERKKOKAUPPA.COM");
+    }
+
+    #[test]
+    fn replaces_star_with_space() {
+        assert_eq!(format_name("PAYPAL*BANDCAMP"), "PAYPAL BANDCAMP");
+    }
+
+    #[test]
+    fn replaces_slash_with_space() {
+        assert_eq!(format_name("APPLE/ITUNES"), "APPLE ITUNES");
+    }
+
+    #[test]
+    fn replaces_underscore_with_space() {
+        assert_eq!(format_name("SOME_STORE_NAME"), "SOME STORE NAME");
+    }
+
+    #[test]
+    fn replaces_html_ampersand() {
+        assert_eq!(format_name("ROCK&amp;ROLL"), "ROCK&ROLL");
+    }
+
+    #[test]
+    fn removes_square_brackets() {
+        assert_eq!(format_name("STORE [CODE]"), "STORE CODE");
+    }
+
+    #[test]
+    fn removes_parentheses() {
+        assert_eq!(format_name("STORE (LOCATION)"), "STORE LOCATION");
+    }
+
+    #[test]
+    fn removes_curly_braces() {
+        assert_eq!(format_name("STORE {INFO}"), "STORE INFO");
+    }
+
+    #[test]
+    fn converts_to_uppercase() {
+        assert_eq!(format_name("lowercase store"), "LOWERCASE STORE");
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(format_name("  STORE NAME  "), "STORE NAME");
+    }
+
+    #[test]
+    fn collapses_multiple_spaces() {
+        assert_eq!(format_name("STORE    NAME"), "STORE NAME");
+    }
+
+    #[test]
+    fn replaces_known_pattern_4029357733() {
+        assert_eq!(format_name("PAYPAL 4029357733"), "PAYPAL");
+    }
+
+    #[test]
+    fn replaces_known_pattern_35314369001() {
+        assert_eq!(format_name("STEAM 35314369001"), "STEAM");
+    }
+
+    #[test]
+    fn replaces_dri_pattern() {
+        // " DRI " is replaced with "" which collapses spaces
+        assert_eq!(format_name("STORE DRI NAME"), "STORENAME");
+    }
+
+    #[test]
+    fn replaces_vfi_pattern() {
+        assert_eq!(format_name("VFI STORE NAME"), "STORE NAME");
+    }
+
+    #[test]
+    fn replaces_contains_epassi() {
+        assert_eq!(format_name("PTL*EPASSI ESPOO"), "EPASSI");
+    }
+
+    #[test]
+    fn replaces_contains_finnair() {
+        assert_eq!(format_name("FINNAIR PLUS SHOP"), "FINNAIR");
+    }
+
+    #[test]
+    fn replaces_contains_itunes() {
+        assert_eq!(format_name("APPLE.COM/BILL ITUNES.COM"), "APPLE ITUNES");
+    }
+
+    #[test]
+    fn replaces_contains_k_citymarket() {
+        assert_eq!(format_name("K-CITYMARKET KAMPPI"), "K-MARKET");
+    }
+
+    #[test]
+    fn replaces_contains_verkkokauppa() {
+        assert_eq!(format_name("TC*VERKKOKAUPPA.COM OY"), "VERKKOKAUPPA.COM");
+    }
+
+    #[test]
+    fn replaces_contains_wolt() {
+        assert_eq!(format_name("WOLT OY FINLAND"), "WOLT");
+    }
+
+    #[test]
+    fn replaces_start_www() {
+        assert_eq!(format_name("WWW.EXAMPLE.COM"), "EXAMPLE.COM");
+    }
+
+    #[test]
+    fn replaces_start_mobpay() {
+        assert_eq!(format_name("MOB.PAY STORE"), "MOBILEPAY STORE");
+    }
+
+    #[test]
+    fn replaces_start_chf_space() {
+        assert_eq!(format_name("CHF STORE"), "STORE");
+    }
+
+    #[test]
+    fn replaces_start_alepa() {
+        assert_eq!(format_name("ALEPA KAMPPI HELSINKI"), "ALEPA");
+    }
+
+    #[test]
+    fn replaces_start_stockmann() {
+        assert_eq!(format_name("STOCKMANN HELSINKI CENTER"), "STOCKMANN");
+    }
+
+    #[test]
+    fn replaces_start_paypal_bandcamp() {
+        assert_eq!(format_name("PAYPAL BANDCAMP SAN FRANCISCO"), "PAYPAL BANDCAMP");
+    }
+
+    #[test]
+    fn replaces_start_paypal_beatport() {
+        assert_eq!(format_name("PAYPAL BEATPORT BERLIN"), "PAYPAL BEATPORT");
+    }
+
+    #[test]
+    fn replaces_start_paypal_djcity() {
+        assert_eq!(format_name("PAYPAL DJCITY USA"), "PAYPAL DJCITY");
+    }
+
+    #[test]
+    fn replaces_start_paypal_dropbox() {
+        assert_eq!(format_name("PAYPAL DROPBOX PREMIUM"), "PAYPAL DROPBOX");
+    }
+
+    #[test]
+    fn replaces_start_paypal_patreon() {
+        assert_eq!(format_name("PAYPAL PATREON MEMBERSH"), "PAYPAL PATREON");
+    }
+
+    #[test]
+    fn replaces_start_hertz() {
+        assert_eq!(format_name("HERTZ RENTAL CAR HELSINKI"), "HERTZ");
+    }
+
+    #[test]
+    fn replaces_start_beamhill() {
+        assert_eq!(format_name("BEAMHILL OY HELSINKI"), "BEAMHILL");
+    }
+
+    #[test]
+    fn replaces_start_k_market() {
+        assert_eq!(format_name("K-MARKET KAMPPI HELSINKI"), "K-MARKET");
+    }
+
+    #[test]
+    fn replaces_chatgpt_subscription() {
+        assert_eq!(
+            format_name("CHATGPT SUBSCRIPTION HTTPSOPENAI.C"),
+            "CHATGPT SUBSCRIPTION OPENAI.COM"
+        );
+    }
+
+    #[test]
+    fn replaces_levistrauss() {
+        assert_eq!(format_name("STORE LEVISTRAUSS JEANS"), "STORE LEVIS JEANS");
+    }
+
+    #[test]
+    fn replaces_dotcomfi() {
+        assert_eq!(format_name("STORE.COMFI"), "STORE.COM");
+    }
+}
+
+#[cfg(test)]
+mod test_split_item_text {
+    use super::*;
+
+    #[test]
+    fn splits_standard_format() {
+        let (date, name, sum) = split_item_text("05.02. Osto K-MARKET HELSINKI  25,50");
+        assert_eq!(date, "05.02.");
+        assert_eq!(name, "Osto K-MARKET HELSINKI");
+        assert_eq!(sum, "25,50");
+    }
+
+    #[test]
+    fn handles_large_sum() {
+        let (date, name, sum) = split_item_text("30.12. Osto LUNDIA OY HELSINKI  1 735,50");
+        assert_eq!(date, "30.12.");
+        assert!(name.contains("LUNDIA"));
+        assert_eq!(sum, "1 735,50");
+    }
+
+    #[test]
+    fn handles_single_digit_day() {
+        let (date, name, sum) = split_item_text("05.02. Osto STORE  9,99");
+        assert_eq!(date, "05.02.");
+        assert!(name.contains("STORE"));
+        assert_eq!(sum, "9,99");
+    }
+
+    #[test]
+    fn handles_empty_string() {
+        let (date, name, sum) = split_item_text("");
+        assert_eq!(date, "");
+        assert_eq!(name, "");
+        assert_eq!(sum, "");
+    }
+
+    #[test]
+    fn handles_no_double_space() {
+        let (date, name, sum) = split_item_text("05.02. NoDoubleSpace");
+        assert_eq!(date, "05.02.");
+        // Without double space, the whole remainder goes to name
+        assert!(name.is_empty() || sum.is_empty() || name.contains("NoDoubleSpace") || sum.contains("NoDoubleSpace"));
+    }
+}
+
+#[cfg(test)]
+mod test_visa_item_serialize {
+    use super::*;
+
+    #[test]
+    fn serializes_to_correct_json() {
+        let item = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            name: "TEST STORE".to_string(),
+            sum: 123.45,
+        };
+
+        let json = serde_json::to_string(&item).expect("should serialize");
+        assert!(json.contains("Date"));
+        assert!(json.contains("Name"));
+        assert!(json.contains("Sum"));
+        assert!(json.contains("2024.06.15"));
+        assert!(json.contains("TEST STORE"));
+        assert!(json.contains("123,45"));
+    }
+}
+
+#[cfg(test)]
+mod test_visa_item_ordering_comprehensive {
+    use super::*;
+
+    #[test]
+    fn orders_by_date_first() {
+        let item1 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "ZZZ".to_string(),
+            sum: 999.99,
+        };
+        let item2 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+            name: "AAA".to_string(),
+            sum: 1.00,
+        };
+
+        assert!(item1 < item2);
+    }
+
+    #[test]
+    fn orders_by_name_when_date_equal() {
+        let item1 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "AAA".to_string(),
+            sum: 999.99,
+        };
+        let item2 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "ZZZ".to_string(),
+            sum: 1.00,
+        };
+
+        assert!(item1 < item2);
+    }
+
+    #[test]
+    fn orders_by_sum_when_date_and_name_equal() {
+        let item1 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "SAME".to_string(),
+            sum: 10.00,
+        };
+        let item2 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "SAME".to_string(),
+            sum: 20.00,
+        };
+
+        assert!(item1 < item2);
+    }
+
+    #[test]
+    fn equal_items_are_equal() {
+        let item1 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "SAME".to_string(),
+            sum: 10.00,
+        };
+        let item2 = VisaItem {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            name: "SAME".to_string(),
+            sum: 10.00,
+        };
+
+        assert_eq!(item1.cmp(&item2), Ordering::Equal);
+    }
+}
+
+#[cfg(test)]
+mod test_extract_items_edge_cases {
+    use super::*;
+
+    #[test]
+    fn handles_single_digit_day_and_month() {
+        let lines = vec!["05.02. Osto STORE  10,00".to_string()];
+        let year = 2024;
+
+        let items = extract_items(&lines, year).expect("should parse");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].date.day(), 5);
+        assert_eq!(items[0].date.month(), 2);
+    }
+
+    #[test]
+    fn handles_double_digit_day_and_month() {
+        let lines = vec!["15.12. Osto STORE  10,00".to_string()];
+        let year = 2024;
+
+        let items = extract_items(&lines, year).expect("should parse");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].date.day(), 15);
+        assert_eq!(items[0].date.month(), 12);
+    }
+
+    #[test]
+    fn returns_error_for_invalid_date_format() {
+        let lines = vec!["invalid date format  10,00".to_string()];
+        let year = 2024;
+
+        let result = extract_items(&lines, year);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn returns_error_for_invalid_sum() {
+        let lines = vec!["05.02. Osto STORE  not_a_number".to_string()];
+        let year = 2024;
+
+        let result = extract_items(&lines, year);
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_clean_whitespaces_comprehensive {
+    use super::*;
+
+    #[test]
+    fn replaces_tabs() {
+        assert_eq!(clean_whitespaces("hello\tworld"), "hello world");
+    }
+
+    #[test]
+    fn replaces_newlines() {
+        assert_eq!(clean_whitespaces("hello\nworld"), "hello world");
+    }
+
+    #[test]
+    fn replaces_carriage_returns() {
+        assert_eq!(clean_whitespaces("hello\rworld"), "hello world");
+    }
+
+    #[test]
+    fn collapses_multiple_whitespaces() {
+        assert_eq!(clean_whitespaces("hello     world"), "hello world");
+    }
+
+    #[test]
+    fn handles_mixed_whitespace() {
+        assert_eq!(clean_whitespaces("hello\t\n\r  world"), "hello world");
+    }
+
+    #[test]
+    fn preserves_single_spaces() {
+        assert_eq!(clean_whitespaces("hello world"), "hello world");
+    }
+}
+
+#[cfg(test)]
+mod test_filter_prefixes {
+    use super::*;
+
+    #[test]
+    fn filter_prefixes_contains_common_items() {
+        assert!(FILTER_PREFIXES.contains(&"WOLT"));
+        assert!(FILTER_PREFIXES.contains(&"ALEPA"));
+        assert!(FILTER_PREFIXES.contains(&"K-MARKET"));
+        assert!(FILTER_PREFIXES.contains(&"STOCKMANN"));
+        assert!(FILTER_PREFIXES.contains(&"EPASSI"));
+    }
+
+    #[test]
+    fn filter_prefixes_is_not_empty() {
+        assert!(!FILTER_PREFIXES.is_empty());
+        assert!(FILTER_PREFIXES.len() > 50);
+    }
+}
+
+#[cfg(test)]
+mod test_regex_patterns {
+    use super::*;
+
+    #[test]
+    fn re_brackets_matches_square_brackets() {
+        assert!(RE_BRACKETS.is_match("[test]"));
+    }
+
+    #[test]
+    fn re_brackets_matches_parentheses() {
+        assert!(RE_BRACKETS.is_match("(test)"));
+    }
+
+    #[test]
+    fn re_brackets_matches_curly_braces() {
+        assert!(RE_BRACKETS.is_match("{test}"));
+    }
+
+    #[test]
+    fn re_html_and_matches_ampersand() {
+        assert!(RE_HTML_AND.is_match("&amp;"));
+        assert!(RE_HTML_AND.is_match("&AMP;"));
+    }
+
+    #[test]
+    fn re_separators_matches_newline() {
+        assert!(RE_SEPARATORS.is_match("\n"));
+    }
+
+    #[test]
+    fn re_separators_matches_tab() {
+        assert!(RE_SEPARATORS.is_match("\t"));
+    }
+
+    #[test]
+    fn re_separators_matches_carriage_return() {
+        assert!(RE_SEPARATORS.is_match("\r"));
+    }
+
+    #[test]
+    fn re_whitespace_matches_multiple_spaces() {
+        assert!(RE_WHITESPACE.is_match("  "));
+        assert!(RE_WHITESPACE.is_match("   "));
+    }
+
+    #[test]
+    fn re_whitespace_does_not_match_single_space() {
+        assert!(!RE_WHITESPACE.is_match(" "));
+    }
+
+    #[test]
+    fn re_item_date_matches_date_format() {
+        assert!(RE_ITEM_DATE.is_match("05.02.Some text"));
+        assert!(RE_ITEM_DATE.is_match("15.12.Another text"));
+    }
+
+    #[test]
+    fn re_item_date_does_not_match_without_date() {
+        assert!(!RE_ITEM_DATE.is_match("Some text without date"));
+    }
+
+    #[test]
+    fn re_start_date_extracts_year() {
+        let text = r#"<StartDate Format="CCYYMMDD">20240201</StartDate>"#;
+        let caps = RE_START_DATE.captures(text);
+        assert!(caps.is_some());
+        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "2024");
+    }
+
+    #[test]
+    fn re_specification_free_text_extracts_content() {
+        let text = "  <SpecificationFreeText>05.02. Some content here</SpecificationFreeText>";
+        let caps = RE_SPECIFICATION_FREE_TEXT.captures(text);
+        assert!(caps.is_some());
+        assert!(caps.unwrap().get(1).unwrap().as_str().contains("05.02."));
+    }
+}
+
+#[cfg(test)]
+mod test_replace_pairs {
+    use super::*;
+
+    #[test]
+    fn replace_pairs_has_expected_entries() {
+        assert!(REPLACE_PAIRS.iter().any(|(pattern, _)| *pattern == "4029357733"));
+        assert!(REPLACE_PAIRS.iter().any(|(pattern, _)| *pattern == " - "));
+        assert!(REPLACE_PAIRS.iter().any(|(pattern, _)| *pattern == " DRI "));
+        assert!(REPLACE_PAIRS.iter().any(|(pattern, _)| *pattern == "VFI "));
+    }
+
+    #[test]
+    fn replace_start_pairs_has_expected_entries() {
+        assert!(REPLACE_START_PAIRS.iter().any(|(pattern, _)| *pattern == "WWW."));
+        assert!(REPLACE_START_PAIRS.iter().any(|(pattern, _)| *pattern == "MOB.PAY"));
+    }
+
+    #[test]
+    fn replace_contains_has_expected_entries() {
+        assert!(REPLACE_CONTAINS.iter().any(|(pattern, _)| *pattern == "EPASSI"));
+        assert!(REPLACE_CONTAINS.iter().any(|(pattern, _)| *pattern == "WOLT"));
+        assert!(REPLACE_CONTAINS.iter().any(|(pattern, _)| *pattern == "ITUNES.COM"));
+    }
+
+    #[test]
+    fn replace_start_has_expected_entries() {
+        assert!(REPLACE_START.contains(&"ALEPA"));
+        assert!(REPLACE_START.contains(&"K-MARKET"));
+        assert!(REPLACE_START.contains(&"STOCKMANN"));
+        assert!(REPLACE_START.contains(&"PAYPAL BANDCAMP"));
     }
 }

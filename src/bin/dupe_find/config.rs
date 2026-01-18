@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use anyhow::Result;
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
@@ -65,15 +66,18 @@ impl DupeConfig {
                     })
                     .ok()
             })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|e| {
-                        print_error!("Error reading config file: {e}");
-                    })
-                    .ok()
-            })
-            .map(|config| config.dupefind)
+            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse configuration from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.dupefind)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
     }
 }
 
@@ -113,5 +117,93 @@ impl Config {
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
         })
+    }
+}
+
+#[cfg(test)]
+mod dupe_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_str_parses_empty_config() {
+        let toml = "";
+        let config = DupeConfig::from_toml_str(toml).expect("should parse empty config");
+        assert!(!config.dryrun);
+        assert!(!config.move_files);
+        assert!(!config.recurse);
+        assert!(!config.verbose);
+        assert!(config.extensions.is_empty());
+        assert!(config.patterns.is_empty());
+        assert!(config.paths.is_empty());
+        assert!(config.default_paths.is_empty());
+    }
+
+    #[test]
+    fn from_toml_str_parses_dupefind_section() {
+        let toml = r"
+[dupefind]
+dryrun = true
+move_files = true
+recurse = true
+verbose = true
+";
+        let config = DupeConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.dryrun);
+        assert!(config.move_files);
+        assert!(config.recurse);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn from_toml_str_parses_extensions() {
+        let toml = r#"
+[dupefind]
+extensions = ["mp4", "mkv", "avi"]
+"#;
+        let config = DupeConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.extensions, vec!["mp4", "mkv", "avi"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_patterns() {
+        let toml = r#"
+[dupefind]
+patterns = ["pattern1", "pattern2"]
+"#;
+        let config = DupeConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.patterns, vec!["pattern1", "pattern2"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_paths() {
+        let toml = r#"
+[dupefind]
+paths = ["/path/one", "/path/two"]
+default_paths = ["/default/path"]
+"#;
+        let config = DupeConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.paths.len(), 2);
+        assert_eq!(config.default_paths.len(), 1);
+    }
+
+    #[test]
+    fn from_toml_str_invalid_toml_returns_error() {
+        let toml = "this is not valid toml {{{";
+        let result = DupeConfig::from_toml_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_toml_str_ignores_other_sections() {
+        let toml = r"
+[other_section]
+some_value = true
+
+[dupefind]
+verbose = true
+";
+        let config = DupeConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.verbose);
+        assert!(!config.dryrun);
     }
 }

@@ -1,5 +1,6 @@
 use std::fs;
 
+use anyhow::Result;
 use serde::Deserialize;
 
 use cli_tools::print_error;
@@ -102,15 +103,18 @@ impl ThumbnailConfig {
                     })
                     .ok()
             })
-            .and_then(|config_string| {
-                toml::from_str::<UserConfig>(&config_string)
-                    .map_err(|e| {
-                        print_error!("Error reading config file: {e}");
-                    })
-                    .ok()
-            })
-            .map(|config| config.thumbnail)
+            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
             .unwrap_or_default()
+    }
+
+    /// Parse configuration from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.thumbnail)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
     }
 }
 
@@ -161,5 +165,101 @@ impl Config {
             scale_width,
             verbose: args.verbose || user_config.verbose,
         }
+    }
+}
+
+#[cfg(test)]
+mod thumbnail_config_tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_str_parses_empty_config() {
+        let toml = "";
+        let config = ThumbnailConfig::from_toml_str(toml).expect("should parse empty config");
+        assert!(!config.dryrun);
+        assert!(!config.overwrite);
+        assert!(!config.recurse);
+        assert!(!config.verbose);
+        assert!(config.cols_landscape.is_none());
+        assert!(config.rows_landscape.is_none());
+    }
+
+    #[test]
+    fn from_toml_str_parses_thumbnail_section() {
+        let toml = r"
+[thumbnail]
+dryrun = true
+overwrite = true
+recurse = true
+verbose = true
+";
+        let config = ThumbnailConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.dryrun);
+        assert!(config.overwrite);
+        assert!(config.recurse);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn from_toml_str_parses_grid_settings() {
+        let toml = r"
+[thumbnail]
+cols_landscape = 4
+rows_landscape = 5
+cols_portrait = 5
+rows_portrait = 4
+";
+        let config = ThumbnailConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.cols_landscape, Some(4));
+        assert_eq!(config.rows_landscape, Some(5));
+        assert_eq!(config.cols_portrait, Some(5));
+        assert_eq!(config.rows_portrait, Some(4));
+    }
+
+    #[test]
+    fn from_toml_str_parses_padding_settings() {
+        let toml = r"
+[thumbnail]
+padding_landscape = 10
+padding_portrait = 20
+";
+        let config = ThumbnailConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.padding_landscape, Some(10));
+        assert_eq!(config.padding_portrait, Some(20));
+    }
+
+    #[test]
+    fn from_toml_str_parses_display_settings() {
+        let toml = r"
+[thumbnail]
+font_size = 24
+quality = 3
+scale_width = 640
+";
+        let config = ThumbnailConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.font_size, Some(24));
+        assert_eq!(config.quality, Some(3));
+        assert_eq!(config.scale_width, Some(640));
+    }
+
+    #[test]
+    fn from_toml_str_invalid_toml_returns_error() {
+        let toml = "this is not valid toml {{{";
+        let result = ThumbnailConfig::from_toml_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_toml_str_ignores_other_sections() {
+        let toml = r"
+[other_section]
+some_value = true
+
+[thumbnail]
+verbose = true
+";
+        let config = ThumbnailConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.verbose);
+        assert!(!config.dryrun);
     }
 }

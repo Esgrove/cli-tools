@@ -771,3 +771,156 @@ mod directory_tests {
         assert_eq!(Date::replace_file_date_with_directory_date("2024.09.09"), "2024-09-09");
     }
 }
+
+#[cfg(test)]
+mod date_struct_tests {
+    use super::*;
+
+    #[test]
+    fn try_from_valid_date() {
+        let date = Date::try_from(2024, 6, 15);
+        assert!(date.is_some());
+        let date = date.unwrap();
+        assert_eq!(date.year, 2024);
+        assert_eq!(date.month, 6);
+        assert_eq!(date.day, 15);
+    }
+
+    #[test]
+    fn try_from_invalid_year_too_old() {
+        let date = Date::try_from(1980, 6, 15);
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn try_from_invalid_year_future() {
+        let date = Date::try_from(2099, 6, 15);
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn try_from_invalid_month_zero() {
+        let date = Date::try_from(2024, 0, 15);
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn try_from_invalid_month_thirteen() {
+        let date = Date::try_from(2024, 13, 15);
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn try_from_invalid_day_zero() {
+        let date = Date::try_from(2024, 6, 0);
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn try_from_invalid_day_32() {
+        let date = Date::try_from(2024, 6, 32);
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn parse_from_short_valid() {
+        let date = Date::parse_from_short("24", "06", "15");
+        assert!(date.is_some());
+        let date = date.unwrap();
+        assert_eq!(date.year, 2024);
+        assert_eq!(date.month, 6);
+        assert_eq!(date.day, 15);
+    }
+
+    #[test]
+    fn parse_from_short_invalid_year_length() {
+        let date = Date::parse_from_short("2024", "06", "15");
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn parse_from_short_invalid_year_single_digit() {
+        let date = Date::parse_from_short("4", "06", "15");
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn swap_year_valid() {
+        // 2005.12.23 -> 2023.12.05
+        let date = Date::try_from(2005, 12, 23).unwrap();
+        let swapped = date.swap_year();
+        assert!(swapped.is_some());
+        let swapped = swapped.unwrap();
+        assert_eq!(swapped.year, 2023);
+        assert_eq!(swapped.month, 12);
+        assert_eq!(swapped.day, 5);
+    }
+
+    #[test]
+    fn swap_year_invalid_result() {
+        // Would result in invalid year (future)
+        let date = Date::try_from(2001, 6, 99).unwrap_or(Date {
+            year: 2001,
+            month: 6,
+            day: 99,
+        });
+        let swapped = date.swap_year();
+        assert!(swapped.is_none());
+    }
+
+    #[test]
+    fn dash_format() {
+        let date = Date::try_from(2024, 6, 5).unwrap();
+        assert_eq!(date.dash_format(), "2024-06-05");
+    }
+
+    #[test]
+    fn dash_format_pads_single_digits() {
+        let date = Date::try_from(2024, 1, 3).unwrap();
+        assert_eq!(date.dash_format(), "2024-01-03");
+    }
+
+    #[test]
+    fn dot_format() {
+        let date = Date::try_from(2024, 6, 5).unwrap();
+        assert_eq!(date.dot_format(), "2024.06.05");
+    }
+
+    #[test]
+    fn dot_format_pads_single_digits() {
+        let date = Date::try_from(2024, 1, 3).unwrap();
+        assert_eq!(date.dot_format(), "2024.01.03");
+    }
+
+    #[test]
+    fn display_format() {
+        let date = Date::try_from(2024, 6, 15).unwrap();
+        let display = format!("{date}");
+        assert_eq!(display, "2024.06.15");
+    }
+
+    #[test]
+    fn boundary_year_1991() {
+        let date = Date::try_from(1991, 1, 1);
+        assert!(date.is_some());
+    }
+
+    #[test]
+    fn boundary_year_1990() {
+        // 1990 is NOT valid (year > 1990 required)
+        let date = Date::try_from(1990, 1, 1);
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn boundary_month_12() {
+        let date = Date::try_from(2024, 12, 15);
+        assert!(date.is_some());
+    }
+
+    #[test]
+    fn boundary_day_31() {
+        let date = Date::try_from(2024, 1, 31);
+        assert!(date.is_some());
+    }
+}
