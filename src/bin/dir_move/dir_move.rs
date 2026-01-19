@@ -5885,7 +5885,7 @@ mod test_realistic_grouping {
 
         // The 2 files in specific group should also be in general group
         for file in specific_files {
-            assert!(general_files.contains(file), "File {:?} should be in both groups", file);
+            assert!(general_files.contains(file), "File {file:?} should be in both groups");
         }
     }
 
@@ -7017,7 +7017,7 @@ mod test_varied_prefix_grouping {
         assert_eq!(dragon_group.unwrap().1.0.len(), 3);
 
         // Verify random files are not in any main group
-        for (_, (files, _)) in &groups {
+        for (files, _) in groups.values() {
             for file in files {
                 let name = file.to_string_lossy();
                 assert!(
@@ -7350,7 +7350,7 @@ mod test_varied_prefix_grouping {
         );
     }
 
-    /// Tests for the min_prefix_chars configuration option.
+    /// Tests for the `min_prefix_chars` configuration option.
     /// This option sets the minimum character count for single-word prefixes
     /// to be considered valid group names. Default is 5 to avoid false matches
     /// with short names like "alex", "name", etc.
@@ -7388,7 +7388,7 @@ mod test_varied_prefix_grouping {
 
             // Should only find 2-part prefix "Alex.Video", not 1-part "Alex"
             assert!(
-                !candidates.iter().any(|(p, _, parts)| *parts == 1),
+                !candidates.iter().any(|(_, _, parts)| *parts == 1),
                 "Single-part prefix 'Alex' should be excluded with min_prefix_chars=5"
             );
             assert!(
