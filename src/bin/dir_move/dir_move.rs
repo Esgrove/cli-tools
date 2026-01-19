@@ -820,30 +820,55 @@ impl DirMove {
     /// Collect all possible prefix groups for files.
     /// Files can appear in multiple groups - they are only excluded once actually moved.
     /// Returns a map from display prefix to list of matching file paths.
-    fn collect_all_prefix_groups(&self, files_with_names: &[(PathBuf, String)]) -> HashMap<String, Vec<PathBuf>> {
-        // Use lowercase keys for grouping, but store original prefix for display
-        let mut prefix_groups: HashMap<String, (String, Vec<PathBuf>)> = HashMap::new();
+    /// Collect all possible prefix groups for files.
+    /// Files can appear in multiple groups - they are only excluded once actually moved.
+    /// Returns a map from display prefix to (files, `prefix_parts`) where `prefix_parts` indicates specificity.
+    fn collect_all_prefix_groups(
+        &self,
+        files_with_names: &[(PathBuf, String)],
+    ) -> HashMap<String, (Vec<PathBuf>, usize)> {
+        // Use normalized keys (no dots, lowercase) for grouping to handle
+        // both case variations and dot-separated vs concatenated prefixes
+        // Value is (original_prefix, files, prefix_parts, has_concatenated_form)
+        let mut prefix_groups: HashMap<String, (String, Vec<PathBuf>, usize, bool)> = HashMap::new();
 
         for (file_path, file_name) in files_with_names {
             let prefix_candidates =
                 Self::find_prefix_candidates(file_name, files_with_names, self.config.min_group_size);
 
             // Add file to ALL matching prefix groups, not just the best one
-            // Use fully normalized key (no dots, lowercase) for grouping to handle
-            // both case variations and dot-separated vs concatenated prefixes
-            for (prefix, _count) in prefix_candidates {
+            for (prefix, _count, prefix_parts) in prefix_candidates {
                 let key = Self::normalize_prefix(&prefix);
-                if let Some((_, files)) = prefix_groups.get_mut(&key) {
+                let is_concatenated = !prefix.contains('.');
+
+                if let Some((stored_prefix, files, existing_parts, has_concat)) = prefix_groups.get_mut(&key) {
                     files.push(file_path.clone());
+                    // Keep the highest specificity (most parts)
+                    *existing_parts = (*existing_parts).max(prefix_parts);
+                    // Prefer concatenated (no-dot) form for directory names
+                    if is_concatenated && !*has_concat {
+                        *stored_prefix = prefix.into_owned();
+                        *has_concat = true;
+                    }
                 } else {
-                    // Store the original prefix for display purposes
-                    prefix_groups.insert(key, (prefix.into_owned(), vec![file_path.clone()]));
+                    prefix_groups.insert(
+                        key,
+                        (
+                            prefix.into_owned(),
+                            vec![file_path.clone()],
+                            prefix_parts,
+                            is_concatenated,
+                        ),
+                    );
                 }
             }
         }
 
-        // Convert to final format: display_prefix -> files
-        let display_groups: HashMap<String, Vec<PathBuf>> = prefix_groups.into_values().collect();
+        // Convert to final format: display_prefix -> (files, prefix_parts)
+        let display_groups: HashMap<String, (Vec<PathBuf>, usize)> = prefix_groups
+            .into_values()
+            .map(|(prefix, files, parts, _)| (prefix, (files, parts)))
+            .collect();
 
         // Apply prefix overrides: if a group's prefix starts with an override, use the override
         self.apply_prefix_overrides(display_groups)
@@ -856,19 +881,18 @@ impl DirMove {
         let files_with_names = self.collect_files_with_names()?;
         let prefix_groups = self.collect_all_prefix_groups(&files_with_names);
 
-        // Sort groups by prefix length (longest first) for better grouping, then alphabetically
+        // Sort groups by prefix length (longest first) for better grouping, then alphabetically.
+        // Filter out groups smaller than the configured minimum.
+        let min_group_size = self.config.min_group_size;
         let mut groups_to_process: Vec<_> = prefix_groups
             .into_iter()
-            .filter(|(_, files)| files.len() >= self.config.min_group_size)
+            .filter(|(_, (files, _))| files.len() >= min_group_size)
             .sorted_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)))
             .collect();
 
         if groups_to_process.is_empty() {
             if self.config.verbose {
-                println!(
-                    "No file groups with {} or more matching prefixes found.",
-                    self.config.min_group_size
-                );
+                println!("No file groups with {min_group_size} or more matching prefixes found.");
             }
             return Ok(());
         }
@@ -878,19 +902,15 @@ impl DirMove {
 
         // Count initial groups for display (before filtering by moved files)
         let initial_group_count = groups_to_process.len();
-        print_bold!(
-            "Found {} group(s) with {}+ files sharing the same prefix:\n",
-            initial_group_count,
-            self.config.min_group_size
-        );
+        print_bold!("Found {} group(s) with matching prefixes:\n", initial_group_count);
 
         while !groups_to_process.is_empty() {
-            let (prefix, files) = groups_to_process.remove(0);
+            let (prefix, (files, _)) = groups_to_process.remove(0);
 
             // Filter out already moved files
             let available_files: Vec<_> = files.into_iter().filter(|f| !moved_files.contains(f)).collect();
 
-            if available_files.len() < self.config.min_group_size {
+            if available_files.len() < min_group_size {
                 continue;
             }
 
@@ -941,14 +961,17 @@ impl DirMove {
 
     /// Apply prefix overrides to groups.
     /// If files in a group start with an override prefix, merge them under the override name.
-    fn apply_prefix_overrides(&self, groups: HashMap<String, Vec<PathBuf>>) -> HashMap<String, Vec<PathBuf>> {
+    fn apply_prefix_overrides(
+        &self,
+        groups: HashMap<String, (Vec<PathBuf>, usize)>,
+    ) -> HashMap<String, (Vec<PathBuf>, usize)> {
         if self.config.prefix_overrides.is_empty() {
             return groups;
         }
 
-        let mut result: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut result: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
 
-        for (prefix, files) in groups {
+        for (prefix, (files, prefix_parts)) in groups {
             // Check if any override matches: either the prefix starts with override,
             // or the override starts with the prefix (override is more specific),
             // or any file in the group starts with the override
@@ -967,7 +990,12 @@ impl DirMove {
                 })
                 .map_or(prefix, std::clone::Clone::clone);
 
-            result.entry(target_prefix).or_default().extend(files);
+            let entry = result
+                .entry(target_prefix)
+                .or_insert_with(|| (Vec::new(), prefix_parts));
+            entry.0.extend(files);
+            // Keep the highest specificity
+            entry.1 = entry.1.max(prefix_parts);
         }
 
         result
@@ -1014,7 +1042,7 @@ impl DirMove {
     }
 
     /// Find prefix candidates for a file, prioritizing earlier positions in the filename.
-    /// Returns a list of (prefix, `match_count`) pairs in priority order:
+    /// Returns a list of (prefix, `match_count`, `prefix_parts`) tuples in priority order:
     /// 3-part prefix, 2-part prefix, 1-part prefix.
     /// Longer prefixes are preferred as they provide more specific grouping.
     /// Also handles case variations and dot-separated vs concatenated forms.
@@ -1022,14 +1050,13 @@ impl DirMove {
         file_name: &'a str,
         all_files: &[(PathBuf, String)],
         min_group_size: usize,
-    ) -> Vec<(Cow<'a, str>, usize)> {
+    ) -> Vec<(Cow<'a, str>, usize, usize)> {
         let Some(first_part) = file_name.split('.').next().filter(|p| !p.is_empty()) else {
             return Vec::new();
         };
 
-        let mut candidates: Vec<(Cow<'a, str>, usize)> = Vec::new();
+        let mut candidates: Vec<(Cow<'a, str>, usize, usize)> = Vec::new();
 
-        // Count matches for 3-part prefix (highest priority)
         if let Some(three_part) = Self::get_n_part_prefix(file_name, 3) {
             let three_part_normalized = Self::normalize_prefix(three_part);
             let count = all_files
@@ -1037,11 +1064,11 @@ impl DirMove {
                 .filter(|(_, name)| Self::prefix_matches_normalized(name, &three_part_normalized))
                 .count();
             if count >= min_group_size {
-                candidates.push((Cow::Borrowed(three_part), count));
+                candidates.push((Cow::Borrowed(three_part), count, 3));
             }
         }
 
-        // Count matches for 2-part prefix (second priority)
+        // Count matches for 2-part prefix
         if let Some(two_part) = Self::get_n_part_prefix(file_name, 2) {
             let two_part_normalized = Self::normalize_prefix(two_part);
             let count = all_files
@@ -1049,18 +1076,18 @@ impl DirMove {
                 .filter(|(_, name)| Self::prefix_matches_normalized(name, &two_part_normalized))
                 .count();
             if count >= min_group_size {
-                candidates.push((Cow::Borrowed(two_part), count));
+                candidates.push((Cow::Borrowed(two_part), count, 2));
             }
         }
 
-        // Count matches for 1-part prefix (lowest priority)
+        // Count matches for 1-part prefix
         let first_part_normalized = first_part.to_lowercase();
         let count = all_files
             .iter()
             .filter(|(_, name)| Self::prefix_matches_normalized(name, &first_part_normalized))
             .count();
         if count >= min_group_size {
-            candidates.push((Cow::Borrowed(first_part), count));
+            candidates.push((Cow::Borrowed(first_part), count, 1));
         }
 
         candidates
@@ -1314,7 +1341,7 @@ mod test_prefix_candidates {
     fn simple_prefix_multiple_files() {
         let files = make_test_files(&["LongName.v1.mp4", "LongName.v2.mp4", "Other.v2.mp4"]);
         let candidates = DirMove::find_prefix_candidates("LongName.v1.mp4", &files, 2);
-        assert_eq!(candidates, vec![(Cow::Borrowed("LongName"), 2)]);
+        assert_eq!(candidates, vec![(Cow::Borrowed("LongName"), 2, 1)]);
     }
 
     #[test]
@@ -1326,9 +1353,9 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 2);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name.Thing"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Some.Name"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Some"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name.Thing"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some.Name"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Some"), 3, 1));
     }
 
     #[test]
@@ -1340,9 +1367,9 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 2);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name.Thing"), 2));
-        assert_eq!(candidates[1], (Cow::Borrowed("Some.Name"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Some"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name.Thing"), 2, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some.Name"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Some"), 3, 1));
     }
 
     #[test]
@@ -1350,15 +1377,15 @@ mod test_prefix_candidates {
         let files = make_test_files(&["Some.Name.Thing.mp4", "Some.Name.Other.mp4", "Some.Name.More.mp4"]);
         let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.mp4", &files, 2);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Some"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some"), 3, 1));
     }
 
     #[test]
     fn single_word_fallback() {
         let files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
         let candidates = DirMove::find_prefix_candidates("ABC.2023.Thing.mp4", &files, 3);
-        assert_eq!(candidates, vec![(Cow::Borrowed("ABC"), 3)]);
+        assert_eq!(candidates, vec![(Cow::Borrowed("ABC"), 3, 1)]);
     }
 
     #[test]
@@ -1368,10 +1395,13 @@ mod test_prefix_candidates {
             "Some.Name.Thing.v2.mp4",
             "Some.Name.Other.v1.mp4",
         ]);
+        // With min_group_size=3: only prefixes with 3+ files qualify
+        // 3-part "Some.Name.Thing" has 2 files < 3, so excluded
+        // 2-part "Some.Name" has 3 files >= 3, 1-part "Some" has 3 files >= 3
         let candidates = DirMove::find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Some"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Name"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Some"), 3, 1));
     }
 
     #[test]
@@ -1392,8 +1422,8 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Show.Name.S01E01.mp4", &files, 2);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Show.Name"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 5));
+        assert_eq!(candidates[0], (Cow::Borrowed("Show.Name"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 5, 1));
     }
 
     #[test]
@@ -1413,11 +1443,13 @@ mod test_prefix_candidates {
     #[test]
     fn min_group_size_one() {
         let files = make_test_files(&["Unique.Name.v1.mp4", "Other.v2.mp4"]);
+        // With min_group_size=1, threshold is min(1, 2) = 1
+        // All prefixes with at least 1 match qualify
         let candidates = DirMove::find_prefix_candidates("Unique.Name.v1.mp4", &files, 1);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Unique.Name.v1"), 1));
-        assert_eq!(candidates[1], (Cow::Borrowed("Unique.Name"), 1));
-        assert_eq!(candidates[2], (Cow::Borrowed("Unique"), 1));
+        assert_eq!(candidates[0], (Cow::Borrowed("Unique.Name.v1"), 1, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Unique.Name"), 1, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Unique"), 1, 1));
     }
 
     #[test]
@@ -1436,8 +1468,8 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Series.Episode.01.mp4", &files, 5);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Series.Episode"), 10));
-        assert_eq!(candidates[1], (Cow::Borrowed("Series"), 10));
+        assert_eq!(candidates[0], (Cow::Borrowed("Series.Episode"), 10, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Series"), 10, 1));
     }
 
     #[test]
@@ -1446,8 +1478,8 @@ mod test_prefix_candidates {
         let candidates = DirMove::find_prefix_candidates("Show.Name.v1.mp4", &files, 2);
         // Case-insensitive matching should group all three files
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Show.Name"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Show.Name"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 3, 1));
     }
 
     #[test]
@@ -1463,7 +1495,7 @@ mod test_prefix_candidates {
         // All files should match - PhotoLab = Photo.Lab = Photolab
         assert!(!candidates.is_empty());
         // The 1-part prefix "PhotoLab" should match all 4 files
-        let photolab = candidates.iter().find(|(p, _)| p.to_lowercase() == "photolab");
+        let photolab = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "photolab");
         assert!(photolab.is_some());
         assert_eq!(photolab.unwrap().1, 4);
 
@@ -1478,7 +1510,7 @@ mod test_prefix_candidates {
         // All files should match on the single-part prefix (StudioTV = Studio.TV = Studiotv)
         assert!(!candidates.is_empty());
         // The 1-part prefix should match all 4 files
-        let studiotv = candidates.iter().find(|(p, _)| p.to_lowercase() == "studiotv");
+        let studiotv = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "studiotv");
         assert!(studiotv.is_some());
         assert_eq!(studiotv.unwrap().1, 4);
     }
@@ -1494,7 +1526,7 @@ mod test_prefix_candidates {
         let candidates = DirMove::find_prefix_candidates("SunSetHD.Image.Two.jpg", &files, 2);
         assert!(!candidates.is_empty());
         // The 1-part prefix "SunSetHD" should match all 3 files
-        let sunsethd = candidates.iter().find(|(p, _)| p.to_lowercase() == "sunsethd");
+        let sunsethd = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "sunsethd");
         assert!(sunsethd.is_some());
         assert_eq!(sunsethd.unwrap().1, 3);
 
@@ -1506,7 +1538,7 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("ShowTV.Second.Episode.mp4", &files, 2);
         assert!(!candidates.is_empty());
-        let showtv = candidates.iter().find(|(p, _)| p.to_lowercase() == "showtv");
+        let showtv = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "showtv");
         assert!(showtv.is_some());
         assert_eq!(showtv.unwrap().1, 3);
     }
@@ -1560,14 +1592,15 @@ mod test_prefix_candidates {
             "Vacation.Photos.Image2.jpg",
             "Other.Album.Image1.jpg",
         ]);
-        // With min_group_size=3, Vacation.Photos group (2 files) should not appear
+        // With min_group_size=3, only prefixes with 3+ files qualify
+        // "Vacation.Photos" has 2 files < 3, so excluded
         let candidates = DirMove::find_prefix_candidates("Vacation.Photos.Image1.jpg", &files, 3);
         assert!(candidates.is_empty());
 
-        // With min_group_size=2, Vacation.Photos group should appear
+        // With min_group_size=2, "Vacation.Photos" qualifies
         let candidates = DirMove::find_prefix_candidates("Vacation.Photos.Image1.jpg", &files, 2);
         assert!(!candidates.is_empty());
-        assert_eq!(candidates[0].1, 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Vacation.Photos"), 2, 2));
     }
 
     #[test]
@@ -1577,12 +1610,12 @@ mod test_prefix_candidates {
             "Beach.Summer.Photo2.jpg",
             "Beach.Summer.Photo3.jpg",
         ]);
-        // Exactly 3 files, min_group_size=3 should match
+        // With min_group_size=3, prefixes with exactly 3 files qualify
         let candidates = DirMove::find_prefix_candidates("Beach.Summer.Photo1.jpg", &files, 3);
         assert!(!candidates.is_empty());
-        assert!(candidates.iter().any(|(_, count)| *count == 3));
+        assert!(candidates.iter().any(|(_, count, _)| *count == 3));
 
-        // min_group_size=4 should not match
+        // min_group_size=4, "Beach.Summer" with 3 files < 4, so excluded
         let candidates = DirMove::find_prefix_candidates("Beach.Summer.Photo1.jpg", &files, 4);
         assert!(candidates.is_empty());
     }
@@ -1599,7 +1632,7 @@ mod test_prefix_candidates {
         let candidates = DirMove::find_prefix_candidates("MyAlbum.Photo.One.jpg", &files, 2);
         assert!(!candidates.is_empty());
         // All 5 should be grouped together regardless of case
-        let one_part = candidates.iter().find(|(p, _)| !p.contains('.'));
+        let one_part = candidates.iter().find(|(p, _, _)| !p.contains('.'));
         assert!(one_part.is_some());
         assert_eq!(one_part.unwrap().1, 5);
     }
@@ -1617,7 +1650,7 @@ mod test_prefix_candidates {
         let candidates = DirMove::find_prefix_candidates("MyAlbum.Photo.Two.jpg", &files, 2);
         assert!(!candidates.is_empty());
         // All should match: My.Album = MyAlbum = MYALBUM = my.album = MY.ALBUM
-        let myalbum = candidates.iter().find(|(p, _)| p.to_lowercase() == "myalbum");
+        let myalbum = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "myalbum");
         assert!(myalbum.is_some());
         assert_eq!(myalbum.unwrap().1, 5);
     }
@@ -1634,7 +1667,7 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("PhotoLab.Image2.jpg", &files, 3);
         assert!(!candidates.is_empty());
-        let photolab = candidates.iter().find(|(p, _)| p.to_lowercase() == "photolab");
+        let photolab = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "photolab");
         assert!(photolab.is_some());
         assert_eq!(photolab.unwrap().1, 5);
     }
@@ -1649,7 +1682,7 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("SunSetHD.Image2.jpg", &files, 2);
         assert!(!candidates.is_empty());
-        let sunsethd = candidates.iter().find(|(p, _)| p.to_lowercase() == "sunsethd");
+        let sunsethd = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "sunsethd");
         assert!(sunsethd.is_some());
         assert_eq!(sunsethd.unwrap().1, 4);
     }
@@ -1665,19 +1698,22 @@ mod test_prefix_candidates {
         let candidates = DirMove::find_prefix_candidates("Album.Name.Set1.Photo1.jpg", &files, 2);
         // Should offer longer prefixes first: 3-part, then 2-part, then 1-part
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Album.Name.Set1"), 2));
-        assert_eq!(candidates[1], (Cow::Borrowed("Album.Name"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Album"), 4));
+        assert_eq!(candidates[0], (Cow::Borrowed("Album.Name.Set1"), 2, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Album.Name"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Album"), 4, 1));
     }
 
     #[test]
     fn min_group_size_one_matches_single_file() {
         let files = make_test_files(&["Unique.Name.File.jpg", "Other.Name.File.jpg"]);
+        // With min_group_size=1, threshold is min(1, 2) = 1
+        // All prefixes with at least 1 match qualify
         let candidates = DirMove::find_prefix_candidates("Unique.Name.File.jpg", &files, 1);
         assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], (Cow::Borrowed("Unique.Name.File"), 1));
-        assert_eq!(candidates[1], (Cow::Borrowed("Unique.Name"), 1));
-        assert_eq!(candidates[2], (Cow::Borrowed("Unique"), 1));
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], (Cow::Borrowed("Unique.Name.File"), 1, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Unique.Name"), 1, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Unique"), 1, 1));
     }
 
     #[test]
@@ -1689,9 +1725,15 @@ mod test_prefix_candidates {
             "Gallery.Photos.Img4.jpg",
             "Gallery.Photos.Img5.jpg",
         ]);
-        // min_group_size=10 should filter everything (only 5 files)
+        // min_group_size=10, all prefixes with 5 files < 10, so none qualify
         let candidates = DirMove::find_prefix_candidates("Gallery.Photos.Img1.jpg", &files, 10);
         assert!(candidates.is_empty());
+
+        // min_group_size=5, prefixes with exactly 5 files qualify
+        let candidates = DirMove::find_prefix_candidates("Gallery.Photos.Img1.jpg", &files, 5);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Gallery.Photos"), 5, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Gallery"), 5, 1));
     }
 
     #[test]
@@ -1706,7 +1748,7 @@ mod test_prefix_candidates {
         let candidates = DirMove::find_prefix_candidates("Wedding.Photos.IMG001.jpg", &files, 2);
         assert!(!candidates.is_empty());
         // Should find 2-part prefix with all 4 files
-        let two_part = candidates.iter().find(|(p, _)| *p == "Wedding.Photos");
+        let two_part = candidates.iter().find(|(p, _, _)| *p == "Wedding.Photos");
         assert!(two_part.is_some());
         assert_eq!(two_part.unwrap().1, 4);
     }
@@ -1716,7 +1758,7 @@ mod test_prefix_candidates {
         let files = make_test_files(&["Concert.Image1.jpg", "Concert.Image2.jpg", "Concert.Image3.jpg"]);
         let candidates = DirMove::find_prefix_candidates("Concert.Image1.jpg", &files, 2);
         assert!(!candidates.is_empty());
-        let one_part = candidates.iter().find(|(p, _)| *p == "Concert");
+        let one_part = candidates.iter().find(|(p, _, _)| *p == "Concert");
         assert!(one_part.is_some());
         assert_eq!(one_part.unwrap().1, 3);
     }
@@ -1732,8 +1774,8 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Drama.Series.S01E01.mp4", &files, 2);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Drama.Series"), 5));
-        assert_eq!(candidates[1], (Cow::Borrowed("Drama"), 5));
+        assert_eq!(candidates[0], (Cow::Borrowed("Drama.Series"), 5, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Drama"), 5, 1));
     }
 
     #[test]
@@ -1746,8 +1788,8 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Studio.Action.2012.BluRay.mp4", &files, 2);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Studio.Action"), 2));
-        assert_eq!(candidates[1], (Cow::Borrowed("Studio"), 4));
+        assert_eq!(candidates[0], (Cow::Borrowed("Studio.Action"), 2, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Studio"), 4, 1));
     }
 
     #[test]
@@ -1760,9 +1802,9 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Drama.Series.Name.2020.S01E01.Pilot.1080p.mp4", &files, 2);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Drama.Series.Name"), 4));
-        assert_eq!(candidates[1], (Cow::Borrowed("Drama.Series"), 4));
-        assert_eq!(candidates[2], (Cow::Borrowed("Drama"), 4));
+        assert_eq!(candidates[0], (Cow::Borrowed("Drama.Series.Name"), 4, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Drama.Series"), 4, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Drama"), 4, 1));
     }
 
     #[test]
@@ -1774,9 +1816,9 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Action.Movie.Title.2019.Directors.Cut.mp4", &files, 2);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Action.Movie.Title"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Action.Movie"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Action"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Action.Movie.Title"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Action.Movie"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Action"), 3, 1));
     }
 
     #[test]
@@ -1788,9 +1830,9 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Daily.News.Show.2024.01.15.Morning.Report.mp4", &files, 3);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Daily.News.Show"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Daily.News"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Daily"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Daily.News.Show"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Daily.News"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Daily"), 3, 1));
     }
 
     #[test]
@@ -1804,9 +1846,9 @@ mod test_prefix_candidates {
         let candidates =
             DirMove::find_prefix_candidates("Epic.Adventure.Saga.Part.One.2018.BluRay.Remux.mp4", &files, 2);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Epic.Adventure.Saga"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Epic.Adventure"), 4));
-        assert_eq!(candidates[2], (Cow::Borrowed("Epic"), 4));
+        assert_eq!(candidates[0], (Cow::Borrowed("Epic.Adventure.Saga"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Epic.Adventure"), 4, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Epic"), 4, 1));
     }
 
     #[test]
@@ -1820,9 +1862,9 @@ mod test_prefix_candidates {
         let candidates =
             DirMove::find_prefix_candidates("Anthology.Series.Collection.S01E01.Genesis.1080p.WEB.mp4", &files, 2);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Anthology.Series.Collection"), 4));
-        assert_eq!(candidates[1], (Cow::Borrowed("Anthology.Series"), 4));
-        assert_eq!(candidates[2], (Cow::Borrowed("Anthology"), 4));
+        assert_eq!(candidates[0], (Cow::Borrowed("Anthology.Series.Collection"), 4, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Anthology.Series"), 4, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Anthology"), 4, 1));
     }
 
     #[test]
@@ -1835,9 +1877,9 @@ mod test_prefix_candidates {
         let candidates =
             DirMove::find_prefix_candidates("Nature.Wildlife.Documentary.Africa.Savanna.2019.4K.mp4", &files, 3);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Nature.Wildlife.Documentary"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Nature.Wildlife"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Nature"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Nature.Wildlife.Documentary"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Nature.Wildlife"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Nature"), 3, 1));
     }
 
     #[test]
@@ -1849,16 +1891,16 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Software.Tutorial.Guide.v2.2023.Intro.Basics.mp4", &files, 3);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Software.Tutorial.Guide"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Software.Tutorial"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Software"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Software.Tutorial.Guide"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Software.Tutorial"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Software"), 3, 1));
     }
 
     #[test]
     fn short_names_with_extensions() {
         let files = make_test_files(&["A.B.mp4", "A.C.mp4", "A.D.mp4"]);
         let candidates = DirMove::find_prefix_candidates("A.B.mp4", &files, 2);
-        let a_candidate = candidates.iter().find(|(p, _)| p.to_lowercase() == "a");
+        let a_candidate = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "a");
         assert!(a_candidate.is_some());
         assert_eq!(a_candidate.unwrap().1, 3);
     }
@@ -1867,7 +1909,7 @@ mod test_prefix_candidates {
     fn with_filtered_numeric_parts() {
         let files = make_test_files(&["Show.Name.S01.mp4", "Show.Name.S02.mp4", "Show.Name.S03.mp4"]);
         let candidates = DirMove::find_prefix_candidates("Show.Name.S01.mp4", &files, 2);
-        let show_name = candidates.iter().find(|(p, _)| p.to_lowercase() == "show.name");
+        let show_name = candidates.iter().find(|(p, _, _)| p.to_lowercase() == "show.name");
         assert!(show_name.is_some());
         assert_eq!(show_name.unwrap().1, 3);
     }
@@ -1877,15 +1919,15 @@ mod test_prefix_candidates {
         let filtered_files = make_test_files(&["ABC.Thing.v1.mp4", "ABC.Thing.v2.mp4", "ABC.Thing.v3.mp4"]);
         let candidates = DirMove::find_prefix_candidates("ABC.Thing.v1.mp4", &filtered_files, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("ABC.Thing"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("ABC"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("ABC.Thing"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("ABC"), 3, 1));
     }
 
     #[test]
     fn mixed_years_without_filtering() {
         let unfiltered_files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
         let candidates = DirMove::find_prefix_candidates("ABC.2023.Thing.mp4", &unfiltered_files, 3);
-        assert_eq!(candidates, vec![(Cow::Borrowed("ABC"), 3)]);
+        assert_eq!(candidates, vec![(Cow::Borrowed("ABC"), 3, 1)]);
     }
 
     #[test]
@@ -1897,8 +1939,8 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Series.Name.S01E01.1080p.mp4", &filtered_files, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Series.Name"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Series"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Series.Name"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Series"), 3, 1));
     }
 
     #[test]
@@ -1914,9 +1956,9 @@ mod test_prefix_candidates {
             2,
         );
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Studio.Franchise.Title"), 2));
-        assert_eq!(candidates[1], (Cow::Borrowed("Studio.Franchise"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Studio"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Studio.Franchise.Title"), 2, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Studio.Franchise"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Studio"), 3, 1));
     }
 
     #[test]
@@ -1928,9 +1970,9 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Retro.Eighties.Collection.Vol1.Greatest.Hits.mp4", &files, 3);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Retro.Eighties.Collection"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Retro.Eighties"), 3));
-        assert_eq!(candidates[2], (Cow::Borrowed("Retro"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Retro.Eighties.Collection"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Retro.Eighties"), 3, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Retro"), 3, 1));
     }
 
     #[test]
@@ -1943,17 +1985,23 @@ mod test_prefix_candidates {
         ]);
         let candidates = DirMove::find_prefix_candidates("Alpha.Beta.Gamma.One.mp4", &files, 2);
         assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], (Cow::Borrowed("Alpha.Beta.Gamma"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Alpha.Beta"), 4));
-        assert_eq!(candidates[2], (Cow::Borrowed("Alpha"), 4));
+        assert_eq!(candidates[0], (Cow::Borrowed("Alpha.Beta.Gamma"), 3, 3));
+        assert_eq!(candidates[1], (Cow::Borrowed("Alpha.Beta"), 4, 2));
+        assert_eq!(candidates[2], (Cow::Borrowed("Alpha"), 4, 1));
     }
 
     #[test]
     fn only_two_files_high_threshold() {
         let files = make_test_files(&["Show.Name.v1.mp4", "Show.Name.v2.mp4"]);
+        // With min_group_size=5, "Show.Name" has 2 files < 5, so excluded
         let candidates = DirMove::find_prefix_candidates("Show.Name.v1.mp4", &files, 5);
-        // With min_group_size=5 and only 2 files, no candidates should qualify
         assert!(candidates.is_empty());
+
+        // With min_group_size=2, "Show.Name" qualifies
+        let candidates = DirMove::find_prefix_candidates("Show.Name.v1.mp4", &files, 2);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], (Cow::Borrowed("Show.Name"), 2, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 2, 1));
     }
 }
 
@@ -1996,9 +2044,9 @@ mod test_prefix_groups {
         assert!(groups.contains_key("Show.Name"), "Should have Show.Name group");
         assert!(groups.contains_key("Show.Other"), "Should have Show.Other group");
         assert!(groups.contains_key("Show"), "Should have Show group");
-        assert_eq!(groups.get("Show.Name").unwrap().len(), 3);
-        assert_eq!(groups.get("Show.Other").unwrap().len(), 2);
-        assert_eq!(groups.get("Show").unwrap().len(), 5);
+        assert_eq!(groups.get("Show.Name").unwrap().0.len(), 3);
+        assert_eq!(groups.get("Show.Other").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Show").unwrap().0.len(), 5);
     }
 
     #[test]
@@ -2035,10 +2083,10 @@ mod test_prefix_groups {
         assert!(groups.contains_key("Alpha.Beta.Delta"));
         assert!(groups.contains_key("Alpha.Beta"));
         assert!(groups.contains_key("Alpha"));
-        assert_eq!(groups.get("Alpha.Beta.Gamma").unwrap().len(), 2);
-        assert_eq!(groups.get("Alpha.Beta.Delta").unwrap().len(), 2);
-        assert_eq!(groups.get("Alpha.Beta").unwrap().len(), 4);
-        assert_eq!(groups.get("Alpha").unwrap().len(), 4);
+        assert_eq!(groups.get("Alpha.Beta.Gamma").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Alpha.Beta.Delta").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Alpha.Beta").unwrap().0.len(), 4);
+        assert_eq!(groups.get("Alpha").unwrap().0.len(), 4);
     }
 
     #[test]
@@ -2171,11 +2219,11 @@ mod test_prefix_groups {
         assert!(groups.contains_key("SeriesB.Season1"));
         assert!(groups.contains_key("SeriesA"));
         assert!(groups.contains_key("SeriesB"));
-        assert_eq!(groups.get("SeriesA.Season1").unwrap().len(), 10);
-        assert_eq!(groups.get("SeriesA.Season2").unwrap().len(), 8);
-        assert_eq!(groups.get("SeriesA").unwrap().len(), 18);
-        assert_eq!(groups.get("SeriesB.Season1").unwrap().len(), 5);
-        assert_eq!(groups.get("SeriesB").unwrap().len(), 5);
+        assert_eq!(groups.get("SeriesA.Season1").unwrap().0.len(), 10);
+        assert_eq!(groups.get("SeriesA.Season2").unwrap().0.len(), 8);
+        assert_eq!(groups.get("SeriesA").unwrap().0.len(), 18);
+        assert_eq!(groups.get("SeriesB.Season1").unwrap().0.len(), 5);
+        assert_eq!(groups.get("SeriesB").unwrap().0.len(), 5);
     }
 
     #[test]
@@ -2227,6 +2275,7 @@ mod test_prefix_groups {
         let dirmove_high = DirMove::new(root, config_high);
         let files_with_names = dirmove_high.collect_files_with_names().unwrap();
         let groups_high = dirmove_high.collect_all_prefix_groups(&files_with_names);
+        // With min_group_size=5, groups with only 2 files are excluded
         assert!(groups_high.is_empty());
     }
 
@@ -2263,7 +2312,7 @@ mod test_prefix_groups {
         // All case variations should be in the same group
         // Key will be from first file processed (original case preserved for display)
         // Check that some group has all 4 files
-        let max_group_size = groups.values().map(Vec::len).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|(files, _)| files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 4, "Should have a group with all 4 case variations");
     }
 
@@ -2302,8 +2351,60 @@ mod test_prefix_groups {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // All 4 files should be grouped together (PhotoLab = Photo.Lab = Photolab = PHOTOLAB)
-        let max_group_size = groups.values().map(Vec::len).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|(files, _)| files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 4, "Should have a group with all 4 files");
+
+        // Should prefer the concatenated form (no dots) for the directory name
+        // The group key should be "PhotoLab" not "Photo.Lab"
+        assert!(
+            groups.contains_key("PhotoLab"),
+            "Should prefer concatenated prefix 'PhotoLab' over dotted 'Photo.Lab'"
+        );
+    }
+
+    #[test]
+    fn prefers_concatenated_prefix_for_directory_name() {
+        // When files have both "Darkko.TV" and "DarkkoTV" forms, prefer "DarkkoTV"
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Darkko.TV.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("DarkkoTV.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Darkko.TV.Episode.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should have a group with all 3 files
+        let max_group_size = groups.values().map(|(files, _)| files.len()).max().unwrap_or(0);
+        assert_eq!(max_group_size, 3, "Should have a group with all 3 files");
+
+        // The group key should be "DarkkoTV" (concatenated) not "Darkko.TV" (dotted)
+        assert!(
+            groups.contains_key("DarkkoTV"),
+            "Should prefer concatenated prefix 'DarkkoTV' over dotted 'Darkko.TV'"
+        );
+        assert!(
+            !groups.contains_key("Darkko.TV"),
+            "Should not have separate group for dotted form"
+        );
     }
 
     #[test]
@@ -2341,7 +2442,7 @@ mod test_prefix_groups {
             groups.contains_key("Summer.Vacation"),
             "Should have Summer.Vacation group"
         );
-        assert_eq!(groups.get("Summer.Vacation").unwrap().len(), 4);
+        assert_eq!(groups.get("Summer.Vacation").unwrap().0.len(), 4);
     }
 
     #[test]
@@ -2356,7 +2457,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Gallery.Photos.Img4.jpg"), "").unwrap();
         std::fs::write(root.join("Gallery.Photos.Img5.jpg"), "").unwrap();
 
-        // With min_group_size=6, should find no groups
+        // With min_group_size=6, all prefixes with 5 files are excluded
         let config_6 = Config {
             auto: false,
             create: true,
@@ -2376,9 +2477,10 @@ mod test_prefix_groups {
         let dirmove_6 = DirMove::new(root.clone(), config_6);
         let files_with_names = dirmove_6.collect_files_with_names().unwrap();
         let groups_6 = dirmove_6.collect_all_prefix_groups(&files_with_names);
+        // With min_group_size=6, all prefixes with 5 files are excluded
         assert!(
             groups_6.is_empty(),
-            "min_group_size=6 should find no groups with only 5 files"
+            "min_group_size=6 should not find groups with only 5 files"
         );
 
         // With min_group_size=5, should find the group
@@ -2406,7 +2508,7 @@ mod test_prefix_groups {
             groups_5.contains_key("Gallery.Photos"),
             "Should have Gallery.Photos group"
         );
-        assert_eq!(groups_5.get("Gallery.Photos").unwrap().len(), 5);
+        assert_eq!(groups_5.get("Gallery.Photos").unwrap().0.len(), 5);
 
         // With min_group_size=3, should still find the same group
         let config_3 = Config {
@@ -2432,7 +2534,7 @@ mod test_prefix_groups {
             groups_3.contains_key("Gallery.Photos"),
             "Should have Gallery.Photos group"
         );
-        assert_eq!(groups_3.get("Gallery.Photos").unwrap().len(), 5);
+        assert_eq!(groups_3.get("Gallery.Photos").unwrap().0.len(), 5);
     }
 
     #[test]
@@ -2483,7 +2585,7 @@ mod test_prefix_groups {
         // (files may appear multiple times due to multiple prefix matches)
         let show_name_files = groups.get("Show.Name").unwrap();
         assert!(
-            show_name_files.len() >= 4,
+            show_name_files.0.len() >= 4,
             "Show.Name group should have at least 4 entries"
         );
     }
@@ -2525,11 +2627,11 @@ mod test_prefix_groups {
         assert!(groups.contains_key("ShowB"), "Should have ShowB from override");
         // Each override group should have at least 2 entries (the 2 files)
         assert!(
-            groups.get("ShowA").unwrap().len() >= 2,
+            groups.get("ShowA").unwrap().0.len() >= 2,
             "ShowA should have at least 2 entries"
         );
         assert!(
-            groups.get("ShowB").unwrap().len() >= 2,
+            groups.get("ShowB").unwrap().0.len() >= 2,
             "ShowB should have at least 2 entries"
         );
         // ShowC has no override, should have its own group(s)
@@ -2654,7 +2756,7 @@ mod test_prefix_groups {
         // The Show.Name group should contain entries for all 4 files
         let show_name_files = groups.get("Show.Name").unwrap();
         assert!(
-            show_name_files.len() >= 4,
+            show_name_files.0.len() >= 4,
             "Show.Name group should have at least 4 entries"
         );
     }
@@ -2837,8 +2939,8 @@ mod test_prefix_overrides {
     #[test]
     fn no_overrides() {
         let dirmove = make_test_dirmove(Vec::new());
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name.Thing"));
@@ -2848,10 +2950,10 @@ mod test_prefix_overrides {
     #[test]
     fn matching_override() {
         let dirmove = make_test_dirmove(vec!["longer.prefix".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
         groups.insert(
             "longer.prefix.name".to_string(),
-            vec![PathBuf::from("longer.prefix.name.file.mp4")],
+            (vec![PathBuf::from("longer.prefix.name.file.mp4")], 3),
         );
 
         let result = dirmove.apply_prefix_overrides(groups);
@@ -2863,21 +2965,21 @@ mod test_prefix_overrides {
     #[test]
     fn merges_groups() {
         let dirmove = make_test_dirmove(vec!["Some.Name".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
-        groups.insert("Some.Name.Other".to_string(), vec![PathBuf::from("file2.mp4")]);
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
+        groups.insert("Some.Name.Other".to_string(), (vec![PathBuf::from("file2.mp4")], 3));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name"));
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Some.Name").map(Vec::len), Some(2));
+        assert_eq!(result.get("Some.Name").map(|(files, _)| files.len()), Some(2));
     }
 
     #[test]
     fn non_matching() {
         let dirmove = make_test_dirmove(vec!["Other.Prefix".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), vec![PathBuf::from("file1.mp4")]);
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name.Thing"));
@@ -2888,9 +2990,9 @@ mod test_prefix_overrides {
     #[test]
     fn partial_match_only() {
         let dirmove = make_test_dirmove(vec!["Some".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Something.Else".to_string(), vec![PathBuf::from("file1.mp4")]);
-        groups.insert("Some.Name".to_string(), vec![PathBuf::from("file2.mp4")]);
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        groups.insert("Something.Else".to_string(), (vec![PathBuf::from("file1.mp4")], 1));
+        groups.insert("Some.Name".to_string(), (vec![PathBuf::from("file2.mp4")], 2));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some"));
@@ -2900,30 +3002,33 @@ mod test_prefix_overrides {
     #[test]
     fn override_more_specific_than_prefix() {
         let dirmove = make_test_dirmove(vec!["Example.Name".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
         groups.insert(
             "Example".to_string(),
-            vec![
-                PathBuf::from("Example.Name.Video1.mp4"),
-                PathBuf::from("Example.Name.Video2.mp4"),
-                PathBuf::from("Example.Name.Video3.mp4"),
-            ],
+            (
+                vec![
+                    PathBuf::from("Example.Name.Video1.mp4"),
+                    PathBuf::from("Example.Name.Video2.mp4"),
+                    PathBuf::from("Example.Name.Video3.mp4"),
+                ],
+                1,
+            ),
         );
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Example.Name"));
         assert!(!result.contains_key("Example"));
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Example.Name").map(Vec::len), Some(3));
+        assert_eq!(result.get("Example.Name").map(|(files, _)| files.len()), Some(3));
     }
 
     #[test]
     fn multiple_overrides() {
         let dirmove = make_test_dirmove(vec!["Show.A".to_string(), "Show.B".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Show.A.Season1".to_string(), vec![PathBuf::from("file1.mp4")]);
-        groups.insert("Show.B.Season1".to_string(), vec![PathBuf::from("file2.mp4")]);
-        groups.insert("Show.C.Season1".to_string(), vec![PathBuf::from("file3.mp4")]);
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        groups.insert("Show.A.Season1".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
+        groups.insert("Show.B.Season1".to_string(), (vec![PathBuf::from("file2.mp4")], 3));
+        groups.insert("Show.C.Season1".to_string(), (vec![PathBuf::from("file3.mp4")], 3));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Show.A"));
@@ -2935,7 +3040,7 @@ mod test_prefix_overrides {
     #[test]
     fn empty_groups() {
         let dirmove = make_test_dirmove(vec!["Some".to_string()]);
-        let groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.is_empty());
@@ -2944,8 +3049,8 @@ mod test_prefix_overrides {
     #[test]
     fn override_with_case_sensitivity() {
         let dirmove = make_test_dirmove(vec!["show.name".to_string()]);
-        let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        groups.insert("Show.Name.Season1".to_string(), vec![PathBuf::from("file1.mp4")]);
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        groups.insert("Show.Name.Season1".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Show.Name.Season1"));
@@ -3342,10 +3447,10 @@ mod test_full_flow {
         assert_eq!(filtered[4].1, "OtherShow.Episode.mp4");
 
         let show_candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
-        assert_eq!(show_candidates, vec![(Cow::Borrowed("ShowName"), 3)]);
+        assert_eq!(show_candidates, vec![(Cow::Borrowed("ShowName"), 3, 1)]);
 
         let other_candidates = DirMove::find_prefix_candidates(&filtered[3].1, &filtered, 2);
-        assert_eq!(other_candidates, vec![(Cow::Borrowed("OtherShow"), 2)]);
+        assert_eq!(other_candidates, vec![(Cow::Borrowed("OtherShow"), 2, 1)]);
     }
 
     #[test]
@@ -3369,7 +3474,7 @@ mod test_full_flow {
         assert_eq!(filtered[2].1, "MovieName.more.mp4");
 
         let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
-        assert_eq!(candidates, vec![(Cow::Borrowed("MovieName"), 3)]);
+        assert_eq!(candidates, vec![(Cow::Borrowed("MovieName"), 3, 1)]);
     }
 
     #[test]
@@ -3393,7 +3498,7 @@ mod test_full_flow {
         assert_eq!(filtered[2].1, "MovieName.more.mp4");
 
         let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
-        assert_eq!(candidates, vec![(Cow::Borrowed("MovieName"), 3)]);
+        assert_eq!(candidates, vec![(Cow::Borrowed("MovieName"), 3, 1)]);
     }
 
     #[test]
@@ -3418,8 +3523,8 @@ mod test_full_flow {
 
         let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Show.Tell"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Show.Tell"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("Show"), 3, 1));
     }
 
     #[test]
@@ -3436,7 +3541,7 @@ mod test_full_flow {
             .collect();
 
         let candidates_unfiltered = DirMove::find_prefix_candidates(&unfiltered[0].1, &unfiltered, 3);
-        assert_eq!(candidates_unfiltered, vec![(Cow::Borrowed("ABC"), 3)]);
+        assert_eq!(candidates_unfiltered, vec![(Cow::Borrowed("ABC"), 3, 1)]);
 
         let filtered: Vec<(PathBuf, String)> = original_filenames
             .iter()
@@ -3452,8 +3557,8 @@ mod test_full_flow {
 
         let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("ABC.Thing"), 3));
-        assert_eq!(candidates[1], (Cow::Borrowed("ABC"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("ABC.Thing"), 3, 2));
+        assert_eq!(candidates[1], (Cow::Borrowed("ABC"), 3, 1));
     }
 
     #[test]
@@ -3476,7 +3581,7 @@ mod test_full_flow {
 
         let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Some.Video"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Some.Video"), 3, 2));
 
         let dir_name = candidates[0].0.replace('.', " ");
         assert_eq!(dir_name, "Some Video");
@@ -3502,7 +3607,7 @@ mod test_full_flow {
 
         let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Movie.Name"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Movie.Name"), 3, 2));
 
         let dir_name = candidates[0].0.replace('.', " ");
         assert_eq!(dir_name, "Movie Name");
@@ -3528,7 +3633,7 @@ mod test_full_flow {
 
         let candidates = DirMove::find_prefix_candidates(&filtered[0].1, &filtered, 3);
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], (Cow::Borrowed("Cool.Stuff"), 3));
+        assert_eq!(candidates[0], (Cow::Borrowed("Cool.Stuff"), 3, 2));
 
         let dir_name = candidates[0].0.replace('.', " ");
         assert_eq!(dir_name, "Cool Stuff");
@@ -4427,5 +4532,977 @@ mod test_unwanted_directories {
         assert_eq!(unpack_candidates.len(), 1);
         assert_eq!(unpack_candidates[0], videos);
         Ok(())
+    }
+}
+
+/// Comprehensive integration tests with realistic mixed data.
+/// These tests verify grouping behavior with:
+/// - Multiple potential groups in the same dataset
+/// - Non-matching files that should be ignored
+/// - Various prefix lengths and naming conventions
+/// - Both dotted and concatenated naming styles
+#[cfg(test)]
+mod test_realistic_grouping {
+    use super::*;
+
+    /// Helper to create a test config with specified min group size
+    fn make_grouping_config(min_group_size: usize) -> Config {
+        Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        }
+    }
+
+    /// Helper to create config with prefix ignores
+    fn make_config_with_ignores(min_group_size: usize, ignores: Vec<String>) -> Config {
+        Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size,
+            overwrite: false,
+            prefix_ignores: ignores,
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mixed_content_multiple_distinct_groups_with_noise() {
+        // Realistic scenario: multiple distinct groups plus unrelated files
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Group 1: BlueSky.Productions (4 files) - dotted two-part prefix
+        std::fs::write(root.join("BlueSky.Productions.Summer.Adventure.1080p.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("BlueSky.Productions.Winter.Tale.720p.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("BlueSky.Productions.Spring.Romance.1080p.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("BlueSky.Productions.Autumn.Mystery.720p.x265.mp4"), "").unwrap();
+
+        // Group 2: ThunderCatStudios (4 files) - concatenated single word prefix
+        std::fs::write(root.join("ThunderCatStudios.Epic.Battle.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("ThunderCatStudios.Final.Quest.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("ThunderCatStudios.Dark.Rising.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("ThunderCatStudios.Light.Dawn.x265.mp4"), "").unwrap();
+
+        // Group 3: Ocean.Wave (3 files) - should also match as "OceanWave"
+        std::fs::write(root.join("Ocean.Wave.Sunset.Beach.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("OceanWave.Tropical.Paradise.mp4"), "").unwrap();
+        std::fs::write(root.join("Ocean.Wave.Coral.Reef.x265.mp4"), "").unwrap();
+
+        // Noise: various unrelated single files that should not form groups
+        std::fs::write(root.join("RandomStuff.Something.mp4"), "").unwrap();
+        std::fs::write(root.join("AnotherRandom.Video.mp4"), "").unwrap();
+        std::fs::write(root.join("Standalone.Content.Here.mp4"), "").unwrap();
+        std::fs::write(root.join("UniqueFile.NoMatch.mp4"), "").unwrap();
+
+        // Other BlueSky files with different second part - should NOT group with BlueSky.Productions
+        std::fs::write(root.join("BlueSky.Entertainment.Comedy.720p.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("BlueSky.Media.Documentary.1080p.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find BlueSky.Productions as a specific group (4 files)
+        assert!(
+            groups.contains_key("BlueSky.Productions"),
+            "Should find BlueSky.Productions group"
+        );
+        assert_eq!(
+            groups.get("BlueSky.Productions").unwrap().0.len(),
+            4,
+            "BlueSky.Productions should have 4 files"
+        );
+
+        // Should find ThunderCatStudios group (4 files)
+        assert!(
+            groups.contains_key("ThunderCatStudios"),
+            "Should find ThunderCatStudios group"
+        );
+        assert_eq!(
+            groups.get("ThunderCatStudios").unwrap().0.len(),
+            4,
+            "ThunderCatStudios should have 4 files"
+        );
+
+        // Should find OceanWave group (concatenated form preferred) with 3 files
+        assert!(
+            groups.contains_key("OceanWave") || groups.contains_key("Ocean.Wave"),
+            "Should find Ocean.Wave or OceanWave group"
+        );
+        let ocean_wave_key = if groups.contains_key("OceanWave") {
+            "OceanWave"
+        } else {
+            "Ocean.Wave"
+        };
+        assert_eq!(
+            groups.get(ocean_wave_key).unwrap().0.len(),
+            3,
+            "OceanWave should have 3 files"
+        );
+
+        // Should also have broader "BlueSky" group with all 6 BlueSky files
+        assert!(groups.contains_key("BlueSky"), "Should find broader BlueSky group");
+        assert_eq!(
+            groups.get("BlueSky").unwrap().0.len(),
+            6,
+            "BlueSky should have 6 files total"
+        );
+    }
+
+    #[test]
+    fn concatenated_vs_dotted_same_name_grouped_with_concat_preferred() {
+        // Files with same logical name but different formatting should group together
+        // and prefer the concatenated (no-dot) form for directory name
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Mix of NeonLight, Neon.Light, neonlight, NEONLIGHT
+        std::fs::write(root.join("NeonLight.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Neon.Light.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("neonlight.Episode.03.mp4"), "").unwrap();
+        std::fs::write(root.join("NEONLIGHT.Episode.04.mp4"), "").unwrap();
+        std::fs::write(root.join("Neon.light.Episode.05.mp4"), "").unwrap();
+
+        // Unrelated files that should not interfere
+        std::fs::write(root.join("DifferentShow.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("SomeOther.Content.Video.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // All 5 NeonLight variants should be in one group
+        // Should prefer concatenated form "NeonLight"
+        assert!(
+            groups.contains_key("NeonLight"),
+            "Should prefer concatenated form NeonLight, got keys: {:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            groups.get("NeonLight").unwrap().0.len(),
+            5,
+            "All 5 NeonLight variants should be grouped"
+        );
+
+        // Should NOT have separate groups for dotted forms
+        assert!(
+            !groups.contains_key("Neon.Light"),
+            "Should not have separate Neon.Light group"
+        );
+    }
+
+    #[test]
+    fn three_part_prefix_coexists_with_two_part_and_one_part() {
+        // Test that more specific prefixes are found alongside broader ones
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // 3 files with Studio.West.Coast prefix (3-part)
+        std::fs::write(root.join("Studio.West.Coast.Video1.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.West.Coast.Video2.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.West.Coast.Video3.mp4"), "").unwrap();
+
+        // 2 files with Studio.West.Mountain prefix (different 3-part)
+        std::fs::write(root.join("Studio.West.Mountain.Video1.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.West.Mountain.Video2.mp4"), "").unwrap();
+
+        // 1 file with Studio.West.Valley (not enough for its own 3-part group)
+        std::fs::write(root.join("Studio.West.Valley.Video1.mp4"), "").unwrap();
+
+        // 2 files with Studio.East (different 2-part)
+        std::fs::write(root.join("Studio.East.Downtown.Video1.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.East.Uptown.Video2.mp4"), "").unwrap();
+
+        // Unrelated noise
+        std::fs::write(root.join("Completely.Different.Content.mp4"), "").unwrap();
+        std::fs::write(root.join("Random.Other.File.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find specific 3-part groups
+        assert!(
+            groups.contains_key("Studio.West.Coast"),
+            "Should find Studio.West.Coast group"
+        );
+        assert_eq!(groups.get("Studio.West.Coast").unwrap().0.len(), 3);
+
+        assert!(
+            groups.contains_key("Studio.West.Mountain"),
+            "Should find Studio.West.Mountain group"
+        );
+        assert_eq!(groups.get("Studio.West.Mountain").unwrap().0.len(), 2);
+
+        // Should also find broader 2-part group (Studio.West) with 6 files
+        assert!(groups.contains_key("Studio.West"), "Should find Studio.West group");
+        assert_eq!(
+            groups.get("Studio.West").unwrap().0.len(),
+            6,
+            "Studio.West should include all West files"
+        );
+
+        // Should find Studio.East group
+        assert!(groups.contains_key("Studio.East"), "Should find Studio.East group");
+        assert_eq!(groups.get("Studio.East").unwrap().0.len(), 2);
+
+        // Should find broadest 1-part group (Studio) with all 8 Studio files
+        assert!(groups.contains_key("Studio"), "Should find Studio group");
+        assert_eq!(
+            groups.get("Studio").unwrap().0.len(),
+            8,
+            "Studio should include all Studio files"
+        );
+    }
+
+    #[test]
+    fn long_single_word_prefix_forms_valid_group() {
+        // Single long word prefixes should form valid groups
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Long concatenated prefix (simulating something like "SuperMegaProductions")
+        std::fs::write(root.join("SuperMegaProductionsHD.Adventure.One.mp4"), "").unwrap();
+        std::fs::write(root.join("SuperMegaProductionsHD.Adventure.Two.mp4"), "").unwrap();
+        std::fs::write(root.join("SuperMegaProductionsHD.Comedy.Special.mp4"), "").unwrap();
+
+        // Another long prefix
+        std::fs::write(root.join("UltraHighDefinitionStudio.Movie.Alpha.mp4"), "").unwrap();
+        std::fs::write(root.join("UltraHighDefinitionStudio.Movie.Beta.mp4"), "").unwrap();
+
+        // Short unrelated files
+        std::fs::write(root.join("Short.Video.mp4"), "").unwrap();
+        std::fs::write(root.join("Another.Short.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find long single-word prefix groups
+        assert!(
+            groups.contains_key("SuperMegaProductionsHD"),
+            "Should find SuperMegaProductionsHD group"
+        );
+        assert_eq!(groups.get("SuperMegaProductionsHD").unwrap().0.len(), 3);
+
+        assert!(
+            groups.contains_key("UltraHighDefinitionStudio"),
+            "Should find UltraHighDefinitionStudio group"
+        );
+        assert_eq!(groups.get("UltraHighDefinitionStudio").unwrap().0.len(), 2);
+    }
+
+    #[test]
+    fn prefix_ignore_strips_common_prefixes_for_better_grouping() {
+        // Test that prefix ignores help group files with common prefixes stripped
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files with "Premium" prefix that should be ignored
+        std::fs::write(root.join("Premium.GoldenStudio.Film.One.mp4"), "").unwrap();
+        std::fs::write(root.join("Premium.GoldenStudio.Film.Two.mp4"), "").unwrap();
+        std::fs::write(root.join("Premium.GoldenStudio.Film.Three.mp4"), "").unwrap();
+
+        // Files without Premium prefix but same studio
+        std::fs::write(root.join("GoldenStudio.Film.Four.mp4"), "").unwrap();
+        std::fs::write(root.join("GoldenStudio.Film.Five.mp4"), "").unwrap();
+
+        // Different studio with Premium prefix
+        std::fs::write(root.join("Premium.SilverStudio.Movie.One.mp4"), "").unwrap();
+        std::fs::write(root.join("Premium.SilverStudio.Movie.Two.mp4"), "").unwrap();
+
+        // Unrelated
+        std::fs::write(root.join("RandomContent.Video.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_config_with_ignores(2, vec!["Premium".to_string()]));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // With "Premium" ignored, all GoldenStudio files should group together
+        assert!(
+            groups.contains_key("GoldenStudio"),
+            "Should find GoldenStudio group after ignoring Premium prefix"
+        );
+        assert_eq!(
+            groups.get("GoldenStudio").unwrap().0.len(),
+            5,
+            "GoldenStudio should have all 5 files (Premium stripped)"
+        );
+
+        // SilverStudio should also group
+        assert!(groups.contains_key("SilverStudio"), "Should find SilverStudio group");
+        assert_eq!(groups.get("SilverStudio").unwrap().0.len(), 2);
+    }
+
+    #[test]
+    fn substring_prefix_does_not_incorrectly_match() {
+        // Verify that "Thunder" doesn't match "ThunderCat" files incorrectly
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // ThunderCat files (concatenated)
+        std::fs::write(root.join("ThunderCat.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("ThunderCat.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("ThunderCat.Episode.03.mp4"), "").unwrap();
+
+        // Thunder files (shorter, different)
+        std::fs::write(root.join("Thunder.Storm.Video1.mp4"), "").unwrap();
+        std::fs::write(root.join("Thunder.Storm.Video2.mp4"), "").unwrap();
+
+        // ThunderBolt files (different concatenation)
+        std::fs::write(root.join("ThunderBolt.Action.Movie1.mp4"), "").unwrap();
+        std::fs::write(root.join("ThunderBolt.Action.Movie2.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // ThunderCat should be its own group with exactly 3 files
+        assert!(groups.contains_key("ThunderCat"), "Should find ThunderCat group");
+        assert_eq!(
+            groups.get("ThunderCat").unwrap().0.len(),
+            3,
+            "ThunderCat should have exactly 3 files, not mixed with Thunder or ThunderBolt"
+        );
+
+        // Thunder.Storm should group (2-part)
+        assert!(
+            groups.contains_key("Thunder.Storm") || groups.contains_key("Thunder"),
+            "Should find Thunder related group"
+        );
+
+        // ThunderBolt should be its own group
+        assert!(groups.contains_key("ThunderBolt"), "Should find ThunderBolt group");
+        assert_eq!(groups.get("ThunderBolt").unwrap().0.len(), 2);
+    }
+
+    #[test]
+    fn files_with_numeric_and_resolution_parts_filtered_for_grouping() {
+        // Test that year, resolution, etc. are filtered out when determining groups
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Same logical content with different years/resolutions
+        std::fs::write(root.join("CreativeArts.Documentary.2019.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("CreativeArts.Documentary.2020.720p.mp4"), "").unwrap();
+        std::fs::write(root.join("CreativeArts.Documentary.2021.4K.mp4"), "").unwrap();
+        std::fs::write(root.join("CreativeArts.Documentary.2022.1080p.mp4"), "").unwrap();
+
+        // Different content
+        std::fs::write(root.join("TechReview.2023.Product.Launch.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("TechReview.2024.Annual.Summary.720p.mp4"), "").unwrap();
+
+        // Unrelated
+        std::fs::write(root.join("Random.2020.Content.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // All CreativeArts.Documentary files should group despite different years
+        assert!(
+            groups.contains_key("CreativeArts.Documentary") || groups.contains_key("CreativeArts"),
+            "Should find CreativeArts group"
+        );
+
+        // Check that we got the more specific group if it exists
+        if groups.contains_key("CreativeArts.Documentary") {
+            assert_eq!(
+                groups.get("CreativeArts.Documentary").unwrap().0.len(),
+                4,
+                "CreativeArts.Documentary should have 4 files"
+            );
+        }
+
+        // TechReview should also group
+        assert!(groups.contains_key("TechReview"), "Should find TechReview group");
+        assert_eq!(groups.get("TechReview").unwrap().0.len(), 2);
+    }
+
+    #[test]
+    fn multiple_valid_groupings_all_offered() {
+        // Test that when files can be grouped multiple ways, all valid groupings are available
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files that match multiple groupings:
+        // - "Network.Channel.Morning" (3-part, 2 files)
+        // - "Network.Channel" (2-part, 4 files)
+        // - "Network" (1-part, 6 files)
+        std::fs::write(root.join("Network.Channel.Morning.Show1.mp4"), "").unwrap();
+        std::fs::write(root.join("Network.Channel.Morning.Show2.mp4"), "").unwrap();
+        std::fs::write(root.join("Network.Channel.Evening.Show1.mp4"), "").unwrap();
+        std::fs::write(root.join("Network.Channel.Evening.Show2.mp4"), "").unwrap();
+        std::fs::write(root.join("Network.Sports.Game1.mp4"), "").unwrap();
+        std::fs::write(root.join("Network.Sports.Game2.mp4"), "").unwrap();
+
+        // Completely unrelated
+        std::fs::write(root.join("Independent.Film.Festival.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // All three levels of grouping should be available
+        assert!(
+            groups.contains_key("Network.Channel.Morning"),
+            "Should find 3-part Network.Channel.Morning group"
+        );
+        assert_eq!(groups.get("Network.Channel.Morning").unwrap().0.len(), 2);
+
+        assert!(
+            groups.contains_key("Network.Channel"),
+            "Should find 2-part Network.Channel group"
+        );
+        assert_eq!(groups.get("Network.Channel").unwrap().0.len(), 4);
+
+        assert!(groups.contains_key("Network"), "Should find 1-part Network group");
+        assert_eq!(groups.get("Network").unwrap().0.len(), 6);
+
+        // Network.Sports should also be a valid 2-part group
+        assert!(
+            groups.contains_key("Network.Sports"),
+            "Should find Network.Sports group"
+        );
+        assert_eq!(groups.get("Network.Sports").unwrap().0.len(), 2);
+    }
+
+    #[test]
+    fn user_can_reject_specific_group_and_use_broader_one() {
+        // Simulates the scenario from the user's example:
+        // User has files like "Galaxy.Quest.Episode.01.mp4"
+        // Tool offers "Galaxy.Quest.Episode" first (most specific)
+        // User rejects it, wants "Galaxy.Quest" instead
+        // Both options should be available in the groups
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // 3 files with "Galaxy.Quest.Episode" prefix
+        std::fs::write(root.join("Galaxy.Quest.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Galaxy.Quest.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Galaxy.Quest.Episode.03.mp4"), "").unwrap();
+        // 2 more files with "Galaxy.Quest" but different third part
+        std::fs::write(root.join("Galaxy.Quest.Movie.mp4"), "").unwrap();
+        std::fs::write(root.join("Galaxy.Quest.Special.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Most specific: "Galaxy.Quest.Episode" with 3 files
+        assert!(
+            groups.contains_key("Galaxy.Quest.Episode"),
+            "Should offer Galaxy.Quest.Episode as an option"
+        );
+        assert_eq!(
+            groups.get("Galaxy.Quest.Episode").unwrap().0.len(),
+            3,
+            "Galaxy.Quest.Episode should have 3 files"
+        );
+
+        // Less specific: "Galaxy.Quest" with all 5 files
+        assert!(
+            groups.contains_key("Galaxy.Quest"),
+            "Should offer Galaxy.Quest as an alternative option"
+        );
+        assert_eq!(
+            groups.get("Galaxy.Quest").unwrap().0.len(),
+            5,
+            "Galaxy.Quest should have all 5 files"
+        );
+
+        // Least specific: "Galaxy" with all 5 files
+        assert!(
+            groups.contains_key("Galaxy"),
+            "Should offer Galaxy as the broadest option"
+        );
+        assert_eq!(
+            groups.get("Galaxy").unwrap().0.len(),
+            5,
+            "Galaxy should have all 5 files"
+        );
+    }
+
+    #[test]
+    fn groups_sorted_by_specificity_longest_prefix_first() {
+        // Verify that when processing, longer prefixes come before shorter ones
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Ghibli.Films.Totoro.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Ghibli.Films.Spirited.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Ghibli.Films.Mononoke.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Ghibli.Shorts.One.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Ghibli.Shorts.Two.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            min_group_size: 2,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Convert to sorted vec like create_dirs_and_move_files does
+        let sorted_groups: Vec<_> = groups
+            .into_iter()
+            .sorted_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)))
+            .collect();
+
+        // Verify order: longest prefixes first
+        let prefixes: Vec<&str> = sorted_groups.iter().map(|(p, _)| p.as_str()).collect();
+
+        // 3-part prefixes should come before 2-part, which come before 1-part
+        let films_pos = prefixes.iter().position(|&p| p == "Studio.Ghibli.Films");
+        let shorts_pos = prefixes.iter().position(|&p| p == "Studio.Ghibli.Shorts");
+        let ghibli_pos = prefixes.iter().position(|&p| p == "Studio.Ghibli");
+        let studio_pos = prefixes.iter().position(|&p| p == "Studio");
+
+        assert!(films_pos.is_some(), "Should have Studio.Ghibli.Films group");
+        assert!(shorts_pos.is_some(), "Should have Studio.Ghibli.Shorts group");
+        assert!(ghibli_pos.is_some(), "Should have Studio.Ghibli group");
+        assert!(studio_pos.is_some(), "Should have Studio group");
+
+        // 3-part prefixes before 2-part
+        assert!(
+            films_pos.unwrap() < ghibli_pos.unwrap(),
+            "Studio.Ghibli.Films should come before Studio.Ghibli"
+        );
+        assert!(
+            shorts_pos.unwrap() < ghibli_pos.unwrap(),
+            "Studio.Ghibli.Shorts should come before Studio.Ghibli"
+        );
+
+        // 2-part before 1-part
+        assert!(
+            ghibli_pos.unwrap() < studio_pos.unwrap(),
+            "Studio.Ghibli should come before Studio"
+        );
+    }
+
+    #[test]
+    fn all_prefix_lengths_offered_complete_hierarchy() {
+        // Ensure complete hierarchy of prefixes is offered for user choice
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Create files where all 3 prefix levels are meaningful choices
+        std::fs::write(root.join("Marvel.Studios.Avengers.Endgame.mp4"), "").unwrap();
+        std::fs::write(root.join("Marvel.Studios.Avengers.Infinity.mp4"), "").unwrap();
+        std::fs::write(root.join("Marvel.Studios.Avengers.Age.mp4"), "").unwrap();
+        std::fs::write(root.join("Marvel.Studios.Guardians.Vol1.mp4"), "").unwrap();
+        std::fs::write(root.join("Marvel.Studios.Guardians.Vol2.mp4"), "").unwrap();
+        std::fs::write(root.join("Marvel.Television.Daredevil.S01.mp4"), "").unwrap();
+        std::fs::write(root.join("Marvel.Television.Daredevil.S02.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // 3-part groups
+        assert!(
+            groups.contains_key("Marvel.Studios.Avengers"),
+            "Missing 3-part Avengers"
+        );
+        assert_eq!(groups.get("Marvel.Studios.Avengers").unwrap().0.len(), 3);
+
+        assert!(
+            groups.contains_key("Marvel.Studios.Guardians"),
+            "Missing 3-part Guardians"
+        );
+        assert_eq!(groups.get("Marvel.Studios.Guardians").unwrap().0.len(), 2);
+
+        assert!(
+            groups.contains_key("Marvel.Television.Daredevil"),
+            "Missing 3-part Daredevil"
+        );
+        assert_eq!(groups.get("Marvel.Television.Daredevil").unwrap().0.len(), 2);
+
+        // 2-part groups
+        assert!(groups.contains_key("Marvel.Studios"), "Missing 2-part Studios");
+        assert_eq!(groups.get("Marvel.Studios").unwrap().0.len(), 5);
+
+        assert!(groups.contains_key("Marvel.Television"), "Missing 2-part Television");
+        assert_eq!(groups.get("Marvel.Television").unwrap().0.len(), 2);
+
+        // 1-part group
+        assert!(groups.contains_key("Marvel"), "Missing 1-part Marvel");
+        assert_eq!(groups.get("Marvel").unwrap().0.len(), 7);
+
+        // User could choose any of these:
+        // - "Marvel.Studios.Avengers" for just Avengers movies (3 files)
+        // - "Marvel.Studios" for all Studios content (5 files)
+        // - "Marvel" for everything (7 files)
+    }
+
+    #[test]
+    fn rejected_group_files_remain_available_for_next_group() {
+        // When a group is skipped (not moved), its files should still be available
+        // for the next offered group
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Series.Season.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Series.Season.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Series.Season.Special.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Both specific and general groups contain overlapping files
+        let specific_files = &groups.get("Series.Season.Episode").unwrap().0;
+        let general_files = &groups.get("Series.Season").unwrap().0;
+
+        assert_eq!(specific_files.len(), 2, "Specific group has 2 files");
+        assert_eq!(general_files.len(), 3, "General group has 3 files");
+
+        // The 2 files in specific group should also be in general group
+        for file in specific_files {
+            assert!(general_files.contains(file), "File {:?} should be in both groups", file);
+        }
+    }
+
+    #[test]
+    fn min_group_size_respected_correctly() {
+        // Verify that min_group_size is respected (not capped at 2)
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Groups of various sizes
+        std::fs::write(root.join("PairOnly.FileA.mp4"), "").unwrap();
+        std::fs::write(root.join("PairOnly.FileB.mp4"), "").unwrap();
+
+        std::fs::write(root.join("TripleGroup.FileA.mp4"), "").unwrap();
+        std::fs::write(root.join("TripleGroup.FileB.mp4"), "").unwrap();
+        std::fs::write(root.join("TripleGroup.FileC.mp4"), "").unwrap();
+
+        // Single files (should NOT form groups)
+        std::fs::write(root.join("LonelyFile.NoMatch.mp4"), "").unwrap();
+        std::fs::write(root.join("AnotherSingle.Standalone.mp4"), "").unwrap();
+        std::fs::write(root.join("ThirdUnique.Content.mp4"), "").unwrap();
+
+        // With min_group_size=5, neither group qualifies (2 and 3 files < 5)
+        let dirmove = DirMove::new(root.clone(), make_grouping_config(5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(
+            groups.is_empty(),
+            "With min_group_size=5, no groups should be found (max is 3 files)"
+        );
+
+        // With min_group_size=3, only TripleGroup qualifies
+        let dirmove = DirMove::new(root.clone(), make_grouping_config(3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(
+            !groups.contains_key("PairOnly"),
+            "PairOnly (2 files) should not be found with min_group_size=3"
+        );
+        assert!(
+            groups.contains_key("TripleGroup"),
+            "TripleGroup (3 files) should be found with min_group_size=3"
+        );
+        assert_eq!(groups.get("TripleGroup").unwrap().0.len(), 3);
+
+        // With min_group_size=2, both groups qualify
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(
+            groups.contains_key("PairOnly"),
+            "PairOnly (2 files) should be found with min_group_size=2"
+        );
+        assert!(
+            groups.contains_key("TripleGroup"),
+            "TripleGroup (3 files) should be found with min_group_size=2"
+        );
+
+        // Single files should NOT form groups regardless of threshold
+        assert!(
+            !groups.contains_key("LonelyFile"),
+            "Single files should not form groups"
+        );
+        assert!(
+            !groups.contains_key("AnotherSingle"),
+            "Single files should not form groups"
+        );
+    }
+
+    #[test]
+    fn mixed_case_and_format_all_normalized_correctly() {
+        // Comprehensive test of case and format normalization
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // All these should be the same group (StarBright)
+        std::fs::write(root.join("StarBright.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Star.Bright.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("STARBRIGHT.Episode.03.mp4"), "").unwrap();
+        std::fs::write(root.join("starbright.Episode.04.mp4"), "").unwrap();
+        std::fs::write(root.join("Star.bright.Episode.05.mp4"), "").unwrap();
+        std::fs::write(root.join("starBright.Episode.06.mp4"), "").unwrap();
+
+        // Different prefix entirely
+        std::fs::write(root.join("MoonGlow.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Moon.Glow.Episode.02.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // All StarBright variants should be in ONE group
+        // Should prefer concatenated form
+        let starbright_key = groups
+            .keys()
+            .find(|k| k.to_lowercase().replace('.', "") == "starbright")
+            .expect("Should find a StarBright group");
+
+        assert_eq!(
+            groups.get(starbright_key).unwrap().0.len(),
+            6,
+            "All 6 StarBright variants should be in one group"
+        );
+
+        // MoonGlow should be separate
+        let moonglow_key = groups
+            .keys()
+            .find(|k| k.to_lowercase().replace('.', "") == "moonglow")
+            .expect("Should find a MoonGlow group");
+
+        assert_eq!(
+            groups.get(moonglow_key).unwrap().0.len(),
+            2,
+            "MoonGlow should have 2 files"
+        );
+    }
+
+    #[test]
+    fn four_part_prefix_uses_three_part_max() {
+        // Prefixes longer than 3 parts should still work, using the first 3 parts
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("One.Two.Three.Four.File1.mp4"), "").unwrap();
+        std::fs::write(root.join("One.Two.Three.Four.File2.mp4"), "").unwrap();
+        std::fs::write(root.join("One.Two.Three.Different.File3.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find "One.Two.Three" as a group with all 3 files
+        assert!(groups.contains_key("One.Two.Three"), "Should find 3-part prefix group");
+        assert_eq!(groups.get("One.Two.Three").unwrap().0.len(), 3);
+    }
+
+    #[test]
+    fn alphanumeric_prefix_not_filtered() {
+        // Alphanumeric prefixes (not purely numeric) should be kept
+        // Note: Purely numeric parts like "24" ARE filtered by design
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Show24.Hours.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show24.Hours.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Show24.Hours.Episode.03.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find "Show24.Hours" or similar as a valid group
+        assert!(
+            groups.keys().any(|k| k.to_lowercase().contains("show24")),
+            "Should find group with alphanumeric prefix"
+        );
+    }
+
+    #[test]
+    fn single_character_prefix_forms_group() {
+        // Single character prefixes should work if they meet threshold
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("X.Files.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("X.Files.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("X.Files.Episode.03.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find "X.Files" as a group
+        assert!(
+            groups.contains_key("X.Files") || groups.contains_key("XFiles"),
+            "Should find X.Files group"
+        );
+    }
+
+    #[test]
+    fn hyphenated_names_treated_as_single_part() {
+        // Hyphens within a dot-part should be preserved
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Spider-Man.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Spider-Man.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Spider-Man.Movie.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find "Spider-Man" as a group
+        assert!(groups.contains_key("Spider-Man"), "Should preserve hyphen in prefix");
+        assert_eq!(groups.get("Spider-Man").unwrap().0.len(), 3);
+    }
+
+    #[test]
+    fn underscore_names_not_split() {
+        // Underscores should not be treated as separators
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("My_Show.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("My_Show.Episode.02.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find "My_Show" as a group (underscore preserved)
+        assert!(groups.contains_key("My_Show"), "Should preserve underscore in prefix");
+    }
+
+    #[test]
+    fn empty_filename_parts_handled() {
+        // Double dots or leading dots should be handled gracefully
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Show..Name.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Show..Name.Episode.02.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should handle gracefully without panic
+        assert!(!groups.is_empty(), "Should find some group even with double dots");
+    }
+
+    #[test]
+    fn very_long_filename_prefix_extraction() {
+        // Very long filenames should still work
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let long_name = "A".repeat(50);
+        std::fs::write(root.join(format!("{long_name}.Part.01.mp4")), "").unwrap();
+        std::fs::write(root.join(format!("{long_name}.Part.02.mp4")), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find the long prefix as a group
+        assert!(
+            groups.keys().any(|k| k.starts_with(&long_name)),
+            "Should handle very long prefixes"
+        );
+    }
+
+    #[test]
+    fn min_group_size_one_creates_single_file_groups() {
+        // With min_group_size=1, even single files should form groups
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Unique.Name.File.mp4"), "").unwrap();
+        std::fs::write(root.join("Another.Unique.File.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(1));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Both unique files should form their own groups
+        assert!(
+            groups.len() >= 2,
+            "With min_group_size=1, single files should form groups"
+        );
+    }
+
+    #[test]
+    fn files_with_only_extension_no_prefix() {
+        // Edge case: files that are just an extension or very short
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join(".mp4"), "").unwrap();
+        std::fs::write(root.join("a.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+
+        // Should not panic, may or may not find groups
+        let _groups = dirmove.collect_all_prefix_groups(&files_with_names);
+    }
+
+    #[test]
+    fn mixed_extensions_same_prefix_grouped() {
+        // Files with same prefix but different extensions should be grouped
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Movie.Name.2024.mp4"), "").unwrap();
+        std::fs::write(root.join("Movie.Name.2024.srt"), "").unwrap();
+        std::fs::write(root.join("Movie.Name.2024.nfo"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // All three should be in one group based on "Movie.Name"
+        let movie_group = groups.iter().find(|(k, _)| k.to_lowercase().contains("movie"));
+        assert!(movie_group.is_some(), "Should find Movie group");
+        assert_eq!(
+            movie_group.unwrap().1.0.len(),
+            3,
+            "All extensions should be in same group"
+        );
     }
 }
