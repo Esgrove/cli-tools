@@ -144,7 +144,7 @@ impl Config {
 }
 
 #[cfg(test)]
-mod dirmove_config_tests {
+mod config_tests {
     use super::*;
 
     #[test]
@@ -264,5 +264,180 @@ verbose = true
         let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.verbose);
         assert!(!config.auto);
+    }
+}
+
+#[cfg(test)]
+mod cli_args_tests {
+    use super::*;
+    use crate::config::Config;
+    use clap::Parser;
+
+    #[test]
+    fn parses_multiple_include_patterns() {
+        let args =
+            DirMoveArgs::try_parse_from(["test", "-n", "*.mp4", "-n", "*.mkv", "-n", "*.avi"]).expect("should parse");
+        assert_eq!(args.include, vec!["*.mp4", "*.mkv", "*.avi"]);
+    }
+
+    #[test]
+    fn parses_multiple_exclude_patterns() {
+        let args =
+            DirMoveArgs::try_parse_from(["test", "-e", "*.txt", "-e", "*.nfo", "-e", "*.jpg"]).expect("should parse");
+        assert_eq!(args.exclude, vec!["*.txt", "*.nfo", "*.jpg"]);
+    }
+
+    #[test]
+    fn parses_multiple_prefix_ignores() {
+        let args = DirMoveArgs::try_parse_from(["test", "-i", "the", "-i", "a", "-i", "an"]).expect("should parse");
+        assert_eq!(args.prefix_ignore, vec!["the", "a", "an"]);
+    }
+
+    #[test]
+    fn parses_multiple_prefix_overrides() {
+        let args = DirMoveArgs::try_parse_from(["test", "-o", "special", "-o", "custom"]).expect("should parse");
+        assert_eq!(args.prefix_override, vec!["special", "custom"]);
+    }
+
+    #[test]
+    fn parses_multiple_unpack_directories() {
+        let args =
+            DirMoveArgs::try_parse_from(["test", "-u", "subs", "-u", "sample", "-u", "screens"]).expect("should parse");
+        assert_eq!(args.unpack_directory, vec!["subs", "sample", "screens"]);
+    }
+
+    #[test]
+    fn parses_group_size() {
+        let args = DirMoveArgs::try_parse_from(["test", "-g", "5"]).expect("should parse");
+        assert_eq!(args.group, Some(5));
+    }
+
+    #[test]
+    fn default_group_size_is_none() {
+        let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
+        assert_eq!(args.group, None);
+    }
+
+    #[test]
+    fn parses_min_prefix_chars() {
+        let args = DirMoveArgs::try_parse_from(["test", "-m", "8"]).expect("should parse");
+        assert_eq!(args.min_prefix_chars, Some(8));
+    }
+
+    #[test]
+    fn parses_min_prefix_chars_long_form() {
+        let args = DirMoveArgs::try_parse_from(["test", "--min-chars", "10"]).expect("should parse");
+        assert_eq!(args.min_prefix_chars, Some(10));
+    }
+
+    #[test]
+    fn default_min_prefix_chars_is_none() {
+        let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
+        assert_eq!(args.min_prefix_chars, None);
+    }
+
+    #[test]
+    fn rejects_invalid_min_prefix_chars() {
+        let result = DirMoveArgs::try_parse_from(["test", "-m", "not_a_number"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_from_args_uses_cli_min_prefix_chars() {
+        let args = DirMoveArgs::try_parse_from(["test", "-m", "8"]).expect("should parse");
+        let config = Config::from_args(args);
+        assert_eq!(config.min_prefix_chars, 8);
+    }
+
+    #[test]
+    fn config_from_args_default_min_prefix_chars_is_five() {
+        let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
+        let config = Config::from_args(args);
+        assert_eq!(config.min_prefix_chars, 5);
+    }
+
+    #[test]
+    fn parses_combined_short_flags() {
+        let args = DirMoveArgs::try_parse_from(["test", "-acrv"]).expect("should parse");
+        assert!(args.auto);
+        assert!(args.create);
+        assert!(args.recurse);
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn parses_long_flags() {
+        let args = DirMoveArgs::try_parse_from(["test", "--auto", "--create", "--recurse", "--verbose"])
+            .expect("should parse");
+        assert!(args.auto);
+        assert!(args.create);
+        assert!(args.recurse);
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn parses_path_argument() {
+        let args = DirMoveArgs::try_parse_from(["test", "/some/path"]).expect("should parse");
+        assert!(args.path.is_some());
+        assert_eq!(args.path.unwrap().to_string_lossy(), "/some/path");
+    }
+
+    #[test]
+    fn rejects_invalid_group_size() {
+        let result = DirMoveArgs::try_parse_from(["test", "-g", "not_a_number"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_arrays_by_default() {
+        let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
+        assert!(args.include.is_empty());
+        assert!(args.exclude.is_empty());
+        assert!(args.prefix_ignore.is_empty());
+        assert!(args.prefix_override.is_empty());
+        assert!(args.unpack_directory.is_empty());
+    }
+
+    #[test]
+    fn config_from_args_includes_cli_patterns() {
+        let args = DirMoveArgs::try_parse_from(["test", "-n", "*.mp4", "-n", "*.mkv"]).expect("should parse");
+        let config = Config::from_args(args);
+        // CLI patterns should be included (may also have user config patterns)
+        assert!(config.include.contains(&"*.mp4".to_string()));
+        assert!(config.include.contains(&"*.mkv".to_string()));
+    }
+
+    #[test]
+    fn config_from_args_cli_flags_enable_options() {
+        // CLI boolean flags should enable options (OR with user config)
+        let args = DirMoveArgs::try_parse_from(["test", "-a", "-c", "-r", "-v"]).expect("should parse");
+        let config = Config::from_args(args);
+        assert!(config.auto);
+        assert!(config.create);
+        assert!(config.recurse);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn config_from_args_includes_unpack_dirs_lowercase() {
+        let args = DirMoveArgs::try_parse_from(["test", "-u", "SUBS", "-u", "Sample"]).expect("should parse");
+        let config = Config::from_args(args);
+        // CLI unpack dirs should be included as lowercase
+        assert!(config.unpack_directory_names.contains(&"subs".to_string()));
+        assert!(config.unpack_directory_names.contains(&"sample".to_string()));
+    }
+
+    #[test]
+    fn config_from_args_print_enables_dryrun() {
+        let args = DirMoveArgs::try_parse_from(["test", "-p"]).expect("should parse");
+        let config = Config::from_args(args);
+        assert!(config.dryrun);
+    }
+
+    #[test]
+    fn config_from_args_force_enables_overwrite() {
+        let args = DirMoveArgs::try_parse_from(["test", "-f"]).expect("should parse");
+        let config = Config::from_args(args);
+        assert!(config.overwrite);
     }
 }
