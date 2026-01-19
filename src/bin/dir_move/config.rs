@@ -18,6 +18,7 @@ pub struct Config {
     pub(crate) include: Vec<String>,
     pub(crate) exclude: Vec<String>,
     pub(crate) min_group_size: usize,
+    pub(crate) min_prefix_chars: usize,
     pub(crate) overwrite: bool,
     pub(crate) prefix_ignores: Vec<String>,
     pub(crate) prefix_overrides: Vec<String>,
@@ -43,6 +44,8 @@ struct DirMoveConfig {
     exclude: Vec<String>,
     #[serde(default)]
     min_group_size: Option<usize>,
+    #[serde(default)]
+    min_prefix_chars: Option<usize>,
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
@@ -129,6 +132,7 @@ impl Config {
             include,
             exclude,
             min_group_size: args.group.or(user_config.min_group_size).unwrap_or(3),
+            min_prefix_chars: args.min_prefix_chars.or(user_config.min_prefix_chars).unwrap_or(5),
             overwrite: args.force || user_config.overwrite,
             prefix_ignores,
             prefix_overrides,
@@ -212,6 +216,23 @@ min_group_size = 5
 ";
         let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.min_group_size, Some(5));
+    }
+
+    #[test]
+    fn from_toml_str_parses_min_prefix_chars() {
+        let toml = r"
+[dirmove]
+min_prefix_chars = 8
+";
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.min_prefix_chars, Some(8));
+    }
+
+    #[test]
+    fn from_toml_str_default_min_prefix_chars_is_none() {
+        let toml = "";
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse empty config");
+        assert_eq!(config.min_prefix_chars, None);
     }
 
     #[test]

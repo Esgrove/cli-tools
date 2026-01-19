@@ -55,6 +55,10 @@ struct DirMoveArgs {
     #[arg(short = 'g', long, name = "COUNT")]
     group: Option<usize>,
 
+    /// Minimum character count for prefixes to be valid group names (excluding dots)
+    #[arg(short = 'm', long = "min-chars", name = "CHARS")]
+    min_prefix_chars: Option<usize>,
+
     /// Only print changes without moving files
     #[arg(short = 'p', long)]
     print: bool,
@@ -129,6 +133,44 @@ mod cli_args_tests {
     fn default_group_size_is_none() {
         let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
         assert_eq!(args.group, None);
+    }
+
+    #[test]
+    fn parses_min_prefix_chars() {
+        let args = DirMoveArgs::try_parse_from(["test", "-m", "8"]).expect("should parse");
+        assert_eq!(args.min_prefix_chars, Some(8));
+    }
+
+    #[test]
+    fn parses_min_prefix_chars_long_form() {
+        let args = DirMoveArgs::try_parse_from(["test", "--min-chars", "10"]).expect("should parse");
+        assert_eq!(args.min_prefix_chars, Some(10));
+    }
+
+    #[test]
+    fn default_min_prefix_chars_is_none() {
+        let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
+        assert_eq!(args.min_prefix_chars, None);
+    }
+
+    #[test]
+    fn rejects_invalid_min_prefix_chars() {
+        let result = DirMoveArgs::try_parse_from(["test", "-m", "not_a_number"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_from_args_uses_cli_min_prefix_chars() {
+        let args = DirMoveArgs::try_parse_from(["test", "-m", "8"]).expect("should parse");
+        let config = Config::from_args(args);
+        assert_eq!(config.min_prefix_chars, 8);
+    }
+
+    #[test]
+    fn config_from_args_default_min_prefix_chars_is_five() {
+        let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
+        let config = Config::from_args(args);
+        assert_eq!(config.min_prefix_chars, 5);
     }
 
     #[test]

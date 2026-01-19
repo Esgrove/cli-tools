@@ -8,6 +8,7 @@
 # include = []
 # exclude = []
 # min_group_size = 3
+# min_prefix_chars = 5
 # overwrite = false
 # prefix_ignores = ["Something", "Other.Prefix"]
 # prefix_overrides = ["longer.prefix", "some.name"]
