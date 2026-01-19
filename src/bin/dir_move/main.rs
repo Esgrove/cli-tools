@@ -52,8 +52,8 @@ struct DirMoveArgs {
     unpack_directory: Vec<String>,
 
     /// Minimum number of matching files needed to create a group
-    #[arg(short = 'g', long, name = "COUNT", default_value_t = 3)]
-    group: usize,
+    #[arg(short = 'g', long, name = "COUNT")]
+    group: Option<usize>,
 
     /// Only print changes without moving files
     #[arg(short = 'p', long)]
@@ -122,13 +122,13 @@ mod cli_args_tests {
     #[test]
     fn parses_group_size() {
         let args = DirMoveArgs::try_parse_from(["test", "-g", "5"]).expect("should parse");
-        assert_eq!(args.group, 5);
+        assert_eq!(args.group, Some(5));
     }
 
     #[test]
-    fn default_group_size_is_3() {
+    fn default_group_size_is_none() {
         let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
-        assert_eq!(args.group, 3);
+        assert_eq!(args.group, None);
     }
 
     #[test]

@@ -5505,4 +5505,63 @@ mod test_realistic_grouping {
             "All extensions should be in same group"
         );
     }
+
+    #[test]
+    fn realistic_scenario_seven_files_four_share_two_part_prefix() {
+        // Realistic scenario: 7 files starting with "Studio"
+        // 4 of them share the two-part prefix "Studio.Alpha"
+        // With min_group_size=3, both groups should be offered:
+        // - "Studio.Alpha" (4 files)
+        // - "Studio" (7 files)
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // 4 files with "Studio.Alpha" prefix
+        std::fs::write(root.join("Studio.Alpha.First.Project.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Second.Work.1080p.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Third.Creation.720p.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Fourth.Piece.720p.x265.mp4"), "").unwrap();
+
+        // 3 more files with different second parts
+        std::fs::write(root.join("Studio.Beta.Something.Different.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Gamma.Another.Thing.720p.x265.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Delta.Yet.Another.Item.1080p.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+
+        // Debug: print what files we collected
+        eprintln!("Collected files:");
+        for (path, name) in &files_with_names {
+            eprintln!("  {} -> {}", path.file_name().unwrap().to_string_lossy(), name);
+        }
+
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Debug: print all groups found
+        eprintln!("Groups found:");
+        for (prefix, (files, parts)) in &groups {
+            eprintln!("  {} ({} parts): {} files", prefix, parts, files.len());
+        }
+
+        // Should find "Studio.Alpha" with 4 files (meets min_group_size=3)
+        assert!(
+            groups.contains_key("Studio.Alpha"),
+            "Should find Studio.Alpha group. Found groups: {:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            groups.get("Studio.Alpha").unwrap().0.len(),
+            4,
+            "Studio.Alpha should have 4 files"
+        );
+
+        // Should find "Studio" with 7 files
+        assert!(
+            groups.contains_key("Studio"),
+            "Should find Studio group. Found groups: {:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(groups.get("Studio").unwrap().0.len(), 7, "Studio should have 7 files");
+    }
 }

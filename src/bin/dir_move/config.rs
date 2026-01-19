@@ -128,7 +128,7 @@ impl Config {
             dryrun: args.print || user_config.dryrun,
             include,
             exclude,
-            min_group_size: user_config.min_group_size.unwrap_or(args.group),
+            min_group_size: args.group.or(user_config.min_group_size).unwrap_or(3),
             overwrite: args.force || user_config.overwrite,
             prefix_ignores,
             prefix_overrides,
