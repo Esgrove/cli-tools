@@ -174,6 +174,30 @@ static FILTER_PREFIXES: [&str; 82] = [
     "WOLT",
 ];
 
+/// Intermediate parsed data before creating a `VisaItem`.
+/// Used during the parsing phase to handle year transitions.
+#[derive(Debug)]
+struct RawParsedItem {
+    day: i32,
+    month: i32,
+    name: String,
+    sum: f64,
+}
+
+impl RawParsedItem {
+    /// Convert this raw parsed item into a `VisaItem` with the given year.
+    fn into_visa_item(self, year: i32) -> Result<VisaItem> {
+        let date_str = format!("{:02}.{:02}.{year}", self.day, self.month);
+        let date = NaiveDate::parse_from_str(&date_str, "%d.%m.%Y")
+            .with_context(|| format!("Invalid date '{date_str}' for item: {} ({:.2}€)", self.name, self.sum))?;
+        Ok(VisaItem {
+            date,
+            name: self.name,
+            sum: self.sum,
+        })
+    }
+}
+
 /// Represents one credit card purchase.
 #[derive(Debug, Clone, PartialEq)]
 struct VisaItem {
@@ -402,7 +426,7 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
 
 /// Convert text lines to visa items.
 fn extract_items(rows: &[String], year: i32) -> Result<Vec<VisaItem>> {
-    let mut formatted_data: Vec<(i32, i32, String, f64)> = Vec::new();
+    let mut parsed_items: Vec<RawParsedItem> = Vec::new();
     for line in rows {
         let (date, name, sum) = split_item_text(line);
         let (day, month) = date
@@ -412,34 +436,32 @@ fn extract_items(rows: &[String], year: i32) -> Result<Vec<VisaItem>> {
         let day: i32 = day.parse()?;
         let name = format_name(&name);
         let sum = format_sum(&sum).with_context(|| format!("Failed format sum: {sum}"))?;
-        formatted_data.push((day, month, name, sum));
+        parsed_items.push(RawParsedItem { day, month, name, sum });
     }
 
     // Determine if there's a transition from December to January.
     let mut year_transition_detected = false;
     let mut last_month: i32 = 0;
-    for (_, month, _, _) in &formatted_data {
-        if *month == 1 && last_month == 12 {
+    for item in &parsed_items {
+        if item.month == 1 && last_month == 12 {
             year_transition_detected = true;
             break;
         }
-        last_month = *month;
+        last_month = item.month;
     }
 
     let previous_year = year - 1;
     let mut result: Vec<VisaItem> = Vec::new();
-    for (day, month, name, sum) in formatted_data {
-        let year = if month == 12 && year_transition_detected {
+    for item in parsed_items {
+        let item_year = if item.month == 12 && year_transition_detected {
             previous_year
         } else {
             year
         };
 
-        let date_str = format!("{day:02}.{month:02}.{year}");
-        if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%d.%m.%Y") {
-            result.push(VisaItem { date, name, sum });
-        } else {
-            eprintln!("{}", format!("Failed to parse date: {date_str}").red());
+        match item.into_visa_item(item_year) {
+            Ok(visa_item) => result.push(visa_item),
+            Err(err) => eprintln!("{}", format!("Failed to parse item: {err}").red()),
         }
     }
 

@@ -42,6 +42,47 @@ const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {
 /// All video extensions
 pub const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
 
+/// Range of a pattern match in a filename.
+#[derive(Debug, Clone, Copy)]
+pub struct MatchRange {
+    /// Start position of the match (inclusive).
+    pub start: usize,
+    /// End position of the match (exclusive).
+    pub end: usize,
+}
+
+impl MatchRange {
+    /// Extract the matched substring from the given text.
+    pub fn extract_from<'a>(&self, text: &'a str) -> &'a str {
+        &text[self.start..self.end]
+    }
+}
+
+/// A group of duplicate files that share a common key.
+#[derive(Debug, Clone)]
+pub struct DuplicateGroup {
+    /// The normalized key that identifies this group.
+    pub key: String,
+    /// Files belonging to this duplicate group.
+    pub files: Vec<FileInfo>,
+}
+
+impl DuplicateGroup {
+    /// Create a new duplicate group.
+    pub const fn new(key: String, files: Vec<FileInfo>) -> Self {
+        Self { key, files }
+    }
+
+    /// Get the display name for this group.
+    /// Uses the pattern match text from the first file if available, otherwise falls back to the key.
+    pub fn display_name(&self) -> String {
+        self.files
+            .first()
+            .and_then(|f| f.pattern_match.map(|range| range.extract_from(&f.filename).to_string()))
+            .unwrap_or_else(|| self.key.clone())
+    }
+}
+
 /// Information about a found file
 #[derive(Debug, Clone)]
 pub struct FileInfo {
@@ -49,8 +90,8 @@ pub struct FileInfo {
     pub(crate) filename: String,
     pub(crate) stem: String,
     pub(crate) extension: String,
-    /// Pattern match range (start, end) if matched by a pattern
-    pattern_match: Option<(usize, usize)>,
+    /// Pattern match range if matched by a pattern.
+    pattern_match: Option<MatchRange>,
 }
 
 pub struct DupeFind {
@@ -142,9 +183,9 @@ impl DupeFind {
             format!("Found {} duplicate groups:", duplicates.len()).yellow().bold()
         );
 
-        for (key, files) in &duplicates {
-            println!("\n{}:", key.cyan());
-            for file in files.iter().sorted_by_key(|f| &f.path) {
+        for group in &duplicates {
+            println!("\n{}:", group.key.cyan());
+            for file in group.files.iter().sorted_by_key(|f| &f.path) {
                 let display_name = Self::format_filename_with_highlight(&file.filename, file.pattern_match);
                 println!("  {display_name}");
             }
@@ -202,7 +243,7 @@ impl DupeFind {
     /// - Same filename in different directories
     /// - Match the same identifier pattern
     /// - Same normalized name (different resolution / codec / extension)
-    fn find_all_duplicates(&self, files: &[FileInfo]) -> Vec<(String, Vec<FileInfo>)> {
+    fn find_all_duplicates(&self, files: &[FileInfo]) -> Vec<DuplicateGroup> {
         if self.config.verbose {
             println!("Checking {} files for duplicates...", files.len());
         }
@@ -255,14 +296,20 @@ impl DupeFind {
         }
 
         // Merge groups based on pattern matches and store match positions
-        let mut pattern_matches: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut pattern_matches: HashMap<usize, MatchRange> = HashMap::new();
         if !self.config.patterns.is_empty() {
             let mut pattern_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
             for (idx, file) in files.iter().enumerate() {
                 for pattern in &self.config.patterns {
                     if let Some(m) = pattern.find(&file.filename) {
                         pattern_to_indices.entry(m.as_str().to_string()).or_default().push(idx);
-                        pattern_matches.insert(idx, (m.start(), m.end()));
+                        pattern_matches.insert(
+                            idx,
+                            MatchRange {
+                                start: m.start(),
+                                end: m.end(),
+                            },
+                        );
                         break; // Only match first pattern
                     }
                 }
@@ -288,9 +335,9 @@ impl DupeFind {
                         file
                     })
                     .collect();
-                (key, file_refs)
+                DuplicateGroup::new(key, file_refs)
             })
-            .sorted_by(|a, b| a.0.cmp(&b.0))
+            .sorted_by(|a, b| a.key.cmp(&b.key))
             .collect()
     }
 
@@ -322,15 +369,16 @@ impl DupeFind {
     }
 
     /// Format filename with optional pattern match highlighting
-    fn format_filename_with_highlight(filename: &str, pattern_match: Option<(usize, usize)>) -> String {
-        if let Some((start, end)) = pattern_match {
-            let before = &filename[..start];
-            let matched = filename[start..end].green().to_string();
-            let after = &filename[end..];
-            format!("{before}{matched}{after}")
-        } else {
-            filename.to_string()
-        }
+    fn format_filename_with_highlight(filename: &str, pattern_match: Option<MatchRange>) -> String {
+        pattern_match.map_or_else(
+            || filename.to_string(),
+            |range| {
+                let before = &filename[..range.start];
+                let matched = range.extract_from(filename).green().to_string();
+                let after = &filename[range.end..];
+                format!("{before}{matched}{after}")
+            },
+        )
     }
 
     /// Normalize a file stem by removing resolution and codec patterns
@@ -356,7 +404,7 @@ impl DupeFind {
     }
 
     /// Move duplicate files to a Duplicates directory
-    fn move_duplicates(&self, duplicates: &[(String, Vec<FileInfo>)]) -> anyhow::Result<()> {
+    fn move_duplicates(&self, duplicates: &[DuplicateGroup]) -> anyhow::Result<()> {
         // Use the first root as the duplicates directory location
         let duplicates_dir = self.roots.first().map_or_else(
             || {
@@ -379,14 +427,10 @@ impl DupeFind {
             std::fs::create_dir_all(&duplicates_dir)?;
         }
 
-        for (identifier, files) in duplicates {
-            // Use pattern match text as directory name if available, otherwise use identifier
-            let group_name = files
-                .first()
-                .and_then(|f| f.pattern_match.map(|(start, end)| f.filename[start..end].to_string()))
-                .unwrap_or_else(|| identifier.clone());
+        for group in duplicates {
+            let group_name = group.display_name();
 
-            for file in files {
+            for file in &group.files {
                 let target_dir = duplicates_dir.join(&group_name);
                 let target_path = cli_tools::get_unique_path(&target_dir, &file.filename, &file.stem, &file.extension);
 
@@ -476,8 +520,8 @@ mod tests {
 
         // movie.1080p and movie.720p should be grouped (both normalize to "movie")
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].0, "movie");
-        assert_eq!(duplicates[0].1.len(), 2);
+        assert_eq!(duplicates[0].key, "movie");
+        assert_eq!(duplicates[0].files.len(), 2);
     }
 
     #[test]
@@ -492,7 +536,7 @@ mod tests {
         let duplicates = finder.find_all_duplicates(&files);
 
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 2);
+        assert_eq!(duplicates[0].files.len(), 2);
     }
 
     #[test]
@@ -508,9 +552,9 @@ mod tests {
 
         // video.ABC123 and movie.ABC123 should be grouped by pattern match
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 2);
+        assert_eq!(duplicates[0].files.len(), 2);
         // Verify pattern match positions are stored
-        assert!(duplicates[0].1.iter().all(|f| f.pattern_match.is_some()));
+        assert!(duplicates[0].files.iter().all(|f| f.pattern_match.is_some()));
     }
 
     #[test]
@@ -529,8 +573,8 @@ mod tests {
         let duplicates = finder.find_all_duplicates(&files);
 
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 3);
-        assert!(duplicates[0].1.iter().all(|f| f.pattern_match.is_some()));
+        assert_eq!(duplicates[0].files.len(), 3);
+        assert!(duplicates[0].files.iter().all(|f| f.pattern_match.is_some()));
     }
 
     #[test]
@@ -548,7 +592,7 @@ mod tests {
         let duplicates = finder.find_all_duplicates(&files);
 
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 5);
+        assert_eq!(duplicates[0].files.len(), 5);
     }
 
     #[test]
@@ -572,9 +616,9 @@ mod tests {
         // tt9999999 is alone, so no group for it
         let tt1234567_group = duplicates
             .iter()
-            .find(|(_, files)| files.iter().any(|f| f.filename.contains("tt1234567")));
+            .find(|group| group.files.iter().any(|f| f.filename.contains("tt1234567")));
         assert!(tt1234567_group.is_some());
-        assert_eq!(tt1234567_group.unwrap().1.len(), 5);
+        assert_eq!(tt1234567_group.unwrap().files.len(), 5);
     }
 
     #[test]
@@ -598,15 +642,15 @@ mod tests {
 
         let e05_group = duplicates
             .iter()
-            .find(|(_, files)| files.iter().any(|f| f.filename.contains("S01E05")));
+            .find(|group| group.files.iter().any(|f| f.filename.contains("S01E05")));
         assert!(e05_group.is_some());
-        assert_eq!(e05_group.unwrap().1.len(), 4);
+        assert_eq!(e05_group.unwrap().files.len(), 4);
 
         let e06_group = duplicates
             .iter()
-            .find(|(_, files)| files.iter().any(|f| f.filename.contains("S01E06")));
+            .find(|group| group.files.iter().any(|f| f.filename.contains("S01E06")));
         assert!(e06_group.is_some());
-        assert_eq!(e06_group.unwrap().1.len(), 2);
+        assert_eq!(e06_group.unwrap().files.len(), 2);
     }
 
     #[test]
@@ -623,7 +667,7 @@ mod tests {
         let duplicates = finder.find_all_duplicates(&files);
 
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 4);
+        assert_eq!(duplicates[0].files.len(), 4);
     }
 
     #[test]
@@ -645,7 +689,7 @@ mod tests {
 
         // All have same pattern match "ID123", so grouped together
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 4);
+        assert_eq!(duplicates[0].files.len(), 4);
     }
 
     #[test]
@@ -662,9 +706,9 @@ mod tests {
         let duplicates = finder.find_all_duplicates(&files);
 
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 4);
+        assert_eq!(duplicates[0].files.len(), 4);
         // Verify all have pattern matches recorded
-        assert!(duplicates[0].1.iter().all(|f| f.pattern_match.is_some()));
+        assert!(duplicates[0].files.iter().all(|f| f.pattern_match.is_some()));
     }
 
     #[test]
@@ -681,7 +725,7 @@ mod tests {
 
         // Should group by pattern V1080, resolution should be stripped separately
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].1.len(), 3);
+        assert_eq!(duplicates[0].files.len(), 3);
     }
 
     #[test]
@@ -717,23 +761,23 @@ mod tests {
 
         let grpa = duplicates
             .iter()
-            .find(|(_, f)| f.iter().any(|x| x.filename.contains("GRPA")));
-        assert_eq!(grpa.unwrap().1.len(), 3);
+            .find(|group| group.files.iter().any(|x| x.filename.contains("GRPA")));
+        assert_eq!(grpa.unwrap().files.len(), 3);
 
         let grpb = duplicates
             .iter()
-            .find(|(_, f)| f.iter().any(|x| x.filename.contains("GRPB")));
-        assert_eq!(grpb.unwrap().1.len(), 2);
+            .find(|group| group.files.iter().any(|x| x.filename.contains("GRPB")));
+        assert_eq!(grpb.unwrap().files.len(), 2);
 
         let num001 = duplicates
             .iter()
-            .find(|(_, f)| f.iter().any(|x| x.filename.contains("NUM001")));
-        assert_eq!(num001.unwrap().1.len(), 4);
+            .find(|group| group.files.iter().any(|x| x.filename.contains("NUM001")));
+        assert_eq!(num001.unwrap().files.len(), 4);
 
         let tag_test = duplicates
             .iter()
-            .find(|(_, f)| f.iter().any(|x| x.filename.contains("TAG_test")));
-        assert_eq!(tag_test.unwrap().1.len(), 2);
+            .find(|group| group.files.iter().any(|x| x.filename.contains("TAG_test")));
+        assert_eq!(tag_test.unwrap().files.len(), 2);
     }
 
     #[test]
@@ -771,16 +815,16 @@ mod tests {
         assert_eq!(duplicates.len(), 2);
 
         // Find the movie group and verify it has 2 files
-        let movie_group = duplicates.iter().find(|(k, _)| k == "movie");
+        let movie_group = duplicates.iter().find(|group| group.key == "movie");
         assert!(movie_group.is_some());
-        assert_eq!(movie_group.unwrap().1.len(), 2);
+        assert_eq!(movie_group.unwrap().files.len(), 2);
 
         // Find the pattern-matched group (will be keyed by first file's normalized name)
-        let pattern_group = duplicates.iter().find(|(k, _)| k != "movie");
+        let pattern_group = duplicates.iter().find(|group| group.key != "movie");
         assert!(pattern_group.is_some());
-        assert_eq!(pattern_group.unwrap().1.len(), 2);
+        assert_eq!(pattern_group.unwrap().files.len(), 2);
         // Verify pattern match positions are stored
-        assert!(pattern_group.unwrap().1.iter().all(|f| f.pattern_match.is_some()));
+        assert!(pattern_group.unwrap().files.iter().all(|f| f.pattern_match.is_some()));
     }
 
     #[test]
@@ -797,8 +841,8 @@ mod tests {
 
         // All should normalize to "show"
         assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0].0, "show");
-        assert_eq!(duplicates[0].1.len(), 4);
+        assert_eq!(duplicates[0].key, "show");
+        assert_eq!(duplicates[0].files.len(), 4);
     }
 
     #[test]
@@ -837,16 +881,17 @@ mod tests {
         // FIRST001 group should have 3 files (including the one with both patterns)
         let first_group = duplicates
             .iter()
-            .find(|(_, f)| f.iter().any(|x| x.filename.contains("FIRST001")));
+            .find(|group| group.files.iter().any(|x| x.filename.contains("FIRST001")));
         assert!(first_group.is_some());
-        assert_eq!(first_group.unwrap().1.len(), 3);
+        assert_eq!(first_group.unwrap().files.len(), 3);
 
         // SECOND002 group should have 2 files (excluding the one matched by FIRST)
-        let second_group = duplicates.iter().find(|(_, f)| {
-            f.iter().all(|x| !x.filename.contains("FIRST001")) && f.iter().any(|x| x.filename.contains("SECOND002"))
+        let second_group = duplicates.iter().find(|group| {
+            group.files.iter().all(|x| !x.filename.contains("FIRST001"))
+                && group.files.iter().any(|x| x.filename.contains("SECOND002"))
         });
         assert!(second_group.is_some());
-        assert_eq!(second_group.unwrap().1.len(), 2);
+        assert_eq!(second_group.unwrap().files.len(), 2);
     }
 
     #[test]

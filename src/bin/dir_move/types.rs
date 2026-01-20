@@ -133,3 +133,66 @@ impl PrefixGroup {
         }
     }
 }
+
+/// Intermediate data structure for building prefix groups.
+/// Used during the collection phase before converting to final `PrefixGroup`.
+#[derive(Debug)]
+pub struct PrefixGroupBuilder {
+    /// The original prefix string (may contain dots).
+    pub(crate) original_prefix: String,
+    /// Files belonging to this prefix group.
+    pub(crate) files: Vec<PathBuf>,
+    /// Number of dot-separated parts in the prefix.
+    pub(crate) part_count: usize,
+    /// Whether the prefix has a concatenated (no-dot) form.
+    pub(crate) has_concatenated_form: bool,
+    /// Minimum start position where this prefix appears across all files.
+    pub(crate) min_start_position: usize,
+}
+
+impl PrefixGroupBuilder {
+    /// Create a new `PrefixGroupBuilder`.
+    pub(crate) fn new(
+        original_prefix: String,
+        file: PathBuf,
+        part_count: usize,
+        has_concatenated_form: bool,
+        start_position: usize,
+    ) -> Self {
+        Self {
+            original_prefix,
+            files: vec![file],
+            part_count,
+            has_concatenated_form,
+            min_start_position: start_position,
+        }
+    }
+
+    /// Add a file to this group and update metadata.
+    /// If this is the first concatenated form encountered, also update the original prefix.
+    pub(crate) fn add_file(
+        &mut self,
+        file: PathBuf,
+        part_count: usize,
+        is_concatenated: bool,
+        start_position: usize,
+        prefix: String,
+    ) {
+        self.files.push(file);
+        self.part_count = self.part_count.max(part_count);
+        self.min_start_position = self.min_start_position.min(start_position);
+        // Prefer concatenated (no-dot) form for directory names
+        if is_concatenated && !self.has_concatenated_form {
+            self.original_prefix = prefix;
+            self.has_concatenated_form = true;
+        }
+    }
+
+    /// Convert this builder into a final `PrefixGroup`.
+    pub(crate) fn into_prefix_group(self) -> (String, PrefixGroup) {
+        (
+            self.original_prefix,
+            PrefixGroup::new(self.files, self.part_count, self.min_start_position),
+        )
+    }
+}

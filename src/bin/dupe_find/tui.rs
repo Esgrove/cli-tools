@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use cli_tools::print_warning;
 
-use crate::dupe_find::FileInfo;
+use crate::dupe_find::{DuplicateGroup, FileInfo};
 
 /// Action to perform on a duplicate group
 #[derive(Debug, Clone)]
@@ -21,6 +21,15 @@ enum DuplicateAction {
     Skip,
     /// Quit the interactive session
     Quit,
+}
+
+/// An action to apply to a specific duplicate group.
+#[derive(Debug)]
+struct GroupAction {
+    /// Index of the duplicate group this action applies to.
+    group_index: usize,
+    /// The action to perform on the group.
+    action: DuplicateAction,
 }
 
 /// State for the interactive TUI
@@ -102,7 +111,7 @@ impl TuiState {
 }
 
 /// Run interactive TUI mode for handling duplicates
-pub fn run_interactive(duplicates: &[(String, Vec<FileInfo>)]) -> anyhow::Result<()> {
+pub fn run_interactive(duplicates: &[DuplicateGroup]) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
@@ -127,16 +136,16 @@ pub fn run_interactive(duplicates: &[(String, Vec<FileInfo>)]) -> anyhow::Result
 /// Main interactive loop - returns collected actions to be applied after terminal is restored
 fn interactive_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    duplicates: &[(String, Vec<FileInfo>)],
-) -> anyhow::Result<Vec<(usize, DuplicateAction)>> {
+    duplicates: &[DuplicateGroup],
+) -> anyhow::Result<Vec<GroupAction>> {
     let mut group_index = 0;
-    let mut actions: Vec<(usize, DuplicateAction)> = Vec::new();
+    let mut actions: Vec<GroupAction> = Vec::new();
 
     while group_index < duplicates.len() {
-        let (key, files) = &duplicates[group_index];
-        let sorted_files: Vec<&FileInfo> = files.iter().sorted_by_key(|f| &f.path).collect();
+        let group = &duplicates[group_index];
+        let sorted_files: Vec<&FileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
-        let action = handle_duplicate_group(terminal, key, &sorted_files, group_index, duplicates.len())?;
+        let action = handle_duplicate_group(terminal, &group.key, &sorted_files, group_index, duplicates.len())?;
 
         match action {
             DuplicateAction::Quit => break,
@@ -144,7 +153,10 @@ fn interactive_loop(
                 group_index += 1;
             }
             DuplicateAction::Keep { keep_index, new_name } => {
-                actions.push((group_index, DuplicateAction::Keep { keep_index, new_name }));
+                actions.push(GroupAction {
+                    group_index,
+                    action: DuplicateAction::Keep { keep_index, new_name },
+                });
                 group_index += 1;
             }
         }
@@ -344,12 +356,12 @@ fn render_ui(
 }
 
 /// Apply all collected actions
-fn apply_actions(duplicates: &[(String, Vec<FileInfo>)], actions: &[(usize, DuplicateAction)]) -> anyhow::Result<()> {
-    for (group_idx, action) in actions {
-        let (_, files) = &duplicates[*group_idx];
-        let sorted_files: Vec<&FileInfo> = files.iter().sorted_by_key(|f| &f.path).collect();
+fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyhow::Result<()> {
+    for group_action in actions {
+        let group = &duplicates[group_action.group_index];
+        let sorted_files: Vec<&FileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
-        if let DuplicateAction::Keep { keep_index, new_name } = action {
+        if let DuplicateAction::Keep { keep_index, new_name } = &group_action.action {
             let keep_file = sorted_files[*keep_index];
 
             // Handle rename if specified

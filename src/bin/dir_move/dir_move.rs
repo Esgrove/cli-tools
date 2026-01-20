@@ -13,7 +13,7 @@ use cli_tools::{
 };
 
 use crate::config::Config;
-use crate::types::{DirectoryInfo, FileInfo, MoveInfo, PrefixGroup, UnpackInfo};
+use crate::types::{DirectoryInfo, FileInfo, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo};
 use crate::{DirMoveArgs, utils};
 
 #[derive(Debug)]
@@ -732,8 +732,7 @@ impl DirMove {
     fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, PrefixGroup> {
         // Use normalized keys (no dots, lowercase) for grouping to handle
         // both case variations and dot-separated vs concatenated prefixes
-        // Value is (original_prefix, files, prefix_parts, has_concatenated_form, min_start_position)
-        let mut prefix_groups: HashMap<String, (String, Vec<PathBuf>, usize, bool, usize)> = HashMap::new();
+        let mut prefix_groups: HashMap<String, PrefixGroupBuilder> = HashMap::new();
 
         // First pass: collect prefix candidates from each file
         for file_info in files_with_names {
@@ -774,23 +773,20 @@ impl DirMove {
                 let key = utils::normalize_prefix(&candidate.prefix);
                 let is_concatenated = !candidate.prefix.contains('.');
 
-                if let Some((stored_prefix, files, existing_parts, has_concat, min_pos)) = prefix_groups.get_mut(&key) {
-                    files.push(file_info.path_buf());
-                    // Keep the highest specificity (most parts)
-                    *existing_parts = (*existing_parts).max(candidate.part_count);
-                    // Track minimum start position across all files
-                    *min_pos = (*min_pos).min(candidate.start_position);
-                    // Prefer concatenated (no-dot) form for directory names
-                    if is_concatenated && !*has_concat {
-                        *stored_prefix = candidate.prefix.into_owned();
-                        *has_concat = true;
-                    }
+                if let Some(builder) = prefix_groups.get_mut(&key) {
+                    builder.add_file(
+                        file_info.path_buf(),
+                        candidate.part_count,
+                        is_concatenated,
+                        candidate.start_position,
+                        candidate.prefix.into_owned(),
+                    );
                 } else {
                     prefix_groups.insert(
                         key,
-                        (
+                        PrefixGroupBuilder::new(
                             candidate.prefix.into_owned(),
-                            vec![file_info.path_buf()],
+                            file_info.path_buf(),
                             candidate.part_count,
                             is_concatenated,
                             candidate.start_position,
@@ -809,8 +805,8 @@ impl DirMove {
 
             for group_key in &group_keys {
                 // Skip if file is already in this group
-                if let Some((_, files, _, _, _)) = prefix_groups.get(group_key)
-                    && files.contains(&file_path)
+                if let Some(builder) = prefix_groups.get(group_key)
+                    && builder.files.contains(&file_path)
                 {
                     continue;
                 }
@@ -822,9 +818,9 @@ impl DirMove {
                     // For this check, we need to reconstruct the prefix parts from the group key
                     // Since the key is normalized (no dots), we check if the original starts with it
                     if utils::parts_are_contiguous_in_original(&file_info.original_name, &[group_key.as_str()])
-                        && let Some((_, files, _, _, _)) = prefix_groups.get_mut(group_key)
+                        && let Some(builder) = prefix_groups.get_mut(group_key)
                     {
-                        files.push(file_path.clone());
+                        builder.files.push(file_path.clone());
                     }
                 }
             }
@@ -833,7 +829,7 @@ impl DirMove {
         // Convert to final format: display_prefix -> PrefixGroup
         let display_groups: HashMap<String, PrefixGroup> = prefix_groups
             .into_values()
-            .map(|(prefix, files, parts, _, min_pos)| (prefix, PrefixGroup::new(files, parts, min_pos)))
+            .map(PrefixGroupBuilder::into_prefix_group)
             .collect();
 
         // Apply prefix overrides: if a group's prefix starts with an override, use the override
@@ -848,29 +844,35 @@ impl DirMove {
         let prefix_groups = self.collect_all_prefix_groups(&files_with_names);
 
         // Sort groups by:
-        // 1. Start position (earlier in filename = lower value = first)
-        // 2. Prefix length (longer = first, for same position)
-        // 3. Alphabetically (for ties)
+        // 1. Start position (earlier in filename is better)
+        // 2. File count (descending)
+        // 3. Prefix length (longer is better)
+        // 4. Alphabetically
         // This biases towards prefixes from the start of filenames.
         // Filter out groups smaller than the configured minimum.
-        let min_group_size = self.config.min_group_size;
         let mut groups_to_process: Vec<_> = prefix_groups
             .into_iter()
-            .filter(|(_, group)| group.files.len() >= min_group_size)
-            .sorted_by(|a, b| {
+            .filter(|(_, group)| group.files.len() >= self.config.min_group_size)
+            .sorted_by(|(prefix_a, group_a), (prefix_b, group_b)| {
                 // First by position (ascending - earlier is better)
-                a.1.min_start_position
-                    .cmp(&b.1.min_start_position)
-                    // Then by length (descending - longer is more specific)
-                    .then_with(|| b.1.files.len().cmp(&a.1.files.len()))
+                group_a
+                    .min_start_position
+                    .cmp(&group_b.min_start_position)
+                    // Then by count (descending - more files = better)
+                    .then_with(|| group_b.files.len().cmp(&group_a.files.len()))
+                    // Then by length (descending - longer = better)
+                    .then_with(|| prefix_b.chars().count().cmp(&prefix_a.chars().count()))
                     // Finally alphabetically
-                    .then_with(|| a.0.cmp(&b.0))
+                    .then_with(|| prefix_a.cmp(prefix_b))
             })
             .collect();
 
         if groups_to_process.is_empty() {
             if self.config.verbose {
-                println!("No file groups with {min_group_size} or more matching prefixes found.");
+                println!(
+                    "No file groups with {} or more matching prefixes found",
+                    self.config.min_group_size
+                );
             }
             return Ok(());
         }
@@ -888,7 +890,7 @@ impl DirMove {
             // Filter out already moved files
             let available_files: Vec<_> = group.files.into_iter().filter(|f| !moved_files.contains(f)).collect();
 
-            if available_files.len() < min_group_size {
+            if available_files.len() < self.config.min_group_size {
                 continue;
             }
 

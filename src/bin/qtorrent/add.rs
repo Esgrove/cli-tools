@@ -33,6 +33,28 @@ pub struct QTorrent {
     dot_rename: Option<DotRenameConfig>,
 }
 
+/// Summary of files skipped due to directory matching.
+#[derive(Debug, Default)]
+struct SkippedDirectorySummary {
+    /// Number of files in the skipped directory.
+    file_count: usize,
+    /// Total size of all files in the skipped directory.
+    total_size: u64,
+}
+
+impl SkippedDirectorySummary {
+    /// Add a file to this summary.
+    const fn add_file(&mut self, size: u64) {
+        self.file_count += 1;
+        self.total_size += size;
+    }
+
+    /// Returns "file" or "files" based on the count.
+    const fn files_word(&self) -> &'static str {
+        if self.file_count == 1 { "file" } else { "files" }
+    }
+}
+
 /// Information about a torrent file to be added.
 struct TorrentInfo {
     /// Path to the torrent file.
@@ -443,16 +465,14 @@ impl QTorrent {
         use std::collections::HashMap;
 
         // Group excluded files by directory if they were excluded due to directory matching
-        let mut skipped_directories: HashMap<String, (usize, u64)> = HashMap::new();
+        let mut skipped_directories: HashMap<String, SkippedDirectorySummary> = HashMap::new();
         let mut other_excluded: Vec<&FileInfo<'_>> = Vec::new();
 
         for file in &filtered.excluded {
             if let Some(ref reason) = file.exclusion_reason {
                 if reason.starts_with("directory: ") {
                     let dir_name = reason.trim_start_matches("directory: ").to_string();
-                    let entry = skipped_directories.entry(dir_name).or_insert((0, 0));
-                    entry.0 += 1;
-                    entry.1 += file.size;
+                    skipped_directories.entry(dir_name).or_default().add_file(file.size);
                 } else {
                     other_excluded.push(file);
                 }
@@ -470,7 +490,7 @@ impl QTorrent {
 
         // Sort skipped directories by total size descending
         let mut skipped_dirs_sorted: Vec<_> = skipped_directories.into_iter().collect();
-        skipped_dirs_sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        skipped_dirs_sorted.sort_by(|a, b| b.1.total_size.cmp(&a.1.total_size));
 
         println!("\n  {}", "Files:".bold());
 
@@ -497,16 +517,15 @@ impl QTorrent {
         }
 
         // Print skipped directory summaries
-        for (dir_name, (count, size)) in skipped_dirs_sorted {
-            let files_word = if count == 1 { "file" } else { "files" };
+        for (dir_name, summary) in skipped_dirs_sorted {
             println!(
                 "    {} {}/{} ({} {}, {}) - {}",
                 "✗".red(),
                 dir_name,
                 "...".dimmed(),
-                count,
-                files_word,
-                cli_tools::format_size(size),
+                summary.file_count,
+                summary.files_word(),
+                cli_tools::format_size(summary.total_size),
                 format!("directory: {dir_name}").dimmed()
             );
         }
