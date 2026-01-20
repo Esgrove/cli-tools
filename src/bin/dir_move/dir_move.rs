@@ -935,33 +935,89 @@ impl DirMove {
             }
 
             if !self.config.dryrun {
-                let confirmed = if self.config.auto {
-                    true
+                let final_dir_path = if self.config.auto {
+                    Some(dir_path)
                 } else {
-                    print!("{}", "Create directory and move files? (y/n): ".magenta());
-                    std::io::stdout().flush()?;
-
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    input.trim().eq_ignore_ascii_case("y")
+                    self.prompt_for_directory_name(&dir_path, &dir_name)?
                 };
 
-                if confirmed {
-                    if let Err(e) = self.move_files_to_target_dir(&dir_path, &available_files) {
-                        print_error!("Failed to process {}: {e}", dir_name);
+                if let Some(target_path) = final_dir_path {
+                    if let Err(e) = self.move_files_to_target_dir(&target_path, &available_files) {
+                        print_error!("Failed to process {}: {e}", target_path.display());
                     } else {
                         // Mark files as moved
                         moved_files.extend(available_files);
                     }
-                } else {
-                    println!("  Skipped");
-                    // Files remain available for other groups since they weren't moved
                 }
+                // Note: "Skipped" message is printed in prompt_for_directory_name
             }
             println!();
         }
 
         Ok(())
+    }
+
+    /// Prompt the user for directory name confirmation.
+    /// Returns `Some(path)` if confirmed (with original or custom name), `None` if skipped.
+    ///
+    /// Accepts:
+    /// - "y" or "yes" to confirm with the suggested name
+    /// - "n" or "no" to skip
+    /// - Any other non-empty string as a custom directory name (with confirmation)
+    fn prompt_for_directory_name(
+        &self,
+        suggested_path: &Path,
+        suggested_name: &str,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        print!(
+            "{}",
+            format!("Create directory and move files? (y/n or custom name) [{suggested_name}]: ").magenta()
+        );
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        // Empty input or "y"/"yes" confirms the suggested name
+        if input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
+            return Ok(Some(suggested_path.to_path_buf()));
+        }
+
+        // "n"/"no" skips
+        if input.eq_ignore_ascii_case("n") || input.eq_ignore_ascii_case("no") {
+            println!("  Skipped");
+            return Ok(None);
+        }
+
+        // Any other non-empty input is treated as a custom directory name
+        // (input is already trimmed, but we double-check for safety)
+        let custom_name = input.trim();
+        if custom_name.is_empty() {
+            return Ok(Some(suggested_path.to_path_buf()));
+        }
+        let custom_path = self.root.join(custom_name);
+
+        // Show what will happen and ask for confirmation
+        if custom_path.exists() {
+            println!("  {} Directory '{}' already exists", "→".green(), custom_name.cyan());
+        } else {
+            println!("  {} Will create directory: {}", "→".yellow(), custom_name.cyan());
+        }
+
+        print!("{}", format!("Confirm using '{custom_name}'? (y/n): ").magenta());
+        std::io::stdout().flush()?;
+
+        let mut confirm_input = String::new();
+        std::io::stdin().read_line(&mut confirm_input)?;
+        let confirm_input = confirm_input.trim();
+
+        if confirm_input.eq_ignore_ascii_case("y") || confirm_input.eq_ignore_ascii_case("yes") {
+            Ok(Some(custom_path))
+        } else {
+            println!("  Skipped");
+            Ok(None)
+        }
     }
 
     /// Apply prefix overrides to groups.
