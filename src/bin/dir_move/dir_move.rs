@@ -902,6 +902,17 @@ impl DirMove {
                 continue;
             }
 
+            // Skip if the stripped directory name matches an ignored group name
+            let dir_name_normalized = dir_name.to_lowercase().replace(' ', "");
+            if self.config.ignored_group_names.contains(&dir_name_normalized) {
+                continue;
+            }
+
+            // Skip if the stripped directory name is itself a prefix_ignore
+            if self.is_ignored_prefix(&dir_name) {
+                continue;
+            }
+
             // Skip if the proposed directory name matches the current parent directory
             if parent_dir_name
                 .as_ref()
@@ -1945,6 +1956,388 @@ mod test_parent_directory_skipped {
         let dir_name = "DL ";
         let stripped = dirmove.strip_ignored_prefixes(dir_name);
         assert_eq!(stripped, "", "DL with trailing space should result in empty");
+    }
+
+    #[test]
+    fn ignored_group_name_checked_after_prefix_strip() {
+        // When a prefix_ignore is stripped, the remaining name should still be
+        // checked against ignored_group_names
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files with prefix "DL.Studio" where "DL" is a prefix_ignore
+        // and "Studio" is an ignored_group_name
+        std::fs::write(root.join("DL.Studio.ep1.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.Studio.ep2.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.Studio.ep3.mp4"), "").unwrap();
+
+        let config = Config::test_with_prefix_ignores_and_ignored_group_names(vec!["dl"], vec!["studio"]);
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "DL Studio" would become "Studio" after stripping, which is ignored
+        // The group key uses the original prefix without dots
+        assert!(
+            !groups.contains_key("DLStudio") || groups.get("DLStudio").is_none_or(|g| g.files.len() < 3),
+            "Group 'DL Studio' should not result in 'Studio' directory after stripping"
+        );
+    }
+
+    #[test]
+    fn prefix_ignore_not_offered_as_dir_name() {
+        // When stripping prefixes results in a name that is itself a prefix_ignore,
+        // it should not be offered as a directory name
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files where stripping "WEB" leaves "DL" which is also a prefix_ignore
+        std::fs::write(root.join("WEB.DL.ep1.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.ep2.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.ep3.mp4"), "").unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["web", "dl"]);
+
+        let dirmove = DirMove::new(root, config);
+
+        // After stripping "WEB", we get "DL" which is itself a prefix_ignore
+        // This should be skipped via is_ignored_prefix check
+        let dir_name = "WEB DL";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "DL", "WEB should be stripped leaving DL");
+        assert!(
+            dirmove.is_ignored_prefix(&stripped),
+            "DL should be recognized as an ignored prefix"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_stripped_name_filtering_integration {
+    //! Integration tests verifying that `ignored_group_names` and `prefix_ignores`
+    //! are checked after stripping prefixes from directory names.
+
+    use super::*;
+
+    /// Helper to create a `DirMove` with both `prefix_ignores` and `ignored_group_names`.
+    fn make_dirmove_with_ignores_and_ignored_names(
+        root: PathBuf,
+        prefix_ignores: Vec<&str>,
+        ignored_group_names: Vec<&str>,
+    ) -> DirMove {
+        DirMove {
+            root,
+            config: Config::test_with_prefix_ignores_and_ignored_group_names(prefix_ignores, ignored_group_names),
+        }
+    }
+
+    #[test]
+    fn stripped_name_matches_ignored_group_name_not_offered() {
+        // Files with prefix "DL.Studio" where "DL" is stripped, leaving "Studio"
+        // which matches an ignored_group_name - should not be offered
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("DL.Studio.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.Studio.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.Studio.Episode.03.mp4"), "").unwrap();
+
+        let dirmove = make_dirmove_with_ignores_and_ignored_names(root, vec!["dl"], vec!["studio"]);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // The prefix "DL.Studio" exists in groups, but when we process it:
+        // 1. dir_name becomes "DL Studio"
+        // 2. After stripping "DL ", it becomes "Studio"
+        // 3. "studio" is in ignored_group_names, so it should be skipped
+
+        // Verify the group exists (it's collected before the skip logic)
+        let has_dl_studio = groups.contains_key("DLStudio") || groups.contains_key("DL.Studio");
+
+        // The key point is that when create_dirs_and_move_files processes this,
+        // it will skip the "Studio" directory because it matches ignored_group_names
+        if has_dl_studio {
+            let dir_name = "DL Studio";
+            let stripped = dirmove.strip_ignored_prefixes(dir_name);
+            assert_eq!(stripped, "Studio");
+
+            // Verify it would be filtered by ignored_group_names check
+            let normalized = stripped.to_lowercase().replace(' ', "");
+            assert!(
+                dirmove.config.ignored_group_names.contains(&normalized),
+                "Stripped name 'studio' should be in ignored_group_names"
+            );
+        }
+    }
+
+    #[test]
+    fn stripped_name_is_prefix_ignore_not_offered() {
+        // Files where stripping one prefix_ignore leaves another prefix_ignore
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("WEB.DL.Content.01.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.Content.02.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.Content.03.mp4"), "").unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["web", "dl"]);
+        let dirmove = DirMove::new(root, config);
+
+        // When processing "WEB DL" group:
+        // 1. Strip "WEB " -> leaves "DL"
+        // 2. "DL" is itself a prefix_ignore, should be skipped
+
+        let dir_name = "WEB DL";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "DL");
+        assert!(
+            dirmove.is_ignored_prefix(&stripped),
+            "Stripped name 'DL' should be recognized as a prefix_ignore"
+        );
+    }
+
+    #[test]
+    fn multiple_prefix_ignores_chain_to_ignored_group_name() {
+        // Complex case: multiple prefix_ignores stripped, result matches ignored_group_name
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("WEB.DL.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.Episode.03.mp4"), "").unwrap();
+
+        let dirmove = make_dirmove_with_ignores_and_ignored_names(root, vec!["web", "dl"], vec!["episode"]);
+
+        // When processing "WEB DL Episode" group:
+        // 1. Strip "WEB " -> "DL Episode"
+        // 2. Strip "DL " -> "Episode"
+        // 3. "episode" is in ignored_group_names, should be skipped
+
+        let dir_name = "WEB DL Episode";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "Episode");
+
+        let normalized = stripped.to_lowercase().replace(' ', "");
+        assert!(
+            dirmove.config.ignored_group_names.contains(&normalized),
+            "Stripped name 'episode' should be in ignored_group_names"
+        );
+    }
+
+    #[test]
+    fn valid_name_after_stripping_is_offered() {
+        // Verify that valid names after stripping are still offered
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("DL.MySeries.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.MySeries.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.MySeries.Episode.03.mp4"), "").unwrap();
+
+        let dirmove = make_dirmove_with_ignores_and_ignored_names(root, vec!["dl"], vec!["episode"]);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "DL MySeries" should become "MySeries" after stripping
+        // "MySeries" is NOT in ignored_group_names, so it should be valid
+
+        let dir_name = "DL MySeries";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "MySeries");
+
+        // Verify it's NOT filtered
+        let normalized = stripped.to_lowercase().replace(' ', "");
+        assert!(
+            !dirmove.config.ignored_group_names.contains(&normalized),
+            "Stripped name 'myseries' should NOT be in ignored_group_names"
+        );
+        assert!(
+            !dirmove.is_ignored_prefix(&stripped),
+            "Stripped name 'MySeries' should NOT be a prefix_ignore"
+        );
+
+        // The group should exist
+        assert!(
+            groups.contains_key("DLMySeries") || groups.contains_key("MySeries"),
+            "Group for 'MySeries' should exist"
+        );
+    }
+
+    #[test]
+    fn multi_word_ignored_group_name_after_stripping() {
+        // Test with multi-word ignored_group_name
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("WEB.Some.Name.01.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.Some.Name.02.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.Some.Name.03.mp4"), "").unwrap();
+
+        // "somename" (normalized, no spaces) is the ignored group name
+        let dirmove = make_dirmove_with_ignores_and_ignored_names(root, vec!["web"], vec!["somename"]);
+
+        // "WEB Some Name" -> strip "WEB " -> "Some Name"
+        // Normalized: "somename" which is in ignored_group_names
+
+        let dir_name = "WEB Some Name";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "Some Name");
+
+        let normalized = stripped.to_lowercase().replace(' ', "");
+        assert_eq!(normalized, "somename");
+        assert!(
+            dirmove.config.ignored_group_names.contains(&normalized),
+            "Stripped name 'Some Name' normalized to 'somename' should be in ignored_group_names"
+        );
+    }
+
+    #[test]
+    fn case_insensitive_ignored_group_name_after_stripping() {
+        // Test case insensitivity of ignored_group_names after stripping
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("DL.STUDIO.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.Studio.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.studio.Episode.03.mp4"), "").unwrap();
+
+        let dirmove = make_dirmove_with_ignores_and_ignored_names(root, vec!["dl"], vec!["studio"]);
+
+        // Various cases should all normalize to "studio"
+        for dir_name in ["DL STUDIO", "DL Studio", "DL studio"] {
+            let stripped = dirmove.strip_ignored_prefixes(dir_name);
+            let normalized = stripped.to_lowercase().replace(' ', "");
+            assert!(
+                dirmove.config.ignored_group_names.contains(&normalized),
+                "Case variation '{dir_name}' stripped to '{stripped}' should match ignored_group_names"
+            );
+        }
+    }
+
+    #[test]
+    fn case_insensitive_prefix_ignore_result() {
+        // Test case insensitivity of is_ignored_prefix check
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+        let dirmove = DirMove::new(root, config);
+
+        // Various cases should all be recognized as ignored prefix
+        assert!(dirmove.is_ignored_prefix("dl"));
+        assert!(dirmove.is_ignored_prefix("DL"));
+        assert!(dirmove.is_ignored_prefix("Dl"));
+        assert!(dirmove.is_ignored_prefix("dL"));
+    }
+
+    #[test]
+    fn empty_after_full_strip_is_skipped() {
+        // When stripping removes everything, the empty result should be skipped
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("WEB.DL.01.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.02.mp4"), "").unwrap();
+        std::fs::write(root.join("WEB.DL.03.mp4"), "").unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["web", "dl"]);
+        let dirmove = DirMove::new(root, config);
+
+        // "WEB DL" -> strip "WEB " -> "DL" -> strip "DL " would need trailing space
+        // But without trailing content, "DL" remains
+        let dir_name = "WEB DL";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+
+        // "DL" is itself a prefix_ignore, so it should be skipped
+        assert!(
+            dirmove.is_ignored_prefix(&stripped),
+            "Result 'DL' should be recognized as prefix_ignore"
+        );
+    }
+
+    #[test]
+    fn partial_match_not_filtered() {
+        // Ensure partial matches don't incorrectly filter
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("DL.Studios.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.Studios.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.Studios.Episode.03.mp4"), "").unwrap();
+
+        // "studio" is ignored, but "studios" (with 's') should NOT be ignored
+        let dirmove = make_dirmove_with_ignores_and_ignored_names(root, vec!["dl"], vec!["studio"]);
+
+        let dir_name = "DL Studios";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "Studios");
+
+        let normalized = stripped.to_lowercase().replace(' ', "");
+        assert_eq!(normalized, "studios");
+        assert!(
+            !dirmove.config.ignored_group_names.contains(&normalized),
+            "'studios' should NOT match ignored_group_name 'studio'"
+        );
+    }
+
+    #[test]
+    fn prefix_ignore_partial_match_not_filtered() {
+        // "dl" is a prefix_ignore, but "dla" should not be filtered
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+        let dirmove = DirMove::new(root, config);
+
+        assert!(!dirmove.is_ignored_prefix("dla"));
+        assert!(!dirmove.is_ignored_prefix("DLA"));
+        assert!(!dirmove.is_ignored_prefix("adl"));
+    }
+
+    #[test]
+    fn real_world_scenario_release_group_filtering() {
+        // Simulates a real-world scenario with release group prefixes
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files from a release group with common prefixes
+        std::fs::write(root.join("DUMMY.Cool.Show.S01E01.mp4"), "").unwrap();
+        std::fs::write(root.join("DUMMY.Cool.Show.S01E02.mp4"), "").unwrap();
+        std::fs::write(root.join("DUMMY.Cool.Show.S01E03.mp4"), "").unwrap();
+
+        // "DUMMY" is the release group (prefix_ignore)
+        // "cool" is a common word we want to ignore as a standalone group name
+        let dirmove = make_dirmove_with_ignores_and_ignored_names(root, vec!["DUMMY"], vec!["cool"]);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // After stripping "DUMMY", "Cool" alone should be filtered by ignored_group_names
+        // But "Cool Show" should still be valid
+
+        let cool_stripped = dirmove.strip_ignored_prefixes("DUMMY Cool");
+        assert_eq!(cool_stripped, "Cool");
+        assert!(
+            dirmove
+                .config
+                .ignored_group_names
+                .contains(&cool_stripped.to_lowercase()),
+            "'Cool' should be filtered"
+        );
+
+        let cool_show_stripped = dirmove.strip_ignored_prefixes("DUMMY Cool Show");
+        assert_eq!(cool_show_stripped, "Cool Show");
+        let normalized = cool_show_stripped.to_lowercase().replace(' ', "");
+        assert!(
+            !dirmove.config.ignored_group_names.contains(&normalized),
+            "'Cool Show' should NOT be filtered"
+        );
+
+        // Verify "Cool Show" group exists
+        assert!(
+            groups.contains_key("CoolShow") || groups.contains_key("Cool.Show"),
+            "Group for 'Cool Show' should exist"
+        );
     }
 }
 

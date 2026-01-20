@@ -273,6 +273,22 @@ impl Config {
             ..Default::default()
         }
     }
+
+    /// Create a test config with both prefix ignores and ignored group names (both automatically lowercased).
+    pub fn test_with_prefix_ignores_and_ignored_group_names(
+        prefix_ignores: Vec<&str>,
+        ignored_group_names: Vec<&str>,
+    ) -> Self {
+        Self {
+            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
+            ignored_group_names: ignored_group_names.into_iter().map(str::to_lowercase).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            dryrun: true,
+            create: true,
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]
