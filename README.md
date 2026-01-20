@@ -83,21 +83,25 @@ Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -a, --auto                 Auto-confirm all prompts without asking
-  -c, --create               Create directories for files with matching prefixes
-  -D, --debug                Print debug information
-  -f, --force                Overwrite existing files
-  -n, --include <INCLUDE>    Include files that match the given pattern
-  -e, --exclude <EXCLUDE>    Exclude files that match the given pattern
-  -i, --ignore <IGNORE>      Ignore prefix when matching filenames
-  -o, --override <OVERRIDE>  Override prefix to use for directory names
-  -g, --group <COUNT>        Minimum number of matching files needed to create a group [default: 3]
-  -p, --print                Only print changes without moving files
-  -r, --recurse              Recurse into subdirectories
-  -l, --completion <SHELL>   Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
-  -v, --verbose              Print verbose output
-  -h, --help                 Print help
-  -V, --version              Print version
+  -a, --auto                      Auto-confirm all prompts without asking
+  -c, --create                    Create directories for files with matching prefixes
+  -D, --debug                     Print debug information
+  -f, --force                     Overwrite existing files
+  -n, --include <INCLUDE>         Include files that match the given pattern
+  -e, --exclude <EXCLUDE>         Exclude files that match the given pattern
+  -i, --ignore <IGNORE>           Ignore prefix when matching filenames
+  -I, --ignore-group <GROUP>      Group name to ignore (exact match, won't be offered as new directory)
+  -P, --ignore-group-part <PART>  Ignore groups containing this part (substring match in any part of group name)
+  -o, --override <OVERRIDE>       Override prefix to use for directory names
+  -u, --unpack <NAME>             Directory name to "unpack" by moving its contents to the parent directory
+  -g, --group <COUNT>             Minimum number of matching files needed to create a group
+  -m, --min-chars <CHARS>         Minimum character count for prefixes to be valid group names (excluding dots)
+  -p, --print                     Only print changes without moving files
+  -r, --recurse                   Recurse into subdirectories
+  -l, --completion <SHELL>        Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose                   Print verbose output
+  -h, --help                      Print help
+  -V, --version                   Print version
 ```
 
 ## Dots
@@ -105,14 +109,20 @@ Options:
 ```console
 Rename files to use dot formatting
 
-Usage: dots [OPTIONS] [PATH]
+Usage: dots [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  prefix      Prefix files with a name or parent directory name
+  suffix      Suffix files with a name or parent directory name
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file
 
 Options:
   -c, --case                                Convert casing
-      --debug                               Enable debug prints
+  -D, --debug                               Enable debug prints
   -d, --directory                           Rename directories
   -f, --force                               Overwrite existing files
   -n, --include <INCLUDE>                   Include files that match the given pattern
@@ -122,14 +132,16 @@ Options:
   -r, --recurse                             Recurse into subdirectories
   -x, --prefix <PREFIX>                     Append prefix to the start
   -b, --prefix-dir                          Prefix files with directory name
+  -B, --prefix-dir-start                    Force prefix name to the start
+  -R, --prefix-dir-recursive                Prefix files with their parent directory name
   -j, --suffix-dir                          Suffix files with directory name
+  -J, --suffix-dir-recursive                Suffix files with their parent directory name
   -u, --suffix <SUFFIX>                     Append suffix to the end
   -s, --substitute <PATTERN> <REPLACEMENT>  Substitute pattern with replacement in filenames
   -m, --random                              Remove random strings
   -z, --remove <PATTERN>                    Remove pattern from filenames
   -g, --regex <PATTERN> <REPLACEMENT>       Substitute regex pattern with replacement in filenames
   -y, --year                                Assume year is last in short dates
-  -l, --completion <SHELL>                  Create shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose                             Print verbose output
   -h, --help                                Print help
   -V, --version                             Print version
@@ -150,8 +162,8 @@ Arguments:
 
 Options:
   -g, --pattern <PATTERN>      Identifier patterns to search for (regex)
-  -e, --extension <EXTENSION>  Video file extensions to include
-  -m, --move-files             Move duplicates to a "Duplicates" directory
+  -e, --extension <EXTENSION>  File extensions to include
+  -m, --move                   Move duplicates to a "Duplicates" directory
   -p, --print                  Only print changes without moving files
   -r, --recurse                Recurse into subdirectories
   -d, --default                Use default paths from config file
@@ -201,30 +213,31 @@ Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -a, --all                          Convert all known video file types (default is only .mp4 and .mkv)
-  -b, --bitrate <LIMIT>              Minimum bitrate threshold in kbps [default: 8000]
-  -B, --max-bitrate <MAX_BITRATE>    Maximum bitrate filter (kbps)
-  -c, --count <COUNT>                Limit the number of files to process
-  -C, --clear-db                     Clear all entries from the database
+  -a, --all                          Convert all known video file types
+  -b, --bitrate <LIMIT>              Skip files with bitrate lower than LIMIT kbps [default: 8000]
+  -c, --count <COUNT>                Limit the number of files to convert
   -d, --delete                       Delete input files immediately instead of moving to trash
-  -D, --from-db                      Process files from database instead of scanning
-  -e, --exclude <EXCLUDE>            Exclude files that match the given pattern
-  -f, --force                        Overwrite existing output files
-  -k, --skip-convert                 Skip conversion
-  -l, --completion <SHELL>           Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
-  -m, --skip-remux                   Skip remuxing
-  -n, --include <INCLUDE>            Include files that match the given pattern
-  -o, --other                        Convert all known video file types except MP4 files
   -p, --print                        Print commands without running them
+  -f, --force                        Overwrite existing output files
+  -n, --include <INCLUDE>            Include files that match the given pattern
+  -e, --exclude <EXCLUDE>            Exclude files that match the given pattern
+  -t, --extension <EXTENSION>        Override file extensions to convert
+  -o, --other                        Convert all known video file types except MP4 files
   -r, --recurse                      Recurse into subdirectories
-  -s, --sort <ORDER>                 Sort files [possible values: bitrate, bitrate-asc, size, size-asc, duration, duration-asc, resolution, resolution-asc, name, name-desc]
-  -E, --list-extensions              List file extension counts in the database
-  -L, --display-limit <LIMIT>        Maximum files to display (0 = all) [default: 100]
-  -S, --show-db                      Show database statistics and contents
-  -t, --extension <EXTENSION>        Filter by file extension (can be repeated)
-  -u, --min-duration <SECONDS>       Minimum duration filter (seconds)
-  -U, --max-duration <SECONDS>       Maximum duration filter (seconds)
+  -k, --skip-convert                 Skip conversion
+  -x, --delete-duplicates            Delete source file if converted x265 file already exists
+  -m, --skip-remux                   Skip remuxing
+  -s, --sort [<ORDER>]               Sort files [possible values: bitrate, size, size-asc, duration, duration-asc, resolution, resolution-asc, impact, name]
+  -l, --completion <SHELL>           Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose                      Print verbose output
+  -D, --from-db                      Process files from database instead of scanning
+  -C, --clear-db                     Clear all entries from the database
+  -S, --show-db                      Show database statistics and contents
+  -E, --list-extensions              List file extension counts in the database
+  -B, --max-bitrate <MAX_BITRATE>    Maximum bitrate in kbps
+  -u, --min-duration <MIN_DURATION>  Minimum duration in seconds
+  -U, --max-duration <MAX_DURATION>  Maximum duration in seconds
+  -L, --display-limit <LIMIT>        Maximum number of files to display
   -h, --help                         Print help (see more with '--help')
   -V, --version                      Print version
 ```
@@ -292,14 +305,42 @@ Arguments:
   [PATH]  Optional input directory or file path
 
 Options:
-  -d, --debug              Enable debug prints
+  -D, --debug              Enable debug prints
   -x, --delete [<DELETE>]  Delete files with width or height smaller than limit (default: 500)
   -f, --force              Overwrite existing files
   -p, --print              Only print file names without renaming or deleting
-  -r, --recurse            Recursive directory iteration
+  -r, --recurse            Recurse into subdirectories
   -v, --verbose            Print verbose output
   -h, --help               Print help
   -V, --version            Print version
+```
+
+## Thumbs
+
+Create thumbnail sheets for video files using ffmpeg.
+
+```console
+Create thumbnail sheets for video files using ffmpeg
+
+Usage: thumbs [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Optional input directory or file
+
+Options:
+  -f, --force               Overwrite existing thumbnail files
+  -p, --print               Print commands without running them
+  -r, --recurse             Recurse into subdirectories
+  -c, --cols <COLS>         Number of columns in the thumbnail grid
+  -w, --rows <ROWS>         Number of rows in the thumbnail grid
+  -s, --scale <WIDTH>       Thumbnail width in pixels
+  -a, --padding <PIXELS>    Padding between tiles in pixels
+  -t, --fontsize <SIZE>     Font size for timestamp overlay
+  -q, --quality <QUALITY>   JPEG quality (1-31, lower is better)
+  -l, --completion <SHELL>  Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -v, --verbose             Print verbose output
+  -h, --help                Print help
+  -V, --version             Print version
 ```
 
 ## Visaparse
@@ -317,7 +358,7 @@ Arguments:
 Options:
   -o, --output <OUTPUT_PATH>  Optional output path (default is the input directory)
   -p, --print                 Only print information without writing to file
-  -n, --number <NUMBER>       How many total sums to print with verbose output [default: 20]
+  -n, --number <NUMBER>       How many total sums to print with verbose output
   -v, --verbose               Print verbose output
   -h, --help                  Print help
   -V, --version               Print version
@@ -326,8 +367,9 @@ Options:
 ## Qtorrent
 
 Add torrents to qBittorrent with automatic file renaming.
-Parses single-file `.torrent` files and adds them to qBittorrent,
-automatically setting the output filename based on the torrent filename.
+Parses `.torrent` files and adds them to qBittorrent,
+automatically setting the output filename or folder name based on the torrent filename.
+For multi-file torrents, offers to rename the root folder and supports filtering files by extension, name, or minimum size.
 
 ```console
 Add torrents to qBittorrent with automatic file renaming
@@ -352,6 +394,7 @@ Options:
   -k, --skip-name <NAME>     Directory names to skip (case-insensitive full name match)
   -m, --min-size <MB>        Minimum file size in MB (files smaller than this will be skipped)
   -r, --recurse              Recurse into subdirectories when searching for torrent files
+  -x, --skip-existing        Skip rename prompts for existing/duplicate torrents
   -l, --completion <SHELL>   Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose              Print verbose output
   -h, --help                 Print help (see more with '--help')

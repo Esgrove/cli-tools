@@ -2,98 +2,208 @@
 # Copy file to ~/.config/cli-tools.toml
 
 [dirmove]
+# Auto-confirm all prompts without asking
 # auto = false
+
+# Create directories for files with matching prefixes
+# create = false
+
+# Print debug information
 # debug = false
+
+# Only print changes without moving files
 # dryrun = false
+
+# Include files that match the given pattern
 # include = []
+
+# Exclude files that match the given pattern
 # exclude = []
-# min_group_size = 3
-# min_prefix_chars = 5
+
+# Overwrite existing files
 # overwrite = false
+
+# Recurse into subdirectories
+# recurse = false
+
+# Minimum number of matching files needed to create a group
+# min_group_size = 3
+
+# Minimum character count for prefixes to be valid group names (excluding dots)
+# min_prefix_chars = 5
+
+# Prefixes to ignore when matching filenames (will not be used for grouping)
 # prefix_ignores = ["Something", "Other.Prefix"]
+
+# Prefixes to always use for directory names (overrides automatic prefix detection)
 # prefix_overrides = ["longer.prefix", "some.name"]
+
+# Group names to ignore (exact match, won't be offered as new directory)
 # ignored_group_names = ["Episode", "Video", "Part", "Chapter", "Scene"]
+
+# Ignore groups containing this part (substring match in any part of group name)
 # ignored_group_parts = ["x265", "x264", "HEVC"]
-# recursive = false
+
+# Directory names to "unpack" by moving their contents to the parent directory
 # unpack_directories = ["videos", "vids", "vid", "horizontal", "vertical"]
-# verbose = false
 
 [dots]
-# date_starts_with_year = true
+# Enable debug prints
 # debug = false
-# directory = false
-# dryrun = false
-# increment = false
-# include = []
-# move_date_after_prefix = []
-# move_to_end = []
-# move_to_start = []
-# overwrite = false
-# prefix_dir = false
-# prefix_dir_recursive = false
-# prefix_dir_start = false
-# suffix_dir = false
-# suffix_dir_recursive = false
-# pre_replace = []
-# recursive = false
-# regex_replace = []
-# remove_random = false
-# remove_from_start = []
-# verbose = false
 
-# replacement pairs:
+# Rename directories
+# directory = false
+
+# Only print changes without renaming files
+# dryrun = false
+
+# Include files that match the given pattern
+# include = []
+
+# Overwrite existing files
+# overwrite = false
+
+# Recurse into subdirectories
+# recurse = false
+
+# Assume year is first in short dates
+# date_starts_with_year = true
+
+# Increment conflicting file name with running index
+# increment = false
+
+# For files starting with these prefixes, move the date to directly after the prefix
+# Example: "Artist something 2024.01.15" -> "Artist.2024.01.15.Something"
+# move_date_after_prefix = ["Artist"]
+
+# Strings to move to the end of the filename
+# move_to_end = []
+
+# Strings to move to the start of the filename
+# move_to_start = []
+
+# Prefix files with their parent directory name
+# prefix_dir = false
+
+# Use each file's parent directory name as prefix (when recursing)
+# prefix_dir_recursive = false
+
+# Force prefix to always be at the start of the filename
+# prefix_dir_start = false
+
+# Suffix files with their parent directory name
+# suffix_dir = false
+
+# Use each file's parent directory name as suffix (when recursing)
+# suffix_dir_recursive = false
+
+# Replacements applied before the main rename logic (list of [pattern, replacement] pairs)
+# pre_replace = []
+
+# Regex pattern replacements (list of [pattern, replacement] pairs)
+# regex_replace = []
+
+# Remove random-looking strings (hashes, UUIDs) from filenames
+# remove_random = false
+
+# Patterns to remove from the start of filenames only
+# remove_from_start = []
+
+# Plain text replacement pairs [pattern, replacement]
 replace = [
     [".WEBDL", ""],
     [".HEVC", ".x265"],
 ]
 
 [dupefind]
-# default_paths = []
+# Only print changes without moving files
 # dryrun = false
-# extensions = ["mp4", "mkv", "avi", "mov", "wmv", "webm"]
-# move_files = false
-# paths = []
-# recurse = false
-# verbose = false
 
-# Identifier patterns to search for (regex)
-#patterns = ["ABC\\d{3,4}", "XYZ\\d{3,4}"]
+# Move duplicates to a "Duplicates" directory
+# move_files = false
+
+# Recurse into subdirectories
+# recurse = false
+
+# Paths to search when --default flag is used
+# default_paths = []
+
+# Paths to always search (in addition to CLI arguments)
+# paths = []
+
+# File extensions to include in search
+# extensions = ["mp4", "mkv", "avi", "mov", "wmv", "webm"]
+
+# Identifier patterns to search for (regex) - used to find duplicate video IDs
+# patterns = ["ABC\\d{3,4}", "XYZ\\d{3,4}"]
 
 [flip_date]
-# directory = false
+# Only print changes without renaming
 # dryrun = false
-# file_extensions = []
+
+# Overwrite existing files
 # overwrite = false
-# recursive = false
+
+# Recurse into subdirectories
+# recurse = false
+
+# Use directory rename mode
+# directory = false
+
+# Specify file extension(s) to limit renaming
+# file_extensions = []
+
+# Swap year and day around (for correcting incorrectly formatted dates)
 # swap_year = false
-# verbose = false
+
+# Assume year is first in short dates (e.g., 24.12.31 instead of 31.12.24)
 # year_first = false
 
 [video_convert]
-# Minimum bitrate threshold in kbps (files below this are skipped)
+# Convert all known video file types (default is only .mp4 and .mkv)
+# convert_all_types = false
+
+# Convert all known video file types except MP4 files
+# convert_other_types = false
+
+# Delete input files immediately instead of moving to trash
+# delete = false
+
+# Delete source file if converted x265 file already exists
+# delete_duplicates = false
+
+# Exclude files that match the given pattern
+# exclude = []
+
+# Include files that match the given pattern
+# include = []
+
+# Override file extensions to convert
+# extensions = []
+
+# Overwrite existing output files
+# overwrite = false
+
+# Recurse into subdirectories
+# recurse = false
+
+# Skip files with bitrate lower than this threshold (kbps)
 # bitrate = 8000
 
-# Maximum bitrate threshold in kbps (files above this are skipped)
+# Maximum bitrate in kbps (files above this are skipped)
 # max_bitrate = 50000
 
-# Minimum duration threshold in seconds (files shorter than this are skipped)
+# Minimum duration in seconds (files shorter than this are skipped)
 # min_duration = 60
 
-# Maximum duration threshold in seconds (files longer than this are skipped)
+# Maximum duration in seconds (files longer than this are skipped)
 # max_duration = 7200
 
-# convert_all_types = false
-# convert_other_types = false
+# Limit the number of files to convert
 # count = 10
-# delete = false
-# delete_duplicates = false
+
+# Maximum number of files to display in listings (0 = unlimited)
 # display_limit = 100
-# exclude = []
-# include = []
-# extensions = []
-# overwrite = false
-# recurse = false
-# verbose = false
 
 # Sort order for files to convert. Options:
 # - "bitrate" (highest first, default)
@@ -104,56 +214,90 @@ replace = [
 # - "duration_asc" (shortest first)
 # - "resolution" (highest first)
 # - "resolution_asc" (lowest first)
+# - "impact" (potential savings: bitrate / fps * duration, highest first)
 # - "name" (alphabetical)
-# - "name_desc" (reverse alphabetical)
 # sort = "bitrate"
 
 [thumbnail]
+# Print commands without running them
 # dryrun = false
-# overwrite = false
-# recurse = false
-# verbose = false
 
-# Grid layout for landscape videos (width > height)
+# Overwrite existing thumbnail files
+# overwrite = false
+
+# Recurse into subdirectories
+# recurse = false
+
+# Number of columns in the thumbnail grid (landscape videos)
 # cols_landscape = 3
+
+# Number of rows in the thumbnail grid (landscape videos)
 # rows_landscape = 4
+
+# Padding between tiles in pixels (landscape videos)
 # padding_landscape = 8
 
-# Grid layout for portrait videos (height > width)
+# Number of columns in the thumbnail grid (portrait videos)
 # cols_portrait = 4
+
+# Number of rows in the thumbnail grid (portrait videos)
 # rows_portrait = 3
+
+# Padding between tiles in pixels (portrait videos)
 # padding_portrait = 16
 
-# Thumbnail scaling and quality
+# Thumbnail width in pixels (height is calculated to maintain aspect ratio)
 # scale_width = 480
+
+# Font size for timestamp overlay
 # font_size = 20
-# quality = 2  # JPEG quality (1-31, lower is better)
+
+# JPEG quality (1-31, lower values = better quality, larger file size)
+# quality = 2
 
 [qtorrent]
-# qBittorrent WebUI connection settings
-# host = "localhost"
-# port = 8080
-# username = "admin"
-# password = "adminadmin"
-
-# Default options for added torrents
-# save_path = "/downloads"
-# category = ""
-# tags = ""
-# paused = false
-
-# CLI behavior
+# Print what would be done without actually adding torrents
 # dryrun = false
-# verbose = false
-# yes = false
-# skip_existing = false
+
+# Recurse into subdirectories when searching for torrent files
 # recurse = false
 
-# File filtering for multi-file torrents
-# File extensions to skip (without dot)
+# qBittorrent WebUI host
+# host = "localhost"
+
+# qBittorrent WebUI port
+# port = 8080
+
+# qBittorrent WebUI username
+# username = "admin"
+
+# qBittorrent WebUI password
+# password = "adminadmin"
+
+# Save path for downloaded files
+# save_path = "/downloads"
+
+# Category for the torrent
+# category = ""
+
+# Tags for the torrent (comma-separated)
+# tags = ""
+
+# Add torrent in paused state
+# paused = false
+
+# Skip confirmation prompts
+# yes = false
+
+# Skip rename prompts for existing/duplicate torrents
+# skip_existing = false
+
+# File extensions to skip when selecting files from multi-file torrents (without dot)
 # skip_extensions = ["nfo", "txt", "jpg", "png", "sfv", "md5", "url"]
-# Directory names to skip (case-insensitive full name match)
+
+# Directory names to skip in multi-file torrents (case-insensitive full name match)
 # skip_names = ["sample", "proof", "screens"]
+
 # Minimum file size in MB (files smaller than this will be skipped)
 # min_file_size_mb = 10
 
@@ -167,21 +311,24 @@ replace = [
 # ignore_torrent_names = []
 
 [resolution]
+# Enable debug prints
 # debug = false
-# dryrun = false
-# overwrite = false
-# recurse = false
-# verbose = false
 
-# Default resolution limit for delete mode (files smaller than this are deleted)
+# Only print file names without renaming or deleting
+# dryrun = false
+
+# Overwrite existing files
+# overwrite = false
+
+# Recurse into subdirectories
+# recurse = false
+
+# Delete files with width or height smaller than this limit (default: 500)
 # delete_limit = 500
 
 [visaparse]
-# How many total sums to print with verbose output
-# number = 20
-
 # Only print information without writing to file
 # print = false
 
-# Print verbose output
-# verbose = false
+# How many merchant total sums to print with verbose output
+# number = 20
