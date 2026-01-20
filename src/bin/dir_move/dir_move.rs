@@ -13,7 +13,7 @@ use cli_tools::{
 };
 
 use crate::config::Config;
-use crate::types::{DirectoryInfo, FileInfo, MoveInfo, UnpackInfo};
+use crate::types::{DirectoryInfo, FileInfo, MoveInfo, PrefixGroup, UnpackInfo};
 use crate::{DirMoveArgs, utils};
 
 #[derive(Debug)]
@@ -729,10 +729,7 @@ impl DirMove {
     /// Collect all possible prefix groups for files.
     /// Files can appear in multiple groups - they are only excluded once actually moved.
     /// Returns a map from display prefix to (files, `prefix_parts`) where `prefix_parts` indicates specificity.
-    fn collect_all_prefix_groups(
-        &self,
-        files_with_names: &[FileInfo<'_>],
-    ) -> HashMap<String, (Vec<PathBuf>, usize, usize)> {
+    fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, PrefixGroup> {
         // Use normalized keys (no dots, lowercase) for grouping to handle
         // both case variations and dot-separated vs concatenated prefixes
         // Value is (original_prefix, files, prefix_parts, has_concatenated_form, min_start_position)
@@ -833,10 +830,10 @@ impl DirMove {
             }
         }
 
-        // Convert to final format: display_prefix -> (files, prefix_parts, min_start_position)
-        let display_groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = prefix_groups
+        // Convert to final format: display_prefix -> PrefixGroup
+        let display_groups: HashMap<String, PrefixGroup> = prefix_groups
             .into_values()
-            .map(|(prefix, files, parts, _, min_pos)| (prefix, (files, parts, min_pos)))
+            .map(|(prefix, files, parts, _, min_pos)| (prefix, PrefixGroup::new(files, parts, min_pos)))
             .collect();
 
         // Apply prefix overrides: if a group's prefix starts with an override, use the override
@@ -859,15 +856,13 @@ impl DirMove {
         let min_group_size = self.config.min_group_size;
         let mut groups_to_process: Vec<_> = prefix_groups
             .into_iter()
-            .filter(|(_, (files, _, _))| files.len() >= min_group_size)
+            .filter(|(_, group)| group.files.len() >= min_group_size)
             .sorted_by(|a, b| {
-                let (_, (_, _, pos_a)) = a;
-                let (_, (_, _, pos_b)) = b;
                 // First by position (ascending - earlier is better)
-                pos_a
-                    .cmp(pos_b)
+                a.1.min_start_position
+                    .cmp(&b.1.min_start_position)
                     // Then by length (descending - longer is more specific)
-                    .then_with(|| b.0.len().cmp(&a.0.len()))
+                    .then_with(|| b.1.files.len().cmp(&a.1.files.len()))
                     // Finally alphabetically
                     .then_with(|| a.0.cmp(&b.0))
             })
@@ -888,10 +883,10 @@ impl DirMove {
         print_bold!("Found {} group(s) with matching prefixes:\n", initial_group_count);
 
         while !groups_to_process.is_empty() {
-            let (prefix, (files, _, _)) = groups_to_process.remove(0);
+            let (prefix, group) = groups_to_process.remove(0);
 
             // Filter out already moved files
-            let available_files: Vec<_> = files.into_iter().filter(|f| !moved_files.contains(f)).collect();
+            let available_files: Vec<_> = group.files.into_iter().filter(|f| !moved_files.contains(f)).collect();
 
             if available_files.len() < min_group_size {
                 continue;
@@ -944,17 +939,14 @@ impl DirMove {
 
     /// Apply prefix overrides to groups.
     /// If files in a group start with an override prefix, merge them under the override name.
-    fn apply_prefix_overrides(
-        &self,
-        groups: HashMap<String, (Vec<PathBuf>, usize, usize)>,
-    ) -> HashMap<String, (Vec<PathBuf>, usize, usize)> {
+    fn apply_prefix_overrides(&self, groups: HashMap<String, PrefixGroup>) -> HashMap<String, PrefixGroup> {
         if self.config.prefix_overrides.is_empty() {
             return groups;
         }
 
-        let mut result: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        let mut result: HashMap<String, PrefixGroup> = HashMap::new();
 
-        for (prefix, (files, prefix_parts, min_pos)) in groups {
+        for (prefix, group) in groups {
             // Check if any override matches: either the prefix starts with override,
             // or the override starts with the prefix (override is more specific),
             // or any file in the group starts with the override
@@ -965,7 +957,7 @@ impl DirMove {
                 .find(|&override_prefix| {
                     prefix.starts_with(override_prefix)
                         || override_prefix.starts_with(&prefix)
-                        || files.iter().any(|f| {
+                        || group.files.iter().any(|f| {
                             f.file_name()
                                 .and_then(|n| n.to_str())
                                 .is_some_and(|name| name.starts_with(override_prefix))
@@ -975,12 +967,12 @@ impl DirMove {
 
             let entry = result
                 .entry(target_prefix)
-                .or_insert_with(|| (Vec::new(), prefix_parts, min_pos));
-            entry.0.extend(files);
+                .or_insert_with(|| PrefixGroup::new(Vec::new(), group.part_count, group.min_start_position));
+            entry.files.extend(group.files);
             // Keep the highest specificity
-            entry.1 = entry.1.max(prefix_parts);
+            entry.part_count = entry.part_count.max(group.part_count);
             // Keep the minimum start position
-            entry.2 = entry.2.min(min_pos);
+            entry.min_start_position = entry.min_start_position.min(group.min_start_position);
         }
 
         result
@@ -1189,9 +1181,9 @@ mod test_prefix_groups {
         assert!(groups.contains_key("Show.Name"), "Should have Show.Name group");
         assert!(groups.contains_key("Show.Other"), "Should have Show.Other group");
         assert!(groups.contains_key("Show"), "Should have Show group");
-        assert_eq!(groups.get("Show.Name").unwrap().0.len(), 3);
-        assert_eq!(groups.get("Show.Other").unwrap().0.len(), 2);
-        assert_eq!(groups.get("Show").unwrap().0.len(), 5);
+        assert_eq!(groups.get("Show.Name").unwrap().files.len(), 3);
+        assert_eq!(groups.get("Show.Other").unwrap().files.len(), 2);
+        assert_eq!(groups.get("Show").unwrap().files.len(), 5);
     }
 
     #[test]
@@ -1231,10 +1223,10 @@ mod test_prefix_groups {
         assert!(groups.contains_key("Alpha.Beta.Delta"));
         assert!(groups.contains_key("Alpha.Beta"));
         assert!(groups.contains_key("Alpha"));
-        assert_eq!(groups.get("Alpha.Beta.Gamma").unwrap().0.len(), 2);
-        assert_eq!(groups.get("Alpha.Beta.Delta").unwrap().0.len(), 2);
-        assert_eq!(groups.get("Alpha.Beta").unwrap().0.len(), 4);
-        assert_eq!(groups.get("Alpha").unwrap().0.len(), 4);
+        assert_eq!(groups.get("Alpha.Beta.Gamma").unwrap().files.len(), 2);
+        assert_eq!(groups.get("Alpha.Beta.Delta").unwrap().files.len(), 2);
+        assert_eq!(groups.get("Alpha.Beta").unwrap().files.len(), 4);
+        assert_eq!(groups.get("Alpha").unwrap().files.len(), 4);
     }
 
     #[test]
@@ -1379,11 +1371,11 @@ mod test_prefix_groups {
         assert!(groups.contains_key("SeriesB.Season1"));
         assert!(groups.contains_key("SeriesA"));
         assert!(groups.contains_key("SeriesB"));
-        assert_eq!(groups.get("SeriesA.Season1").unwrap().0.len(), 10);
-        assert_eq!(groups.get("SeriesA.Season2").unwrap().0.len(), 8);
-        assert_eq!(groups.get("SeriesA").unwrap().0.len(), 18);
-        assert_eq!(groups.get("SeriesB.Season1").unwrap().0.len(), 5);
-        assert_eq!(groups.get("SeriesB").unwrap().0.len(), 5);
+        assert_eq!(groups.get("SeriesA.Season1").unwrap().files.len(), 10);
+        assert_eq!(groups.get("SeriesA.Season2").unwrap().files.len(), 8);
+        assert_eq!(groups.get("SeriesA").unwrap().files.len(), 18);
+        assert_eq!(groups.get("SeriesB.Season1").unwrap().files.len(), 5);
+        assert_eq!(groups.get("SeriesB").unwrap().files.len(), 5);
     }
 
     #[test]
@@ -1481,7 +1473,7 @@ mod test_prefix_groups {
         // All case variations should be in the same group
         // Key will be from first file processed (original case preserved for display)
         // Check that some group has all 4 files
-        let max_group_size = groups.values().map(|(files, _, _)| files.len()).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|group| group.files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 4, "Should have a group with all 4 case variations");
     }
 
@@ -1523,7 +1515,7 @@ mod test_prefix_groups {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // All 4 files should be grouped together (PhotoLab = Photo.Lab = Photolab = PHOTOLAB)
-        let max_group_size = groups.values().map(|(files, _, _)| files.len()).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|group| group.files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 4, "Should have a group with all 4 files");
 
         // Should prefer the concatenated form (no dots) for the directory name
@@ -1568,7 +1560,7 @@ mod test_prefix_groups {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // Should have a group with all 3 files
-        let max_group_size = groups.values().map(|(files, _, _)| files.len()).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|group| group.files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 3, "Should have a group with all 3 files");
 
         // The group key should be "DarkkoTV" (concatenated) not "Darkko.TV" (dotted)
@@ -1620,7 +1612,7 @@ mod test_prefix_groups {
             groups.contains_key("Summer.Vacation"),
             "Should have Summer.Vacation group"
         );
-        assert_eq!(groups.get("Summer.Vacation").unwrap().0.len(), 4);
+        assert_eq!(groups.get("Summer.Vacation").unwrap().files.len(), 4);
     }
 
     #[test]
@@ -1692,7 +1684,7 @@ mod test_prefix_groups {
             groups_5.contains_key("Gallery.Photos"),
             "Should have Gallery.Photos group"
         );
-        assert_eq!(groups_5.get("Gallery.Photos").unwrap().0.len(), 5);
+        assert_eq!(groups_5.get("Gallery.Photos").unwrap().files.len(), 5);
 
         // With min_group_size=3, should still find the same group
         let config_3 = Config {
@@ -1721,7 +1713,7 @@ mod test_prefix_groups {
             groups_3.contains_key("Gallery.Photos"),
             "Should have Gallery.Photos group"
         );
-        assert_eq!(groups_3.get("Gallery.Photos").unwrap().0.len(), 5);
+        assert_eq!(groups_3.get("Gallery.Photos").unwrap().files.len(), 5);
     }
 
     #[test]
@@ -1775,7 +1767,7 @@ mod test_prefix_groups {
         // (files may appear multiple times due to multiple prefix matches)
         let show_name_files = groups.get("Show.Name").unwrap();
         assert!(
-            show_name_files.0.len() >= 4,
+            show_name_files.files.len() >= 4,
             "Show.Name group should have at least 4 entries"
         );
     }
@@ -1820,11 +1812,11 @@ mod test_prefix_groups {
         assert!(groups.contains_key("ShowB"), "Should have ShowB from override");
         // Each override group should have at least 2 entries (the 2 files)
         assert!(
-            groups.get("ShowA").unwrap().0.len() >= 2,
+            groups.get("ShowA").unwrap().files.len() >= 2,
             "ShowA should have at least 2 entries"
         );
         assert!(
-            groups.get("ShowB").unwrap().0.len() >= 2,
+            groups.get("ShowB").unwrap().files.len() >= 2,
             "ShowB should have at least 2 entries"
         );
         // ShowC has no override, should have its own group(s)
@@ -1958,7 +1950,7 @@ mod test_prefix_groups {
         // The Show.Name group should contain entries for all 4 files
         let show_name_files = groups.get("Show.Name").unwrap();
         assert!(
-            show_name_files.0.len() >= 4,
+            show_name_files.files.len() >= 4,
             "Show.Name group should have at least 4 entries"
         );
     }
@@ -2257,7 +2249,7 @@ mod test_ignored_group_parts {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
-            ignored_group_parts: ignored_parts.into_iter().map(|s| s.to_lowercase()).collect(),
+            ignored_group_parts: ignored_parts.into_iter().map(str::to_lowercase).collect(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -2320,8 +2312,7 @@ mod test_ignored_group_parts {
             let key_lower = key.to_lowercase();
             assert!(
                 !key_lower.contains("x265") && !key_lower.contains("hevc"),
-                "Group '{}' should not contain ignored parts",
-                key
+                "Group '{key}' should not contain ignored parts"
             );
         }
         // Studio should still be available
@@ -2347,8 +2338,7 @@ mod test_ignored_group_parts {
             let key_lower = key.to_lowercase();
             assert!(
                 !key_lower.contains("x265"),
-                "Group '{}' should not contain 'x265' (case-insensitive)",
-                key
+                "Group '{key}' should not contain 'x265' (case-insensitive)"
             );
         }
     }
@@ -2406,8 +2396,11 @@ mod test_prefix_overrides {
     #[test]
     fn no_overrides() {
         let dirmove = make_test_dirmove(Vec::new());
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
+        groups.insert(
+            "Some.Name.Thing".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file1.mp4")], 3, 0),
+        );
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name.Thing"));
@@ -2417,10 +2410,10 @@ mod test_prefix_overrides {
     #[test]
     fn matching_override() {
         let dirmove = make_test_dirmove(vec!["longer.prefix".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "longer.prefix.name".to_string(),
-            (vec![PathBuf::from("longer.prefix.name.file.mp4")], 3, 0),
+            PrefixGroup::new(vec![PathBuf::from("longer.prefix.name.file.mp4")], 3, 0),
         );
 
         let result = dirmove.apply_prefix_overrides(groups);
@@ -2432,21 +2425,30 @@ mod test_prefix_overrides {
     #[test]
     fn merges_groups() {
         let dirmove = make_test_dirmove(vec!["Some.Name".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
-        groups.insert("Some.Name.Other".to_string(), (vec![PathBuf::from("file2.mp4")], 3, 0));
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
+        groups.insert(
+            "Some.Name.Thing".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file1.mp4")], 3, 0),
+        );
+        groups.insert(
+            "Some.Name.Other".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file2.mp4")], 3, 0),
+        );
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name"));
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Some.Name").map(|(files, _, _)| files.len()), Some(2));
+        assert_eq!(result.get("Some.Name").map(|group| group.files.len()), Some(2));
     }
 
     #[test]
     fn non_matching() {
         let dirmove = make_test_dirmove(vec!["Other.Prefix".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
+        groups.insert(
+            "Some.Name.Thing".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file1.mp4")], 3, 0),
+        );
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name.Thing"));
@@ -2457,9 +2459,15 @@ mod test_prefix_overrides {
     #[test]
     fn partial_match_only() {
         let dirmove = make_test_dirmove(vec!["Some".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
-        groups.insert("Something.Else".to_string(), (vec![PathBuf::from("file1.mp4")], 1, 0));
-        groups.insert("Some.Name".to_string(), (vec![PathBuf::from("file2.mp4")], 2, 0));
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
+        groups.insert(
+            "Something.Else".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file1.mp4")], 1, 0),
+        );
+        groups.insert(
+            "Some.Name".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file2.mp4")], 2, 0),
+        );
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some"));
@@ -2469,10 +2477,10 @@ mod test_prefix_overrides {
     #[test]
     fn override_more_specific_than_prefix() {
         let dirmove = make_test_dirmove(vec!["Example.Name".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Example".to_string(),
-            (
+            PrefixGroup::new(
                 vec![
                     PathBuf::from("Example.Name.Video1.mp4"),
                     PathBuf::from("Example.Name.Video2.mp4"),
@@ -2487,16 +2495,25 @@ mod test_prefix_overrides {
         assert!(result.contains_key("Example.Name"));
         assert!(!result.contains_key("Example"));
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Example.Name").map(|(files, _, _)| files.len()), Some(3));
+        assert_eq!(result.get("Example.Name").map(|group| group.files.len()), Some(3));
     }
 
     #[test]
     fn multiple_overrides() {
         let dirmove = make_test_dirmove(vec!["Show.A".to_string(), "Show.B".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
-        groups.insert("Show.A.Season1".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
-        groups.insert("Show.B.Season1".to_string(), (vec![PathBuf::from("file2.mp4")], 3, 0));
-        groups.insert("Show.C.Season1".to_string(), (vec![PathBuf::from("file3.mp4")], 3, 0));
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
+        groups.insert(
+            "Show.A.Season1".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file1.mp4")], 3, 0),
+        );
+        groups.insert(
+            "Show.B.Season1".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file2.mp4")], 3, 0),
+        );
+        groups.insert(
+            "Show.C.Season1".to_string(),
+            PrefixGroup::new(vec![PathBuf::from("file3.mp4")], 3, 0),
+        );
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Show.A"));
@@ -2508,7 +2525,7 @@ mod test_prefix_overrides {
     #[test]
     fn empty_groups() {
         let dirmove = make_test_dirmove(vec!["Some".to_string()]);
-        let groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        let groups: HashMap<String, PrefixGroup> = HashMap::new();
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.is_empty());
@@ -2517,10 +2534,10 @@ mod test_prefix_overrides {
     #[test]
     fn override_with_case_sensitivity() {
         let dirmove = make_test_dirmove(vec!["show.name".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Show.Name.Season1".to_string(),
-            (vec![PathBuf::from("file1.mp4")], 3, 0),
+            PrefixGroup::new(vec![PathBuf::from("file1.mp4")], 3, 0),
         );
 
         let result = dirmove.apply_prefix_overrides(groups);
@@ -4090,7 +4107,7 @@ mod test_realistic_grouping {
             "Should find BlueSky.Productions group"
         );
         assert_eq!(
-            groups.get("BlueSky.Productions").unwrap().0.len(),
+            groups.get("BlueSky.Productions").unwrap().files.len(),
             4,
             "BlueSky.Productions should have 4 files"
         );
@@ -4101,7 +4118,7 @@ mod test_realistic_grouping {
             "Should find ThunderCatStudios group"
         );
         assert_eq!(
-            groups.get("ThunderCatStudios").unwrap().0.len(),
+            groups.get("ThunderCatStudios").unwrap().files.len(),
             4,
             "ThunderCatStudios should have 4 files"
         );
@@ -4117,7 +4134,7 @@ mod test_realistic_grouping {
             "Ocean.Wave"
         };
         assert_eq!(
-            groups.get(ocean_wave_key).unwrap().0.len(),
+            groups.get(ocean_wave_key).unwrap().files.len(),
             3,
             "OceanWave should have 3 files"
         );
@@ -4125,7 +4142,7 @@ mod test_realistic_grouping {
         // Should also have broader "BlueSky" group with all 6 BlueSky files
         assert!(groups.contains_key("BlueSky"), "Should find broader BlueSky group");
         assert_eq!(
-            groups.get("BlueSky").unwrap().0.len(),
+            groups.get("BlueSky").unwrap().files.len(),
             6,
             "BlueSky should have 6 files total"
         );
@@ -4161,7 +4178,7 @@ mod test_realistic_grouping {
             groups.keys().collect::<Vec<_>>()
         );
         assert_eq!(
-            groups.get("NeonLight").unwrap().0.len(),
+            groups.get("NeonLight").unwrap().files.len(),
             5,
             "All 5 NeonLight variants should be grouped"
         );
@@ -4208,30 +4225,30 @@ mod test_realistic_grouping {
             groups.contains_key("Studio.West.Coast"),
             "Should find Studio.West.Coast group"
         );
-        assert_eq!(groups.get("Studio.West.Coast").unwrap().0.len(), 3);
+        assert_eq!(groups.get("Studio.West.Coast").unwrap().files.len(), 3);
 
         assert!(
             groups.contains_key("Studio.West.Mountain"),
             "Should find Studio.West.Mountain group"
         );
-        assert_eq!(groups.get("Studio.West.Mountain").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Studio.West.Mountain").unwrap().files.len(), 2);
 
         // Should also find broader 2-part group (Studio.West) with 6 files
         assert!(groups.contains_key("Studio.West"), "Should find Studio.West group");
         assert_eq!(
-            groups.get("Studio.West").unwrap().0.len(),
+            groups.get("Studio.West").unwrap().files.len(),
             6,
             "Studio.West should include all West files"
         );
 
         // Should find Studio.East group
         assert!(groups.contains_key("Studio.East"), "Should find Studio.East group");
-        assert_eq!(groups.get("Studio.East").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Studio.East").unwrap().files.len(), 2);
 
         // Should find broadest 1-part group (Studio) with all 8 Studio files
         assert!(groups.contains_key("Studio"), "Should find Studio group");
         assert_eq!(
-            groups.get("Studio").unwrap().0.len(),
+            groups.get("Studio").unwrap().files.len(),
             8,
             "Studio should include all Studio files"
         );
@@ -4265,13 +4282,13 @@ mod test_realistic_grouping {
             groups.contains_key("SuperMegaProductionsHD"),
             "Should find SuperMegaProductionsHD group"
         );
-        assert_eq!(groups.get("SuperMegaProductionsHD").unwrap().0.len(), 3);
+        assert_eq!(groups.get("SuperMegaProductionsHD").unwrap().files.len(), 3);
 
         assert!(
             groups.contains_key("UltraHighDefinitionStudio"),
             "Should find UltraHighDefinitionStudio group"
         );
-        assert_eq!(groups.get("UltraHighDefinitionStudio").unwrap().0.len(), 2);
+        assert_eq!(groups.get("UltraHighDefinitionStudio").unwrap().files.len(), 2);
     }
 
     #[test]
@@ -4306,14 +4323,14 @@ mod test_realistic_grouping {
             "Should find GoldenStudio group after ignoring Premium prefix"
         );
         assert_eq!(
-            groups.get("GoldenStudio").unwrap().0.len(),
+            groups.get("GoldenStudio").unwrap().files.len(),
             5,
             "GoldenStudio should have all 5 files (Premium stripped)"
         );
 
         // SilverStudio should also group
         assert!(groups.contains_key("SilverStudio"), "Should find SilverStudio group");
-        assert_eq!(groups.get("SilverStudio").unwrap().0.len(), 2);
+        assert_eq!(groups.get("SilverStudio").unwrap().files.len(), 2);
     }
 
     #[test]
@@ -4342,7 +4359,7 @@ mod test_realistic_grouping {
         // ThunderCat should be its own group with exactly 3 files
         assert!(groups.contains_key("ThunderCat"), "Should find ThunderCat group");
         assert_eq!(
-            groups.get("ThunderCat").unwrap().0.len(),
+            groups.get("ThunderCat").unwrap().files.len(),
             3,
             "ThunderCat should have exactly 3 files, not mixed with Thunder or ThunderBolt"
         );
@@ -4355,7 +4372,7 @@ mod test_realistic_grouping {
 
         // ThunderBolt should be its own group
         assert!(groups.contains_key("ThunderBolt"), "Should find ThunderBolt group");
-        assert_eq!(groups.get("ThunderBolt").unwrap().0.len(), 2);
+        assert_eq!(groups.get("ThunderBolt").unwrap().files.len(), 2);
     }
 
     #[test]
@@ -4390,7 +4407,7 @@ mod test_realistic_grouping {
         // Check that we got the more specific group if it exists
         if groups.contains_key("CreativeArts.Documentary") {
             assert_eq!(
-                groups.get("CreativeArts.Documentary").unwrap().0.len(),
+                groups.get("CreativeArts.Documentary").unwrap().files.len(),
                 4,
                 "CreativeArts.Documentary should have 4 files"
             );
@@ -4398,7 +4415,7 @@ mod test_realistic_grouping {
 
         // TechReview should also group
         assert!(groups.contains_key("TechReview"), "Should find TechReview group");
-        assert_eq!(groups.get("TechReview").unwrap().0.len(), 2);
+        assert_eq!(groups.get("TechReview").unwrap().files.len(), 2);
     }
 
     #[test]
@@ -4430,23 +4447,23 @@ mod test_realistic_grouping {
             groups.contains_key("Network.Channel.Morning"),
             "Should find 3-part Network.Channel.Morning group"
         );
-        assert_eq!(groups.get("Network.Channel.Morning").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Network.Channel.Morning").unwrap().files.len(), 2);
 
         assert!(
             groups.contains_key("Network.Channel"),
             "Should find 2-part Network.Channel group"
         );
-        assert_eq!(groups.get("Network.Channel").unwrap().0.len(), 4);
+        assert_eq!(groups.get("Network.Channel").unwrap().files.len(), 4);
 
         assert!(groups.contains_key("Network"), "Should find 1-part Network group");
-        assert_eq!(groups.get("Network").unwrap().0.len(), 6);
+        assert_eq!(groups.get("Network").unwrap().files.len(), 6);
 
         // Network.Sports should also be a valid 2-part group
         assert!(
             groups.contains_key("Network.Sports"),
             "Should find Network.Sports group"
         );
-        assert_eq!(groups.get("Network.Sports").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Network.Sports").unwrap().files.len(), 2);
     }
 
     #[test]
@@ -4477,7 +4494,7 @@ mod test_realistic_grouping {
             "Should offer Galaxy.Quest.Episode as an option"
         );
         assert_eq!(
-            groups.get("Galaxy.Quest.Episode").unwrap().0.len(),
+            groups.get("Galaxy.Quest.Episode").unwrap().files.len(),
             3,
             "Galaxy.Quest.Episode should have 3 files"
         );
@@ -4488,7 +4505,7 @@ mod test_realistic_grouping {
             "Should offer Galaxy.Quest as an alternative option"
         );
         assert_eq!(
-            groups.get("Galaxy.Quest").unwrap().0.len(),
+            groups.get("Galaxy.Quest").unwrap().files.len(),
             5,
             "Galaxy.Quest should have all 5 files"
         );
@@ -4499,7 +4516,7 @@ mod test_realistic_grouping {
             "Should offer Galaxy as the broadest option"
         );
         assert_eq!(
-            groups.get("Galaxy").unwrap().0.len(),
+            groups.get("Galaxy").unwrap().files.len(),
             5,
             "Galaxy should have all 5 files"
         );
@@ -4541,15 +4558,20 @@ mod test_realistic_grouping {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // Convert to sorted vec like create_dirs_and_move_files does
+        // Sorting: position first, then file count (descending), then alphabetically
         let sorted_groups: Vec<_> = groups
             .into_iter()
-            .sorted_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)))
+            .sorted_by(|a, b| {
+                a.1.min_start_position
+                    .cmp(&b.1.min_start_position)
+                    .then_with(|| b.1.files.len().cmp(&a.1.files.len()))
+                    .then_with(|| a.0.cmp(&b.0))
+            })
             .collect();
 
-        // Verify order: longest prefixes first
+        // Verify groups exist
         let prefixes: Vec<&str> = sorted_groups.iter().map(|(p, _)| p.as_str()).collect();
 
-        // 3-part prefixes should come before 2-part, which come before 1-part
         let films_pos = prefixes.iter().position(|&p| p == "Studio.Ghibli.Films");
         let shorts_pos = prefixes.iter().position(|&p| p == "Studio.Ghibli.Shorts");
         let ghibli_pos = prefixes.iter().position(|&p| p == "Studio.Ghibli");
@@ -4560,20 +4582,16 @@ mod test_realistic_grouping {
         assert!(ghibli_pos.is_some(), "Should have Studio.Ghibli group");
         assert!(studio_pos.is_some(), "Should have Studio group");
 
-        // 3-part prefixes before 2-part
+        // All prefixes start at position 0, so secondary sort by file count applies:
+        // Studio.Ghibli has 5 files, Studio has 5 files, Films has 3, Shorts has 2
+        // So broader groups (with more files) come first when position is equal
         assert!(
-            films_pos.unwrap() < ghibli_pos.unwrap(),
-            "Studio.Ghibli.Films should come before Studio.Ghibli"
+            ghibli_pos.unwrap() < films_pos.unwrap(),
+            "Studio.Ghibli (5 files) should come before Studio.Ghibli.Films (3 files)"
         );
         assert!(
-            shorts_pos.unwrap() < ghibli_pos.unwrap(),
-            "Studio.Ghibli.Shorts should come before Studio.Ghibli"
-        );
-
-        // 2-part before 1-part
-        assert!(
-            ghibli_pos.unwrap() < studio_pos.unwrap(),
-            "Studio.Ghibli should come before Studio"
+            ghibli_pos.unwrap() < shorts_pos.unwrap(),
+            "Studio.Ghibli (5 files) should come before Studio.Ghibli.Shorts (2 files)"
         );
     }
 
@@ -4601,30 +4619,30 @@ mod test_realistic_grouping {
             groups.contains_key("Marvel.Studios.Avengers"),
             "Missing 3-part Avengers"
         );
-        assert_eq!(groups.get("Marvel.Studios.Avengers").unwrap().0.len(), 3);
+        assert_eq!(groups.get("Marvel.Studios.Avengers").unwrap().files.len(), 3);
 
         assert!(
             groups.contains_key("Marvel.Studios.Guardians"),
             "Missing 3-part Guardians"
         );
-        assert_eq!(groups.get("Marvel.Studios.Guardians").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Marvel.Studios.Guardians").unwrap().files.len(), 2);
 
         assert!(
             groups.contains_key("Marvel.Television.Daredevil"),
             "Missing 3-part Daredevil"
         );
-        assert_eq!(groups.get("Marvel.Television.Daredevil").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Marvel.Television.Daredevil").unwrap().files.len(), 2);
 
         // 2-part groups
         assert!(groups.contains_key("Marvel.Studios"), "Missing 2-part Studios");
-        assert_eq!(groups.get("Marvel.Studios").unwrap().0.len(), 5);
+        assert_eq!(groups.get("Marvel.Studios").unwrap().files.len(), 5);
 
         assert!(groups.contains_key("Marvel.Television"), "Missing 2-part Television");
-        assert_eq!(groups.get("Marvel.Television").unwrap().0.len(), 2);
+        assert_eq!(groups.get("Marvel.Television").unwrap().files.len(), 2);
 
         // 1-part group
         assert!(groups.contains_key("Marvel"), "Missing 1-part Marvel");
-        assert_eq!(groups.get("Marvel").unwrap().0.len(), 7);
+        assert_eq!(groups.get("Marvel").unwrap().files.len(), 7);
 
         // User could choose any of these:
         // - "Marvel.Studios.Avengers" for just Avengers movies (3 files)
@@ -4648,8 +4666,8 @@ mod test_realistic_grouping {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // Both specific and general groups contain overlapping files
-        let specific_files = &groups.get("Series.Season.Episode").unwrap().0;
-        let general_files = &groups.get("Series.Season").unwrap().0;
+        let specific_files = &groups.get("Series.Season.Episode").unwrap().files;
+        let general_files = &groups.get("Series.Season").unwrap().files;
 
         assert_eq!(specific_files.len(), 2, "Specific group has 2 files");
         assert_eq!(general_files.len(), 3, "General group has 3 files");
@@ -4702,7 +4720,7 @@ mod test_realistic_grouping {
             groups.contains_key("TripleGroup"),
             "TripleGroup (3 files) should be found with min_group_size=3"
         );
-        assert_eq!(groups.get("TripleGroup").unwrap().0.len(), 3);
+        assert_eq!(groups.get("TripleGroup").unwrap().files.len(), 3);
 
         // With min_group_size=2, both groups qualify
         let dirmove = DirMove::new(root, make_grouping_config(2));
@@ -4759,7 +4777,7 @@ mod test_realistic_grouping {
             .expect("Should find a StarBright group");
 
         assert_eq!(
-            groups.get(starbright_key).unwrap().0.len(),
+            groups.get(starbright_key).unwrap().files.len(),
             6,
             "All 6 StarBright variants should be in one group"
         );
@@ -4771,7 +4789,7 @@ mod test_realistic_grouping {
             .expect("Should find a MoonGlow group");
 
         assert_eq!(
-            groups.get(moonglow_key).unwrap().0.len(),
+            groups.get(moonglow_key).unwrap().files.len(),
             2,
             "MoonGlow should have 2 files"
         );
@@ -4793,7 +4811,7 @@ mod test_realistic_grouping {
 
         // Should find "One.Two.Three" as a group with all 3 files
         assert!(groups.contains_key("One.Two.Three"), "Should find 3-part prefix group");
-        assert_eq!(groups.get("One.Two.Three").unwrap().0.len(), 3);
+        assert_eq!(groups.get("One.Two.Three").unwrap().files.len(), 3);
     }
 
     #[test]
@@ -4855,7 +4873,7 @@ mod test_realistic_grouping {
 
         // Should find "Spider-Man" as a group
         assert!(groups.contains_key("Spider-Man"), "Should preserve hyphen in prefix");
-        assert_eq!(groups.get("Spider-Man").unwrap().0.len(), 3);
+        assert_eq!(groups.get("Spider-Man").unwrap().files.len(), 3);
     }
 
     #[test]
@@ -4967,7 +4985,7 @@ mod test_realistic_grouping {
         let movie_group = groups.iter().find(|(k, _)| k.to_lowercase().contains("movie"));
         assert!(movie_group.is_some(), "Should find Movie group");
         assert_eq!(
-            movie_group.unwrap().1.0.len(),
+            movie_group.unwrap().1.files.len(),
             3,
             "All extensions should be in same group"
         );
@@ -5005,7 +5023,7 @@ mod test_realistic_grouping {
             groups.keys().collect::<Vec<_>>()
         );
         assert_eq!(
-            groups.get("Studio.Alpha").unwrap().0.len(),
+            groups.get("Studio.Alpha").unwrap().files.len(),
             4,
             "Studio.Alpha should have 4 files"
         );
@@ -5016,7 +5034,11 @@ mod test_realistic_grouping {
             "Should find Studio group. Found groups: {:?}",
             groups.keys().collect::<Vec<_>>()
         );
-        assert_eq!(groups.get("Studio").unwrap().0.len(), 7, "Studio should have 7 files");
+        assert_eq!(
+            groups.get("Studio").unwrap().files.len(),
+            7,
+            "Studio should have 7 files"
+        );
     }
 
     #[test]
@@ -5047,7 +5069,7 @@ mod test_realistic_grouping {
             "Should find Site group. Found groups: {:?}",
             groups.keys().collect::<Vec<_>>()
         );
-        assert_eq!(groups.get("Site").unwrap().0.len(), 4, "Site should have 4 files");
+        assert_eq!(groups.get("Site").unwrap().files.len(), 4, "Site should have 4 files");
 
         // Should NOT find "Site.Person" as a group because only 1 file has them adjacent
         // (the other 3 have dates between Site and Person)
@@ -5088,7 +5110,7 @@ mod test_realistic_grouping {
             .find(|(k, _)| k.to_lowercase().replace('.', "") == "photolab");
         assert!(photolab_group.is_some(), "Should find PhotoLab group");
         assert_eq!(
-            photolab_group.unwrap().1.0.len(),
+            photolab_group.unwrap().1.files.len(),
             8,
             "All 8 files should be in PhotoLab group"
         );
@@ -5130,7 +5152,7 @@ mod test_realistic_grouping {
             groups.keys().collect::<Vec<_>>()
         );
         assert_eq!(
-            dark_star_media_group.unwrap().1.0.len(),
+            dark_star_media_group.unwrap().1.files.len(),
             8,
             "All 8 files should be in group"
         );
@@ -5158,13 +5180,17 @@ mod test_realistic_grouping {
 
         // Should find "Creator" with 6 files
         assert!(groups.contains_key("Creator"), "Should find Creator group");
-        assert_eq!(groups.get("Creator").unwrap().0.len(), 6, "Creator should have 6 files");
+        assert_eq!(
+            groups.get("Creator").unwrap().files.len(),
+            6,
+            "Creator should have 6 files"
+        );
 
         // Should NOT find "Creator.Name" with 6 files because only 2 have contiguous parts
         // If it exists, it should only have 2 files
-        if let Some((files, _, _)) = groups.get("Creator.Name") {
+        if let Some(group) = groups.get("Creator.Name") {
             assert_eq!(
-                files.len(),
+                group.files.len(),
                 2,
                 "Creator.Name should only have 2 files (the contiguous ones)"
             );
@@ -5191,7 +5217,11 @@ mod test_realistic_grouping {
 
         // Should find "Beauty" with 4 files
         assert!(groups.contains_key("Beauty"), "Should find Beauty group");
-        assert_eq!(groups.get("Beauty").unwrap().0.len(), 4, "Beauty should have 4 files");
+        assert_eq!(
+            groups.get("Beauty").unwrap().files.len(),
+            4,
+            "Beauty should have 4 files"
+        );
 
         // "Beauty.Beast" should NOT have 4 files - only 1 has them contiguous in original
         assert!(
@@ -5237,7 +5267,11 @@ mod test_realistic_grouping {
             "Should find AlphaBeta group. Found: {:?}",
             groups.keys().collect::<Vec<_>>()
         );
-        assert_eq!(alpha_beta_group.unwrap().1.0.len(), 5, "AlphaBeta should have 5 files");
+        assert_eq!(
+            alpha_beta_group.unwrap().1.files.len(),
+            5,
+            "AlphaBeta should have 5 files"
+        );
 
         // "Alpha" should have ALL 10 files because:
         // - Files 01, 02, 05 start with "Alpha." (dotted)
@@ -5247,7 +5281,7 @@ mod test_realistic_grouping {
         // The starts_with behavior allows broad grouping
         assert!(groups.contains_key("Alpha"), "Should find Alpha group");
         assert_eq!(
-            groups.get("Alpha").unwrap().0.len(),
+            groups.get("Alpha").unwrap().files.len(),
             10,
             "Alpha should have all 10 files (including AlphaBeta files via starts_with)"
         );
@@ -5274,7 +5308,11 @@ mod test_realistic_grouping {
 
         // Should find "Studio" with 5 files
         assert!(groups.contains_key("Studio"), "Should find Studio group");
-        assert_eq!(groups.get("Studio").unwrap().0.len(), 5, "Studio should have 5 files");
+        assert_eq!(
+            groups.get("Studio").unwrap().files.len(),
+            5,
+            "Studio should have 5 files"
+        );
 
         // "Studio.Actor" should NOT have 5 files
         assert!(
@@ -5316,7 +5354,7 @@ mod test_realistic_grouping {
             .find(|(k, _)| k.to_lowercase().replace('.', "") == "photolab");
         assert!(photolab_group.is_some(), "Should find PhotoLab group");
         assert_eq!(
-            photolab_group.unwrap().1.0.len(),
+            photolab_group.unwrap().1.files.len(),
             9,
             "PhotoLab should have all 9 files (including PhotoLabs and PhotoLabPro)"
         );
@@ -5324,7 +5362,7 @@ mod test_realistic_grouping {
         // "PhotoLabs" should have exactly 3 files (specific group)
         assert!(groups.contains_key("PhotoLabs"), "Should find PhotoLabs group");
         assert_eq!(
-            groups.get("PhotoLabs").unwrap().0.len(),
+            groups.get("PhotoLabs").unwrap().files.len(),
             3,
             "PhotoLabs should have exactly 3 files"
         );
@@ -5332,7 +5370,7 @@ mod test_realistic_grouping {
         // "PhotoLabPro" should have exactly 3 files (specific group)
         assert!(groups.contains_key("PhotoLabPro"), "Should find PhotoLabPro group");
         assert_eq!(
-            groups.get("PhotoLabPro").unwrap().0.len(),
+            groups.get("PhotoLabPro").unwrap().files.len(),
             3,
             "PhotoLabPro should have exactly 3 files"
         );
@@ -5361,7 +5399,7 @@ mod test_realistic_grouping {
             "Should find Studio.Production group"
         );
         assert_eq!(
-            groups.get("Studio.Production").unwrap().0.len(),
+            groups.get("Studio.Production").unwrap().files.len(),
             4,
             "Studio.Production should have 4 files"
         );
@@ -5390,7 +5428,11 @@ mod test_realistic_grouping {
         let alpha_beta_group = groups
             .iter()
             .find(|(k, _)| k.to_lowercase().replace('.', "") == "alphabeta");
-        assert_eq!(alpha_beta_group.unwrap().1.0.len(), 3, "Alpha.Beta should have 3 files");
+        assert_eq!(
+            alpha_beta_group.unwrap().1.files.len(),
+            3,
+            "Alpha.Beta should have 3 files"
+        );
     }
 }
 
@@ -5462,13 +5504,13 @@ mod test_varied_prefix_grouping {
         // - 1 with SiteX prefix (position-agnostic matching finds StudioAlpha anywhere)
         assert!(groups.contains_key("StudioAlpha"), "Should find StudioAlpha group");
         assert_eq!(
-            groups.get("StudioAlpha").unwrap().0.len(),
+            groups.get("StudioAlpha").unwrap().files.len(),
             6,
             "StudioAlpha should have 6 files (position-agnostic matching)"
         );
 
         // RandomVideo and UnrelatedContent should NOT be in StudioAlpha
-        let studio_files = &groups.get("StudioAlpha").unwrap().0;
+        let studio_files = &groups.get("StudioAlpha").unwrap().files;
         assert!(
             !studio_files.iter().any(|p| p.to_string_lossy().contains("RandomVideo")),
             "RandomVideo should not be in StudioAlpha group"
@@ -5510,7 +5552,7 @@ mod test_varied_prefix_grouping {
             groups.contains_key("ContentCreator"),
             "Should find ContentCreator group"
         );
-        let cc_files = &groups.get("ContentCreator").unwrap().0;
+        let cc_files = &groups.get("ContentCreator").unwrap().files;
 
         // All 5 ContentCreator files should be present
         let content_creator_count = cc_files
@@ -5549,7 +5591,7 @@ mod test_varied_prefix_grouping {
 
         assert!(groups.contains_key("StudioBeta"), "Should find StudioBeta group");
         assert_eq!(
-            groups.get("StudioBeta").unwrap().0.len(),
+            groups.get("StudioBeta").unwrap().files.len(),
             4,
             "StudioBeta should have 4 files (case variations stripped)"
         );
@@ -5574,7 +5616,7 @@ mod test_varied_prefix_grouping {
 
         // MainChannel should have exactly 3 files (the ones with Site prefix stripped)
         assert!(groups.contains_key("MainChannel"), "Should find MainChannel group");
-        let mc_files = &groups.get("MainChannel").unwrap().0;
+        let mc_files = &groups.get("MainChannel").unwrap().files;
         assert_eq!(mc_files.len(), 3, "MainChannel should have exactly 3 files");
     }
 
@@ -5606,12 +5648,12 @@ mod test_varied_prefix_grouping {
 
         // StudioAlpha should have exactly 3 files
         assert!(groups.contains_key("StudioAlpha"), "Should find StudioAlpha group");
-        let studio_a_files = &groups.get("StudioAlpha").unwrap().0;
+        let studio_a_files = &groups.get("StudioAlpha").unwrap().files;
         assert_eq!(studio_a_files.len(), 3, "StudioAlpha should have exactly 3 files");
 
         // StudioBeta should have exactly 3 files
         assert!(groups.contains_key("StudioBeta"), "Should find StudioBeta group");
-        assert_eq!(groups.get("StudioBeta").unwrap().0.len(), 3);
+        assert_eq!(groups.get("StudioBeta").unwrap().files.len(), 3);
 
         // Verify StudioBeta files are NOT in StudioAlpha group
         for file in studio_a_files {
@@ -5652,7 +5694,7 @@ mod test_varied_prefix_grouping {
             .find(|(k, _)| k.contains("Network") && !k.contains("Old") && !k.contains("New") && !k.contains("The"));
         assert!(network_group.is_some(), "Should find Network group");
         assert_eq!(
-            network_group.unwrap().1.0.len(),
+            network_group.unwrap().1.files.len(),
             3,
             "Network group should have exactly 3 files"
         );
@@ -5688,15 +5730,15 @@ mod test_varied_prefix_grouping {
 
         // DarkStar should have exactly 3 files
         assert!(groups.contains_key("DarkStar"), "Should find DarkStar group");
-        assert_eq!(groups.get("DarkStar").unwrap().0.len(), 3);
+        assert_eq!(groups.get("DarkStar").unwrap().files.len(), 3);
 
         // DarkStorm should have exactly 3 files
         assert!(groups.contains_key("DarkStorm"), "Should find DarkStorm group");
-        assert_eq!(groups.get("DarkStorm").unwrap().0.len(), 3);
+        assert_eq!(groups.get("DarkStorm").unwrap().files.len(), 3);
 
         // StarDark should have exactly 2 files (not mixed with DarkStar)
         assert!(groups.contains_key("StarDark"), "Should find StarDark group");
-        assert_eq!(groups.get("StarDark").unwrap().0.len(), 2);
+        assert_eq!(groups.get("StarDark").unwrap().files.len(), 2);
     }
 
     #[test]
@@ -5734,7 +5776,7 @@ mod test_varied_prefix_grouping {
                 || k.as_str() == "Alpha.Project.File"
         });
         assert!(alpha_group.is_some(), "Should find Alpha group");
-        let alpha_files = &alpha_group.unwrap().1.0;
+        let alpha_files = &alpha_group.unwrap().1.files;
         assert_eq!(alpha_files.len(), 3, "Alpha group should have exactly 3 files");
 
         // Verify BetaAlpha and TeamAlpha are not in Alpha group
@@ -5750,7 +5792,7 @@ mod test_varied_prefix_grouping {
 
         // TeamAlpha should be its own group
         assert!(groups.contains_key("TeamAlpha"), "Should find TeamAlpha group");
-        assert_eq!(groups.get("TeamAlpha").unwrap().0.len(), 2);
+        assert_eq!(groups.get("TeamAlpha").unwrap().files.len(), 2);
     }
 
     // ===== Tests for completely different files not being grouped =====
@@ -5785,16 +5827,16 @@ mod test_varied_prefix_grouping {
         // Phoenix should have exactly 3 files
         let phoenix_group = groups.iter().find(|(k, _)| k.contains("Phoenix"));
         assert!(phoenix_group.is_some(), "Should find Phoenix group");
-        assert_eq!(phoenix_group.unwrap().1.0.len(), 3);
+        assert_eq!(phoenix_group.unwrap().1.files.len(), 3);
 
         // Dragon should have exactly 3 files
         let dragon_group = groups.iter().find(|(k, _)| k.contains("Dragon"));
         assert!(dragon_group.is_some(), "Should find Dragon group");
-        assert_eq!(dragon_group.unwrap().1.0.len(), 3);
+        assert_eq!(dragon_group.unwrap().1.files.len(), 3);
 
         // Verify random files are not in any main group
-        for (files, _, _) in groups.values() {
-            for file in files {
+        for group in groups.values() {
+            for file in &group.files {
                 let name = file.to_string_lossy();
                 assert!(
                     !name.contains("vacation_photo"),
@@ -5839,7 +5881,7 @@ mod test_varied_prefix_grouping {
 
         // StudioPremium should have exactly 4 files
         assert!(groups.contains_key("StudioPremium"), "Should find StudioPremium group");
-        let sp_files = &groups.get("StudioPremium").unwrap().0;
+        let sp_files = &groups.get("StudioPremium").unwrap().files;
         assert_eq!(sp_files.len(), 4, "StudioPremium should have exactly 4 files");
 
         // Verify no noise is included
@@ -5883,7 +5925,7 @@ mod test_varied_prefix_grouping {
 
         // ChannelX should have 5 files (3 with Web stripped + 2 without prefix)
         assert!(groups.contains_key("ChannelX"), "Should find ChannelX group");
-        let channel_files = &groups.get("ChannelX").unwrap().0;
+        let channel_files = &groups.get("ChannelX").unwrap().files;
         assert_eq!(channel_files.len(), 5, "ChannelX should have exactly 5 files");
 
         // Verify close-but-different files are NOT included
@@ -5925,7 +5967,7 @@ mod test_varied_prefix_grouping {
 
         // TargetStudio should have exactly 5 files
         assert!(groups.contains_key("TargetStudio"), "Should find TargetStudio group");
-        let ts_files = &groups.get("TargetStudio").unwrap().0;
+        let ts_files = &groups.get("TargetStudio").unwrap().files;
         assert_eq!(ts_files.len(), 5, "TargetStudio should have exactly 5 files");
 
         // Verify no wrong files included
@@ -5970,7 +6012,7 @@ mod test_varied_prefix_grouping {
             .find(|(k, _)| k.to_lowercase().replace('.', "") == "goldeneagle");
         assert!(golden_eagle.is_some(), "Should find GoldenEagle group");
         assert_eq!(
-            golden_eagle.unwrap().1.0.len(),
+            golden_eagle.unwrap().1.files.len(),
             6,
             "GoldenEagle should have 6 files (both forms + with prefix)"
         );
@@ -6009,10 +6051,10 @@ mod test_varied_prefix_grouping {
             .iter()
             .find(|(k, _)| k.to_lowercase().replace('.', "") == "bigredstudio");
         assert!(brs_group.is_some(), "Should find BigRedStudio group");
-        assert_eq!(brs_group.unwrap().1.0.len(), 6, "BigRedStudio should have 6 files");
+        assert_eq!(brs_group.unwrap().1.files.len(), 6, "BigRedStudio should have 6 files");
 
         // Verify close-but-different files are excluded
-        let brs_files = &brs_group.unwrap().1.0;
+        let brs_files = &brs_group.unwrap().1.files;
         for file in brs_files {
             let name = file.to_string_lossy();
             assert!(!name.contains("Big.Blue"), "Big.Blue should not match");
@@ -6048,7 +6090,7 @@ mod test_varied_prefix_grouping {
 
         // MainContent should have 5 files
         assert!(groups.contains_key("MainContent"), "Should find MainContent group");
-        let mc_files = &groups.get("MainContent").unwrap().0;
+        let mc_files = &groups.get("MainContent").unwrap().files;
         assert_eq!(mc_files.len(), 5, "MainContent should have 5 files");
 
         // XMainContent and MainXContent should NOT be included
@@ -6088,7 +6130,7 @@ mod test_varied_prefix_grouping {
         // - 2 without prefix
         // - 1 with Ver3 prefix (position-agnostic matching finds StudioName anywhere)
         assert!(groups.contains_key("StudioName"), "Should find StudioName group");
-        let sn_files = &groups.get("StudioName").unwrap().0;
+        let sn_files = &groups.get("StudioName").unwrap().files;
         assert_eq!(sn_files.len(), 6, "StudioName should have 6 files");
     }
 
@@ -6114,7 +6156,7 @@ mod test_varied_prefix_grouping {
             .find(|(k, _)| k.contains("Prefix") && k.contains("Target"));
         assert!(pt_group.is_some(), "Should find Prefix.Target group");
         assert_eq!(
-            pt_group.unwrap().1.0.len(),
+            pt_group.unwrap().1.files.len(),
             3,
             "Prefix.Target should have 3 files (no stripping)"
         );
@@ -6798,12 +6840,12 @@ mod test_varied_prefix_grouping {
 
         // "Studio" group exists and includes base files
         assert!(groups.contains_key("Studio"), "Should find Studio group");
-        let studio_files = &groups.get("Studio").unwrap().0;
+        let studio_files = &groups.get("Studio").unwrap().files;
         assert!(studio_files.len() >= 3, "Studio should have at least base 3 files");
 
         // StudioPro should also exist as its own more specific group
         assert!(groups.contains_key("StudioPro"), "Should find StudioPro group");
-        assert_eq!(groups.get("StudioPro").unwrap().0.len(), 2);
+        assert_eq!(groups.get("StudioPro").unwrap().files.len(), 2);
 
         // MyStudio should NOT be in Studio group (Studio not at prefix position)
         for file in studio_files {
@@ -6838,7 +6880,7 @@ mod test_varied_prefix_grouping {
 
         // AlphaStudio should have exactly 3 files
         assert!(groups.contains_key("AlphaStudio"), "Should find AlphaStudio group");
-        let alpha_files = &groups.get("AlphaStudio").unwrap().0;
+        let alpha_files = &groups.get("AlphaStudio").unwrap().files;
         assert_eq!(alpha_files.len(), 3, "AlphaStudio should have exactly 3 files");
 
         // Verify BetaStudio is NOT in AlphaStudio group
@@ -6856,14 +6898,14 @@ mod test_varied_prefix_grouping {
 
         // BetaStudio should have its own group
         assert!(groups.contains_key("BetaStudio"), "Should find BetaStudio group");
-        assert_eq!(groups.get("BetaStudio").unwrap().0.len(), 3);
+        assert_eq!(groups.get("BetaStudio").unwrap().files.len(), 3);
 
         // GammaProduction should have its own group
         assert!(
             groups.contains_key("GammaProduction"),
             "Should find GammaProduction group"
         );
-        assert_eq!(groups.get("GammaProduction").unwrap().0.len(), 2);
+        assert_eq!(groups.get("GammaProduction").unwrap().files.len(), 2);
     }
 
     #[test]
@@ -6892,10 +6934,10 @@ mod test_varied_prefix_grouping {
         // Target.Series should have 3 files
         let target_group = groups.iter().find(|(k, _)| k.contains("Target"));
         assert!(target_group.is_some(), "Should find Target group");
-        assert_eq!(target_group.unwrap().1.0.len(), 3);
+        assert_eq!(target_group.unwrap().1.files.len(), 3);
 
         // standalone, another_file, nodots should NOT be in Target group
-        let target_files = &target_group.unwrap().1.0;
+        let target_files = &target_group.unwrap().1.files;
         for file in target_files {
             let name = file.to_string_lossy();
             assert!(!name.contains("standalone"), "standalone should not be in Target group");

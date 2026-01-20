@@ -108,3 +108,28 @@ impl<'a> PrefixCandidate<'a> {
         }
     }
 }
+
+/// A group of files that share a common prefix.
+/// Used for organizing files into directories based on their name prefixes.
+#[derive(Debug, Clone)]
+pub struct PrefixGroup {
+    /// Files belonging to this prefix group.
+    pub(crate) files: Vec<PathBuf>,
+    /// Number of dot-separated parts in the prefix (1, 2, or 3).
+    /// Higher values indicate more specific prefixes.
+    pub(crate) part_count: usize,
+    /// Minimum start position where this prefix appears across all files.
+    /// Lower values indicate prefixes closer to the start of filenames.
+    pub(crate) min_start_position: usize,
+}
+
+impl PrefixGroup {
+    /// Create a new `PrefixGroup`.
+    pub(crate) const fn new(files: Vec<PathBuf>, part_count: usize, min_start_position: usize) -> Self {
+        Self {
+            files,
+            part_count,
+            min_start_position,
+        }
+    }
+}

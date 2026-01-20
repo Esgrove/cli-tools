@@ -12,8 +12,9 @@ After making code changes, always run:
 
 ```shell
 cargo clippy --fix --allow-dirty
+cargo clippy --fix --allow-dirty --tests
 cargo fmt
-cargo nextest run
+cargo test
 ```
 
 ### Other commands
@@ -31,20 +32,14 @@ cargo run --bin <name> -- [args]
 # Format code
 cargo fmt
 
-# Run tests with standard cargo test (slower)
+# Run tests with standard cargo test (faster)
 cargo test
 
-# Run tests with nextest (faster, better output)
+# Run tests with nextest (slower, better output)
 cargo nextest run
 
 # Run tests with coverage report (text output)
 cargo llvm-cov nextest
-
-# Run tests with coverage report (HTML output in target/llvm-cov/html/)
-cargo llvm-cov nextest --html
-
-# Open HTML coverage report in browser
-cargo llvm-cov nextest --html --open
 ```
 
 ### Required tools
