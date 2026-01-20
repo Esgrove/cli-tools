@@ -45,9 +45,13 @@ struct DirMoveArgs {
     #[arg(short = 'i', long = "ignore", num_args = 1, action = clap::ArgAction::Append, name = "IGNORE")]
     prefix_ignore: Vec<String>,
 
-    /// Group name to ignore (won't be offered as new directory)
+    /// Group name to ignore (exact match, won't be offered as new directory)
     #[arg(short = 'I', long = "ignore-group", num_args = 1, action = clap::ArgAction::Append, name = "GROUP")]
     ignored_group_name: Vec<String>,
+
+    /// Ignore groups containing this part (substring match in any part of group name)
+    #[arg(short = 'P', long = "ignore-group-part", num_args = 1, action = clap::ArgAction::Append, name = "PART")]
+    ignored_group_part: Vec<String>,
 
     /// Override prefix to use for directory names
     #[arg(short = 'o', long = "override", num_args = 1, action = clap::ArgAction::Append, name = "OVERRIDE")]

@@ -729,11 +729,14 @@ impl DirMove {
     /// Collect all possible prefix groups for files.
     /// Files can appear in multiple groups - they are only excluded once actually moved.
     /// Returns a map from display prefix to (files, `prefix_parts`) where `prefix_parts` indicates specificity.
-    fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, (Vec<PathBuf>, usize)> {
+    fn collect_all_prefix_groups(
+        &self,
+        files_with_names: &[FileInfo<'_>],
+    ) -> HashMap<String, (Vec<PathBuf>, usize, usize)> {
         // Use normalized keys (no dots, lowercase) for grouping to handle
         // both case variations and dot-separated vs concatenated prefixes
-        // Value is (original_prefix, files, prefix_parts, has_concatenated_form)
-        let mut prefix_groups: HashMap<String, (String, Vec<PathBuf>, usize, bool)> = HashMap::new();
+        // Value is (original_prefix, files, prefix_parts, has_concatenated_form, min_start_position)
+        let mut prefix_groups: HashMap<String, (String, Vec<PathBuf>, usize, bool, usize)> = HashMap::new();
 
         // First pass: collect prefix candidates from each file
         for file_info in files_with_names {
@@ -752,6 +755,18 @@ impl DirMove {
                     continue;
                 }
 
+                // Skip candidates where any part matches an ignored_group_part
+                // This filters out groups like "DL x265 TEST" when "x265" is in ignored_group_parts
+                let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
+                if candidate_parts.iter().any(|part| {
+                    self.config
+                        .ignored_group_parts
+                        .iter()
+                        .any(|ignored| part.eq_ignore_ascii_case(ignored))
+                }) {
+                    continue;
+                }
+
                 // Verify this file itself has the prefix parts contiguous in its original name.
                 // This prevents adding files where filtering made non-adjacent parts appear adjacent.
                 let prefix_parts_vec: Vec<&str> = candidate.prefix.split('.').collect();
@@ -762,10 +777,12 @@ impl DirMove {
                 let key = utils::normalize_prefix(&candidate.prefix);
                 let is_concatenated = !candidate.prefix.contains('.');
 
-                if let Some((stored_prefix, files, existing_parts, has_concat)) = prefix_groups.get_mut(&key) {
+                if let Some((stored_prefix, files, existing_parts, has_concat, min_pos)) = prefix_groups.get_mut(&key) {
                     files.push(file_info.path_buf());
                     // Keep the highest specificity (most parts)
                     *existing_parts = (*existing_parts).max(candidate.part_count);
+                    // Track minimum start position across all files
+                    *min_pos = (*min_pos).min(candidate.start_position);
                     // Prefer concatenated (no-dot) form for directory names
                     if is_concatenated && !*has_concat {
                         *stored_prefix = candidate.prefix.into_owned();
@@ -779,6 +796,7 @@ impl DirMove {
                             vec![file_info.path_buf()],
                             candidate.part_count,
                             is_concatenated,
+                            candidate.start_position,
                         ),
                     );
                 }
@@ -794,7 +812,7 @@ impl DirMove {
 
             for group_key in &group_keys {
                 // Skip if file is already in this group
-                if let Some((_, files, _, _)) = prefix_groups.get(group_key)
+                if let Some((_, files, _, _, _)) = prefix_groups.get(group_key)
                     && files.contains(&file_path)
                 {
                     continue;
@@ -807,7 +825,7 @@ impl DirMove {
                     // For this check, we need to reconstruct the prefix parts from the group key
                     // Since the key is normalized (no dots), we check if the original starts with it
                     if utils::parts_are_contiguous_in_original(&file_info.original_name, &[group_key.as_str()])
-                        && let Some((_, files, _, _)) = prefix_groups.get_mut(group_key)
+                        && let Some((_, files, _, _, _)) = prefix_groups.get_mut(group_key)
                     {
                         files.push(file_path.clone());
                     }
@@ -815,10 +833,10 @@ impl DirMove {
             }
         }
 
-        // Convert to final format: display_prefix -> (files, prefix_parts)
-        let display_groups: HashMap<String, (Vec<PathBuf>, usize)> = prefix_groups
+        // Convert to final format: display_prefix -> (files, prefix_parts, min_start_position)
+        let display_groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = prefix_groups
             .into_values()
-            .map(|(prefix, files, parts, _)| (prefix, (files, parts)))
+            .map(|(prefix, files, parts, _, min_pos)| (prefix, (files, parts, min_pos)))
             .collect();
 
         // Apply prefix overrides: if a group's prefix starts with an override, use the override
@@ -832,13 +850,27 @@ impl DirMove {
         let files_with_names = self.collect_files_with_names()?;
         let prefix_groups = self.collect_all_prefix_groups(&files_with_names);
 
-        // Sort groups by prefix length (longest first) for better grouping, then alphabetically.
+        // Sort groups by:
+        // 1. Start position (earlier in filename = lower value = first)
+        // 2. Prefix length (longer = first, for same position)
+        // 3. Alphabetically (for ties)
+        // This biases towards prefixes from the start of filenames.
         // Filter out groups smaller than the configured minimum.
         let min_group_size = self.config.min_group_size;
         let mut groups_to_process: Vec<_> = prefix_groups
             .into_iter()
-            .filter(|(_, (files, _))| files.len() >= min_group_size)
-            .sorted_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)))
+            .filter(|(_, (files, _, _))| files.len() >= min_group_size)
+            .sorted_by(|a, b| {
+                let (_, (_, _, pos_a)) = a;
+                let (_, (_, _, pos_b)) = b;
+                // First by position (ascending - earlier is better)
+                pos_a
+                    .cmp(pos_b)
+                    // Then by length (descending - longer is more specific)
+                    .then_with(|| b.0.len().cmp(&a.0.len()))
+                    // Finally alphabetically
+                    .then_with(|| a.0.cmp(&b.0))
+            })
             .collect();
 
         if groups_to_process.is_empty() {
@@ -856,7 +888,7 @@ impl DirMove {
         print_bold!("Found {} group(s) with matching prefixes:\n", initial_group_count);
 
         while !groups_to_process.is_empty() {
-            let (prefix, (files, _)) = groups_to_process.remove(0);
+            let (prefix, (files, _, _)) = groups_to_process.remove(0);
 
             // Filter out already moved files
             let available_files: Vec<_> = files.into_iter().filter(|f| !moved_files.contains(f)).collect();
@@ -914,15 +946,15 @@ impl DirMove {
     /// If files in a group start with an override prefix, merge them under the override name.
     fn apply_prefix_overrides(
         &self,
-        groups: HashMap<String, (Vec<PathBuf>, usize)>,
-    ) -> HashMap<String, (Vec<PathBuf>, usize)> {
+        groups: HashMap<String, (Vec<PathBuf>, usize, usize)>,
+    ) -> HashMap<String, (Vec<PathBuf>, usize, usize)> {
         if self.config.prefix_overrides.is_empty() {
             return groups;
         }
 
-        let mut result: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        let mut result: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
 
-        for (prefix, (files, prefix_parts)) in groups {
+        for (prefix, (files, prefix_parts, min_pos)) in groups {
             // Check if any override matches: either the prefix starts with override,
             // or the override starts with the prefix (override is more specific),
             // or any file in the group starts with the override
@@ -943,10 +975,12 @@ impl DirMove {
 
             let entry = result
                 .entry(target_prefix)
-                .or_insert_with(|| (Vec::new(), prefix_parts));
+                .or_insert_with(|| (Vec::new(), prefix_parts, min_pos));
             entry.0.extend(files);
             // Keep the highest specificity
             entry.1 = entry.1.max(prefix_parts);
+            // Keep the minimum start position
+            entry.2 = entry.2.min(min_pos);
         }
 
         result
@@ -1044,6 +1078,7 @@ pub mod test_helpers {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 5,
             overwrite: false,
@@ -1064,6 +1099,7 @@ pub mod test_helpers {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 5,
             overwrite,
@@ -1087,8 +1123,13 @@ pub mod test_helpers {
     }
 
     /// Helper to create a `PrefixCandidate` for test assertions.
-    pub fn candidate(prefix: &str, match_count: usize, part_count: usize) -> PrefixCandidate<'static> {
-        PrefixCandidate::new(Cow::Owned(prefix.to_string()), match_count, part_count)
+    pub fn candidate(
+        prefix: &str,
+        match_count: usize,
+        part_count: usize,
+        start_position: usize,
+    ) -> PrefixCandidate<'static> {
+        PrefixCandidate::new(Cow::Owned(prefix.to_string()), match_count, part_count, start_position)
     }
 
     pub fn make_test_dirs(names: &[&str]) -> Vec<DirectoryInfo> {
@@ -1129,6 +1170,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1170,6 +1212,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1207,6 +1250,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1239,6 +1283,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1273,6 +1318,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1313,6 +1359,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1355,6 +1402,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1379,6 +1427,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 5,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1414,6 +1463,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1431,7 +1481,7 @@ mod test_prefix_groups {
         // All case variations should be in the same group
         // Key will be from first file processed (original case preserved for display)
         // Check that some group has all 4 files
-        let max_group_size = groups.values().map(|(files, _)| files.len()).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|(files, _, _)| files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 4, "Should have a group with all 4 case variations");
     }
 
@@ -1456,6 +1506,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1472,7 +1523,7 @@ mod test_prefix_groups {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // All 4 files should be grouped together (PhotoLab = Photo.Lab = Photolab = PHOTOLAB)
-        let max_group_size = groups.values().map(|(files, _)| files.len()).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|(files, _, _)| files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 4, "Should have a group with all 4 files");
 
         // Should prefer the concatenated form (no dots) for the directory name
@@ -1501,6 +1552,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1516,7 +1568,7 @@ mod test_prefix_groups {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // Should have a group with all 3 files
-        let max_group_size = groups.values().map(|(files, _)| files.len()).max().unwrap_or(0);
+        let max_group_size = groups.values().map(|(files, _, _)| files.len()).max().unwrap_or(0);
         assert_eq!(max_group_size, 3, "Should have a group with all 3 files");
 
         // The group key should be "DarkkoTV" (concatenated) not "Darkko.TV" (dotted)
@@ -1548,6 +1600,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1591,6 +1644,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 6,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1619,6 +1673,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 5,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1648,6 +1703,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1686,6 +1742,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1743,6 +1800,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1791,6 +1849,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1832,6 +1891,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1869,6 +1929,7 @@ mod test_prefix_groups {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1924,6 +1985,7 @@ mod test_ignored_group_names {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: vec!["episode".to_string()],
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1967,6 +2029,7 @@ mod test_ignored_group_names {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: vec!["video".to_string(), "part".to_string()],
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -2014,6 +2077,7 @@ mod test_ignored_group_names {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: vec!["episode".to_string()], // lowercase in config
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -2060,6 +2124,7 @@ mod test_ignored_group_names {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: vec!["seasonone".to_string()], // normalized form (no dots)
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -2103,6 +2168,7 @@ mod test_ignored_group_names {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(), // empty list
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -2146,6 +2212,7 @@ mod test_ignored_group_names {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: vec!["scene".to_string(), "chapter".to_string()],
+            ignored_group_parts: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 5,
             overwrite: false,
@@ -2178,6 +2245,160 @@ mod test_ignored_group_names {
 }
 
 #[cfg(test)]
+mod test_ignored_group_parts {
+    use super::*;
+
+    fn make_config_with_ignored_parts(ignored_parts: Vec<&str>) -> Config {
+        Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
+            ignored_group_parts: ignored_parts.into_iter().map(|s| s.to_lowercase()).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn filters_groups_containing_ignored_part() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files that would form a group "DL.x265.TEST" without filtering
+        std::fs::write(root.join("Show.S01E01.1080p.DL.x265.TEST.mkv"), "").unwrap();
+        std::fs::write(root.join("Show.S01E02.1080p.DL.x265.TEST.mkv"), "").unwrap();
+        std::fs::write(root.join("Show.S01E03.1080p.DL.x265.TEST.mkv"), "").unwrap();
+
+        let config = make_config_with_ignored_parts(vec!["x265"]);
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Groups containing "x265" as a part should be filtered out
+        assert!(
+            !groups.contains_key("DL.x265.TEST"),
+            "Group containing ignored part 'x265' should not be offered"
+        );
+        assert!(
+            !groups.contains_key("x265.TEST"),
+            "Group containing ignored part 'x265' should not be offered"
+        );
+        assert!(
+            !groups.contains_key("DL.x265"),
+            "Group containing ignored part 'x265' should not be offered"
+        );
+        // But "Show" should still be offered
+        assert!(groups.contains_key("Show"), "Show should still be offered as a group");
+    }
+
+    #[test]
+    fn multiple_ignored_parts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Video.x265.HEVC.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Video.x265.HEVC.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Video.x265.HEVC.003.mp4"), "").unwrap();
+
+        let config = make_config_with_ignored_parts(vec!["x265", "HEVC"]);
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Groups with x265 or HEVC should be filtered
+        for key in groups.keys() {
+            let key_lower = key.to_lowercase();
+            assert!(
+                !key_lower.contains("x265") && !key_lower.contains("hevc"),
+                "Group '{}' should not contain ignored parts",
+                key
+            );
+        }
+        // Studio should still be available
+        assert!(groups.contains_key("Studio"), "Studio should be offered");
+    }
+
+    #[test]
+    fn case_insensitive_matching() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Name.X265.Thing.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Name.x265.Thing.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Name.X265.Thing.003.mp4"), "").unwrap();
+
+        let config = make_config_with_ignored_parts(vec!["x265"]); // lowercase in config
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should filter both X265 and x265 variations
+        for key in groups.keys() {
+            let key_lower = key.to_lowercase();
+            assert!(
+                !key_lower.contains("x265"),
+                "Group '{}' should not contain 'x265' (case-insensitive)",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn empty_ignored_parts_allows_all() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("DL.x265.TEST.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.x265.TEST.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.x265.TEST.Video.003.mp4"), "").unwrap();
+
+        let config = make_config_with_ignored_parts(vec![]); // empty list
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // With empty list, groups containing x265 should be allowed
+        assert!(
+            groups.keys().any(|k| k.to_lowercase().contains("x265")),
+            "With empty ignored_parts, groups with 'x265' should be offered"
+        );
+    }
+
+    #[test]
+    fn does_not_filter_substring_matches() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // "x26" is in ignored_parts, but "x265" should NOT be filtered
+        // because we match whole parts, not substrings
+        std::fs::write(root.join("Studio.x265.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.x265.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.x265.Video.003.mp4"), "").unwrap();
+
+        let config = make_config_with_ignored_parts(vec!["x26"]); // partial match
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "x265" should NOT be filtered because "x26" doesn't match the whole part
+        assert!(
+            groups.keys().any(|k| k.contains("x265")),
+            "Partial match 'x26' should not filter 'x265' groups"
+        );
+    }
+}
+
+#[cfg(test)]
 mod test_prefix_overrides {
     use super::test_helpers::*;
     use super::*;
@@ -2185,8 +2406,8 @@ mod test_prefix_overrides {
     #[test]
     fn no_overrides() {
         let dirmove = make_test_dirmove(Vec::new());
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name.Thing"));
@@ -2196,10 +2417,10 @@ mod test_prefix_overrides {
     #[test]
     fn matching_override() {
         let dirmove = make_test_dirmove(vec!["longer.prefix".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
         groups.insert(
             "longer.prefix.name".to_string(),
-            (vec![PathBuf::from("longer.prefix.name.file.mp4")], 3),
+            (vec![PathBuf::from("longer.prefix.name.file.mp4")], 3, 0),
         );
 
         let result = dirmove.apply_prefix_overrides(groups);
@@ -2211,21 +2432,21 @@ mod test_prefix_overrides {
     #[test]
     fn merges_groups() {
         let dirmove = make_test_dirmove(vec!["Some.Name".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
-        groups.insert("Some.Name.Other".to_string(), (vec![PathBuf::from("file2.mp4")], 3));
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
+        groups.insert("Some.Name.Other".to_string(), (vec![PathBuf::from("file2.mp4")], 3, 0));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name"));
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Some.Name").map(|(files, _)| files.len()), Some(2));
+        assert_eq!(result.get("Some.Name").map(|(files, _, _)| files.len()), Some(2));
     }
 
     #[test]
     fn non_matching() {
         let dirmove = make_test_dirmove(vec!["Other.Prefix".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
-        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        groups.insert("Some.Name.Thing".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some.Name.Thing"));
@@ -2236,9 +2457,9 @@ mod test_prefix_overrides {
     #[test]
     fn partial_match_only() {
         let dirmove = make_test_dirmove(vec!["Some".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
-        groups.insert("Something.Else".to_string(), (vec![PathBuf::from("file1.mp4")], 1));
-        groups.insert("Some.Name".to_string(), (vec![PathBuf::from("file2.mp4")], 2));
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        groups.insert("Something.Else".to_string(), (vec![PathBuf::from("file1.mp4")], 1, 0));
+        groups.insert("Some.Name".to_string(), (vec![PathBuf::from("file2.mp4")], 2, 0));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Some"));
@@ -2248,7 +2469,7 @@ mod test_prefix_overrides {
     #[test]
     fn override_more_specific_than_prefix() {
         let dirmove = make_test_dirmove(vec!["Example.Name".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
         groups.insert(
             "Example".to_string(),
             (
@@ -2258,6 +2479,7 @@ mod test_prefix_overrides {
                     PathBuf::from("Example.Name.Video3.mp4"),
                 ],
                 1,
+                0,
             ),
         );
 
@@ -2265,16 +2487,16 @@ mod test_prefix_overrides {
         assert!(result.contains_key("Example.Name"));
         assert!(!result.contains_key("Example"));
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("Example.Name").map(|(files, _)| files.len()), Some(3));
+        assert_eq!(result.get("Example.Name").map(|(files, _, _)| files.len()), Some(3));
     }
 
     #[test]
     fn multiple_overrides() {
         let dirmove = make_test_dirmove(vec!["Show.A".to_string(), "Show.B".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
-        groups.insert("Show.A.Season1".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
-        groups.insert("Show.B.Season1".to_string(), (vec![PathBuf::from("file2.mp4")], 3));
-        groups.insert("Show.C.Season1".to_string(), (vec![PathBuf::from("file3.mp4")], 3));
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        groups.insert("Show.A.Season1".to_string(), (vec![PathBuf::from("file1.mp4")], 3, 0));
+        groups.insert("Show.B.Season1".to_string(), (vec![PathBuf::from("file2.mp4")], 3, 0));
+        groups.insert("Show.C.Season1".to_string(), (vec![PathBuf::from("file3.mp4")], 3, 0));
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Show.A"));
@@ -2286,7 +2508,7 @@ mod test_prefix_overrides {
     #[test]
     fn empty_groups() {
         let dirmove = make_test_dirmove(vec!["Some".to_string()]);
-        let groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
+        let groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.is_empty());
@@ -2295,8 +2517,11 @@ mod test_prefix_overrides {
     #[test]
     fn override_with_case_sensitivity() {
         let dirmove = make_test_dirmove(vec!["show.name".to_string()]);
-        let mut groups: HashMap<String, (Vec<PathBuf>, usize)> = HashMap::new();
-        groups.insert("Show.Name.Season1".to_string(), (vec![PathBuf::from("file1.mp4")], 3));
+        let mut groups: HashMap<String, (Vec<PathBuf>, usize, usize)> = HashMap::new();
+        groups.insert(
+            "Show.Name.Season1".to_string(),
+            (vec![PathBuf::from("file1.mp4")], 3, 0),
+        );
 
         let result = dirmove.apply_prefix_overrides(groups);
         assert!(result.contains_key("Show.Name.Season1"));
@@ -2688,10 +2913,10 @@ mod test_full_flow {
         assert_eq!(filtered[4].filtered_name, "OtherShow.Episode.mp4");
 
         let show_candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
-        assert_eq!(show_candidates, vec![candidate("ShowName", 3, 1)]);
+        assert_eq!(show_candidates, vec![candidate("ShowName", 3, 1, 0)]);
 
         let other_candidates = utils::find_prefix_candidates(&filtered[3].filtered_name, &filtered, 2, 1);
-        assert_eq!(other_candidates, vec![candidate("OtherShow", 2, 1)]);
+        assert_eq!(other_candidates, vec![candidate("OtherShow", 2, 1, 0)]);
     }
 
     #[test]
@@ -2709,7 +2934,7 @@ mod test_full_flow {
         assert_eq!(filtered[2].filtered_name, "MovieName.more.mp4");
 
         let candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
-        assert_eq!(candidates, vec![candidate("MovieName", 3, 1)]);
+        assert_eq!(candidates, vec![candidate("MovieName", 3, 1, 0)]);
     }
 
     #[test]
@@ -2727,7 +2952,7 @@ mod test_full_flow {
         assert_eq!(filtered[2].filtered_name, "MovieName.more.mp4");
 
         let candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
-        assert_eq!(candidates, vec![candidate("MovieName", 3, 1)]);
+        assert_eq!(candidates, vec![candidate("MovieName", 3, 1, 0)]);
     }
 
     #[test]
@@ -2749,8 +2974,8 @@ mod test_full_flow {
         // (they're separated by "and")
         // With position-agnostic matching, "Tell" is also found as a candidate
         assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Show", 3, 1));
-        assert_eq!(candidates[1], candidate("Tell", 3, 1));
+        assert_eq!(candidates[0], candidate("Show", 3, 1, 0));
+        assert_eq!(candidates[1], candidate("Tell", 3, 1, 1));
     }
 
     #[test]
@@ -3788,6 +4013,7 @@ mod test_realistic_grouping {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size,
             min_prefix_chars: 1,
             overwrite: false,
@@ -3809,6 +4035,7 @@ mod test_realistic_grouping {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size,
             min_prefix_chars: 1,
             overwrite: false,
@@ -4298,6 +4525,7 @@ mod test_realistic_grouping {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -4934,7 +5162,7 @@ mod test_realistic_grouping {
 
         // Should NOT find "Creator.Name" with 6 files because only 2 have contiguous parts
         // If it exists, it should only have 2 files
-        if let Some((files, _)) = groups.get("Creator.Name") {
+        if let Some((files, _, _)) = groups.get("Creator.Name") {
             assert_eq!(
                 files.len(),
                 2,
@@ -5184,6 +5412,7 @@ mod test_varied_prefix_grouping {
             include: Vec::new(),
             exclude: Vec::new(),
             ignored_group_names: Vec::new(),
+            ignored_group_parts: Vec::new(),
             min_group_size,
             min_prefix_chars: 1,
             overwrite: false,
@@ -5564,7 +5793,7 @@ mod test_varied_prefix_grouping {
         assert_eq!(dragon_group.unwrap().1.0.len(), 3);
 
         // Verify random files are not in any main group
-        for (files, _) in groups.values() {
+        for (files, _, _) in groups.values() {
             for file in files {
                 let name = file.to_string_lossy();
                 assert!(
@@ -5909,6 +6138,7 @@ mod test_varied_prefix_grouping {
                 include: Vec::new(),
                 exclude: Vec::new(),
                 ignored_group_names: Vec::new(),
+                ignored_group_parts: Vec::new(),
                 min_group_size,
                 min_prefix_chars,
                 overwrite: false,

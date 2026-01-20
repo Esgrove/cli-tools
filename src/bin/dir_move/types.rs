@@ -39,6 +39,9 @@ pub struct PrefixCandidate<'a> {
     pub(crate) match_count: usize,
     /// Number of dot-separated parts in the prefix (1, 2, or 3).
     pub(crate) part_count: usize,
+    /// Position in the filename where this prefix starts (0 = beginning).
+    /// Lower values indicate prefixes closer to the start of the filename.
+    pub(crate) start_position: usize,
 }
 
 /// Information about what needs to be moved during an unpack operation.
@@ -91,11 +94,17 @@ impl MoveInfo {
 
 impl<'a> PrefixCandidate<'a> {
     /// Create a new `PrefixCandidate`.
-    pub(crate) const fn new(prefix: Cow<'a, str>, match_count: usize, part_count: usize) -> Self {
+    pub(crate) const fn new(
+        prefix: Cow<'a, str>,
+        match_count: usize,
+        part_count: usize,
+        start_position: usize,
+    ) -> Self {
         Self {
             prefix,
             match_count,
             part_count,
+            start_position,
         }
     }
 }

@@ -18,6 +18,7 @@ pub struct Config {
     pub(crate) include: Vec<String>,
     pub(crate) exclude: Vec<String>,
     pub(crate) ignored_group_names: Vec<String>,
+    pub(crate) ignored_group_parts: Vec<String>,
     pub(crate) min_group_size: usize,
     pub(crate) min_prefix_chars: usize,
     pub(crate) overwrite: bool,
@@ -45,6 +46,8 @@ struct DirMoveConfig {
     exclude: Vec<String>,
     #[serde(default)]
     ignored_group_names: Vec<String>,
+    #[serde(default)]
+    ignored_group_parts: Vec<String>,
     #[serde(default)]
     min_group_size: Option<usize>,
     #[serde(default)]
@@ -113,6 +116,14 @@ impl Config {
             .unique()
             .collect();
 
+        let ignored_group_parts: Vec<String> = user_config
+            .ignored_group_parts
+            .into_iter()
+            .chain(args.ignored_group_part)
+            .map(|s| s.to_lowercase())
+            .unique()
+            .collect();
+
         let prefix_ignores: Vec<String> = user_config
             .prefix_ignores
             .into_iter()
@@ -143,6 +154,7 @@ impl Config {
             include,
             exclude,
             ignored_group_names,
+            ignored_group_parts,
             min_group_size: args.group.or(user_config.min_group_size).unwrap_or(3),
             min_prefix_chars: args.min_prefix_chars.or(user_config.min_prefix_chars).unwrap_or(5),
             overwrite: args.force || user_config.overwrite,
@@ -229,6 +241,16 @@ ignored_group_names = ["Episode", "Video", "Part"]
 "#;
         let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.ignored_group_names, vec!["Episode", "Video", "Part"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_ignored_group_parts() {
+        let toml = r#"
+[dirmove]
+ignored_group_parts = ["x265", "x264", "HEVC", "TEST"]
+"#;
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.ignored_group_parts, vec!["x265", "x264", "HEVC", "TEST"]);
     }
 
     #[test]
@@ -416,6 +438,29 @@ mod cli_args_tests {
         let args =
             DirMoveArgs::try_parse_from(["test", "-I", "episode", "-I", "video", "-I", "part"]).expect("should parse");
         assert_eq!(args.ignored_group_name, vec!["episode", "video", "part"]);
+    }
+
+    #[test]
+    fn parses_multiple_ignored_group_parts() {
+        let args =
+            DirMoveArgs::try_parse_from(["test", "-P", "x265", "-P", "x264", "-P", "HEVC"]).expect("should parse");
+        assert_eq!(args.ignored_group_part, vec!["x265", "x264", "HEVC"]);
+    }
+
+    #[test]
+    fn parses_ignored_group_parts_long_form() {
+        let args = DirMoveArgs::try_parse_from(["test", "--ignore-group-part", "x265", "--ignore-group-part", "TEST"])
+            .expect("should parse");
+        assert_eq!(args.ignored_group_part, vec!["x265", "TEST"]);
+    }
+
+    #[test]
+    fn config_from_args_ignored_group_parts_lowercase() {
+        let args = DirMoveArgs::try_parse_from(["test", "-P", "X265", "-P", "Hevc"]).expect("should parse");
+        let config = Config::from_args(args);
+        // CLI ignored group parts should be stored as lowercase
+        assert!(config.ignored_group_parts.contains(&"x265".to_string()));
+        assert!(config.ignored_group_parts.contains(&"hevc".to_string()));
     }
 
     #[test]

@@ -83,7 +83,10 @@ pub fn find_prefix_candidates<'a>(
     let name_without_extension = file_name.rsplit_once('.').map_or(file_name, |(name, _ext)| name);
 
     // Check all 3-part sequences from any position (excluding extension)
-    for three_part in get_all_n_part_sequences(name_without_extension, 3) {
+    for (position, three_part) in get_all_n_part_sequences(name_without_extension, 3)
+        .into_iter()
+        .enumerate()
+    {
         let char_count = count_prefix_chars(three_part);
         if char_count >= min_prefix_chars {
             let three_part_normalized = normalize_prefix(three_part);
@@ -102,13 +105,21 @@ pub fn find_prefix_candidates<'a>(
                 })
                 .count();
             if match_count >= min_group_size {
-                candidates.push(PrefixCandidate::new(Cow::Borrowed(three_part), match_count, 3));
+                candidates.push(PrefixCandidate::new(
+                    Cow::Borrowed(three_part),
+                    match_count,
+                    3,
+                    position,
+                ));
             }
         }
     }
 
     // Check all 2-part sequences from any position (excluding extension)
-    for two_part in get_all_n_part_sequences(name_without_extension, 2) {
+    for (position, two_part) in get_all_n_part_sequences(name_without_extension, 2)
+        .into_iter()
+        .enumerate()
+    {
         let char_count = count_prefix_chars(two_part);
         if char_count >= min_prefix_chars {
             let two_part_normalized = normalize_prefix(two_part);
@@ -127,13 +138,16 @@ pub fn find_prefix_candidates<'a>(
                 })
                 .count();
             if match_count >= min_group_size {
-                candidates.push(PrefixCandidate::new(Cow::Borrowed(two_part), match_count, 2));
+                candidates.push(PrefixCandidate::new(Cow::Borrowed(two_part), match_count, 2, position));
             }
         }
     }
 
     // Check all 1-part sequences from any position (excluding extension)
-    for single_part in get_all_n_part_sequences(name_without_extension, 1) {
+    for (position, single_part) in get_all_n_part_sequences(name_without_extension, 1)
+        .into_iter()
+        .enumerate()
+    {
         if single_part.chars().count() >= min_prefix_chars {
             let single_part_normalized = single_part.to_lowercase();
             // Skip if we've already processed this normalized form
@@ -147,7 +161,12 @@ pub fn find_prefix_candidates<'a>(
                 .filter(|f| prefix_matches_normalized(&f.filtered_name, &single_part_normalized))
                 .count();
             if match_count >= min_group_size {
-                candidates.push(PrefixCandidate::new(Cow::Borrowed(single_part), match_count, 1));
+                candidates.push(PrefixCandidate::new(
+                    Cow::Borrowed(single_part),
+                    match_count,
+                    1,
+                    position,
+                ));
             }
         }
     }
@@ -975,7 +994,7 @@ mod test_prefix_candidates {
     fn simple_prefix_multiple_files() {
         let files = make_test_files(&["LongName.v1.mp4", "LongName.v2.mp4", "Other.v2.mp4"]);
         let candidates = find_prefix_candidates("LongName.v1.mp4", &files, 2, 1);
-        assert_eq!(candidates, vec![candidate("LongName", 2, 1)]);
+        assert_eq!(candidates, vec![candidate("LongName", 2, 1, 0)]);
     }
 
     #[test]
@@ -1676,7 +1695,7 @@ mod test_prefix_candidates {
     fn mixed_years_without_filtering() {
         let unfiltered_files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
         let candidates = find_prefix_candidates("ABC.2023.Thing.mp4", &unfiltered_files, 3, 1);
-        assert_eq!(candidates, vec![candidate("ABC", 3, 1)]);
+        assert_eq!(candidates, vec![candidate("ABC", 3, 1, 0)]);
     }
 
     #[test]
