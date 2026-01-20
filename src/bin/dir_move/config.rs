@@ -17,6 +17,7 @@ pub struct Config {
     pub(crate) dryrun: bool,
     pub(crate) include: Vec<String>,
     pub(crate) exclude: Vec<String>,
+    pub(crate) ignored_group_names: Vec<String>,
     pub(crate) min_group_size: usize,
     pub(crate) min_prefix_chars: usize,
     pub(crate) overwrite: bool,
@@ -42,6 +43,8 @@ struct DirMoveConfig {
     include: Vec<String>,
     #[serde(default)]
     exclude: Vec<String>,
+    #[serde(default)]
+    ignored_group_names: Vec<String>,
     #[serde(default)]
     min_group_size: Option<usize>,
     #[serde(default)]
@@ -102,6 +105,14 @@ impl Config {
         let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
         let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
 
+        let ignored_group_names: Vec<String> = user_config
+            .ignored_group_names
+            .into_iter()
+            .chain(args.ignored_group_name)
+            .map(|s| s.to_lowercase())
+            .unique()
+            .collect();
+
         let prefix_ignores: Vec<String> = user_config
             .prefix_ignores
             .into_iter()
@@ -131,6 +142,7 @@ impl Config {
             dryrun: args.print || user_config.dryrun,
             include,
             exclude,
+            ignored_group_names,
             min_group_size: args.group.or(user_config.min_group_size).unwrap_or(3),
             min_prefix_chars: args.min_prefix_chars.or(user_config.min_prefix_chars).unwrap_or(5),
             overwrite: args.force || user_config.overwrite,
@@ -160,6 +172,7 @@ mod config_tests {
         assert!(!config.verbose);
         assert!(config.include.is_empty());
         assert!(config.exclude.is_empty());
+        assert!(config.ignored_group_names.is_empty());
     }
 
     #[test]
@@ -206,6 +219,16 @@ prefix_overrides = ["special"]
         let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.prefix_ignores, vec!["the", "a"]);
         assert_eq!(config.prefix_overrides, vec!["special"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_ignored_group_names() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["Episode", "Video", "Part"]
+"#;
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.ignored_group_names, vec!["Episode", "Video", "Part"]);
     }
 
     #[test]
@@ -389,12 +412,36 @@ mod cli_args_tests {
     }
 
     #[test]
+    fn parses_multiple_ignored_group_names() {
+        let args =
+            DirMoveArgs::try_parse_from(["test", "-I", "episode", "-I", "video", "-I", "part"]).expect("should parse");
+        assert_eq!(args.ignored_group_name, vec!["episode", "video", "part"]);
+    }
+
+    #[test]
+    fn parses_ignored_group_names_long_form() {
+        let args = DirMoveArgs::try_parse_from(["test", "--ignore-group", "chapter", "--ignore-group", "scene"])
+            .expect("should parse");
+        assert_eq!(args.ignored_group_name, vec!["chapter", "scene"]);
+    }
+
+    #[test]
+    fn config_from_args_ignored_group_names_lowercase() {
+        let args = DirMoveArgs::try_parse_from(["test", "-I", "EPISODE", "-I", "Video"]).expect("should parse");
+        let config = Config::from_args(args);
+        // CLI ignored group names should be stored as lowercase
+        assert!(config.ignored_group_names.contains(&"episode".to_string()));
+        assert!(config.ignored_group_names.contains(&"video".to_string()));
+    }
+
+    #[test]
     fn empty_arrays_by_default() {
         let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
         assert!(args.include.is_empty());
         assert!(args.exclude.is_empty());
         assert!(args.prefix_ignore.is_empty());
         assert!(args.prefix_override.is_empty());
+        assert!(args.ignored_group_name.is_empty());
         assert!(args.unpack_directory.is_empty());
     }
 

@@ -746,6 +746,12 @@ impl DirMove {
 
             // Add file to ALL matching prefix groups, not just the best one
             for candidate in prefix_candidates {
+                // Skip candidates that match ignored group names
+                let candidate_normalized = utils::normalize_prefix(&candidate.prefix);
+                if self.config.ignored_group_names.contains(&candidate_normalized) {
+                    continue;
+                }
+
                 // Verify this file itself has the prefix parts contiguous in its original name.
                 // This prevents adding files where filtering made non-adjacent parts appear adjacent.
                 let prefix_parts_vec: Vec<&str> = candidate.prefix.split('.').collect();
@@ -1037,8 +1043,9 @@ pub mod test_helpers {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 3,
-            min_prefix_chars: 1,
+            min_prefix_chars: 5,
             overwrite: false,
             prefix_ignores,
             prefix_overrides,
@@ -1056,8 +1063,9 @@ pub mod test_helpers {
             dryrun,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 3,
-            min_prefix_chars: 1,
+            min_prefix_chars: 5,
             overwrite,
             prefix_ignores: Vec::new(),
             prefix_overrides: Vec::new(),
@@ -1120,6 +1128,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1160,6 +1169,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1196,6 +1206,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1227,6 +1238,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1260,6 +1272,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1299,6 +1312,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1340,6 +1354,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1363,6 +1378,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 5,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1397,6 +1413,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1438,6 +1455,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1482,6 +1500,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1528,6 +1547,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1570,6 +1590,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 6,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1597,6 +1618,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 5,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1625,6 +1647,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1662,6 +1685,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1718,6 +1742,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1765,6 +1790,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1805,6 +1831,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 3,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1841,6 +1868,7 @@ mod test_prefix_groups {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -1871,6 +1899,280 @@ mod test_prefix_groups {
         assert!(
             show_name_files.0.len() >= 4,
             "Show.Name group should have at least 4 entries"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_ignored_group_names {
+    use super::*;
+
+    #[test]
+    fn ignored_group_name_not_offered() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ignored_group_names: vec!["episode".to_string()],
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Episode" should NOT be offered as a group name
+        assert!(
+            !groups.contains_key("Episode"),
+            "Ignored group name 'Episode' should not be offered"
+        );
+        // But "Studio" should still be offered
+        assert!(
+            groups.contains_key("Studio"),
+            "Non-ignored group name 'Studio' should still be offered"
+        );
+    }
+
+    #[test]
+    fn multiple_ignored_group_names() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Video.Part.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Video.Part.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Video.Part.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ignored_group_names: vec!["video".to_string(), "part".to_string()],
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Both "Video" and "Part" should NOT be offered
+        assert!(
+            !groups.contains_key("Video"),
+            "Ignored group name 'Video' should not be offered"
+        );
+        assert!(
+            !groups.contains_key("Part"),
+            "Ignored group name 'Part' should not be offered"
+        );
+        // "Studio" should still be offered
+        assert!(
+            groups.contains_key("Studio"),
+            "Non-ignored group name 'Studio' should still be offered"
+        );
+    }
+
+    #[test]
+    fn ignored_group_names_case_insensitive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.EPISODE.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.episode.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ignored_group_names: vec!["episode".to_string()], // lowercase in config
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // All case variations of "Episode" should be filtered out
+        assert!(
+            !groups.contains_key("EPISODE"),
+            "Ignored group name 'EPISODE' should not be offered"
+        );
+        assert!(
+            !groups.contains_key("Episode"),
+            "Ignored group name 'Episode' should not be offered"
+        );
+        assert!(
+            !groups.contains_key("episode"),
+            "Ignored group name 'episode' should not be offered"
+        );
+    }
+
+    #[test]
+    fn ignored_multi_part_group_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Season.One.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ignored_group_names: vec!["seasonone".to_string()], // normalized form (no dots)
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Season.One" (normalized to "seasonone") should NOT be offered
+        assert!(
+            !groups.contains_key("Season.One"),
+            "Ignored group name 'Season.One' should not be offered"
+        );
+        // But "Studio" should still be offered
+        assert!(
+            groups.contains_key("Studio"),
+            "Non-ignored group name 'Studio' should still be offered"
+        );
+    }
+
+    #[test]
+    fn empty_ignored_list_allows_all() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ignored_group_names: Vec::new(), // empty list
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Both "Studio" and "Episode" should be offered when no ignores
+        assert!(
+            groups.contains_key("Studio"),
+            "'Studio' should be offered with empty ignore list"
+        );
+        assert!(
+            groups.contains_key("Episode"),
+            "'Episode' should be offered with empty ignore list"
+        );
+    }
+
+    #[test]
+    fn ignored_group_name_with_common_words() {
+        // Test realistic scenario with common words to ignore
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("StudioName.Scene.01.Chapter.01.mp4"), "").unwrap();
+        std::fs::write(root.join("StudioName.Scene.02.Chapter.02.mp4"), "").unwrap();
+        std::fs::write(root.join("StudioName.Scene.03.Chapter.03.mp4"), "").unwrap();
+
+        let config = Config {
+            auto: false,
+            create: true,
+            debug: false,
+            dryrun: true,
+            include: Vec::new(),
+            exclude: Vec::new(),
+            ignored_group_names: vec!["scene".to_string(), "chapter".to_string()],
+            min_group_size: 3,
+            min_prefix_chars: 5,
+            overwrite: false,
+            prefix_ignores: Vec::new(),
+            prefix_overrides: Vec::new(),
+            recurse: false,
+            verbose: false,
+            unpack_directory_names: Vec::new(),
+        };
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Common words "Scene" and "Chapter" should NOT be offered
+        assert!(
+            !groups.contains_key("Scene"),
+            "Common word 'Scene' should not be offered"
+        );
+        assert!(
+            !groups.contains_key("Chapter"),
+            "Common word 'Chapter' should not be offered"
+        );
+        // But the actual studio name should still be offered
+        assert!(
+            groups.contains_key("StudioName"),
+            "Actual studio name should still be offered"
         );
     }
 }
@@ -2445,8 +2747,10 @@ mod test_full_flow {
         let candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
         // Note: Show.Tell won't match because "Show" and "Tell" are not contiguous in original
         // (they're separated by "and")
-        assert_eq!(candidates.len(), 1);
+        // With position-agnostic matching, "Tell" is also found as a candidate
+        assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0], candidate("Show", 3, 1));
+        assert_eq!(candidates[1], candidate("Tell", 3, 1));
     }
 
     #[test]
@@ -2460,7 +2764,18 @@ mod test_full_flow {
         let unfiltered = make_test_files(&original_filenames);
 
         let candidates_unfiltered = utils::find_prefix_candidates(&unfiltered[0].filtered_name, &unfiltered, 3, 1);
-        assert_eq!(candidates_unfiltered, vec![candidate("ABC", 3, 1)]);
+        // With position-agnostic matching, "Thing" is also found
+        assert_eq!(candidates_unfiltered.len(), 2);
+        assert!(
+            candidates_unfiltered
+                .iter()
+                .any(|c| c.prefix == "ABC" && c.match_count == 3)
+        );
+        assert!(
+            candidates_unfiltered
+                .iter()
+                .any(|c| c.prefix == "Thing" && c.match_count == 3)
+        );
 
         let filtered = make_filtered_files(&original_filenames);
 
@@ -2471,8 +2786,10 @@ mod test_full_flow {
         let candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
         // Note: ABC.Thing won't match because "ABC" and "Thing" are not contiguous in original
         // (they're separated by year like "2023")
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0], candidate("ABC", 3, 1));
+        // With position-agnostic matching, "Thing" is also found as a candidate
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|c| c.prefix == "ABC" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Thing" && c.match_count == 3));
     }
 
     #[test]
@@ -2488,10 +2805,17 @@ mod test_full_flow {
         assert_eq!(filtered[0].filtered_name, "Some.Video.part1.mp4");
 
         let candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Some.Video", 3, 2));
+        // With position-agnostic matching, "Video" is also found
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Some.Video" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Some" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Video" && c.match_count == 3));
 
-        let dir_name = candidates[0].prefix.replace('.', " ");
+        let some_video = candidates.iter().find(|c| c.prefix == "Some.Video").unwrap();
+        let dir_name = some_video.prefix.replace('.', " ");
         assert_eq!(dir_name, "Some Video");
     }
 
@@ -2508,10 +2832,16 @@ mod test_full_flow {
         assert_eq!(filtered[0].filtered_name, "Movie.Name.file1.mp4");
 
         let candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Movie.Name", 3, 2));
+        // With position-agnostic matching, "Movie" and "Name" are also found
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Movie.Name" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Movie" && c.match_count == 3));
 
-        let dir_name = candidates[0].prefix.replace('.', " ");
+        let movie_name = candidates.iter().find(|c| c.prefix == "Movie.Name").unwrap();
+        let dir_name = movie_name.prefix.replace('.', " ");
         assert_eq!(dir_name, "Movie Name");
     }
 
@@ -2528,10 +2858,17 @@ mod test_full_flow {
         assert_eq!(filtered[0].filtered_name, "Cool.Stuff.part1.mp4");
 
         let candidates = utils::find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Cool.Stuff", 3, 2));
+        // With position-agnostic matching, "Stuff" is also found
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Cool.Stuff" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Cool" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Stuff" && c.match_count == 3));
 
-        let dir_name = candidates[0].prefix.replace('.', " ");
+        let cool_stuff = candidates.iter().find(|c| c.prefix == "Cool.Stuff").unwrap();
+        let dir_name = cool_stuff.prefix.replace('.', " ");
         assert_eq!(dir_name, "Cool Stuff");
     }
 }
@@ -3450,6 +3787,7 @@ mod test_realistic_grouping {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size,
             min_prefix_chars: 1,
             overwrite: false,
@@ -3470,6 +3808,7 @@ mod test_realistic_grouping {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size,
             min_prefix_chars: 1,
             overwrite: false,
@@ -3958,6 +4297,7 @@ mod test_realistic_grouping {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size: 2,
             min_prefix_chars: 1,
             overwrite: false,
@@ -4843,6 +5183,7 @@ mod test_varied_prefix_grouping {
             dryrun: true,
             include: Vec::new(),
             exclude: Vec::new(),
+            ignored_group_names: Vec::new(),
             min_group_size,
             min_prefix_chars: 1,
             overwrite: false,
@@ -4875,7 +5216,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("StudioAlpha.Scene.004.mp4"), "").unwrap();
         std::fs::write(root.join("StudioAlpha.Scene.005.mp4"), "").unwrap();
 
-        // Close but different: "SiteX" prefix (not exactly "Site")
+        // With position-agnostic matching, this file also matches StudioAlpha
         std::fs::write(root.join("SiteX.StudioAlpha.Scene.006.mp4"), "").unwrap();
 
         // Completely different files
@@ -4886,12 +5227,15 @@ mod test_varied_prefix_grouping {
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
-        // StudioAlpha should have 5 files (3 with Site prefix stripped + 2 without)
+        // StudioAlpha should have 6 files:
+        // - 3 with Site prefix stripped
+        // - 2 without prefix
+        // - 1 with SiteX prefix (position-agnostic matching finds StudioAlpha anywhere)
         assert!(groups.contains_key("StudioAlpha"), "Should find StudioAlpha group");
         assert_eq!(
             groups.get("StudioAlpha").unwrap().0.len(),
-            5,
-            "StudioAlpha should have 5 files (Site prefix stripped)"
+            6,
+            "StudioAlpha should have 6 files (position-agnostic matching)"
         );
 
         // RandomVideo and UnrelatedContent should NOT be in StudioAlpha
@@ -5499,7 +5843,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("StudioName.Content.04.mp4"), "").unwrap();
         std::fs::write(root.join("StudioName.Content.05.mp4"), "").unwrap();
 
-        // Different version prefix
+        // Different version prefix - with position-agnostic matching, this also matches StudioName
         std::fs::write(root.join("Ver3.StudioName.Different.01.mp4"), "").unwrap();
 
         // Noise
@@ -5510,19 +5854,13 @@ mod test_varied_prefix_grouping {
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
-        // StudioName should have 5 files (Ver2 stripped)
+        // StudioName should have 6 files:
+        // - 3 with Ver2 stripped
+        // - 2 without prefix
+        // - 1 with Ver3 prefix (position-agnostic matching finds StudioName anywhere)
         assert!(groups.contains_key("StudioName"), "Should find StudioName group");
         let sn_files = &groups.get("StudioName").unwrap().0;
-        assert_eq!(sn_files.len(), 5, "StudioName should have 5 files");
-
-        // Ver3 file should NOT be included (different prefix)
-        for file in sn_files {
-            let name = file.to_string_lossy();
-            assert!(
-                !name.contains("Ver3"),
-                "Ver3 file should not be in group (only Ver2 ignored)"
-            );
-        }
+        assert_eq!(sn_files.len(), 6, "StudioName should have 6 files");
     }
 
     #[test]
@@ -5570,6 +5908,7 @@ mod test_varied_prefix_grouping {
                 dryrun: true,
                 include: Vec::new(),
                 exclude: Vec::new(),
+                ignored_group_names: Vec::new(),
                 min_group_size,
                 min_prefix_chars,
                 overwrite: false,
@@ -5589,10 +5928,14 @@ mod test_varied_prefix_grouping {
             let files = make_test_files(&["Alex.Video.001.mp4", "Alex.Video.002.mp4", "Alex.Video.003.mp4"]);
             let candidates = utils::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 5);
 
-            // Should only find 2-part prefix "Alex.Video", not 1-part "Alex"
+            // "Alex" (4 chars) should be excluded, but "Video" (5 chars) is found with position-agnostic matching
             assert!(
-                !candidates.iter().any(|c| c.part_count == 1),
-                "Single-part prefix 'Alex' should be excluded with min_prefix_chars=5"
+                !candidates.iter().any(|c| c.prefix == "Alex"),
+                "Single-part prefix 'Alex' (4 chars) should be excluded with min_prefix_chars=5"
+            );
+            assert!(
+                candidates.iter().any(|c| c.prefix == "Video"),
+                "Single-part prefix 'Video' (5 chars) should be included with position-agnostic matching"
             );
             assert!(
                 candidates.iter().any(|c| c.part_count == 2 && c.prefix == "Alex.Video"),
@@ -5684,19 +6027,23 @@ mod test_varied_prefix_grouping {
 
             // With min_prefix_chars=3, "日本語" (3 chars) should be included
             let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 3);
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
+            let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
             assert!(
-                single_part.is_some(),
+                unicode_prefix.is_some(),
                 "Unicode prefix '日本語' (3 chars) should be included with min=3"
             );
 
             // With min_prefix_chars=4, "日本語" (3 chars) should be excluded
+            // but "Video" (5 chars) is still found with position-agnostic matching
             let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 4);
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
+            let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
             assert!(
-                single_part.is_none(),
+                unicode_prefix.is_none(),
                 "Unicode prefix '日本語' (3 chars) should be excluded with min=4"
             );
+            // Video (5 chars) is still found
+            let video_prefix = candidates.iter().find(|c| c.prefix == "Video");
+            assert!(video_prefix.is_some(), "Video (5 chars) should be included with min=4");
         }
 
         #[test]

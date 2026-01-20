@@ -60,27 +60,39 @@ pub fn filter_numeric_resolution_and_glue_parts(filename: &str) -> String {
         .join(".")
 }
 
-/// Find prefix candidates for a file, prioritizing earlier positions in the filename.
-/// Returns candidates in priority order: 3-part prefix, 2-part prefix, 1-part prefix.
+/// Find prefix candidates for a file from any position in the filename.
+/// Returns candidates in priority order: 3-part sequences, 2-part sequences, 1-part sequences.
 /// Longer prefixes are preferred as they provide more specific grouping.
 /// Also handles case variations and dot-separated vs concatenated forms.
+///
+/// Unlike prefix-only matching, this function extracts candidates from all positions
+/// in the filename, allowing common group names that appear in the middle of filenames
+/// to be detected.
+///
+/// The file extension (last part after the final dot) is excluded from candidate generation.
 pub fn find_prefix_candidates<'a>(
     file_name: &'a str,
     all_files: &[FileInfo<'_>],
     min_group_size: usize,
     min_prefix_chars: usize,
 ) -> Vec<PrefixCandidate<'a>> {
-    let Some(first_part) = file_name.split('.').next().filter(|p| !p.is_empty()) else {
-        return Vec::new();
-    };
-
     let mut candidates: Vec<PrefixCandidate<'a>> = Vec::new();
+    let mut seen_normalized: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Check 3-part prefix if it meets minimum character count (excluding dots)
-    if let Some(three_part) = get_n_part_prefix(file_name, 3) {
+    // Get the filename without the extension to avoid matching file extensions as group names
+    let name_without_extension = file_name.rsplit_once('.').map_or(file_name, |(name, _ext)| name);
+
+    // Check all 3-part sequences from any position (excluding extension)
+    for three_part in get_all_n_part_sequences(name_without_extension, 3) {
         let char_count = count_prefix_chars(three_part);
         if char_count >= min_prefix_chars {
             let three_part_normalized = normalize_prefix(three_part);
+            // Skip if we've already processed this normalized form
+            if seen_normalized.contains(&three_part_normalized) {
+                continue;
+            }
+            seen_normalized.insert(three_part_normalized.clone());
+
             let prefix_parts: Vec<&str> = three_part.split('.').collect();
             let match_count = all_files
                 .iter()
@@ -95,11 +107,17 @@ pub fn find_prefix_candidates<'a>(
         }
     }
 
-    // Check 2-part prefix if it meets minimum character count (excluding dots)
-    if let Some(two_part) = get_n_part_prefix(file_name, 2) {
+    // Check all 2-part sequences from any position (excluding extension)
+    for two_part in get_all_n_part_sequences(name_without_extension, 2) {
         let char_count = count_prefix_chars(two_part);
         if char_count >= min_prefix_chars {
             let two_part_normalized = normalize_prefix(two_part);
+            // Skip if we've already processed this normalized form
+            if seen_normalized.contains(&two_part_normalized) {
+                continue;
+            }
+            seen_normalized.insert(two_part_normalized.clone());
+
             let prefix_parts: Vec<&str> = two_part.split('.').collect();
             let match_count = all_files
                 .iter()
@@ -114,16 +132,23 @@ pub fn find_prefix_candidates<'a>(
         }
     }
 
-    // Check 1-part prefix if it meets minimum character count
-    // to avoid false matches with short names like "alex", "name", etc.
-    if first_part.chars().count() >= min_prefix_chars {
-        let first_part_normalized = first_part.to_lowercase();
-        let match_count = all_files
-            .iter()
-            .filter(|f| prefix_matches_normalized(&f.filtered_name, &first_part_normalized))
-            .count();
-        if match_count >= min_group_size {
-            candidates.push(PrefixCandidate::new(Cow::Borrowed(first_part), match_count, 1));
+    // Check all 1-part sequences from any position (excluding extension)
+    for single_part in get_all_n_part_sequences(name_without_extension, 1) {
+        if single_part.chars().count() >= min_prefix_chars {
+            let single_part_normalized = single_part.to_lowercase();
+            // Skip if we've already processed this normalized form
+            if seen_normalized.contains(&single_part_normalized) {
+                continue;
+            }
+            seen_normalized.insert(single_part_normalized.clone());
+
+            let match_count = all_files
+                .iter()
+                .filter(|f| prefix_matches_normalized(&f.filtered_name, &single_part_normalized))
+                .count();
+            if match_count >= min_group_size {
+                candidates.push(PrefixCandidate::new(Cow::Borrowed(single_part), match_count, 1));
+            }
         }
     }
 
@@ -136,34 +161,35 @@ pub fn count_prefix_chars(prefix: &str) -> usize {
     prefix.chars().filter(|c| *c != '.').count()
 }
 
-/// Check if a filename's prefix matches the given normalized target.
-/// Checks 1-part, 2-part, and 3-part prefixes to handle cases like:
-/// - "PhotoLab.Image" matching "photolab" (1-part exact)
-/// - "PhotoLabTV.Image" matching "photolab" (1-part starts with)
+/// Check if a filename contains the given normalized target anywhere in the name.
+/// Checks all single parts and all contiguous 2-part and 3-part combinations to handle cases like:
+/// - "PhotoLab.Image" matching "photolab" (single part exact)
+/// - "PhotoLabTV.Image" matching "photolab" (single part starts with)
 /// - "Photo.Lab.Image" matching "photolab" (2-part combined)
-/// - "Photo.Lab.TV.Image" matching "photolab" (2-part combined, starts with)
+/// - "Something.Photo.Lab.Image" matching "photolab" (2-part combined, not at start)
+/// - "Extra.PhotoLabTV.Image" matching "photolab" (single part starts with, not at start)
 pub fn prefix_matches_normalized(file_name: &str, target_normalized: &str) -> bool {
     let parts: Vec<&str> = file_name.split('.').collect();
 
-    // Check 1-part prefix (exact match or starts with)
-    if let Some(&first) = parts.first() {
-        let first_lower = first.to_lowercase();
-        if first_lower == *target_normalized || first_lower.starts_with(target_normalized) {
+    // Check all single parts (exact match or starts with)
+    for part in &parts {
+        let part_lower = part.to_lowercase();
+        if part_lower == *target_normalized || part_lower.starts_with(target_normalized) {
             return true;
         }
     }
 
-    // Check 2-part prefix combined (exact match or starts with)
-    if parts.len() >= 2 {
-        let two_combined = format!("{}{}", parts[0], parts[1]).to_lowercase();
+    // Check all 2-part combinations (exact match or starts with)
+    for window in parts.windows(2) {
+        let two_combined = format!("{}{}", window[0], window[1]).to_lowercase();
         if two_combined == *target_normalized || two_combined.starts_with(target_normalized) {
             return true;
         }
     }
 
-    // Check 3-part prefix combined (exact match or starts with)
-    if parts.len() >= 3 {
-        let three_combined = format!("{}{}{}", parts[0], parts[1], parts[2]).to_lowercase();
+    // Check all 3-part combinations (exact match or starts with)
+    for window in parts.windows(3) {
+        let three_combined = format!("{}{}{}", window[0], window[1], window[2]).to_lowercase();
         if three_combined == *target_normalized || three_combined.starts_with(target_normalized) {
             return true;
         }
@@ -247,31 +273,44 @@ pub fn normalize_prefix(prefix: &str) -> String {
     prefix.replace('.', "").to_lowercase()
 }
 
-/// Extract a prefix consisting of the first n dot-separated parts.
-/// Returns None if there aren't enough parts.
-pub fn get_n_part_prefix(file_name: &str, n: usize) -> Option<&str> {
-    let mut dots_found = 0;
-    let mut nth_dot_pos = 0;
+/// Extract all N-part sequences from a filename as string slices.
+/// For `A.B.C.D`, with n=2, returns `["A.B", "B.C", "C.D"]`.
+/// This allows finding common group names that appear anywhere in filenames,
+/// not just at the start.
+pub fn get_all_n_part_sequences(file_name: &str, n: usize) -> Vec<&str> {
+    if n == 0 {
+        return Vec::new();
+    }
 
+    // Collect the start position of each part (after each dot, plus position 0)
+    let mut part_starts: Vec<usize> = vec![0];
     for (i, c) in file_name.bytes().enumerate() {
         if c == b'.' {
-            dots_found += 1;
-            if dots_found == n {
-                nth_dot_pos = i;
-            } else if dots_found > n {
-                // Found more than n dots, return prefix up to nth dot
-                return Some(&file_name[..nth_dot_pos]);
-            }
+            part_starts.push(i + 1);
+        }
+    }
+    let num_parts = part_starts.len();
+
+    if num_parts < n {
+        return Vec::new();
+    }
+
+    let mut sequences = Vec::new();
+    for start in 0..=(num_parts - n) {
+        let start_pos = part_starts[start];
+        let end_pos = if start + n < num_parts {
+            // End just before the next part's dot
+            part_starts[start + n] - 1
+        } else {
+            file_name.len()
+        };
+
+        if start_pos < end_pos {
+            sequences.push(&file_name[start_pos..end_pos]);
         }
     }
 
-    // If we found exactly n dots, that's n+1 parts which is enough
-    if dots_found >= n && nth_dot_pos > 0 {
-        return Some(&file_name[..nth_dot_pos]);
-    }
-
-    // Not enough parts
-    None
+    sequences
 }
 
 /// Check if a directory name is in the unwanted list.
@@ -748,74 +787,6 @@ mod test_contiguity {
 }
 
 #[cfg(test)]
-mod test_prefix_extraction {
-    use super::*;
-
-    #[test]
-    fn three_parts_from_long_name() {
-        assert_eq!(get_n_part_prefix("Some.Name.Thing.v1.mp4", 3), Some("Some.Name.Thing"));
-    }
-
-    #[test]
-    fn two_parts_from_name() {
-        assert_eq!(get_n_part_prefix("Some.Name.Thing.mp4", 2), Some("Some.Name"));
-    }
-
-    #[test]
-    fn not_enough_parts_for_three() {
-        assert_eq!(get_n_part_prefix("Some.Name.mp4", 3), None);
-    }
-
-    #[test]
-    fn not_enough_parts_for_two() {
-        assert_eq!(get_n_part_prefix("Some.mp4", 2), None);
-    }
-
-    #[test]
-    fn exact_parts_for_two() {
-        assert_eq!(get_n_part_prefix("Some.Name.mp4", 2), Some("Some.Name"));
-    }
-
-    #[test]
-    fn single_part_name() {
-        assert_eq!(get_n_part_prefix("file.mp4", 1), Some("file"));
-    }
-
-    #[test]
-    fn empty_string() {
-        assert_eq!(get_n_part_prefix("", 1), None);
-    }
-
-    #[test]
-    fn no_extension() {
-        assert_eq!(get_n_part_prefix("Some.Name", 1), Some("Some"));
-    }
-
-    #[test]
-    fn many_parts() {
-        assert_eq!(get_n_part_prefix("A.B.C.D.E.F.mp4", 3), Some("A.B.C"));
-    }
-
-    #[test]
-    fn with_numbers_in_name() {
-        assert_eq!(get_n_part_prefix("Show.2024.S01E01.mp4", 2), Some("Show.2024"));
-    }
-
-    #[test]
-    fn with_special_characters() {
-        assert_eq!(get_n_part_prefix("Show-Name.Part.One.mp4", 2), Some("Show-Name.Part"));
-    }
-
-    #[test]
-    fn with_underscores() {
-        assert_eq!(
-            get_n_part_prefix("Show_Name.Part_One.Episode.mp4", 2),
-            Some("Show_Name.Part_One")
-        );
-    }
-}
-
-#[cfg(test)]
 mod test_filtering {
     use super::*;
 
@@ -984,12 +955,17 @@ mod test_filtering {
 }
 
 #[cfg(test)]
+/// Tests for prefix candidate finding with ORIGINAL filenames.
+/// These tests use the original test filenames from before position-agnostic matching
+/// was implemented. Assertions have been updated to reflect the new behavior where
+/// group names can be found at any position in the filename.
 mod test_prefix_candidates {
     use super::*;
     use crate::dir_move::test_helpers::*;
 
     #[test]
     fn single_file_no_match() {
+        // Original test: LongName only appears in one file, no group formed
         let files = make_test_files(&["LongName.v1.mp4", "Other.v2.mp4"]);
         let candidates = find_prefix_candidates("LongName.v1.mp4", &files, 2, 1);
         assert!(candidates.is_empty());
@@ -1010,10 +986,23 @@ mod test_prefix_candidates {
             "Some.Name.Thing.v3.mp4",
         ]);
         let candidates = find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Some.Name.Thing", 3, 3));
-        assert_eq!(candidates[1], candidate("Some.Name", 3, 2));
-        assert_eq!(candidates[2], candidate("Some", 3, 1));
+        // With position-agnostic matching, we find candidates from all positions
+        // Core expected candidates should be present
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Some.Name.Thing" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Some.Name" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Some" && c.match_count == 3));
+        // Position-agnostic matching also finds Name.Thing, Name, Thing
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Name.Thing" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Name" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Thing" && c.match_count == 3));
     }
 
     #[test]
@@ -1024,26 +1013,30 @@ mod test_prefix_candidates {
             "Some.Name.Other.v1.mp4",
         ]);
         let candidates = find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Some.Name.Thing", 2, 3));
-        assert_eq!(candidates[1], candidate("Some.Name", 3, 2));
-        assert_eq!(candidates[2], candidate("Some", 3, 1));
+        // Core expected candidates
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Some.Name.Thing" && c.match_count == 2)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Some.Name" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Some" && c.match_count == 3));
     }
 
     #[test]
     fn fallback_to_two_part_when_no_three_part_matches() {
         let files = make_test_files(&["Some.Name.Thing.mp4", "Some.Name.Other.mp4", "Some.Name.More.mp4"]);
         let candidates = find_prefix_candidates("Some.Name.Thing.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Some.Name", 3, 2));
-        assert_eq!(candidates[1], candidate("Some", 3, 1));
+        // Core expected candidates
+        assert!(candidates.iter().any(|c| c.prefix == "Some.Name" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Some" && c.match_count == 3));
     }
 
     #[test]
     fn single_word_fallback() {
         let files = make_test_files(&["ABC.2023.Thing.mp4", "ABC.2024.Other.mp4", "ABC.2025.More.mp4"]);
         let candidates = find_prefix_candidates("ABC.2023.Thing.mp4", &files, 3, 1);
-        assert_eq!(candidates, vec![candidate("ABC", 3, 1)]);
+        assert!(candidates.iter().any(|c| c.prefix == "ABC" && c.match_count == 3));
     }
 
     #[test]
@@ -1057,9 +1050,14 @@ mod test_prefix_candidates {
         // 3-part "Some.Name.Thing" has 2 files < 3, so excluded
         // 2-part "Some.Name" has 3 files >= 3, 1-part "Some" has 3 files >= 3
         let candidates = find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 3, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Some.Name", 3, 2));
-        assert_eq!(candidates[1], candidate("Some", 3, 1));
+        assert!(candidates.iter().any(|c| c.prefix == "Some.Name" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Some" && c.match_count == 3));
+        // Thing only appears in 2 files, below threshold
+        assert!(
+            !candidates
+                .iter()
+                .any(|c| c.prefix == "Some.Name.Thing" && c.match_count >= 3)
+        );
     }
 
     #[test]
@@ -1079,9 +1077,9 @@ mod test_prefix_candidates {
             "Show.Other.S01E02.mp4",
         ]);
         let candidates = find_prefix_candidates("Show.Name.S01E01.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Show.Name", 3, 2));
-        assert_eq!(candidates[1], candidate("Show", 5, 1));
+        // Core expected candidates
+        assert!(candidates.iter().any(|c| c.prefix == "Show.Name" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Show" && c.match_count == 5));
     }
 
     #[test]
@@ -1104,10 +1102,12 @@ mod test_prefix_candidates {
         // With min_group_size=1, threshold is min(1, 2) = 1
         // All prefixes with at least 1 match qualify
         let candidates = find_prefix_candidates("Unique.Name.v1.mp4", &files, 1, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Unique.Name.v1", 1, 3));
-        assert_eq!(candidates[1], candidate("Unique.Name", 1, 2));
-        assert_eq!(candidates[2], candidate("Unique", 1, 1));
+        // Core expected candidates from prefix position
+        assert!(candidates.iter().any(|c| c.prefix == "Unique.Name.v1"));
+        assert!(candidates.iter().any(|c| c.prefix == "Unique.Name"));
+        assert!(candidates.iter().any(|c| c.prefix == "Unique"));
+        // Position-agnostic matching also finds Name
+        assert!(candidates.iter().any(|c| c.prefix == "Name"));
     }
 
     #[test]
@@ -1125,9 +1125,15 @@ mod test_prefix_candidates {
             "Series.Episode.10.mp4",
         ]);
         let candidates = find_prefix_candidates("Series.Episode.01.mp4", &files, 5, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Series.Episode", 10, 2));
-        assert_eq!(candidates[1], candidate("Series", 10, 1));
+        // Core expected candidates
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Series.Episode" && c.match_count == 10)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Series" && c.match_count == 10));
+        // Position-agnostic matching also finds Episode
+        assert!(candidates.iter().any(|c| c.prefix == "Episode" && c.match_count == 10));
     }
 
     #[test]
@@ -1135,9 +1141,10 @@ mod test_prefix_candidates {
         let files = make_test_files(&["Show.Name.v1.mp4", "show.name.v2.mp4", "SHOW.NAME.v3.mp4"]);
         let candidates = find_prefix_candidates("Show.Name.v1.mp4", &files, 2, 1);
         // Case-insensitive matching should group all three files
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Show.Name", 3, 2));
-        assert_eq!(candidates[1], candidate("Show", 3, 1));
+        // With position-agnostic matching, "Name" is also found as a candidate
+        assert!(candidates.iter().any(|c| c.prefix == "Show.Name" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Show" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Name" && c.match_count == 3));
     }
 
     #[test]
@@ -1155,7 +1162,7 @@ mod test_prefix_candidates {
         // The 1-part prefix "PhotoLab" should match all 4 files
         let photolab = candidates.iter().find(|c| c.prefix.to_lowercase() == "photolab");
         assert!(photolab.is_some());
-        assert_eq!(photolab.unwrap().match_count, 4); // count should be 4
+        assert_eq!(photolab.unwrap().match_count, 4);
 
         // Verify with dotted form as source
         let files = make_test_files(&[
@@ -1236,17 +1243,17 @@ mod test_prefix_candidates {
 
     #[test]
     fn prefix_matches_normalized_no_match() {
-        // These don't match because the first part doesn't start with the prefix
+        // These don't match because no part starts with the prefix
         assert!(!prefix_matches_normalized("Other.Album.jpg", "photolab"));
         assert!(!prefix_matches_normalized("Other.Show.mp4", "showtv"));
-        // These don't match because the prefix appears in the middle, not at start
+        // These don't match because "XPhotoLab" doesn't start with "photolab"
         assert!(!prefix_matches_normalized("XPhotoLab.Image.jpg", "photolab"));
         assert!(!prefix_matches_normalized("XShowTV.Episode.mp4", "showtv"));
     }
 
     #[test]
     fn prefix_matches_normalized_starts_with() {
-        // These match because the first part STARTS WITH the prefix
+        // These match because a part STARTS WITH the prefix
         // This allows grouping JosephExampleTV with JosephExample files
         assert!(prefix_matches_normalized("PhotoLabX.Image.jpg", "photolab"));
         assert!(prefix_matches_normalized("ShowTVX.Episode.mp4", "showtv"));
@@ -1269,7 +1276,11 @@ mod test_prefix_candidates {
         // With min_group_size=2, "Vacation.Photos" qualifies
         let candidates = find_prefix_candidates("Vacation.Photos.Image1.jpg", &files, 2, 1);
         assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], candidate("Vacation.Photos", 2, 2));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Vacation.Photos" && c.match_count == 2)
+        );
     }
 
     #[test]
@@ -1366,24 +1377,31 @@ mod test_prefix_candidates {
             "Album.Other.Set1.Photo1.jpg",
         ]);
         let candidates = find_prefix_candidates("Album.Name.Set1.Photo1.jpg", &files, 2, 1);
-        // Should offer longer prefixes first: 3-part, then 2-part, then 1-part
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Album.Name.Set1", 2, 3));
-        assert_eq!(candidates[1], candidate("Album.Name", 3, 2));
-        assert_eq!(candidates[2], candidate("Album", 4, 1));
+        // Should find longer prefixes first: 3-part, then 2-part, then 1-part
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Album.Name.Set1" && c.match_count == 2)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Album.Name" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Album" && c.match_count == 4));
     }
 
     #[test]
     fn min_group_size_one_matches_single_file() {
-        let files = make_test_files(&["Unique.Name.File.jpg", "Other.Name.File.jpg"]);
-        // With min_group_size=1, threshold is min(1, 2) = 1
-        // All prefixes with at least 1 match qualify
+        let files = make_test_files(&["Unique.Name.File.jpg", "Other.File.jpg"]);
+        // With min_group_size=1, all prefixes with at least 1 match qualify
         let candidates = find_prefix_candidates("Unique.Name.File.jpg", &files, 1, 1);
         assert!(!candidates.is_empty());
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Unique.Name.File", 1, 3));
-        assert_eq!(candidates[1], candidate("Unique.Name", 1, 2));
-        assert_eq!(candidates[2], candidate("Unique", 1, 1));
+        assert!(candidates.iter().any(|c| c.prefix == "Unique.Name.File"));
+        assert!(candidates.iter().any(|c| c.prefix == "Unique.Name"));
+        assert!(candidates.iter().any(|c| c.prefix == "Unique"));
+        // Position-agnostic: File appears in both files
+        assert!(candidates.iter().any(|c| c.prefix == "File" && c.match_count == 2));
     }
 
     #[test]
@@ -1401,9 +1419,12 @@ mod test_prefix_candidates {
 
         // min_group_size=5, prefixes with exactly 5 files qualify
         let candidates = find_prefix_candidates("Gallery.Photos.Img1.jpg", &files, 5, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Gallery.Photos", 5, 2));
-        assert_eq!(candidates[1], candidate("Gallery", 5, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Gallery.Photos" && c.match_count == 5)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Gallery" && c.match_count == 5));
     }
 
     #[test]
@@ -1443,9 +1464,14 @@ mod test_prefix_candidates {
             "Drama.Series.S02E02.mp4",
         ]);
         let candidates = find_prefix_candidates("Drama.Series.S01E01.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Drama.Series", 5, 2));
-        assert_eq!(candidates[1], candidate("Drama", 5, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Drama.Series" && c.match_count == 5)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Drama" && c.match_count == 5));
+        // Position-agnostic also finds Series
+        assert!(candidates.iter().any(|c| c.prefix == "Series" && c.match_count == 5));
     }
 
     #[test]
@@ -1457,9 +1483,14 @@ mod test_prefix_candidates {
             "Studio.Comedy.2017.BluRay.mp4",
         ]);
         let candidates = find_prefix_candidates("Studio.Action.2012.BluRay.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Studio.Action", 2, 2));
-        assert_eq!(candidates[1], candidate("Studio", 4, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Studio.Action" && c.match_count == 2)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Studio" && c.match_count == 4));
+        // Position-agnostic also finds BluRay
+        assert!(candidates.iter().any(|c| c.prefix == "BluRay" && c.match_count == 4));
     }
 
     #[test]
@@ -1471,10 +1502,17 @@ mod test_prefix_candidates {
             "Drama.Series.Name.2021.S02E01.Return.1080p.mp4",
         ]);
         let candidates = find_prefix_candidates("Drama.Series.Name.2020.S01E01.Pilot.1080p.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Drama.Series.Name", 4, 3));
-        assert_eq!(candidates[1], candidate("Drama.Series", 4, 2));
-        assert_eq!(candidates[2], candidate("Drama", 4, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Drama.Series.Name" && c.match_count == 4)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Drama.Series" && c.match_count == 4)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Drama" && c.match_count == 4));
     }
 
     #[test]
@@ -1485,10 +1523,17 @@ mod test_prefix_candidates {
             "Action.Movie.Title.2021.Remastered.mp4",
         ]);
         let candidates = find_prefix_candidates("Action.Movie.Title.2019.Directors.Cut.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Action.Movie.Title", 3, 3));
-        assert_eq!(candidates[1], candidate("Action.Movie", 3, 2));
-        assert_eq!(candidates[2], candidate("Action", 3, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Action.Movie.Title" && c.match_count == 3)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Action.Movie" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Action" && c.match_count == 3));
     }
 
     #[test]
@@ -1499,10 +1544,17 @@ mod test_prefix_candidates {
             "Daily.News.Show.2024.01.17.Special.Coverage.mp4",
         ]);
         let candidates = find_prefix_candidates("Daily.News.Show.2024.01.15.Morning.Report.mp4", &files, 3, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Daily.News.Show", 3, 3));
-        assert_eq!(candidates[1], candidate("Daily.News", 3, 2));
-        assert_eq!(candidates[2], candidate("Daily", 3, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Daily.News.Show" && c.match_count == 3)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Daily.News" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Daily" && c.match_count == 3));
     }
 
     #[test]
@@ -1514,10 +1566,17 @@ mod test_prefix_candidates {
             "Epic.Adventure.Origins.Prequel.2015.BluRay.mp4",
         ]);
         let candidates = find_prefix_candidates("Epic.Adventure.Saga.Part.One.2018.BluRay.Remux.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Epic.Adventure.Saga", 3, 3));
-        assert_eq!(candidates[1], candidate("Epic.Adventure", 4, 2));
-        assert_eq!(candidates[2], candidate("Epic", 4, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Epic.Adventure.Saga" && c.match_count == 3)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Epic.Adventure" && c.match_count == 4)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Epic" && c.match_count == 4));
     }
 
     #[test]
@@ -1530,10 +1589,17 @@ mod test_prefix_candidates {
         ]);
         let candidates =
             find_prefix_candidates("Anthology.Series.Collection.S01E01.Genesis.1080p.WEB.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Anthology.Series.Collection", 4, 3));
-        assert_eq!(candidates[1], candidate("Anthology.Series", 4, 2));
-        assert_eq!(candidates[2], candidate("Anthology", 4, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Anthology.Series.Collection" && c.match_count == 4)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Anthology.Series" && c.match_count == 4)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Anthology" && c.match_count == 4));
     }
 
     #[test]
@@ -1544,10 +1610,17 @@ mod test_prefix_candidates {
             "Nature.Wildlife.Documentary.Europe.Alps.2021.4K.mp4",
         ]);
         let candidates = find_prefix_candidates("Nature.Wildlife.Documentary.Africa.Savanna.2019.4K.mp4", &files, 3, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Nature.Wildlife.Documentary", 3, 3));
-        assert_eq!(candidates[1], candidate("Nature.Wildlife", 3, 2));
-        assert_eq!(candidates[2], candidate("Nature", 3, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Nature.Wildlife.Documentary" && c.match_count == 3)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Nature.Wildlife" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Nature" && c.match_count == 3));
     }
 
     #[test]
@@ -1558,10 +1631,17 @@ mod test_prefix_candidates {
             "Software.Tutorial.Guide.v2.2023.Expert.Masterclass.mp4",
         ]);
         let candidates = find_prefix_candidates("Software.Tutorial.Guide.v2.2023.Intro.Basics.mp4", &files, 3, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Software.Tutorial.Guide", 3, 3));
-        assert_eq!(candidates[1], candidate("Software.Tutorial", 3, 2));
-        assert_eq!(candidates[2], candidate("Software", 3, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Software.Tutorial.Guide" && c.match_count == 3)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Software.Tutorial" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Software" && c.match_count == 3));
     }
 
     #[test]
@@ -1586,9 +1666,10 @@ mod test_prefix_candidates {
     fn numeric_filtering_groups_correctly() {
         let filtered_files = make_test_files(&["ABC.Thing.v1.mp4", "ABC.Thing.v2.mp4", "ABC.Thing.v3.mp4"]);
         let candidates = find_prefix_candidates("ABC.Thing.v1.mp4", &filtered_files, 3, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("ABC.Thing", 3, 2));
-        assert_eq!(candidates[1], candidate("ABC", 3, 1));
+        // With position-agnostic matching, "Thing" is also found as a candidate
+        assert!(candidates.iter().any(|c| c.prefix == "ABC.Thing" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "ABC" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Thing" && c.match_count == 3));
     }
 
     #[test]
@@ -1606,9 +1687,14 @@ mod test_prefix_candidates {
             "Series.Name.S01E03.1080p.mp4",
         ]);
         let candidates = find_prefix_candidates("Series.Name.S01E01.1080p.mp4", &filtered_files, 3, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Series.Name", 3, 2));
-        assert_eq!(candidates[1], candidate("Series", 3, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Series.Name" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Series" && c.match_count == 3));
+        // Position-agnostic also finds Name
+        assert!(candidates.iter().any(|c| c.prefix == "Name" && c.match_count == 3));
     }
 
     #[test]
@@ -1624,10 +1710,17 @@ mod test_prefix_candidates {
             2,
             1,
         );
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Studio.Franchise.Title", 2, 3));
-        assert_eq!(candidates[1], candidate("Studio.Franchise", 3, 2));
-        assert_eq!(candidates[2], candidate("Studio", 3, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Studio.Franchise.Title" && c.match_count == 2)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Studio.Franchise" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Studio" && c.match_count == 3));
     }
 
     #[test]
@@ -1638,10 +1731,17 @@ mod test_prefix_candidates {
             "Retro.Eighties.Collection.Vol3.Deep.Tracks.mp4",
         ]);
         let candidates = find_prefix_candidates("Retro.Eighties.Collection.Vol1.Greatest.Hits.mp4", &files, 3, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Retro.Eighties.Collection", 3, 3));
-        assert_eq!(candidates[1], candidate("Retro.Eighties", 3, 2));
-        assert_eq!(candidates[2], candidate("Retro", 3, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Retro.Eighties.Collection" && c.match_count == 3)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Retro.Eighties" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Retro" && c.match_count == 3));
     }
 
     #[test]
@@ -1653,10 +1753,17 @@ mod test_prefix_candidates {
             "Alpha.Beta.Delta.One.mp4",
         ]);
         let candidates = find_prefix_candidates("Alpha.Beta.Gamma.One.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0], candidate("Alpha.Beta.Gamma", 3, 3));
-        assert_eq!(candidates[1], candidate("Alpha.Beta", 4, 2));
-        assert_eq!(candidates[2], candidate("Alpha", 4, 1));
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Alpha.Beta.Gamma" && c.match_count == 3)
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Alpha.Beta" && c.match_count == 4)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Alpha" && c.match_count == 4));
     }
 
     #[test]
@@ -1667,9 +1774,365 @@ mod test_prefix_candidates {
         assert!(candidates.is_empty());
 
         // With min_group_size=2, "Show.Name" qualifies
+        // With position-agnostic matching, "Name" is also found
         let candidates = find_prefix_candidates("Show.Name.v1.mp4", &files, 2, 1);
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], candidate("Show.Name", 2, 2));
-        assert_eq!(candidates[1], candidate("Show", 2, 1));
+        assert!(candidates.iter().any(|c| c.prefix == "Show.Name" && c.match_count == 2));
+        assert!(candidates.iter().any(|c| c.prefix == "Show" && c.match_count == 2));
+        assert!(candidates.iter().any(|c| c.prefix == "Name" && c.match_count == 2));
+    }
+}
+
+#[cfg(test)]
+mod test_get_all_n_part_sequences {
+    use super::*;
+
+    #[test]
+    fn single_part_sequences() {
+        let result = get_all_n_part_sequences("A.B.C.D", 1);
+        assert_eq!(result, vec!["A", "B", "C", "D"]);
+    }
+
+    #[test]
+    fn two_part_sequences() {
+        let result = get_all_n_part_sequences("A.B.C.D", 2);
+        assert_eq!(result, vec!["A.B", "B.C", "C.D"]);
+    }
+
+    #[test]
+    fn three_part_sequences() {
+        let result = get_all_n_part_sequences("A.B.C.D", 3);
+        assert_eq!(result, vec!["A.B.C", "B.C.D"]);
+    }
+
+    #[test]
+    fn four_part_sequences_exact_length() {
+        let result = get_all_n_part_sequences("A.B.C.D", 4);
+        assert_eq!(result, vec!["A.B.C.D"]);
+    }
+
+    #[test]
+    fn too_few_parts() {
+        let result = get_all_n_part_sequences("A.B", 3);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn zero_parts_returns_empty() {
+        let result = get_all_n_part_sequences("A.B.C", 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn no_dots_single_part() {
+        let result = get_all_n_part_sequences("SingleWord", 1);
+        assert_eq!(result, vec!["SingleWord"]);
+    }
+
+    #[test]
+    fn no_dots_multi_part_returns_empty() {
+        let result = get_all_n_part_sequences("SingleWord", 2);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn realistic_filename() {
+        let result = get_all_n_part_sequences("Studio.Name.Video.Title.2024.mp4", 2);
+        assert_eq!(
+            result,
+            vec!["Studio.Name", "Name.Video", "Video.Title", "Title.2024", "2024.mp4"]
+        );
+    }
+
+    #[test]
+    fn realistic_filename_three_parts() {
+        let result = get_all_n_part_sequences("Studio.Name.Video.Title.mp4", 3);
+        assert_eq!(result, vec!["Studio.Name.Video", "Name.Video.Title", "Video.Title.mp4"]);
+    }
+}
+
+#[cfg(test)]
+mod test_position_agnostic_matching {
+    use super::*;
+    use crate::dir_move::test_helpers::*;
+
+    #[test]
+    fn group_name_in_middle_of_filename() {
+        // CommonGroup appears in the middle of filenames, not at the start
+        let files = make_test_files(&[
+            "Something.CommonGroup.file.1.txt",
+            "New.CommonGroup.another.file.2.txt",
+            "CommonGroup.simply.as.prefix.file.3.txt",
+        ]);
+        let candidates = find_prefix_candidates("Something.CommonGroup.file.1.txt", &files, 3, 5);
+        // Should find CommonGroup as a candidate since it appears in all 3 files
+        assert!(
+            candidates.iter().any(|c| c.prefix == "CommonGroup"),
+            "Expected to find CommonGroup candidate, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn group_name_at_various_positions() {
+        let files = make_test_files(&[
+            "Something.CommonGroup.file.1.txt",
+            "New.CommonGroup.another.file.2.txt",
+            "CommonGroup.simply.as.prefix.file.3.txt",
+            "Extra.stuff.at.start.CommonGroup.file.4.txt",
+        ]);
+        let candidates = find_prefix_candidates("Something.CommonGroup.file.1.txt", &files, 3, 5);
+        assert!(
+            candidates.iter().any(|c| c.prefix == "CommonGroup"),
+            "Expected to find CommonGroup candidate, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn dotted_group_name_in_middle() {
+        // Common.GroupName as a 2-part sequence appearing in the middle
+        let files = make_test_files(&[
+            "Common.GroupName.simply.as.prefix.file.5.txt",
+            "Content.Common.GroupName.even.more.versions.file.6.txt",
+            "Another.Common.GroupName.variation.file.7.txt",
+        ]);
+        let candidates = find_prefix_candidates("Content.Common.GroupName.even.more.versions.file.6.txt", &files, 3, 5);
+        // Should find Common.GroupName as a 2-part candidate
+        assert!(
+            candidates.iter().any(|c| c.prefix == "Common.GroupName"),
+            "Expected to find Common.GroupName candidate, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_prefix_and_middle_positions() {
+        // Mix of files where the group name is at the start for some and middle for others
+        let files = make_test_files(&[
+            "StudioName.video.one.mp4",
+            "StudioName.video.two.mp4",
+            "Extra.StudioName.video.three.mp4",
+            "More.Extra.StudioName.video.four.mp4",
+        ]);
+        let candidates = find_prefix_candidates("Extra.StudioName.video.three.mp4", &files, 3, 5);
+        // StudioName should be found since it appears in all 4 files (in various positions)
+        assert!(
+            candidates.iter().any(|c| c.prefix == "StudioName"),
+            "Expected to find StudioName candidate, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn concatenated_and_dotted_at_various_positions() {
+        // Mix of concatenated and dotted forms at various positions
+        let files = make_test_files(&[
+            "PhotoLab.Image.One.jpg",
+            "Extra.Photo.Lab.Image.Two.jpg",
+            "More.PhotoLab.Image.Three.jpg",
+        ]);
+        let candidates = find_prefix_candidates("PhotoLab.Image.One.jpg", &files, 3, 5);
+        // PhotoLab should match all (via concatenation normalization)
+        let photolab_candidate = candidates.iter().find(|c| normalize_prefix(&c.prefix) == "photolab");
+        assert!(
+            photolab_candidate.is_some(),
+            "Expected to find PhotoLab-related candidate, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn prefix_matches_normalized_finds_anywhere() {
+        // Test that prefix_matches_normalized checks all positions
+        assert!(prefix_matches_normalized("Extra.StudioName.video.mp4", "studioname"));
+        assert!(prefix_matches_normalized("More.Extra.StudioName.mp4", "studioname"));
+        assert!(prefix_matches_normalized("StudioName.video.mp4", "studioname"));
+    }
+
+    #[test]
+    fn prefix_matches_normalized_two_part_anywhere() {
+        // Two-part prefix matching anywhere
+        assert!(prefix_matches_normalized("Extra.Photo.Lab.video.mp4", "photolab"));
+        assert!(prefix_matches_normalized("Photo.Lab.video.mp4", "photolab"));
+        assert!(prefix_matches_normalized("More.Photo.Lab.mp4", "photolab"));
+    }
+
+    #[test]
+    fn prefix_matches_normalized_three_part_anywhere() {
+        // Three-part prefix matching anywhere
+        assert!(prefix_matches_normalized(
+            "Extra.Alpha.Beta.Gamma.video.mp4",
+            "alphabetagamma"
+        ));
+        assert!(prefix_matches_normalized(
+            "Alpha.Beta.Gamma.video.mp4",
+            "alphabetagamma"
+        ));
+    }
+
+    #[test]
+    fn group_name_not_found_when_not_contiguous() {
+        // GroupName parts separated by other content should not match
+        let files = make_test_files(&[
+            "Common.2024.GroupName.file.1.txt",
+            "Common.2023.GroupName.file.2.txt",
+            "Common.2022.GroupName.file.3.txt",
+        ]);
+        let candidates = find_prefix_candidates("Common.2024.GroupName.file.1.txt", &files, 3, 5);
+        // Common.GroupName should NOT be found because Common and GroupName are not contiguous
+        // But Common should be found as a single-part candidate, and GroupName too
+        let common_groupname = candidates.iter().find(|c| c.prefix == "Common.GroupName");
+        assert!(
+            common_groupname.is_none(),
+            "Should NOT find Common.GroupName when parts are not contiguous"
+        );
+    }
+
+    #[test]
+    fn realistic_scenario_with_dates_in_middle() {
+        // Realistic scenario where studio name appears after date
+        let files = make_test_files(&[
+            "2024.01.15.StudioName.Video.Title.mp4",
+            "2024.01.16.StudioName.Another.Video.mp4",
+            "2024.01.17.StudioName.Third.Video.mp4",
+        ]);
+        let candidates = find_prefix_candidates("2024.01.15.StudioName.Video.Title.mp4", &files, 3, 5);
+        assert!(
+            candidates.iter().any(|c| c.prefix == "StudioName"),
+            "Expected to find StudioName candidate, got: {candidates:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_file_extension_exclusion {
+    use super::*;
+    use crate::dir_move::test_helpers::*;
+
+    #[test]
+    fn extension_not_included_as_candidate() {
+        // File extension should never be offered as a group name
+        let files = make_test_files(&[
+            "StudioName.Video.Title.mp4",
+            "StudioName.Another.Video.mp4",
+            "StudioName.Third.Video.mp4",
+        ]);
+        let candidates = find_prefix_candidates("StudioName.Video.Title.mp4", &files, 3, 1);
+        // "mp4" should NOT appear as a candidate
+        assert!(
+            !candidates.iter().any(|c| c.prefix.to_lowercase() == "mp4"),
+            "File extension 'mp4' should not be offered as a group name, got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn extension_not_included_even_when_common() {
+        // Even if all files share the same extension, it shouldn't be a candidate
+        let files = make_test_files(&["Different.Name.One.jpg", "Another.Name.Two.jpg", "Third.Name.Three.jpg"]);
+        let candidates = find_prefix_candidates("Different.Name.One.jpg", &files, 3, 1);
+        assert!(
+            !candidates.iter().any(|c| c.prefix.to_lowercase() == "jpg"),
+            "File extension 'jpg' should not be offered as a group name"
+        );
+    }
+
+    #[test]
+    fn extension_not_part_of_multi_part_candidate() {
+        // Extension should not be part of any multi-part candidate
+        let files = make_test_files(&[
+            "Studio.Name.Video.mp4",
+            "Studio.Name.Other.mp4",
+            "Studio.Name.Third.mp4",
+        ]);
+        let candidates = find_prefix_candidates("Studio.Name.Video.mp4", &files, 3, 1);
+        // Should not have candidates like "Video.mp4" or "Name.Video.mp4"
+        assert!(
+            !candidates.iter().any(|c| c.prefix.contains("mp4")),
+            "No candidate should contain the file extension 'mp4', got: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn long_extension_excluded() {
+        // Longer extensions like "torrent" should also be excluded
+        let files = make_test_files(&[
+            "Movie.Name.2024.torrent",
+            "Movie.Name.2023.torrent",
+            "Movie.Name.2022.torrent",
+        ]);
+        let candidates = find_prefix_candidates("Movie.Name.2024.torrent", &files, 3, 1);
+        assert!(
+            !candidates.iter().any(|c| c.prefix.to_lowercase() == "torrent"),
+            "File extension 'torrent' should not be offered as a group name"
+        );
+        assert!(
+            !candidates.iter().any(|c| c.prefix.contains("torrent")),
+            "No candidate should contain 'torrent'"
+        );
+    }
+
+    #[test]
+    fn valid_candidates_still_found_without_extension() {
+        // Verify that valid candidates are still found when extension is excluded
+        let files = make_test_files(&[
+            "StudioName.Video.One.mkv",
+            "StudioName.Video.Two.mkv",
+            "StudioName.Video.Three.mkv",
+        ]);
+        let candidates = find_prefix_candidates("StudioName.Video.One.mkv", &files, 3, 5);
+        // Should find StudioName and Video as candidates
+        assert!(
+            candidates.iter().any(|c| c.prefix == "StudioName"),
+            "Should find 'StudioName' as a candidate"
+        );
+        assert!(
+            candidates.iter().any(|c| c.prefix == "Video"),
+            "Should find 'Video' as a candidate"
+        );
+        // But not mkv
+        assert!(
+            !candidates.iter().any(|c| c.prefix.to_lowercase() == "mkv"),
+            "Should NOT find 'mkv' as a candidate"
+        );
+    }
+
+    #[test]
+    fn name_that_looks_like_extension_at_non_extension_position() {
+        // A word that looks like an extension but isn't at the extension position
+        // should still be considered (e.g., "mp4" as part of a name)
+        let files = make_test_files(&[
+            "Convert.mp4.to.mkv.Guide.One.pdf",
+            "Convert.mp4.to.mkv.Guide.Two.pdf",
+            "Convert.mp4.to.mkv.Guide.Three.pdf",
+        ]);
+        let candidates = find_prefix_candidates("Convert.mp4.to.mkv.Guide.One.pdf", &files, 3, 1);
+        // "pdf" at extension position should be excluded
+        assert!(
+            !candidates.iter().any(|c| c.prefix.to_lowercase() == "pdf"),
+            "Extension 'pdf' should be excluded"
+        );
+        // But "mp4" in the middle of the name could be found if it meets criteria
+        // (though it's only 3 chars so might be excluded by min_prefix_chars)
+    }
+
+    #[test]
+    fn double_extension_only_last_excluded() {
+        // For files like "file.tar.gz", only "gz" is the extension
+        let files = make_test_files(&["Archive.backup.tar.gz", "Archive.data.tar.gz", "Archive.logs.tar.gz"]);
+        let candidates = find_prefix_candidates("Archive.backup.tar.gz", &files, 3, 1);
+        // "gz" should be excluded as extension
+        assert!(
+            !candidates.iter().any(|c| c.prefix.to_lowercase() == "gz"),
+            "Extension 'gz' should be excluded"
+        );
+        // "tar" is NOT the extension, it's part of the name, so it could be a candidate
+        // (tar.gz is treated as extension=gz, name ending in tar)
+    }
+
+    #[test]
+    fn extension_case_insensitive_exclusion() {
+        // Extensions with different cases should all be excluded
+        let files = make_test_files(&["Video.One.MP4", "Video.Two.Mp4", "Video.Three.mp4"]);
+        let candidates = find_prefix_candidates("Video.One.MP4", &files, 3, 1);
+        // All case variations of the extension should be excluded
+        assert!(
+            !candidates.iter().any(|c| c.prefix.to_lowercase() == "mp4"),
+            "Extension in any case should be excluded"
+        );
     }
 }

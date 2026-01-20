@@ -12,6 +12,7 @@
 # overwrite = false
 # prefix_ignores = ["Something", "Other.Prefix"]
 # prefix_overrides = ["longer.prefix", "some.name"]
+# ignored_group_names = ["Episode", "Video", "Part", "Chapter", "Scene"]
 # recursive = false
 # unpack_directories = ["videos", "vids", "vid", "horizontal", "vertical"]
 # verbose = false
