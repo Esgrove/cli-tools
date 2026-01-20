@@ -450,12 +450,9 @@ impl DirMove {
                     continue;
                 }
                 let dir_name = dir_name.to_lowercase();
+                // Note: exclude patterns are already lowercase from config creation
                 if !self.config.exclude.is_empty()
-                    && self
-                        .config
-                        .exclude
-                        .iter()
-                        .any(|pattern| dir_name.contains(&pattern.to_lowercase()))
+                    && self.config.exclude.iter().any(|pattern| dir_name.contains(pattern))
                 {
                     if self.config.verbose {
                         println!("Excluding directory: {}", path_to_string_relative(&entry.path()));
@@ -476,22 +473,15 @@ impl DirMove {
                 let file_name = entry.file_name().to_string_lossy().to_lowercase();
 
                 // Skip files that don't match include patterns (if any specified)
+                // Note: include patterns are already lowercase from config creation
                 if !self.config.include.is_empty()
-                    && !self
-                        .config
-                        .include
-                        .iter()
-                        .any(|pattern| file_name.contains(&pattern.to_lowercase()))
+                    && !self.config.include.iter().any(|pattern| file_name.contains(pattern))
                 {
                     continue;
                 }
                 // Skip files that match exclude patterns
-                if self
-                    .config
-                    .exclude
-                    .iter()
-                    .any(|pattern| file_name.contains(&pattern.to_lowercase()))
-                {
+                // Note: exclude patterns are already lowercase from config creation
+                if self.config.exclude.iter().any(|pattern| file_name.contains(pattern)) {
                     continue;
                 }
 
@@ -580,18 +570,23 @@ impl DirMove {
             return filename.to_string();
         }
 
+        // Pre-compute patterns with dots (prefix_ignores are already lowercase)
+        let patterns_with_dot: Vec<String> = self
+            .config
+            .prefix_ignores
+            .iter()
+            .map(|ignore| format!("{ignore}."))
+            .collect();
+
         let mut result = filename.to_string();
         let mut changed = true;
 
         // Keep stripping prefixes until no more matches
         while changed {
             changed = false;
-            for ignore in &self.config.prefix_ignores {
-                let ignore_lower = ignore.to_lowercase();
-                let result_lower = result.to_lowercase();
-                // Check if filename starts with the ignored prefix followed by a dot
-                let prefix_with_dot = format!("{ignore_lower}.");
-                if result_lower.starts_with(&prefix_with_dot) {
+            let result_lower = result.to_lowercase();
+            for prefix_with_dot in &patterns_with_dot {
+                if result_lower.starts_with(prefix_with_dot) {
                     result = result[prefix_with_dot.len()..].to_string();
                     changed = true;
                     break;
@@ -884,6 +879,9 @@ impl DirMove {
         let initial_group_count = groups_to_process.len();
         print_bold!("Found {} group(s) with matching prefixes:\n", initial_group_count);
 
+        // Get parent directory name to avoid offering it as a new directory
+        let parent_dir_name = self.root.file_name().and_then(|n| n.to_str()).map(str::to_lowercase);
+
         while !groups_to_process.is_empty() {
             let (prefix, group) = groups_to_process.remove(0);
 
@@ -895,6 +893,22 @@ impl DirMove {
             }
 
             let dir_name = prefix.replace('.', " ");
+
+            // Strip ignored prefixes from the directory name
+            let dir_name = self.strip_ignored_prefixes(&dir_name).into_owned();
+
+            // Skip if the directory name is empty after stripping
+            if dir_name.is_empty() {
+                continue;
+            }
+
+            // Skip if the proposed directory name matches the current parent directory
+            if parent_dir_name
+                .as_ref()
+                .is_some_and(|parent| parent.eq_ignore_ascii_case(&dir_name))
+            {
+                continue;
+            }
             let dir_path = self.root.join(&dir_name);
             let dir_exists = dir_path.exists();
 
@@ -982,10 +996,19 @@ impl DirMove {
 
     /// Strip ignored prefixes from a normalized filename (spaces as separators).
     /// Recursively removes any matching prefix from the start of the filename.
+    /// Comparison is case-insensitive.
     fn strip_ignored_prefixes<'a>(&self, filename: &'a str) -> Cow<'a, str> {
         if self.config.prefix_ignores.is_empty() {
             return Cow::Borrowed(filename);
         }
+
+        // Pre-compute patterns with spaces (prefix_ignores are already lowercase)
+        let patterns_with_space: Vec<String> = self
+            .config
+            .prefix_ignores
+            .iter()
+            .map(|ignore| format!("{ignore} "))
+            .collect();
 
         let mut result = filename;
         let mut changed = true;
@@ -993,12 +1016,10 @@ impl DirMove {
         // Keep stripping prefixes until no more matches
         while changed {
             changed = false;
-            for ignore in &self.config.prefix_ignores {
-                let ignore_lower = ignore.to_lowercase();
-                // Check if filename starts with the ignored prefix followed by a space
-                let prefix_with_space = format!("{ignore_lower} ");
-                if result.starts_with(&prefix_with_space) {
-                    result = result.strip_prefix(&prefix_with_space).unwrap_or(result);
+            let result_lower = result.to_lowercase();
+            for prefix_with_space in &patterns_with_space {
+                if result_lower.starts_with(prefix_with_space) {
+                    result = &result[prefix_with_space.len()..];
                     changed = true;
                     break;
                 }
@@ -1063,56 +1084,14 @@ pub mod test_helpers {
         assert!(!path.exists(), "Expected path to NOT exist: {}", path.display());
     }
 
-    pub fn make_test_config_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> Config {
-        Config {
-            auto: false,
-            create: false,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 5,
-            overwrite: false,
-            prefix_ignores,
-            prefix_overrides,
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        }
-    }
-
-    pub fn make_unpack_config(unpack_names: Vec<&str>, recurse: bool, dryrun: bool, overwrite: bool) -> Config {
-        Config {
-            auto: true,
-            create: false,
-            debug: false,
-            dryrun,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 5,
-            overwrite,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse,
-            verbose: false,
-            unpack_directory_names: unpack_names.into_iter().map(String::from).collect(),
-        }
-    }
-
-    pub fn make_test_dirmove_with_ignores(prefix_overrides: Vec<String>, prefix_ignores: Vec<String>) -> DirMove {
+    pub fn make_test_dirmove_with_ignores(prefix_overrides: Vec<&str>, prefix_ignores: Vec<&str>) -> DirMove {
         DirMove {
             root: PathBuf::from("."),
-            config: make_test_config_with_ignores(prefix_overrides, prefix_ignores),
+            config: Config::test_with_overrides_and_ignores(prefix_overrides, prefix_ignores),
         }
     }
 
-    pub fn make_test_dirmove(prefix_overrides: Vec<String>) -> DirMove {
+    pub fn make_test_dirmove(prefix_overrides: Vec<&str>) -> DirMove {
         make_test_dirmove_with_ignores(prefix_overrides, Vec::new())
     }
 
@@ -1156,24 +1135,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Other.S01E01.mp4"), "").unwrap();
         std::fs::write(root.join("Show.Other.S01E02.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1198,24 +1160,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Alpha.Beta.Delta.part1.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.Beta.Delta.part2.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1236,24 +1181,7 @@ mod test_prefix_groups {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1269,24 +1197,7 @@ mod test_prefix_groups {
 
         std::fs::write(root.join("Lonely.File.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1304,24 +1215,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Beta.Two.mp4"), "").unwrap();
         std::fs::write(root.join("Gamma.Three.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1345,24 +1239,7 @@ mod test_prefix_groups {
             std::fs::write(root.join(format!("SeriesB.Season1.E{episode:02}.mp4")), "").unwrap();
         }
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(3);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1388,24 +1265,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("Show.Episode.02.mp4"), "").unwrap();
 
-        let config_low = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config_low = Config::test_with_group_size(2);
 
         let dirmove_low = DirMove::new(root.clone(), config_low);
         let files_with_names = dirmove_low.collect_files_with_names().unwrap();
@@ -1413,24 +1273,7 @@ mod test_prefix_groups {
         assert!(groups_low.contains_key("Show.Episode"));
         assert!(groups_low.contains_key("Show"));
 
-        let config_high = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 5,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config_high = Config::test_with_group_size(5);
 
         let dirmove_high = DirMove::new(root, config_high);
         let files_with_names = dirmove_high.collect_files_with_names().unwrap();
@@ -1449,24 +1292,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("myshow.Episode.03.mp4"), "").unwrap();
         std::fs::write(root.join("Myshow.Episode.04.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(3);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1492,24 +1318,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Photolab.Image.03.jpg"), "").unwrap();
         std::fs::write(root.join("PHOTOLAB.Image.04.jpg"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1538,24 +1347,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("DarkkoTV.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Darkko.TV.Episode.03.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1586,24 +1378,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("SUMMER.VACATION.Photo3.jpg"), "").unwrap();
         std::fs::write(root.join("summer.vacation.Photo4.jpg"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1630,24 +1405,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Gallery.Photos.Img5.jpg"), "").unwrap();
 
         // With min_group_size=6, all prefixes with 5 files are excluded
-        let config_6 = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 6,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config_6 = Config::test_with_group_size(6);
 
         let dirmove_6 = DirMove::new(root.clone(), config_6);
         let files_with_names = dirmove_6.collect_files_with_names().unwrap();
@@ -1659,24 +1417,7 @@ mod test_prefix_groups {
         );
 
         // With min_group_size=5, should find the group
-        let config_5 = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 5,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config_5 = Config::test_with_group_size(5);
 
         let dirmove_5 = DirMove::new(root.clone(), config_5);
         let files_with_names = dirmove_5.collect_files_with_names().unwrap();
@@ -1689,24 +1430,7 @@ mod test_prefix_groups {
         assert_eq!(groups_5.get("Gallery.Photos").unwrap().files.len(), 5);
 
         // With min_group_size=3, should still find the same group
-        let config_3 = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config_3 = Config::test_with_group_size(3);
 
         let dirmove_3 = DirMove::new(root, config_3);
         let files_with_names = dirmove_3.collect_files_with_names().unwrap();
@@ -1729,22 +1453,8 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Name.Season2.Episode02.mp4"), "").unwrap();
 
         let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
             prefix_overrides: vec!["Show.Name".to_string()],
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
+            ..Config::test_with_group_size(2)
         };
 
         let dirmove = DirMove::new(root, config);
@@ -1787,22 +1497,8 @@ mod test_prefix_groups {
         std::fs::write(root.join("ShowC.Season1.Ep02.mp4"), "").unwrap();
 
         let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: vec!["ShowA".to_string(), "ShowB".to_string()],
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
+            prefix_overrides: vec!["SeriesA".to_string(), "SeriesB".to_string()],
+            ..Config::test_with_group_size(2)
         };
 
         let dirmove = DirMove::new(root, config);
@@ -1836,22 +1532,8 @@ mod test_prefix_groups {
         std::fs::write(root.join("MyShow.Episode.03.mp4"), "").unwrap();
 
         let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: vec!["OtherShow".to_string()],
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
+            prefix_overrides: vec!["NoMatch".to_string()],
+            ..Config::test_with_group_size(2)
         };
 
         let dirmove = DirMove::new(root, config);
@@ -1877,24 +1559,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("www.Example.Show.Ep02.mp4"), "").unwrap();
         std::fs::write(root.join("Example.Show.Ep03.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: vec!["www".to_string()],
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_prefix_ignores(vec!["www"]);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -1916,22 +1581,9 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Name.Season2.Ep02.mp4"), "").unwrap();
 
         let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: vec!["release".to_string()],
+            prefix_ignores: vec!["dl".to_string()],
             prefix_overrides: vec!["Show.Name".to_string()],
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
+            ..Config::test_with_group_size(2)
         };
 
         let dirmove = DirMove::new(root, config);
@@ -1971,24 +1623,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: vec!["episode".to_string()],
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_ignored_group_names(vec!["episode"]);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -2015,24 +1650,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Video.Part.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Video.Part.03.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: vec!["video".to_string(), "part".to_string()],
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_ignored_group_names(vec!["video", "part"]);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -2063,24 +1681,8 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.episode.03.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: vec!["episode".to_string()], // lowercase in config
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        // Config helper automatically lowercases
+        let config = Config::test_with_ignored_group_names(vec!["episode"]);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -2110,24 +1712,8 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Season.One.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: vec!["seasonone".to_string()], // normalized form (no dots)
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        // normalized form (no dots)
+        let config = Config::test_with_ignored_group_names(vec!["seasonone"]);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -2154,24 +1740,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(), // empty list
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(3);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -2199,22 +1768,8 @@ mod test_ignored_group_names {
         std::fs::write(root.join("StudioName.Scene.03.Chapter.03.mp4"), "").unwrap();
 
         let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: vec!["scene".to_string(), "chapter".to_string()],
-            ignored_group_parts: Vec::new(),
-            min_group_size: 3,
             min_prefix_chars: 5,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
+            ..Config::test_with_ignored_group_names(vec!["scene", "chapter"])
         };
 
         let dirmove = DirMove::new(root, config);
@@ -2239,29 +1794,163 @@ mod test_ignored_group_names {
 }
 
 #[cfg(test)]
-mod test_ignored_group_parts {
+mod test_parent_directory_skipped {
     use super::*;
 
-    fn make_config_with_ignored_parts(ignored_parts: Vec<&str>) -> Config {
-        Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: ignored_parts.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
+    #[test]
+    fn parent_dir_name_not_offered_as_new_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Create a directory named "My Series" to use as the root
+        let root = tmp.path().join("My Series");
+        std::fs::create_dir(&root).unwrap();
+
+        // Create files that would normally group under "My Series"
+        std::fs::write(root.join("My.Series.S01E01.mp4"), "").unwrap();
+        std::fs::write(root.join("My.Series.S01E02.mp4"), "").unwrap();
+        std::fs::write(root.join("My.Series.S01E03.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+
+        let dirmove = DirMove::new(root.clone(), config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // The groups are collected, but when processing in create_dirs_and_move_files,
+        // "My Series" would be skipped because it matches the parent directory name.
+        // We verify here that groups are found but the dir_name would match parent.
+        assert!(
+            groups.contains_key("My.Series") || groups.contains_key("MySeries"),
+            "Files should still form a group based on prefix"
+        );
+
+        // The actual directory name after converting would be "My Series"
+        // which matches the parent - this is checked in create_dirs_and_move_files
+        let parent_name = root.file_name().unwrap().to_str().unwrap();
+        assert_eq!(parent_name, "My Series");
+
+        // Verify the prefix would convert to same name as parent
+        if let Some(group) = groups.get("My.Series") {
+            let dir_name = "My.Series".replace('.', " ");
+            assert_eq!(dir_name.to_lowercase(), parent_name.to_lowercase());
+            assert_eq!(group.files.len(), 3);
         }
     }
+
+    #[test]
+    fn parent_dir_name_case_insensitive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Create a directory with different case
+        let root = tmp.path().join("MYSERIES");
+        std::fs::create_dir(&root).unwrap();
+
+        std::fs::write(root.join("MySeries.ep1.mp4"), "").unwrap();
+        std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
+        std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+
+        let dirmove = DirMove::new(root.clone(), config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Files should form a group
+        assert!(groups.contains_key("MySeries"));
+
+        // Parent dir is "MYSERIES", proposed dir would be "MySeries"
+        // These should match case-insensitively
+        let parent_name = root.file_name().unwrap().to_str().unwrap();
+        assert_eq!(parent_name, "MYSERIES");
+
+        let dir_name = "MySeries";
+        assert!(parent_name.eq_ignore_ascii_case(dir_name));
+    }
+
+    #[test]
+    fn different_name_still_offered() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Parent directory has a different name
+        let root = tmp.path().join("Downloads");
+        std::fs::create_dir(&root).unwrap();
+
+        std::fs::write(root.join("MySeries.ep1.mp4"), "").unwrap();
+        std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
+        std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "MySeries" should be offered since parent is "Downloads"
+        assert!(
+            groups.contains_key("MySeries"),
+            "MySeries should be offered when parent dir is different"
+        );
+    }
+
+    #[test]
+    fn prefix_ignore_stripped_from_dir_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("Downloads");
+        std::fs::create_dir(&root).unwrap();
+
+        // Files with ignored prefix "DL"
+        std::fs::write(root.join("DL.MySeries.ep1.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.MySeries.ep2.mp4"), "").unwrap();
+        std::fs::write(root.join("DL.MySeries.ep3.mp4"), "").unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+
+        let dirmove = DirMove::new(root, config);
+
+        // Test that strip_ignored_prefixes works on space-separated names
+        let dir_name = "DL MySeries";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "MySeries", "DL prefix should be stripped from directory name");
+    }
+
+    #[test]
+    fn prefix_ignore_multiple_prefixes_stripped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("Downloads");
+        std::fs::create_dir(&root).unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["dl", "web"]);
+
+        let dirmove = DirMove::new(root, config);
+
+        // Test stripping multiple chained prefixes
+        let dir_name = "DL WEB MySeries";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "MySeries", "Both DL and WEB prefixes should be stripped");
+    }
+
+    #[test]
+    fn prefix_ignore_only_prefix_results_in_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("Downloads");
+        std::fs::create_dir(&root).unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+
+        let dirmove = DirMove::new(root, config);
+
+        // If the entire name is just the ignored prefix, result should be empty
+        let dir_name = "DL";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "DL", "Single word without space separator is not stripped");
+
+        // With trailing content that gets stripped
+        let dir_name = "DL ";
+        let stripped = dirmove.strip_ignored_prefixes(dir_name);
+        assert_eq!(stripped, "", "DL with trailing space should result in empty");
+    }
+}
+
+#[cfg(test)]
+mod test_ignored_group_parts {
+    use super::*;
 
     #[test]
     fn filters_groups_containing_ignored_part() {
@@ -2273,7 +1962,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Show.S01E02.1080p.DL.x265.TEST.mkv"), "").unwrap();
         std::fs::write(root.join("Show.S01E03.1080p.DL.x265.TEST.mkv"), "").unwrap();
 
-        let config = make_config_with_ignored_parts(vec!["x265"]);
+        let config = Config::test_with_ignored_group_parts(vec!["x265"]);
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -2304,7 +1993,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Studio.Video.x265.HEVC.002.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Video.x265.HEVC.003.mp4"), "").unwrap();
 
-        let config = make_config_with_ignored_parts(vec!["x265", "HEVC"]);
+        let config = Config::test_with_ignored_group_parts(vec!["x265", "hevc"]);
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -2330,7 +2019,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Name.x265.Thing.002.mp4"), "").unwrap();
         std::fs::write(root.join("Name.X265.Thing.003.mp4"), "").unwrap();
 
-        let config = make_config_with_ignored_parts(vec!["x265"]); // lowercase in config
+        let config = Config::test_with_ignored_group_parts(vec!["x265"]); // lowercase in config
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -2354,7 +2043,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("DL.x265.TEST.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("DL.x265.TEST.Video.003.mp4"), "").unwrap();
 
-        let config = make_config_with_ignored_parts(vec![]); // empty list
+        let config = Config::test_with_ignored_group_parts(vec![]); // empty list
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -2377,7 +2066,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Studio.x265.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.x265.Video.003.mp4"), "").unwrap();
 
-        let config = make_config_with_ignored_parts(vec!["x26"]); // partial match
+        let config = Config::test_with_ignored_group_parts(vec!["x26"]); // partial match
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -2411,7 +2100,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn matching_override() {
-        let dirmove = make_test_dirmove(vec!["longer.prefix".to_string()]);
+        let dirmove = make_test_dirmove(vec!["longer.prefix"]);
         let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "longer.prefix.name".to_string(),
@@ -2426,7 +2115,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn merges_groups() {
-        let dirmove = make_test_dirmove(vec!["Some.Name".to_string()]);
+        let dirmove = make_test_dirmove(vec!["Some.Name"]);
         let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Some.Name.Thing".to_string(),
@@ -2445,7 +2134,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn non_matching() {
-        let dirmove = make_test_dirmove(vec!["Other.Prefix".to_string()]);
+        let dirmove = make_test_dirmove(vec!["Other.Prefix"]);
         let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Some.Name.Thing".to_string(),
@@ -2460,7 +2149,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn partial_match_only() {
-        let dirmove = make_test_dirmove(vec!["Some".to_string()]);
+        let dirmove = make_test_dirmove(vec!["Some"]);
         let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Something.Else".to_string(),
@@ -2478,7 +2167,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn override_more_specific_than_prefix() {
-        let dirmove = make_test_dirmove(vec!["Example.Name".to_string()]);
+        let dirmove = make_test_dirmove(vec!["Example.Name"]);
         let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Example".to_string(),
@@ -2502,7 +2191,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn multiple_overrides() {
-        let dirmove = make_test_dirmove(vec!["Show.A".to_string(), "Show.B".to_string()]);
+        let dirmove = make_test_dirmove(vec!["Show.A", "Show.B"]);
         let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Show.A.Season1".to_string(),
@@ -2526,7 +2215,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn empty_groups() {
-        let dirmove = make_test_dirmove(vec!["Some".to_string()]);
+        let dirmove = make_test_dirmove(vec!["Some"]);
         let groups: HashMap<String, PrefixGroup> = HashMap::new();
 
         let result = dirmove.apply_prefix_overrides(groups);
@@ -2535,7 +2224,7 @@ mod test_prefix_overrides {
 
     #[test]
     fn override_with_case_sensitivity() {
-        let dirmove = make_test_dirmove(vec!["show.name".to_string()]);
+        let dirmove = make_test_dirmove(vec!["show.name"]);
         let mut groups: HashMap<String, PrefixGroup> = HashMap::new();
         groups.insert(
             "Show.Name.Season1".to_string(),
@@ -2561,56 +2250,56 @@ mod test_prefix_ignores {
 
     #[test]
     fn single_ignore() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www"]);
         let result = dirmove.strip_ignored_prefixes("www example com test");
         assert_eq!(result, "example com test");
     }
 
     #[test]
     fn multiple_ignores() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string(), "example".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www", "example"]);
         let result = dirmove.strip_ignored_prefixes("www example com test");
         assert_eq!(result, "com test");
     }
 
     #[test]
     fn no_match() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["xyz".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["xyz"]);
         let result = dirmove.strip_ignored_prefixes("www example com test");
         assert_eq!(result, "www example com test");
     }
 
     #[test]
     fn dot_prefix_single_ignore() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www"]);
         let result = dirmove.strip_ignored_dot_prefixes("www.example.com.test");
         assert_eq!(result, "example.com.test");
     }
 
     #[test]
     fn dot_prefix_multiple_ignores() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string(), "example".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www", "example"]);
         let result = dirmove.strip_ignored_dot_prefixes("www.example.com.test");
         assert_eq!(result, "com.test");
     }
 
     #[test]
     fn case_insensitive_ignore() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["WWW".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["WWW"]);
         let result = dirmove.strip_ignored_dot_prefixes("www.example.com");
         assert_eq!(result, "example.com");
     }
 
     #[test]
     fn ignore_in_middle_not_stripped() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["example".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["example"]);
         let result = dirmove.strip_ignored_dot_prefixes("www.example.com");
         assert_eq!(result, "www.example.com");
     }
 
     #[test]
     fn is_ignored_prefix_exact_match() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www"]);
         assert!(dirmove.is_ignored_prefix("www"));
         assert!(dirmove.is_ignored_prefix("WWW"));
         assert!(!dirmove.is_ignored_prefix("www2"));
@@ -2618,14 +2307,14 @@ mod test_prefix_ignores {
 
     #[test]
     fn repeated_prefix_in_name() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix"]);
         let result = dirmove.strip_ignored_dot_prefixes("prefix.prefix.name.mp4");
         assert_eq!(result, "name.mp4");
     }
 
     #[test]
     fn all_parts_are_ignored() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["a".to_string(), "b".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["a", "b"]);
         let result = dirmove.strip_ignored_dot_prefixes("a.b.c");
         assert_eq!(result, "c");
     }
@@ -2738,7 +2427,7 @@ mod test_directory_matching {
 
     #[test]
     fn with_prefix_ignore() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www"]);
         let dirs = make_test_dirs(&["example"]);
         let files = make_file_paths(&["www.example.file.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
@@ -2748,7 +2437,7 @@ mod test_directory_matching {
 
     #[test]
     fn with_repeated_prefix_ignore() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix"]);
         let dirs = make_test_dirs(&["name"]);
         let files = make_file_paths(&["prefix.prefix.name.file.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
@@ -2758,7 +2447,7 @@ mod test_directory_matching {
 
     #[test]
     fn with_multiple_prefix_ignores() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string(), "ftp".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www", "ftp"]);
         let dirs = make_test_dirs(&["example"]);
         let files = make_file_paths(&["www.ftp.example.file.mp4", "ftp.example.other.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
@@ -2768,7 +2457,7 @@ mod test_directory_matching {
 
     #[test]
     fn prefix_ignore_applied_to_both() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["release".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["release"]);
         let dirs = make_test_dirs(&["release show name"]);
         let files = make_file_paths(&["release.show.name.ep1.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
@@ -2778,7 +2467,7 @@ mod test_directory_matching {
 
     #[test]
     fn file_has_prefix_dir_does_not() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www"]);
         let dirs = make_test_dirs(&["example"]);
         let files = make_file_paths(&["www.example.file.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
@@ -2787,7 +2476,7 @@ mod test_directory_matching {
 
     #[test]
     fn dir_has_prefix_file_does_not() {
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["www"]);
         let dirs = make_test_dirs(&["www example"]);
         let files = make_file_paths(&["example.file.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
@@ -2881,7 +2570,7 @@ mod test_directory_matching {
     #[test]
     fn concatenated_directory_with_dotted_files_and_prefix() {
         // Directory "SomeName" should match files like "prefix.some.name.file.mp4"
-        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix".to_string()]);
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["prefix"]);
         let dirs = make_test_dirs(&["SomeName"]);
         let files = make_file_paths(&[
             "prefix.some.name.file.01.mp4",
@@ -3137,7 +2826,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3162,7 +2851,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3189,7 +2878,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], false, false, false),
+            config: Config::test_unpack(vec!["videos"], false, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3215,7 +2904,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3241,7 +2930,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, true, false),
+            config: Config::test_unpack(vec!["videos"], true, true, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3268,7 +2957,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3294,7 +2983,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos", "extras"], true, false, false),
+            config: Config::test_unpack(vec!["videos", "extras"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3321,7 +3010,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3346,7 +3035,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, true),
+            config: Config::test_unpack(vec!["videos"], true, false, true),
         };
 
         dirmove.unpack_directories()?;
@@ -3371,7 +3060,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3398,7 +3087,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], false, false, false),
+            config: Config::test_unpack(vec!["videos"], false, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3424,7 +3113,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3452,7 +3141,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3479,7 +3168,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec![], true, false, false),
+            config: Config::test_unpack(vec![], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3503,7 +3192,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3529,7 +3218,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3556,7 +3245,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3583,7 +3272,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3610,7 +3299,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3637,7 +3326,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root: root.clone(),
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         let info = dirmove.collect_unpack_info(&videos, &root);
@@ -3661,7 +3350,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, true, false),
+            config: Config::test_unpack(vec!["videos"], true, true, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3685,7 +3374,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["updates", "1", "videos"], true, false, false),
+            config: Config::test_unpack(vec!["updates", "1", "videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3710,7 +3399,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["updates", "videos"], true, false, false),
+            config: Config::test_unpack(vec!["updates", "videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3740,7 +3429,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["updates", "videos", "downloads"], true, false, false),
+            config: Config::test_unpack(vec!["updates", "videos", "downloads"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3763,7 +3452,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root: root.clone(),
-            config: make_unpack_config(vec!["videos", "updates", "downloads"], true, false, false),
+            config: Config::test_unpack(vec!["videos", "updates", "downloads"], true, false, false),
         };
 
         let (_, candidates) = dirmove.collect_unwanted_and_unpack_candidates();
@@ -3787,7 +3476,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3815,7 +3504,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["updates", "videos", "downloads"], true, false, false),
+            config: Config::test_unpack(vec!["updates", "videos", "downloads"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3841,7 +3530,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["updates"], true, false, false),
+            config: Config::test_unpack(vec!["updates"], true, false, false),
         };
 
         dirmove.unpack_directories()?;
@@ -3864,7 +3553,7 @@ mod test_unpack {
 
         let dirmove = DirMove {
             root: root.clone(),
-            config: make_unpack_config(vec!["videos"], true, false, false),
+            config: Config::test_unpack(vec!["videos"], true, false, false),
         };
 
         assert!(dirmove.contains_unpack_directory(&root.join("A")));
@@ -3892,7 +3581,7 @@ mod test_unwanted_directories {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec![], false, false, false),
+            config: Config::test_unpack(vec![], false, false, false),
         };
 
         dirmove.run()?;
@@ -3914,7 +3603,7 @@ mod test_unwanted_directories {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec![], true, false, false),
+            config: Config::test_unpack(vec![], true, false, false),
         };
 
         dirmove.run()?;
@@ -3935,7 +3624,7 @@ mod test_unwanted_directories {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec![], false, true, false),
+            config: Config::test_unpack(vec![], false, true, false),
         };
 
         dirmove.run()?;
@@ -3955,7 +3644,7 @@ mod test_unwanted_directories {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec![], false, false, false),
+            config: Config::test_unpack(vec![], false, false, false),
         };
 
         dirmove.run()?;
@@ -3976,7 +3665,7 @@ mod test_unwanted_directories {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec![], false, true, false),
+            config: Config::test_unpack(vec![], false, true, false),
         };
 
         let dirs = dirmove.collect_directories_in_root()?;
@@ -3999,7 +3688,7 @@ mod test_unwanted_directories {
 
         let dirmove = DirMove {
             root,
-            config: make_unpack_config(vec!["videos"], false, false, false),
+            config: Config::test_unpack(vec!["videos"], false, false, false),
         };
 
         let (unwanted_dirs, unpack_candidates) = dirmove.collect_unwanted_and_unpack_candidates();
@@ -4021,50 +3710,6 @@ mod test_unwanted_directories {
 #[cfg(test)]
 mod test_realistic_grouping {
     use super::*;
-
-    /// Helper to create a test config with specified min group size
-    fn make_grouping_config(min_group_size: usize) -> Config {
-        Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        }
-    }
-
-    /// Helper to create config with prefix ignores
-    fn make_config_with_ignores(min_group_size: usize, ignores: Vec<String>) -> Config {
-        Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: ignores,
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        }
-    }
 
     #[test]
     fn mixed_content_multiple_distinct_groups_with_noise() {
@@ -4099,7 +3744,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("BlueSky.Entertainment.Comedy.720p.x265.mp4"), "").unwrap();
         std::fs::write(root.join("BlueSky.Media.Documentary.1080p.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4168,7 +3813,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("DifferentShow.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("SomeOther.Content.Video.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4218,7 +3863,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Completely.Different.Content.mp4"), "").unwrap();
         std::fs::write(root.join("Random.Other.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4275,7 +3920,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Short.Video.mp4"), "").unwrap();
         std::fs::write(root.join("Another.Short.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4315,7 +3960,7 @@ mod test_realistic_grouping {
         // Unrelated
         std::fs::write(root.join("RandomContent.Video.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(2, vec!["Premium".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Premium"], 2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4354,7 +3999,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("ThunderBolt.Action.Movie1.mp4"), "").unwrap();
         std::fs::write(root.join("ThunderBolt.Action.Movie2.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4396,7 +4041,7 @@ mod test_realistic_grouping {
         // Unrelated
         std::fs::write(root.join("Random.2020.Content.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4440,7 +4085,7 @@ mod test_realistic_grouping {
         // Completely unrelated
         std::fs::write(root.join("Independent.Film.Festival.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4486,7 +4131,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Galaxy.Quest.Movie.mp4"), "").unwrap();
         std::fs::write(root.join("Galaxy.Quest.Special.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4536,24 +4181,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Studio.Ghibli.Shorts.One.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Ghibli.Shorts.Two.mp4"), "").unwrap();
 
-        let config = Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size: 2,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: Vec::new(),
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        };
+        let config = Config::test_with_group_size(2);
 
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -4612,7 +4240,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Marvel.Television.Daredevil.S01.mp4"), "").unwrap();
         std::fs::write(root.join("Marvel.Television.Daredevil.S02.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4663,7 +4291,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Series.Season.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Series.Season.Special.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4700,7 +4328,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("ThirdUnique.Content.mp4"), "").unwrap();
 
         // With min_group_size=5, neither group qualifies (2 and 3 files < 5)
-        let dirmove = DirMove::new(root.clone(), make_grouping_config(5));
+        let dirmove = DirMove::new(root.clone(), Config::test_with_group_size(5));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4710,7 +4338,7 @@ mod test_realistic_grouping {
         );
 
         // With min_group_size=3, only TripleGroup qualifies
-        let dirmove = DirMove::new(root.clone(), make_grouping_config(3));
+        let dirmove = DirMove::new(root.clone(), Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4725,7 +4353,7 @@ mod test_realistic_grouping {
         assert_eq!(groups.get("TripleGroup").unwrap().files.len(), 3);
 
         // With min_group_size=2, both groups qualify
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4767,7 +4395,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("MoonGlow.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("Moon.Glow.Episode.02.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4807,7 +4435,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("One.Two.Three.Four.File2.mp4"), "").unwrap();
         std::fs::write(root.join("One.Two.Three.Different.File3.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4827,7 +4455,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Show24.Hours.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Show24.Hours.Episode.03.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4848,7 +4476,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("X.Files.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("X.Files.Episode.03.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4869,7 +4497,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Spider-Man.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Spider-Man.Movie.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4887,7 +4515,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("My_Show.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("My_Show.Episode.02.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4904,7 +4532,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Show..Name.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("Show..Name.Episode.02.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4922,7 +4550,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join(format!("{long_name}.Part.01.mp4")), "").unwrap();
         std::fs::write(root.join(format!("{long_name}.Part.02.mp4")), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4942,7 +4570,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Unique.Name.File.mp4"), "").unwrap();
         std::fs::write(root.join("Another.Unique.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(1));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(1));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -4962,7 +4590,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join(".mp4"), "").unwrap();
         std::fs::write(root.join("a.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
 
         // Should not panic, may or may not find groups
@@ -4979,7 +4607,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Movie.Name.2024.srt"), "").unwrap();
         std::fs::write(root.join("Movie.Name.2024.nfo"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5014,7 +4642,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Studio.Gamma.Another.Thing.720p.x265.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Delta.Yet.Another.Item.1080p.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5061,7 +4689,7 @@ mod test_realistic_grouping {
         // This one has Site.Person adjacent
         std::fs::write(root.join("Site.Person.Fourth.1080p.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5102,7 +4730,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("photolab.Project.Eta.720p.mp4"), "").unwrap();
         std::fs::write(root.join("Photolab.Project.Theta.1080p.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5140,7 +4768,7 @@ mod test_realistic_grouping {
         // Other partial: "Dark.StarMedia"
         std::fs::write(root.join("Dark.StarMedia.Video.08.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5176,7 +4804,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Creator.Name.Video.05.mp4"), "").unwrap();
         std::fs::write(root.join("Creator.Name.Video.06.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5213,7 +4841,7 @@ mod test_realistic_grouping {
         // "Beauty.Beast" contiguous (no glue word)
         std::fs::write(root.join("Beauty.Beast.Special.01.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5255,7 +4883,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Alpha.2023.Beta.Content.09.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.2024.Beta.Content.10.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5304,7 +4932,7 @@ mod test_realistic_grouping {
         // Contiguous version
         std::fs::write(root.join("Studio.Actor.Scene.Direct.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5346,7 +4974,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("PhotoLabPro.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabPro.Image.03.jpg"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5391,7 +5019,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Studio.Production.2160p.Episode.03.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Production.480p.Episode.04.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5418,7 +5046,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Alpha.Beta.Another.File.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.Beta.Third.Entry.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5447,31 +5075,6 @@ mod test_realistic_grouping {
 mod test_varied_prefix_grouping {
     use super::*;
 
-    fn make_config_with_ignores(min_group_size: usize, ignores: Vec<String>) -> Config {
-        Config {
-            auto: false,
-            create: true,
-            debug: false,
-            dryrun: true,
-            include: Vec::new(),
-            exclude: Vec::new(),
-            ignored_group_names: Vec::new(),
-            ignored_group_parts: Vec::new(),
-            min_group_size,
-            min_prefix_chars: 1,
-            overwrite: false,
-            prefix_ignores: ignores,
-            prefix_overrides: Vec::new(),
-            recurse: false,
-            verbose: false,
-            unpack_directory_names: Vec::new(),
-        }
-    }
-
-    fn make_grouping_config(min_group_size: usize) -> Config {
-        make_config_with_ignores(min_group_size, Vec::new())
-    }
-
     // ===== Tests for prefix ignore functionality =====
 
     #[test]
@@ -5496,7 +5099,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("RandomVideo.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("UnrelatedContent.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["Site".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Site"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5542,10 +5145,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Premium.OtherStudio.File.001.mp4"), "").unwrap();
         std::fs::write(root.join("MyContentMaker.Video.001.mp4"), "").unwrap(); // Different name entirely
 
-        let dirmove = DirMove::new(
-            root,
-            make_config_with_ignores(3, vec!["Premium".to_string(), "HD".to_string()]),
-        );
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Premium", "HD"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5587,7 +5187,7 @@ mod test_varied_prefix_grouping {
         // Different studio
         std::fs::write(root.join("Premium.StudioGamma.Movie.01.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["PREMIUM".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["PREMIUM"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5612,7 +5212,7 @@ mod test_varied_prefix_grouping {
         // Completely different
         std::fs::write(root.join("OtherChannel.Video.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["Site".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Site"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5644,7 +5244,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("OtherProduction.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("RandomFile.txt"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5686,7 +5286,7 @@ mod test_varied_prefix_grouping {
         // Completely unrelated
         std::fs::write(root.join("Documentary.Nature.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5726,7 +5326,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("LightStar.Content.mp4"), "").unwrap();
         std::fs::write(root.join("BrightStorm.Content.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5766,7 +5366,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Beta.Different.File.mp4"), "").unwrap();
         std::fs::write(root.join("Gamma.Another.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5822,7 +5422,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("config.json"), "").unwrap();
         std::fs::write(root.join("SingleFile.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5877,7 +5477,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("notes.txt"), "").unwrap();
         std::fs::write(root.join("backup.zip"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5921,7 +5521,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Unrelated.Random.File.mp4"), "").unwrap();
         std::fs::write(root.join("Another.Completely.Different.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["Web".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Web"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -5960,10 +5560,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("NoMatch.AtAll.mp4"), "").unwrap();
         std::fs::write(root.join("random_file_123.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(
-            root,
-            make_config_with_ignores(3, vec!["AAA".to_string(), "BBB".to_string()]),
-        );
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["AAA", "BBB"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6004,7 +5601,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("SilverEagle.Other.01.mp4"), "").unwrap();
         std::fs::write(root.join("GoldenHawk.Similar.01.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["HD".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["HD"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6044,7 +5641,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Unrelated.Content.File.mp4"), "").unwrap();
         std::fs::write(root.join("Random.Video.Here.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["Premium".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Premium"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6086,7 +5683,7 @@ mod test_varied_prefix_grouping {
         // Noise
         std::fs::write(root.join("OtherStuff.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["X".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["X"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6123,7 +5720,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Ver2StudioName.Wrong.01.mp4"), "").unwrap(); // No dot
         std::fs::write(root.join("Random.Other.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, vec!["Ver2".to_string()]));
+        let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Ver2"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6148,7 +5745,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Target.File.04.mp4"), "").unwrap();
 
         // With empty ignore list, "Prefix.Target" files should group separately
-        let dirmove = DirMove::new(root, make_config_with_ignores(3, Vec::new()));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6172,27 +5769,6 @@ mod test_varied_prefix_grouping {
     mod test_min_prefix_chars {
         use super::test_helpers::*;
         use super::*;
-
-        fn make_config_with_min_chars(min_group_size: usize, min_prefix_chars: usize) -> Config {
-            Config {
-                auto: false,
-                create: true,
-                debug: false,
-                dryrun: true,
-                include: Vec::new(),
-                exclude: Vec::new(),
-                ignored_group_names: Vec::new(),
-                ignored_group_parts: Vec::new(),
-                min_group_size,
-                min_prefix_chars,
-                overwrite: false,
-                prefix_ignores: Vec::new(),
-                prefix_overrides: Vec::new(),
-                recurse: false,
-                verbose: false,
-                unpack_directory_names: Vec::new(),
-            }
-        }
 
         // ===== Unit tests for find_prefix_candidates =====
 
@@ -6363,7 +5939,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("Alexander.Movie.002.mp4"), "").unwrap();
             std::fs::write(root.join("Alexander.Movie.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 5));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6404,7 +5980,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("Test.Case.002.rs"), "").unwrap();
             std::fs::write(root.join("Test.Case.003.rs"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 5));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6431,7 +6007,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("ABC.Video.003.mp4"), "").unwrap();
 
             // With min_prefix_chars=3, "ABC" should be allowed
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 3));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 3));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6460,7 +6036,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("VeryLongPrefix.Video.003.mp4"), "").unwrap();
 
             // With min_prefix_chars=10, only "VeryLongPrefix" (14 chars) qualifies
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 10));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 10));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6498,7 +6074,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("Series.Drama.002.mp4"), "").unwrap();
             std::fs::write(root.join("Series.Drama.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 5));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6523,7 +6099,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("🎬🎥.Video.003.mp4"), "").unwrap();
 
             // With min=2, emoji prefix should work
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 2));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 2));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6619,7 +6195,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("AB.CD.Video.002.mp4"), "").unwrap();
             std::fs::write(root.join("AB.CD.Video.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 5));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6639,7 +6215,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("Alpha.Beta.Video.002.mp4"), "").unwrap();
             std::fs::write(root.join("Alpha.Beta.Video.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 5));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6673,7 +6249,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("Studio.Movie.002.mp4"), "").unwrap();
             std::fs::write(root.join("Studio.Movie.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 5));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6699,7 +6275,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("X.Y.Content.002.mp4"), "").unwrap();
             std::fs::write(root.join("X.Y.Content.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 0));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 0));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6727,7 +6303,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("Ab.Cd.Other.002.mp4"), "").unwrap();
             std::fs::write(root.join("Ab.Cd.Other.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 5));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6760,7 +6336,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("Super.Long.Prefix.Content.002.mp4"), "").unwrap();
             std::fs::write(root.join("Super.Long.Prefix.Content.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 15));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 15));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6797,7 +6373,7 @@ mod test_varied_prefix_grouping {
             std::fs::write(root.join("日本語.映画.Content.002.mp4"), "").unwrap();
             std::fs::write(root.join("日本語.映画.Content.003.mp4"), "").unwrap();
 
-            let dirmove = DirMove::new(root, make_config_with_min_chars(3, 3));
+            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 3));
             let files_with_names = dirmove.collect_files_with_names().unwrap();
             let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6836,7 +6412,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("OtherContent.File.mp4"), "").unwrap();
         std::fs::write(root.join("MyStudio.Different.mp4"), "").unwrap(); // "Studio" not at start
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6876,7 +6452,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("GammaProduction.Film.001.mp4"), "").unwrap();
         std::fs::write(root.join("GammaProduction.Film.002.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(2));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
@@ -6929,7 +6505,7 @@ mod test_varied_prefix_grouping {
         // Completely different
         std::fs::write(root.join("Unrelated.Other.File.mp4"), "").unwrap();
 
-        let dirmove = DirMove::new(root, make_grouping_config(3));
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 

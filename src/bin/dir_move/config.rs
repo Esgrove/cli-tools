@@ -9,7 +9,7 @@ use cli_tools::print_error;
 use crate::DirMoveArgs;
 
 /// Final config combined from CLI arguments and user config file.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Config {
     pub(crate) auto: bool,
     pub(crate) create: bool,
@@ -105,8 +105,20 @@ impl Config {
     /// Create config from given command line args and user config file.
     pub fn from_args(args: DirMoveArgs) -> Self {
         let user_config = DirMoveConfig::get_user_config();
-        let include: Vec<String> = user_config.include.into_iter().chain(args.include).unique().collect();
-        let exclude: Vec<String> = user_config.exclude.into_iter().chain(args.exclude).unique().collect();
+        let include: Vec<String> = user_config
+            .include
+            .into_iter()
+            .chain(args.include)
+            .map(|s| s.to_lowercase())
+            .unique()
+            .collect();
+        let exclude: Vec<String> = user_config
+            .exclude
+            .into_iter()
+            .chain(args.exclude)
+            .map(|s| s.to_lowercase())
+            .unique()
+            .collect();
 
         let ignored_group_names: Vec<String> = user_config
             .ignored_group_names
@@ -128,6 +140,7 @@ impl Config {
             .prefix_ignores
             .into_iter()
             .chain(args.prefix_ignore)
+            .map(|s| s.to_lowercase())
             .unique()
             .collect();
 
@@ -163,6 +176,101 @@ impl Config {
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
             unpack_directory_names,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Config {
+    /// Create a test config with specified `min_group_size` and default values.
+    pub fn test_with_group_size(min_group_size: usize) -> Self {
+        Self {
+            min_group_size,
+            min_prefix_chars: 1,
+            dryrun: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a test config with prefix ignores (automatically lowercased).
+    pub fn test_with_prefix_ignores(prefix_ignores: Vec<&str>) -> Self {
+        Self {
+            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            dryrun: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a test config with prefix overrides and ignores (ignores automatically lowercased).
+    pub fn test_with_overrides_and_ignores(prefix_overrides: Vec<&str>, prefix_ignores: Vec<&str>) -> Self {
+        Self {
+            prefix_overrides: prefix_overrides.into_iter().map(String::from).collect(),
+            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 5,
+            dryrun: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a test config for unpack operations.
+    pub fn test_unpack(unpack_names: Vec<&str>, recurse: bool, dryrun: bool, overwrite: bool) -> Self {
+        Self {
+            auto: true,
+            dryrun,
+            overwrite,
+            recurse,
+            unpack_directory_names: unpack_names.into_iter().map(str::to_lowercase).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 5,
+            ..Default::default()
+        }
+    }
+
+    /// Create a test config with ignored group names (automatically lowercased).
+    pub fn test_with_ignored_group_names(ignored_group_names: Vec<&str>) -> Self {
+        Self {
+            ignored_group_names: ignored_group_names.into_iter().map(str::to_lowercase).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            dryrun: true,
+            create: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a test config with ignored group parts (automatically lowercased).
+    pub fn test_with_ignored_group_parts(ignored_group_parts: Vec<&str>) -> Self {
+        Self {
+            ignored_group_parts: ignored_group_parts.into_iter().map(str::to_lowercase).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 1,
+            dryrun: true,
+            create: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a test config with specified `min_group_size` and `min_prefix_chars`.
+    pub fn test_with_group_size_and_min_chars(min_group_size: usize, min_prefix_chars: usize) -> Self {
+        Self {
+            min_group_size,
+            min_prefix_chars,
+            dryrun: true,
+            ..Default::default()
+        }
+    }
+
+    /// Create a test config with prefix ignores and specified `min_group_size` (ignores automatically lowercased).
+    pub fn test_with_ignores_and_group_size(prefix_ignores: Vec<&str>, min_group_size: usize) -> Self {
+        Self {
+            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
+            min_group_size,
+            min_prefix_chars: 1,
+            dryrun: true,
+            ..Default::default()
         }
     }
 }
