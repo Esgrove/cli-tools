@@ -13,18 +13,26 @@ use cli_tools::{
 };
 
 use crate::config::Config;
+use crate::database::Database;
 use crate::types::{DirectoryInfo, FileInfo, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo};
 use crate::{DirMoveArgs, utils};
 
-#[derive(Debug)]
 pub struct DirMove {
     root: PathBuf,
     config: Config,
+    database: Option<Database>,
 }
 
 impl DirMove {
-    pub const fn new(root: PathBuf, config: Config) -> Self {
-        Self { root, config }
+    pub fn new(root: PathBuf, config: Config) -> Self {
+        let database = match Database::open_default() {
+            Ok(db) => Some(db),
+            Err(e) => {
+                print_warning!("Failed to open database: {e}");
+                None
+            }
+        };
+        Self { root, config, database }
     }
 
     pub fn try_from_args(args: DirMoveArgs) -> anyhow::Result<Self> {
@@ -34,13 +42,45 @@ impl DirMove {
             eprintln!("Config: {config:#?}");
             eprintln!("Root: {}", root.display());
         }
-        Ok(Self::new(root, config))
+        let dirmove = Self::new(root, config);
+        if dirmove.config.debug {
+            dirmove.print_database_debug_info();
+        }
+        Ok(dirmove)
+    }
+
+    /// Print debug information about the database contents.
+    fn print_database_debug_info(&self) {
+        let Some(ref db) = self.database else {
+            eprintln!("Database: not available (failed to open)");
+            return;
+        };
+
+        eprintln!("Database: {}", Database::path().display());
+        match db.get_all_entries() {
+            Ok(entries) => {
+                if entries.is_empty() {
+                    eprintln!("Database: empty");
+                } else {
+                    eprintln!("Database entries ({}):", entries.len());
+                    for entry in entries {
+                        eprintln!("  {entry}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to get database entries: {e}");
+            }
+        }
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
         // Delete unwanted directories and unpack configured directory names.
         // These are combined into a single directory walk for efficiency.
         self.unpack_directories()?;
+
+        // Update database with existing directory names
+        self.update_database_with_existing_directories();
 
         // Normal directory matching and moving
         self.move_files_to_dir()?;
@@ -51,6 +91,107 @@ impl DirMove {
         }
 
         Ok(())
+    }
+
+    /// Update the database with directory names found in the root directory.
+    /// Skips names that are in the `prefix_ignores` or `ignored_group_names` lists.
+    /// Does nothing in dryrun mode.
+    fn update_database_with_existing_directories(&self) {
+        if self.config.dryrun {
+            return;
+        }
+
+        let Some(ref db) = self.database else {
+            return;
+        };
+
+        if let Ok(dirs) = self.collect_directories_in_root() {
+            for dir_info in dirs {
+                let dir_name = cli_tools::path_to_filename_string(&dir_info.path);
+                if self.should_store_in_database(&dir_name)
+                    && let Err(e) = db.insert_if_new(&dir_name)
+                    && self.config.debug
+                {
+                    eprintln!("Failed to add directory to database: {e}");
+                }
+            }
+        }
+    }
+
+    /// Check if a directory name should be stored in the database.
+    /// Returns false if the name is in `prefix_ignores` or `ignored_group_names`.
+    fn should_store_in_database(&self, name: &str) -> bool {
+        let normalized = name.to_lowercase().replace(' ', "");
+
+        // Skip if it matches a prefix_ignore
+        if self.is_ignored_prefix(name) {
+            return false;
+        }
+
+        // Skip if it matches an ignored_group_name
+        if self.config.ignored_group_names.contains(&normalized) {
+            return false;
+        }
+
+        // Skip if any part matches an ignored_group_part
+        let parts: Vec<&str> = name.split([' ', '.']).collect();
+        if parts.iter().any(|part| {
+            self.config
+                .ignored_group_parts
+                .iter()
+                .any(|ignored| part.eq_ignore_ascii_case(ignored))
+        }) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Add a directory name to the database (increments use count if exists).
+    /// Does nothing in dryrun mode.
+    fn add_to_database(&self, name: &str) {
+        if self.config.dryrun {
+            return;
+        }
+
+        let Some(ref db) = self.database else {
+            return;
+        };
+
+        if self.should_store_in_database(name)
+            && let Err(e) = db.upsert(name)
+            && self.config.debug
+        {
+            eprintln!("Failed to update database: {e}");
+        }
+    }
+
+    /// Get the best database suggestion for a directory name prefix.
+    /// Returns the display name (with proper casing) from the database, if any.
+    fn get_database_suggestion_for_prefix(&self, dir_name: &str) -> Option<String> {
+        let db = self.database.as_ref()?;
+
+        // Normalize the dir_name for comparison
+        let normalized = crate::database::normalize_name(dir_name);
+
+        // Get all database entries
+        let entries = db.get_all_entries().ok()?;
+
+        // Look for exact match first
+        for entry in &entries {
+            if entry.normalized_name == normalized {
+                return Some(entry.display_name.clone());
+            }
+        }
+
+        // Look for entries that start with the normalized name or vice versa
+        for entry in &entries {
+            if entry.normalized_name.starts_with(&normalized) || normalized.starts_with(&entry.normalized_name) {
+                return Some(entry.display_name.clone());
+            }
+        }
+
+        None
     }
 
     /// Delete unwanted directories and unpack directories with names matching config.
@@ -920,6 +1061,9 @@ impl DirMove {
             {
                 continue;
             }
+            // Check database for a matching suggestion
+            let database_suggestion = self.get_database_suggestion_for_prefix(&dir_name);
+
             let dir_path = self.root.join(&dir_name);
             let dir_exists = dir_path.exists();
 
@@ -938,7 +1082,11 @@ impl DirMove {
                 let final_dir_path = if self.config.auto {
                     Some(dir_path)
                 } else {
-                    self.prompt_for_directory_name(&dir_path, &dir_name)?
+                    self.prompt_for_directory_name_with_suggestion(
+                        &dir_path,
+                        &dir_name,
+                        database_suggestion.as_deref(),
+                    )?
                 };
 
                 if let Some(target_path) = final_dir_path {
@@ -947,6 +1095,9 @@ impl DirMove {
                     } else {
                         // Mark files as moved
                         moved_files.extend(available_files);
+                        // Add directory name to database
+                        let final_dir_name = cli_tools::path_to_filename_string(&target_path);
+                        self.add_to_database(&final_dir_name);
                     }
                 }
                 // Note: "Skipped" message is printed in prompt_for_directory_name
@@ -957,21 +1108,44 @@ impl DirMove {
         Ok(())
     }
 
-    /// Prompt the user for directory name confirmation.
-    /// Returns `Some(path)` if confirmed (with original or custom name), `None` if skipped.
+    /// Prompt the user for directory name confirmation with optional database suggestion.
+    /// Returns `Some(path)` if confirmed (with original, database, or custom name), `None` if skipped.
+    ///
+    /// If a database suggestion is provided and differs from the suggested name,
+    /// it will be offered first as the primary choice.
     ///
     /// Accepts:
-    /// - "y" or "yes" to confirm with the suggested name
+    /// - "y" or "yes" to confirm with the suggested name (or database suggestion if shown)
     /// - "n" or "no" to skip
     /// - Any other non-empty string as a custom directory name (with confirmation)
-    fn prompt_for_directory_name(
+    #[allow(clippy::option_if_let_else)]
+    fn prompt_for_directory_name_with_suggestion(
         &self,
         suggested_path: &Path,
         suggested_name: &str,
+        database_suggestion: Option<&str>,
     ) -> anyhow::Result<Option<PathBuf>> {
+        // Check if database suggestion differs from suggested name
+        // Note: Using if-let instead of map_or because we have a side effect (println)
+        let effective_suggestion = if let Some(db_name) = database_suggestion {
+            let db_normalized = db_name.to_lowercase().replace(' ', "");
+            let suggested_normalized = suggested_name.to_lowercase().replace(' ', "");
+            if db_normalized == suggested_normalized {
+                suggested_name
+            } else {
+                // Show database suggestion as primary
+                println!("  {} Database suggests: {}", "★".yellow(), db_name.cyan().bold());
+                db_name
+            }
+        } else {
+            suggested_name
+        };
+
+        let effective_path = self.root.join(effective_suggestion);
+
         print!(
             "{}",
-            format!("Create directory and move files? (y/n or custom name) [{suggested_name}]: ").magenta()
+            format!("Create directory and move files? (y/n or custom name) [{effective_suggestion}]: ").magenta()
         );
         std::io::stdout().flush()?;
 
@@ -979,9 +1153,9 @@ impl DirMove {
         std::io::stdin().read_line(&mut input)?;
         let input = input.trim();
 
-        // Empty input or "y"/"yes" confirms the suggested name
+        // Empty input or "y"/"yes" confirms the effective suggestion
         if input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
-            return Ok(Some(suggested_path.to_path_buf()));
+            return Ok(Some(effective_path));
         }
 
         // "n"/"no" skips
@@ -1114,6 +1288,15 @@ pub mod test_helpers {
     use super::*;
     use crate::types::PrefixCandidate;
 
+    /// Create a `DirMove` for testing with no database.
+    pub fn make_dirmove(root: PathBuf, config: Config) -> DirMove {
+        DirMove {
+            root,
+            config,
+            database: None,
+        }
+    }
+
     /// Create test files with path, original name, and filtered name.
     /// For simple tests, the original and filtered names are the same.
     pub fn make_test_files(names: &[&str]) -> Vec<FileInfo<'static>> {
@@ -1152,10 +1335,10 @@ pub mod test_helpers {
     }
 
     pub fn make_test_dirmove_with_ignores(prefix_overrides: Vec<&str>, prefix_ignores: Vec<&str>) -> DirMove {
-        DirMove {
-            root: PathBuf::from("."),
-            config: Config::test_with_overrides_and_ignores(prefix_overrides, prefix_ignores),
-        }
+        make_dirmove(
+            PathBuf::from("."),
+            Config::test_with_overrides_and_ignores(prefix_overrides, prefix_ignores),
+        )
     }
 
     pub fn make_test_dirmove(prefix_overrides: Vec<&str>) -> DirMove {
@@ -2082,10 +2265,10 @@ mod test_stripped_name_filtering_integration {
         prefix_ignores: Vec<&str>,
         ignored_group_names: Vec<&str>,
     ) -> DirMove {
-        DirMove {
+        test_helpers::make_dirmove(
             root,
-            config: Config::test_with_prefix_ignores_and_ignored_group_names(prefix_ignores, ignored_group_names),
-        }
+            Config::test_with_prefix_ignores_and_ignored_group_names(prefix_ignores, ignored_group_names),
+        )
     }
 
     #[test]
@@ -3273,10 +3456,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3298,10 +3478,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3325,10 +3502,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], false, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], false, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3351,10 +3525,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3377,10 +3548,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, true, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, true, false));
 
         dirmove.unpack_directories()?;
 
@@ -3404,10 +3572,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3430,10 +3595,8 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos", "extras"], true, false, false),
-        };
+        let dirmove =
+            test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos", "extras"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3457,10 +3620,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3482,10 +3642,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, true),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, true));
 
         dirmove.unpack_directories()?;
 
@@ -3507,10 +3664,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3534,10 +3688,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], false, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], false, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3560,10 +3711,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3588,10 +3736,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3615,10 +3760,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec![], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec![], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3639,10 +3781,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3665,10 +3804,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3692,10 +3828,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3719,10 +3852,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3746,10 +3876,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3773,10 +3900,7 @@ mod test_unpack {
         write_file(&videos.join("Dir1").join("nested.txt"), "nested")?;
         write_file(&videos.join("Dir2").join("nested.txt"), "nested")?;
 
-        let dirmove = DirMove {
-            root: root.clone(),
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root.clone(), Config::test_unpack(vec!["videos"], true, false, false));
 
         let info = dirmove.collect_unpack_info(&videos, &root);
 
@@ -3797,10 +3921,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, true, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, true, false));
 
         dirmove.unpack_directories()?;
 
@@ -3821,10 +3942,10 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
+        let dirmove = test_helpers::make_dirmove(
             root,
-            config: Config::test_unpack(vec!["updates", "1", "videos"], true, false, false),
-        };
+            Config::test_unpack(vec!["updates", "1", "videos"], true, false, false),
+        );
 
         dirmove.unpack_directories()?;
 
@@ -3846,10 +3967,8 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["updates", "videos"], true, false, false),
-        };
+        let dirmove =
+            test_helpers::make_dirmove(root, Config::test_unpack(vec!["updates", "videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3876,10 +3995,10 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
+        let dirmove = test_helpers::make_dirmove(
             root,
-            config: Config::test_unpack(vec!["updates", "videos", "downloads"], true, false, false),
-        };
+            Config::test_unpack(vec!["updates", "videos", "downloads"], true, false, false),
+        );
 
         dirmove.unpack_directories()?;
 
@@ -3899,10 +4018,10 @@ mod test_unpack {
         std::fs::create_dir_all(&path)?;
         write_file(&path.join("file.txt"), "x")?;
 
-        let dirmove = DirMove {
-            root: root.clone(),
-            config: Config::test_unpack(vec!["videos", "updates", "downloads"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(
+            root.clone(),
+            Config::test_unpack(vec!["videos", "updates", "downloads"], true, false, false),
+        );
 
         let (_, candidates) = dirmove.collect_unwanted_and_unpack_candidates();
 
@@ -3923,10 +4042,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -3951,10 +4067,10 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
+        let dirmove = test_helpers::make_dirmove(
             root,
-            config: Config::test_unpack(vec!["updates", "videos", "downloads"], true, false, false),
-        };
+            Config::test_unpack(vec!["updates", "videos", "downloads"], true, false, false),
+        );
 
         dirmove.unpack_directories()?;
 
@@ -3977,10 +4093,7 @@ mod test_unpack {
 
         let root_for_asserts = root.clone();
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["updates"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["updates"], true, false, false));
 
         dirmove.unpack_directories()?;
 
@@ -4000,10 +4113,7 @@ mod test_unpack {
         write_file(&videos.join("file.txt"), "x")?;
         write_file(&root.join("C").join("nothing_special").join("file.txt"), "y")?;
 
-        let dirmove = DirMove {
-            root: root.clone(),
-            config: Config::test_unpack(vec!["videos"], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root.clone(), Config::test_unpack(vec!["videos"], true, false, false));
 
         assert!(dirmove.contains_unpack_directory(&root.join("A")));
         assert!(dirmove.contains_unpack_directory(&root.join("A").join("B")));
@@ -4028,10 +4138,7 @@ mod test_unwanted_directories {
         std::fs::create_dir(&unwanted)?;
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec![], false, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec![], false, false, false));
 
         dirmove.run()?;
 
@@ -4050,10 +4157,7 @@ mod test_unwanted_directories {
         std::fs::create_dir(&unwanted)?;
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec![], true, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec![], true, false, false));
 
         dirmove.run()?;
 
@@ -4071,10 +4175,7 @@ mod test_unwanted_directories {
         std::fs::create_dir(&unwanted)?;
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec![], false, true, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec![], false, true, false));
 
         dirmove.run()?;
 
@@ -4091,10 +4192,7 @@ mod test_unwanted_directories {
         std::fs::create_dir(&unwanted)?;
         write_file(&unwanted.join("junk.txt"), "junk")?;
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec![], false, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec![], false, false, false));
 
         dirmove.run()?;
 
@@ -4112,10 +4210,7 @@ mod test_unwanted_directories {
         let normal = root.join("normal");
         std::fs::create_dir(&normal)?;
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec![], false, true, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec![], false, true, false));
 
         let dirs = dirmove.collect_directories_in_root()?;
 
@@ -4135,10 +4230,7 @@ mod test_unwanted_directories {
         std::fs::create_dir(&videos)?;
         write_file(&videos.join("file.txt"), "x")?;
 
-        let dirmove = DirMove {
-            root,
-            config: Config::test_unpack(vec!["videos"], false, false, false),
-        };
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], false, false, false));
 
         let (unwanted_dirs, unpack_candidates) = dirmove.collect_unwanted_and_unpack_candidates();
 

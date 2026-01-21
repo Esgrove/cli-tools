@@ -1,4 +1,5 @@
 mod config;
+mod database;
 mod dir_move;
 mod types;
 mod utils;
