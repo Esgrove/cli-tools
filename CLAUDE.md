@@ -69,7 +69,9 @@ cargo install cargo-llvm-cov
 
 ## Code organization
 
-- Put all struct definitions before their implementations
+- All enums before structs
+- Put all struct definitions before any implementations.
+- Implementations only after last struct definition in the order of struct definitions.
 - Functions after implementations
 - In implementations, Order public methods before private methods
 - In implementations, put associated functions last
