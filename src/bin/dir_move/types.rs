@@ -30,6 +30,23 @@ pub struct MoveInfo {
     pub(crate) target: PathBuf,
 }
 
+/// A pair of directories to merge: source (with prefix) into target (without prefix).
+/// Used during the `merge_prefixed_directories` operation.
+#[derive(Debug)]
+pub struct MergePair {
+    /// Directory with the `prefix_ignore` prefix (to be merged from).
+    pub(crate) source: PathBuf,
+    /// Directory without the prefix (to be merged into).
+    pub(crate) target: PathBuf,
+}
+
+impl MergePair {
+    /// Create a new `MergePair`.
+    pub(crate) const fn new(source: PathBuf, target: PathBuf) -> Self {
+        Self { source, target }
+    }
+}
+
 /// A candidate prefix for grouping files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixCandidate<'a> {

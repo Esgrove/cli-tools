@@ -289,6 +289,20 @@ impl Config {
             ..Default::default()
         }
     }
+
+    /// Create a test config for merge directory operations with prefix ignores.
+    pub fn test_merge(prefix_ignores: Vec<&str>, recurse: bool, dryrun: bool, overwrite: bool) -> Self {
+        Self {
+            auto: true,
+            dryrun,
+            overwrite,
+            recurse,
+            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
+            min_group_size: 3,
+            min_prefix_chars: 5,
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

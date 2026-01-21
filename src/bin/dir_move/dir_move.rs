@@ -14,7 +14,7 @@ use cli_tools::{
 
 use crate::config::Config;
 use crate::database::Database;
-use crate::types::{DirectoryInfo, FileInfo, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo};
+use crate::types::{DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo};
 use crate::{DirMoveArgs, utils};
 
 pub struct DirMove {
@@ -78,6 +78,9 @@ impl DirMove {
         // Delete unwanted directories and unpack configured directory names.
         // These are combined into a single directory walk for efficiency.
         self.unpack_directories()?;
+
+        // Merge directories that have prefix_ignore prefixes into matching directories without the prefix.
+        self.merge_prefixed_directories()?;
 
         // Update database with existing directory names
         self.update_database_with_existing_directories();
@@ -202,6 +205,215 @@ impl DirMove {
     /// `Example/Videos/Name/file2.txt` -> `Example/Name/file2.txt`
     ///
     /// Prunes empty directories that were touched by this unpack operation or already empty directories that match.
+    /// Merge directories that have a `prefix_ignore` prefix into matching directories without the prefix.
+    /// For example, if `prefix_ignore` contains "studio" and there are directories "studio alpha beta"
+    /// and "alpha beta", the contents of "studio alpha beta" will be merged into "alpha beta".
+    fn merge_prefixed_directories(&self) -> anyhow::Result<()> {
+        if self.config.prefix_ignores.is_empty() {
+            return Ok(());
+        }
+
+        let merge_pairs = self.find_merge_candidates()?;
+        if merge_pairs.is_empty() {
+            return Ok(());
+        }
+
+        for pair in merge_pairs {
+            self.merge_directory_contents(&pair.source, &pair.target)?;
+        }
+
+        Ok(())
+    }
+
+    /// Find pairs of directories where one has a `prefix_ignore` prefix and the other doesn't.
+    /// Returns Vec of `MergePair` structs with source (prefixed) and target (non-prefixed) directories.
+    /// When recurse is enabled, checks all directory levels.
+    /// Only matches directories within the same parent (siblings), not across different levels.
+    fn find_merge_candidates(&self) -> anyhow::Result<Vec<MergePair>> {
+        let mut all_pairs = Vec::new();
+
+        // Collect parent directories to check for merge candidates
+        let parent_dirs = self.collect_parent_directories_for_merge();
+
+        for parent_dir in parent_dirs {
+            let pairs = self.find_merge_candidates_in_directory(&parent_dir)?;
+            all_pairs.extend(pairs);
+        }
+
+        // Sort deepest first so we process nested directories before their parents
+        all_pairs.sort_by_key(|pair| std::cmp::Reverse(pair.source.components().count()));
+
+        Ok(all_pairs)
+    }
+
+    /// Collect all parent directories that should be checked for merge candidates.
+    /// Returns just the root if not recursive, or all directories if recursive.
+    fn collect_parent_directories_for_merge(&self) -> Vec<PathBuf> {
+        if !self.config.recurse {
+            return vec![self.root.clone()];
+        }
+
+        let mut parent_dirs: HashSet<PathBuf> = HashSet::new();
+        parent_dirs.insert(self.root.clone());
+
+        for entry in WalkDir::new(&self.root)
+            .into_iter()
+            .filter_entry(|e| !cli_tools::should_skip_entry(e))
+            .filter_map(Result::ok)
+        {
+            if entry.file_type().is_dir()
+                && let Some(parent) = entry.path().parent()
+            {
+                parent_dirs.insert(parent.to_path_buf());
+            }
+        }
+
+        parent_dirs.into_iter().collect()
+    }
+
+    /// Find merge candidates within a single directory.
+    /// Returns `MergePair` structs for sibling directories where one has a `prefix_ignore` prefix
+    /// that, when stripped, matches another directory's name.
+    fn find_merge_candidates_in_directory(&self, parent: &Path) -> anyhow::Result<Vec<MergePair>> {
+        let mut pairs = Vec::new();
+
+        // Collect all directories in this parent
+        let dirs: Vec<PathBuf> = std::fs::read_dir(parent)?
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+            .map(|e| e.path())
+            .collect();
+
+        // Build a map of normalized names (lowercase) to paths for quick lookup
+        let name_to_path: HashMap<String, PathBuf> = dirs
+            .iter()
+            .filter_map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| (n.to_lowercase(), p.clone()))
+            })
+            .collect();
+
+        // For each directory, check if stripping prefix_ignore gives us another existing directory
+        for dir in &dirs {
+            let Some(dir_name) = dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            let stripped = self.strip_ignored_prefixes(dir_name);
+            if stripped == dir_name {
+                // No prefix was stripped
+                continue;
+            }
+
+            let stripped_lower = stripped.to_lowercase();
+            if let Some(target_path) = name_to_path.get(&stripped_lower) {
+                // Found a matching directory without the prefix
+                if target_path != dir {
+                    pairs.push(MergePair::new(dir.clone(), target_path.clone()));
+                }
+            }
+        }
+
+        Ok(pairs)
+    }
+
+    /// Merge contents from source directory into target directory.
+    /// Handles file conflicts based on the overwrite config flag.
+    /// Deletes the source directory if it becomes empty.
+    fn merge_directory_contents(&self, source: &Path, target: &Path) -> anyhow::Result<()> {
+        let source_display = path_to_string_relative(source);
+        let target_display = path_to_string_relative(target);
+
+        print_magenta!("{}", format!("Merging: {source_display} -> {target_display}").bold());
+
+        let mut skipped_files = Vec::new();
+        let mut moved_count = 0;
+
+        let entries: Vec<_> = std::fs::read_dir(source)?.filter_map(Result::ok).collect();
+
+        for entry in entries {
+            let entry_path = entry.path();
+            let Some(entry_name) = entry_path.file_name() else {
+                continue;
+            };
+
+            let target_path = target.join(entry_name);
+
+            if target_path.exists() {
+                if self.config.overwrite {
+                    if self.config.verbose {
+                        println!("  {} Overwriting: {}", "→".yellow(), entry_name.to_string_lossy());
+                    }
+                } else {
+                    skipped_files.push(entry_name.to_string_lossy().to_string());
+                    continue;
+                }
+            }
+
+            if self.config.dryrun {
+                if self.config.verbose {
+                    println!("  {} Would move: {}", "→".cyan(), entry_name.to_string_lossy());
+                }
+                moved_count += 1;
+                continue;
+            }
+
+            // Move the entry (file or directory)
+            if entry_path.is_dir() {
+                if target_path.exists() && self.config.overwrite {
+                    std::fs::remove_dir_all(&target_path)?;
+                }
+                if std::fs::rename(&entry_path, &target_path).is_err() {
+                    utils::copy_dir_recursive(&entry_path, &target_path)?;
+                    std::fs::remove_dir_all(&entry_path)?;
+                }
+            } else {
+                if target_path.exists() && self.config.overwrite {
+                    std::fs::remove_file(&target_path)?;
+                }
+                if std::fs::rename(&entry_path, &target_path).is_err() {
+                    std::fs::copy(&entry_path, &target_path)?;
+                    std::fs::remove_file(&entry_path)?;
+                }
+            }
+            moved_count += 1;
+        }
+
+        // Print skipped files warning
+        if !skipped_files.is_empty() {
+            print_warning!(
+                "Skipped {} file(s) that already exist (use -f to overwrite):",
+                skipped_files.len()
+            );
+            for file in &skipped_files {
+                println!("    {file}");
+            }
+        }
+
+        // Print summary
+        if moved_count > 0 || !skipped_files.is_empty() {
+            let action = if self.config.dryrun { "Would move" } else { "Moved" };
+            println!("  {action} {moved_count} item(s)");
+        }
+
+        // Remove source directory if empty (and not in dryrun mode)
+        if !self.config.dryrun {
+            let is_empty = std::fs::read_dir(source).is_ok_and(|mut it| it.next().is_none());
+            if is_empty {
+                if let Err(err) = std::fs::remove_dir(source) {
+                    print_warning!("Failed to remove empty directory {source_display}: {err}");
+                } else if self.config.verbose {
+                    println!("  {} Removed empty directory: {source_display}", "→".green());
+                }
+            }
+        } else if self.config.verbose {
+            println!("  {} Would remove empty directory: {source_display}", "→".yellow());
+        }
+
+        Ok(())
+    }
+
     fn unpack_directories(&self) -> anyhow::Result<()> {
         let (unwanted, candidates) = self.collect_unwanted_and_unpack_candidates();
 
@@ -4326,6 +4538,465 @@ mod test_unwanted_directories {
         assert_eq!(unwanted_dirs[0], unwanted);
         assert_eq!(unpack_candidates.len(), 1);
         assert_eq!(unpack_candidates[0], videos);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_merge_prefixed_directories {
+    use super::test_helpers::*;
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn merges_prefixed_directory_into_non_prefixed() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create "studio alpha beta" with files
+        let prefixed_dir = root.join("studio alpha beta");
+        write_file(&prefixed_dir.join("file1.txt"), "content1")?;
+        write_file(&prefixed_dir.join("file2.txt"), "content2")?;
+
+        // Create "alpha beta" with different files
+        let target_dir = root.join("alpha beta");
+        write_file(&target_dir.join("existing.txt"), "existing")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Files should be merged into "alpha beta"
+        assert_exists(&root_for_asserts.join("alpha beta").join("file1.txt"));
+        assert_exists(&root_for_asserts.join("alpha beta").join("file2.txt"));
+        assert_exists(&root_for_asserts.join("alpha beta").join("existing.txt"));
+
+        // "studio alpha beta" should be deleted (empty after merge)
+        assert_not_exists(&root_for_asserts.join("studio alpha beta"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn skips_existing_files_without_overwrite() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let prefixed_dir = root.join("studio alpha");
+        write_file(&prefixed_dir.join("conflict.txt"), "new content")?;
+
+        let target_dir = root.join("alpha");
+        write_file(&target_dir.join("conflict.txt"), "original content")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Original file should be preserved
+        let content = std::fs::read_to_string(root_for_asserts.join("alpha").join("conflict.txt"))?;
+        assert_eq!(content, "original content");
+
+        // Source directory still exists because file wasn't moved
+        assert_exists(&root_for_asserts.join("studio alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn overwrites_existing_files_with_force_flag() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let prefixed_dir = root.join("studio alpha");
+        write_file(&prefixed_dir.join("conflict.txt"), "new content")?;
+
+        let target_dir = root.join("alpha");
+        write_file(&target_dir.join("conflict.txt"), "original content")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, true));
+        dirmove.merge_prefixed_directories()?;
+
+        // File should be overwritten
+        let content = std::fs::read_to_string(root_for_asserts.join("alpha").join("conflict.txt"))?;
+        assert_eq!(content, "new content");
+
+        // Source directory should be deleted (empty after merge)
+        assert_not_exists(&root_for_asserts.join("studio alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn dryrun_does_not_modify_files() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let prefixed_dir = root.join("studio alpha");
+        write_file(&prefixed_dir.join("file.txt"), "content")?;
+
+        let target_dir = root.join("alpha");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, true, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // File should still be in original location
+        assert_exists(&root_for_asserts.join("studio alpha").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("alpha").join("file.txt"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn case_insensitive_prefix_matching() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let prefixed_dir = root.join("STUDIO alpha");
+        write_file(&prefixed_dir.join("file.txt"), "content")?;
+
+        let target_dir = root.join("alpha");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // File should be merged
+        assert_exists(&root_for_asserts.join("alpha").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("STUDIO alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn merges_subdirectories() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let prefixed_dir = root.join("studio alpha");
+        write_file(&prefixed_dir.join("subdir").join("nested.txt"), "nested")?;
+
+        let target_dir = root.join("alpha");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Subdirectory should be merged
+        assert_exists(&root_for_asserts.join("alpha").join("subdir").join("nested.txt"));
+        assert_not_exists(&root_for_asserts.join("studio alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_prefix_ignores() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let prefixed_dir1 = root.join("studio alpha");
+        write_file(&prefixed_dir1.join("file1.txt"), "content1")?;
+
+        let prefixed_dir2 = root.join("team alpha");
+        write_file(&prefixed_dir2.join("file2.txt"), "content2")?;
+
+        let target_dir = root.join("alpha");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio", "team"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Both prefixed directories should be merged
+        assert_exists(&root_for_asserts.join("alpha").join("file1.txt"));
+        assert_exists(&root_for_asserts.join("alpha").join("file2.txt"));
+        assert_not_exists(&root_for_asserts.join("studio alpha"));
+        assert_not_exists(&root_for_asserts.join("team alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn no_merge_without_matching_target() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Only prefixed directory exists, no matching target
+        let prefixed_dir = root.join("studio alpha");
+        write_file(&prefixed_dir.join("file.txt"), "content")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Directory should remain unchanged
+        assert_exists(&root_for_asserts.join("studio alpha").join("file.txt"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn empty_prefix_ignores_does_nothing() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        let dir1 = root.join("studio alpha");
+        write_file(&dir1.join("file.txt"), "content")?;
+
+        let dir2 = root.join("alpha");
+        std::fs::create_dir_all(&dir2)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec![], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Nothing should change
+        assert_exists(&root_for_asserts.join("studio alpha").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("alpha").join("file.txt"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn chained_prefix_stripping() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Directory with multiple prefixes that can be stripped
+        let prefixed_dir = root.join("studio team alpha");
+        write_file(&prefixed_dir.join("file.txt"), "content")?;
+
+        let target_dir = root.join("alpha");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio", "team"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Should strip both prefixes and find "alpha"
+        assert_exists(&root_for_asserts.join("alpha").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("studio team alpha"));
+
+        Ok(())
+    }
+    #[test]
+    fn recursive_merges_in_subdirectories() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create nested structure:
+        // Root/subdir/studio alpha/file.txt
+        // Root/subdir/alpha/
+        let subdir = root.join("subdir");
+        let prefixed_dir = subdir.join("studio alpha");
+        write_file(&prefixed_dir.join("file.txt"), "content")?;
+
+        let target_dir = subdir.join("alpha");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        // With recurse=true, should find and merge in subdirectory
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], true, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        assert_exists(&root_for_asserts.join("subdir").join("alpha").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("subdir").join("studio alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn non_recursive_ignores_subdirectories() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create nested structure that would match if recursive
+        let subdir = root.join("subdir");
+        let prefixed_dir = subdir.join("studio alpha");
+        write_file(&prefixed_dir.join("file.txt"), "content")?;
+
+        let target_dir = subdir.join("alpha");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        // With recurse=false, should NOT merge in subdirectory
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // File should still be in original location
+        assert_exists(&root_for_asserts.join("subdir").join("studio alpha").join("file.txt"));
+        assert_not_exists(&root_for_asserts.join("subdir").join("alpha").join("file.txt"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_merges_at_multiple_levels() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create merge candidates at root level
+        let root_prefixed = root.join("studio beta");
+        write_file(&root_prefixed.join("root_file.txt"), "root")?;
+        let root_target = root.join("beta");
+        std::fs::create_dir_all(&root_target)?;
+
+        // Create merge candidates in subdirectory
+        let subdir = root.join("subdir");
+        let sub_prefixed = subdir.join("studio alpha");
+        write_file(&sub_prefixed.join("sub_file.txt"), "sub")?;
+        let sub_target = subdir.join("alpha");
+        std::fs::create_dir_all(&sub_target)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], true, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // Both levels should be merged
+        assert_exists(&root_for_asserts.join("beta").join("root_file.txt"));
+        assert_not_exists(&root_for_asserts.join("studio beta"));
+        assert_exists(&root_for_asserts.join("subdir").join("alpha").join("sub_file.txt"));
+        assert_not_exists(&root_for_asserts.join("subdir").join("studio alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_deeply_nested() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create deeply nested structure
+        let deep = root.join("a").join("b").join("c");
+        let prefixed_dir = deep.join("studio gamma");
+        write_file(&prefixed_dir.join("deep_file.txt"), "deep")?;
+        let target_dir = deep.join("gamma");
+        std::fs::create_dir_all(&target_dir)?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], true, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        assert_exists(
+            &root_for_asserts
+                .join("a")
+                .join("b")
+                .join("c")
+                .join("gamma")
+                .join("deep_file.txt"),
+        );
+        assert_not_exists(&root_for_asserts.join("a").join("b").join("c").join("studio gamma"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn only_merges_siblings_not_across_levels() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create structure where prefixed and non-prefixed dirs are at different levels:
+        // Root/studio dirname/file1.txt       <- prefixed at root
+        // Root/subdir/dirname/file2.txt       <- non-prefixed in subdir (NOT a sibling)
+        // Root/subdir/subsubdir/studio dirname/file3.txt  <- prefixed deeply nested
+
+        let prefixed_root = root.join("studio dirname");
+        write_file(&prefixed_root.join("file1.txt"), "root level")?;
+
+        let non_prefixed_subdir = root.join("subdir").join("dirname");
+        write_file(&non_prefixed_subdir.join("file2.txt"), "subdir level")?;
+
+        let prefixed_deep = root.join("subdir").join("subsubdir").join("studio dirname");
+        write_file(&prefixed_deep.join("file3.txt"), "deep level")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], true, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // "studio dirname" at root should NOT merge with "subdir/dirname" (different parents)
+        assert_exists(&root_for_asserts.join("studio dirname").join("file1.txt"));
+        assert_exists(&root_for_asserts.join("subdir").join("dirname").join("file2.txt"));
+
+        // "subdir/subsubdir/studio dirname" should NOT merge (no sibling "dirname" exists there)
+        assert_exists(
+            &root_for_asserts
+                .join("subdir")
+                .join("subsubdir")
+                .join("studio dirname")
+                .join("file3.txt"),
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn merges_only_when_sibling_exists() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        // Create structure:
+        // Root/studio alpha/file1.txt         <- NO sibling "alpha" at root
+        // Root/subdir/studio beta/file2.txt   <- HAS sibling "beta" in same subdir
+        // Root/subdir/beta/existing.txt
+
+        let prefixed_no_sibling = root.join("studio alpha");
+        write_file(&prefixed_no_sibling.join("file1.txt"), "no sibling")?;
+
+        let subdir = root.join("subdir");
+        let prefixed_with_sibling = subdir.join("studio beta");
+        write_file(&prefixed_with_sibling.join("file2.txt"), "has sibling")?;
+
+        let sibling_target = subdir.join("beta");
+        write_file(&sibling_target.join("existing.txt"), "existing")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], true, false, false));
+        dirmove.merge_prefixed_directories()?;
+
+        // "studio alpha" should remain (no sibling "alpha" at root level)
+        assert_exists(&root_for_asserts.join("studio alpha").join("file1.txt"));
+
+        // "subdir/studio beta" should merge into "subdir/beta"
+        assert_exists(&root_for_asserts.join("subdir").join("beta").join("file2.txt"));
+        assert_exists(&root_for_asserts.join("subdir").join("beta").join("existing.txt"));
+        assert_not_exists(&root_for_asserts.join("subdir").join("studio beta"));
+
         Ok(())
     }
 }
