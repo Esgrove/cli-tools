@@ -977,6 +977,16 @@ impl DirMove {
     /// Files can match multiple groups - they remain available until actually moved.
     fn create_dirs_and_move_files(&self) -> anyhow::Result<()> {
         let files_with_names = self.collect_files_with_names()?;
+
+        // Debug: show prefix_ignores config
+        if self.config.debug {
+            eprintln!("prefix_ignores: {:?}", self.config.prefix_ignores);
+            eprintln!("Original names after stripping prefix_ignores:");
+            for file_info in &files_with_names {
+                eprintln!("  {}", file_info.original_name);
+            }
+        }
+
         let prefix_groups = self.collect_all_prefix_groups(&files_with_names);
 
         // Sort groups by:
@@ -2249,6 +2259,84 @@ mod test_parent_directory_skipped {
             dirmove.is_ignored_prefix(&stripped),
             "DL should be recognized as an ignored prefix"
         );
+    }
+
+    #[test]
+    fn prefix_ignore_with_mixed_dotted_and_concatenated_names() {
+        // Scenario: files have prefix like "Studio.Alpha.Something" and "Studio.AlphaSomething"
+        // When "Studio" is in prefix_ignores, the offered directory name should NOT contain "Studio"
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Mix of dotted and concatenated second parts
+        std::fs::write(root.join("Studio.Alpha.Small.Video1.1080p.m4v"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Small.Video2.1080p.m4v"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Large.Video.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.AlphaBravo.Video.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.AlphaCharlie.Video1.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.AlphaCharlie.Video2.1080p.mp4"), "").unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["studio"]);
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+
+        // Verify that "Studio" prefix was stripped from original names
+        for file_info in &files_with_names {
+            assert!(
+                !file_info.original_name.to_lowercase().starts_with("studio"),
+                "Original name '{}' should not start with 'Studio' after stripping",
+                file_info.original_name
+            );
+        }
+
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // No group key should contain "studio"
+        for key in groups.keys() {
+            assert!(
+                !key.to_lowercase().contains("studio"),
+                "Group key '{key}' should not contain 'studio'"
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_ignore_not_in_create_mode_dir_name() {
+        // This tests the full flow that create_dirs_and_move_files uses:
+        // 1. Collect files with names (strips dot prefixes)
+        // 2. Collect prefix groups
+        // 3. Convert prefix to dir_name by replacing dots with spaces
+        // 4. Strip ignored prefixes from dir_name
+        // The final dir_name should NOT contain any prefix_ignores
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Files with "Studio" prefix that should be ignored
+        std::fs::write(root.join("Studio.Alpha.Small.Video1.1080p.m4v"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Small.Video2.1080p.m4v"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Large.Video.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.AlphaBravo.Video.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.AlphaCharlie.Video1.1080p.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.AlphaCharlie.Video2.1080p.mp4"), "").unwrap();
+
+        let config = Config::test_with_prefix_ignores(vec!["studio"]);
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let prefix_groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Simulate the dir_name creation logic from create_dirs_and_move_files
+        for prefix in prefix_groups.keys() {
+            // This is exactly what create_dirs_and_move_files does:
+            let dir_name = prefix.replace('.', " ");
+            let dir_name = dirmove.strip_ignored_prefixes(&dir_name);
+
+            assert!(
+                !dir_name.to_lowercase().contains("studio"),
+                "Directory name '{dir_name}' (from prefix '{prefix}') should not contain 'studio'"
+            );
+        }
     }
 }
 
