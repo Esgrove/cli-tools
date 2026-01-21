@@ -236,15 +236,17 @@ impl QTorrent {
     /// Create a new `TorrentAdder` from command line arguments.
     ///
     /// Loads user configuration and merges it with CLI arguments.
-    #[must_use]
-    pub fn new(args: QtorrentArgs) -> Self {
-        let config = Config::from_args(args);
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
+    pub fn new(args: QtorrentArgs) -> Result<Self> {
+        let config = Config::from_args(args)?;
         let dot_rename = if config.use_dots_formatting {
-            Some(DotRenameConfig::from_user_config())
+            Some(DotRenameConfig::from_user_config()?)
         } else {
             None
         };
-        Self { config, dot_rename }
+        Ok(Self { config, dot_rename })
     }
 
     /// Run the main add workflow.

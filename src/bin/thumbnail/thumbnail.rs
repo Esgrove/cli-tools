@@ -78,7 +78,7 @@ impl ThumbnailCreator {
         Self::check_dependencies()?;
 
         let input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
-        let config = Config::from_args(args);
+        let config = Config::from_args(args)?;
         let escaped_font = Self::escape_for_drawtext(DEFAULT_FONT_FILE);
         let quality_str = config.quality.to_string();
 

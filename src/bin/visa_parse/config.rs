@@ -8,8 +8,6 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
-use cli_tools::print_error;
-
 use crate::VisaParseArgs;
 
 /// Default number of totals to display in verbose output.
@@ -39,18 +37,20 @@ struct UserConfig {
 impl VisaParseConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    pub fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|error| {
-                        print_error!("Error reading config file {}: {error}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    pub fn get_user_config() -> Result<Self> {
+        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
+        }
     }
 
     /// Parse configuration from a TOML string.
@@ -85,7 +85,7 @@ impl Config {
     /// # Errors
     /// Returns an error if the input/output paths cannot be resolved.
     pub fn from_args(args: &VisaParseArgs) -> Result<Self> {
-        Self::from_args_and_config(args, &VisaParseConfig::get_user_config())
+        Self::from_args_and_config(args, &VisaParseConfig::get_user_config()?)
     }
 
     /// Create config from given command line args and explicit user config.

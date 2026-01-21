@@ -37,7 +37,7 @@ impl DirMove {
 
     pub fn try_from_args(args: DirMoveArgs) -> anyhow::Result<Self> {
         let root = cli_tools::resolve_input_path(args.path.as_deref())?;
-        let config = Config::from_args(args);
+        let config = Config::from_args(args)?;
         if config.debug {
             eprintln!("Config: {config:#?}");
             eprintln!("Root: {}", root.display());

@@ -3,11 +3,10 @@ use std::sync::LazyLock;
 
 const PROJECT_NAME: &str = env!("CARGO_PKG_NAME");
 
+/// Path to the user config file: `$HOME/.config/cli-tools.toml`
+///
+/// Returns `None` if the home directory cannot be determined.
 pub static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     let home_dir = dirs::home_dir()?;
-
-    // Config file path: "$HOME/.config/<PROJECT_NAME>.toml"
-    let config_path = home_dir.join(".config").join(format!("{PROJECT_NAME}.toml"));
-
-    if config_path.exists() { Some(config_path) } else { None }
+    Some(home_dir.join(".config").join(format!("{PROJECT_NAME}.toml")))
 });

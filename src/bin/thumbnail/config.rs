@@ -3,8 +3,6 @@ use std::fs;
 use anyhow::Result;
 use serde::Deserialize;
 
-use cli_tools::print_error;
-
 use crate::ThumbnailArgs;
 
 /// Default number of columns for landscape videos.
@@ -93,18 +91,23 @@ struct UserConfig {
 impl ThumbnailConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|e| {
-                        print_error!("Error reading config file {}: {e}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    fn get_user_config() -> Result<Self> {
+        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                path.display()
+            )),
+        }
     }
 
     /// Parse configuration from a TOML string.
@@ -120,8 +123,11 @@ impl ThumbnailConfig {
 
 impl Config {
     /// Create config from given command line args and user config file.
-    pub fn from_args(args: &ThumbnailArgs) -> Self {
-        let user_config = ThumbnailConfig::get_user_config();
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
+    pub fn from_args(args: &ThumbnailArgs) -> Result<Self> {
+        let user_config = ThumbnailConfig::get_user_config()?;
 
         let cols_landscape = args
             .cols
@@ -150,7 +156,7 @@ impl Config {
         let rows_portrait = args.rows.or(user_config.rows_portrait).unwrap_or(DEFAULT_ROWS_PORTRAIT);
         let scale_width = args.scale.or(user_config.scale_width).unwrap_or(DEFAULT_SCALE_WIDTH);
 
-        Self {
+        Ok(Self {
             cols_landscape,
             cols_portrait,
             dryrun: args.print || user_config.dryrun,
@@ -164,7 +170,7 @@ impl Config {
             rows_portrait,
             scale_width,
             verbose: args.verbose || user_config.verbose,
-        }
+        })
     }
 }
 

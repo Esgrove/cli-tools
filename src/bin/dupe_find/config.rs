@@ -10,8 +10,6 @@ use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
 
-use cli_tools::print_error;
-
 use crate::Args;
 use crate::dupe_find::FILE_EXTENSIONS;
 
@@ -56,18 +54,24 @@ pub struct Config {
 
 impl DupeConfig {
     /// Try to read user config from the file if it exists.
-    pub(crate) fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|e| {
-                        print_error!("Error reading config file {}: {e}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    /// Otherwise, fall back to default config.
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    pub(crate) fn get_user_config() -> Result<Self> {
+        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                path.display()
+            )),
+        }
     }
 
     /// Parse configuration from a TOML string.
@@ -83,8 +87,11 @@ impl DupeConfig {
 
 impl Config {
     /// Create config from given command line args and user config file.
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
     pub fn from_args(args: Args) -> anyhow::Result<Self> {
-        let user_config = DupeConfig::get_user_config();
+        let user_config = DupeConfig::get_user_config()?;
 
         // Combine patterns from config and CLI
         let pattern_strings: Vec<String> = user_config.patterns.into_iter().chain(args.pattern).unique().collect();

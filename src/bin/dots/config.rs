@@ -15,7 +15,7 @@ use crate::DotsCli;
 /// # Errors
 /// Returns an error if regex patterns in the config are invalid.
 pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
-    let user_config = DotsConfig::get_user_config();
+    let user_config = DotsConfig::get_user_config()?;
     let substitutes = DotsConfig::parse_substitutes(&cli.substitute);
     let removes = DotsConfig::parse_removes(&cli.remove);
 

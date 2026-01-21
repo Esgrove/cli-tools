@@ -9,8 +9,6 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use cli_tools::print_error;
-
 use crate::QtorrentArgs;
 
 /// Default qBittorrent `WebUI` host.
@@ -136,18 +134,20 @@ struct UserConfig {
 impl QtorrentConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    pub fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|error| {
-                        print_error!("Error reading config file {}: {error}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    pub fn get_user_config() -> Result<Self> {
+        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
+        }
     }
 
     /// Parse configuration from a TOML string.
@@ -163,9 +163,11 @@ impl QtorrentConfig {
 
 impl Config {
     /// Create config from given command line args and user config file.
-    #[must_use]
-    pub fn from_args(args: QtorrentArgs) -> Self {
-        let user_config = QtorrentConfig::get_user_config();
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
+    pub fn from_args(args: QtorrentArgs) -> Result<Self> {
+        let user_config = QtorrentConfig::get_user_config()?;
 
         // Get credentials from args or config, with args taking priority
         let host = args
@@ -232,7 +234,7 @@ impl Config {
         // Filename ignore patterns
         let ignore_torrent_names = user_config.ignore_torrent_names;
 
-        Self {
+        Ok(Self {
             host,
             port,
             username,
@@ -253,7 +255,7 @@ impl Config {
             remove_from_name,
             use_dots_formatting,
             ignore_torrent_names,
-        }
+        })
     }
 
     /// Check if credentials are provided.

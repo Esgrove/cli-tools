@@ -4,8 +4,6 @@ use anyhow::Result;
 use itertools::Itertools;
 use serde::Deserialize;
 
-use cli_tools::print_error;
-
 use crate::DirMoveArgs;
 
 /// Final config combined from CLI arguments and user config file.
@@ -76,18 +74,23 @@ struct UserConfig {
 impl DirMoveConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|e| {
-                        print_error!("Error reading config file {}: {e}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    fn get_user_config() -> Result<Self> {
+        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                path.display()
+            )),
+        }
     }
 
     /// Parse configuration from a TOML string.
@@ -103,8 +106,11 @@ impl DirMoveConfig {
 
 impl Config {
     /// Create config from given command line args and user config file.
-    pub fn from_args(args: DirMoveArgs) -> Self {
-        let user_config = DirMoveConfig::get_user_config();
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
+    pub fn from_args(args: DirMoveArgs) -> Result<Self> {
+        let user_config = DirMoveConfig::get_user_config()?;
         let include: Vec<String> = user_config
             .include
             .into_iter()
@@ -159,7 +165,7 @@ impl Config {
             .unique()
             .collect();
 
-        Self {
+        Ok(Self {
             auto: args.auto || user_config.auto,
             create: args.create || user_config.create,
             debug: args.debug || user_config.debug,
@@ -176,7 +182,7 @@ impl Config {
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
             unpack_directory_names,
-        }
+        })
     }
 }
 
@@ -528,14 +534,14 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_uses_cli_min_prefix_chars() {
         let args = DirMoveArgs::try_parse_from(["test", "-m", "8"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert_eq!(config.min_prefix_chars, 8);
     }
 
     #[test]
     fn config_from_args_default_min_prefix_chars_is_five() {
         let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert_eq!(config.min_prefix_chars, 5);
     }
 
@@ -595,7 +601,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_ignored_group_parts_lowercase() {
         let args = DirMoveArgs::try_parse_from(["test", "-P", "X265", "-P", "Hevc"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         // CLI ignored group parts should be stored as lowercase
         assert!(config.ignored_group_parts.contains(&"x265".to_string()));
         assert!(config.ignored_group_parts.contains(&"hevc".to_string()));
@@ -611,7 +617,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_ignored_group_names_lowercase() {
         let args = DirMoveArgs::try_parse_from(["test", "-I", "EPISODE", "-I", "Video"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         // CLI ignored group names should be stored as lowercase
         assert!(config.ignored_group_names.contains(&"episode".to_string()));
         assert!(config.ignored_group_names.contains(&"video".to_string()));
@@ -631,7 +637,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_includes_cli_patterns() {
         let args = DirMoveArgs::try_parse_from(["test", "-n", "*.mp4", "-n", "*.mkv"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         // CLI patterns should be included (may also have user config patterns)
         assert!(config.include.contains(&"*.mp4".to_string()));
         assert!(config.include.contains(&"*.mkv".to_string()));
@@ -641,7 +647,7 @@ mod cli_args_tests {
     fn config_from_args_cli_flags_enable_options() {
         // CLI boolean flags should enable options (OR with user config)
         let args = DirMoveArgs::try_parse_from(["test", "-a", "-c", "-r", "-v"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert!(config.auto);
         assert!(config.create);
         assert!(config.recurse);
@@ -651,7 +657,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_includes_unpack_dirs_lowercase() {
         let args = DirMoveArgs::try_parse_from(["test", "-u", "SUBS", "-u", "Sample"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         // CLI unpack dirs should be included as lowercase
         assert!(config.unpack_directory_names.contains(&"subs".to_string()));
         assert!(config.unpack_directory_names.contains(&"sample".to_string()));
@@ -660,14 +666,14 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_print_enables_dryrun() {
         let args = DirMoveArgs::try_parse_from(["test", "-p"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert!(config.dryrun);
     }
 
     #[test]
     fn config_from_args_force_enables_overwrite() {
         let args = DirMoveArgs::try_parse_from(["test", "-f"]).expect("should parse");
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert!(config.overwrite);
     }
 }

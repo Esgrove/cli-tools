@@ -107,12 +107,23 @@ struct RenameItem {
 impl DateConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    fn get_user_config() -> Result<Self> {
+        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                path.display()
+            )),
+        }
     }
 
     /// Parse config from a TOML string.
@@ -128,8 +139,11 @@ impl DateConfig {
 
 impl Config {
     /// Create config from given command line args and user config file.
-    pub fn from_args(args: Args) -> Self {
-        let user_config = DateConfig::get_user_config();
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
+    pub fn from_args(args: Args) -> Result<Self> {
+        let user_config = DateConfig::get_user_config()?;
 
         // Determine which extensions to use (args > config > default)
         let file_extensions = args
@@ -144,7 +158,7 @@ impl Config {
             })
             .unwrap_or_else(|| FILE_EXTENSIONS.iter().map(std::string::ToString::to_string).collect());
 
-        Self {
+        Ok(Self {
             directory_mode: args.dir || user_config.directory,
             dryrun: args.print || user_config.dryrun,
             file_extensions,
@@ -153,14 +167,14 @@ impl Config {
             swap_year: args.swap || user_config.swap_year,
             verbose: args.verbose || user_config.verbose,
             year_first: args.year || user_config.year_first,
-        }
+        })
     }
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let path = cli_tools::resolve_input_path(args.path.as_deref())?;
-    let config = Config::from_args(args);
+    let config = Config::from_args(args)?;
     if config.directory_mode {
         date_flip_directories(path, &config)
     } else {
@@ -674,7 +688,7 @@ mod config_from_args_tests {
     #[test]
     fn from_args_uses_default_extensions() {
         let args = default_args();
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert_eq!(config.file_extensions.len(), FILE_EXTENSIONS.len());
     }
 
@@ -689,7 +703,7 @@ mod config_from_args_tests {
         args.verbose = true;
         args.year = true;
 
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert!(config.directory_mode);
         assert!(config.overwrite);
         assert!(config.dryrun);
@@ -704,7 +718,7 @@ mod config_from_args_tests {
         let mut args = default_args();
         args.extensions = Some(vec!["mp4".to_string(), "mkv".to_string()]);
 
-        let config = Config::from_args(args);
+        let config = Config::from_args(args).expect("config should parse");
         assert_eq!(config.file_extensions, vec!["mp4", "mkv"]);
     }
 }

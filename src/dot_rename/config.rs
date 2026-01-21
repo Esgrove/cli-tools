@@ -3,7 +3,6 @@
 use std::{fmt, fs};
 
 use anyhow::Context;
-use colored::Colorize;
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
@@ -100,22 +99,23 @@ pub struct DotRenameConfig {
 impl DotsConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
-    #[must_use]
-    pub fn get_user_config() -> Self {
-        crate::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|e| {
-                        eprintln!(
-                            "{}",
-                            format!("Error reading config file {}: {}", path.display(), e).red()
-                        );
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    pub fn get_user_config() -> anyhow::Result<Self> {
+        let Some(path) = crate::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                path.display()
+            )),
+        }
     }
 
     /// Parse config from a TOML string.
@@ -209,9 +209,11 @@ impl DotRenameConfig {
     ///
     /// This loads the user config file but doesn't require CLI args.
     /// Useful when you just want to format names without running the full rename operation.
-    #[must_use]
-    pub fn from_user_config() -> Self {
-        let user_config = DotsConfig::get_user_config();
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
+    pub fn from_user_config() -> anyhow::Result<Self> {
+        let user_config = DotsConfig::get_user_config()?;
         let config_regex = DotsConfig::compile_regex_patterns(user_config.regex_replace).unwrap_or_default();
 
         let move_date_after_prefix = user_config
@@ -225,7 +227,7 @@ impl DotRenameConfig {
             })
             .collect::<Vec<_>>();
 
-        Self {
+        Ok(Self {
             convert_case: false,
             date_starts_with_year: user_config.date_starts_with_year,
             debug: user_config.debug,
@@ -254,7 +256,7 @@ impl DotRenameConfig {
             suffix_dir: user_config.suffix_dir || user_config.suffix_dir_recursive,
             suffix_dir_recursive: user_config.suffix_dir_recursive,
             verbose: user_config.verbose,
-        }
+        })
     }
 }
 

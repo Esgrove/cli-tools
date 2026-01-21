@@ -115,7 +115,7 @@ impl FileInfo {
 
 impl DupeFind {
     pub fn new(args: Args) -> anyhow::Result<Self> {
-        let user_config = DupeConfig::get_user_config();
+        let user_config = DupeConfig::get_user_config()?;
 
         // Resolve all input paths:
         // - If default flag is set, use default_paths from config

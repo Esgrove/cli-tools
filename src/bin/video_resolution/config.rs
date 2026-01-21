@@ -22,8 +22,6 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
-use cli_tools::print_error;
-
 use crate::Args;
 
 /// Default resolution limit for delete mode (in pixels).
@@ -101,20 +99,22 @@ struct UserConfig {
 impl ResolutionConfig {
     /// Read user configuration from the config file.
     ///
-    /// Attempts to read from `~/.config/cli-tools.toml`. If the file doesn't exist
-    /// or cannot be parsed, returns default configuration.
-    fn get_user_config() -> Self {
-        cli_tools::config::CONFIG_PATH
-            .as_deref()
-            .and_then(|path| {
-                fs::read_to_string(path)
-                    .map_err(|error| {
-                        print_error!("Error reading config file {}: {error}", path.display());
-                    })
-                    .ok()
-            })
-            .and_then(|config_string| Self::from_toml_str(&config_string).ok())
-            .unwrap_or_default()
+    /// Attempts to read from `~/.config/cli-tools.toml`. If the file doesn't exist,
+    /// returns default configuration.
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    fn get_user_config() -> Result<Self> {
+        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
+        }
     }
 
     /// Parse configuration from a TOML string.
@@ -135,10 +135,9 @@ impl Config {
     /// Boolean flags are combined with OR (enabled if either source enables them).
     ///
     /// # Errors
-    ///
-    /// Returns an error if the input path cannot be resolved.
+    /// Returns an error if the path cannot be resolved or the config file cannot be read or parsed.
     pub fn try_from_args(args: &Args) -> Result<Self> {
-        let user_config = ResolutionConfig::get_user_config();
+        let user_config = ResolutionConfig::get_user_config()?;
         let path = cli_tools::resolve_input_path(args.path.as_deref())?;
 
         // Handle delete limit: CLI can specify --delete with optional value

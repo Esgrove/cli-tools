@@ -48,7 +48,7 @@ pub struct VideoConvert {
 impl VideoConvert {
     /// Create a new video converter from command line arguments.
     pub fn new(args: VideoConvertArgs) -> Result<Self> {
-        let user_config = VideoConvertConfig::get_user_config();
+        let user_config = VideoConvertConfig::get_user_config()?;
         let config = Config::try_from_args(args, user_config)?;
         let logger = RefCell::new(FileLogger::new()?);
 
