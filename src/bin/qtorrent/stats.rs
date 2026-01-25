@@ -8,6 +8,7 @@ pub struct TorrentStats {
     duplicate: usize,
     renamed: usize,
     error: usize,
+    total_bytes: u64,
 }
 
 impl TorrentStats {
@@ -19,11 +20,13 @@ impl TorrentStats {
             duplicate: 0,
             renamed: 0,
             error: 0,
+            total_bytes: 0,
         }
     }
 
-    pub const fn inc_success(&mut self) {
+    pub const fn inc_success(&mut self, bytes: u64) {
         self.success += 1;
+        self.total_bytes += bytes;
     }
 
     pub const fn inc_skipped(&mut self) {
@@ -47,7 +50,12 @@ impl TorrentStats {
         println!("{}", "Summary:".bold());
         println!("  Total:    {}", self.total);
         if self.success > 0 {
-            println!("  {}    {}", "Added:".green(), self.success);
+            println!(
+                "  {}    {} ({})",
+                "Added:".green(),
+                self.success,
+                cli_tools::format_size(self.total_bytes),
+            );
         }
         if self.renamed > 0 {
             println!("  {}  {}", "Renamed:".cyan(), self.renamed);
@@ -82,6 +90,7 @@ mod tests {
         assert_eq!(stats.duplicate, 0);
         assert_eq!(stats.renamed, 0);
         assert_eq!(stats.error, 0);
+        assert_eq!(stats.total_bytes, 0);
     }
 
     #[test]
@@ -93,8 +102,9 @@ mod tests {
         assert_eq!(stats.duplicate, 0);
         assert_eq!(stats.renamed, 0);
         assert_eq!(stats.error, 0);
+        assert_eq!(stats.total_bytes, 0);
 
-        stats.inc_success();
+        stats.inc_success(1024);
         stats.inc_skipped();
         stats.inc_duplicate();
         stats.inc_renamed();
@@ -106,5 +116,6 @@ mod tests {
         assert_eq!(stats.duplicate, 1);
         assert_eq!(stats.renamed, 1);
         assert_eq!(stats.error, 1);
+        assert_eq!(stats.total_bytes, 1024);
     }
 }

@@ -274,6 +274,7 @@ impl FilteredFiles<'_> {
 
     /// Get the total size of excluded files.
     #[must_use]
+    #[allow(unused)]
     pub fn excluded_size(&self) -> u64 {
         self.excluded.iter().map(|file| file.size).sum()
     }

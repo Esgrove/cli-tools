@@ -73,6 +73,8 @@ struct TorrentInfo {
     effective_is_multi_file: bool,
     /// Custom name to rename to (None = use torrent's internal name).
     rename_to: Option<String>,
+    /// Size of the included files.
+    included_size: u64,
     /// Indices of files to exclude (for setting priority to 0).
     excluded_indices: Vec<usize>,
     /// For originally multi-file torrents that become effectively single-file,
@@ -338,10 +340,11 @@ impl QTorrent {
         let original_name = torrent.name().map(String::from);
 
         // Filter files and determine effective multi-file status based on included files
-        let (effective_is_multi_file, excluded_indices, single_included_file, effective_original_name) =
+        let (effective_is_multi_file, excluded_indices, single_included_file, effective_original_name, included_size) =
             if original_is_multi_file && !filter.is_empty() {
                 let filtered = torrent.filter_files(filter);
                 let excluded: Vec<usize> = filtered.excluded.iter().map(|file| file.index).collect();
+                let included_size = filtered.included_size();
                 // Treat as multi-file only if more than one file will be included
                 let effective_multi = filtered.included.len() > 1;
                 // If only one file remains, store its name for extension extraction
@@ -352,10 +355,16 @@ impl QTorrent {
                 } else {
                     (None, original_name)
                 };
-                (effective_multi, excluded, single_file, eff_name)
+                (effective_multi, excluded, single_file, eff_name, included_size)
             } else {
                 // No filtering applied - use original multi-file status
-                (original_is_multi_file, Vec::new(), None, original_name)
+                (
+                    original_is_multi_file,
+                    Vec::new(),
+                    None,
+                    original_name,
+                    torrent.total_size(),
+                )
             };
 
         Ok(TorrentInfo {
@@ -366,6 +375,7 @@ impl QTorrent {
             original_is_multi_file,
             effective_is_multi_file,
             rename_to: None,
+            included_size,
             excluded_indices,
             single_included_file,
             original_name: effective_original_name,
@@ -388,8 +398,7 @@ impl QTorrent {
 
     /// Print information about a single torrent.
     ///
-    /// The index is displayed as `[index/total]` with the index right-aligned
-    /// to match the width of the total count.
+    /// The index is displayed as `[index/total]` with the index right-aligned to match the width of the total count.
     fn print_torrent_info(&self, info: &TorrentInfo, index: usize, total: usize) {
         let internal_name = info.torrent.name().unwrap_or("Unknown");
         let size = cli_tools::format_size(info.torrent.total_size());
@@ -424,11 +433,12 @@ impl QTorrent {
 
     /// Print file information for multi-file torrents.
     fn print_multi_file_info(&self, info: &TorrentInfo) {
-        let filter = self.create_file_filter();
-        let filtered = info.torrent.filter_files(&filter);
-        let included_count = filtered.included.len();
-        let excluded_count = filtered.excluded.len();
-        let total_count = included_count + excluded_count;
+        let total_count = info.torrent.files().len();
+        let excluded_count = info.excluded_indices.len();
+        let included_count = total_count - excluded_count;
+        let included_size = info.included_size;
+        let total_size = info.torrent.total_size();
+        let excluded_size = total_size - included_size;
 
         // Always show file counts
         if excluded_count > 0 {
@@ -442,20 +452,18 @@ impl QTorrent {
             println!(
                 "  {} {} (skipping {})",
                 "Download size:".dimmed(),
-                cli_tools::format_size(filtered.included_size()).green(),
-                cli_tools::format_size(filtered.excluded_size()).yellow()
+                cli_tools::format_size(included_size).green(),
+                cli_tools::format_size(excluded_size).yellow()
             );
         } else {
             println!("  {} {}", "Files:".dimmed(), total_count);
-            println!(
-                "  {} {}",
-                "Total size:".dimmed(),
-                cli_tools::format_size(filtered.included_size())
-            );
+            println!("  {} {}", "Total size:".dimmed(), cli_tools::format_size(included_size));
         }
 
         // In verbose mode, show all files sorted by size (largest first)
         if self.config.verbose {
+            let filter = self.create_file_filter();
+            let filtered = info.torrent.filter_files(&filter);
             Self::print_all_files_sorted(&filtered);
         }
     }
@@ -654,7 +662,7 @@ impl QTorrent {
             }
 
             match self.add_single_torrent(&client, info).await {
-                Ok(()) => stats.inc_success(),
+                Ok(size) => stats.inc_success(size),
                 Err(error) => {
                     stats.inc_error();
                     cli_tools::print_error!("{error}");
@@ -975,7 +983,7 @@ impl QTorrent {
 
     /// Add a single torrent to qBittorrent.
     #[allow(clippy::too_many_lines)]
-    async fn add_single_torrent(&self, client: &QBittorrentClient, info: TorrentInfo) -> Result<()> {
+    async fn add_single_torrent(&self, client: &QBittorrentClient, info: TorrentInfo) -> Result<u64> {
         let info_hash = info.info_hash.clone();
         let display_name = info.display_name().into_owned();
         let effective_is_multi_file = info.effective_is_multi_file;
@@ -1097,7 +1105,7 @@ impl QTorrent {
             }
         }
 
-        Ok(())
+        Ok(info.included_size)
     }
 }
 
