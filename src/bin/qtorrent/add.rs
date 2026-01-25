@@ -13,7 +13,7 @@ use colored::Colorize;
 
 use cli_tools::date::RE_CORRECT_DATE_FORMAT;
 use cli_tools::dot_rename::{DotFormat, DotRenameConfig};
-use cli_tools::{print_bold, print_magenta_bold};
+use cli_tools::{print_bold, print_cyan, print_magenta_bold};
 
 use crate::QtorrentArgs;
 use crate::config::Config;
@@ -576,8 +576,7 @@ impl QTorrent {
     /// Connect to qBittorrent and add torrents one by one with individual confirmation.
     #[allow(clippy::similar_names)]
     async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<()> {
-        // Connect to qBittorrent
-        println!("{}", "Connecting to qBittorrent...".cyan());
+        print_cyan("Connecting to qBittorrent...");
         let mut client = QBittorrentClient::new(&self.config.host, self.config.port);
 
         client.login(&self.config.username, &self.config.password).await?;
@@ -587,8 +586,8 @@ impl QTorrent {
         let api_version = client.get_api_version().await?;
 
         if self.config.verbose {
-            println!("  {} {app_version}", "qBittorrent app version:".dimmed());
-            println!("  {} {api_version}", "qBittorrent API version:".dimmed());
+            println!("{} {app_version}", "qBittorrent app version:".dimmed());
+            println!("{} {api_version}", "qBittorrent API version:".dimmed());
         }
 
         println!("{}\n", "Connected successfully".green());
@@ -597,7 +596,7 @@ impl QTorrent {
         let existing_torrents = client.get_torrent_list().await?;
         if self.config.verbose {
             println!(
-                "  {} {}",
+                "{} {}",
                 "Existing torrents in qBittorrent:".dimmed(),
                 existing_torrents.len()
             );
