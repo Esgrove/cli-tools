@@ -5,7 +5,7 @@ use itertools::Itertools;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use cli_tools::print_warning;
+use cli_tools::print_yellow;
 
 use crate::dupe_find::{DuplicateGroup, FileInfo};
 
@@ -391,7 +391,7 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
                         trash::delete(&file.path).map_err(std::io::Error::other)
                     };
                     if let Err(e) = result {
-                        print_warning!("Failed to delete {}: {e}", file.path.display());
+                        print_yellow!("Failed to delete {}: {e}", file.path.display());
                     }
                 }
             }

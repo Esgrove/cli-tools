@@ -78,6 +78,10 @@ struct DirMoveArgs {
     #[arg(short = 'r', long)]
     recurse: bool,
 
+    /// Show database statistics and contents
+    #[arg(short = 'S', long = "show-db")]
+    show_db: bool,
+
     /// Generate shell completion
     #[arg(short = 'l', long, name = "SHELL")]
     completion: Option<Shell>,

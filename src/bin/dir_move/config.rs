@@ -25,6 +25,7 @@ pub struct Config {
     pub(crate) recurse: bool,
     pub(crate) verbose: bool,
     pub(crate) unpack_directory_names: Vec<String>,
+    pub(crate) show_db: bool,
 }
 
 /// Config from the user config file
@@ -182,6 +183,7 @@ impl Config {
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
             unpack_directory_names,
+            show_db: args.show_db,
         })
     }
 }

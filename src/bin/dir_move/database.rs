@@ -26,17 +26,24 @@ pub struct DirectoryEntry {
 }
 
 impl Database {
-    /// Get the database path.
-    ///
-    /// Uses the platform-specific local data directory:
-    /// - Windows: `%LOCALAPPDATA%\cli-tools\dirmove.db`
-    /// - macOS: `~/Library/Application Support/cli-tools/dirmove.db`
-    /// - Linux: `~/.local/share/cli-tools/dirmove.db`
-    fn database_path() -> PathBuf {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cli-tools");
-        data_dir.join(DATABASE_FILENAME)
+    /// Print debug information about the database contents.
+    pub fn print_debug_info(&self) {
+        eprintln!("Database: {}", Self::path().display());
+        match self.get_all_entries() {
+            Ok(entries) => {
+                if entries.is_empty() {
+                    eprintln!("Database: empty");
+                } else {
+                    eprintln!("Database entries ({}):", entries.len());
+                    for entry in entries {
+                        eprintln!("  {entry}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to get database entries: {e}");
+            }
+        }
     }
 
     /// Get the database path for display purposes.
@@ -69,40 +76,6 @@ impl Database {
         database.initialize()?;
 
         Ok(database)
-    }
-
-    /// Open an in-memory database for testing.
-    #[cfg(test)]
-    fn open_in_memory() -> Result<Self> {
-        let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
-
-        let database = Self { connection };
-        database.initialize()?;
-
-        Ok(database)
-    }
-
-    /// Initialize the database schema.
-    fn initialize(&self) -> Result<()> {
-        self.connection
-            .execute_batch(
-                r"
-                CREATE TABLE IF NOT EXISTS directory_names (
-                    id INTEGER PRIMARY KEY,
-                    normalized_name TEXT NOT NULL UNIQUE,
-                    display_name TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_normalized_name ON directory_names(normalized_name);
-
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA cache_size = -2000;
-                ",
-            )
-            .context("Failed to initialize database schema")?;
-
-        Ok(())
     }
 
     /// Add a directory name to the database.
@@ -171,6 +144,53 @@ impl Database {
 
         #[allow(clippy::cast_sign_loss)]
         Ok(count as u64)
+    }
+
+    /// Get the database path.
+    ///
+    /// Uses the platform-specific local data directory:
+    /// - Windows: `%LOCALAPPDATA%\cli-tools\dirmove.db`
+    /// - macOS: `~/Library/Application Support/cli-tools/dirmove.db`
+    /// - Linux: `~/.local/share/cli-tools/dirmove.db`
+    fn database_path() -> PathBuf {
+        let data_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("cli-tools");
+        data_dir.join(DATABASE_FILENAME)
+    }
+
+    /// Open an in-memory database for testing.
+    #[cfg(test)]
+    fn open_in_memory() -> Result<Self> {
+        let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
+
+        let database = Self { connection };
+        database.initialize()?;
+
+        Ok(database)
+    }
+
+    /// Initialize the database schema.
+    fn initialize(&self) -> Result<()> {
+        self.connection
+            .execute_batch(
+                r"
+                CREATE TABLE IF NOT EXISTS directory_names (
+                    id INTEGER PRIMARY KEY,
+                    normalized_name TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_normalized_name ON directory_names(normalized_name);
+
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA cache_size = -2000;
+                ",
+            )
+            .context("Failed to initialize database schema")?;
+
+        Ok(())
     }
 }
 

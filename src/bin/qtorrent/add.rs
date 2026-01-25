@@ -672,7 +672,7 @@ impl QTorrent {
 
         // Logout
         if let Err(error) = client.logout().await {
-            cli_tools::print_warning!("Failed to logout: {error}");
+            cli_tools::print_yellow!("Failed to logout: {error}");
         }
 
         stats.print_summary();
@@ -819,7 +819,7 @@ impl QTorrent {
                     );
                 }
                 Err(error) => {
-                    cli_tools::print_warning!("Could not rename file/folder on disk: {error}");
+                    cli_tools::print_yellow!("Could not rename file/folder on disk: {error}");
                 }
             }
         }
@@ -1054,7 +1054,7 @@ impl QTorrent {
 
             if !rename_success {
                 if let Some(error) = last_error {
-                    cli_tools::print_warning!("Could not rename file/folder after retries: {error}");
+                    cli_tools::print_yellow!("Could not rename file/folder after retries: {error}");
                 }
                 println!(
                     "  {} You may need to manually rename in qBittorrent: {} → {}",
@@ -1095,7 +1095,7 @@ impl QTorrent {
 
             if !priority_success {
                 if let Some(error) = last_error {
-                    cli_tools::print_warning!("Could not set file priorities (torrent may still be loading): {error}");
+                    cli_tools::print_yellow!("Could not set file priorities (torrent may still be loading): {error}");
                 }
                 println!(
                     "  {} You may need to manually skip {} file(s) in qBittorrent",

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use cli_tools::{print_error, print_warning};
+use cli_tools::{print_error, print_yellow};
 use colored::Colorize;
 use walkdir::WalkDir;
 
@@ -95,7 +95,7 @@ impl ThumbnailCreator {
         let video_files = self.gather_video_files()?;
 
         if video_files.is_empty() {
-            print_warning!("No video files found in: {}", self.root.display());
+            print_yellow!("No video files found in: {}", self.root.display());
             return Ok(());
         }
 
@@ -216,7 +216,7 @@ impl ThumbnailCreator {
         let output_path = screens_dir.join(format!("{file_stem}.jpg"));
 
         if output_path.exists() && !self.config.overwrite {
-            print_warning!("Thumbnail already exists: {}", output_path.display());
+            print_yellow!("Thumbnail already exists: {}", output_path.display());
             return Ok(());
         }
 
@@ -377,16 +377,16 @@ impl ThumbnailCreator {
         let filename = video_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
 
         if width.is_none() || height.is_none() {
-            print_warning!("Could not detect video resolution for: {filename}");
+            print_yellow!("Could not detect video resolution for: {filename}");
         }
         if duration.is_none() {
-            print_warning!("Could not detect duration for: {filename}");
+            print_yellow!("Could not detect duration for: {filename}");
         }
         if codec.is_none() {
-            print_warning!("Could not detect codec for: {filename}");
+            print_yellow!("Could not detect codec for: {filename}");
         }
         if bitrate_kbps.is_none() {
-            print_warning!("Could not detect bitrate for: {filename}");
+            print_yellow!("Could not detect bitrate for: {filename}");
         }
 
         Ok(VideoInfo {

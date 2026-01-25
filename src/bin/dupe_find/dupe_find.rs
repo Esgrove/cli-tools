@@ -12,7 +12,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 use walkdir::WalkDir;
 
-use cli_tools::{print_error, print_warning};
+use cli_tools::{print_error, print_yellow};
 
 use crate::Args;
 use crate::config::{Config, DupeConfig};
@@ -457,7 +457,7 @@ impl DupeFind {
                 if input.trim().eq_ignore_ascii_case("y") {
                     // Create directory if needed
                     if let Err(e) = std::fs::create_dir_all(&target_dir) {
-                        print_warning!("Failed to create directory {}: {e}", target_dir.display());
+                        print_yellow!("Failed to create directory {}: {e}", target_dir.display());
                         continue;
                     }
 

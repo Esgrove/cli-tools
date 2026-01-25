@@ -6,7 +6,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use cli_tools::{print_error, print_warning};
+use cli_tools::{print_error, print_yellow};
 use colored::Colorize;
 use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -278,7 +278,7 @@ impl VideoConvert {
 
             // Check if file still exists
             if !file.file.path.exists() {
-                print_warning!("File no longer exists: {}", file.file.path.display());
+                print_yellow!("File no longer exists: {}", file.file.path.display());
                 let _ = database.remove_pending_file(&file.file.path);
                 continue;
             }
@@ -523,7 +523,7 @@ impl VideoConvert {
         }
 
         // Fallback: if audio codec is not MP4-friendly, transcode audio to AAC
-        print_warning!("Remux failed with code {status}. Retrying with AAC audio transcode...");
+        print_yellow!("Remux failed with code {status}. Retrying with AAC audio transcode...");
 
         // Remove failed output file if it exists
         if output.exists() {
@@ -652,7 +652,7 @@ impl VideoConvert {
         // If output is larger than input, reconvert once with lower quality
         let output_info = if output_info.size_bytes > info.size_bytes {
             let new_quality_level = quality_level + 2;
-            print_warning!(
+            print_yellow!(
                 "Output file ({}) is larger than input ({}), reconverting with lower quality level ({})",
                 cli_tools::format_size(output_info.size_bytes),
                 cli_tools::format_size(info.size_bytes),
@@ -905,7 +905,7 @@ impl VideoConvert {
                         && !matches!(reason, SkipReason::AnalysisFailed { .. })
                         && !matches!(reason, SkipReason::OutputExists { .. })
                     {
-                        print_warning!("{}: {reason}", cli_tools::path_to_string_relative(&file.path));
+                        print_yellow!("{}: {reason}", cli_tools::path_to_string_relative(&file.path));
                     }
                 }
             }

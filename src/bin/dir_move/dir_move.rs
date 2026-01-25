@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 
 use cli_tools::{
     get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
-    print_magenta, print_warning,
+    print_magenta, print_yellow,
 };
 
 use crate::config::Config;
@@ -28,7 +28,7 @@ impl DirMove {
         let database = match Database::open_default() {
             Ok(db) => Some(db),
             Err(e) => {
-                print_warning!("Failed to open database: {e}");
+                print_yellow!("Failed to open database: {e}");
                 None
             }
         };
@@ -51,30 +51,27 @@ impl DirMove {
 
     /// Print debug information about the database contents.
     fn print_database_debug_info(&self) {
-        let Some(ref db) = self.database else {
-            eprintln!("Database: not available (failed to open)");
-            return;
-        };
-
-        eprintln!("Database: {}", Database::path().display());
-        match db.get_all_entries() {
-            Ok(entries) => {
-                if entries.is_empty() {
-                    eprintln!("Database: empty");
-                } else {
-                    eprintln!("Database entries ({}):", entries.len());
-                    for entry in entries {
-                        eprintln!("  {entry}");
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to get database entries: {e}");
-            }
+        if let Some(ref db) = self.database {
+            db.print_debug_info();
+        } else {
+            eprintln!("Database not available");
         }
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
+        if self.config.show_db {
+            if let Some(db) = &self.database {
+                let entries = db.get_all_entries()?;
+                println!("Database entries: {}", entries.len());
+                for entry in entries {
+                    println!("  {}", entry.display_name);
+                }
+            } else {
+                print_yellow("Database not available");
+            }
+            return Ok(());
+        }
+
         // Delete unwanted directories and unpack configured directory names.
         // These are combined into a single directory walk for efficiency.
         self.unpack_directories()?;
@@ -382,7 +379,7 @@ impl DirMove {
 
         // Print skipped files warning
         if !skipped_files.is_empty() {
-            print_warning!(
+            print_yellow!(
                 "Skipped {} file(s) that already exist (use -f to overwrite):",
                 skipped_files.len()
             );
@@ -402,7 +399,7 @@ impl DirMove {
             let is_empty = std::fs::read_dir(source).is_ok_and(|mut it| it.next().is_none());
             if is_empty {
                 if let Err(err) = std::fs::remove_dir(source) {
-                    print_warning!("Failed to remove empty directory {source_display}: {err}");
+                    print_yellow!("Failed to remove empty directory {source_display}: {err}");
                 } else if self.config.verbose {
                     println!("  {} Removed empty directory: {source_display}", "→".green());
                 }
@@ -646,7 +643,7 @@ impl DirMove {
     /// Move an entire directory to a new location.
     fn move_directory(&self, source: &Path, target: &Path, touched_dirs: &mut HashSet<PathBuf>) -> anyhow::Result<()> {
         if target.exists() && !self.config.overwrite {
-            print_warning!("Skipping existing directory: {}", target.display());
+            print_yellow!("Skipping existing directory: {}", target.display());
             return Ok(());
         }
 
@@ -671,7 +668,7 @@ impl DirMove {
         touched_dirs: &mut HashSet<PathBuf>,
     ) -> anyhow::Result<()> {
         if target.exists() && !self.config.overwrite {
-            print_warning!("Skipping existing file: {}", target.display());
+            print_yellow!("Skipping existing file: {}", target.display());
             return Ok(());
         }
 
@@ -1002,7 +999,7 @@ impl DirMove {
             let new_path = dir_path.join(&file_name);
 
             if new_path.exists() && !self.config.overwrite {
-                print_warning!("Skipping existing file: {}", new_path.display());
+                print_yellow!("Skipping existing file: {}", new_path.display());
                 continue;
             }
 

@@ -771,14 +771,14 @@ macro_rules! print_error {
 }
 
 #[inline]
-pub fn print_warning(message: &str) {
+pub fn print_yellow(message: &str) {
     eprintln!("{}", message.yellow());
 }
 
 #[macro_export]
-macro_rules! print_warning {
+macro_rules! print_yellow {
     ($($arg:tt)*) => {
-        $crate::print_warning(&format!($($arg)*))
+        $crate::print_yellow(&format!($($arg)*))
     };
 }
 
@@ -1752,7 +1752,7 @@ mod print_function_tests {
 
     #[test]
     fn print_warning_does_not_panic() {
-        print_warning("test warning message");
+        print_yellow("test warning message");
     }
 
     #[test]
