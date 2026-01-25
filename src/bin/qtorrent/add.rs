@@ -18,6 +18,7 @@ use cli_tools::{print_bold, print_cyan, print_magenta_bold};
 use crate::QtorrentArgs;
 use crate::config::Config;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
+use crate::stats::TorrentStats;
 use crate::torrent::{FileFilter, FileInfo, FilteredFiles, Torrent};
 
 // List of known media file extensions
@@ -603,12 +604,8 @@ impl QTorrent {
         }
 
         // Process each torrent individually
-        let mut success_count = 0;
-        let mut skipped_count = 0;
-        let mut duplicate_count = 0;
-        let mut renamed_count = 0;
-        let mut error_count = 0;
         let total = torrents.len();
+        let mut stats = TorrentStats::new(total);
 
         for (index, mut info) in torrents.into_iter().enumerate() {
             println!("{}", "─".repeat(60));
@@ -624,11 +621,11 @@ impl QTorrent {
 
                 // Offer to rename the existing torrent
                 match self.prompt_rename_existing(&info, existing_name, &client).await {
-                    Ok(true) => renamed_count += 1,
-                    Ok(false) => duplicate_count += 1,
+                    Ok(true) => stats.inc_renamed(),
+                    Ok(false) => stats.inc_duplicate(),
                     Err(error) => {
                         cli_tools::print_error!("Failed to rename: {error}");
-                        duplicate_count += 1;
+                        stats.inc_duplicate();
                     }
                 }
                 continue;
@@ -652,14 +649,14 @@ impl QTorrent {
 
             if !should_add {
                 println!("{}", "Skipped.".yellow());
-                skipped_count += 1;
+                stats.inc_skipped();
                 continue;
             }
 
             match self.add_single_torrent(&client, info).await {
-                Ok(()) => success_count += 1,
+                Ok(()) => stats.inc_success(),
                 Err(error) => {
-                    error_count += 1;
+                    stats.inc_error();
                     cli_tools::print_error!("{error}");
                 }
             }
@@ -670,24 +667,7 @@ impl QTorrent {
             cli_tools::print_warning!("Failed to logout: {error}");
         }
 
-        // Print final summary
-        println!("\n{}", "─".repeat(60));
-        println!("{}", "Summary:".bold());
-        if success_count > 0 {
-            println!("  {} {}", "Added:".green(), success_count);
-        }
-        if renamed_count > 0 {
-            println!("  {} {}", "Renamed:".cyan(), renamed_count);
-        }
-        if duplicate_count > 0 {
-            println!("  {} {}", "Already added:".dimmed(), duplicate_count);
-        }
-        if skipped_count > 0 {
-            println!("  {} {}", "Skipped:".yellow(), skipped_count);
-        }
-        if error_count > 0 {
-            println!("  {} {}", "Failed:".red(), error_count);
-        }
+        stats.print_summary();
 
         Ok(())
     }

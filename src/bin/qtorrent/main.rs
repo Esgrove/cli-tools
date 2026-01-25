@@ -6,6 +6,7 @@
 mod add;
 mod config;
 mod qbittorrent;
+mod stats;
 mod torrent;
 
 use std::path::PathBuf;
