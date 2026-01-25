@@ -119,8 +119,13 @@ impl DirMove {
     }
 
     /// Check if a directory name should be stored in the database.
-    /// Returns false if the name is in `prefix_ignores` or `ignored_group_names`.
+    /// Returns false if the name starts with a dot, or is in `prefix_ignores` or `ignored_group_names`.
     fn should_store_in_database(&self, name: &str) -> bool {
+        // Skip hidden directories (starting with dot)
+        if name.starts_with('.') {
+            return false;
+        }
+
         let normalized = name.to_lowercase().replace(' ', "");
 
         // Skip if it matches a prefix_ignore
@@ -796,6 +801,12 @@ impl DirMove {
                 }
                 let file_name = entry.file_name();
                 let dir_name = file_name.to_string_lossy();
+
+                // Skip hidden directories (starting with dot)
+                if dir_name.starts_with('.') {
+                    continue;
+                }
+
                 if utils::is_unwanted_directory(&dir_name) {
                     continue;
                 }
