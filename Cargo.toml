@@ -33,7 +33,7 @@ rayon = "1.11.0"
 regex = "1.12.2"
 reqwest = { version = "0.13.1", features = ["cookies", "form", "multipart"] }
 rusqlite = { version = "0.38.0", features = ["bundled"] }
-rust_xlsxwriter = { version = "0.92.3", features = ["chrono", "serde"] }
+rust_xlsxwriter = { version = "0.93.0", features = ["chrono", "serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_bencode = "0.2.4"
 serde_bytes = "0.11.19"
