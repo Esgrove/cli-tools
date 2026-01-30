@@ -186,7 +186,9 @@ impl PrefixGroupBuilder {
     }
 
     /// Add a file to this group and update metadata.
-    /// If this is the first concatenated form encountered, also update the original prefix.
+    /// Prefers concatenated (no-dot) forms for directory names.
+    /// Among concatenated forms, prefers proper casing (starts with uppercase).
+    /// For determinism across platforms, uses alphabetical ordering as tiebreaker.
     pub(crate) fn add_file(
         &mut self,
         file: PathBuf,
@@ -198,10 +200,64 @@ impl PrefixGroupBuilder {
         self.files.push(file);
         self.part_count = self.part_count.max(part_count);
         self.min_start_position = self.min_start_position.min(start_position);
+
         // Prefer concatenated (no-dot) form for directory names
-        if is_concatenated && !self.has_concatenated_form {
-            self.original_prefix = prefix;
-            self.has_concatenated_form = true;
+        if is_concatenated {
+            if self.has_concatenated_form {
+                // Already have a concatenated form - prefer better casing or alphabetical order
+                let should_replace = Self::is_better_prefix(&prefix, &self.original_prefix);
+                if should_replace {
+                    self.original_prefix = prefix;
+                }
+            } else {
+                // First concatenated form - use it
+                self.original_prefix = prefix;
+                self.has_concatenated_form = true;
+            }
+        }
+    }
+
+    /// Determine if `new_prefix` is better than `current_prefix` for display.
+    /// Prefers CamelCase (mixed case) over all-uppercase or all-lowercase.
+    /// Uses alphabetical order as final tiebreaker for determinism.
+    fn is_better_prefix(new_prefix: &str, current_prefix: &str) -> bool {
+        let new_score = Self::casing_score(new_prefix);
+        let current_score = Self::casing_score(current_prefix);
+
+        if new_score == current_score {
+            // Same casing quality - use alphabetical order for determinism
+            new_prefix < current_prefix
+        } else {
+            // Higher score is better
+            new_score > current_score
+        }
+    }
+
+    /// Score the casing quality of a prefix.
+    /// Higher scores are better.
+    /// CamelCase (mixed case starting with uppercase) = 3
+    /// Starts with uppercase but all same case = 2
+    /// Mixed case starting with lowercase = 1
+    /// All lowercase or all uppercase = 0
+    fn casing_score(prefix: &str) -> u8 {
+        let mut chars = prefix.chars();
+        let Some(first) = chars.next() else {
+            return 0;
+        };
+
+        let starts_upper = first.is_ascii_uppercase();
+        let has_upper = starts_upper || chars.clone().any(|c| c.is_ascii_uppercase());
+        let has_lower = first.is_ascii_lowercase() || chars.any(|c| c.is_ascii_lowercase());
+
+        match (starts_upper, has_upper, has_lower) {
+            // CamelCase: starts uppercase, has both upper and lower (e.g., "PhotoLab")
+            (true, true, true) => 3,
+            // Starts uppercase, single case (e.g., "PHOTOLAB")
+            (true, true, false) => 2,
+            // Mixed case but starts lowercase (e.g., "photoLab")
+            (false, true, true) => 1,
+            // All lowercase (e.g., "photolab") or edge cases
+            _ => 0,
         }
     }
 
@@ -211,5 +267,84 @@ impl PrefixGroupBuilder {
             self.original_prefix,
             PrefixGroup::new(self.files, self.part_count, self.min_start_position),
         )
+    }
+}
+
+#[cfg(test)]
+mod test_casing_score {
+    use super::*;
+
+    #[test]
+    fn camel_case_scores_highest() {
+        // CamelCase (starts uppercase, has both upper and lower) = 3
+        assert_eq!(PrefixGroupBuilder::casing_score("PhotoLab"), 3);
+        assert_eq!(PrefixGroupBuilder::casing_score("NeonLight"), 3);
+        assert_eq!(PrefixGroupBuilder::casing_score("MyApp"), 3);
+    }
+
+    #[test]
+    fn all_uppercase_scores_second() {
+        // Starts uppercase, all same case = 2
+        assert_eq!(PrefixGroupBuilder::casing_score("PHOTOLAB"), 2);
+        assert_eq!(PrefixGroupBuilder::casing_score("NEONLIGHT"), 2);
+        assert_eq!(PrefixGroupBuilder::casing_score("ABC"), 2);
+    }
+
+    #[test]
+    fn mixed_case_starting_lowercase_scores_third() {
+        // Mixed case but starts lowercase = 1
+        assert_eq!(PrefixGroupBuilder::casing_score("photoLab"), 1);
+        assert_eq!(PrefixGroupBuilder::casing_score("neonLight"), 1);
+    }
+
+    #[test]
+    fn all_lowercase_scores_zero() {
+        // All lowercase = 0
+        assert_eq!(PrefixGroupBuilder::casing_score("photolab"), 0);
+        assert_eq!(PrefixGroupBuilder::casing_score("neonlight"), 0);
+    }
+
+    #[test]
+    fn empty_string_scores_zero() {
+        assert_eq!(PrefixGroupBuilder::casing_score(""), 0);
+    }
+}
+
+#[cfg(test)]
+mod test_is_better_prefix {
+    use super::*;
+
+    #[test]
+    fn camel_case_preferred_over_all_uppercase() {
+        assert!(PrefixGroupBuilder::is_better_prefix("PhotoLab", "PHOTOLAB"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("PHOTOLAB", "PhotoLab"));
+    }
+
+    #[test]
+    fn camel_case_preferred_over_all_lowercase() {
+        assert!(PrefixGroupBuilder::is_better_prefix("PhotoLab", "photolab"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("photolab", "PhotoLab"));
+    }
+
+    #[test]
+    fn all_uppercase_preferred_over_all_lowercase() {
+        assert!(PrefixGroupBuilder::is_better_prefix("PHOTOLAB", "photolab"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("photolab", "PHOTOLAB"));
+    }
+
+    #[test]
+    fn alphabetical_order_breaks_ties() {
+        // Both CamelCase - alphabetical order wins
+        assert!(PrefixGroupBuilder::is_better_prefix("NeonLight", "PhotoLab"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("PhotoLab", "NeonLight"));
+
+        // Both all lowercase - alphabetical order wins
+        assert!(PrefixGroupBuilder::is_better_prefix("abc", "xyz"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("xyz", "abc"));
+    }
+
+    #[test]
+    fn same_prefix_not_better() {
+        assert!(!PrefixGroupBuilder::is_better_prefix("PhotoLab", "PhotoLab"));
     }
 }
