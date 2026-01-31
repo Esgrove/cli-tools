@@ -259,6 +259,9 @@ replace = [
 # Print what would be done without actually adding torrents
 # dryrun = false
 
+# Offline mode: skip qBittorrent connection entirely (implies dryrun)
+# offline = false
+
 # Recurse into subdirectories when searching for torrent files
 # recurse = false
 

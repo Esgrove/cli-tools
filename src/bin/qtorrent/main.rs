@@ -8,6 +8,7 @@ mod config;
 mod qbittorrent;
 mod stats;
 mod torrent;
+mod utils;
 
 use std::path::PathBuf;
 
@@ -70,7 +71,11 @@ pub struct QtorrentArgs {
 
     /// Print what would be done without actually adding torrents
     #[arg(short = 'p', long)]
-    dryrun: bool,
+    pub dryrun: bool,
+
+    /// Offline mode: skip qBittorrent connection entirely (implies --dryrun)
+    #[arg(short = 'o', long)]
+    pub offline: bool,
 
     /// Skip confirmation prompts
     #[arg(short = 'y', long)]
@@ -175,13 +180,14 @@ mod cli_args_tests {
 
     #[test]
     fn parses_combined_boolean_flags() {
-        let args = QtorrentArgs::try_parse_from(["test", "-apyrxv"]).expect("should parse");
+        let args = QtorrentArgs::try_parse_from(["test", "-apyrxvo"]).expect("should parse");
         assert!(args.paused);
         assert!(args.dryrun);
         assert!(args.yes);
         assert!(args.recurse);
         assert!(args.skip_existing);
         assert!(args.verbose);
+        assert!(args.offline);
     }
 
     #[test]
@@ -194,6 +200,7 @@ mod cli_args_tests {
             "--recurse",
             "--skip-existing",
             "--verbose",
+            "--offline",
         ])
         .expect("should parse");
         assert!(args.paused);
@@ -202,6 +209,7 @@ mod cli_args_tests {
         assert!(args.recurse);
         assert!(args.skip_existing);
         assert!(args.verbose);
+        assert!(args.offline);
     }
 
     #[test]
@@ -235,6 +243,19 @@ mod cli_args_tests {
         assert!(args.min_file_size_mb.is_none());
         assert!(!args.paused);
         assert!(!args.dryrun);
+        assert!(!args.offline);
+    }
+
+    #[test]
+    fn parses_offline_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "--offline"]).expect("should parse");
+        assert!(args.offline);
+    }
+
+    #[test]
+    fn parses_offline_short_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "-o"]).expect("should parse");
+        assert!(args.offline);
     }
 
     #[test]
@@ -389,5 +410,29 @@ mod config_from_args_tests {
         assert!(config.recurse);
         assert!(config.skip_existing);
         assert!(config.verbose);
+    }
+
+    #[test]
+    fn config_offline_implies_dryrun() {
+        let args = QtorrentArgs::try_parse_from(["test", "--offline"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.offline);
+        assert!(config.dryrun, "offline should imply dryrun");
+    }
+
+    #[test]
+    fn config_offline_short_flag_implies_dryrun() {
+        let args = QtorrentArgs::try_parse_from(["test", "-o"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.offline);
+        assert!(config.dryrun, "offline should imply dryrun");
+    }
+
+    #[test]
+    fn config_dryrun_without_offline() {
+        let args = QtorrentArgs::try_parse_from(["test", "--dryrun"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.dryrun);
+        assert!(!config.offline, "dryrun should not imply offline");
     }
 }

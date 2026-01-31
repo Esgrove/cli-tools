@@ -3,12 +3,15 @@
 //! Provides structs and functions to parse `.torrent` files and extract metadata.
 
 use std::borrow::Cow;
+use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
+
+use crate::utils::TorrentInfo;
 
 const HEX_CHARS: &[u8] = b"0123456789abcdef";
 const BYTES_PER_MB: u64 = 1024 * 1024;
@@ -278,6 +281,63 @@ impl FilteredFiles<'_> {
     pub fn excluded_size(&self) -> u64 {
         self.excluded.iter().map(|file| file.size).sum()
     }
+}
+
+/// Parse a single torrent file.
+///
+/// Applies file filtering and determines whether to treat this as a multi-file torrent
+/// based on how many files will actually be included after filtering.
+pub fn parse_torrent(path: &Path, filter: &FileFilter<'_>) -> Result<TorrentInfo> {
+    let bytes = fs::read(path).context("Failed to read torrent file")?;
+    let torrent = Torrent::from_buffer(&bytes)?;
+
+    // Calculate info hash from raw bytes (not re-serialized) for correct hash
+    let info_hash = Torrent::info_hash_hex_from_bytes(&bytes)?;
+
+    let original_is_multi_file = torrent.is_multi_file();
+    let original_name = torrent.name().map(String::from);
+
+    // Filter files and determine effective multi-file status based on included files
+    let (effective_is_multi_file, excluded_indices, single_included_file, effective_original_name, included_size) =
+        if original_is_multi_file && !filter.is_empty() {
+            let filtered = torrent.filter_files(filter);
+            let excluded: Vec<usize> = filtered.excluded.iter().map(|file| file.index).collect();
+            let included_size = filtered.included_size();
+            // Treat as multi-file only if more than one file will be included
+            let effective_multi = filtered.included.len() > 1;
+            // If only one file remains, store its name for extension extraction
+            // and use its path as the original name for renaming (since NoSubfolder is used)
+            let (single_file, eff_name) = if filtered.included.len() == 1 {
+                let file_path = filtered.included[0].path.to_string();
+                (Some(file_path.clone()), Some(file_path))
+            } else {
+                (None, original_name)
+            };
+            (effective_multi, excluded, single_file, eff_name, included_size)
+        } else {
+            // No filtering applied - use original multi-file status
+            (
+                original_is_multi_file,
+                Vec::new(),
+                None,
+                original_name,
+                torrent.total_size(),
+            )
+        };
+
+    Ok(TorrentInfo {
+        path: path.to_path_buf(),
+        torrent,
+        bytes,
+        info_hash,
+        original_is_multi_file,
+        effective_is_multi_file,
+        rename_to: None,
+        included_size,
+        excluded_indices,
+        single_included_file,
+        original_name: effective_original_name,
+    })
 }
 
 /// Convert bytes to a hex string.

@@ -50,6 +50,9 @@ pub struct QtorrentConfig {
     /// Enable dry-run mode by default.
     #[serde(default)]
     dryrun: bool,
+    /// Enable offline mode by default (implies dryrun).
+    #[serde(default)]
+    offline: bool,
     /// Skip confirmation prompts by default.
     #[serde(default)]
     yes: bool,
@@ -102,6 +105,8 @@ pub struct Config {
     pub verbose: bool,
     /// Dry-run mode (don't actually add torrents).
     pub dryrun: bool,
+    /// Offline mode (skip qBittorrent connection, implies dryrun).
+    pub offline: bool,
     /// Skip confirmation prompts.
     pub yes: bool,
     /// Skip rename prompts for existing/duplicate torrents.
@@ -187,7 +192,9 @@ impl Config {
         let tags = args.tags.or(user_config.tags);
         let paused = args.paused || user_config.paused;
         let verbose = args.verbose || user_config.verbose;
-        let dryrun = args.dryrun || user_config.dryrun;
+        let offline = args.offline || user_config.offline;
+        // Offline implies dryrun
+        let dryrun = args.dryrun || user_config.dryrun || offline;
         let yes = args.yes || user_config.yes;
         let skip_existing = args.skip_existing || user_config.skip_existing;
         let recurse = args.recurse || user_config.recurse;
@@ -245,6 +252,7 @@ impl Config {
             paused,
             verbose,
             dryrun,
+            offline,
             yes,
             skip_existing,
             recurse,
@@ -358,6 +366,7 @@ mod qtorrent_config_tests {
         assert!(!config.paused);
         assert!(!config.verbose);
         assert!(!config.dryrun);
+        assert!(!config.offline);
     }
 
     #[test]
@@ -436,6 +445,16 @@ skip_existing = true
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.recurse);
         assert!(config.skip_existing);
+    }
+
+    #[test]
+    fn from_toml_str_parses_offline() {
+        let toml = r"
+[qtorrent]
+offline = true
+";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.offline);
     }
 
     #[test]
