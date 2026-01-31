@@ -537,14 +537,17 @@ impl QTorrent {
         });
 
         let mode_label = if self.config.offline { "OFFLINE" } else { "DRYRUN" };
-        print_bold!("{} {} torrents to add:", mode_label, torrents.len());
 
         if duplicate_count > 0 {
-            println!(
-                "  {} {} already in qBittorrent (would be skipped or renamed)",
-                "⊘".yellow(),
+            print_bold!(
+                "{} {} torrents, {} to add, {} existing:",
+                mode_label,
+                torrents.len(),
+                torrents.len() - duplicate_count,
                 duplicate_count
             );
+        } else {
+            print_bold!("{} {} torrents to add:", mode_label, torrents.len());
         }
 
         if self.config.verbose {
