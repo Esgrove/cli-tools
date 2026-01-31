@@ -979,3 +979,128 @@ mod test_extract_info_dict_bytes {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod test_parse_torrent {
+    use super::*;
+    use std::path::Path;
+
+    fn dummy_torrent_path() -> &'static Path {
+        Path::new("tests/fixtures/dummy.torrent")
+    }
+
+    #[test]
+    fn parses_valid_torrent_file() {
+        let filter = FileFilter::new(&[], &[], None);
+        let result = parse_torrent(dummy_torrent_path(), &filter);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sets_path_correctly() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert_eq!(info.path, dummy_torrent_path());
+    }
+
+    #[test]
+    fn calculates_info_hash() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert_eq!(info.info_hash.len(), 40);
+        assert!(info.info_hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn stores_raw_bytes() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert!(!info.bytes.is_empty());
+    }
+
+    #[test]
+    fn single_file_torrent_not_multi_file() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert!(!info.original_is_multi_file);
+        assert!(!info.effective_is_multi_file);
+    }
+
+    #[test]
+    fn calculates_included_size() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert_eq!(info.included_size, 7);
+    }
+
+    #[test]
+    fn no_excluded_indices_without_filter() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert!(info.excluded_indices.is_empty());
+    }
+
+    #[test]
+    fn sets_original_name() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert_eq!(info.original_name, Some("dummy.txt".to_string()));
+    }
+
+    #[test]
+    fn rename_to_is_none_initially() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert!(info.rename_to.is_none());
+    }
+
+    #[test]
+    fn single_included_file_is_none_for_single_file_torrent() {
+        let filter = FileFilter::new(&[], &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+        assert!(info.single_included_file.is_none());
+    }
+
+    #[test]
+    fn fails_on_nonexistent_file() {
+        let filter = FileFilter::new(&[], &[], None);
+        let result = parse_torrent(Path::new("nonexistent.torrent"), &filter);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fails_on_invalid_torrent_data() {
+        // Create a temp file with invalid data
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("invalid_test.torrent");
+        std::fs::write(&temp_path, b"not a valid torrent").expect("should write temp file");
+
+        let filter = FileFilter::new(&[], &[], None);
+        let result = parse_torrent(&temp_path, &filter);
+
+        std::fs::remove_file(&temp_path).ok();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn filter_excludes_by_extension() {
+        let skip_extensions = vec!["txt".to_string()];
+        let filter = FileFilter::new(&skip_extensions, &[], None);
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+
+        // Single file torrent with txt extension should have the file excluded
+        // but since it's single-file, excluded_indices is only populated for multi-file
+        // The included_size should still be the full size for single-file torrents
+        assert_eq!(info.included_size, 7);
+    }
+
+    #[test]
+    fn filter_by_size_on_single_file() {
+        // File is 7 bytes, set minimum to 100 bytes
+        let filter = FileFilter::new(&[], &[], Some(100));
+        let info = parse_torrent(dummy_torrent_path(), &filter).expect("should parse");
+
+        // Single file torrent - size filter doesn't affect single-file torrents at parse time
+        assert_eq!(info.included_size, 7);
+    }
+}
