@@ -785,60 +785,6 @@ impl QTorrent {
         }
     }
 
-    /// Normalize two rename options by ensuring both have the same date and extension if applicable.
-    ///
-    /// If one option has a file extension and the other doesn't, the extension is added.
-    /// If one option has a date (yyyy.mm.dd format) and the other doesn't, the date is added.
-    ///
-    /// Extensions are checked first to avoid date parts (like `.15`) being mistaken for extensions.
-    fn normalize_rename_options(suggested: &str, internal: Option<&str>) -> (String, Option<String>) {
-        let Some(internal) = internal else {
-            return (suggested.to_string(), None);
-        };
-
-        let mut normalized_suggested = suggested.to_string();
-        let mut normalized_internal = internal.to_string();
-
-        // Extract extensions from both options FIRST (before adding dates)
-        // This avoids date parts like ".15" being mistaken for extensions
-        let suggested_ext = utils::extract_file_extension(&normalized_suggested);
-        let internal_ext = utils::extract_file_extension(&normalized_internal);
-
-        // If one has an extension and the other doesn't, add the extension
-        match (&suggested_ext, &internal_ext) {
-            (Some(ext), None) => {
-                normalized_internal = format!("{normalized_internal}.{ext}");
-            }
-            (None, Some(ext)) => {
-                normalized_suggested = format!("{normalized_suggested}.{ext}");
-            }
-            _ => {}
-        }
-
-        // Extract dates from both options
-        let suggested_date = RE_CORRECT_DATE_FORMAT
-            .find(&normalized_suggested)
-            .map(|m| m.as_str().to_string());
-        let internal_date = RE_CORRECT_DATE_FORMAT
-            .find(&normalized_internal)
-            .map(|m| m.as_str().to_string());
-
-        // If one has a date and the other doesn't, add the date to the one missing it
-        match (&suggested_date, &internal_date) {
-            (Some(date), None) => {
-                // Add date from suggested to internal (insert before extension if present)
-                normalized_internal = utils::insert_date_before_extension(&normalized_internal, date);
-            }
-            (None, Some(date)) => {
-                // Add date from internal to suggested (insert before extension if present)
-                normalized_suggested = utils::insert_date_before_extension(&normalized_suggested, date);
-            }
-            _ => {}
-        }
-
-        (normalized_suggested, Some(normalized_internal))
-    }
-
     /// Print all files sorted by size (largest first), showing include/exclude status.
     ///
     /// Files excluded due to directory matching are grouped by directory name
@@ -912,6 +858,60 @@ impl QTorrent {
                 format!("directory: {dir_name}").dimmed()
             );
         }
+    }
+
+    /// Normalize two rename options by ensuring both have the same date and extension if applicable.
+    ///
+    /// If one option has a file extension and the other doesn't, the extension is added.
+    /// If one option has a date (yyyy.mm.dd format) and the other doesn't, the date is added.
+    ///
+    /// Extensions are checked first to avoid date parts (like `.15`) being mistaken for extensions.
+    fn normalize_rename_options(suggested: &str, internal: Option<&str>) -> (String, Option<String>) {
+        let Some(internal) = internal else {
+            return (suggested.to_string(), None);
+        };
+
+        let mut normalized_suggested = suggested.to_string();
+        let mut normalized_internal = internal.to_string();
+
+        // Extract extensions from both options FIRST (before adding dates)
+        // This avoids date parts like ".15" being mistaken for extensions
+        let suggested_ext = utils::extract_file_extension(&normalized_suggested);
+        let internal_ext = utils::extract_file_extension(&normalized_internal);
+
+        // If one has an extension and the other doesn't, add the extension
+        match (&suggested_ext, &internal_ext) {
+            (Some(ext), None) => {
+                normalized_internal = format!("{normalized_internal}.{ext}");
+            }
+            (None, Some(ext)) => {
+                normalized_suggested = format!("{normalized_suggested}.{ext}");
+            }
+            _ => {}
+        }
+
+        // Extract dates from both options
+        let suggested_date = RE_CORRECT_DATE_FORMAT
+            .find(&normalized_suggested)
+            .map(|m| m.as_str().to_string());
+        let internal_date = RE_CORRECT_DATE_FORMAT
+            .find(&normalized_internal)
+            .map(|m| m.as_str().to_string());
+
+        // If one has a date and the other doesn't, add the date to the one missing it
+        match (&suggested_date, &internal_date) {
+            (Some(date), None) => {
+                // Add date from suggested to internal (insert before extension if present)
+                normalized_internal = utils::insert_date_before_extension(&normalized_internal, date);
+            }
+            (None, Some(date)) => {
+                // Add date from internal to suggested (insert before extension if present)
+                normalized_suggested = utils::insert_date_before_extension(&normalized_suggested, date);
+            }
+            _ => {}
+        }
+
+        (normalized_suggested, Some(normalized_internal))
     }
 
     /// Check if a torrent already exists in qBittorrent by comparing info hashes.
@@ -1025,5 +1025,81 @@ mod normalize_rename_options {
         let (suggested, internal) = QTorrent::normalize_rename_options("Show.Name.One", Some("Show.Name.Two"));
         assert_eq!(suggested, "Show.Name.One");
         assert_eq!(internal.as_deref(), Some("Show.Name.Two"));
+    }
+}
+
+#[cfg(test)]
+mod test_check_existing_torrent {
+    use super::*;
+    use crate::torrent::Torrent;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Creates a minimal `TorrentInfo` for testing with the given info hash.
+    fn create_torrent_info_with_hash(info_hash: &str) -> TorrentInfo {
+        TorrentInfo {
+            path: PathBuf::from("test.torrent"),
+            torrent: Torrent::default(),
+            bytes: vec![],
+            info_hash: info_hash.to_string(),
+            original_is_multi_file: false,
+            effective_is_multi_file: false,
+            rename_to: None,
+            included_size: 1000,
+            excluded_indices: vec![],
+            single_included_file: None,
+            original_name: None,
+        }
+    }
+
+    #[test]
+    fn returns_none_when_map_is_empty() {
+        let info = create_torrent_info_with_hash("abc123def456");
+        let existing: HashMap<String, String> = HashMap::new();
+
+        let result = QTorrent::check_existing_torrent(&info, &existing);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn returns_none_when_hash_not_found() {
+        let info = create_torrent_info_with_hash("abc123def456");
+        let mut existing: HashMap<String, String> = HashMap::new();
+        existing.insert("different_hash".to_string(), "Some Torrent".to_string());
+
+        let result = QTorrent::check_existing_torrent(&info, &existing);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn returns_name_when_hash_matches() {
+        let info = create_torrent_info_with_hash("abc123def456");
+        let mut existing: HashMap<String, String> = HashMap::new();
+        existing.insert("abc123def456".to_string(), "Existing Torrent Name".to_string());
+
+        let result = QTorrent::check_existing_torrent(&info, &existing);
+        assert_eq!(result, Some(&"Existing Torrent Name".to_string()));
+    }
+
+    #[test]
+    fn matches_case_insensitively() {
+        let info = create_torrent_info_with_hash("ABC123DEF456");
+        let mut existing: HashMap<String, String> = HashMap::new();
+        existing.insert("abc123def456".to_string(), "Existing Torrent".to_string());
+
+        let result = QTorrent::check_existing_torrent(&info, &existing);
+        assert_eq!(result, Some(&"Existing Torrent".to_string()));
+    }
+
+    #[test]
+    fn finds_among_multiple_torrents() {
+        let info = create_torrent_info_with_hash("target_hash_123");
+        let mut existing: HashMap<String, String> = HashMap::new();
+        existing.insert("hash_one".to_string(), "Torrent One".to_string());
+        existing.insert("target_hash_123".to_string(), "Target Torrent".to_string());
+        existing.insert("hash_three".to_string(), "Torrent Three".to_string());
+
+        let result = QTorrent::check_existing_torrent(&info, &existing);
+        assert_eq!(result, Some(&"Target Torrent".to_string()));
     }
 }
