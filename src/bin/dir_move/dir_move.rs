@@ -171,27 +171,29 @@ impl DirMove {
         }
     }
 
-    /// Get the best database suggestion for a directory name prefix.
-    /// Returns the display name (with proper casing) from the database, if any.
+    /// Get a database suggestion for a directory name, but only if it's an exact match.
+    ///
+    /// An "exact match" means the same letters (case-insensitive), but may differ in:
+    /// - Whitespace (e.g., "JaneDoe" vs "Jane Doe")
+    /// - Dots (e.g., "Jane.Doe" vs "Jane Doe")
+    /// - Case (e.g., "JANE DOE" vs "Jane Doe")
+    ///
+    /// This is used internally to map user's grouping name to the database's preferred formatting,
+    /// only when they represent the same entity.
+    #[allow(clippy::doc_markdown)]
     fn get_database_suggestion_for_prefix(&self, dir_name: &str) -> Option<String> {
         let db = self.database.as_ref()?;
 
-        // Normalize the dir_name for comparison
-        let normalized = crate::database::normalize_name(dir_name);
+        // Normalize input using the same function as database storage
+        let normalized = utils::normalize_name(dir_name);
 
         // Get all database entries
         let entries = db.get_all_entries().ok()?;
 
-        // Look for exact match first
+        // Only return exact matches (same letters, may differ in spacing/dots/case)
+        // Uses the pre-computed normalized_name from the database
         for entry in &entries {
             if entry.normalized_name == normalized {
-                return Some(entry.display_name.clone());
-            }
-        }
-
-        // Look for entries that start with the normalized name or vice versa
-        for entry in &entries {
-            if entry.normalized_name.starts_with(&normalized) || normalized.starts_with(&entry.normalized_name) {
                 return Some(entry.display_name.clone());
             }
         }
@@ -1338,39 +1340,25 @@ impl DirMove {
         Ok(())
     }
 
-    /// Prompt the user for directory name confirmation with optional database suggestion.
+    /// Prompt the user for directory name confirmation with optional database formatting.
     /// Returns `Some(path)` if confirmed (with original, database, or custom name), `None` if skipped.
     ///
-    /// If a database suggestion is provided and differs from the suggested name,
-    /// it will be offered first as the primary choice.
+    /// If a database suggestion is provided (an exact match with different formatting),
+    /// it will be used silently as the default without showing any extra messages.
     ///
     /// Accepts:
-    /// - "y" or "yes" to confirm with the suggested name (or database suggestion if shown)
+    /// - "y" or "yes" to confirm with the effective name (database formatting if available, otherwise suggested)
     /// - "n" or "no" to skip
     /// - Any other non-empty string as a custom directory name (with confirmation)
-    #[allow(clippy::option_if_let_else)]
     fn prompt_for_directory_name_with_suggestion(
         &self,
         suggested_path: &Path,
         suggested_name: &str,
         database_suggestion: Option<&str>,
     ) -> anyhow::Result<Option<PathBuf>> {
-        // Check if database suggestion differs from suggested name
-        // Note: Using if-let instead of map_or because we have a side effect (println)
-        let effective_suggestion = if let Some(db_name) = database_suggestion {
-            let db_normalized = db_name.to_lowercase().replace(' ', "");
-            let suggested_normalized = suggested_name.to_lowercase().replace(' ', "");
-            if db_normalized == suggested_normalized {
-                suggested_name
-            } else {
-                // Show database suggestion as primary
-                println!("  {} Database suggests: {}", "★".yellow(), db_name.cyan().bold());
-                db_name
-            }
-        } else {
-            suggested_name
-        };
-
+        // If database has an exact match (same letters, different formatting), use its formatting silently.
+        // This maps e.g. "JaneDoe" -> "Jane Doe" without showing confusing messages.
+        let effective_suggestion = database_suggestion.unwrap_or(suggested_name);
         let effective_path = self.root.join(effective_suggestion);
 
         print!(
@@ -1597,6 +1585,144 @@ pub mod test_helpers {
 
     pub fn make_file_paths(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(|n| PathBuf::from(*n)).collect()
+    }
+}
+
+#[cfg(test)]
+mod test_database_suggestion {
+    use super::*;
+    use crate::database::Database;
+
+    /// Helper to create a `DirMove` with an in-memory database containing the given entries.
+    fn make_dirmove_with_db_entries(entries: &[&str]) -> DirMove {
+        let db = Database::open_in_memory().unwrap();
+        for entry in entries {
+            db.upsert(entry).unwrap();
+        }
+        DirMove {
+            root: PathBuf::from("."),
+            config: Config::default(),
+            database: Some(db),
+        }
+    }
+
+    #[test]
+    fn exact_match_same_case() {
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane Doe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_different_case() {
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("JANE DOE");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_no_spaces() {
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("JaneDoe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_with_dots() {
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane.Doe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_dots_and_different_case() {
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("jane.doe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn no_match_for_prefix_only() {
+        // "Jane" should NOT match "Jane Doe" - they are different entities
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn no_match_for_longer_name() {
+        // "Jane Doe Extra" should NOT match "Jane Doe"
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane Doe Extra");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn no_match_for_partial_overlap() {
+        // "Jan" should NOT match "Jane Doe"
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Jan");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn no_match_for_completely_different() {
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Bob Wilson");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn multiple_entries_exact_match() {
+        let dirmove = make_dirmove_with_db_entries(&["Jane Doe", "John Smith", "Bob Wilson"]);
+
+        assert_eq!(
+            dirmove.get_database_suggestion_for_prefix("JohnSmith"),
+            Some("John Smith".to_string())
+        );
+        assert_eq!(
+            dirmove.get_database_suggestion_for_prefix("bob.wilson"),
+            Some("Bob Wilson".to_string())
+        );
+        assert_eq!(dirmove.get_database_suggestion_for_prefix("Alice"), None);
+    }
+
+    #[test]
+    fn no_database_returns_none() {
+        let dirmove = DirMove {
+            root: PathBuf::from("."),
+            config: Config::default(),
+            database: None,
+        };
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Anything");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn empty_database_returns_none() {
+        let dirmove = make_dirmove_with_db_entries(&[]);
+        let suggestion = dirmove.get_database_suggestion_for_prefix("Anything");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn preserves_database_formatting() {
+        // Database has specific formatting that should be preserved
+        let dirmove = make_dirmove_with_db_entries(&["The Best Show"]);
+
+        // All these variations should return the database's formatting
+        assert_eq!(
+            dirmove.get_database_suggestion_for_prefix("thebestshow"),
+            Some("The Best Show".to_string())
+        );
+        assert_eq!(
+            dirmove.get_database_suggestion_for_prefix("The.Best.Show"),
+            Some("The Best Show".to_string())
+        );
+        assert_eq!(
+            dirmove.get_database_suggestion_for_prefix("THE BEST SHOW"),
+            Some("The Best Show".to_string())
+        );
     }
 }
 

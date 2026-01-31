@@ -16,6 +16,14 @@ const GLUE_WORDS: &[&str] = &[
 /// Directory names that should be deleted when encountered.
 const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
 
+/// Normalize a directory name for storage and comparison.
+/// Converts to lowercase and removes spaces and dots.
+/// This allows matching variations like "Jane Doe", "`JaneDoe`", and "Jane.Doe".
+#[allow(clippy::doc_markdown)]
+pub fn normalize_name(name: &str) -> String {
+    name.to_lowercase().replace([' ', '.'], "")
+}
+
 /// Recursively copy a directory and its contents.
 pub fn copy_dir_recursive(source: &Path, target: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(target)?;
@@ -335,6 +343,22 @@ pub fn get_all_n_part_sequences(file_name: &str, n: usize) -> Vec<&str> {
 /// Check if a directory name is in the unwanted list.
 pub fn is_unwanted_directory(name: &str) -> bool {
     UNWANTED_DIRECTORIES.iter().any(|u| name.eq_ignore_ascii_case(u))
+}
+
+#[cfg(test)]
+mod test_normalize_name {
+    use super::*;
+
+    #[test]
+    fn normalize_name_function() {
+        assert_eq!(normalize_name("Hello World"), "helloworld");
+        assert_eq!(normalize_name("UPPER CASE"), "uppercase");
+        assert_eq!(normalize_name("NoSpaces"), "nospaces");
+        assert_eq!(normalize_name("  extra  spaces  "), "extraspaces");
+        assert_eq!(normalize_name("Hello.World"), "helloworld");
+        assert_eq!(normalize_name("Name.With.Dots"), "namewithdots");
+        assert_eq!(normalize_name("Mixed.Dots And Spaces"), "mixeddotsandspaces");
+    }
 }
 
 #[cfg(test)]

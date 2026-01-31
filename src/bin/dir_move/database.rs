@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
+use crate::utils;
+
 /// Default database filename.
 const DATABASE_FILENAME: &str = "dirmove.db";
 
@@ -81,7 +83,7 @@ impl Database {
     /// Add a directory name to the database.
     /// If a name with the same normalized form already exists, updates the display name.
     pub fn upsert(&self, display_name: &str) -> Result<()> {
-        let normalized_name = normalize_name(display_name);
+        let normalized_name = utils::normalize_name(display_name);
 
         self.connection
             .execute(
@@ -100,7 +102,7 @@ impl Database {
     /// Add a directory name only if it doesn't already exist.
     /// Returns true if inserted, false if already existed.
     pub fn insert_if_new(&self, display_name: &str) -> Result<bool> {
-        let normalized_name = normalize_name(display_name);
+        let normalized_name = utils::normalize_name(display_name);
 
         let rows_affected = self
             .connection
@@ -161,7 +163,7 @@ impl Database {
 
     /// Open an in-memory database for testing.
     #[cfg(test)]
-    fn open_in_memory() -> Result<Self> {
+    pub fn open_in_memory() -> Result<Self> {
         let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
 
         let database = Self { connection };
@@ -192,12 +194,6 @@ impl Database {
 
         Ok(())
     }
-}
-
-/// Normalize a directory name for storage and comparison.
-/// Converts to lowercase and removes spaces.
-pub fn normalize_name(name: &str) -> String {
-    name.to_lowercase().replace(' ', "")
 }
 
 impl std::fmt::Display for DirectoryEntry {
@@ -297,11 +293,23 @@ mod tests {
     }
 
     #[test]
-    fn normalize_name_function() {
-        assert_eq!(normalize_name("Hello World"), "helloworld");
-        assert_eq!(normalize_name("UPPER CASE"), "uppercase");
-        assert_eq!(normalize_name("NoSpaces"), "nospaces");
-        assert_eq!(normalize_name("  extra  spaces  "), "extraspaces");
+    fn dotted_and_spaced_same_entry() {
+        let db = Database::open_in_memory().unwrap();
+
+        db.upsert("Jane Doe").unwrap();
+
+        // All these variations should map to the same entry
+        assert!(!db.insert_if_new("JaneDoe").unwrap());
+        assert!(!db.insert_if_new("Jane.Doe").unwrap());
+        assert!(!db.insert_if_new("JANE DOE").unwrap());
+        assert!(!db.insert_if_new("jane.doe").unwrap());
+
+        // Only one entry exists
+        assert_eq!(db.count().unwrap(), 1);
+
+        // Display name is preserved from first insert
+        let entries = db.get_all_entries().unwrap();
+        assert_eq!(entries[0].display_name, "Jane Doe");
     }
 
     #[test]
