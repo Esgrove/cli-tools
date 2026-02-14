@@ -12,7 +12,7 @@ use cli_tools::{
     print_magenta, print_yellow,
 };
 
-use crate::config::Config;
+use crate::config::{Config, CustomMapping};
 use crate::database::Database;
 use crate::types::{DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo};
 use crate::{DirMoveArgs, utils};
@@ -765,7 +765,14 @@ impl DirMove {
             return Ok(());
         }
 
-        let matches = self.match_files_to_directories(&files_in_root, &directories);
+        // Process custom mappings first - these take priority
+        let remaining_files = self.process_custom_mapping_matches(&files_in_root, &directories)?;
+
+        if remaining_files.is_empty() {
+            return Ok(());
+        }
+
+        let matches = self.match_files_to_directories(&remaining_files, &directories);
         if matches.is_empty() {
             return Ok(());
         }
@@ -789,6 +796,86 @@ impl DirMove {
         }
 
         Ok(())
+    }
+
+    /// Process custom mapping matches - move files matching custom patterns to their target directories.
+    /// Returns the list of files that were NOT matched by any custom mapping.
+    fn process_custom_mapping_matches(
+        &self,
+        files: &[PathBuf],
+        directories: &[DirectoryInfo],
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        if self.config.custom_mappings.is_empty() {
+            return Ok(files.to_vec());
+        }
+
+        let mut remaining_files: Vec<PathBuf> = Vec::new();
+        let mut custom_matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
+
+        for file_path in files {
+            let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
+                remaining_files.push(file_path.clone());
+                continue;
+            };
+
+            // Normalize filename for matching (lowercase, no dots/spaces)
+            let file_name_normalized = file_name.to_lowercase().replace(['.', ' '], "");
+
+            // Check if file matches any custom mapping
+            let mut matched = false;
+            for mapping in &self.config.custom_mappings {
+                if file_name_normalized.contains(&mapping.pattern) {
+                    // Find target directory
+                    if let Some(dir_idx) = Self::find_directory_for_custom_mapping(mapping, directories) {
+                        custom_matches.entry(dir_idx).or_default().push(file_path.clone());
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+
+            if !matched {
+                remaining_files.push(file_path.clone());
+            }
+        }
+
+        // Process custom mapping matches
+        if !custom_matches.is_empty() {
+            let groups_to_process: Vec<_> = custom_matches
+                .into_iter()
+                .map(|(idx, matched_files)| (&directories[idx], matched_files))
+                .sorted_by(|a, b| a.0.name.cmp(&b.0.name))
+                .collect();
+
+            if self.config.verbose {
+                print_bold!(
+                    "Found {} custom mapping match(es) with files to move:\n",
+                    groups_to_process.len()
+                );
+            }
+
+            for (dir, matched_files) in groups_to_process {
+                self.process_directory_match(dir, &matched_files)?;
+            }
+        }
+
+        Ok(remaining_files)
+    }
+
+    /// Find a directory that matches a custom mapping's target directory name.
+    /// Returns the index into the directories slice if found.
+    fn find_directory_for_custom_mapping(mapping: &CustomMapping, directories: &[DirectoryInfo]) -> Option<usize> {
+        // Normalize the target directory name for matching
+        let target_normalized = mapping.directory.to_lowercase().replace(['.', ' '], "");
+
+        for (idx, dir) in directories.iter().enumerate() {
+            // dir.name is already lowercase with dots replaced by spaces
+            let dir_normalized = dir.name.replace(' ', "");
+            if dir_normalized == target_normalized {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     fn collect_directories_in_root(&self) -> anyhow::Result<Vec<DirectoryInfo>> {
@@ -1200,6 +1287,12 @@ impl DirMove {
     fn create_dirs_and_move_files(&self) -> anyhow::Result<()> {
         let files_with_names = self.collect_files_with_names()?;
 
+        // Track files that have been moved to avoid offering them again
+        let mut moved_files: HashSet<PathBuf> = HashSet::new();
+
+        // Process custom mappings first in create mode
+        self.process_custom_mappings_create_mode(&files_with_names, &mut moved_files)?;
+
         // Debug: show prefix_ignores config
         if self.config.debug {
             eprintln!("prefix_ignores: {:?}", self.config.prefix_ignores);
@@ -1244,9 +1337,6 @@ impl DirMove {
             }
             return Ok(());
         }
-
-        // Track files that have been moved to avoid offering them again
-        let mut moved_files: HashSet<PathBuf> = HashSet::new();
 
         // Count initial groups for display (before filtering by moved files)
         let initial_group_count = groups_to_process.len();
@@ -1333,6 +1423,82 @@ impl DirMove {
                     }
                 }
                 // Note: "Skipped" message is printed in prompt_for_directory_name
+            }
+            println!();
+        }
+
+        Ok(())
+    }
+
+    /// Process custom mappings in create mode - offer to create directories for matching files.
+    /// Updates `moved_files` with files that were successfully moved.
+    fn process_custom_mappings_create_mode(
+        &self,
+        files_with_names: &[FileInfo<'_>],
+        moved_files: &mut HashSet<PathBuf>,
+    ) -> anyhow::Result<()> {
+        if self.config.custom_mappings.is_empty() {
+            return Ok(());
+        }
+
+        // Group files by custom mapping
+        let mut mapping_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+        for file_info in files_with_names {
+            let file_name_normalized = file_info.original_name.to_lowercase().replace(['.', ' '], "");
+
+            for mapping in &self.config.custom_mappings {
+                if file_name_normalized.contains(&mapping.pattern) {
+                    mapping_groups
+                        .entry(mapping.directory.clone())
+                        .or_default()
+                        .push(file_info.path_buf());
+                    break;
+                }
+            }
+        }
+
+        if mapping_groups.is_empty() {
+            return Ok(());
+        }
+
+        print_bold!("Found {} custom mapping group(s):\n", mapping_groups.len());
+
+        for (dir_name, files) in mapping_groups.into_iter().sorted_by(|a, b| a.0.cmp(&b.0)) {
+            if files.is_empty() {
+                continue;
+            }
+
+            let dir_path = self.root.join(&dir_name);
+            let dir_exists = dir_path.exists();
+
+            println!("{}: {} files (custom mapping)", dir_name.cyan().bold(), files.len());
+            for file_path in &files {
+                println!("  {}", path_to_filename_string(file_path));
+            }
+
+            if dir_exists {
+                println!("  {} Directory already exists", "→".green());
+            } else {
+                println!("  {} Will create directory: {dir_name}", "→".yellow());
+            }
+
+            if !self.config.dryrun {
+                let final_dir_path = if self.config.auto {
+                    Some(dir_path)
+                } else {
+                    self.prompt_for_directory_name_with_suggestion(&dir_path, &dir_name, None)?
+                };
+
+                if let Some(target_path) = final_dir_path {
+                    if let Err(e) = self.move_files_to_target_dir(&target_path, &files) {
+                        print_error!("Failed to process {}: {e}", target_path.display());
+                    } else {
+                        moved_files.extend(files);
+                        let final_dir_name = cli_tools::path_to_filename_string(&target_path);
+                        self.add_to_database(&final_dir_name);
+                    }
+                }
             }
             println!();
         }
@@ -1585,6 +1751,223 @@ pub mod test_helpers {
 
     pub fn make_file_paths(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(|n| PathBuf::from(*n)).collect()
+    }
+}
+
+#[cfg(test)]
+mod test_custom_mappings {
+    use super::test_helpers::*;
+    use super::*;
+    use crate::config::CustomMapping;
+    use tempfile::TempDir;
+
+    /// Helper to create a `DirMove` with custom mappings.
+    fn make_dirmove_with_mappings(root: PathBuf, mappings: Vec<(&str, &str)>) -> DirMove {
+        let custom_mappings = mappings
+            .into_iter()
+            .map(|(pattern, dir)| CustomMapping::new(pattern, dir))
+            .collect();
+        let config = Config {
+            custom_mappings,
+            dryrun: true,
+            min_group_size: 1,
+            min_prefix_chars: 1,
+            ..Default::default()
+        };
+        make_dirmove(root, config)
+    }
+
+    #[test]
+    fn find_directory_matches_exact_name() {
+        let mapping = CustomMapping::new("pattern", "Target Dir");
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("Target Dir"),
+            name: "target dir".to_string(),
+        }];
+        let result = DirMove::find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn find_directory_matches_normalized_name() {
+        let mapping = CustomMapping::new("pattern", "Target Dir");
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("targetdir"),
+            name: "targetdir".to_string(),
+        }];
+        let result = DirMove::find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn find_directory_matches_dotted_name() {
+        let mapping = CustomMapping::new("pattern", "Target Dir");
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("Target.Dir"),
+            name: "target dir".to_string(),
+        }];
+        let result = DirMove::find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn find_directory_no_match() {
+        let mapping = CustomMapping::new("pattern", "Target Dir");
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("Other Dir"),
+            name: "other dir".to_string(),
+        }];
+        let result = DirMove::find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_directory_selects_correct_index() {
+        let mapping = CustomMapping::new("pattern", "Second Dir");
+        let directories = vec![
+            DirectoryInfo {
+                path: PathBuf::from("First Dir"),
+                name: "first dir".to_string(),
+            },
+            DirectoryInfo {
+                path: PathBuf::from("Second Dir"),
+                name: "second dir".to_string(),
+            },
+            DirectoryInfo {
+                path: PathBuf::from("Third Dir"),
+                name: "third dir".to_string(),
+            },
+        ];
+        let result = DirMove::find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn process_custom_mappings_returns_unmatched_files() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+
+        // Create files
+        std::fs::write(root.join("something.video.mp4"), "")?;
+        std::fs::write(root.join("other.file.mp4"), "")?;
+
+        // Create target directory
+        std::fs::create_dir(root.join("Custom Dir"))?;
+
+        let dirmove = make_dirmove_with_mappings(root.clone(), vec![("something", "Custom Dir")]);
+        let files = vec![root.join("something.video.mp4"), root.join("other.file.mp4")];
+        let directories = dirmove.collect_directories_in_root()?;
+
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+
+        // "other.file.mp4" should remain since it doesn't match the pattern
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining[0].ends_with("other.file.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn process_custom_mappings_empty_when_no_mappings() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("file1.mp4"), "")?;
+        std::fs::write(root.join("file2.mp4"), "")?;
+
+        let config = Config {
+            custom_mappings: vec![],
+            dryrun: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove(root.clone(), config);
+        let files = vec![root.join("file1.mp4"), root.join("file2.mp4")];
+        let directories = vec![];
+
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+
+        // All files should remain since there are no mappings
+        assert_eq!(remaining.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn process_custom_mappings_case_insensitive_pattern() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+
+        // File with different case than pattern
+        std::fs::write(root.join("SOMETHING.Video.mp4"), "")?;
+        std::fs::create_dir(root.join("Target"))?;
+
+        let dirmove = make_dirmove_with_mappings(root.clone(), vec![("something", "Target")]);
+        let files = vec![root.join("SOMETHING.Video.mp4")];
+        let directories = dirmove.collect_directories_in_root()?;
+
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+
+        // File should be matched despite case difference
+        assert!(remaining.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn process_custom_mappings_ignores_dots_in_pattern() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+
+        // File with dots
+        std::fs::write(root.join("Some.Thing.Video.mp4"), "")?;
+        std::fs::create_dir(root.join("Target"))?;
+
+        // Pattern without dots should match file with dots
+        let dirmove = make_dirmove_with_mappings(root.clone(), vec![("something", "Target")]);
+        let files = vec![root.join("Some.Thing.Video.mp4")];
+        let directories = dirmove.collect_directories_in_root()?;
+
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+
+        assert!(remaining.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn process_custom_mappings_no_match_without_directory() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("something.video.mp4"), "")?;
+        // No target directory created
+
+        let dirmove = make_dirmove_with_mappings(root.clone(), vec![("something", "Missing Dir")]);
+        let files = vec![root.join("something.video.mp4")];
+        let directories = vec![];
+
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+
+        // File should remain since target directory doesn't exist
+        assert_eq!(remaining.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_mappings_first_match_wins() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("abc.xyz.video.mp4"), "")?;
+        std::fs::create_dir(root.join("Dir A"))?;
+        std::fs::create_dir(root.join("Dir B"))?;
+
+        // Both patterns match, but first should win
+        let dirmove = make_dirmove_with_mappings(root.clone(), vec![("abc", "Dir A"), ("xyz", "Dir B")]);
+        let files = vec![root.join("abc.xyz.video.mp4")];
+        let directories = dirmove.collect_directories_in_root()?;
+
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+
+        // File should be matched to first mapping
+        assert!(remaining.is_empty());
+        Ok(())
     }
 }
 

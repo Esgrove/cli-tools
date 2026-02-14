@@ -46,11 +46,11 @@ struct DirMoveArgs {
     #[arg(short = 'i', long = "ignore", num_args = 1, action = clap::ArgAction::Append, name = "IGNORE")]
     prefix_ignore: Vec<String>,
 
-    /// Group name to ignore (exact match, won't be offered as new directory)
+    /// Group name to ignore
     #[arg(short = 'I', long = "ignore-group", num_args = 1, action = clap::ArgAction::Append, name = "GROUP")]
     ignored_group_name: Vec<String>,
 
-    /// Ignore groups containing this part (substring match in any part of group name)
+    /// Ignore groups containing this part (substring match)
     #[arg(short = 'P', long = "ignore-group-part", num_args = 1, action = clap::ArgAction::Append, name = "PART")]
     ignored_group_part: Vec<String>,
 
@@ -62,11 +62,15 @@ struct DirMoveArgs {
     #[arg(short = 'u', long = "unpack", num_args = 1, action = clap::ArgAction::Append, name = "NAME")]
     unpack_directory: Vec<String>,
 
+    /// Name to directory mapping pair (pattern:dirname)
+    #[arg(short = 'M', long = "map", num_args = 1, action = clap::ArgAction::Append, name = "MAPPING")]
+    custom_mapping: Vec<String>,
+
     /// Minimum number of matching files needed to create a group
     #[arg(short = 'g', long, name = "COUNT")]
     group: Option<usize>,
 
-    /// Minimum character count for prefixes to be valid group names (excluding dots)
+    /// Minimum character count for prefixes to be valid group names
     #[arg(short = 'm', long = "min-chars", name = "CHARS")]
     min_prefix_chars: Option<usize>,
 

@@ -6,11 +6,31 @@ use serde::Deserialize;
 
 use crate::DirMoveArgs;
 
+/// A custom mapping pair that maps files containing a pattern to a specific directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomMapping {
+    /// Pattern to match in filename (case-insensitive, normalized).
+    pub(crate) pattern: String,
+    /// Target directory name for matching files.
+    pub(crate) directory: String,
+}
+
+impl CustomMapping {
+    /// Create a new custom mapping with normalized pattern (lowercase, no dots/spaces).
+    pub(crate) fn new(pattern: &str, directory: &str) -> Self {
+        Self {
+            pattern: pattern.to_lowercase().replace(['.', ' '], ""),
+            directory: directory.to_string(),
+        }
+    }
+}
+
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug, Default)]
 pub struct Config {
     pub(crate) auto: bool,
     pub(crate) create: bool,
+    pub(crate) custom_mappings: Vec<CustomMapping>,
     pub(crate) debug: bool,
     pub(crate) dryrun: bool,
     pub(crate) include: Vec<String>,
@@ -35,6 +55,8 @@ struct DirMoveConfig {
     auto: bool,
     #[serde(default)]
     create: bool,
+    #[serde(default)]
+    custom_mappings: Vec<[String; 2]>,
     #[serde(default)]
     debug: bool,
     #[serde(default)]
@@ -127,6 +149,28 @@ impl Config {
             .unique()
             .collect();
 
+        // Parse CLI mappings from "pattern:dirname" format
+        let cli_mappings: Vec<[String; 2]> = args
+            .custom_mapping
+            .into_iter()
+            .filter_map(|s| {
+                let parts: Vec<&str> = s.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    Some([parts[0].to_string(), parts[1].to_string()])
+                } else {
+                    eprintln!("Warning: Invalid custom mapping format '{s}', expected 'pattern:dirname'");
+                    None
+                }
+            })
+            .collect();
+
+        let custom_mappings: Vec<CustomMapping> = user_config
+            .custom_mappings
+            .into_iter()
+            .chain(cli_mappings)
+            .map(|pair| CustomMapping::new(&pair[0], &pair[1]))
+            .collect();
+
         let ignored_group_names: Vec<String> = user_config
             .ignored_group_names
             .into_iter()
@@ -169,6 +213,7 @@ impl Config {
         Ok(Self {
             auto: args.auto || user_config.auto,
             create: args.create || user_config.create,
+            custom_mappings,
             debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
             include,
@@ -437,6 +482,25 @@ unpack_directories = ["subs", "sample"]
     }
 
     #[test]
+    fn from_toml_str_parses_custom_mappings() {
+        let toml = r#"
+[dirmove]
+custom_mappings = [["something", "Custom Dir"], ["other", "Another Dir"]]
+"#;
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.custom_mappings.len(), 2);
+        assert_eq!(config.custom_mappings[0], ["something", "Custom Dir"]);
+        assert_eq!(config.custom_mappings[1], ["other", "Another Dir"]);
+    }
+
+    #[test]
+    fn from_toml_str_default_custom_mappings_is_empty() {
+        let toml = "";
+        let config = DirMoveConfig::from_toml_str(toml).expect("should parse empty config");
+        assert!(config.custom_mappings.is_empty());
+    }
+
+    #[test]
     fn from_toml_str_invalid_toml_returns_error() {
         let toml = "this is not valid toml {{{";
         let result = DirMoveConfig::from_toml_str(toml);
@@ -455,6 +519,41 @@ verbose = true
         let config = DirMoveConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.verbose);
         assert!(!config.auto);
+    }
+}
+
+#[cfg(test)]
+mod custom_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn new_normalizes_pattern_to_lowercase() {
+        let mapping = CustomMapping::new("SomePattern", "Target Dir");
+        assert_eq!(mapping.pattern, "somepattern");
+    }
+
+    #[test]
+    fn new_removes_dots_from_pattern() {
+        let mapping = CustomMapping::new("some.pattern", "Target Dir");
+        assert_eq!(mapping.pattern, "somepattern");
+    }
+
+    #[test]
+    fn new_removes_spaces_from_pattern() {
+        let mapping = CustomMapping::new("some pattern", "Target Dir");
+        assert_eq!(mapping.pattern, "somepattern");
+    }
+
+    #[test]
+    fn new_preserves_directory_name_case() {
+        let mapping = CustomMapping::new("pattern", "Custom Dir Name");
+        assert_eq!(mapping.directory, "Custom Dir Name");
+    }
+
+    #[test]
+    fn new_handles_mixed_separators() {
+        let mapping = CustomMapping::new("Some.Pattern Here", "Target");
+        assert_eq!(mapping.pattern, "somepatternhere");
     }
 }
 
@@ -677,5 +776,48 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "-f"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         assert!(config.overwrite);
+    }
+
+    #[test]
+    fn parses_custom_mapping_cli_arg() {
+        let args = DirMoveArgs::try_parse_from(["test", "-M", "pattern:dirname"]).expect("should parse");
+        assert_eq!(args.custom_mapping, vec!["pattern:dirname"]);
+    }
+
+    #[test]
+    fn parses_multiple_custom_mappings() {
+        let args =
+            DirMoveArgs::try_parse_from(["test", "-M", "one:Dir One", "-M", "two:Dir Two"]).expect("should parse");
+        assert_eq!(args.custom_mapping, vec!["one:Dir One", "two:Dir Two"]);
+    }
+
+    #[test]
+    fn parses_custom_mapping_long_form() {
+        let args = DirMoveArgs::try_parse_from(["test", "--map", "pattern:dirname"]).expect("should parse");
+        assert_eq!(args.custom_mapping, vec!["pattern:dirname"]);
+    }
+
+    #[test]
+    fn config_from_args_parses_custom_mappings() {
+        let args = DirMoveArgs::try_parse_from(["test", "-M", "something:Custom Dir"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert_eq!(config.custom_mappings.len(), 1);
+        assert_eq!(config.custom_mappings[0].pattern, "something");
+        assert_eq!(config.custom_mappings[0].directory, "Custom Dir");
+    }
+
+    #[test]
+    fn config_from_args_normalizes_custom_mapping_pattern() {
+        let args = DirMoveArgs::try_parse_from(["test", "-M", "Some.Pattern:Target"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert_eq!(config.custom_mappings[0].pattern, "somepattern");
+    }
+
+    #[test]
+    fn config_from_args_warns_on_invalid_mapping_format() {
+        let args = DirMoveArgs::try_parse_from(["test", "-M", "invalid_no_colon"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        // Invalid format should be skipped
+        assert!(config.custom_mappings.is_empty());
     }
 }

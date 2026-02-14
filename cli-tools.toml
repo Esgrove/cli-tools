@@ -38,6 +38,10 @@
 # Prefixes to always use for directory names (overrides automatic prefix detection)
 # prefix_overrides = ["longer.prefix", "some.name"]
 
+# Custom mapping pairs [pattern, dirname] - files containing pattern are moved to dirname
+# Pattern matching is case-insensitive and ignores dots/spaces
+# custom_mappings = [["something", "Custom Dir"], ["otherpattern", "Another Directory"]]
+
 # Group names to ignore (exact match, won't be offered as new directory)
 # ignored_group_names = ["Episode", "Video", "Part", "Chapter", "Scene"]
 
