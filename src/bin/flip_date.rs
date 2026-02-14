@@ -111,7 +111,7 @@ impl DateConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+        let Some(path) = cli_tools::config_path() else {
             return Ok(Self::default());
         };
 

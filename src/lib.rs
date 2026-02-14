@@ -1,4 +1,3 @@
-pub mod config;
 pub mod date;
 pub mod dot_rename;
 
@@ -7,6 +6,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use clap::Command;
@@ -15,6 +15,29 @@ use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
+
+#[cfg(not(test))]
+const PROJECT_NAME: &str = env!("CARGO_PKG_NAME");
+
+/// Path to the user config file: `$HOME/.config/cli-tools.toml`
+///
+/// Returns `None` if the home directory cannot be determined.
+#[cfg(not(test))]
+static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    let home_dir = dirs::home_dir()?;
+    Some(home_dir.join(".config").join(format!("{PROJECT_NAME}.toml")))
+});
+
+/// Path to the sample config fixture file used during tests.
+#[cfg(test)]
+static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    Some(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample_config.toml"),
+    )
+});
 
 /// Bytes per kilobyte.
 const KB: u64 = 1024;
@@ -41,6 +64,16 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
     // Linux
     "lost+found",
 ];
+
+/// Return the path to the user config file.
+///
+/// During library tests, returns the sample fixture at `tests/fixtures/sample_config.toml`.
+/// Otherwise, returns `$HOME/.config/cli-tools.toml`.
+///
+/// Returns `None` if the home directory cannot be determined.
+pub fn config_path() -> Option<&'static Path> {
+    CONFIG_PATH.as_deref()
+}
 
 /// Append an extension to `PathBuf`, which is missing from the standard lib :(
 #[must_use]

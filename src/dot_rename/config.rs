@@ -103,7 +103,7 @@ impl DotsConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     pub fn get_user_config() -> anyhow::Result<Self> {
-        let Some(path) = crate::config::CONFIG_PATH.as_deref() else {
+        let Some(path) = crate::config_path() else {
             return Ok(Self::default());
         };
 

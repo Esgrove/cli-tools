@@ -1,31 +1,6 @@
 # Sample configuration file for testing cli-tools config parsing
 # This file contains all sections with various options for testing
 
-[dots]
-# Dot rename tool configuration
-date_starts_with_year = true
-move_to_start = ["REPACK", "PROPER"]
-move_to_end = ["READNFO"]
-include = ["*.mkv", "*.mp4"]
-exclude = ["*.txt", "*.nfo"]
-
-[dots.replace]
-"SAMPLE.TEXT" = "REPLACED"
-"OLD.NAME" = "NEW.NAME"
-
-[dots.regex_replace]
-"\\d{4}\\.\\d{2}\\.\\d{2}" = "DATE"
-
-[flip_date]
-directory = false
-dryrun = false
-verbose = false
-recurse = false
-overwrite = false
-swap_year = false
-year_first = false
-file_extensions = ["mp4", "mkv", "avi", "mov"]
-
 [dirmove]
 auto = false
 create = false
@@ -40,6 +15,30 @@ min_group_size = 3
 prefix_ignores = ["the", "a", "an"]
 prefix_overrides = ["special"]
 unpack_directories = ["subs", "sample", "screens"]
+
+[dots]
+date_starts_with_year = true
+move_to_start = ["REPACK", "PROPER"]
+move_to_end = ["READNFO"]
+include = ["*.mkv", "*.mp4"]
+exclude = ["*.txt", "*.nfo"]
+replace = [
+    ["SAMPLE.TEXT", "REPLACED"],
+    ["OLD.NAME", "NEW.NAME"],
+]
+regex_replace = [
+    ["\\d{4}\\.\\d{2}\\.\\d{2}", "DATE"],
+]
+
+[flip_date]
+directory = false
+dryrun = false
+verbose = false
+recurse = false
+overwrite = false
+swap_year = false
+year_first = false
+file_extensions = ["mp4", "mkv", "avi", "mov"]
 
 [dupefind]
 dryrun = false

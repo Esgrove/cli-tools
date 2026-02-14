@@ -101,7 +101,7 @@ impl DirMoveConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools::config::CONFIG_PATH.as_deref() else {
+        let Some(path) = cli_tools::config_path() else {
             return Ok(Self::default());
         };
 
@@ -134,6 +134,17 @@ impl Config {
     /// Returns an error if the config file cannot be read or parsed.
     pub fn from_args(args: DirMoveArgs) -> Result<Self> {
         let user_config = DirMoveConfig::get_user_config()?;
+        Ok(Self::from_args_with_config(args, user_config))
+    }
+
+    /// Create config from command line args only, ignoring the user config file.
+    #[cfg(test)]
+    fn from_args_default_config(args: DirMoveArgs) -> Self {
+        Self::from_args_with_config(args, DirMoveConfig::default())
+    }
+
+    /// Create config by combining command line args with the given user config.
+    fn from_args_with_config(args: DirMoveArgs, user_config: DirMoveConfig) -> Self {
         let include: Vec<String> = user_config
             .include
             .into_iter()
@@ -210,7 +221,7 @@ impl Config {
             .unique()
             .collect();
 
-        Ok(Self {
+        Self {
             auto: args.auto || user_config.auto,
             create: args.create || user_config.create,
             custom_mappings,
@@ -229,7 +240,7 @@ impl Config {
             verbose: args.verbose || user_config.verbose,
             unpack_directory_names,
             show_db: args.show_db,
-        })
+        }
     }
 }
 
@@ -800,7 +811,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_parses_custom_mappings() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "something:Custom Dir"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = Config::from_args_default_config(args);
         assert_eq!(config.custom_mappings.len(), 1);
         assert_eq!(config.custom_mappings[0].pattern, "something");
         assert_eq!(config.custom_mappings[0].directory, "Custom Dir");
@@ -809,14 +820,14 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_normalizes_custom_mapping_pattern() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "Some.Pattern:Target"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = Config::from_args_default_config(args);
         assert_eq!(config.custom_mappings[0].pattern, "somepattern");
     }
 
     #[test]
     fn config_from_args_warns_on_invalid_mapping_format() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "invalid_no_colon"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = Config::from_args_default_config(args);
         // Invalid format should be skipped
         assert!(config.custom_mappings.is_empty());
     }
