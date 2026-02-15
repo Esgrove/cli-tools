@@ -2,9 +2,12 @@
 //!
 //! This CLI tool parses `.torrent` files and adds them to qBittorrent via the `WebUI` API,
 //! automatically renaming the output file based on the torrent filename.
+//! The `info` subcommand connects to qBittorrent and displays statistics
+//! about existing torrents, including counts, sizes, and completion status.
 
 mod add;
 mod config;
+mod info;
 mod qbittorrent;
 mod stats;
 mod torrent;
@@ -13,7 +16,7 @@ mod utils;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::add::QTorrent;
@@ -33,25 +36,28 @@ use crate::add::QTorrent;
 )]
 #[allow(clippy::doc_markdown)]
 pub struct QtorrentArgs {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Optional input path(s) with torrent files or directories
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub path: Vec<PathBuf>,
 
     /// qBittorrent WebUI host
-    #[arg(short = 'H', long, name = "HOST")]
-    host: Option<String>,
+    #[arg(short = 'H', long, name = "HOST", global = true)]
+    pub host: Option<String>,
 
     /// qBittorrent WebUI port
-    #[arg(short = 'P', long, name = "PORT")]
-    port: Option<u16>,
+    #[arg(short = 'P', long, name = "PORT", global = true)]
+    pub port: Option<u16>,
 
     /// qBittorrent WebUI username
-    #[arg(short = 'u', long, name = "USER")]
-    username: Option<String>,
+    #[arg(short = 'u', long, name = "USER", global = true)]
+    pub username: Option<String>,
 
     /// qBittorrent WebUI password
-    #[arg(short = 'w', long, name = "PASS")]
-    password: Option<String>,
+    #[arg(short = 'w', long, name = "PASS", global = true)]
+    pub password: Option<String>,
 
     /// Save path for downloaded files
     #[arg(short = 's', long, name = "PATH")]
@@ -101,24 +107,41 @@ pub struct QtorrentArgs {
     #[arg(short = 'x', long)]
     pub skip_existing: bool,
 
-    /// Generate shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
     /// Print verbose output
-    #[arg(short = 'v', long)]
-    verbose: bool,
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
+}
+
+/// Subcommands for qtorrent.
+#[derive(Subcommand)]
+enum Command {
+    /// Show info and statistics for existing torrents in qBittorrent
+    #[command(name = "info")]
+    Info,
+
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = QtorrentArgs::parse();
 
-    // Handle shell completion generation
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, QtorrentArgs::command(), true, env!("CARGO_BIN_NAME"))
-    } else {
-        QTorrent::new(args)?.run().await
+    match args.command {
+        Some(Command::Completion { shell, install }) => {
+            cli_tools::generate_shell_completion(shell, QtorrentArgs::command(), install, env!("CARGO_BIN_NAME"))
+        }
+        Some(Command::Info) => info::run(args).await,
+        None => QTorrent::new(args)?.run().await,
     }
 }
 
@@ -244,6 +267,7 @@ mod cli_args_tests {
         assert!(!args.paused);
         assert!(!args.dryrun);
         assert!(!args.offline);
+        assert!(args.command.is_none());
     }
 
     #[test]
@@ -315,6 +339,54 @@ mod cli_args_tests {
     fn rejects_invalid_min_size() {
         let result = QtorrentArgs::try_parse_from(["test", "-m", "not_a_number"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_info_subcommand() {
+        let args = QtorrentArgs::try_parse_from(["test", "info"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info)));
+    }
+
+    #[test]
+    fn parses_info_with_global_verbose() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-v"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info)));
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn parses_info_with_global_connection_args() {
+        let args =
+            QtorrentArgs::try_parse_from(["test", "info", "-H", "192.168.1.1", "-P", "9090"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info)));
+        assert_eq!(args.host, Some("192.168.1.1".to_string()));
+        assert_eq!(args.port, Some(9090));
+    }
+
+    #[test]
+    fn parses_completion_subcommand() {
+        let args = QtorrentArgs::try_parse_from(["test", "completion", "bash"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Completion { .. })));
+    }
+
+    #[test]
+    fn parses_completion_with_install() {
+        let args = QtorrentArgs::try_parse_from(["test", "completion", "bash", "-I"]).expect("should parse");
+        match args.command {
+            Some(Command::Completion { shell, install }) => {
+                assert_eq!(shell, Shell::Bash);
+                assert!(install);
+            }
+            _ => panic!("Expected Completion command"),
+        }
+    }
+
+    #[test]
+    fn global_args_before_subcommand() {
+        let args = QtorrentArgs::try_parse_from(["test", "-v", "-H", "myhost", "info"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info)));
+        assert!(args.verbose);
+        assert_eq!(args.host, Some("myhost".to_string()));
     }
 }
 

@@ -15,7 +15,7 @@ use cli_tools::{print_bold, print_cyan, print_magenta_bold};
 
 use crate::QtorrentArgs;
 use crate::config::Config;
-use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
+use crate::qbittorrent::{AddTorrentParams, QBittorrentClient, TorrentListItem};
 use crate::stats::TorrentStats;
 use crate::torrent::{FileInfo, FilteredFiles, parse_torrent};
 use crate::utils;
@@ -126,15 +126,15 @@ impl QTorrent {
             }
 
             // Check if a torrent already exists in qBittorrent
-            if let Some(existing_name) = Self::check_existing_torrent(&info, &existing_torrents) {
+            if let Some(existing_item) = Self::check_existing_torrent(&info, &existing_torrents) {
                 println!(
                     "  {} Already exists in qBittorrent as: {}",
                     "⊘".yellow(),
-                    existing_name.cyan()
+                    existing_item.name.cyan()
                 );
 
                 // Offer to rename the existing torrent
-                match self.prompt_rename_existing(&info, existing_name, &client).await {
+                match self.prompt_rename_existing(&info, &existing_item.name, &client).await {
                     Ok(true) => stats.inc_renamed(),
                     Ok(false) => stats.inc_duplicate(),
                     Err(error) => {
@@ -520,7 +520,11 @@ impl QTorrent {
     }
 
     /// Print dry-run summary of all torrents.
-    fn print_dryrun_summary(&self, torrents: &[TorrentInfo], existing_torrents: Option<&HashMap<String, String>>) {
+    fn print_dryrun_summary(
+        &self,
+        torrents: &[TorrentInfo],
+        existing_torrents: Option<&HashMap<String, TorrentListItem>>,
+    ) {
         let total = torrents.len();
 
         // Count how many would be skipped as duplicates
@@ -561,9 +565,9 @@ impl QTorrent {
 
             // Show if this torrent already exists
             if let Some(existing) = existing_torrents
-                && let Some(existing_name) = Self::check_existing_torrent(info, existing)
+                && let Some(existing_item) = Self::check_existing_torrent(info, existing)
             {
-                println!("  {} Already exists as: {}", "⊘".yellow(), existing_name.cyan());
+                println!("  {} Already exists as: {}", "⊘".yellow(), existing_item.name.cyan());
             }
         }
     }
@@ -924,11 +928,11 @@ impl QTorrent {
 
     /// Check if a torrent already exists in qBittorrent by comparing info hashes.
     ///
-    /// Returns the existing torrent name if found, None otherwise.
+    /// Returns the existing `TorrentListItem` if found, `None` otherwise.
     fn check_existing_torrent<'a>(
         info: &TorrentInfo,
-        existing_torrents: &'a HashMap<String, String>,
-    ) -> Option<&'a String> {
+        existing_torrents: &'a HashMap<String, TorrentListItem>,
+    ) -> Option<&'a TorrentListItem> {
         let hash_lower = info.info_hash.to_lowercase();
         existing_torrents.get(&hash_lower)
     }
@@ -1039,9 +1043,25 @@ mod normalize_rename_options {
 #[cfg(test)]
 mod test_check_existing_torrent {
     use super::*;
+    use crate::qbittorrent::TorrentListItem;
     use crate::torrent::Torrent;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    /// Creates a minimal `TorrentListItem` for testing with the given name.
+    fn create_torrent_list_item(name: &str) -> TorrentListItem {
+        TorrentListItem {
+            hash: String::new(),
+            name: name.to_string(),
+            added_on: 0,
+            completion_on: None,
+            progress: 0.0,
+            ratio: 0.0,
+            save_path: String::new(),
+            size: 0,
+            tags: String::new(),
+        }
+    }
 
     /// Creates a minimal `TorrentInfo` for testing with the given info hash.
     fn create_torrent_info_with_hash(info_hash: &str) -> TorrentInfo {
@@ -1064,7 +1084,7 @@ mod test_check_existing_torrent {
     #[test]
     fn returns_none_when_map_is_empty() {
         let info = create_torrent_info_with_hash("abc123def456");
-        let existing: HashMap<String, String> = HashMap::new();
+        let existing: HashMap<String, TorrentListItem> = HashMap::new();
 
         let result = QTorrent::check_existing_torrent(&info, &existing);
         assert!(result.is_none());
@@ -1073,8 +1093,8 @@ mod test_check_existing_torrent {
     #[test]
     fn returns_none_when_hash_not_found() {
         let info = create_torrent_info_with_hash("abc123def456");
-        let mut existing: HashMap<String, String> = HashMap::new();
-        existing.insert("different_hash".to_string(), "Some Torrent".to_string());
+        let mut existing: HashMap<String, TorrentListItem> = HashMap::new();
+        existing.insert("different_hash".to_string(), create_torrent_list_item("Some Torrent"));
 
         let result = QTorrent::check_existing_torrent(&info, &existing);
         assert!(result.is_none());
@@ -1083,32 +1103,41 @@ mod test_check_existing_torrent {
     #[test]
     fn returns_name_when_hash_matches() {
         let info = create_torrent_info_with_hash("abc123def456");
-        let mut existing: HashMap<String, String> = HashMap::new();
-        existing.insert("abc123def456".to_string(), "Existing Torrent Name".to_string());
+        let mut existing: HashMap<String, TorrentListItem> = HashMap::new();
+        existing.insert(
+            "abc123def456".to_string(),
+            create_torrent_list_item("Existing Torrent Name"),
+        );
 
         let result = QTorrent::check_existing_torrent(&info, &existing);
-        assert_eq!(result, Some(&"Existing Torrent Name".to_string()));
+        assert_eq!(
+            result.map(|item| &item.name),
+            Some(&"Existing Torrent Name".to_string())
+        );
     }
 
     #[test]
     fn matches_case_insensitively() {
         let info = create_torrent_info_with_hash("ABC123DEF456");
-        let mut existing: HashMap<String, String> = HashMap::new();
-        existing.insert("abc123def456".to_string(), "Existing Torrent".to_string());
+        let mut existing: HashMap<String, TorrentListItem> = HashMap::new();
+        existing.insert("abc123def456".to_string(), create_torrent_list_item("Existing Torrent"));
 
         let result = QTorrent::check_existing_torrent(&info, &existing);
-        assert_eq!(result, Some(&"Existing Torrent".to_string()));
+        assert_eq!(result.map(|item| &item.name), Some(&"Existing Torrent".to_string()));
     }
 
     #[test]
     fn finds_among_multiple_torrents() {
         let info = create_torrent_info_with_hash("target_hash_123");
-        let mut existing: HashMap<String, String> = HashMap::new();
-        existing.insert("hash_one".to_string(), "Torrent One".to_string());
-        existing.insert("target_hash_123".to_string(), "Target Torrent".to_string());
-        existing.insert("hash_three".to_string(), "Torrent Three".to_string());
+        let mut existing: HashMap<String, TorrentListItem> = HashMap::new();
+        existing.insert("hash_one".to_string(), create_torrent_list_item("Torrent One"));
+        existing.insert(
+            "target_hash_123".to_string(),
+            create_torrent_list_item("Target Torrent"),
+        );
+        existing.insert("hash_three".to_string(), create_torrent_list_item("Torrent Three"));
 
         let result = QTorrent::check_existing_torrent(&info, &existing);
-        assert_eq!(result, Some(&"Target Torrent".to_string()));
+        assert_eq!(result.map(|item| &item.name), Some(&"Target Torrent".to_string()));
     }
 }

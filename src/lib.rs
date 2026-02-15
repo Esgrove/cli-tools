@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local, Utc};
 use clap::Command;
 use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
@@ -789,6 +790,18 @@ pub fn path_to_file_extension_string(path: &Path) -> String {
 #[must_use]
 pub fn path_to_string_relative(path: &Path) -> String {
     path_to_string(&get_relative_path_from_current_working_directory(path))
+}
+
+/// Format a Unix timestamp as a local datetime string.
+#[must_use]
+pub fn format_timestamp(timestamp: i64) -> String {
+    DateTime::<Utc>::from_timestamp(timestamp, 0).map_or_else(
+        || "unknown".to_string(),
+        |utc| {
+            let local: DateTime<Local> = utc.into();
+            local.format("%Y-%m-%d %H:%M").to_string()
+        },
+    )
 }
 
 #[inline]

@@ -374,7 +374,12 @@ For multi-file torrents, offers to rename the root folder and supports filtering
 ```console
 Add torrents to qBittorrent with automatic file renaming
 
-Usage: qtorrent [OPTIONS] [PATH]...
+Usage: qtorrent [OPTIONS] [PATH]... [COMMAND]
+
+Commands:
+  info        Show info and statistics for existing torrents in qBittorrent
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]...  Optional input path(s) with torrent files or directories
@@ -389,16 +394,37 @@ Options:
   -t, --tags <TAGS>          Tags for the torrent (comma-separated)
   -a, --paused               Add torrent in paused state
   -p, --dryrun               Print what would be done without actually adding torrents
+  -o, --offline              Offline mode: skip qBittorrent connection entirely (implies --dryrun)
   -y, --yes                  Skip confirmation prompts
   -e, --skip-ext <EXT>       File extensions to skip (e.g., nfo, txt, jpg)
-  -k, --skip-name <NAME>     Directory names to skip (case-insensitive full name match)
+  -k, --skip-dir <NAME>      Directory names to skip (case-insensitive full name match)
   -m, --min-size <MB>        Minimum file size in MB (files smaller than this will be skipped)
   -r, --recurse              Recurse into subdirectories when searching for torrent files
   -x, --skip-existing        Skip rename prompts for existing/duplicate torrents
-  -l, --completion <SHELL>   Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose              Print verbose output
   -h, --help                 Print help (see more with '--help')
   -V, --version              Print version
+```
+
+### Info subcommand
+
+Show statistics for existing torrents: total count, total size,
+completed size, downloading, and not-yet-started sizes.
+Use `--verbose` to list each torrent with progress, size, ratio, save path,
+added/completed dates, and tags — separated into completed and incomplete sections.
+
+```console
+Show info and statistics for existing torrents in qBittorrent
+
+Usage: qtorrent info [OPTIONS]
+
+Options:
+  -H, --host <HOST>      qBittorrent WebUI host
+  -P, --port <PORT>      qBittorrent WebUI port
+  -u, --username <USER>  qBittorrent WebUI username
+  -w, --password <PASS>  qBittorrent WebUI password
+  -v, --verbose          Print verbose output
+  -h, --help             Print help
 ```
 
 ## Vtag

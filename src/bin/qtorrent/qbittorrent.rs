@@ -48,11 +48,37 @@ pub struct AddTorrentParams {
 
 /// Torrent info from the qBittorrent API `/torrents/info` endpoint.
 #[derive(Debug, Deserialize)]
-struct TorrentListItem {
+pub struct TorrentListItem {
     /// Torrent hash.
-    hash: String,
+    pub hash: String,
     /// Torrent name.
-    name: String,
+    pub name: String,
+    /// Time (Unix Epoch) when the torrent was added to the client.
+    pub added_on: i64,
+    /// Time (Unix Epoch) when the torrent completed, or `None` if not yet completed.
+    #[serde(deserialize_with = "deserialize_completion_timestamp")]
+    pub completion_on: Option<i64>,
+    /// Torrent progress (percentage/100). Ranges from 0.0 to 1.0.
+    pub progress: f64,
+    /// Torrent share ratio. Max ratio value: 9999.
+    pub ratio: f64,
+    /// Path where this torrent's data is stored.
+    pub save_path: String,
+    /// Total size (bytes) of files selected for download.
+    pub size: i64,
+    /// Comma-concatenated tag list of the torrent.
+    pub tags: String,
+}
+
+impl TorrentListItem {
+    /// Check if the torrent has completed downloading.
+    ///
+    /// A torrent is considered completed if its progress is 1.0 (100%)
+    /// or if it has a valid completion timestamp.
+    #[must_use]
+    pub fn is_completed(&self) -> bool {
+        self.progress >= 1.0 || self.completion_on.is_some()
+    }
 }
 
 impl QBittorrentClient {
@@ -337,12 +363,12 @@ impl QBittorrentClient {
 
     /// Get the list of all torrents in qBittorrent.
     ///
-    /// Returns a map from torrent hash (lowercase) to torrent name.
+    /// Returns a map from torrent hash (lowercase) to `TorrentListItem`.
     /// The list is sorted by name.
     ///
     /// # Errors
     /// Returns an error if the request fails or if not authenticated.
-    pub async fn get_torrent_list(&self) -> Result<HashMap<String, String>> {
+    pub async fn get_torrent_list(&self) -> Result<HashMap<String, TorrentListItem>> {
         if !self.authenticated {
             bail!("Not authenticated. Call login() first.");
         }
@@ -371,7 +397,7 @@ impl QBittorrentClient {
             .into_iter()
             .map(|item| {
                 let hash = item.hash.to_lowercase();
-                (hash, item.name)
+                (hash, item)
             })
             .collect();
 
@@ -515,4 +541,15 @@ impl QBittorrentClient {
     fn build_url(&self, url: &str) -> String {
         format!("{}/api/v2/{url}", self.base_url)
     }
+}
+
+/// Deserialize a Unix timestamp into `Option<i64>`, treating negative values as `None`.
+///
+/// The qBittorrent API returns `-1` for `completion_on` when a torrent has not yet completed.
+fn deserialize_completion_timestamp<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i64::deserialize(deserializer)?;
+    if value < 0 { Ok(None) } else { Ok(Some(value)) }
 }
