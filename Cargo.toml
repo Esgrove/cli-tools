@@ -1,9 +1,9 @@
 [package]
 name = "cli-tools"
-version = "8.13.0"
+version = "8.14.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
-description = "A collection of CLI utilities."
+description = "A collection of CLI utilities"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Esgrove/cli-tools"

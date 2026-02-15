@@ -40,6 +40,8 @@ pub struct TorrentInfo {
     /// For single-file torrents, this is the filename.
     /// For multi-file torrents, this is the root folder name.
     pub(crate) original_name: Option<String>,
+    /// Resolved tags for this torrent (from tag overwrite prefixes or default config tags).
+    pub(crate) tags: Option<String>,
 }
 
 /// Summary of files skipped due to directory matching.
@@ -65,6 +67,16 @@ impl SkippedDirectorySummary {
 }
 
 impl TorrentInfo {
+    /// Check if all files in this torrent were excluded by filters.
+    ///
+    /// Returns `true` for multi-file torrents where every file was filtered out,
+    /// meaning there are no files left to download.
+    pub(crate) fn all_files_excluded(&self) -> bool {
+        self.original_is_multi_file
+            && !self.excluded_indices.is_empty()
+            && self.excluded_indices.len() == self.torrent.files().len()
+    }
+
     /// Get the display name for this torrent (`rename_to` or internal name).
     #[allow(clippy::option_if_let_else)]
     pub(crate) fn display_name(&self) -> Cow<'_, str> {
@@ -394,7 +406,7 @@ mod test_torrent_info_helpers {
     //! Helper module to create test `TorrentInfo` instances.
 
     use super::*;
-    use crate::torrent::Torrent;
+    use crate::torrent::{File, Torrent};
     use std::path::PathBuf;
 
     /// Creates a minimal single-file torrent for testing.
@@ -402,6 +414,25 @@ mod test_torrent_info_helpers {
         let mut torrent = Torrent::default();
         torrent.info.name = Some(name.to_string());
         torrent.info.length = Some(1000);
+        torrent
+    }
+
+    /// Creates a minimal multi-file torrent for testing.
+    ///
+    /// Returns a torrent with the given file names, each 500 bytes.
+    pub fn create_multi_file_torrent(name: &str, file_names: &[&str]) -> Torrent {
+        let mut torrent = Torrent::default();
+        torrent.info.name = Some(name.to_string());
+        torrent.info.files = Some(
+            file_names
+                .iter()
+                .map(|file_name| File {
+                    length: 500,
+                    path: vec![(*file_name).to_string()],
+                    md5sum: None,
+                })
+                .collect(),
+        );
         torrent
     }
 
@@ -434,7 +465,81 @@ mod test_torrent_info_helpers {
             excluded_indices: vec![],
             single_included_file: single_included_file.map(String::from),
             original_name: None,
+            tags: None,
         }
+    }
+
+    /// Creates a `TorrentInfo` with specified excluded file indices for testing.
+    pub fn create_torrent_info_with_exclusions(
+        path: &str,
+        torrent_name: &str,
+        file_names: &[&str],
+        excluded_indices: Vec<usize>,
+        included_size: u64,
+    ) -> TorrentInfo {
+        let torrent = create_multi_file_torrent(torrent_name, file_names);
+        TorrentInfo {
+            path: PathBuf::from(path),
+            torrent,
+            bytes: vec![],
+            info_hash: "abc123".to_string(),
+            original_is_multi_file: true,
+            effective_is_multi_file: excluded_indices.len() < file_names.len()
+                && (file_names.len() - excluded_indices.len()) > 1,
+            rename_to: None,
+            included_size,
+            excluded_indices,
+            single_included_file: None,
+            original_name: Some(torrent_name.to_string()),
+            tags: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_all_files_excluded {
+    use crate::utils::test_torrent_info_helpers::*;
+
+    #[test]
+    fn returns_true_when_all_files_excluded() {
+        let info = create_torrent_info_with_exclusions(
+            "test.torrent",
+            "test_folder",
+            &["file1.txt", "file2.txt"],
+            vec![0, 1],
+            0,
+        );
+        assert!(info.all_files_excluded());
+    }
+
+    #[test]
+    fn returns_false_when_some_files_remain() {
+        let info = create_torrent_info_with_exclusions(
+            "test.torrent",
+            "test_folder",
+            &["file1.txt", "video.mp4"],
+            vec![0],
+            500,
+        );
+        assert!(!info.all_files_excluded());
+    }
+
+    #[test]
+    fn returns_false_when_no_files_excluded() {
+        let info = create_torrent_info_with_exclusions(
+            "test.torrent",
+            "test_folder",
+            &["file1.txt", "file2.txt"],
+            vec![],
+            1000,
+        );
+        assert!(!info.all_files_excluded());
+    }
+
+    #[test]
+    fn returns_false_for_single_file_torrent() {
+        let info = create_torrent_info("test.torrent", Some("file.txt"), None, false, false, None);
+        assert!(!info.all_files_excluded());
     }
 }
 

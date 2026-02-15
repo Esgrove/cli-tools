@@ -346,8 +346,8 @@ mod config_from_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "-e", ".NFO,.TXT"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         // CLI extensions should be included as lowercase without leading dots
-        assert!(config.skip_extensions.contains(&"nfo".to_string()));
-        assert!(config.skip_extensions.contains(&"txt".to_string()));
+        assert!(config.file_filter.skip_extensions.contains(&"nfo".to_string()));
+        assert!(config.file_filter.skip_extensions.contains(&"txt".to_string()));
     }
 
     #[test]
@@ -355,8 +355,8 @@ mod config_from_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "-k", "SAMPLE,Subs"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         // CLI directory names should be included as lowercase
-        assert!(config.skip_directories.contains(&"sample".to_string()));
-        assert!(config.skip_directories.contains(&"subs".to_string()));
+        assert!(config.file_filter.skip_directories.contains(&"sample".to_string()));
+        assert!(config.file_filter.skip_directories.contains(&"subs".to_string()));
     }
 
     #[test]
@@ -364,7 +364,7 @@ mod config_from_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "-m", "10"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         // CLI 10 MB = 10 * 1024 * 1024 bytes should take priority
-        assert_eq!(config.min_file_size_bytes, Some(10 * 1024 * 1024));
+        assert_eq!(config.file_filter.min_size_bytes, Some(10 * 1024 * 1024));
     }
 
     #[test]
@@ -380,24 +380,24 @@ mod config_from_args_tests {
     fn config_cli_extensions_enable_file_filters() {
         let args = QtorrentArgs::try_parse_from(["test", "-e", "nfo"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
-        assert!(config.has_file_filters());
-        assert!(config.skip_extensions.contains(&"nfo".to_string()));
+        assert!(!config.file_filter.is_empty());
+        assert!(config.file_filter.skip_extensions.contains(&"nfo".to_string()));
     }
 
     #[test]
     fn config_cli_directories_enable_file_filters() {
         let args = QtorrentArgs::try_parse_from(["test", "-k", "sample"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
-        assert!(config.has_file_filters());
-        assert!(config.skip_directories.contains(&"sample".to_string()));
+        assert!(!config.file_filter.is_empty());
+        assert!(config.file_filter.skip_directories.contains(&"sample".to_string()));
     }
 
     #[test]
     fn config_cli_min_size_enables_file_filters() {
         let args = QtorrentArgs::try_parse_from(["test", "-m", "50"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
-        assert!(config.has_file_filters());
-        assert!(config.min_file_size_bytes.is_some());
+        assert!(!config.file_filter.is_empty());
+        assert!(config.file_filter.min_size_bytes.is_some());
     }
 
     #[test]

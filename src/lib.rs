@@ -1784,7 +1784,7 @@ mod print_function_tests {
     }
 
     #[test]
-    fn print_warning_does_not_panic() {
+    fn print_yellow_does_not_panic() {
         print_yellow("test warning message");
     }
 

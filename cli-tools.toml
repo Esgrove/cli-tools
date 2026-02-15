@@ -317,6 +317,12 @@ replace = [
 # If torrent filename contains any of these strings, ignore it and use internal name instead
 # ignore_torrent_names = []
 
+# Overwrite tags based on torrent filename prefix.
+# If a torrent filename starts with one of these prefixes (case-insensitive),
+# use the prefix as the tag string instead of the default "tags" value.
+# Longer prefixes are checked first to allow more specific matches.
+# tag_overwrite_prefixes = ["SomePrefix", "Other"]
+
 [resolution]
 # Enable debug prints
 # debug = false

@@ -9,6 +9,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
+use crate::torrent::FileFilter;
+
 use crate::QtorrentArgs;
 
 /// Default qBittorrent `WebUI` host.
@@ -80,6 +82,23 @@ pub struct QtorrentConfig {
     /// If torrent filename contains any of these strings, ignore it and use internal name instead.
     #[serde(default)]
     ignore_torrent_names: Vec<String>,
+    /// Prefix-to-tag pairs for overwriting tags based on torrent filename.
+    /// Each entry is `[prefix, tag]`. If a torrent filename starts with the prefix
+    /// (case-insensitive), the corresponding tag is used instead of the default `tags` value.
+    /// Longer prefixes are checked first to allow more specific matches.
+    #[serde(default)]
+    tag_overwrite_prefixes: Vec<Vec<String>>,
+}
+
+/// A tag overwrite rule:
+/// if a torrent filename starts with the prefix,
+/// use the associated tag value.
+#[derive(Debug, Clone)]
+pub struct TagOverwrite {
+    /// Tag value to use when the prefix matches.
+    pub tag: String,
+    /// Lowercase prefix for case-insensitive matching.
+    lowercase_prefix: String,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -115,18 +134,18 @@ pub struct Config {
     pub recurse: bool,
     /// Input paths from command line arguments.
     pub input_paths: Vec<PathBuf>,
-    /// File extensions to skip (lowercase, without dot).
-    pub skip_extensions: Vec<String>,
-    /// Directory names to skip (lowercase for case-insensitive full name matching).
-    pub skip_directories: Vec<String>,
-    /// Minimum file size in bytes. Files smaller than this will be skipped.
-    pub min_file_size_bytes: Option<u64>,
+    /// File filter configuration for skipping files by extension, directory, or size.
+    pub file_filter: FileFilter,
     /// Substrings to remove from torrent filename when generating suggested name.
     pub remove_from_name: Vec<String>,
     /// Apply dots formatting to suggested name (uses dots config from config file).
     pub use_dots_formatting: bool,
     /// If torrent filename contains any of these strings, ignore it and use internal name instead.
     pub ignore_torrent_names: Vec<String>,
+    /// Prefixes to match against torrent filenames for tag overwriting.
+    /// If a torrent filename starts with one of these prefixes (case-insensitive),
+    /// use the prefix as the tag string instead of the default `tags` value.
+    pub tag_overwrite_prefixes: Vec<TagOverwrite>,
 }
 
 /// Wrapper needed for parsing the config file section.
@@ -235,6 +254,8 @@ impl Config {
             .or(user_config.min_file_size_mb)
             .map(|mb| (mb * 1024.0 * 1024.0) as u64);
 
+        let file_filter = FileFilter::new(skip_extensions, skip_directories, min_file_size_bytes);
+
         // Substrings to remove from suggested name
         let remove_from_name = user_config.remove_from_name;
 
@@ -243,6 +264,28 @@ impl Config {
 
         // Filename ignore patterns
         let ignore_torrent_names = user_config.ignore_torrent_names;
+
+        // Tag overwrite prefixes: parse [prefix, tag] pairs, pre-lowercase prefix,
+        // and sort by length descending for longest-match-first
+        let mut tag_overwrite_prefixes: Vec<TagOverwrite> = user_config
+            .tag_overwrite_prefixes
+            .into_iter()
+            .filter_map(|pair| {
+                if pair.len() == 2 {
+                    Some(TagOverwrite {
+                        lowercase_prefix: pair[0].to_lowercase(),
+                        tag: pair[1].clone(),
+                    })
+                } else {
+                    cli_tools::print_yellow!(
+                        "Ignoring invalid tag_overwrite_prefixes entry: expected [prefix, tag] pair"
+                    );
+                    None
+                }
+            })
+            .collect();
+
+        tag_overwrite_prefixes.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.lowercase_prefix.chars().count()));
 
         Ok(Self {
             host,
@@ -260,12 +303,11 @@ impl Config {
             skip_existing,
             recurse,
             input_paths,
-            skip_extensions,
-            skip_directories,
-            min_file_size_bytes,
+            file_filter,
             remove_from_name,
             use_dots_formatting,
             ignore_torrent_names,
+            tag_overwrite_prefixes,
         })
     }
 
@@ -275,10 +317,27 @@ impl Config {
         !self.username.is_empty() && !self.password.is_empty()
     }
 
-    /// Check if any file filtering is configured.
+    /// Resolve tags for a given torrent file path.
+    ///
+    /// If the torrent filename (without extension) starts with one of the configured
+    /// `tag_overwrite_prefixes` (case-insensitive), returns the associated tag value.
+    /// Otherwise, returns the default `tags` value from config.
     #[must_use]
-    pub const fn has_file_filters(&self) -> bool {
-        !self.skip_extensions.is_empty() || !self.skip_directories.is_empty() || self.min_file_size_bytes.is_some()
+    pub fn resolve_tags(&self, torrent_path: &std::path::Path) -> Option<String> {
+        if !self.tag_overwrite_prefixes.is_empty() {
+            let filename = torrent_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+
+            for entry in &self.tag_overwrite_prefixes {
+                if filename.starts_with(&entry.lowercase_prefix) {
+                    return Some(entry.tag.clone());
+                }
+            }
+        }
+
+        self.tags.clone()
     }
 
     /// Collect torrent file paths from the configured input paths.
@@ -439,6 +498,38 @@ ignore_torrent_names = ["unknown", "noname"]
     }
 
     #[test]
+    fn from_toml_str_parses_tag_overwrite_prefixes() {
+        let toml = r#"
+[qtorrent]
+tag_overwrite_prefixes = [["LongPrefix", "longtag"], ["Short", "shorttag"]]
+"#;
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.tag_overwrite_prefixes.len(), 2);
+        assert_eq!(config.tag_overwrite_prefixes[0], vec!["LongPrefix", "longtag"]);
+        assert_eq!(config.tag_overwrite_prefixes[1], vec!["Short", "shorttag"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_empty_tag_overwrite_prefixes() {
+        let toml = r"
+[qtorrent]
+tag_overwrite_prefixes = []
+";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.tag_overwrite_prefixes.is_empty());
+    }
+
+    #[test]
+    fn from_toml_str_defaults_tag_overwrite_prefixes_to_empty() {
+        let toml = r"
+[qtorrent]
+verbose = true
+";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.tag_overwrite_prefixes.is_empty());
+    }
+
+    #[test]
     fn from_toml_str_parses_recurse_and_skip_existing() {
         let toml = r"
 [qtorrent]
@@ -468,6 +559,19 @@ offline = true
     }
 
     #[test]
+    fn from_toml_str_parses_tags_and_tag_overwrite_prefixes_together() {
+        let toml = r#"
+[qtorrent]
+tags = "default-tag"
+tag_overwrite_prefixes = [["SpecialPrefix", "special"], ["Other", "othertag"]]
+"#;
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.tags, Some("default-tag".to_string()));
+        assert_eq!(config.tag_overwrite_prefixes.len(), 2);
+        assert_eq!(config.tag_overwrite_prefixes[0], vec!["SpecialPrefix", "special"]);
+    }
+
+    #[test]
     fn from_toml_str_ignores_other_sections() {
         let toml = r"
 [other_section]
@@ -479,5 +583,134 @@ verbose = true
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.verbose);
         assert!(!config.dryrun);
+    }
+}
+
+#[cfg(test)]
+mod test_resolve_tags {
+    use std::path::Path;
+
+    use super::*;
+
+    /// Helper to create a minimal `Config` with given tags and prefix-tag pairs.
+    fn make_config(tags: Option<&str>, prefixes: Vec<(&str, &str)>) -> Config {
+        let mut tag_overwrite_prefixes: Vec<TagOverwrite> = prefixes
+            .into_iter()
+            .map(|(prefix, tag)| TagOverwrite {
+                lowercase_prefix: prefix.to_lowercase(),
+                tag: tag.to_string(),
+            })
+            .collect();
+        tag_overwrite_prefixes.sort_by_key(|entry| std::cmp::Reverse(entry.lowercase_prefix.len()));
+
+        Config {
+            host: String::new(),
+            port: 8080,
+            username: String::new(),
+            password: String::new(),
+            save_path: None,
+            category: None,
+            tags: tags.map(String::from),
+            paused: false,
+            verbose: false,
+            dryrun: false,
+            offline: false,
+            yes: false,
+            skip_existing: false,
+            recurse: false,
+            input_paths: Vec::new(),
+            file_filter: FileFilter::default(),
+            remove_from_name: Vec::new(),
+            use_dots_formatting: false,
+            ignore_torrent_names: Vec::new(),
+            tag_overwrite_prefixes,
+        }
+    }
+
+    #[test]
+    fn returns_default_tags_when_no_prefixes_configured() {
+        let config = make_config(Some("default-tag"), vec![]);
+        let result = config.resolve_tags(Path::new("something.torrent"));
+        assert_eq!(result, Some("default-tag".to_string()));
+    }
+
+    #[test]
+    fn returns_none_when_no_tags_and_no_prefix_match() {
+        let config = make_config(None, vec![("prefix", "mytag")]);
+        let result = config.resolve_tags(Path::new("other.torrent"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn returns_default_tags_when_no_prefix_matches() {
+        let config = make_config(Some("default-tag"), vec![("prefix", "mytag")]);
+        let result = config.resolve_tags(Path::new("other.torrent"));
+        assert_eq!(result, Some("default-tag".to_string()));
+    }
+
+    #[test]
+    fn returns_associated_tag_on_prefix_match() {
+        let config = make_config(Some("default-tag"), vec![("MyPrefix", "custom-tag")]);
+        let result = config.resolve_tags(Path::new("MyPrefix.Something.2024.torrent"));
+        assert_eq!(result, Some("custom-tag".to_string()));
+    }
+
+    #[test]
+    fn matches_case_insensitively() {
+        let config = make_config(Some("default-tag"), vec![("MyPrefix", "custom-tag")]);
+        let result = config.resolve_tags(Path::new("myprefix.something.torrent"));
+        assert_eq!(result, Some("custom-tag".to_string()));
+    }
+
+    #[test]
+    fn longer_prefix_matches_first() {
+        let config = make_config(
+            Some("default-tag"),
+            vec![("name", "short-tag"), ("nameprefix", "long-tag")],
+        );
+        let result = config.resolve_tags(Path::new("nameprefix.something.torrent"));
+        assert_eq!(result, Some("long-tag".to_string()));
+    }
+
+    #[test]
+    fn shorter_prefix_matches_when_longer_does_not() {
+        let config = make_config(
+            Some("default-tag"),
+            vec![("name", "short-tag"), ("nameprefix", "long-tag")],
+        );
+        let result = config.resolve_tags(Path::new("name.other.torrent"));
+        assert_eq!(result, Some("short-tag".to_string()));
+    }
+
+    #[test]
+    fn uses_file_stem_without_torrent_extension() {
+        let config = make_config(Some("default-tag"), vec![("test", "testtag")]);
+        let result = config.resolve_tags(Path::new("/some/path/test.file.torrent"));
+        assert_eq!(result, Some("testtag".to_string()));
+    }
+
+    #[test]
+    fn handles_path_with_directories() {
+        let config = make_config(Some("default-tag"), vec![("MyPrefix", "custom-tag")]);
+        let result = config.resolve_tags(Path::new("/downloads/torrents/MyPrefix.Show.torrent"));
+        assert_eq!(result, Some("custom-tag".to_string()));
+    }
+
+    #[test]
+    fn returns_none_when_no_tags_and_no_prefixes() {
+        let config = make_config(None, vec![]);
+        let result = config.resolve_tags(Path::new("something.torrent"));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn prefixes_sorted_by_length_descending_in_config() {
+        let config = make_config(None, vec![("a", "tag-a"), ("ccc", "tag-c"), ("bb", "tag-b")]);
+        let prefixes: Vec<&str> = config
+            .tag_overwrite_prefixes
+            .iter()
+            .map(|entry| entry.lowercase_prefix.as_str())
+            .collect();
+        assert_eq!(prefixes, vec!["ccc", "bb", "a"]);
     }
 }

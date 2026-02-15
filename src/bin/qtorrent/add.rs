@@ -17,7 +17,7 @@ use crate::QtorrentArgs;
 use crate::config::Config;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient};
 use crate::stats::TorrentStats;
-use crate::torrent::{FileFilter, FileInfo, FilteredFiles, parse_torrent};
+use crate::torrent::{FileInfo, FilteredFiles, parse_torrent};
 use crate::utils;
 use crate::utils::TorrentInfo;
 
@@ -118,6 +118,13 @@ impl QTorrent {
             println!("{}", "─".repeat(60));
             self.print_torrent_info(&info, index + 1, total);
 
+            // Skip torrent when all files are excluded by filters
+            if info.all_files_excluded() {
+                println!("  {} All files excluded by filters, skipping torrent", "⊘".yellow(),);
+                stats.inc_skipped();
+                continue;
+            }
+
             // Check if a torrent already exists in qBittorrent
             if let Some(existing_name) = Self::check_existing_torrent(&info, &existing_torrents) {
                 println!(
@@ -201,7 +208,7 @@ impl QTorrent {
             torrent_bytes: info.bytes,
             save_path: self.config.save_path.clone(),
             category: self.config.category.clone(),
-            tags: self.config.tags.clone(),
+            tags: info.tags,
             rename: rename_to.clone(),
             skip_checking: false,
             paused: self.config.paused,
@@ -498,30 +505,18 @@ impl QTorrent {
         Some(name)
     }
 
-    /// Create a file filter from the config.
-    fn create_file_filter(&self) -> FileFilter<'_> {
-        FileFilter::new(
-            &self.config.skip_extensions,
-            &self.config.skip_directories,
-            self.config.min_file_size_bytes,
-        )
-    }
-
-    /// Parse all torrent files.
+    /// Parse all torrent files and resolve tags for each.
     fn parse_torrents(&self, torrent_paths: &[PathBuf]) -> Vec<TorrentInfo> {
-        let mut torrents = Vec::new();
-        let filter = self.create_file_filter();
-
-        for path in torrent_paths {
-            match parse_torrent(path, &filter) {
-                Ok(info) => torrents.push(info),
-                Err(error) => {
-                    cli_tools::print_error!("Failed to parse {}: {error}", path.display());
-                }
-            }
-        }
-
-        torrents
+        torrent_paths
+            .iter()
+            .filter_map(|path| {
+                parse_torrent(path, &self.config)
+                    .inspect_err(|error| {
+                        cli_tools::print_error!("Failed to parse {}: {error}", path.display());
+                    })
+                    .ok()
+            })
+            .collect()
     }
 
     /// Print dry-run summary of all torrents.
@@ -536,18 +531,20 @@ impl QTorrent {
                 .count()
         });
 
+        // Count how many would be skipped because all files are excluded by filters
+        let all_excluded_count = torrents.iter().filter(|info| info.all_files_excluded()).count();
+
+        let skipped_total = duplicate_count + all_excluded_count;
         let mode_label = if self.config.offline { "OFFLINE" } else { "DRYRUN" };
 
-        if duplicate_count > 0 {
+        if skipped_total > 0 {
             print_bold!(
-                "{} {} torrents, {} to add, {} existing:",
-                mode_label,
+                "{mode_label} {} torrents, {} to add, {duplicate_count} skipped, excluded {all_excluded_count}:",
                 torrents.len(),
-                torrents.len() - duplicate_count,
-                duplicate_count
+                torrents.len() - skipped_total,
             );
         } else {
-            print_bold!("{} {} torrents to add:", mode_label, torrents.len());
+            print_bold!("{mode_label} {} torrents to add:", torrents.len());
         }
 
         if self.config.verbose {
@@ -556,6 +553,11 @@ impl QTorrent {
 
         for (index, info) in torrents.iter().enumerate() {
             self.print_torrent_info(info, index + 1, total);
+
+            // Show if all files are excluded by filters
+            if info.all_files_excluded() {
+                println!("  {} All files excluded by filters, skipping torrent", "⊘".yellow());
+            }
 
             // Show if this torrent already exists
             if let Some(existing) = existing_torrents
@@ -588,8 +590,8 @@ impl QTorrent {
             println!("  {}     {}", "Info hash:".dimmed(), info.info_hash);
         }
         if info.original_is_multi_file {
-            // Show folder name only if treating it as multi-file
-            if info.effective_is_multi_file {
+            // Show folder name if treating as multi-file or if all files were excluded
+            if info.effective_is_multi_file || info.all_files_excluded() {
                 println!("  {}   {}", "Folder name:".dimmed(), info.display_name().green());
             } else {
                 println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
@@ -632,8 +634,7 @@ impl QTorrent {
 
         // In verbose mode, show all files sorted by size (largest first)
         if self.config.verbose {
-            let filter = self.create_file_filter();
-            let filtered = info.torrent.filter_files(&filter);
+            let filtered = info.torrent.filter_files(&self.config.file_filter);
             Self::print_all_files_sorted(&filtered);
         }
     }
@@ -660,24 +661,24 @@ impl QTorrent {
             }
         );
 
-        if self.config.has_file_filters() {
+        if !self.config.file_filter.is_empty() {
             println!("{}", "File filters:".bold());
-            if !self.config.skip_extensions.is_empty() {
+            if !self.config.file_filter.skip_extensions.is_empty() {
                 println!(
                     "  {} {}",
                     "Skip extensions:".dimmed(),
-                    self.config.skip_extensions.join(", ")
+                    self.config.file_filter.skip_extensions.join(", ")
                 );
             }
-            if !self.config.skip_directories.is_empty() {
+            if !self.config.file_filter.skip_directories.is_empty() {
                 println!(
                     "  {} {}",
                     "Skip directories:".dimmed(),
-                    self.config.skip_directories.join(", ")
+                    self.config.file_filter.skip_directories.join(", ")
                 );
             }
-            if let Some(min_size) = self.config.min_file_size_bytes {
-                println!("  {} {} MB", "Min file size:".dimmed(), min_size / (1024 * 1024));
+            if let Some(min_size_mb) = self.config.file_filter.min_size_mb {
+                println!("  {} {} MB", "Min file size:".dimmed(), min_size_mb);
             }
         }
     }
@@ -700,7 +701,7 @@ impl QTorrent {
         if let Some(ref category) = self.config.category {
             println!("    {} {}", "Category:".dimmed(), category);
         }
-        if let Some(ref tags) = self.config.tags {
+        if let Some(ref tags) = info.tags {
             println!("    {} {}", "Tags:".dimmed(), tags);
         }
         if self.config.paused {
@@ -1056,6 +1057,7 @@ mod test_check_existing_torrent {
             excluded_indices: vec![],
             single_included_file: None,
             original_name: None,
+            tags: None,
         }
     }
 
