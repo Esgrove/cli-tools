@@ -92,7 +92,10 @@ impl QTorrent {
         let mut stats = TorrentStats::new(total);
 
         for (index, mut info) in torrents.into_iter().enumerate() {
-            println!("{}", "─".repeat(60));
+            if self.config.verbose {
+                println!("{}", "─".repeat(60));
+            }
+
             self.print_torrent_info(&info, index + 1, total);
 
             // Skip torrent when all files are excluded by filters
@@ -589,26 +592,26 @@ impl QTorrent {
             "\n[{index:>width$}/{total}] {}",
             cli_tools::path_to_string_relative(&info.path)
         );
-        println!("  {} {}", "Internal name:".dimmed(), internal_name);
+        println!("  {}         {}", "Name:".dimmed(), internal_name);
         if let Some(comment) = &info.torrent.comment
             && !comment.is_empty()
         {
-            println!("  {}       {}", "Comment:".dimmed(), comment);
+            println!("  {}      {}", "Comment:".dimmed(), comment);
         }
         if self.config.verbose {
-            println!("  {}     {}", "Info hash:".dimmed(), info.info_hash);
+            println!("  {}    {}", "Info hash:".dimmed(), info.info_hash);
         }
         if info.original_is_multi_file {
             // Show folder name if treating as multi-file or if all files were excluded
             if info.effective_is_multi_file || info.all_files_excluded() {
-                println!("  {}   {}", "Folder name:".dimmed(), info.display_name().green());
+                println!("  {}  {}", "Folder name:".dimmed(), info.display_name().green());
             } else {
-                println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
+                println!("  {}    {}", "File name:".dimmed(), info.display_name().green());
             }
             self.print_multi_file_info(info);
         } else {
-            println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
-            println!("  {}    {}", "Total size:".dimmed(), size);
+            println!("  {}    {}", "File name:".dimmed(), info.display_name().green());
+            println!("  {}   {}", "Total size:".dimmed(), size);
         }
     }
 
@@ -763,7 +766,7 @@ impl QTorrent {
             .is_some_and(|internal| internal != &normalized_suggested);
 
         println!(
-            "  {} [{}]",
+            "{} [{}]",
             label.cyan(),
             "press Enter to skip, or type new name".dimmed()
         );
