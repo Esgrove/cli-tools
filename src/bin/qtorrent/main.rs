@@ -86,8 +86,8 @@ pub struct QtorrentArgs {
     skip_extensions: Vec<String>,
 
     /// Directory names to skip (case-insensitive full name match)
-    #[arg(short = 'k', long = "skip-name", name = "NAME", value_delimiter = ',')]
-    skip_names: Vec<String>,
+    #[arg(short = 'k', long = "skip-dir", name = "NAME", value_delimiter = ',')]
+    skip_directories: Vec<String>,
 
     /// Minimum file size in MB (files smaller than this will be skipped)
     #[arg(short = 'm', long = "min-size", name = "MB")]
@@ -167,9 +167,9 @@ mod cli_args_tests {
     }
 
     #[test]
-    fn parses_comma_delimited_skip_names() {
+    fn parses_comma_delimited_skip_directories() {
         let args = QtorrentArgs::try_parse_from(["test", "-k", "sample,subs,screens"]).expect("should parse");
-        assert_eq!(args.skip_names, vec!["sample", "subs", "screens"]);
+        assert_eq!(args.skip_directories, vec!["sample", "subs", "screens"]);
     }
 
     #[test]
@@ -219,9 +219,9 @@ mod cli_args_tests {
     }
 
     #[test]
-    fn parses_long_form_skip_name() {
-        let args = QtorrentArgs::try_parse_from(["test", "--skip-name", "sample,subs"]).expect("should parse");
-        assert_eq!(args.skip_names, vec!["sample", "subs"]);
+    fn parses_long_form_skip_dir() {
+        let args = QtorrentArgs::try_parse_from(["test", "--skip-dir", "sample,subs"]).expect("should parse");
+        assert_eq!(args.skip_directories, vec!["sample", "subs"]);
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod cli_args_tests {
         assert!(args.username.is_none());
         assert!(args.password.is_none());
         assert!(args.skip_extensions.is_empty());
-        assert!(args.skip_names.is_empty());
+        assert!(args.skip_directories.is_empty());
         assert!(args.min_file_size_mb.is_none());
         assert!(!args.paused);
         assert!(!args.dryrun);
@@ -298,7 +298,7 @@ mod cli_args_tests {
         assert_eq!(args.category, Some("movies".to_string()));
         assert_eq!(args.tags, Some("hd,new".to_string()));
         assert_eq!(args.skip_extensions, vec!["nfo", "txt"]);
-        assert_eq!(args.skip_names, vec!["sample"]);
+        assert_eq!(args.skip_directories, vec!["sample"]);
         assert_eq!(args.min_file_size_mb, Some(50.0));
         assert!(args.paused);
         assert!(args.recurse);
@@ -351,12 +351,12 @@ mod config_from_args_tests {
     }
 
     #[test]
-    fn config_includes_cli_skip_names_normalized() {
+    fn config_includes_cli_skip_directories_normalized() {
         let args = QtorrentArgs::try_parse_from(["test", "-k", "SAMPLE,Subs"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
-        // CLI names should be included as lowercase
-        assert!(config.skip_names.contains(&"sample".to_string()));
-        assert!(config.skip_names.contains(&"subs".to_string()));
+        // CLI directory names should be included as lowercase
+        assert!(config.skip_directories.contains(&"sample".to_string()));
+        assert!(config.skip_directories.contains(&"subs".to_string()));
     }
 
     #[test]
@@ -385,11 +385,11 @@ mod config_from_args_tests {
     }
 
     #[test]
-    fn config_cli_names_enable_file_filters() {
+    fn config_cli_directories_enable_file_filters() {
         let args = QtorrentArgs::try_parse_from(["test", "-k", "sample"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         assert!(config.has_file_filters());
-        assert!(config.skip_names.contains(&"sample".to_string()));
+        assert!(config.skip_directories.contains(&"sample".to_string()));
     }
 
     #[test]

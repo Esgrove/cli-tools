@@ -96,7 +96,7 @@ pub struct FileFilter<'a> {
     /// File extensions to skip (lowercase, without dot).
     pub skip_extensions: &'a [String],
     /// Directory names to skip (lowercase for case-insensitive full name matching).
-    pub skip_names: &'a [String],
+    pub skip_directories: &'a [String],
     /// Minimum file size in bytes.
     pub min_size_bytes: Option<u64>,
     /// Minimum file size in MB (pre-calculated for display).
@@ -213,11 +213,11 @@ impl Torrent {
 impl<'a> FileFilter<'a> {
     /// Create a new file filter from the given configuration.
     #[must_use]
-    pub fn new(skip_extensions: &'a [String], skip_names: &'a [String], min_size_bytes: Option<u64>) -> Self {
+    pub fn new(skip_extensions: &'a [String], skip_directories: &'a [String], min_size_bytes: Option<u64>) -> Self {
         let min_size_mb = min_size_bytes.map(|bytes| bytes / BYTES_PER_MB);
         Self {
             skip_extensions,
-            skip_names,
+            skip_directories,
             min_size_bytes,
             min_size_mb,
         }
@@ -226,7 +226,7 @@ impl<'a> FileFilter<'a> {
     /// Check if any filters are configured.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.skip_extensions.is_empty() && self.skip_names.is_empty() && self.min_size_bytes.is_none()
+        self.skip_extensions.is_empty() && self.skip_directories.is_empty() && self.min_size_bytes.is_none()
     }
 
     /// Check if a file should be excluded. Returns the reason if excluded.
@@ -241,7 +241,7 @@ impl<'a> FileFilter<'a> {
             for component in parent.components() {
                 if let std::path::Component::Normal(dir_name) = component {
                     let dir_name_str = dir_name.to_string_lossy();
-                    if self.skip_names.iter().any(|skip| skip == dir_name_str.as_ref()) {
+                    if self.skip_directories.iter().any(|skip| skip == dir_name_str.as_ref()) {
                         return Some(format!("directory: {dir_name_str}"));
                     }
                 }

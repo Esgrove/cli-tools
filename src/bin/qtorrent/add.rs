@@ -502,7 +502,7 @@ impl QTorrent {
     fn create_file_filter(&self) -> FileFilter<'_> {
         FileFilter::new(
             &self.config.skip_extensions,
-            &self.config.skip_names,
+            &self.config.skip_directories,
             self.config.min_file_size_bytes,
         )
     }
@@ -669,8 +669,12 @@ impl QTorrent {
                     self.config.skip_extensions.join(", ")
                 );
             }
-            if !self.config.skip_names.is_empty() {
-                println!("  {} {}", "Skip names:".dimmed(), self.config.skip_names.join(", "));
+            if !self.config.skip_directories.is_empty() {
+                println!(
+                    "  {} {}",
+                    "Skip directories:".dimmed(),
+                    self.config.skip_directories.join(", ")
+                );
             }
             if let Some(min_size) = self.config.min_file_size_bytes {
                 println!("  {} {} MB", "Min file size:".dimmed(), min_size / (1024 * 1024));

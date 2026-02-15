@@ -65,9 +65,9 @@ pub struct QtorrentConfig {
     /// File extensions to skip (without dot, e.g., "nfo", "txt", "jpg").
     #[serde(default)]
     skip_extensions: Vec<String>,
-    /// Directory names to skip (case-insensitive match
+    /// Directory names to skip (case-insensitive full name match).
     #[serde(default)]
-    skip_names: Vec<String>,
+    skip_directories: Vec<String>,
     /// Minimum file size in MB. Files smaller than this will be skipped.
     #[serde(default)]
     min_file_size_mb: Option<f64>,
@@ -118,7 +118,7 @@ pub struct Config {
     /// File extensions to skip (lowercase, without dot).
     pub skip_extensions: Vec<String>,
     /// Directory names to skip (lowercase for case-insensitive full name matching).
-    pub skip_names: Vec<String>,
+    pub skip_directories: Vec<String>,
     /// Minimum file size in bytes. Files smaller than this will be skipped.
     pub min_file_size_bytes: Option<u64>,
     /// Substrings to remove from torrent filename when generating suggested name.
@@ -216,14 +216,17 @@ impl Config {
                 .collect()
         };
 
-        let skip_names: Vec<String> = if args.skip_names.is_empty() {
+        let skip_directories: Vec<String> = if args.skip_directories.is_empty() {
             user_config
-                .skip_names
+                .skip_directories
                 .into_iter()
                 .map(|name| name.to_lowercase())
                 .collect()
         } else {
-            args.skip_names.into_iter().map(|name| name.to_lowercase()).collect()
+            args.skip_directories
+                .into_iter()
+                .map(|name| name.to_lowercase())
+                .collect()
         };
 
         // Convert MB to bytes for easier comparison
@@ -258,7 +261,7 @@ impl Config {
             recurse,
             input_paths,
             skip_extensions,
-            skip_names,
+            skip_directories,
             min_file_size_bytes,
             remove_from_name,
             use_dots_formatting,
@@ -275,7 +278,7 @@ impl Config {
     /// Check if any file filtering is configured.
     #[must_use]
     pub const fn has_file_filters(&self) -> bool {
-        !self.skip_extensions.is_empty() || !self.skip_names.is_empty() || self.min_file_size_bytes.is_some()
+        !self.skip_extensions.is_empty() || !self.skip_directories.is_empty() || self.min_file_size_bytes.is_some()
     }
 
     /// Collect torrent file paths from the configured input paths.
@@ -412,12 +415,12 @@ tags = "hd,new"
         let toml = r#"
 [qtorrent]
 skip_extensions = ["nfo", "txt", "jpg"]
-skip_names = ["sample", "subs"]
+skip_directories = ["sample", "subs"]
 min_file_size_mb = 50.0
 "#;
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.skip_extensions, vec!["nfo", "txt", "jpg"]);
-        assert_eq!(config.skip_names, vec!["sample", "subs"]);
+        assert_eq!(config.skip_directories, vec!["sample", "subs"]);
         assert_eq!(config.min_file_size_mb, Some(50.0));
     }
 

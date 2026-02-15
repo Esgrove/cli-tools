@@ -303,7 +303,7 @@ replace = [
 # skip_extensions = ["nfo", "txt", "jpg", "png", "sfv", "md5", "url"]
 
 # Directory names to skip in multi-file torrents (case-insensitive full name match)
-# skip_names = ["sample", "proof", "screens"]
+# skip_directories = ["sample", "proof", "screens"]
 
 # Minimum file size in MB (files smaller than this will be skipped)
 # min_file_size_mb = 10
