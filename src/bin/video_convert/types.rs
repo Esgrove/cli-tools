@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::convert::RE_X265;
-use crate::convert::TARGET_EXTENSION;
+use regex::Regex;
+
+use crate::convert::{RE_AV1, RE_X265, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
 /// Information about a video file from ffprobe
@@ -61,10 +62,19 @@ pub struct ProcessableFile {
 pub struct AnalysisOutput {
     /// Files that need full conversion (non-HEVC to HEVC).
     pub(crate) conversions: Vec<ProcessableFile>,
-    /// Files that need remuxing (HEVC but wrong container).
+    /// Files that need remuxing (target codec but wrong container).
     pub(crate) remuxes: Vec<ProcessableFile>,
-    /// Files that need to be renamed (HEVC MP4 without .x265 suffix).
-    pub(crate) renames: Vec<VideoFile>,
+    /// Files that need to be renamed (target codec MP4 without codec suffix).
+    pub(crate) renames: Vec<ProcessableFile>,
+}
+
+/// Codec used in output filenames to identify the video codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    /// HEVC/H.265 codec, uses "x265" suffix.
+    X265,
+    /// AV1 codec, uses "av1" suffix.
+    Av1,
 }
 
 /// Reasons why a file was skipped
@@ -101,19 +111,11 @@ pub enum ProcessResult {
 #[derive(Debug)]
 pub enum AnalysisResult {
     /// File needs to be converted to HEVC
-    NeedsConversion {
-        file: VideoFile,
-        info: VideoInfo,
-        output_path: PathBuf,
-    },
+    NeedsConversion(ProcessableFile),
     /// File is already HEVC but needs remuxing to MP4
-    NeedsRemux {
-        file: VideoFile,
-        info: VideoInfo,
-        output_path: PathBuf,
-    },
-    /// File should be renamed to add .x265 suffix
-    NeedsRename { file: VideoFile },
+    NeedsRemux(ProcessableFile),
+    /// File should be renamed to add codec suffix
+    NeedsRename(ProcessableFile),
     /// File should be skipped
     Skip { file: VideoFile, reason: SkipReason },
 }
@@ -137,6 +139,18 @@ impl ProcessResult {
     }
 }
 
+impl ProcessableFile {
+    /// Create a new `ProcessableFile`, computing the output path from file and info.
+    pub(crate) fn new(file: VideoFile, info: VideoInfo) -> Self {
+        let output_path = file.get_output_path(info.codec_suffix());
+        Self {
+            file,
+            info,
+            output_path,
+        }
+    }
+}
+
 impl VideoFile {
     /// Create a new `VideoFile` from a path, extracting name and extension.
     pub(crate) fn new(path: &Path) -> Self {
@@ -147,14 +161,14 @@ impl VideoFile {
         Self { path, name, extension }
     }
 
-    /// Get the output path for the converted file.
-    pub(crate) fn output_path(&self) -> PathBuf {
+    /// Compute the output path for the converted file with the given codec suffix.
+    pub(crate) fn get_output_path(&self, suffix: Codec) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        // Only add .x265 suffix if the filename doesn't already contain x265
-        let new_name = if RE_X265.is_match(&self.name) {
+        // Only add suffix if the filename doesn't already contain it
+        let new_name = if suffix.regex().is_match(&self.name) {
             format!("{}.{TARGET_EXTENSION}", self.name)
         } else {
-            format!("{}.x265.{TARGET_EXTENSION}", self.name)
+            format!("{}.{suffix}.{TARGET_EXTENSION}", self.name)
         };
         parent.join(new_name)
     }
@@ -295,6 +309,45 @@ impl VideoInfo {
             31
         }
     }
+
+    /// Check if the codec is a target codec that does not need conversion.
+    pub(crate) fn is_target_codec(&self) -> bool {
+        matches!(self.codec.as_str(), "hevc" | "h265" | "av1")
+    }
+
+    /// Get the codec suffix for this video's codec.
+    pub(crate) fn codec_suffix(&self) -> Codec {
+        match self.codec.as_str() {
+            "av1" => Codec::Av1,
+            _ => Codec::X265,
+        }
+    }
+}
+
+impl Codec {
+    /// Get the string representation of this codec suffix.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X265 => "x265",
+            Self::Av1 => "av1",
+        }
+    }
+
+    /// Get the regex that matches this codec suffix in filenames.
+    #[must_use]
+    pub fn regex(self) -> &'static Regex {
+        match self {
+            Self::X265 => &RE_X265,
+            Self::Av1 => &RE_AV1,
+        }
+    }
+}
+
+impl std::fmt::Display for Codec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl std::fmt::Display for VideoInfo {
@@ -325,7 +378,7 @@ impl std::fmt::Display for VideoFile {
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AlreadyConverted => write!(f, "Already HEVC in MP4 container"),
+            Self::AlreadyConverted => write!(f, "Already target codec in MP4 container"),
             Self::BitrateBelowThreshold { bitrate, threshold } => {
                 write!(f, "Bitrate {bitrate} kbps is below threshold {threshold} kbps")
             }
@@ -375,15 +428,29 @@ mod video_file_tests {
     #[test]
     fn output_path_adds_x265_suffix() {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"));
-        let output = file.output_path();
+        let output = file.get_output_path(Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
     fn output_path_preserves_existing_x265() {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"));
-        let output = file.output_path();
+        let output = file.get_output_path(Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
+    }
+
+    #[test]
+    fn output_path_adds_av1_suffix() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"));
+        let output = file.get_output_path(Codec::Av1);
+        assert_eq!(output, PathBuf::from("/videos/movie.av1.mp4"));
+    }
+
+    #[test]
+    fn output_path_preserves_existing_av1() {
+        let file = VideoFile::new(Path::new("/videos/movie.av1.mkv"));
+        let output = file.get_output_path(Codec::Av1);
+        assert_eq!(output, PathBuf::from("/videos/movie.av1.mp4"));
     }
 
     #[test]
@@ -566,7 +633,7 @@ mod skip_reason_tests {
     #[test]
     fn display_already_converted() {
         let reason = SkipReason::AlreadyConverted;
-        assert_eq!(format!("{reason}"), "Already HEVC in MP4 container");
+        assert_eq!(format!("{reason}"), "Already target codec in MP4 container");
     }
 
     #[test]

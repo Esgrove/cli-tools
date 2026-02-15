@@ -20,11 +20,19 @@ use crate::database::{Database, PendingAction};
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 use crate::types::{
-    AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessResult, ProcessableFile, SkipReason, VideoFile, VideoInfo,
+    AnalysisFilter, AnalysisOutput, AnalysisResult, Codec, ProcessResult, ProcessableFile, SkipReason, VideoFile,
+    VideoInfo,
 };
 use crate::{SortOrder, VideoConvertArgs};
 
 pub const TARGET_EXTENSION: &str = "mp4";
+
+/// Regex to match x265 codec identifier in filenames (case-insensitive, word boundary).
+pub static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b").expect("Invalid x265 regex"));
+
+/// Regex to match AV1 codec identifier in filenames (case-insensitive, word boundary).
+pub static RE_AV1: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bav1\b").expect("Invalid av1 regex"));
+
 const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
@@ -35,9 +43,6 @@ const MIN_DURATION_RATIO: f64 = 0.85;
 /// Windows API constant for creating a new process group.
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-
-/// Regex to match x265 codec identifier in filenames (case-insensitive, word boundary).
-pub static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b").expect("Invalid x265 regex"));
 
 /// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert {
@@ -114,7 +119,7 @@ impl VideoConvert {
         // Analyze files to determine required actions
         let mut analysis_output = self.analyze_files(candidate_files);
 
-        // Process renames: these files are already in HEVC format but missing "x265" label
+        // Process renames: these files are already in a target codec but missing their codec suffix label
         if !analysis_output.renames.is_empty() {
             stats.files_renamed = self.process_renames(&analysis_output.renames);
         }
@@ -368,20 +373,20 @@ impl VideoConvert {
         let mut remux_files: Vec<ProcessableFile> = remuxes
             .into_iter()
             .filter(|f| f.full_path.exists())
-            .map(|f| ProcessableFile {
-                file: VideoFile::new(&f.full_path),
-                info: f.to_video_info(),
-                output_path: VideoFile::new(&f.full_path).output_path(),
+            .map(|f| {
+                let video_file = VideoFile::new(&f.full_path);
+                let info = f.to_video_info();
+                ProcessableFile::new(video_file, info)
             })
             .collect();
 
         let mut conversion_files: Vec<ProcessableFile> = conversions
             .into_iter()
             .filter(|f| f.full_path.exists())
-            .map(|f| ProcessableFile {
-                file: VideoFile::new(&f.full_path),
-                info: f.to_video_info(),
-                output_path: VideoFile::new(&f.full_path).output_path(),
+            .map(|f| {
+                let video_file = VideoFile::new(&f.full_path);
+                let info = f.to_video_info();
+                ProcessableFile::new(video_file, info)
             })
             .collect();
 
@@ -472,11 +477,12 @@ impl VideoConvert {
         VideoInfo::from_ffprobe_output(&stdout, &stderr, path)
     }
 
-    /// Remux HEVC video to MP4 container
+    /// Remux HEVC or AV1 to MP4 container
     fn remux_to_mp4(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
         let input = &file.file.path;
         let output = &file.output_path;
         let info = &file.info;
+        let codec = info.codec_suffix();
 
         println!(
             "{}",
@@ -493,7 +499,7 @@ impl VideoConvert {
         self.log_start(input, "remux", file_index, info, None);
         let start = Instant::now();
 
-        let mut cmd = Self::build_remux_command(input, output, false);
+        let mut cmd = Self::build_remux_command(input, output, false, codec);
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
@@ -530,7 +536,7 @@ impl VideoConvert {
             let _ = std::fs::remove_file(output);
         }
 
-        let mut cmd = Self::build_remux_command(input, output, true);
+        let mut cmd = Self::build_remux_command(input, output, true, codec);
 
         let status = match Self::run_command_isolated(&mut cmd) {
             Ok(s) => s,
@@ -769,40 +775,24 @@ impl VideoConvert {
         // Collect files into separate vectors
         let mut conversions = Vec::new();
         let mut remuxes = Vec::new();
-        let mut renames = Vec::new();
+        let mut renames: Vec<ProcessableFile> = Vec::new();
         let mut analysis_stats = AnalysisStats::default();
         // Collect duplicate pairs for verbose output when not deleting
         let mut duplicate_pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
 
         for result in results {
             match result {
-                AnalysisResult::NeedsConversion {
-                    file,
-                    info,
-                    output_path,
-                } => {
+                AnalysisResult::NeedsConversion(processable) => {
                     analysis_stats.to_convert += 1;
-                    conversions.push(ProcessableFile {
-                        file,
-                        info,
-                        output_path,
-                    });
+                    conversions.push(processable);
                 }
-                AnalysisResult::NeedsRemux {
-                    file,
-                    info,
-                    output_path,
-                } => {
+                AnalysisResult::NeedsRemux(processable) => {
                     analysis_stats.to_remux += 1;
-                    remuxes.push(ProcessableFile {
-                        file,
-                        info,
-                        output_path,
-                    });
+                    remuxes.push(processable);
                 }
-                AnalysisResult::NeedsRename { file } => {
+                AnalysisResult::NeedsRename(processable) => {
                     analysis_stats.to_rename += 1;
-                    renames.push(file);
+                    renames.push(processable);
                 }
                 AnalysisResult::Skip { file, reason } => {
                     match &reason {
@@ -996,7 +986,7 @@ impl VideoConvert {
     }
 
     /// Process all files that need renaming. Returns the number of files successfully renamed.
-    fn process_renames(&self, files: &[VideoFile]) -> usize {
+    fn process_renames(&self, files: &[ProcessableFile]) -> usize {
         let start = Instant::now();
         let total = files.len();
         let num_digits = total.checked_ilog10().map_or(1, |d| d as usize + 1);
@@ -1005,28 +995,21 @@ impl VideoConvert {
         for (index, file) in files.iter().enumerate() {
             let file_index = format!("[{:>width$}/{total}]", index + 1, width = num_digits);
 
-            // Skip adding .x265 suffix if filename already contains x265
-            if RE_X265.is_match(&file.name) {
-                continue;
-            }
-
-            let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
-
             if self.config.dryrun {
                 println!("{}", format!("{file_index} [DRYRUN] Rename:").bold().purple());
                 cli_tools::show_diff(
-                    &cli_tools::path_to_string_relative(&file.path),
-                    &cli_tools::path_to_string_relative(&new_path),
+                    &cli_tools::path_to_string_relative(&file.file.path),
+                    &cli_tools::path_to_string_relative(&file.output_path),
                 );
                 renamed_count += 1;
             } else {
                 println!("{}", format!("{file_index} Rename:").bold().purple());
                 cli_tools::show_diff(
-                    &cli_tools::path_to_string_relative(&file.path),
-                    &cli_tools::path_to_string_relative(&new_path),
+                    &cli_tools::path_to_string_relative(&file.file.path),
+                    &cli_tools::path_to_string_relative(&file.output_path),
                 );
-                if let Err(e) = std::fs::rename(&file.path, &new_path) {
-                    print_error!("Failed to rename {}: {e}", file.path.display());
+                if let Err(e) = std::fs::rename(&file.file.path, &file.output_path) {
+                    print_error!("Failed to rename {}: {e}", file.file.path.display());
                 } else {
                     renamed_count += 1;
                 }
@@ -1087,8 +1070,8 @@ impl VideoConvert {
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
     fn should_include_file(&self, file: &VideoFile) -> bool {
-        // Skip files with "x265" in the filename (already converted)
-        if RE_X265.is_match(&file.name) && file.extension == TARGET_EXTENSION {
+        // Skip files with "x265" or "av1" in the filename (already converted)
+        if (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name)) && file.extension == TARGET_EXTENSION {
             return false;
         }
 
@@ -1191,6 +1174,7 @@ impl VideoConvert {
 
     /// Analyze a single file to determine what action to take.
     /// This is a standalone function to allow parallel execution without borrowing `VideoConvert`.
+    #[allow(clippy::too_many_lines)]
     fn analyze_video_file(file: VideoFile, filter: &AnalysisFilter) -> AnalysisResult {
         // Get video info using ffprobe
         let info = match Self::get_video_info(&file.path) {
@@ -1203,23 +1187,24 @@ impl VideoConvert {
             }
         };
 
-        let is_hevc = info.codec == "hevc" || info.codec == "h265";
+        let is_target = info.is_target_codec();
+        let suffix = info.codec_suffix();
 
-        // Check if already converted (HEVC in MP4 with .x265 marker)
-        if is_hevc && file.extension == TARGET_EXTENSION {
-            if !RE_X265.is_match(&file.name) {
-                // Needs rename to add .x265 suffix
-                let new_path = cli_tools::insert_suffix_before_extension(&file.path, ".x265");
-                if new_path.exists() && !filter.overwrite {
+        // Check if already converted (target codec in MP4 with matching suffix marker)
+        if is_target && file.extension == TARGET_EXTENSION {
+            if !suffix.regex().is_match(&file.name) {
+                // Needs rename to add codec suffix
+                let output_path = file.get_output_path(suffix);
+                if output_path.exists() && !filter.overwrite {
                     return AnalysisResult::Skip {
                         file,
                         reason: SkipReason::OutputExists {
-                            path: new_path,
+                            path: output_path,
                             source_duration: info.duration,
                         },
                     };
                 }
-                return AnalysisResult::NeedsRename { file };
+                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info));
             }
             return AnalysisResult::Skip {
                 file,
@@ -1277,7 +1262,7 @@ impl VideoConvert {
             };
         }
 
-        let output_path = file.output_path();
+        let output_path = file.get_output_path(suffix);
 
         // Check if output already exists
         if output_path.exists() && !filter.overwrite {
@@ -1290,23 +1275,15 @@ impl VideoConvert {
             };
         }
 
-        if is_hevc {
-            AnalysisResult::NeedsRemux {
-                file,
-                info,
-                output_path,
-            }
+        if is_target {
+            AnalysisResult::NeedsRemux(ProcessableFile::new(file, info))
         } else {
-            AnalysisResult::NeedsConversion {
-                file,
-                info,
-                output_path,
-            }
+            AnalysisResult::NeedsConversion(ProcessableFile::new(file, info))
         }
     }
 
     /// Build ffmpeg command for remuxing with stream copy.
-    fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool) -> Command {
+    fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool, codec: Codec) -> Command {
         // -map 0:v:0   -> first video stream only
         // -map 0:a?    -> all audio streams (optional, if any)
         // -map -0:t    -> drop attachments
@@ -1323,7 +1300,11 @@ impl VideoConvert {
             cmd.args(["-c:a", "copy"]);
         }
 
-        cmd.args(["-movflags", "+faststart", "-tag:v", "hvc1"]).arg(output);
+        cmd.args(["-movflags", "+faststart"]);
+        if codec == Codec::X265 {
+            cmd.args(["-tag:v", "hvc1"]);
+        }
+        cmd.arg(output);
         cmd
     }
 
