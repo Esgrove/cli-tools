@@ -410,8 +410,15 @@ Options:
 
 Show statistics for existing torrents: total count, total size,
 completed size, downloading, and not-yet-started sizes.
-Use `--verbose` to list each torrent with progress, size, ratio, save path,
-added/completed dates, and tags — separated into completed and incomplete sections.
+
+Print modes:
+
+- Default: summary statistics only
+- `--list`: one line per torrent with progress, size, name, save path, and tags
+- `--list --verbose`: same as list but also shows ratio, added date, and completed date
+- `--verbose`: full multi-line detail per torrent with all fields
+
+Torrents are sorted by name by default. Use `--sort` to change the order.
 
 ```console
 Show info and statistics for existing torrents in qBittorrent
@@ -419,6 +426,8 @@ Show info and statistics for existing torrents in qBittorrent
 Usage: qtorrent info [OPTIONS]
 
 Options:
+  -s, --sort <SORT>      Sort torrents by the given field [default: name] [possible values: name, size, path]
+  -l, --list             List all torrents (one per line)
   -H, --host <HOST>      qBittorrent WebUI host
   -P, --port <PORT>      qBittorrent WebUI port
   -u, --username <USER>  qBittorrent WebUI username

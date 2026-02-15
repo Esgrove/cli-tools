@@ -16,7 +16,7 @@ mod utils;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 use crate::add::QTorrent;
@@ -117,7 +117,15 @@ pub struct QtorrentArgs {
 enum Command {
     /// Show info and statistics for existing torrents in qBittorrent
     #[command(name = "info")]
-    Info,
+    Info {
+        /// Sort torrents
+        #[arg(short = 's', long, value_enum, default_value_t = SortOrder::Name)]
+        sort: SortOrder,
+
+        /// Print one line per torrent
+        #[arg(short = 'l', long)]
+        list: bool,
+    },
 
     /// Generate shell completion script
     #[command(name = "completion")]
@@ -132,15 +140,28 @@ enum Command {
     },
 }
 
+/// Sort order for the info subcommand torrent listing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum SortOrder {
+    /// Sort alphabetically by torrent name
+    #[default]
+    Name,
+    /// Sort by total size (largest first)
+    Size,
+    /// Sort by save path
+    Path,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = QtorrentArgs::parse();
+    let mut args = QtorrentArgs::parse();
+    let command = args.command.take();
 
-    match args.command {
+    match command {
         Some(Command::Completion { shell, install }) => {
             cli_tools::generate_shell_completion(shell, QtorrentArgs::command(), install, env!("CARGO_BIN_NAME"))
         }
-        Some(Command::Info) => info::run(args).await,
+        Some(Command::Info { sort, list }) => info::run(args, sort, list).await,
         None => QTorrent::new(args)?.run().await,
     }
 }
@@ -267,7 +288,7 @@ mod cli_args_tests {
         assert!(!args.paused);
         assert!(!args.dryrun);
         assert!(!args.offline);
-        assert!(args.command.is_none());
+        assert!(args.command.is_none(), "command should be None by default");
     }
 
     #[test]
@@ -344,13 +365,13 @@ mod cli_args_tests {
     #[test]
     fn parses_info_subcommand() {
         let args = QtorrentArgs::try_parse_from(["test", "info"]).expect("should parse");
-        assert!(matches!(args.command, Some(Command::Info)));
+        assert!(matches!(args.command, Some(Command::Info { .. })));
     }
 
     #[test]
     fn parses_info_with_global_verbose() {
         let args = QtorrentArgs::try_parse_from(["test", "info", "-v"]).expect("should parse");
-        assert!(matches!(args.command, Some(Command::Info)));
+        assert!(matches!(args.command, Some(Command::Info { .. })));
         assert!(args.verbose);
     }
 
@@ -358,9 +379,69 @@ mod cli_args_tests {
     fn parses_info_with_global_connection_args() {
         let args =
             QtorrentArgs::try_parse_from(["test", "info", "-H", "192.168.1.1", "-P", "9090"]).expect("should parse");
-        assert!(matches!(args.command, Some(Command::Info)));
+        assert!(matches!(args.command, Some(Command::Info { .. })));
         assert_eq!(args.host, Some("192.168.1.1".to_string()));
         assert_eq!(args.port, Some(9090));
+    }
+
+    #[test]
+    fn parses_info_sort_by_size() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-s", "size"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Size);
+                assert!(!list);
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn parses_info_sort_by_path() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "--sort", "path"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, .. }) => {
+                assert_eq!(sort, SortOrder::Path);
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn parses_info_list_mode() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-l"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Name);
+                assert!(list);
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn parses_info_list_with_sort_and_verbose() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-l", "-s", "size", "-v"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Size);
+                assert!(list);
+            }
+            _ => panic!("Expected Info command"),
+        }
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn info_defaults_to_name_sort_no_list() {
+        let args = QtorrentArgs::try_parse_from(["test", "info"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Name);
+                assert!(!list);
+            }
+            _ => panic!("Expected Info command"),
+        }
     }
 
     #[test]
@@ -384,7 +465,7 @@ mod cli_args_tests {
     #[test]
     fn global_args_before_subcommand() {
         let args = QtorrentArgs::try_parse_from(["test", "-v", "-H", "myhost", "info"]).expect("should parse");
-        assert!(matches!(args.command, Some(Command::Info)));
+        assert!(matches!(args.command, Some(Command::Info { .. })));
         assert!(args.verbose);
         assert_eq!(args.host, Some("myhost".to_string()));
     }
