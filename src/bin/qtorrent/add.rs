@@ -75,30 +75,7 @@ impl QTorrent {
     /// Connect to qBittorrent and add torrents one by one with individual confirmation.
     #[allow(clippy::similar_names)]
     async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<()> {
-        // Check for credentials before connecting
-        if !self.config.has_credentials() {
-            bail!(
-                "qBittorrent credentials not configured.\n\
-                 Set username and password via command line arguments or in config file:\n\
-                 ~/.config/cli-tools.toml under [qtorrent] section"
-            );
-        }
-
-        print_cyan("Connecting to qBittorrent...");
-        let mut client = QBittorrentClient::new(&self.config.host, self.config.port);
-
-        client.login(&self.config.username, &self.config.password).await?;
-
-        // Check connection works by getting app and api version numbers
-        let app_version = client.get_app_version().await?;
-        let api_version = client.get_api_version().await?;
-
-        if self.config.verbose {
-            println!("{} {app_version}", "qBittorrent app version:".dimmed());
-            println!("{} {api_version}", "qBittorrent API version:".dimmed());
-        }
-
-        println!("{}\n", "Connected successfully".green());
+        let mut client = self.connect_to_client().await?;
 
         // Get the list of existing torrents to check for duplicates
         let existing_torrents = client.get_torrent_list().await?;
@@ -336,13 +313,8 @@ impl QTorrent {
             return Ok(());
         }
 
-        print_cyan("Connecting to qBittorrent...");
-        let mut client = QBittorrentClient::new(&self.config.host, self.config.port);
-
-        match client.login(&self.config.username, &self.config.password).await {
-            Ok(()) => {
-                println!("{}\n", "Connected successfully".green());
-
+        match self.connect_to_client().await {
+            Ok(mut client) => {
                 let existing_torrents = client.get_torrent_list().await.ok();
                 self.print_dryrun_summary(&torrents_with_names, existing_torrents.as_ref());
 
@@ -357,6 +329,39 @@ impl QTorrent {
         }
 
         Ok(())
+    }
+
+    #[allow(clippy::similar_names)]
+    async fn connect_to_client(&self) -> Result<QBittorrentClient> {
+        // Check for credentials before connecting
+        if !self.config.has_credentials() {
+            bail!(
+                "qBittorrent credentials not configured.\n\
+                 Set username and password via command line arguments or in config file:\n\
+                 ~/.config/cli-tools.toml under [qtorrent] section"
+            );
+        }
+
+        if self.config.verbose {
+            print_cyan("Connecting to qBittorrent...");
+        }
+
+        let mut client = QBittorrentClient::new(&self.config.host, self.config.port);
+
+        client.login(&self.config.username, &self.config.password).await?;
+
+        // Check connection works by getting app and api version numbers
+        let app_version = client.get_app_version().await?;
+        let api_version = client.get_api_version().await?;
+
+        if self.config.verbose {
+            println!(
+                "{} (App {app_version}, API v{api_version})\n",
+                "Connected successfully".green()
+            );
+        }
+
+        Ok(client)
     }
 
     /// Prompt user to rename an existing torrent in qBittorrent.
