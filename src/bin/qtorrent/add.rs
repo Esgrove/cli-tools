@@ -984,6 +984,8 @@ impl QTorrent {
     ///
     /// Queries the qBittorrent API for the actual file paths (which reflect any folder renames
     /// that have already been applied), then renames each included file with dot formatting.
+    /// Retries with a fresh file list if renames fail (paths can change asynchronously after
+    /// a folder rename propagates).
     async fn rename_torrent_files(
         &self,
         client: &QBittorrentClient,
@@ -991,71 +993,102 @@ impl QTorrent {
         excluded_indices: &[usize],
         dot_rename: &DotFormat<'_>,
     ) {
-        // Query qBittorrent for the actual current file paths
-        let api_files = match client.get_torrent_files(info_hash).await {
-            Ok(files) => files,
-            Err(error) => {
-                cli_tools::print_yellow!("Could not get file list for dot-renaming: {error}");
-                return;
-            }
-        };
+        print_cyan("Renaming files...");
+        let max_attempts = 3;
+        let mut total_renamed: usize = 0;
+        // Track indices that still need renaming
+        let mut pending_indices: Option<Vec<usize>> = None;
 
-        let mut renamed_count: usize = 0;
-        let mut error_count: usize = 0;
-
-        for file in &api_files {
-            if excluded_indices.contains(&file.index) {
-                continue;
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
 
-            // The API returns the full path as qBittorrent sees it (including root folder)
-            let old_path = &file.name;
-            let path = Path::new(old_path.as_str());
-
-            let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
-                continue;
-            };
-
-            // Apply dot formatting to the filename
-            let formatted = utils::format_single_file_name(dot_rename, filename);
-
-            if formatted == filename {
-                continue;
-            }
-
-            // Build new path by replacing only the filename portion
-            let parent = path.parent().and_then(|p| p.to_str()).unwrap_or("");
-            let new_path = if parent.is_empty() {
-                formatted.clone()
-            } else {
-                format!("{parent}/{formatted}")
-            };
-
-            match client.rename_file(info_hash, old_path, &new_path).await {
-                Ok(()) => {
-                    renamed_count += 1;
-                    if self.config.verbose {
-                        println!("    {} {} → {}", "·".dimmed(), filename.dimmed(), formatted.green());
-                    }
-                }
+            // Fetch the current file list from qBittorrent
+            let api_files = match client.get_torrent_files(info_hash).await {
+                Ok(files) => files,
                 Err(error) => {
-                    error_count += 1;
-                    if self.config.verbose {
-                        cli_tools::print_yellow!("    Could not rename {filename}: {error}");
+                    cli_tools::print_yellow!("Could not get file list for dot-renaming: {error}");
+                    return;
+                }
+            };
+
+            let mut attempt_renamed: usize = 0;
+            let mut failed_indices: Vec<usize> = Vec::new();
+
+            for file in &api_files {
+                if excluded_indices.contains(&file.index) {
+                    continue;
+                }
+
+                // On retries, only process previously failed indices
+                if let Some(ref pending) = pending_indices
+                    && !pending.contains(&file.index)
+                {
+                    continue;
+                }
+
+                // The API returns the full path as qBittorrent sees it (including root folder)
+                let old_path = &file.name;
+                let path = Path::new(old_path.as_str());
+
+                let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
+                    continue;
+                };
+
+                // Apply dot formatting to the filename
+                let formatted = utils::format_single_file_name(dot_rename, filename);
+
+                if formatted == filename {
+                    continue;
+                }
+
+                // Build new path by replacing only the filename portion
+                let parent = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+                let new_path = if parent.is_empty() {
+                    formatted.clone()
+                } else {
+                    format!("{parent}/{formatted}")
+                };
+
+                match client.rename_file(info_hash, old_path, &new_path).await {
+                    Ok(()) => {
+                        attempt_renamed += 1;
+                        if self.config.verbose {
+                            println!("    {} → {}", filename.dimmed(), formatted.green());
+                        }
+                    }
+                    Err(error) => {
+                        failed_indices.push(file.index);
+                        if self.config.verbose && attempt == max_attempts - 1 {
+                            cli_tools::print_yellow!("    Could not rename {filename}: {error}");
+                        }
                     }
                 }
             }
+
+            total_renamed += attempt_renamed;
+
+            if failed_indices.is_empty() {
+                break;
+            }
+
+            pending_indices = Some(failed_indices);
         }
 
-        if renamed_count > 0 {
+        if total_renamed > 0 {
             println!(
                 "  {} Renamed {} file(s) with dot formatting",
                 "✓".green(),
-                renamed_count
+                total_renamed
             );
         }
-        if error_count > 0 && !self.config.verbose {
-            cli_tools::print_yellow!("  Failed to dot-rename {error_count} file(s) (use --verbose for details)");
+        if let Some(ref pending) = pending_indices
+            && !pending.is_empty()
+            && !self.config.verbose
+        {
+            let count = pending.len();
+            cli_tools::print_yellow!("  Failed to dot-rename {count} file(s) (use --verbose for details)");
         }
     }
 
