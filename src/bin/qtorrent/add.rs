@@ -606,21 +606,21 @@ impl QTorrent {
             "\n[{index:>width$}/{total}] {}",
             cli_tools::path_to_string_relative(&info.path)
         );
-        println!("  {}         {}", "Name:".dimmed(), internal_name);
+        println!("  {}          {}", "Name:".dimmed(), internal_name);
         if let Some(comment) = &info.torrent.comment
             && !comment.is_empty()
         {
-            println!("  {}      {}", "Comment:".dimmed(), comment);
+            println!("  {}       {}", "Comment:".dimmed(), comment);
         }
         if self.config.verbose {
-            println!("  {}    {}", "Info hash:".dimmed(), info.info_hash);
+            println!("  {}     {}", "Info hash:".dimmed(), info.info_hash);
         }
         if info.original_is_multi_file {
             // Show folder name if treating as multi-file or if all files were excluded
             if info.effective_is_multi_file || info.all_files_excluded() {
-                println!("  {}  {}", "Folder name:".dimmed(), info.display_name().green());
+                println!("  {}   {}", "Folder name:".dimmed(), info.display_name().green());
             } else {
-                println!("  {}    {}", "File name:".dimmed(), info.display_name().green());
+                println!("  {}     {}", "File name:".dimmed(), info.display_name().green());
             }
             self.print_multi_file_info(info);
         } else {
@@ -870,7 +870,7 @@ impl QTorrent {
             .collect();
         let max_size_width = all_sizes.iter().map(String::len).max().unwrap_or(0);
 
-        println!("\n  {}", "Files:".bold());
+        println!("  {}", "Files:".bold());
 
         // Print included files
         let mut size_index = 0;
