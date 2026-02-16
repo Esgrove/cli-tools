@@ -70,6 +70,20 @@ pub struct TorrentListItem {
     pub tags: String,
 }
 
+/// File info from the qBittorrent API `/torrents/files` endpoint.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub struct TorrentFileItem {
+    /// File index.
+    pub index: usize,
+    /// File name (including relative path within the torrent).
+    pub name: String,
+    /// File size in bytes.
+    pub size: i64,
+    /// File priority (0 = do not download, 1 = normal, 6 = high, 7 = max).
+    pub priority: u8,
+}
+
 impl TorrentListItem {
     /// Check if the torrent has completed downloading.
     ///
@@ -533,6 +547,51 @@ impl QBittorrentClient {
             _ => {
                 let body = response.text().await.unwrap_or_default();
                 bail!("Failed to rename torrent: HTTP {status} - {body}")
+            }
+        }
+    }
+
+    /// Get the file list for a specific torrent from qBittorrent.
+    ///
+    /// Returns the files with their current paths as qBittorrent sees them.
+    /// This is useful to get the actual file paths after the torrent has been added,
+    /// since the paths may differ from the torrent metadata (e.g. after folder renames).
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or if not authenticated.
+    pub async fn get_torrent_files(&self, info_hash: &str) -> Result<Vec<TorrentFileItem>> {
+        if !self.authenticated {
+            bail!("Not authenticated. Call login() first.");
+        }
+
+        let url = self.build_url(&format!("torrents/files?hash={info_hash}"));
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to get torrent files")?;
+
+        let status = response.status();
+
+        match status {
+            StatusCode::OK => {
+                let body = response.text().await.context("Failed to read torrent files response")?;
+                let files: Vec<TorrentFileItem> =
+                    serde_json::from_str(&body).context("Failed to parse torrent files JSON")?;
+
+                Ok(files)
+            }
+            StatusCode::NOT_FOUND => {
+                bail!("Torrent hash not found")
+            }
+            StatusCode::FORBIDDEN => {
+                bail!("Authentication required or session expired")
+            }
+            _ => {
+                let body = response.text().await.unwrap_or_default();
+                bail!("Failed to get torrent files: HTTP {status} - {body}")
             }
         }
     }

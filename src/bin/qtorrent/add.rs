@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
@@ -204,13 +204,13 @@ impl QTorrent {
         }
 
         // Rename actual file/folder on disk if a custom name was specified
+        let mut folder_renamed = false;
         if let Some(ref new_name) = rename_to
             && let Some(ref old_name) = original_name
             && new_name != old_name
         {
             // Retry with increasing delays - qBittorrent needs time to fully register the torrent
             let delays_ms = [250, 500, 1000];
-            let mut rename_success = false;
             let mut last_error = None;
 
             for delay in &delays_ms {
@@ -228,7 +228,7 @@ impl QTorrent {
                     Ok(()) => {
                         println!("  {} Renamed on disk:", "✓".green(),);
                         cli_tools::show_diff(old_name, new_name);
-                        rename_success = true;
+                        folder_renamed = true;
                         break;
                     }
                     Err(error) => {
@@ -237,7 +237,7 @@ impl QTorrent {
                 }
             }
 
-            if !rename_success {
+            if !folder_renamed {
                 if let Some(error) = last_error {
                     cli_tools::print_yellow!("Could not rename file/folder after retries: {error}");
                 }
@@ -248,6 +248,20 @@ impl QTorrent {
                     new_name
                 );
             }
+        }
+
+        // Rename individual files with dot formatting for multi-file torrents
+        if effective_is_multi_file && let Some(dot_rename) = self.dot_formatter() {
+            // Wait for torrent to be ready if no folder rename was attempted (no prior delay)
+            let folder_rename_was_attempted = rename_to
+                .as_ref()
+                .is_some_and(|new| original_name.as_ref().is_some_and(|old| new != old));
+            if !folder_rename_was_attempted {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+
+            self.rename_torrent_files(client, &info_hash, &excluded_indices, &dot_rename)
+                .await;
         }
 
         // Set file priorities to skip excluded files
@@ -647,7 +661,7 @@ impl QTorrent {
         // In verbose mode, show all files sorted by size (largest first)
         if self.config.verbose {
             let filtered = info.torrent.filter_files(&self.config.file_filter);
-            Self::print_all_files_sorted(&filtered);
+            self.print_all_files_sorted(&filtered);
         }
     }
 
@@ -809,9 +823,11 @@ impl QTorrent {
     ///
     /// Files excluded due to directory matching are grouped by directory name
     /// instead of listing each file individually.
-    fn print_all_files_sorted(filtered: &FilteredFiles<'_>) {
+    fn print_all_files_sorted(&self, filtered: &FilteredFiles<'_>) {
         use crate::utils::SkippedDirectorySummary;
         use std::collections::HashMap;
+
+        let dot_formatter = self.dot_formatter();
 
         // Group excluded files by directory if they were excluded due to directory matching
         let mut skipped_directories: HashMap<String, SkippedDirectorySummary> = HashMap::new();
@@ -841,41 +857,71 @@ impl QTorrent {
         let mut skipped_dirs_sorted: Vec<_> = skipped_directories.into_iter().collect();
         skipped_dirs_sorted.sort_by(|a, b| b.1.total_size.cmp(&a.1.total_size));
 
+        // Find the widest formatted size string for right-alignment
+        let all_sizes: Vec<String> = included_files
+            .iter()
+            .map(|file| cli_tools::format_size(file.size))
+            .chain(other_excluded.iter().map(|file| cli_tools::format_size(file.size)))
+            .chain(
+                skipped_dirs_sorted
+                    .iter()
+                    .map(|(_, summary)| cli_tools::format_size(summary.total_size)),
+            )
+            .collect();
+        let max_size_width = all_sizes.iter().map(String::len).max().unwrap_or(0);
+
         println!("\n  {}", "Files:".bold());
 
         // Print included files
+        let mut size_index = 0;
         for file in included_files {
-            println!(
-                "    {} {} ({})",
-                "✓".green(),
-                file.path,
-                cli_tools::format_size(file.size)
-            );
+            // Show the final file name after dot formatting (if configured)
+            let display_path = dot_formatter
+                .as_ref()
+                .and_then(|dot_rename| {
+                    let path = Path::new(file.path.as_ref());
+                    let filename = path.file_name()?.to_str()?;
+                    let formatted = utils::format_single_file_name(dot_rename, filename);
+                    if formatted == filename {
+                        return None;
+                    }
+                    let parent = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+                    if parent.is_empty() {
+                        Some(formatted)
+                    } else {
+                        Some(format!("{parent}/{formatted}"))
+                    }
+                })
+                .unwrap_or_else(|| file.path.to_string());
+
+            let size_str = &all_sizes[size_index];
+            size_index += 1;
+            let check = "✓".green();
+            println!("    {size_str:>max_size_width$}  {check} {display_path}");
         }
 
         // Print other excluded files (not from directory matching)
         for file in other_excluded {
             let reason = file.exclusion_reason.as_deref().unwrap_or("excluded");
-            println!(
-                "    {} {} ({}) - {}",
-                "✗".red(),
-                file.path,
-                cli_tools::format_size(file.size),
-                reason.dimmed()
-            );
+            let size_str = &all_sizes[size_index];
+            size_index += 1;
+            let path = &file.path;
+            let reason = reason.dimmed();
+            let cross = "✗".red();
+            println!("    {size_str:>max_size_width$}  {cross} {path} - {reason}");
         }
 
         // Print skipped directory summaries
         for (dir_name, summary) in skipped_dirs_sorted {
+            let size_str = &all_sizes[size_index];
+            size_index += 1;
+            let ellipsis = "...".dimmed();
+            let file_count = summary.file_count;
+            let files_word = summary.files_word();
+            let cross = "✗".red();
+            let reason = format!("directory: {dir_name}").dimmed();
             println!(
-                "    {} {}/{} ({} {}, {}) - {}",
-                "✗".red(),
-                dir_name,
-                "...".dimmed(),
-                summary.file_count,
-                summary.files_word(),
-                cli_tools::format_size(summary.total_size),
-                format!("directory: {dir_name}").dimmed()
+                "    {size_str:>max_size_width$}  {cross} {dir_name}/{ellipsis} ({file_count} {files_word}) - {reason}"
             );
         }
     }
@@ -932,6 +978,85 @@ impl QTorrent {
         }
 
         (normalized_suggested, Some(normalized_internal))
+    }
+
+    /// Rename individual files within a multi-file torrent using dot formatting.
+    ///
+    /// Queries the qBittorrent API for the actual file paths (which reflect any folder renames
+    /// that have already been applied), then renames each included file with dot formatting.
+    async fn rename_torrent_files(
+        &self,
+        client: &QBittorrentClient,
+        info_hash: &str,
+        excluded_indices: &[usize],
+        dot_rename: &DotFormat<'_>,
+    ) {
+        // Query qBittorrent for the actual current file paths
+        let api_files = match client.get_torrent_files(info_hash).await {
+            Ok(files) => files,
+            Err(error) => {
+                cli_tools::print_yellow!("Could not get file list for dot-renaming: {error}");
+                return;
+            }
+        };
+
+        let mut renamed_count: usize = 0;
+        let mut error_count: usize = 0;
+
+        for file in &api_files {
+            if excluded_indices.contains(&file.index) {
+                continue;
+            }
+
+            // The API returns the full path as qBittorrent sees it (including root folder)
+            let old_path = &file.name;
+            let path = Path::new(old_path.as_str());
+
+            let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
+                continue;
+            };
+
+            // Apply dot formatting to the filename
+            let formatted = utils::format_single_file_name(dot_rename, filename);
+
+            if formatted == filename {
+                continue;
+            }
+
+            // Build new path by replacing only the filename portion
+            let parent = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+            let new_path = if parent.is_empty() {
+                formatted.clone()
+            } else {
+                format!("{parent}/{formatted}")
+            };
+
+            match client.rename_file(info_hash, old_path, &new_path).await {
+                Ok(()) => {
+                    renamed_count += 1;
+                    if self.config.verbose {
+                        println!("    {} {} → {}", "·".dimmed(), filename.dimmed(), formatted.green());
+                    }
+                }
+                Err(error) => {
+                    error_count += 1;
+                    if self.config.verbose {
+                        cli_tools::print_yellow!("    Could not rename {filename}: {error}");
+                    }
+                }
+            }
+        }
+
+        if renamed_count > 0 {
+            println!(
+                "  {} Renamed {} file(s) with dot formatting",
+                "✓".green(),
+                renamed_count
+            );
+        }
+        if error_count > 0 && !self.config.verbose {
+            cli_tools::print_yellow!("  Failed to dot-rename {error_count} file(s) (use --verbose for details)");
+        }
     }
 
     /// Check if a torrent already exists in qBittorrent by comparing info hashes.
