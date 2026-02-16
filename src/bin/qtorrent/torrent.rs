@@ -262,7 +262,7 @@ impl FileFilter {
             && let Some(min_size_mb) = self.min_size_mb
             && file.size < min_size
         {
-            return Some(format!("size {} < {min_size_mb} MB", cli_tools::format_size(file.size)));
+            return Some(format!("size < {min_size_mb} MB"));
         }
 
         None
