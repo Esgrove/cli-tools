@@ -15,7 +15,7 @@ Produces separate binaries for each tool.
 This project uses [cargo-nextest](https://nexte.st/) for faster test execution with better output.
 
 ```shell
-# Run tests with nextest (recommended)
+# Run tests with nextest
 cargo nextest run
 
 # Run tests with standard cargo test
