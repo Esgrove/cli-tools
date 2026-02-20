@@ -9,7 +9,12 @@ use cli_tools::date::Date;
 
 pub use crate::config::Config;
 
-pub static FILE_EXTENSIONS: [&str; 9] = ["m4a", "mp3", "txt", "rtf", "csv", "mp4", "mkv", "mov", "avi"];
+pub static FILE_EXTENSIONS: [&str; 20] = [
+    "m4a", "mp3", // Audio
+    "mp4", "mkv", "mov", "avi", "wmv", "flv", "m4v", // Video
+    "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", // Image
+    "txt", "rtf", "csv", // Other
+];
 
 #[derive(Debug)]
 struct RenameItem {
@@ -417,6 +422,6 @@ mod tests {
         assert!(FILE_EXTENSIONS.contains(&"mp4"));
         assert!(FILE_EXTENSIONS.contains(&"txt"));
         assert!(FILE_EXTENSIONS.contains(&"mkv"));
-        assert_eq!(FILE_EXTENSIONS.len(), 9);
+        assert_eq!(FILE_EXTENSIONS.len(), 20);
     }
 }
