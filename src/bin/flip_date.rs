@@ -186,7 +186,10 @@ fn main() -> Result<()> {
 fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
     let (files, root) = files_to_rename(path, &config.file_extensions, config.recurse)?;
     if files.is_empty() {
-        anyhow::bail!("No files to process");
+        if config.verbose {
+            println!("No files to process");
+        }
+        return Ok(());
     }
 
     let mut files_to_rename: Vec<RenameItem> = Vec::new();
@@ -241,7 +244,10 @@ fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
 fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
     let directories = directories_to_rename(path, config.recurse)?;
     if directories.is_empty() {
-        anyhow::bail!("No directories to rename")
+        if config.verbose {
+            println!("No directories to rename");
+        }
+        return Ok(());
     }
 
     let max_chars: usize = directories
