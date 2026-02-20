@@ -19,32 +19,47 @@ const KNOWN_RESOLUTIONS: &[(u32, u32)] = &[
 ];
 const FUZZY_RESOLUTIONS: [ResolutionMatch; KNOWN_RESOLUTIONS.len()] = precalculate_fuzzy_resolutions();
 
+/// Video resolution represented as width and height in pixels.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Resolution {
+    /// Width in pixels.
     pub(crate) width: u32,
+    /// Height in pixels.
     pub(crate) height: u32,
 }
 
+/// A fuzzy resolution match with tolerance ranges for width and height.
+///
+/// Used to classify resolutions that are close to a known standard
+/// (e.g. 1918x1078 matches 1080p within tolerance).
 #[derive(Copy, Clone, Debug)]
 struct ResolutionMatch {
+    /// The height value used in the label (e.g. 1080 for "1080p").
     label_height: u32,
+    /// Acceptable width range `(min, max)` for this resolution.
     width_range: (u32, u32),
+    /// Acceptable height range `(min, max)` for this resolution.
     height_range: (u32, u32),
 }
 
+/// Result from running ffprobe on a video file.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub struct FFProbeResult {
+    /// Path to the video file.
     pub(crate) file: PathBuf,
+    /// Detected video resolution.
     pub(crate) resolution: Resolution,
 }
 
 impl Resolution {
+    /// Create a new resolution with the given width and height in pixels.
     pub const fn new(width: u32, height: u32) -> Self {
         Self { width, height }
     }
 }
 
 impl fmt::Display for Resolution {
+    /// Format the resolution as `WIDTHxHEIGHT`, prefixed with `Vertical.` for portrait videos.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.width < self.height {
             write!(f, "Vertical.{}x{}", self.width, self.height)
@@ -55,6 +70,7 @@ impl fmt::Display for Resolution {
 }
 
 impl fmt::Display for ResolutionMatch {
+    /// Format as `<height>p: width <range>, height <range>` for debug output.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -65,6 +81,9 @@ impl fmt::Display for ResolutionMatch {
 }
 
 impl FFProbeResult {
+    /// Delete the video file by moving it to trash (or permanently if trash is unavailable).
+    ///
+    /// Prints the file resolution and path. In dryrun mode, only prints without deleting.
     pub(crate) fn delete(&self, dryrun: bool) -> anyhow::Result<()> {
         let path_str = cli_tools::path_to_string_relative(&self.file);
         println!(
@@ -79,6 +98,10 @@ impl FFProbeResult {
         Ok(())
     }
 
+    /// Rename the video file to include its resolution label.
+    ///
+    /// Fails if the target path already exists and `overwrite` is false.
+    /// In dryrun mode, only prints the rename without performing it.
     pub(crate) fn rename(&self, new_path: &Path, overwrite: bool, dryrun: bool) -> anyhow::Result<()> {
         self.print_rename(new_path);
         if new_path.exists() && !overwrite {
@@ -107,6 +130,7 @@ impl FFProbeResult {
         }
     }
 
+    /// Print a colored diff showing the old and new file paths after renaming.
     fn print_rename(&self, new_path: &Path) {
         let (_, new_path_colored) = cli_tools::color_diff(
             &cli_tools::path_to_string_relative(&self.file),
@@ -129,6 +153,10 @@ impl Resolution {
         self.width < limit || self.height < limit
     }
 
+    /// Return a human-readable resolution label like `1080p` or `Vertical.720p`.
+    ///
+    /// Tries exact matches first, then falls back to fuzzy matching within tolerance.
+    /// If no known resolution matches, returns the full `WIDTHxHEIGHT` string.
     fn label(&self) -> Cow<'static, str> {
         if self.width < self.height {
             // Vertical video
@@ -161,6 +189,9 @@ impl Resolution {
         }
     }
 
+    /// Attempt fuzzy matching for vertical (portrait) video resolutions.
+    ///
+    /// Falls back to the full resolution string if no fuzzy match is found.
     fn label_fuzzy_vertical(&self) -> Cow<'static, str> {
         for res in &FUZZY_RESOLUTIONS {
             if self.height >= res.width_range.0
@@ -175,6 +206,9 @@ impl Resolution {
         Cow::Owned(self.to_string())
     }
 
+    /// Attempt fuzzy matching for horizontal (landscape) video resolutions.
+    ///
+    /// Falls back to the full resolution string if no fuzzy match is found.
     fn label_fuzzy_horizontal(&self) -> Cow<'static, str> {
         for res in &FUZZY_RESOLUTIONS {
             if self.width >= res.width_range.0
@@ -190,6 +224,7 @@ impl Resolution {
     }
 }
 
+/// Print all precalculated fuzzy resolution ranges to stdout for debugging.
 pub fn print_fuzzy_resolution_ranges() {
     println!("Fuzzy resolution ranges:");
     for res in &FUZZY_RESOLUTIONS {
@@ -197,6 +232,7 @@ pub fn print_fuzzy_resolution_ranges() {
     }
 }
 
+/// Precalculate fuzzy resolution match ranges for all known resolutions at compile time.
 const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
     let mut out = [ResolutionMatch {
         label_height: 0,
@@ -216,6 +252,9 @@ const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS
     out
 }
 
+/// Compute the lower and upper tolerance bounds for a resolution dimension.
+///
+/// Returns `(min, max)` where the bounds are `resolution ± (resolution * RESOLUTION_TOLERANCE)`.
 const fn compute_bounds(res: u32) -> (u32, u32) {
     let tolerance = (res as f32 * RESOLUTION_TOLERANCE) as u32;
     let min = res.saturating_sub(tolerance);

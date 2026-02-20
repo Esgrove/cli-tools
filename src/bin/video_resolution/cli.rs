@@ -60,6 +60,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rename video files to include their resolution label in the filename.
+///
+/// Files that already have the correct label are skipped.
+/// Errors during renaming are printed and do not stop processing of remaining files.
 fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) {
     // Rename remaining files to add resolution labels
     let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = files
@@ -234,6 +238,7 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<FFProbeResul
     Ok(results)
 }
 
+/// Run ffprobe on a single file and parse the output into an `FFProbeResult`.
 async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
     let output = Command::new("ffprobe")
         .args([
