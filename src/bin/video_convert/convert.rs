@@ -1187,11 +1187,11 @@ impl VideoConvert {
             }
         };
 
-        let is_target = info.is_target_codec();
+        let is_target_codec = info.is_target_codec();
         let suffix = info.codec_suffix();
 
         // Check if already converted (target codec in MP4 with matching suffix marker)
-        if is_target && file.extension == TARGET_EXTENSION {
+        if is_target_codec && file.extension == TARGET_EXTENSION {
             if !suffix.regex().is_match(&file.name) {
                 // Needs rename to add codec suffix
                 let output_path = file.get_output_path(suffix);
@@ -1212,54 +1212,57 @@ impl VideoConvert {
             };
         }
 
-        // Check minimum bitrate threshold
-        if info.bitrate_kbps < filter.min_bitrate {
-            return AnalysisResult::Skip {
-                file,
-                reason: SkipReason::BitrateBelowThreshold {
-                    bitrate: info.bitrate_kbps,
-                    threshold: filter.min_bitrate,
-                },
-            };
-        }
+        // Bitrate and duration limits only apply to conversions, not remuxes
+        if !is_target_codec {
+            // Check minimum bitrate threshold
+            if info.bitrate_kbps < filter.min_bitrate {
+                return AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::BitrateBelowThreshold {
+                        bitrate: info.bitrate_kbps,
+                        threshold: filter.min_bitrate,
+                    },
+                };
+            }
 
-        // Check maximum bitrate threshold
-        if let Some(max_bitrate) = filter.max_bitrate
-            && info.bitrate_kbps > max_bitrate
-        {
-            return AnalysisResult::Skip {
-                file,
-                reason: SkipReason::BitrateAboveThreshold {
-                    bitrate: info.bitrate_kbps,
-                    threshold: max_bitrate,
-                },
-            };
-        }
+            // Check maximum bitrate threshold
+            if let Some(max_bitrate) = filter.max_bitrate
+                && info.bitrate_kbps > max_bitrate
+            {
+                return AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::BitrateAboveThreshold {
+                        bitrate: info.bitrate_kbps,
+                        threshold: max_bitrate,
+                    },
+                };
+            }
 
-        // Check minimum duration threshold
-        if let Some(min_duration) = filter.min_duration
-            && info.duration < min_duration
-        {
-            return AnalysisResult::Skip {
-                file,
-                reason: SkipReason::DurationBelowThreshold {
-                    duration: info.duration,
-                    threshold: min_duration,
-                },
-            };
-        }
+            // Check minimum duration threshold
+            if let Some(min_duration) = filter.min_duration
+                && info.duration < min_duration
+            {
+                return AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::DurationBelowThreshold {
+                        duration: info.duration,
+                        threshold: min_duration,
+                    },
+                };
+            }
 
-        // Check maximum duration threshold
-        if let Some(max_duration) = filter.max_duration
-            && info.duration > max_duration
-        {
-            return AnalysisResult::Skip {
-                file,
-                reason: SkipReason::DurationAboveThreshold {
-                    duration: info.duration,
-                    threshold: max_duration,
-                },
-            };
+            // Check maximum duration threshold
+            if let Some(max_duration) = filter.max_duration
+                && info.duration > max_duration
+            {
+                return AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::DurationAboveThreshold {
+                        duration: info.duration,
+                        threshold: max_duration,
+                    },
+                };
+            }
         }
 
         let output_path = file.get_output_path(suffix);
@@ -1275,7 +1278,7 @@ impl VideoConvert {
             };
         }
 
-        if is_target {
+        if is_target_codec {
             AnalysisResult::NeedsRemux(ProcessableFile::new(file, info))
         } else {
             AnalysisResult::NeedsConversion(ProcessableFile::new(file, info))

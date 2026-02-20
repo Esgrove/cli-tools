@@ -318,24 +318,42 @@ impl Database {
             conditions.push(format!("extension IN ({})", placeholders.join(", ")));
         }
 
+        // Bitrate limits only apply to conversions, not remuxes
         if let Some(min_bitrate) = filter.min_bitrate {
             params_vec.push(Box::new(min_bitrate as i64));
-            conditions.push(format!("bitrate_kbps >= ?{}", params_vec.len()));
+            conditions.push(format!(
+                "(action = '{}' OR bitrate_kbps >= ?{})",
+                PendingAction::Remux.as_str(),
+                params_vec.len()
+            ));
         }
 
         if let Some(max_bitrate) = filter.max_bitrate {
             params_vec.push(Box::new(max_bitrate as i64));
-            conditions.push(format!("bitrate_kbps <= ?{}", params_vec.len()));
+            conditions.push(format!(
+                "(action = '{}' OR bitrate_kbps <= ?{})",
+                PendingAction::Remux.as_str(),
+                params_vec.len()
+            ));
         }
 
+        // Duration limits only apply to conversions, not remuxes
         if let Some(min_duration) = filter.min_duration {
             params_vec.push(Box::new(min_duration));
-            conditions.push(format!("duration >= ?{}", params_vec.len()));
+            conditions.push(format!(
+                "(action = '{}' OR duration >= ?{})",
+                PendingAction::Remux.as_str(),
+                params_vec.len()
+            ));
         }
 
         if let Some(max_duration) = filter.max_duration {
             params_vec.push(Box::new(max_duration));
-            conditions.push(format!("duration <= ?{}", params_vec.len()));
+            conditions.push(format!(
+                "(action = '{}' OR duration <= ?{})",
+                PendingAction::Remux.as_str(),
+                params_vec.len()
+            ));
         }
 
         let where_clause = if conditions.is_empty() {
@@ -1289,5 +1307,231 @@ mod tests {
         assert!(sorted[0].full_path.to_string_lossy().contains("high_impact"));
         assert!(sorted[1].full_path.to_string_lossy().contains("mid_impact"));
         assert!(sorted[2].full_path.to_string_lossy().contains("low_impact"));
+    }
+
+    #[test]
+    fn test_bitrate_filter_does_not_exclude_remux_files() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_low = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 2000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let info_high = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 2_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        // Low bitrate remux file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/remux_low.mkv"),
+                "mkv",
+                &info_low,
+                PendingAction::Remux,
+            )
+            .expect("Failed to insert");
+
+        // Low bitrate convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_low.mp4"),
+                "mp4",
+                &info_low,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // High bitrate convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_high.mp4"),
+                "mp4",
+                &info_high,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Filter with min_bitrate above the low bitrate value
+        // Should exclude the low bitrate convert file but keep the low bitrate remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(10000),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_low"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_high"))
+        );
+
+        // Filter with max_bitrate below the high bitrate value
+        // Should exclude the high bitrate convert file but keep the low bitrate remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                max_bitrate: Some(5000),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_low"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_low"))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_duration_filter_does_not_exclude_remux_files() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_short = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 500_000_000,
+            duration: 30.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let info_long = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 2_000_000_000,
+            duration: 7200.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let info_mid = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        // Short duration remux file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/remux_short.mkv"),
+                "mkv",
+                &info_short,
+                PendingAction::Remux,
+            )
+            .expect("Failed to insert");
+
+        // Short duration convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_short.mp4"),
+                "mp4",
+                &info_short,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Mid duration convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_mid.mp4"),
+                "mp4",
+                &info_mid,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Long duration convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_long.mp4"),
+                "mp4",
+                &info_long,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Filter with min_duration above the short duration
+        // Should exclude the short convert file but keep the short remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                min_duration: Some(60.0),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 3);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_short"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_mid"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_long"))
+        );
+
+        // Filter with max_duration below the long duration
+        // Should exclude the long convert file but keep the short remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                max_duration: Some(5000.0),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 3);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_short"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_short"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_mid"))
+        );
     }
 }
