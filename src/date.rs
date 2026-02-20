@@ -37,12 +37,12 @@ static RE_FULL_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RE_SHORT_DATE_DAY_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|\D)(?P<date>(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.\d{2})(?:\b|\D)")
+    Regex::new(r"(?:\b|[^a-zA-Z\d])(?P<date>(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.\d{2})(?:\b|[^a-zA-Z\d])")
         .expect("Failed to create regex pattern for short date")
 });
 
 static RE_SHORT_DATE_YEAR_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|\D)(?P<date>(\d{2})\.(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2]))(?:\b|\D)")
+    Regex::new(r"(?:\b|[^a-zA-Z\d])(?P<date>(\d{2})\.(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2]))(?:\b|[^a-zA-Z\d])")
         .expect("Failed to create regex pattern for short date")
 });
 
@@ -512,6 +512,26 @@ mod filename_tests {
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
 
         let filename = "testing08.12.1080p.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+    }
+
+    #[test]
+    fn ordinal_numbers_not_detected_as_date() {
+        // "2nd" should not be split into date digit "2" + leftover "nd"
+        let filename = "01.04.2nd.Live";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.1st.Recording";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "03.05.3rd.Edition";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "10.04.4th.Season";
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
     }
