@@ -69,7 +69,7 @@ path = "src/bin/dupe_find/main.rs"
 
 [[bin]]
 name = "flipdate"
-path = "src/bin/flip_date.rs"
+path = "src/bin/flip_date/main.rs"
 
 [[bin]]
 name = "thumbs"
