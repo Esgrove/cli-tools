@@ -396,7 +396,7 @@ mod regex_tests {
 }
 
 #[cfg(test)]
-mod filename_tests {
+mod date_reorder_tests {
     use super::*;
 
     #[test]
@@ -435,12 +435,88 @@ mod filename_tests {
             Date::reorder_filename_date(filename, false, false, false),
             Some(correct.to_string())
         );
+
+        let filename = "01.06.2020.mp4";
+        let correct = "2020.06.01.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "31.12.2024.New.Years.Eve";
+        let correct = "2024.12.31.New.Years.Eve";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "recording 15.03.2019 final.mp4";
+        let correct = "recording 2019.03.15 final.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Full date at end of string without extension
+        let filename = "backup_28.02.2022";
+        let correct = "backup_2022.02.28";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Full date with single-digit day and month
+        let filename = "log_5.3.2021.txt";
+        let correct = "log_2021.03.05.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // year_first flag should not affect full 4-digit year dates
+        let filename = "event_20.12.2023.txt";
+        let correct = "event_2023.12.20.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
     fn short_date() {
         let filename = "report_20.12.23.txt";
         let correct = "report_2023.12.20.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "clip_30.01.22.mp4";
+        let correct = "clip_2022.01.30.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Short date at start of string
+        let filename = "15.06.21.concert.mp4";
+        let correct = "2021.06.15.concert.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Short date at end of string
+        let filename = "session.25.11.19";
+        let correct = "session.2019.11.25";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Short date with space boundary
+        let filename = "meeting 14.03.20 notes.txt";
+        let correct = "meeting 2020.03.14 notes.txt";
         assert_eq!(
             Date::reorder_filename_date(filename, false, false, false),
             Some(correct.to_string())
@@ -455,6 +531,29 @@ mod filename_tests {
             Date::reorder_filename_date(filename, false, false, false),
             Some(correct.to_string())
         );
+
+        let filename = "note_3.9.24.mp4";
+        let correct = "note_2024.09.03.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Single-digit day with double-digit month
+        let filename = "clip_5.12.22.mkv";
+        let correct = "clip_2022.12.05.mkv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        // Double-digit day with single-digit month
+        let filename = "video_28.3.21.avi";
+        let correct = "video_2021.03.28.avi";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
 
     #[test]
@@ -465,7 +564,33 @@ mod filename_tests {
             Date::reorder_filename_date(filename, false, false, false),
             Some(correct.to_string())
         );
+
+        let filename = "log_1.1.2020.csv";
+        let correct = "log_2020.01.01.csv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "event 9.12.2024 party.mp4";
+        let correct = "event 2024.12.09 party.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "3.6.2018.txt";
+        let correct = "2018.06.03.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
     }
+}
+
+#[cfg(test)]
+mod date_format_detection_tests {
+    use super::*;
 
     #[test]
     fn no_date() {
@@ -481,11 +606,66 @@ mod filename_tests {
         let filename = "name1000.5.22.txt";
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Just text, no numbers at all
+        let filename = "holiday.photos.summer";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Single number
+        let filename = "version.2.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Two numbers but not three
+        let filename = "chapter.12.05.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Empty string
+        let filename = "";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Only dots
+        let filename = "...";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Numbers with dashes instead of dots
+        let filename = "report-20-12-23.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Year-only
+        let filename = "photos.2024.vacation";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Numbers too large for any date component
+        let filename = "item.99.99.99.bin";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
     }
 
     #[test]
     fn correct_date_format() {
         let filename = "report_2023.12.20.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        let filename = "2024.01.01.newyear.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        let filename = "clip.2019.06.15.720p.mkv";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // At end of string
+        let filename = "backup_2022.03.31";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // At start of string
+        let filename = "2020.11.28.recording";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // With space boundaries
+        let filename = "show 2021.07.04 special.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Single-digit month and day in correct format
+        let filename = "note_2023.1.5.txt";
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
     }
 
@@ -493,7 +673,19 @@ mod filename_tests {
     fn correct_date_format_year_first() {
         let filename = "report_2023.12.20.txt";
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // year_first flag should not change behavior for already correct dates
+        let filename = "2024.06.15.photo.jpg";
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "meeting 2019.01.30 notes.txt";
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
     }
+}
+
+#[cfg(test)]
+mod year_first_tests {
+    use super::*;
 
     #[test]
     fn full_date_year_first() {
@@ -503,7 +695,156 @@ mod filename_tests {
             Date::reorder_filename_date(filename, true, false, false),
             Some(correct.to_string())
         );
+
+        let filename = "clip_24.06.15.mp4";
+        let correct = "clip_2024.06.15.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "note_21.01.30.txt";
+        let correct = "note_2021.01.30.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct.to_string())
+        );
     }
+
+    #[test]
+    fn year_first_changes_short_date_interpretation() {
+        // Without year_first: 24.06.12 → day=24 is > 12, so unambiguous DD.MM.YY
+        let filename = "meeting.24.06.12.mp4";
+        let correct_day_first = "meeting.2012.06.24.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct_day_first.to_string())
+        );
+
+        // With year_first: 24.06.12 → year=24, month=06, day=12
+        let correct_year_first = "meeting.2024.06.12.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct_year_first.to_string())
+        );
+
+        // Without year_first: 23.01.05 → day=23, month=01, year=05
+        let filename = "show.23.01.05.mkv";
+        let correct_day_first = "show.2005.01.23.mkv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct_day_first.to_string())
+        );
+
+        // With year_first: 23.01.05 → year=23, month=01, day=05
+        let correct_year_first = "show.2023.01.05.mkv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct_year_first.to_string())
+        );
+    }
+
+    #[test]
+    fn year_first_with_ambiguous_short_dates() {
+        // All three components <= 12: interpretation depends on year_first
+        let filename = "file.12.06.11.txt";
+        // year_first=false: DD.MM.YY → day=12, month=06, year=11
+        let correct_day_first = "file.2011.06.12.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct_day_first.to_string())
+        );
+
+        // year_first=true: YY.MM.DD → year=12, month=06, day=11
+        let correct_year_first = "file.2012.06.11.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct_year_first.to_string())
+        );
+
+        // Another ambiguous case
+        let filename = "clip.10.03.08.avi";
+        let correct_day_first = "clip.2008.03.10.avi";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct_day_first.to_string())
+        );
+        let correct_year_first = "clip.2010.03.08.avi";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct_year_first.to_string())
+        );
+    }
+
+    #[test]
+    fn year_first_does_not_affect_full_year_dates() {
+        // DD.MM.YYYY: year_first flag should not change interpretation
+        let filename = "event_15.03.2024.txt";
+        let correct = "event_2024.03.15.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct.to_string())
+        );
+
+        // MM.DD.YYYY with unambiguous day > 12
+        let filename = "report.01.25.2020.mp4";
+        let correct = "report.2020.01.25.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some(correct.to_string())
+        );
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
+    fn year_first_with_various_boundaries() {
+        // With dot separator
+        let filename = "show.22.11.05.recording";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some("show.2022.11.05.recording".to_string())
+        );
+
+        // With space boundaries
+        let filename = "show 22.11.05 recording";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some("show 2022.11.05 recording".to_string())
+        );
+
+        // At start of string
+        let filename = "21.03.15.concert.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some("2021.03.15.concert.mp4".to_string())
+        );
+
+        // At end of string
+        let filename = "backup.20.01.09";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some("backup.2020.01.09".to_string())
+        );
+
+        // With underscore boundary
+        let filename = "log_19.06.12_final.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some("log_2019.06.12_final.txt".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod invalid_date_tests {
+    use super::*;
 
     #[test]
     fn not_a_valid_date() {
@@ -514,7 +855,39 @@ mod filename_tests {
         let filename = "testing08.12.1080p.mp4";
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Month 13 is invalid
+        let filename = "data.31.13.2024.csv";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Day 0 is invalid
+        let filename = "file.0.12.2023.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Month 0 is invalid
+        let filename = "file.15.0.2023.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Resolution-like numbers should not be dates
+        let filename = "video.1920.1080.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        let filename = "render.3840.2160.output.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Year too far in the future
+        let filename = "plan.01.06.2099.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Year too old
+        let filename = "archive.15.03.1980.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
     }
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    use super::*;
 
     #[test]
     fn ordinal_numbers_not_detected_as_date() {
@@ -535,6 +908,243 @@ mod filename_tests {
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
     }
+
+    #[test]
+    fn ordinal_higher_numbers_not_detected_as_date() {
+        // Higher ordinals that could be confused with months or days
+        let filename = "01.04.5th.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.9th.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.10th.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.11th.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.12th.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Two-digit ordinals that look like valid day values
+        let filename = "01.04.21st.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.22nd.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.23rd.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.31st.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+    }
+
+    #[test]
+    fn ordinal_at_different_positions_not_detected_as_date() {
+        // Ordinal at the start before two numbers
+        let filename = "2nd.01.04.Live";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "1st.03.05.Song";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "3rd.10.12.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "22nd.01.04.Live";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Ordinal in the middle position
+        let filename = "01.2nd.04.Live";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "05.1st.12.Recording";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Only ordinal and numbers at string boundaries
+        let filename = "2nd.01.04";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "1st.05.12";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "23rd.01.04";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+    }
+
+    #[test]
+    fn ordinal_at_end_of_string_not_detected_as_date() {
+        let filename = "01.04.2nd";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.1st";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.3rd";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.22nd";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+    }
+
+    #[test]
+    fn ordinal_with_varied_name_lengths_not_detected_as_date() {
+        // Very short names
+        let filename = "01.04.2nd.A";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "01.04.3rd.X";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Long multi-part names
+        let filename = "01.04.2nd.Live.Recording.Session";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "Some.Long.Name.01.04.3rd.Edition.Remastered";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+    }
+
+    #[test]
+    fn ordinal_with_different_boundaries_not_detected_as_date() {
+        // With spaces as boundaries
+        let filename = "Show 01.04.2nd Live";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "Song 03.05.1st Recording";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "Album 2nd.01.04 Live";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // File extensions
+        let filename = "Show.01.04.2nd.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "Show.01.04.3rd.csv";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "Show.01.04.1st.avi";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Ordinal right before file extension
+        let filename = "Show.01.04.2nd.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "Show.03.05.1st.mkv";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Mixed spaces and dots with ordinals
+        let filename = "Concert 01.04.2nd.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "Concert.01.04 2nd Live.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+    }
+
+    #[test]
+    fn ordinal_with_nearby_real_date() {
+        // Ordinal adjacent to full year: real date is detected and flipped,
+        // but the ordinal itself is not consumed as part of the date
+        let filename = "3rd.01.04.2024.Live";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some("3rd.2024.04.01.Live".to_string())
+        );
+
+        let filename = "1st.10.12.2023.Song";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some("1st.2023.12.10.Song".to_string())
+        );
+
+        // Ordinal between numbers that don't form a date without it
+        let filename = "Show.01.04.2nd.24.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        // Real short date before ordinal: date is detected, ordinal is not part of it
+        let filename = "Show.24.01.04.2nd.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some("Show.2004.01.24.2nd.mp4".to_string())
+        );
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some("Show.2024.01.04.2nd.mp4".to_string())
+        );
+
+        // Already correct date format followed by ordinal: skipped (already year-first)
+        let filename = "2024.01.04.3rd.Edition";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        let filename = "2023.10.12.1st.Song";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        let filename = "2024.06.15.22nd.Anniversary.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Ordinal after full year date that needs flipping
+        let filename = "01.04.2024.3rd.Edition";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some("2024.04.01.3rd.Edition".to_string())
+        );
+
+        let filename = "10.12.2023.1st.Song";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some("2023.12.10.1st.Song".to_string())
+        );
+
+        let filename = "06.15.2024.22nd.Anniversary.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, false, false),
+            Some("2024.06.15.22nd.Anniversary.mp4".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod extra_numbers_tests {
+    use super::*;
 
     #[test]
     fn extra_numbers() {
@@ -569,6 +1179,11 @@ mod filename_tests {
         let name = "99 meeting 20 2019-11-17";
         assert_eq!(Date::reorder_filename_date(name, true, false, false), None);
     }
+}
+
+#[cfg(test)]
+mod swap_year_tests {
+    use super::*;
 
     #[test]
     fn swap_year() {
@@ -594,6 +1209,181 @@ mod filename_tests {
     }
 
     #[test]
+    fn swap_year_with_various_extensions() {
+        let filename = "2010.06.20.mp4";
+        let correct = "2020.06.10.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "2010.06.20.mkv";
+        let correct = "2020.06.10.mkv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "2010.06.20.txt";
+        let correct = "2020.06.10.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "2003.11.22.avi";
+        let correct = "2022.11.03.avi";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
+    fn swap_year_at_different_positions() {
+        // Date at start of filename
+        let filename = "2005.12.23.holiday.clip";
+        let correct = "2023.12.05.holiday.clip";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        // Date in the middle
+        let filename = "vacation.2005.12.23.final.mp4";
+        let correct = "vacation.2023.12.05.final.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        // Date at end of string
+        let filename = "archive.2005.12.23";
+        let correct = "archive.2023.12.05";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        // Date with space boundaries
+        let filename = "show 2003.08.21 episode.mp4";
+        let correct = "show 2021.08.03 episode.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        // Date with dash boundary
+        let filename = "rec-2002.11.18.mp4";
+        let correct = "rec-2018.11.02.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
+    fn swap_year_with_single_digit_result() {
+        // Swap produces single-digit day (should be zero-padded)
+        let filename = "2001.06.20.mp4";
+        let correct = "2020.06.01.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "2003.09.15.mkv";
+        let correct = "2015.09.03.mkv";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "2009.01.24.txt";
+        let correct = "2024.01.09.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
+    fn swap_year_does_not_apply_to_non_correct_format() {
+        // DD.MM.YYYY gets reordered but NOT swapped, even with swap flag
+        let filename = "05.12.2023.jpg";
+        let correct = "2023.12.05.jpg";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        // Short date DD.MM.YY gets reordered but NOT swapped
+        let filename = "15.06.23.mp4";
+        let correct = "2023.06.15.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        // MM.DD.YYYY gets reordered but NOT swapped
+        let filename = "03.15.2020.txt";
+        let correct = "2020.03.15.txt";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
+    fn swap_year_with_year_first_flag() {
+        // year_first should not affect swap behavior on correct format dates
+        let filename = "2005.12.23.jpg";
+        let correct = "2023.12.05.jpg";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, true, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "2010.06.20.mp4";
+        let correct = "2020.06.10.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, true, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
+    fn swap_year_boundary_values() {
+        // Day 1 → year suffix 01
+        let filename = "2001.06.20.mp4";
+        let correct = "2020.06.01.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        // Day 31 → year suffix 31 (would be 2031, likely future/invalid)
+        let filename = "2001.01.31.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, true, false), None);
+
+        // Day matches current year suffix → year becomes same as original year suffix
+        let filename = "2010.05.10.mp4";
+        let correct = "2010.05.10.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+    }
+
+    #[test]
     fn swap_year_invalid_future_year() {
         let future_suffix = (*CURRENT_YEAR + 1) % 100;
         let filename = format!("sample_2024.06.{future_suffix:02}.mp4");
@@ -605,7 +1395,37 @@ mod filename_tests {
     fn swap_year_does_not_trigger_without_flag() {
         let filename = "photo_2023.12.05.jpg";
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
+
+        let filename = "clip_2005.06.20.mp4";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+
+        // Without swap, correct format is simply skipped
+        let filename = "2010.03.15.recording.mkv";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
     }
+
+    #[test]
+    fn swap_year_with_long_names() {
+        let filename = "My.Favorite.Show.2005.12.23.720p.x264.mp4";
+        let correct = "My.Favorite.Show.2023.12.05.720p.x264.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+
+        let filename = "Concert Recording Live 2003.08.21 Final Mix.mp4";
+        let correct = "Concert Recording Live 2021.08.03 Final Mix.mp4";
+        assert_eq!(
+            Date::reorder_filename_date(filename, false, true, false),
+            Some(correct.to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod mm_dd_yyyy_tests {
+    use super::*;
 
     #[test]
     fn date_format_mm_dd_yyyy() {
