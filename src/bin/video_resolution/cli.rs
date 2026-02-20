@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 
-use anyhow::{Error, anyhow};
+use anyhow::anyhow;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use tokio::process::Command;
@@ -48,28 +48,21 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         println!("Processing {} files...", files.len());
     }
 
-    // Keep successfully processed files, print errors for ffprobe command
-    let mut results: Vec<FFProbeResult> = get_resolutions(files)
-        .await?
-        .into_iter()
-        .filter_map(|res| match res {
-            Ok(val) => Some(val),
-            Err(err) => {
-                eprintln!("Error: {err}");
-                None
-            }
-        })
-        .collect();
-
-    results.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
+    let mut results = get_resolutions(files).await?;
 
     // Delete low resolution files if requested
     if let Some(limit) = config.delete_limit {
         results = delete_low_resolution_files(results, limit, &config);
     }
 
+    add_resolution_labels(&config, results);
+
+    Ok(())
+}
+
+fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) {
     // Rename remaining files to add resolution labels
-    let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = results
+    let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = files
         .into_iter()
         .filter_map(|result| match result.new_path_if_needed() {
             Ok(Some(new_path)) => Some((result, new_path)),
@@ -92,7 +85,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         if config.verbose {
             println!("No video files require renaming");
         }
-        return Ok(());
+        return;
     } else if config.verbose {
         print_bold!("Renaming {num_files} file(s)");
     }
@@ -106,8 +99,6 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     }
 
     print_green!("Renamed {num_files} file(s)");
-
-    Ok(())
 }
 
 /// Deletes files with resolution smaller than the given limit.
@@ -125,6 +116,7 @@ fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: 
             print_bold!("Deleting {num_delete} file(s) smaller than {limit}:");
         }
 
+        print_bold!("Resolution            Path");
         for result in to_delete {
             if let Err(error) = result.delete(config.dryrun) {
                 cli_tools::print_error!("{error}");
@@ -193,7 +185,11 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
     Ok(files)
 }
 
-async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFProbeResult, Error>>> {
+/// Run ffprobe on all files concurrently and return successfully parsed results.
+///
+/// Errors from individual ffprobe calls are printed to stderr and the
+/// corresponding files are excluded from the returned results.
+async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<FFProbeResult>> {
     let semaphore = create_semaphore_for_io_bound();
 
     let progress_bar = Arc::new(ProgressBar::new(files.len() as u64));
@@ -218,13 +214,22 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<Result<FFPro
         })
         .collect();
 
-    let results = futures::future::join_all(tasks)
+    let mut results: Vec<FFProbeResult> = futures::future::join_all(tasks)
         .await
         .into_iter()
         .map(|res| res.expect("Download future failed"))
+        .filter_map(|res| match res {
+            Ok(val) => Some(val),
+            Err(err) => {
+                eprintln!("Error: {err}");
+                None
+            }
+        })
         .collect();
 
     progress_bar.finish_and_clear();
+
+    results.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
 
     Ok(results)
 }
