@@ -15,7 +15,9 @@ static RE_BRACKETS: LazyLock<Regex> =
 static RE_WHITESPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("Failed to compile whitespace regex"));
 
-static RE_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Failed to compile dots regex"));
+/// Matches two or more consecutive dots.
+static RE_CONSECUTIVE_DOTS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\.{2,}").expect("Failed to create regex pattern for consecutive dots"));
 
 static RE_EXCLAMATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!+").expect("Failed to compile exclamation regex"));
@@ -203,7 +205,7 @@ impl DotFormat<'_> {
             Self::remove_consecutive_duplicates(&mut new_name, &self.config.deduplicate_patterns);
         }
 
-        Self::remove_extra_dots(&mut new_name);
+        remove_extra_dots(&mut new_name);
 
         new_name
     }
@@ -254,7 +256,7 @@ impl DotFormat<'_> {
             self.remove_from_start(&mut new_name);
         }
 
-        Self::remove_extra_dots(&mut new_name);
+        remove_extra_dots(&mut new_name);
 
         new_name
     }
@@ -441,7 +443,7 @@ impl DotFormat<'_> {
         *name = RE_DOTCOM.replace_all(name, ".").into_owned();
         *name = RE_EXCLAMATION.replace_all(name, ".").into_owned();
         *name = RE_WHITESPACE.replace_all(name, ".").into_owned();
-        *name = RE_DOTS.replace_all(name, ".").into_owned();
+        *name = RE_CONSECUTIVE_DOTS.replace_all(name, ".").into_owned();
     }
 
     /// Remove consecutive duplicate occurrences of patterns from the name.
@@ -528,10 +530,108 @@ impl DotFormat<'_> {
             })
             .into_owned();
     }
+}
 
-    fn remove_extra_dots(name: &mut String) {
-        let result = RE_DOTS.replace_all(name, ".");
-        *name = result.trim_start_matches('.').trim_end_matches('.').to_string();
+/// Replace two or more consecutive dots with a single dot in place.
+pub fn collapse_consecutive_dots_in_place(text: &mut String) {
+    *text = RE_CONSECUTIVE_DOTS.replace_all(text, ".").into_owned();
+}
+
+/// Replace two or more consecutive dots with a single dot.
+#[must_use]
+pub fn collapse_consecutive_dots(text: &str) -> String {
+    RE_CONSECUTIVE_DOTS.replace_all(text, ".").into_owned()
+}
+
+/// Replace two or more consecutive dots with a single dot,
+/// then strip any leading or trailing dots.
+pub fn remove_extra_dots(text: &mut String) {
+    let result = RE_CONSECUTIVE_DOTS.replace_all(text, ".");
+    *text = result.trim_start_matches('.').trim_end_matches('.').to_string();
+}
+
+#[cfg(test)]
+mod collapse_consecutive_dots_tests {
+    use super::*;
+
+    #[test]
+    fn no_dots() {
+        assert_eq!(collapse_consecutive_dots("hello"), "hello");
+    }
+
+    #[test]
+    fn single_dots_unchanged() {
+        assert_eq!(collapse_consecutive_dots("a.b.c"), "a.b.c");
+    }
+
+    #[test]
+    fn double_dots_collapsed() {
+        assert_eq!(collapse_consecutive_dots("a..b"), "a.b");
+    }
+
+    #[test]
+    fn triple_dots_collapsed() {
+        assert_eq!(collapse_consecutive_dots("a...b"), "a.b");
+    }
+
+    #[test]
+    fn many_consecutive_dots_collapsed() {
+        assert_eq!(collapse_consecutive_dots("a.....b"), "a.b");
+    }
+
+    #[test]
+    fn multiple_groups_of_dots() {
+        assert_eq!(collapse_consecutive_dots("a..b...c..d"), "a.b.c.d");
+    }
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(collapse_consecutive_dots(""), "");
+    }
+
+    #[test]
+    fn only_dots() {
+        assert_eq!(collapse_consecutive_dots("...."), ".");
+    }
+
+    #[test]
+    fn filename_with_double_dots() {
+        assert_eq!(collapse_consecutive_dots("video..1080p.mp4"), "video.1080p.mp4");
+    }
+
+    #[test]
+    fn in_place_mutates_string() {
+        let mut text = String::from("a..b...c");
+        collapse_consecutive_dots_in_place(&mut text);
+        assert_eq!(text, "a.b.c");
+    }
+
+    #[test]
+    fn in_place_no_change_needed() {
+        let mut text = String::from("a.b.c");
+        collapse_consecutive_dots_in_place(&mut text);
+        assert_eq!(text, "a.b.c");
+    }
+
+    #[test]
+    fn trim_removes_leading_and_trailing_dots() {
+        let mut text = String::from("..a..b..");
+        remove_extra_dots(&mut text);
+        assert_eq!(text, "a.b");
+    }
+
+    #[test]
+    fn trim_only_dots_becomes_empty() {
+        let mut text = String::from("....");
+        remove_extra_dots(&mut text);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn trim_no_change_needed() {
+        let mut text = String::from("a.b.c");
+        remove_extra_dots(&mut text);
+        assert_eq!(text, "a.b.c");
     }
 }
 

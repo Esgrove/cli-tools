@@ -10,4 +10,5 @@ mod rename;
 
 pub use config::{DotRenameConfig, DotsConfig};
 pub use format::DotFormat;
+pub use format::{collapse_consecutive_dots, collapse_consecutive_dots_in_place, remove_extra_dots};
 pub use rename::DotRename;

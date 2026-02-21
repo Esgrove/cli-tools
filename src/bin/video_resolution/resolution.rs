@@ -3,12 +3,16 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use colored::Colorize;
+use regex::Regex;
+
+use cli_tools::dot_rename::remove_extra_dots;
 
 const RESOLUTION_TOLERANCE: f32 = 0.025;
 const KNOWN_RESOLUTIONS: &[(u32, u32)] = &[
     (640, 480),
     (720, 480),
     (720, 540),
+    (960, 540),
     (720, 544),
     (720, 576),
     (800, 600),
@@ -114,17 +118,46 @@ impl FFProbeResult {
     }
 
     /// Returns `Some(new_path)` if file needs renaming, `None` if already up-to-date.
+    ///
+    /// Handles three cases:
+    /// 1. File has no label and no full resolution → adds the label
+    /// 2. File has a full resolution pattern (e.g. `1080x1920`) → replaces with label
+    /// 3. File has both a full resolution and a label (duplicate) → removes the full resolution
     pub(crate) fn new_path_if_needed(&self) -> anyhow::Result<Option<PathBuf>> {
         let label = self.resolution.label();
-        let (mut name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
-        if name.contains(&*label) {
-            Ok(None)
+        let (name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
+
+        // Remove existing full resolution patterns (WxH or HxW) with optional
+        // case-insensitive "vertical" prefix and optional dot separator.
+        // Word boundaries (\b) prevent partial matches (e.g. "21920x1080" won't match "1920x1080")
+        // because all resolution characters (digits and 'x') are word characters,
+        // so \b requires a non-word character (like '.') or string edge at each end.
+        // For example: "1080x1920", "1920x1080", "vertical.1080x1920", "Vertical1920x1080"
+        let (width, height) = (self.resolution.width, self.resolution.height);
+        let pattern = if width == height {
+            format!(r"(?i)\b(?:vertical\.?)?{width}x{height}\b")
         } else {
-            let full_resolution = self.resolution.to_string();
-            if name.contains(&full_resolution) {
-                name = name.replace(&full_resolution, "");
+            format!(r"(?i)\b(?:vertical\.?)?(?:{width}x{height}|{height}x{width})\b")
+        };
+        let re = Regex::new(&pattern)?;
+        let cleaned_name = re.replace_all(&name, "").into_owned();
+
+        if cleaned_name.contains(&*label) {
+            // Label already present in the cleaned name
+            if cleaned_name == name {
+                // No full resolution was removed, file is already correct
+                Ok(None)
+            } else {
+                // Full resolution was removed but label already exists — fix duplicate
+                let mut new_file_name = format!("{cleaned_name}.{extension}");
+                remove_extra_dots(&mut new_file_name);
+                let new_path = self.file.with_file_name(&new_file_name);
+                Ok(Some(new_path))
             }
-            let new_file_name = format!("{name}.{label}.{extension}").replace("..", ".");
+        } else {
+            // Label not present, add it after removing any existing full resolution
+            let mut new_file_name = format!("{cleaned_name}.{label}.{extension}");
+            remove_extra_dots(&mut new_file_name);
             let new_path = self.file.with_file_name(&new_file_name);
             Ok(Some(new_path))
         }
@@ -162,7 +195,7 @@ impl Resolution {
             // Vertical video
             match (self.width, self.height) {
                 (480, 640 | 720) => Cow::Borrowed("Vertical.480p"),
-                (540, 720) => Cow::Borrowed("Vertical.540p"),
+                (540, 720 | 960) => Cow::Borrowed("Vertical.540p"),
                 (544, 720) => Cow::Borrowed("Vertical.544p"),
                 (576, 720) => Cow::Borrowed("Vertical.576p"),
                 (600, 800) => Cow::Borrowed("Vertical.600p"),
@@ -176,7 +209,7 @@ impl Resolution {
             // Horizontal video
             match (self.width, self.height) {
                 (640 | 720, 480) => Cow::Borrowed("480p"),
-                (720, 540) => Cow::Borrowed("540p"),
+                (720 | 960, 540) => Cow::Borrowed("540p"),
                 (720, 544) => Cow::Borrowed("544p"),
                 (720, 576) => Cow::Borrowed("576p"),
                 (800, 600) => Cow::Borrowed("600p"),
@@ -839,6 +872,30 @@ mod label_tests {
     }
 
     #[test]
+    fn exact_matches_960x540() {
+        assert_eq!(
+            Resolution {
+                width: 960,
+                height: 540
+            }
+            .label(),
+            "540p"
+        );
+    }
+
+    #[test]
+    fn exact_matches_vertical_540x960() {
+        assert_eq!(
+            Resolution {
+                width: 540,
+                height: 960
+            }
+            .label(),
+            "Vertical.540p"
+        );
+    }
+
+    #[test]
     fn label_very_small_resolution() {
         let res = Resolution { width: 64, height: 64 };
         assert_eq!(res.label(), "64x64");
@@ -1460,6 +1517,193 @@ mod ffprobe_result_tests {
     }
 
     #[test]
+    fn new_path_if_needed_replaces_vertical_bare_resolution() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.1080x1920.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(
+            new_path.to_string_lossy().contains("Vertical.1080p"),
+            "Expected 'Vertical.1080p' in: {}",
+            new_path.display()
+        );
+        assert!(
+            !new_path.to_string_lossy().contains("1080x1920"),
+            "Should not contain '1080x1920' in: {}",
+            new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_replaces_vertical_dot_prefix_resolution() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("filename.vertical.1080x1920.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(
+            new_path.to_string_lossy().contains("Vertical.1080p"),
+            "Expected 'Vertical.1080p' in: {}",
+            new_path.display()
+        );
+        assert!(
+            !new_path.to_string_lossy().contains("1080x1920"),
+            "Should not contain '1080x1920' in: {}",
+            new_path.display()
+        );
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "filename.Vertical.1080p.mp4"
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_replaces_vertical_no_dot_prefix_resolution() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("filename.vertical1080x1920.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(
+            new_path.to_string_lossy().contains("Vertical.1080p"),
+            "Expected 'Vertical.1080p' in: {}",
+            new_path.display()
+        );
+        assert!(
+            !new_path.to_string_lossy().contains("vertical1080x1920"),
+            "Should not contain 'vertical1080x1920' in: {}",
+            new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_replaces_capitalized_vertical_prefix() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("filename.Vertical.1080x1920.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "filename.Vertical.1080p.mp4"
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_replaces_swapped_dimensions() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // Filename has HxW but detected resolution is WxH (horizontal)
+        let file_path = temp_dir.path().join("video.1080x1920.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert!(
+            new_path.to_string_lossy().contains("1080p"),
+            "Expected '1080p' in: {}",
+            new_path.display()
+        );
+        assert!(
+            !new_path.to_string_lossy().contains("1080x1920"),
+            "Should not contain '1080x1920' in: {}",
+            new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_replaces_720x540_with_540p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.720x540.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 720,
+                height: 540,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(new_path.file_name().unwrap().to_string_lossy(), "video.540p.mp4");
+    }
+
+    #[test]
+    fn new_path_if_needed_replaces_vertical_540x720_with_vertical_540p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.540x720.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 540,
+                height: 720,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.Vertical.540p.mp4"
+        );
+    }
+
+    #[test]
     fn new_path_if_needed_vertical() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("video.mp4");
@@ -1477,6 +1721,189 @@ mod ffprobe_result_tests {
         assert!(new_path.is_some());
         let new_path = new_path.unwrap();
         assert!(new_path.to_string_lossy().contains("Vertical.1080p"));
+    }
+
+    #[test]
+    fn new_path_if_needed_fixes_duplicate_960x540_540p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.960x540.540p.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 960,
+                height: 540,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(new_path.file_name().unwrap().to_string_lossy(), "video.540p.mp4");
+    }
+
+    #[test]
+    fn new_path_if_needed_fixes_duplicate_1920x1080_1080p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.1920x1080.1080p.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(new_path.file_name().unwrap().to_string_lossy(), "video.1080p.mp4");
+    }
+
+    #[test]
+    fn new_path_if_needed_fixes_duplicate_vertical_with_full_resolution_and_label() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.1080x1920.Vertical.1080p.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.Vertical.1080p.mp4"
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_fixes_duplicate_vertical_prefix_and_label() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.vertical.1080x1920.Vertical.1080p.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.Vertical.1080p.mp4"
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_no_partial_digit_match() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // "21920x1080" should NOT match as "1920x1080"
+        let file_path = temp_dir.path().join("video.21920x1080.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        // The "21920x1080" should NOT be removed since boundaries prevent partial match
+        assert!(
+            new_path.to_string_lossy().contains("21920x1080"),
+            "Partial digit match should not be removed: {}",
+            new_path.display()
+        );
+        assert!(
+            new_path.to_string_lossy().contains("1080p"),
+            "Label should be added: {}",
+            new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_no_partial_digit_match_trailing() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // "1920x10800" should NOT match as "1920x1080"
+        let file_path = temp_dir.path().join("video.1920x10800.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        // The "1920x10800" should NOT be removed since boundaries prevent partial match
+        assert!(
+            new_path.to_string_lossy().contains("1920x10800"),
+            "Partial digit match should not be removed: {}",
+            new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_960x540_replaces_with_540p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.960x540.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 960,
+                height: 540,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(new_path.file_name().unwrap().to_string_lossy(), "video.540p.mp4");
+    }
+
+    #[test]
+    fn new_path_if_needed_fixes_duplicate_720x480_480p() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.720x480.480p.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 720,
+                height: 480,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(new_path.file_name().unwrap().to_string_lossy(), "video.480p.mp4");
     }
 
     #[test]

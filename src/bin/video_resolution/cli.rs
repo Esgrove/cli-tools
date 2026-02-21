@@ -29,6 +29,11 @@ static RE_HIGH_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(720p|1080p|1440p|2160p)").expect("Failed to create regex pattern for high resolutions")
 });
 
+/// Matches full resolution patterns like `1920x1080` or `1080x1920` in filenames.
+/// Used to detect files that have both a resolution label and a full resolution pattern (duplicates).
+static RE_FULL_RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b\d{3,4}x\d{3,4}\b").expect("Failed to create regex pattern for full resolutions"));
+
 /// Main entry point for the resolution CLI.
 pub async fn run(config: Config) -> anyhow::Result<()> {
     if config.debug {
@@ -162,7 +167,7 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
                 && path
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !exclude_regex.is_match(filename))
+                    .is_some_and(|filename| !exclude_regex.is_match(filename) || RE_FULL_RESOLUTION.is_match(filename))
             {
                 files.push(path.to_path_buf());
             }
@@ -179,7 +184,7 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
                 && path
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !exclude_regex.is_match(filename))
+                    .is_some_and(|filename| !exclude_regex.is_match(filename) || RE_FULL_RESOLUTION.is_match(filename))
             {
                 files.push(path);
             }
@@ -315,6 +320,49 @@ fn create_semaphore_for_io_bound() -> Arc<Semaphore> {
 #[cfg(test)]
 mod regex_tests {
     use super::*;
+
+    #[test]
+    fn regex_full_resolution_matches_standard_patterns() {
+        assert!(RE_FULL_RESOLUTION.is_match("video.1920x1080.mp4"));
+        assert!(RE_FULL_RESOLUTION.is_match("video.1080x1920.mp4"));
+        assert!(RE_FULL_RESOLUTION.is_match("video.960x540.mp4"));
+        assert!(RE_FULL_RESOLUTION.is_match("video.3840x2160.mp4"));
+        assert!(RE_FULL_RESOLUTION.is_match("video.720x480.mp4"));
+    }
+
+    #[test]
+    fn regex_full_resolution_no_match_label_only() {
+        assert!(!RE_FULL_RESOLUTION.is_match("video.1080p.mp4"));
+        assert!(!RE_FULL_RESOLUTION.is_match("video.720p.mp4"));
+        assert!(!RE_FULL_RESOLUTION.is_match("video.mp4"));
+    }
+
+    #[test]
+    fn regex_full_resolution_no_match_small_numbers() {
+        assert!(!RE_FULL_RESOLUTION.is_match("video.3x4.mp4"));
+        assert!(!RE_FULL_RESOLUTION.is_match("video.12x34.mp4"));
+    }
+
+    #[test]
+    fn regex_full_resolution_word_boundaries() {
+        // \b treats digits, letters, and underscore as word characters.
+        // The regex \b\d{3,4}x\d{3,4}\b requires a word boundary before the first digit
+        // and after the last digit, preventing matches inside larger word-char sequences.
+        // Dot-separated patterns match because dots are non-word characters.
+        assert!(RE_FULL_RESOLUTION.is_match("video.1920x1080.mp4"));
+        assert!(RE_FULL_RESOLUTION.is_match("video.960x540.540p.mp4"));
+        // 5-digit sequences are rejected since resolutions never exceed 4 digits
+        assert!(!RE_FULL_RESOLUTION.is_match("video.21920x1080.mp4"));
+        assert!(!RE_FULL_RESOLUTION.is_match("video.1920x10800.mp4"));
+    }
+
+    #[test]
+    fn regex_full_resolution_matches_with_label_present() {
+        // Files with both full resolution and label should match
+        assert!(RE_FULL_RESOLUTION.is_match("video.960x540.540p.mp4"));
+        assert!(RE_FULL_RESOLUTION.is_match("video.1920x1080.1080p.mp4"));
+        assert!(RE_FULL_RESOLUTION.is_match("video.1080x1920.Vertical.1080p.mp4"));
+    }
 
     #[test]
     fn regex_resolutions_matches_standard() {
