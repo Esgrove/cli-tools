@@ -57,14 +57,18 @@ impl StatsCollector {
         let video_files = self.gather_video_files()?;
 
         if video_files.is_empty() {
-            print_yellow!("No video files found in: {}", self.root.display());
+            if self.verbose {
+                print_yellow!("No video files found in: {}", self.root.display());
+            }
             return Ok(());
         }
 
-        println!(
-            "{}",
-            format!("Found {} video file(s)", video_files.len()).green().bold()
-        );
+        if self.verbose {
+            println!(
+                "{}",
+                format!("Found {} video file(s)", video_files.len()).green().bold()
+            );
+        }
 
         let runtime = tokio::runtime::Runtime::new()?;
         let (mut probed_files, error_count) = runtime.block_on(probe_files_async(video_files, &self.root));
