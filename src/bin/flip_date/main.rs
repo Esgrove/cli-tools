@@ -3,7 +3,8 @@ mod flip_date;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(
@@ -13,6 +14,9 @@ use clap::Parser;
     about = "Flip dates in file and directory names to start with year"
 )]
 pub struct Args {
+    #[command(subcommand)]
+    command: Option<FlipDateCommand>,
+
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
@@ -50,8 +54,27 @@ pub struct Args {
     verbose: bool,
 }
 
+/// Subcommands for flipdate.
+#[derive(Subcommand)]
+enum FlipDateCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(FlipDateCommand::Completion { shell, install }) = &args.command {
+        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+    }
     let path = cli_tools::resolve_input_path(args.path.as_deref())?;
     let config = flip_date::Config::from_args(args)?;
     if config.directory_mode {

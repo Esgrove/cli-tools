@@ -4,13 +4,17 @@ mod resolution;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 use config::Config;
 
 #[derive(Parser, Debug)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Add video resolution to filenames")]
 pub struct Args {
+    #[command(subcommand)]
+    command: Option<VideoResolutionCommand>,
+
     /// Optional input directory or file path
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
@@ -41,9 +45,28 @@ pub struct Args {
     verbose: bool,
 }
 
+/// Subcommands for vres.
+#[derive(Subcommand, Debug)]
+enum VideoResolutionCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(VideoResolutionCommand::Completion { shell, install }) = &args.command {
+        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+    }
     let config = Config::try_from_args(&args)?;
     cli::run(config).await
 }

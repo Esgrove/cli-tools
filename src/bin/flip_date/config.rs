@@ -213,6 +213,7 @@ mod config_from_args_tests {
 
     fn default_args() -> Args {
         Args {
+            command: None,
             path: None,
             dir: false,
             force: false,

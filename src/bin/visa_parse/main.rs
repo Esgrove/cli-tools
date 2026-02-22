@@ -9,7 +9,8 @@ mod parse;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 pub use crate::config::Config;
 use crate::parse::visa_parse;
@@ -23,6 +24,9 @@ use crate::parse::visa_parse;
     about = "Parse Finvoice XML credit card statement files"
 )]
 pub struct VisaParseArgs {
+    #[command(subcommand)]
+    command: Option<VisaParseCommand>,
+
     /// Optional input directory or XML file path
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub path: Option<PathBuf>,
@@ -44,8 +48,32 @@ pub struct VisaParseArgs {
     pub verbose: bool,
 }
 
+/// Subcommands for visaparse.
+#[derive(Subcommand, Debug)]
+enum VisaParseCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let args = VisaParseArgs::parse();
+    if let Some(VisaParseCommand::Completion { shell, install }) = &args.command {
+        return cli_tools::generate_shell_completion(
+            *shell,
+            VisaParseArgs::command(),
+            *install,
+            env!("CARGO_BIN_NAME"),
+        );
+    }
     let config = Config::from_args(&args)?;
     visa_parse(&config)
 }

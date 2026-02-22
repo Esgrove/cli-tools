@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(
@@ -8,6 +9,9 @@ use clap::Parser;
     about = "Print divider comment with centered text"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<DividerCommand>,
+
     /// Optional divider text(s)
     text: Vec<String>,
 
@@ -24,8 +28,27 @@ struct Args {
     align: bool,
 }
 
-fn main() {
+/// Subcommands for div.
+#[derive(Subcommand)]
+enum DividerCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(DividerCommand::Completion { shell, install }) = &args.command {
+        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+    }
     if args.text.is_empty() {
         println!("{}", format_centered_divider("", args.length, args.character));
     } else if args.text.len() > 1 && args.align {
@@ -48,6 +71,7 @@ fn main() {
             println!("{}", format_centered_divider(text, args.length, args.character));
         }
     }
+    Ok(())
 }
 
 fn format_centered_divider(text: &str, count: usize, character: char) -> String {

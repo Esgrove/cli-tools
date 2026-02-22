@@ -207,6 +207,7 @@ mod test_config_from_args_and_config {
         verbose: bool,
     ) -> VisaParseArgs {
         VisaParseArgs {
+            command: None,
             path,
             output,
             print,
@@ -467,6 +468,7 @@ verbose = true
 
         // CLI provides print=true and number=50, config has number=100 and verbose=true
         let args = VisaParseArgs {
+            command: None,
             path: Some(PathBuf::from(".")),
             output: None,
             print: true,
@@ -490,6 +492,7 @@ verbose = true
         let user_config = VisaParseConfig::from_toml_str(toml).expect("should parse");
 
         let args = VisaParseArgs {
+            command: None,
             path: Some(PathBuf::from(".")),
             output: None,
             print: false,
@@ -515,6 +518,7 @@ verbose = true
         let user_config = VisaParseConfig::from_toml_str(toml).expect("should parse");
 
         let args = VisaParseArgs {
+            command: None,
             path: Some(PathBuf::from(".")),
             output: None,
             print: false,
@@ -538,6 +542,7 @@ number = 100
         let user_config = VisaParseConfig::from_toml_str(toml).expect("should parse");
 
         let args = VisaParseArgs {
+            command: None,
             path: Some(PathBuf::from(".")),
             output: None,
             print: false,

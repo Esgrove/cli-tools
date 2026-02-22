@@ -1,13 +1,17 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use colored::Colorize;
 use git2::{Oid, Repository};
 
 #[derive(Parser, Debug)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create git version tags for a Rust project")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<VersionTagCommand>,
+
     /// Optional git repository path. Defaults to current directory.
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
@@ -33,8 +37,27 @@ struct Args {
     verbose: bool,
 }
 
+/// Subcommands for vtag.
+#[derive(Subcommand, Debug)]
+enum VersionTagCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(VersionTagCommand::Completion { shell, install }) = &args.command {
+        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+    }
     let repo_path = cli_tools::resolve_input_path(args.path.as_deref())?;
     if !repo_path.is_dir() {
         anyhow::bail!("Input path needs to be a git repository directory")
