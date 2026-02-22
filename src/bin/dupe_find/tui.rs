@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
@@ -6,6 +9,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use cli_tools::print_yellow;
+
+use cli_tools::video_info::VideoInfo;
 
 use crate::dupe_find::{DuplicateGroup, FileInfo};
 
@@ -111,7 +116,7 @@ impl TuiState {
 }
 
 /// Run interactive TUI mode for handling duplicates
-pub fn run_interactive(duplicates: &[DuplicateGroup]) -> anyhow::Result<()> {
+pub fn run_interactive(duplicates: &[DuplicateGroup], metadata: &HashMap<PathBuf, VideoInfo>) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
@@ -119,7 +124,7 @@ pub fn run_interactive(duplicates: &[DuplicateGroup]) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let actions = interactive_loop(&mut terminal, duplicates)?;
+    let actions = interactive_loop(&mut terminal, duplicates, metadata)?;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -137,6 +142,7 @@ pub fn run_interactive(duplicates: &[DuplicateGroup]) -> anyhow::Result<()> {
 fn interactive_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     duplicates: &[DuplicateGroup],
+    metadata: &HashMap<PathBuf, VideoInfo>,
 ) -> anyhow::Result<Vec<GroupAction>> {
     let mut group_index = 0;
     let mut actions: Vec<GroupAction> = Vec::new();
@@ -145,7 +151,14 @@ fn interactive_loop(
         let group = &duplicates[group_index];
         let sorted_files: Vec<&FileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
-        let action = handle_duplicate_group(terminal, &group.key, &sorted_files, group_index, duplicates.len())?;
+        let action = handle_duplicate_group(
+            terminal,
+            &group.key,
+            &sorted_files,
+            group_index,
+            duplicates.len(),
+            metadata,
+        )?;
 
         match action {
             DuplicateAction::Quit => break,
@@ -172,6 +185,7 @@ fn handle_duplicate_group(
     files: &[&FileInfo],
     current_group: usize,
     total_groups: usize,
+    metadata: &HashMap<PathBuf, VideoInfo>,
 ) -> anyhow::Result<DuplicateAction> {
     let best_index = find_best_file_index(files);
     let mut state = TuiState::new();
@@ -181,7 +195,16 @@ fn handle_duplicate_group(
 
     loop {
         terminal.draw(|frame| {
-            render_ui(frame, key, files, &state, &mut list_state, current_group, total_groups);
+            render_ui(
+                frame,
+                key,
+                files,
+                &state,
+                &mut list_state,
+                current_group,
+                total_groups,
+                metadata,
+            );
         })?;
 
         if let Event::Key(key_event) = event::read()? {
@@ -254,6 +277,71 @@ fn handle_duplicate_group(
     }
 }
 
+/// Format a metadata detail line for a single file.
+fn format_file_detail_lines(
+    file: &FileInfo,
+    index: usize,
+    selected: usize,
+    metadata: &HashMap<PathBuf, VideoInfo>,
+) -> Vec<Line<'static>> {
+    let is_selected = index == selected;
+    let prefix = if is_selected { "► " } else { "  " };
+
+    let base_style = if is_selected {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let label_style = if is_selected {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let mut lines = Vec::new();
+
+    // File path line
+    let path_str = file.path.display().to_string();
+    lines.push(Line::from(Span::styled(format!("{prefix}{path_str}"), base_style)));
+
+    // Metadata details
+    if let Some(meta) = metadata.get(&file.path) {
+        let size_str = cli_tools::format_size(meta.size_bytes.unwrap_or(0));
+
+        let duration_str = meta
+            .duration
+            .map_or_else(|| "N/A".to_string(), cli_tools::format_duration_seconds);
+
+        let resolution_str = meta.resolution_string().unwrap_or_else(|| "N/A".to_string());
+
+        let codec_str = meta.codec.as_deref().unwrap_or("N/A");
+
+        let detail_line = Line::from(vec![
+            Span::styled(format!("{prefix}  "), base_style),
+            Span::styled("Size: ", label_style),
+            Span::styled(format!("{size_str:<12}"), base_style),
+            Span::styled("Duration: ", label_style),
+            Span::styled(format!("{duration_str:<14}"), base_style),
+            Span::styled("Resolution: ", label_style),
+            Span::styled(format!("{resolution_str:<12}"), base_style),
+            Span::styled("Codec: ", label_style),
+            Span::styled(codec_str.to_string(), base_style),
+        ]);
+        lines.push(detail_line);
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}  (metadata unavailable)"),
+            label_style,
+        )));
+    }
+
+    // Empty separator line between files
+    lines.push(Line::from(""));
+
+    lines
+}
+
 /// Render the TUI
 #[allow(clippy::too_many_arguments)]
 fn render_ui(
@@ -264,17 +352,31 @@ fn render_ui(
     list_state: &mut ListState,
     current_group: usize,
     total_groups: usize,
+    metadata: &HashMap<PathBuf, VideoInfo>,
 ) {
     let area = frame.area();
+
+    // Calculate how many lines the file list needs (just path lines)
+    // 2 for borders + 1 per file
+    let file_list_height = (files.len() as u16).saturating_add(2).min(area.height / 3);
+
+    // Calculate how many lines the details section needs
+    // 2 for borders + 3 lines per file (path, metadata, separator)
+    let details_height = (files.len() as u16)
+        .saturating_mul(3)
+        .saturating_add(2)
+        .min(area.height / 2);
 
     // Create layout
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(10),   // File list
-            Constraint::Length(3), // Status/Edit area
-            Constraint::Length(3), // Help
+            Constraint::Length(3),                // Header
+            Constraint::Length(file_list_height), // File list (compact)
+            Constraint::Length(details_height),   // File details
+            Constraint::Min(0),                   // Spacer to push status/help down
+            Constraint::Length(3),                // Status/Edit area
+            Constraint::Length(3),                // Help
         ])
         .split(area);
 
@@ -305,6 +407,16 @@ fn render_ui(
         .block(Block::default().borders(Borders::ALL).title("Files (↑/↓ to select)"))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     frame.render_stateful_widget(list, chunks[1], list_state);
+
+    // File details panel
+    let mut detail_lines: Vec<Line> = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        let lines = format_file_detail_lines(file, index, state.selected, metadata);
+        detail_lines.extend(lines);
+    }
+
+    let details = Paragraph::new(detail_lines).block(Block::default().borders(Borders::ALL).title("File Details"));
+    frame.render_widget(details, chunks[2]);
 
     // Status/Edit area
     let status_content = if state.editing {
@@ -338,7 +450,7 @@ fn render_ui(
             } else {
                 "Status"
             }));
-    frame.render_widget(status, chunks[2]);
+    frame.render_widget(status, chunks[4]);
 
     // Help
     let help_text = if state.editing {
@@ -352,7 +464,7 @@ fn render_ui(
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL).title("Help"));
 
-    frame.render_widget(help, chunks[3]);
+    frame.render_widget(help, chunks[5]);
 }
 
 /// Apply all collected actions

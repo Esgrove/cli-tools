@@ -1,18 +1,20 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use colored::Colorize;
 #[cfg(not(test))]
 use indicatif::ProgressStyle;
 use indicatif::{ParallelProgressIterator, ProgressBar};
 use itertools::Itertools;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
 use regex::Regex;
 use walkdir::WalkDir;
 
-use cli_tools::{print_error, print_yellow};
+use cli_tools::video_info::VideoInfo;
+use cli_tools::{create_semaphore_for_io_bound, print_error, print_yellow};
 
 use crate::Args;
 use crate::config::{Config, DupeConfig};
@@ -39,6 +41,8 @@ const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 #[cfg(not(test))]
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
+#[cfg(not(test))]
+const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg} ({pos} files found)";
 /// All video extensions
 pub const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
 
@@ -94,6 +98,7 @@ pub struct FileInfo {
     pattern_match: Option<MatchRange>,
 }
 
+/// Duplicate file finder that scans directories for duplicate video files.
 pub struct DupeFind {
     config: Config,
     roots: Vec<PathBuf>,
@@ -174,7 +179,8 @@ impl DupeFind {
 
         // Interactive mode when not in print/dryrun mode
         if !self.config.dryrun {
-            return crate::tui::run_interactive(&duplicates);
+            let metadata = Self::collect_metadata_for_groups(&duplicates);
+            return crate::tui::run_interactive(&duplicates, &metadata);
         }
 
         // Print-only mode
@@ -198,23 +204,47 @@ impl DupeFind {
         Ok(())
     }
 
-    /// Collect all video files from all root directories in parallel
+    /// Collect all video files from all root directories in parallel.
+    /// Shows a spinner progress bar while scanning.
     fn gather_files(&self) -> Vec<FileInfo> {
+        #[cfg(not(test))]
+        let progress_bar = {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template(SPINNER_TEMPLATE)
+                    .expect("Failed to set spinner template"),
+            );
+            pb.set_message("Scanning directories");
+            pb
+        };
+
         let files: Mutex<Vec<FileInfo>> = Mutex::new(Vec::new());
 
         // Process each root directory in parallel
         self.roots.par_iter().for_each(|root| {
-            let collected_files = self.collect_video_files_from_root(root);
+            let collected_files = self.collect_video_files_from_root(
+                root,
+                #[cfg(not(test))]
+                &progress_bar,
+            );
             if let Ok(mut all_files) = files.lock() {
                 all_files.extend(collected_files);
             }
         });
 
+        #[cfg(not(test))]
+        progress_bar.finish_and_clear();
+
         files.into_inner().unwrap_or_default()
     }
 
-    /// Collect video files from a single root directory
-    fn collect_video_files_from_root(&self, root: &Path) -> Vec<FileInfo> {
+    /// Collect video files from a single root directory.
+    fn collect_video_files_from_root(
+        &self,
+        root: &Path,
+        #[cfg(not(test))] progress_bar: &ProgressBar,
+    ) -> Vec<FileInfo> {
         let walker = if self.config.recurse {
             WalkDir::new(root)
         } else {
@@ -230,12 +260,32 @@ impl DupeFind {
                 let path = entry.path();
                 let extension = cli_tools::path_to_file_extension_string(path);
                 if self.config.extensions.contains(&extension) {
+                    #[cfg(not(test))]
+                    progress_bar.inc(1);
                     Some(FileInfo::new(path.to_path_buf(), extension))
                 } else {
                     None
                 }
             })
             .collect()
+    }
+
+    /// Collect metadata for all files in duplicate groups using ffprobe.
+    /// Runs ffprobe calls concurrently with a semaphore to limit parallelism.
+    /// Returns a map from file path to metadata.
+    fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf, VideoInfo> {
+        // Collect all unique file paths from duplicate groups
+        let all_files: Vec<PathBuf> = groups
+            .iter()
+            .flat_map(|group| group.files.iter().map(|f| f.path.clone()))
+            .collect();
+
+        if all_files.is_empty() {
+            return HashMap::new();
+        }
+
+        let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        runtime.block_on(collect_metadata_async(all_files))
     }
 
     /// Find all duplicates in a single pass using multiple detection methods.
@@ -475,8 +525,67 @@ impl DupeFind {
     }
 }
 
+/// Collect video metadata concurrently using semaphore-limited async tasks.
+///
+/// Each ffprobe call runs in a blocking task with concurrency controlled
+/// by a semaphore sized for I/O-bound work (`num_cpus * 2`).
+async fn collect_metadata_async(files: Vec<PathBuf>) -> HashMap<PathBuf, VideoInfo> {
+    let semaphore = create_semaphore_for_io_bound();
+
+    #[cfg(not(test))]
+    let progress_bar = {
+        let pb = ProgressBar::new(files.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(PROGRESS_BAR_TEMPLATE)
+                .expect("Failed to set progress bar template")
+                .progress_chars(PROGRESS_BAR_CHARS),
+        );
+        Arc::new(pb)
+    };
+    #[cfg(test)]
+    let progress_bar = Arc::new(ProgressBar::hidden());
+
+    let tasks: Vec<_> = files
+        .into_iter()
+        .map(|path| {
+            let semaphore = Arc::clone(&semaphore);
+            let progress = Arc::clone(&progress_bar);
+            tokio::spawn(async move {
+                let permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
+                let result = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || VideoInfo::from_path(&path)
+                })
+                .await
+                .expect("spawn_blocking task failed");
+                drop(permit);
+                progress.inc(1);
+                (path, result)
+            })
+        })
+        .collect();
+
+    let metadata: HashMap<PathBuf, VideoInfo> = futures::future::join_all(tasks)
+        .await
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|(path, result)| match result {
+            Ok(info) => Some((path, info)),
+            Err(err) => {
+                eprintln!("Error: {err}");
+                None
+            }
+        })
+        .collect();
+
+    progress_bar.finish_and_clear();
+
+    metadata
+}
+
 #[cfg(test)]
-mod tests {
+mod tests_dupe_find {
     use crate::config::Config;
     use crate::dupe_find::{DupeFind, FileInfo};
     use cli_tools::get_unique_path;
@@ -1028,5 +1137,34 @@ mod tests {
     fn test_format_filename_with_highlight_no_match() {
         let result = DupeFind::format_filename_with_highlight("video.mp4", None);
         assert_eq!(result, "video.mp4");
+    }
+}
+
+#[cfg(test)]
+mod test_video_info_resolution_string {
+    use super::*;
+    use cli_tools::video_info::Resolution;
+
+    #[test]
+    fn formats_resolution() {
+        let info = VideoInfo {
+            size_bytes: Some(1000),
+            duration: Some(60.0),
+            resolution: Some(Resolution::new(1920, 1080)),
+            codec: Some("h264".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(info.resolution_string(), Some("1920x1080".to_string()));
+    }
+
+    #[test]
+    fn returns_none_when_resolution_missing() {
+        let info = VideoInfo {
+            size_bytes: Some(1000),
+            duration: Some(60.0),
+            codec: Some("h264".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(info.resolution_string(), None);
     }
 }

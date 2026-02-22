@@ -1,12 +1,16 @@
 pub mod date;
 pub mod dot_rename;
+pub mod resolution;
+pub mod video_info;
+
+pub use resolution::Resolution;
 
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
@@ -14,6 +18,7 @@ use clap::Command;
 use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
+use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
@@ -910,6 +915,15 @@ pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
     } else {
         trash::delete(path).map_err(std::io::Error::other)
     }
+}
+
+/// Create a semaphore for I/O-bound work.
+///
+/// Uses `num_cpus * 2` permits, which allows enough concurrency for I/O-bound
+/// tasks (like running ffprobe) without overwhelming the system.
+#[must_use]
+pub fn create_semaphore_for_io_bound() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(num_cpus::get_physical() * 2))
 }
 
 #[cfg(test)]

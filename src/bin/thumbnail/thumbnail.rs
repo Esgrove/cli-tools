@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use cli_tools::{print_error, print_yellow};
+use cli_tools::print_error;
+use cli_tools::print_yellow;
+use cli_tools::video_info::{VideoInfo, VideoStats};
 use colored::Colorize;
 use walkdir::WalkDir;
 
@@ -57,21 +59,6 @@ struct ThumbnailParams {
     metadata_text: String,
 }
 
-/// Information about a video file from ffprobe.
-#[derive(Debug)]
-struct VideoInfo {
-    /// Video width in pixels.
-    width: Option<u32>,
-    /// Video height in pixels.
-    height: Option<u32>,
-    /// Duration in seconds.
-    duration: Option<f64>,
-    /// Video codec name.
-    codec: Option<String>,
-    /// Video bitrate in kbps.
-    bitrate_kbps: Option<u64>,
-}
-
 impl ThumbnailCreator {
     /// Create a new thumbnail creator from command line arguments.
     pub fn new(args: &ThumbnailArgs) -> Result<Self> {
@@ -106,9 +93,10 @@ impl ThumbnailCreator {
 
         let mut success_count = 0;
         let mut error_count = 0;
+        let mut stats = VideoStats::new();
 
         for video_file in &video_files {
-            match self.create_thumbnail(video_file) {
+            match self.create_thumbnail(video_file, &mut stats) {
                 Ok(()) => success_count += 1,
                 Err(e) => {
                     print_error!("Failed to create thumbnail for {}: {e}", video_file.display());
@@ -122,6 +110,8 @@ impl ThumbnailCreator {
             success_count.to_string().green(),
             error_count.to_string().red()
         );
+
+        stats.print_summary();
 
         Ok(())
     }
@@ -199,7 +189,7 @@ impl ThumbnailCreator {
     }
 
     /// Create a thumbnail for a single video file.
-    fn create_thumbnail(&self, video_path: &Path) -> Result<()> {
+    fn create_thumbnail(&self, video_path: &Path, stats: &mut VideoStats) -> Result<()> {
         let filename = video_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -223,12 +213,26 @@ impl ThumbnailCreator {
         println!("{}", format!("Creating thumbnail for: {filename}").magenta().bold());
 
         // Get video info
-        let video_info = Self::get_video_info(video_path)?;
+        let video_info = VideoInfo::from_path(video_path)?;
+        stats.add(&video_info);
+
+        if video_info.resolution.is_none() {
+            print_yellow!("Could not detect video resolution for: {filename}");
+        }
+        if video_info.duration.is_none() {
+            print_yellow!("Could not detect duration for: {filename}");
+        }
+        if video_info.codec.is_none() {
+            print_yellow!("Could not detect codec for: {filename}");
+        }
+        if video_info.bitrate_kbps.is_none() {
+            print_yellow!("Could not detect bitrate for: {filename}");
+        }
 
         if self.config.verbose {
             let mut info_parts = Vec::new();
-            if let (Some(width), Some(height)) = (video_info.width, video_info.height) {
-                info_parts.push(format!("resolution: {width}x{height}"));
+            if let Some(resolution) = video_info.resolution {
+                info_parts.push(format!("resolution: {resolution}"));
             }
             if let Some(duration) = video_info.duration {
                 info_parts.push(format!("duration: {duration:.2}s"));
@@ -244,12 +248,8 @@ impl ThumbnailCreator {
             }
         }
 
-        // Determine layout based on aspect ratio
-        let is_landscape = match (video_info.width, video_info.height) {
-            (Some(width), Some(height)) => width > height,
-            // Default to landscape if dimensions unknown
-            _ => true,
-        };
+        // Determine layout based on aspect ratio (default to landscape if dimensions unknown)
+        let is_landscape = video_info.resolution.is_none_or(|r| r.is_landscape());
         let (cols, rows, padding) = if is_landscape {
             (
                 self.config.cols_landscape,
@@ -315,100 +315,17 @@ impl ThumbnailCreator {
         Ok(())
     }
 
-    /// Get video information using ffprobe.
-    fn get_video_info(video_path: &Path) -> Result<VideoInfo> {
-        let output = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng:format=bit_rate,duration",
-                "-of",
-                "default=nokey=0:noprint_wrappers=1",
-            ])
-            .arg(video_path)
-            .output()
-            .context("Failed to execute ffprobe")?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        let mut codec: Option<String> = None;
-        let mut bitrate_kbps: Option<u64> = None;
-        let mut duration: Option<f64> = None;
-        let mut width: Option<u32> = None;
-        let mut height: Option<u32> = None;
-
-        for line in stdout.lines() {
-            let line = line.trim();
-            if let Some((key, value)) = line.split_once('=') {
-                match key {
-                    "codec_name" => codec = Some(value.to_lowercase()),
-                    "bit_rate" | "BPS" | "BPS-eng" => {
-                        if bitrate_kbps.is_none()
-                            && let Ok(bps) = value.parse::<u64>()
-                            && bps > 0
-                        {
-                            bitrate_kbps = Some(bps / 1000);
-                        }
-                    }
-                    "duration" => {
-                        if let Ok(seconds) = value.parse::<f64>() {
-                            duration = Some(seconds);
-                        }
-                    }
-                    "width" => {
-                        if let Ok(w) = value.parse::<u32>() {
-                            width = Some(w);
-                        }
-                    }
-                    "height" => {
-                        if let Ok(h) = value.parse::<u32>() {
-                            height = Some(h);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Print warnings for missing information
-        let filename = video_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-
-        if width.is_none() || height.is_none() {
-            print_yellow!("Could not detect video resolution for: {filename}");
-        }
-        if duration.is_none() {
-            print_yellow!("Could not detect duration for: {filename}");
-        }
-        if codec.is_none() {
-            print_yellow!("Could not detect codec for: {filename}");
-        }
-        if bitrate_kbps.is_none() {
-            print_yellow!("Could not detect bitrate for: {filename}");
-        }
-
-        Ok(VideoInfo {
-            width,
-            height,
-            duration,
-            codec,
-            bitrate_kbps,
-        })
-    }
-
     /// Calculate appropriate font size based on video aspect ratio.
     fn calculate_font_size(&self, video_info: &VideoInfo) -> u32 {
-        let (Some(width), Some(height)) = (video_info.width, video_info.height) else {
+        let Some(resolution) = video_info.resolution else {
             return self.config.font_size;
         };
 
-        if width == 0 || height == 0 {
+        if resolution.width == 0 || resolution.height == 0 {
             return self.config.font_size;
         }
 
-        let ratio = f64::from(width) / f64::from(height);
+        let ratio = resolution.aspect_ratio();
 
         if ratio < 0.75 {
             // Very vertical video
@@ -429,8 +346,8 @@ impl ThumbnailCreator {
         if let Some(duration) = video_info.duration {
             parts.push(cli_tools::format_duration_seconds(duration));
         }
-        if let (Some(width), Some(height)) = (video_info.width, video_info.height) {
-            parts.push(format!("{width}x{height}"));
+        if let Some(resolution) = video_info.resolution {
+            parts.push(resolution.to_string());
         }
         if let Some(ref codec) = video_info.codec {
             parts.push(codec.clone());

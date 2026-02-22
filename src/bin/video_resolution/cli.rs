@@ -6,13 +6,14 @@ use anyhow::anyhow;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use tokio::process::Command;
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::SemaphorePermit;
 use walkdir::WalkDir;
 
-use cli_tools::{print_bold, print_green};
+use cli_tools::resolution::print_fuzzy_resolution_ranges;
+use cli_tools::{Resolution, create_semaphore_for_io_bound, print_bold, print_green};
 
 use crate::config::Config;
-use crate::resolution::{FFProbeResult, Resolution, print_fuzzy_resolution_ranges};
+use crate::resolution::FFProbeResult;
 
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
@@ -309,12 +310,6 @@ pub fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
         .map_err(|e| anyhow!("Failed to parse height '{height_str}': {e}"))?;
 
     Ok(Resolution::new(width, height))
-}
-
-/// Create a Semaphore for I/O-bound work.
-#[inline]
-fn create_semaphore_for_io_bound() -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(num_cpus::get_physical() * 2))
 }
 
 #[cfg(test)]
