@@ -206,14 +206,14 @@ impl VideoStats {
             .max_by_key(|r| r.pixel_count())
             .expect("non-empty");
 
-        println!("  {}: {} — {}", "Resolution".bold(), smallest.label(), biggest.label(),);
+        println!("  {}: {smallest} — {biggest}", "Resolutions".bold());
 
         // Aggregate counts by fuzzy resolution label
         let mut label_counts: HashMap<Cow<'static, str>, (usize, u64)> = HashMap::new();
         for (resolution, count) in &self.resolutions {
-            let label = resolution.label();
+            let label = resolution.to_string();
             let pixel_count = resolution.pixel_count();
-            let entry = label_counts.entry(label).or_insert((0, pixel_count));
+            let entry = label_counts.entry(Cow::from(label)).or_insert((0, pixel_count));
             entry.0 += count;
             // Track minimum pixel count for sorting
             entry.1 = entry.1.min(pixel_count);
@@ -261,8 +261,8 @@ impl VideoStats {
         let median = compute_median_f64(&self.durations);
 
         println!(
-            "  {}: {} (shortest) — {} (longest) | avg: {} | median: {}",
-            "Duration".bold(),
+            "  {}: {} — {} | avg: {} | median: {}",
+            "Durations".bold(),
             crate::format_duration_seconds(min_duration),
             crate::format_duration_seconds(max_duration),
             crate::format_duration_seconds(average),
@@ -299,7 +299,7 @@ impl VideoStats {
 
         println!(
             "  {}: {:.2} Mbps (min) — {:.2} Mbps (max) | avg: {:.2} Mbps | median: {:.2} Mbps",
-            "Bitrate".bold(),
+            "Bitrates".bold(),
             min_bitrate as f64 / 1000.0,
             max_bitrate as f64 / 1000.0,
             average / 1000.0,
@@ -323,7 +323,7 @@ impl VideoStats {
 
         println!(
             "  {}: {} — {} | avg: {} | median: {} | total: {}",
-            "File size".bold(),
+            "File sizes".bold(),
             crate::format_size(min_size),
             crate::format_size(max_size),
             crate::format_size(average_u64),
