@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use colored::Colorize;
 use regex::Regex;
 
 use cli_tools::Resolution;
 use cli_tools::dot_rename::remove_extra_dots;
+
+/// Regex pattern for detecting video codec labels in filenames.
+static RE_CODEC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(x265|x264|av1|hevc)\b").expect("Failed to create codec regex"));
 
 /// Result from running ffprobe on a video file.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -54,23 +59,18 @@ impl FFProbeResult {
     /// 1. File has no label and no full resolution → adds the label
     /// 2. File has a full resolution pattern (e.g. `1080x1920`) → replaces with label
     /// 3. File has both a full resolution and a label (duplicate) → removes the full resolution
+    ///
+    /// If the filename ends with a codec label (x265, x264, av1, hevc),
+    /// the resolution label is inserted before the codec label.
     pub(crate) fn new_path_if_needed(&self) -> anyhow::Result<Option<PathBuf>> {
         let label = self.resolution.label();
         let (name, extension) = cli_tools::get_normalized_file_name_and_extension(&self.file)?;
 
-        // Remove existing full resolution patterns (WxH or HxW) with optional
-        // case-insensitive "vertical" prefix and optional dot separator.
-        // Word boundaries (\b) prevent partial matches (e.g. "21920x1080" won't match "1920x1080")
-        // because all resolution characters (digits and 'x') are word characters,
-        // so \b requires a non-word character (like '.') or string edge at each end.
-        // For example: "1080x1920", "1920x1080", "vertical.1080x1920", "Vertical1920x1080"
-        let (width, height) = (self.resolution.width, self.resolution.height);
-        let pattern = if width == height {
-            format!(r"(?i)\b(?:vertical\.?)?{width}x{height}\b")
-        } else {
-            format!(r"(?i)\b(?:vertical\.?)?(?:{width}x{height}|{height}x{width})\b")
-        };
-        let re = Regex::new(&pattern)?;
+        // Remove existing full resolution patterns for THIS specific resolution (WxH or HxW)
+        // with optional "Vertical" prefix (dot optional). Uses cached regex for known resolutions.
+        // For example, for a 1920x1080 video, removes "1920x1080", "1080x1920",
+        // "Vertical.1080x1920", "Vertical1920x1080", etc., but NOT other resolutions like "2560x1440".
+        let re = self.resolution.dimension_regex()?;
         let cleaned_name = re.replace_all(&name, "").into_owned();
 
         if cleaned_name.contains(&*label) {
@@ -86,12 +86,28 @@ impl FFProbeResult {
                 Ok(Some(new_path))
             }
         } else {
-            // Label not present, add it after removing any existing full resolution
-            let mut new_file_name = format!("{cleaned_name}.{label}.{extension}");
+            // Label not present, add it (before codec if present)
+            let new_name = Self::insert_label_before_codec(&cleaned_name, &label);
+            let mut new_file_name = format!("{new_name}.{extension}");
             remove_extra_dots(&mut new_file_name);
             let new_path = self.file.with_file_name(&new_file_name);
             Ok(Some(new_path))
         }
+    }
+
+    /// Insert the resolution label before any codec label, or at the end if no codec.
+    ///
+    /// Codec labels: x265, x264, av1, hevc (case-insensitive).
+    fn insert_label_before_codec(name: &str, label: &str) -> String {
+        RE_CODEC.find(name).map_or_else(
+            || format!("{name}.{label}"),
+            |codec_match| {
+                // Found a codec - insert label before it
+                let before_codec = &name[..codec_match.start()];
+                let codec_and_after = &name[codec_match.start()..];
+                format!("{before_codec}.{label}.{codec_and_after}")
+            },
+        )
     }
 
     /// Print a colored diff showing the old and new file paths after renaming.
@@ -985,5 +1001,417 @@ mod ffprobe_result_tests {
         assert!(debug_str.contains("video.mp4"));
         assert!(debug_str.contains("1920"));
         assert!(debug_str.contains("1080"));
+    }
+
+    #[test]
+    fn new_path_inserts_resolution_before_x265_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.x265.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.1080p.x265.mp4",
+            "Resolution should be before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_inserts_resolution_before_x264_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("movie.x264.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1280,
+                height: 720,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "movie.720p.x264.mp4",
+            "Resolution should be before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_inserts_resolution_before_av1_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("clip.av1.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 3840,
+                height: 2160,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "clip.2160p.av1.mp4",
+            "Resolution should be before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_inserts_resolution_before_hevc_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.hevc.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.1080p.hevc.mp4",
+            "Resolution should be before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_with_codec_case_insensitive() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.X265.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.1080p.X265.mp4",
+            "Resolution should be before codec (case preserved)"
+        );
+    }
+
+    #[test]
+    fn new_path_with_existing_resolution_and_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.1080p.x265.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(
+            new_path.is_none(),
+            "No rename needed when resolution is already before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_with_full_resolution_and_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.1920x1080.x265.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.1080p.x265.mp4",
+            "Full resolution should be replaced with label before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_with_vertical_resolution_and_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.x264.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.Vertical.1080p.x264.mp4",
+            "Vertical resolution label should be before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_with_codec_in_middle_of_name() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("my.video.x265.extra.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "my.video.1080p.x265.extra.mp4",
+            "Resolution should be inserted before first codec occurrence"
+        );
+    }
+
+    #[test]
+    fn new_path_with_weird_resolution_and_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.x265.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1600,
+                height: 900,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.1600x900.x265.mp4",
+            "Weird resolution should use full format before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_vertical_full_resolution_with_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.1080x1920.x264.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1080,
+                height: 1920,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.Vertical.1080p.x264.mp4",
+            "Should replace full vertical resolution with label before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_multiple_codec_occurrences() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.x264.extra.x265.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.1080p.x264.extra.x265.mp4",
+            "Should insert resolution before first codec occurrence"
+        );
+    }
+
+    #[test]
+    fn new_path_with_duplicate_resolution_and_codec() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.1920x1080.1080p.x265.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        assert_eq!(
+            new_path.file_name().unwrap().to_string_lossy(),
+            "video.1080p.x265.mp4",
+            "Should remove full resolution duplicate and keep label before codec"
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_does_not_remove_other_resolutions() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // Filename contains multiple resolutions - only the matching one should be removed
+        let file_path = temp_dir.path().join("video.2560x1440.or.1920x1080.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        // Should remove "1920x1080" but NOT "2560x1440"
+        assert!(
+            new_path.to_string_lossy().contains("2560x1440"),
+            "Should preserve '2560x1440' (different resolution), got: {}",
+            new_path.display()
+        );
+        assert!(
+            !new_path.to_string_lossy().contains("1920x1080"),
+            "Should remove '1920x1080' (matching resolution), got: {}",
+            new_path.display()
+        );
+        assert!(
+            new_path.to_string_lossy().contains("1080p"),
+            "Should add '1080p' label, got: {}",
+            new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_720p_does_not_remove_2560x1440() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // Processing 720p video, filename has 2560x1440 - should NOT be removed
+        let file_path = temp_dir.path().join("upscaled.2560x1440.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1280,
+                height: 720,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        // "2560x1440" should be preserved - it's a different resolution
+        assert!(
+            new_path.to_string_lossy().contains("2560x1440"),
+            "Should preserve '2560x1440' (different resolution), got: {}",
+            new_path.display()
+        );
+        assert!(
+            new_path.to_string_lossy().contains("720p"),
+            "Should add '720p' label, got: {}",
+            new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_removes_both_orientations() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // Filename mistakenly has both WxH and HxW - both should be removed
+        let file_path = temp_dir.path().join("confused.1920x1080.and.1080x1920.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(new_path.is_some());
+        let new_path = new_path.unwrap();
+        // Both orientations should be removed
+        assert!(
+            !new_path.to_string_lossy().contains("1920x1080"),
+            "Should remove '1920x1080', got: {}",
+            new_path.display()
+        );
+        assert!(
+            !new_path.to_string_lossy().contains("1080x1920"),
+            "Should remove '1080x1920', got: {}",
+            new_path.display()
+        );
+        assert!(
+            new_path.to_string_lossy().contains("1080p"),
+            "Should add '1080p' label, got: {}",
+            new_path.display()
+        );
     }
 }

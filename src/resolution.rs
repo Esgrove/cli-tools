@@ -1,5 +1,9 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 const RESOLUTION_TOLERANCE: f32 = 0.025;
 const KNOWN_RESOLUTIONS: &[(u32, u32)] = &[
@@ -16,6 +20,61 @@ const KNOWN_RESOLUTIONS: &[(u32, u32)] = &[
     (3840, 2160),
 ];
 const FUZZY_RESOLUTIONS: [ResolutionMatch; KNOWN_RESOLUTIONS.len()] = precalculate_fuzzy_resolutions();
+
+/// Regex pattern for detecting full dimension resolution formats in filenames.
+///
+/// Matches only full dimension formats (`WIDTHxHEIGHT`) with optional "Vertical" prefix.
+/// The dot after "Vertical" is optional to match both "Vertical.1920x1080" and "Vertical1920x1080".
+/// Does NOT match short labels like "1080p", "720p", etc.
+///
+/// Pattern breakdown:
+/// - `(?:Vertical\.?)?` - Optional "Vertical" prefix with optional dot (non-capturing)
+/// - `\d{3,4}x\d{3,4}` - Full dimensions: 3-4 digits, 'x', 3-4 digits
+///
+/// Examples:
+/// - Matches: `1920x1080`, `640x480`, `Vertical.1080x1920`, `Vertical1080x1920`
+/// - Does not match: `1080p`, `720p`, `1920-1080`, `12x34` (too few digits)
+static RE_FULL_RESOLUTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:Vertical\.?)?\d{3,4}x\d{3,4}\b").expect("Failed to create full resolution regex")
+});
+
+/// Regex pattern for detecting standard resolution labels (p-labels) in filenames.
+///
+/// Matches standard resolution labels (480p, 540p, 544p, 576p, 600p, 720p, 1080p, 1440p, 2160p)
+/// with optional "Vertical." prefix.
+///
+/// Pattern breakdown:
+/// - `(?:Vertical\.)?` - Optional "Vertical." prefix (non-capturing)
+/// - `(?:480p|540p|544p|576p|600p|720p|1080p|1440p|2160p)` - Known resolution labels
+///
+/// Examples:
+/// - Matches: `1080p`, `720p`, `Vertical.720p`, `Vertical.1080p`
+/// - Does not match: `1920x1080`, `1080`, `360p` (unknown label)
+static RE_P_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:Vertical\.)?(?:480p|540p|544p|576p|600p|720p|1080p|1440p|2160p)\b")
+        .expect("Failed to create p-label regex")
+});
+
+/// Cache of resolution-specific regexes for known resolutions.
+///
+/// This cache stores pre-compiled regexes for common resolutions to avoid
+/// repeated regex compilation. The key is (width, height) and the value is
+/// a regex that matches that specific resolution in either orientation
+/// (`WxH` or `HxW`) with optional "Vertical" prefix.
+static RESOLUTION_REGEX_CACHE: LazyLock<HashMap<(u32, u32), Regex>> = LazyLock::new(|| {
+    let mut cache = HashMap::new();
+    for &(width, height) in KNOWN_RESOLUTIONS {
+        let pattern = if width == height {
+            format!(r"(?i)\b(?:Vertical\.?)?{width}x{height}\b")
+        } else {
+            format!(r"(?i)\b(?:Vertical\.?)?(?:{width}x{height}|{height}x{width})\b")
+        };
+        if let Ok(regex) = Regex::new(&pattern) {
+            cache.insert((width, height), regex);
+        }
+    }
+    cache
+});
 
 /// A fuzzy resolution match with tolerance ranges for width and height.
 ///
@@ -109,6 +168,97 @@ impl Resolution {
         } else {
             format!("Vertical.{self}")
         }
+    }
+
+    /// Get a reference to the static regex pattern for full resolution dimension formats.
+    ///
+    /// This regex matches only full dimension formats like `WIDTHxHEIGHT` (e.g., 1920x1080, 640x480)
+    /// with optional "Vertical." prefix. It does NOT match short labels like "1080p", "720p", etc.
+    ///
+    /// Dimensions must be 3-4 digits each. The pattern is case-insensitive and uses word
+    /// boundaries to prevent partial matches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cli_tools::Resolution;
+    ///
+    /// let regex = Resolution::full_resolution_regex();
+    /// assert!(regex.is_match("video.1920x1080.mp4"));
+    /// assert!(regex.is_match("video.Vertical.1080x1920.mp4"));
+    /// assert!(!regex.is_match("video.1080p.mp4")); // Short label, not matched
+    /// assert!(!regex.is_match("video.12x34.mp4")); // Too few digits
+    /// ```
+    #[must_use]
+    pub fn full_resolution_regex() -> &'static Regex {
+        &RE_FULL_RESOLUTION
+    }
+
+    /// Get a reference to the static regex pattern for standard resolution p-labels.
+    ///
+    /// This regex matches only standard resolution labels (480p, 540p, 544p, 576p, 600p,
+    /// 720p, 1080p, 1440p, 2160p) with optional "Vertical." prefix. It does NOT match
+    /// full dimension formats like "1920x1080".
+    ///
+    /// The pattern is case-insensitive and uses word boundaries to prevent partial matches.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cli_tools::Resolution;
+    ///
+    /// let regex = Resolution::p_label_regex();
+    /// assert!(regex.is_match("video.1080p.mp4"));
+    /// assert!(regex.is_match("video.Vertical.720p.mp4"));
+    /// assert!(!regex.is_match("video.1920x1080.mp4")); // Full format, not matched
+    /// assert!(!regex.is_match("video.360p.mp4")); // Unknown label
+    /// ```
+    #[must_use]
+    pub fn p_label_regex() -> &'static Regex {
+        &RE_P_LABEL
+    }
+
+    /// Get a regex that matches this specific resolution's full dimension format.
+    ///
+    /// For known resolutions (defined in `KNOWN_RESOLUTIONS`), returns a cached
+    /// pre-compiled regex. For unknown resolutions, compiles a new regex on demand.
+    ///
+    /// The regex matches the resolution in either orientation (`WxH` or `HxW`) with
+    /// optional "Vertical" prefix (dot after "Vertical" is optional).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cli_tools::Resolution;
+    ///
+    /// let res = Resolution::new(1920, 1080);
+    /// let regex = res.dimension_regex().expect("Failed to create regex");
+    /// assert!(regex.is_match("video.1920x1080.mp4"));
+    /// assert!(regex.is_match("video.1080x1920.mp4")); // Flipped orientation
+    /// assert!(regex.is_match("video.Vertical.1080x1920.mp4"));
+    /// assert!(!regex.is_match("video.2560x1440.mp4")); // Different resolution
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the regex pattern cannot be compiled (should be rare).
+    pub fn dimension_regex(&self) -> anyhow::Result<Cow<'static, Regex>> {
+        // Try to get from cache first
+        if let Some(regex) = RESOLUTION_REGEX_CACHE.get(&(self.width, self.height)) {
+            return Ok(Cow::Borrowed(regex));
+        }
+
+        // Not in cache, create a new regex
+        let pattern = if self.width == self.height {
+            format!(r"(?i)\b(?:Vertical\.?)?{}x{}\b", self.width, self.height)
+        } else {
+            format!(
+                r"(?i)\b(?:Vertical\.?)?(?:{}x{}|{}x{})\b",
+                self.width, self.height, self.height, self.width
+            )
+        };
+        let regex = Regex::new(&pattern)?;
+        Ok(Cow::Owned(regex))
     }
 
     /// Return a human-readable resolution label like `1080p` or `Vertical.720p`.
@@ -1048,5 +1198,340 @@ mod test_compute_bounds {
         let bounds = compute_bounds(7680);
         assert_eq!(bounds.0, 7488);
         assert_eq!(bounds.1, 7872);
+    }
+}
+
+#[cfg(test)]
+mod test_full_resolution_regex {
+    use super::*;
+
+    #[test]
+    fn matches_3_digit_dimensions() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(regex.is_match("video.640x480.mp4"));
+        assert!(regex.is_match("video.720x540.mp4"));
+        assert!(regex.is_match("video.800x600.mp4"));
+    }
+
+    #[test]
+    fn matches_4_digit_dimensions() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(regex.is_match("video.1920x1080.mp4"));
+        assert!(regex.is_match("video.2560x1440.mp4"));
+        assert!(regex.is_match("video.3840x2160.mp4"));
+    }
+
+    #[test]
+    fn matches_mixed_digit_counts() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(regex.is_match("video.1920x720.mp4"));
+        assert!(regex.is_match("video.720x1280.mp4"));
+    }
+
+    #[test]
+    fn matches_vertical_prefix() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(regex.is_match("video.Vertical.1080x1920.mp4"));
+        assert!(regex.is_match("video.vertical.720x1280.mp4"));
+        assert!(regex.is_match("video.VERTICAL.1920x1080.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_p_labels() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(!regex.is_match("video.480p.mp4"));
+        assert!(!regex.is_match("video.720p.mp4"));
+        assert!(!regex.is_match("video.1080p.mp4"));
+        assert!(!regex.is_match("video.Vertical.1080p.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_too_few_digits() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(!regex.is_match("video.12x34.mp4"));
+        assert!(!regex.is_match("video.99x99.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_too_many_digits() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(!regex.is_match("video.19200x10800.mp4"));
+        assert!(!regex.is_match("video.12345x67890.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_wrong_separator() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(!regex.is_match("video.1920-1080.mp4"));
+        assert!(!regex.is_match("video.1920*1080.mp4"));
+        assert!(!regex.is_match("video.1920_1080.mp4"));
+    }
+
+    #[test]
+    fn matches_at_word_boundaries() {
+        let regex = Resolution::full_resolution_regex();
+        assert!(regex.is_match("prefix.1920x1080.suffix"));
+        assert!(regex.is_match("1920x1080"));
+
+        let text = "video.800.600.811x600.600.mp4";
+        let mat = regex.find(text).expect("should match");
+        assert_eq!(mat.as_str(), "811x600");
+    }
+
+    #[test]
+    fn extracts_correct_match() {
+        let regex = Resolution::full_resolution_regex();
+
+        let text = "clip.1920x1080.final.mp4";
+        let mat = regex.find(text).expect("should match");
+        assert_eq!(mat.as_str(), "1920x1080");
+
+        let text = "video.Vertical.1080x1920.mp4";
+        let mat = regex.find(text).expect("should match");
+        assert_eq!(mat.as_str(), "Vertical.1080x1920");
+    }
+}
+
+#[cfg(test)]
+mod test_p_label_regex {
+    use super::*;
+
+    #[test]
+    fn matches_all_standard_labels() {
+        let regex = Resolution::p_label_regex();
+        assert!(regex.is_match("video.480p.mp4"));
+        assert!(regex.is_match("video.540p.mp4"));
+        assert!(regex.is_match("video.544p.mp4"));
+        assert!(regex.is_match("video.576p.mp4"));
+        assert!(regex.is_match("video.600p.mp4"));
+        assert!(regex.is_match("video.720p.mp4"));
+        assert!(regex.is_match("video.1080p.mp4"));
+        assert!(regex.is_match("video.1440p.mp4"));
+        assert!(regex.is_match("video.2160p.mp4"));
+    }
+
+    #[test]
+    fn matches_case_insensitive() {
+        let regex = Resolution::p_label_regex();
+        assert!(regex.is_match("video.1080P.mp4"));
+        assert!(regex.is_match("video.720P.mp4"));
+    }
+
+    #[test]
+    fn matches_vertical_prefix() {
+        let regex = Resolution::p_label_regex();
+        assert!(regex.is_match("video.Vertical.720p.mp4"));
+        assert!(regex.is_match("video.vertical.1080p.mp4"));
+        assert!(regex.is_match("video.VERTICAL.2160p.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_full_dimensions() {
+        let regex = Resolution::p_label_regex();
+        assert!(!regex.is_match("video.1920x1080.mp4"));
+        assert!(!regex.is_match("video.640x480.mp4"));
+        assert!(!regex.is_match("video.Vertical.1080x1920.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_unknown_labels() {
+        let regex = Resolution::p_label_regex();
+        assert!(!regex.is_match("video.360p.mp4"));
+        assert!(!regex.is_match("video.4320p.mp4"));
+        assert!(!regex.is_match("video.900p.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_without_p_suffix() {
+        let regex = Resolution::p_label_regex();
+        assert!(!regex.is_match("video.1080.mp4"));
+        assert!(!regex.is_match("video.720.mp4"));
+    }
+
+    #[test]
+    fn matches_at_word_boundaries() {
+        let regex = Resolution::p_label_regex();
+        assert!(regex.is_match("my.video.1080p.x265.mp4"));
+        assert!(regex.is_match("1080p"));
+
+        // Should not match "720p" within "12720p"
+        let text = "video.12720p.mp4";
+        assert!(!regex.is_match(text));
+    }
+
+    #[test]
+    fn extracts_correct_match() {
+        let regex = Resolution::p_label_regex();
+
+        let text = "my.video.1080p.x265.mp4";
+        let mat = regex.find(text).expect("should match");
+        assert_eq!(mat.as_str(), "1080p");
+
+        let text = "video.Vertical.720p.mp4";
+        let mat = regex.find(text).expect("should match");
+        assert_eq!(mat.as_str(), "Vertical.720p");
+    }
+
+    #[test]
+    fn matches_multiple_finds_first() {
+        let regex = Resolution::p_label_regex();
+        let text = "video.720p.or.1080p.mp4";
+        let mat = regex.find(text).expect("should match");
+        assert_eq!(mat.as_str(), "720p");
+    }
+}
+
+#[cfg(test)]
+mod test_dimension_regex {
+    use super::*;
+
+    #[test]
+    fn known_resolution_returns_cached_regex() {
+        let resolution = Resolution::new(1920, 1080);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        // Verify it's borrowed (from cache)
+        assert!(matches!(regex, std::borrow::Cow::Borrowed(_)));
+
+        // Verify it matches correct patterns
+        assert!(regex.is_match("video.1920x1080.mp4"));
+        assert!(regex.is_match("video.1080x1920.mp4"));
+        assert!(regex.is_match("video.Vertical.1080x1920.mp4"));
+        assert!(regex.is_match("video.vertical1920x1080.mp4"));
+    }
+
+    #[test]
+    fn known_resolution_does_not_match_other_resolutions() {
+        let resolution = Resolution::new(1920, 1080);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        // Should NOT match other resolutions
+        assert!(!regex.is_match("video.2560x1440.mp4"));
+        assert!(!regex.is_match("video.3840x2160.mp4"));
+        assert!(!regex.is_match("video.1280x720.mp4"));
+        assert!(!regex.is_match("video.720x540.mp4"));
+    }
+
+    #[test]
+    fn unknown_resolution_creates_new_regex() {
+        let resolution = Resolution::new(999, 888);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        // Verify it's owned (not from cache)
+        assert!(matches!(regex, std::borrow::Cow::Owned(_)));
+
+        // Verify it matches correct patterns
+        assert!(regex.is_match("video.999x888.mp4"));
+        assert!(regex.is_match("video.888x999.mp4"));
+        assert!(regex.is_match("video.Vertical.888x999.mp4"));
+    }
+
+    #[test]
+    fn unknown_resolution_does_not_match_others() {
+        let resolution = Resolution::new(999, 888);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        // Should NOT match other resolutions
+        assert!(!regex.is_match("video.1920x1080.mp4"));
+        assert!(!regex.is_match("video.998x888.mp4"));
+        assert!(!regex.is_match("video.999x887.mp4"));
+    }
+
+    #[test]
+    fn all_known_resolutions_are_cached() {
+        // Test that all KNOWN_RESOLUTIONS have cached regexes
+        for &(width, height) in KNOWN_RESOLUTIONS {
+            let resolution = Resolution::new(width, height);
+            let regex = resolution.dimension_regex().expect("should succeed");
+            assert!(
+                matches!(regex, std::borrow::Cow::Borrowed(_)),
+                "Resolution {width}x{height} should be cached"
+            );
+        }
+    }
+
+    #[test]
+    fn square_resolution_matches_only_one_pattern() {
+        let resolution = Resolution::new(1000, 1000);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        assert!(regex.is_match("video.1000x1000.mp4"));
+        // Square resolutions don't generate WxH|HxW alternatives
+        assert!(!regex.is_match("video.1000x1001.mp4"));
+    }
+
+    #[test]
+    fn matches_case_insensitive_vertical() {
+        let resolution = Resolution::new(1920, 1080);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        assert!(regex.is_match("video.VERTICAL.1080x1920.mp4"));
+        assert!(regex.is_match("video.Vertical.1080x1920.mp4"));
+        assert!(regex.is_match("video.vertical.1080x1920.mp4"));
+    }
+
+    #[test]
+    fn vertical_prefix_without_dot_is_matched() {
+        let resolution = Resolution::new(1920, 1080);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        assert!(regex.is_match("video.vertical1920x1080.mp4"));
+        assert!(regex.is_match("video.Vertical1080x1920.mp4"));
+    }
+
+    #[test]
+    fn respects_word_boundaries() {
+        let resolution = Resolution::new(1920, 1080);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        // Should match at word boundaries
+        assert!(regex.is_match("1920x1080"));
+        assert!(regex.is_match("video.1920x1080.mp4"));
+
+        // Should NOT match if embedded in larger numbers
+        assert!(!regex.is_match("video.11920x1080.mp4"));
+        assert!(!regex.is_match("video.1920x10800.mp4"));
+    }
+
+    #[test]
+    fn does_not_match_partial_numbers() {
+        let resolution = Resolution::new(720, 540);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        assert!(regex.is_match("video.720x540.mp4"));
+        assert!(!regex.is_match("video.7200x540.mp4"));
+        assert!(!regex.is_match("video.720x5400.mp4"));
+    }
+
+    #[test]
+    fn extracts_correct_match_from_filename() {
+        let resolution = Resolution::new(1920, 1080);
+        let regex = resolution.dimension_regex().expect("should succeed");
+
+        let text = "my.video.1920x1080.x265.mp4";
+        let mat = regex.find(text).expect("should match");
+        assert_eq!(mat.as_str(), "1920x1080");
+
+        let text2 = "my.video.Vertical.1080x1920.x265.mp4";
+        let mat2 = regex.find(text2).expect("should match");
+        assert_eq!(mat2.as_str(), "Vertical.1080x1920");
+    }
+
+    #[test]
+    fn all_cached_resolutions_match_both_orientations() {
+        for &(width, height) in KNOWN_RESOLUTIONS {
+            if width == height {
+                continue; // Skip square resolutions
+            }
+
+            let resolution = Resolution::new(width, height);
+            let regex = resolution.dimension_regex().expect("should succeed");
+
+            let wxh = format!("video.{width}x{height}.mp4");
+            let hxw = format!("video.{height}x{width}.mp4");
+
+            assert!(regex.is_match(&wxh), "Resolution {width}x{height} should match {wxh}");
+            assert!(regex.is_match(&hxw), "Resolution {width}x{height} should match {hxw}");
+        }
     }
 }
