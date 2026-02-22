@@ -4,7 +4,7 @@ mod tui;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::dupe_find::DupeFind;
@@ -12,6 +12,9 @@ use crate::dupe_find::DupeFind;
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Find duplicate video files based on identifier patterns")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<DupeFindCommand>,
+
     /// Input directories to search
     #[arg(value_hint = clap::ValueHint::DirPath)]
     paths: Vec<PathBuf>,
@@ -40,19 +43,31 @@ struct Args {
     #[arg(short = 'd', long)]
     default: bool,
 
-    /// Generate shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
     /// Print verbose output
     #[arg(short = 'v', long)]
     verbose: bool,
 }
 
+/// Subcommands for dupefind.
+#[derive(Subcommand)]
+enum DupeFindCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, Args::command(), true, env!("CARGO_BIN_NAME"))
+    if let Some(DupeFindCommand::Completion { shell, install }) = &args.command {
+        cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"))
     } else {
         DupeFind::new(args)?.run()
     }

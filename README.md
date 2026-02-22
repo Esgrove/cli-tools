@@ -77,7 +77,11 @@ Options:
 ```console
 Move files to directories based on name
 
-Usage: dirmove [OPTIONS] [PATH]
+Usage: dirmove [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file
@@ -90,15 +94,16 @@ Options:
   -n, --include <INCLUDE>         Include files that match the given pattern
   -e, --exclude <EXCLUDE>         Exclude files that match the given pattern
   -i, --ignore <IGNORE>           Ignore prefix when matching filenames
-  -I, --ignore-group <GROUP>      Group name to ignore (exact match, won't be offered as new directory)
-  -P, --ignore-group-part <PART>  Ignore groups containing this part (substring match in any part of group name)
+  -I, --ignore-group <GROUP>      Group name to ignore
+  -P, --ignore-group-part <PART>  Ignore groups containing this part (substring match)
   -o, --override <OVERRIDE>       Override prefix to use for directory names
   -u, --unpack <NAME>             Directory name to "unpack" by moving its contents to the parent directory
+  -M, --map <MAPPING>             Name to directory mapping pair (pattern:dirname)
   -g, --group <COUNT>             Minimum number of matching files needed to create a group
-  -m, --min-chars <CHARS>         Minimum character count for prefixes to be valid group names (excluding dots)
+  -m, --min-chars <CHARS>         Minimum character count for prefixes to be valid group names
   -p, --print                     Only print changes without moving files
   -r, --recurse                   Recurse into subdirectories
-  -l, --completion <SHELL>        Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -S, --show-db                   Show database statistics and contents
   -v, --verbose                   Print verbose output
   -h, --help                      Print help
   -V, --version                   Print version
@@ -155,7 +160,11 @@ and detect files with the same name but different resolutions, codecs, or file e
 ```console
 Find duplicate video files based on identifier patterns
 
-Usage: dupefind [OPTIONS] [PATHS]...
+Usage: dupefind [OPTIONS] [PATHS]... [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATHS]...  Input directories to search
@@ -167,7 +176,6 @@ Options:
   -p, --print                  Only print changes without moving files
   -r, --recurse                Recurse into subdirectories
   -d, --default                Use default paths from config file
-  -l, --completion <SHELL>     Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose                Print verbose output
   -h, --help                   Print help
   -V, --version                Print version
@@ -207,14 +215,18 @@ Tracks files needing conversion in a local SQLite database for efficient process
 ```console
 Convert video files to HEVC (H.265) format using ffmpeg and NVENC
 
-Usage: vconvert [OPTIONS] [PATH]
+Usage: vconvert [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file
 
 Options:
   -a, --all                          Convert all known video file types
-  -b, --bitrate <LIMIT>              Skip files with bitrate lower than LIMIT kbps [default: 8000]
+  -b, --bitrate <BITRATE>            Skip files with bitrate lower than LIMIT kbps [default: 8000]
   -c, --count <COUNT>                Limit the number of files to convert
   -d, --delete                       Delete input files immediately instead of moving to trash
   -p, --print                        Print commands without running them
@@ -228,7 +240,6 @@ Options:
   -x, --delete-duplicates            Delete source file if converted x265 file already exists
   -m, --skip-remux                   Skip remuxing
   -s, --sort [<ORDER>]               Sort files [possible values: bitrate, size, size-asc, duration, duration-asc, resolution, resolution-asc, impact, name]
-  -l, --completion <SHELL>           Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
   -v, --verbose                      Print verbose output
   -D, --from-db                      Process files from database instead of scanning
   -C, --clear-db                     Clear all entries from the database
@@ -325,17 +336,20 @@ duration, codec, bitrate, and file size summaries.
 ```console
 Collect and print video file statistics
 
-Usage: vstats [OPTIONS] [PATH]
+Usage: vstats [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -r, --recurse             Recurse into subdirectories
-  -v, --verbose             Print verbose per-file output
-  -l, --completion <SHELL>  Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
-  -h, --help                Print help
-  -V, --version             Print version
+  -r, --recurse  Recurse into subdirectories
+  -v, --verbose  Print verbose per-file output
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
 ## Thumbs
@@ -345,25 +359,28 @@ Create thumbnail sheets for video files using ffmpeg.
 ```console
 Create thumbnail sheets for video files using ffmpeg
 
-Usage: thumbs [OPTIONS] [PATH]
+Usage: thumbs [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -f, --force               Overwrite existing thumbnail files
-  -p, --print               Print commands without running them
-  -r, --recurse             Recurse into subdirectories
-  -c, --cols <COLS>         Number of columns in the thumbnail grid
-  -w, --rows <ROWS>         Number of rows in the thumbnail grid
-  -s, --scale <WIDTH>       Thumbnail width in pixels
-  -a, --padding <PIXELS>    Padding between tiles in pixels
-  -t, --fontsize <SIZE>     Font size for timestamp overlay
-  -q, --quality <QUALITY>   JPEG quality (1-31, lower is better)
-  -l, --completion <SHELL>  Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
-  -v, --verbose             Print verbose output
-  -h, --help                Print help
-  -V, --version             Print version
+  -f, --force              Overwrite existing thumbnail files
+  -p, --print              Print commands without running them
+  -r, --recurse            Recurse into subdirectories
+  -c, --cols <COLS>        Number of columns in the thumbnail grid
+  -w, --rows <ROWS>        Number of rows in the thumbnail grid
+  -s, --scale <WIDTH>      Thumbnail width in pixels
+  -a, --padding <PIXELS>   Padding between tiles in pixels
+  -t, --fontsize <SIZE>    Font size for timestamp overlay
+  -q, --quality <QUALITY>  JPEG quality (1-31, lower is better)
+  -v, --verbose            Print verbose output
+  -h, --help               Print help
+  -V, --version            Print version
 ```
 
 ## Visaparse
@@ -449,14 +466,14 @@ Show info and statistics for existing torrents in qBittorrent
 Usage: qtorrent info [OPTIONS]
 
 Options:
-  -s, --sort <SORT>      Sort torrents by the given field [default: name] [possible values: name, size, path]
-  -l, --list             List all torrents (one per line)
+  -s, --sort <SORT>      Sort torrents [default: name] [possible values: name, size, path]
+  -l, --list             Print one line per torrent
   -H, --host <HOST>      qBittorrent WebUI host
   -P, --port <PORT>      qBittorrent WebUI port
   -u, --username <USER>  qBittorrent WebUI username
   -w, --password <PASS>  qBittorrent WebUI password
   -v, --verbose          Print verbose output
-  -h, --help             Print help
+  -h, --help             Print help (see more with '--help')
 ```
 
 ## Vtag

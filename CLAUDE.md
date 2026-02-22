@@ -131,6 +131,15 @@ mod test_filtering {
 These commands can permanently destroy uncommitted work.
 If you need to undo changes, ask the user to do it manually.
 
+## Documentation
+
+When changing CLI arguments or adding new binaries, update the usage output in `README.md`.
+Use the short `-h` flag to get concise output and replace the `.exe` suffix with the plain binary name:
+
+```shell
+cargo run --bin <name> -- -h
+```
+
 ## Configuration
 
 User configuration is read from `~/.config/cli-tools.toml` with sections for each binary.

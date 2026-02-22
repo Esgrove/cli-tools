@@ -9,7 +9,7 @@ mod types;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 pub use crate::cli::{DatabaseMode, SortOrder};
@@ -18,6 +18,9 @@ use crate::convert::VideoConvert;
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
 pub(crate) struct VideoConvertArgs {
+    #[command(subcommand)]
+    command: Option<VideoConvertCommand>,
+
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
@@ -27,7 +30,7 @@ pub(crate) struct VideoConvertArgs {
     all: bool,
 
     /// Skip files with bitrate lower than LIMIT kbps
-    #[arg(short = 'b', long, name = "LIMIT", default_value_t = 8000)]
+    #[arg(short = 'b', long, name = "BITRATE", default_value_t = 8000)]
     bitrate: u64,
 
     /// Limit the number of files to convert
@@ -82,10 +85,6 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 's', long, name = "ORDER", num_args = 0..=1, default_missing_value = "bitrate")]
     sort: Option<SortOrder>,
 
-    /// Generate shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
     /// Print verbose output
     #[arg(short = 'v', long)]
     verbose: bool,
@@ -119,7 +118,7 @@ pub(crate) struct VideoConvertArgs {
     max_duration: Option<f64>,
 
     /// Maximum number of files to display
-    #[arg(short = 'L', long = "display-limit", name = "DISPLAY_LIMIT")]
+    #[arg(short = 'L', long = "display-limit", name = "LIMIT")]
     display_limit: Option<usize>,
 }
 
@@ -140,10 +139,26 @@ impl VideoConvertArgs {
     }
 }
 
+/// Subcommands for vconvert.
+#[derive(Subcommand)]
+enum VideoConvertCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let args = VideoConvertArgs::parse();
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, VideoConvertArgs::command(), true, env!("CARGO_BIN_NAME"))
+    if let Some(VideoConvertCommand::Completion { shell, install }) = &args.command {
+        cli_tools::generate_shell_completion(*shell, VideoConvertArgs::command(), *install, env!("CARGO_BIN_NAME"))
     } else {
         VideoConvert::new(args)?.run()
     }

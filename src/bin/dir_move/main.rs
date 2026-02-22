@@ -6,7 +6,7 @@ mod utils;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::dir_move::DirMove;
@@ -14,6 +14,9 @@ use crate::dir_move::DirMove;
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
 struct DirMoveArgs {
+    #[command(subcommand)]
+    command: Option<DirMoveCommand>,
+
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
@@ -86,19 +89,31 @@ struct DirMoveArgs {
     #[arg(short = 'S', long = "show-db")]
     show_db: bool,
 
-    /// Generate shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
     /// Print verbose output
     #[arg(short = 'v', long)]
     verbose: bool,
 }
 
+/// Subcommands for dirmove.
+#[derive(Subcommand)]
+enum DirMoveCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let args = DirMoveArgs::parse();
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, DirMoveArgs::command(), true, env!("CARGO_BIN_NAME"))
+    if let Some(DirMoveCommand::Completion { shell, install }) = &args.command {
+        cli_tools::generate_shell_completion(*shell, DirMoveArgs::command(), *install, env!("CARGO_BIN_NAME"))
     } else {
         DirMove::try_from_args(args)?.run()
     }

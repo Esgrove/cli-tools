@@ -4,7 +4,7 @@ mod thumbnail;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::thumbnail::ThumbnailCreator;
@@ -12,6 +12,9 @@ use crate::thumbnail::ThumbnailCreator;
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create thumbnail sheets for video files using ffmpeg")]
 pub(crate) struct ThumbnailArgs {
+    #[command(subcommand)]
+    command: Option<ThumbnailCommand>,
+
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
@@ -52,19 +55,31 @@ pub(crate) struct ThumbnailArgs {
     #[arg(short = 'q', long, name = "QUALITY")]
     quality: Option<u32>,
 
-    /// Generate shell completion
-    #[arg(short = 'l', long, name = "SHELL")]
-    completion: Option<Shell>,
-
     /// Print verbose output
     #[arg(short = 'v', long)]
     verbose: bool,
 }
 
+/// Subcommands for thumbs.
+#[derive(Subcommand)]
+enum ThumbnailCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let args = ThumbnailArgs::parse();
-    if let Some(ref shell) = args.completion {
-        cli_tools::generate_shell_completion(*shell, ThumbnailArgs::command(), true, env!("CARGO_BIN_NAME"))
+    if let Some(ThumbnailCommand::Completion { shell, install }) = &args.command {
+        cli_tools::generate_shell_completion(*shell, ThumbnailArgs::command(), *install, env!("CARGO_BIN_NAME"))
     } else {
         ThumbnailCreator::new(&args)?.run()
     }
