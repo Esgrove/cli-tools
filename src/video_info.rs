@@ -286,10 +286,16 @@ impl VideoStats {
         let mut sorted_codecs: Vec<_> = self.codecs.iter().collect();
         sorted_codecs.sort_by(|a, b| b.1.cmp(a.1));
 
-        let codec_summary: Vec<String> = sorted_codecs
-            .iter()
-            .map(|(codec, count)| format!("{codec}: {count}"))
-            .collect();
+        let codec_summary: Vec<String> = if sorted_codecs.len() == 1 {
+            // Single codec: just show the name without count
+            sorted_codecs.iter().map(|(codec, _)| (*codec).clone()).collect()
+        } else {
+            // Multiple codecs: show name with count in parentheses
+            sorted_codecs
+                .iter()
+                .map(|(codec, count)| format!("{codec} ({count})"))
+                .collect()
+        };
         println!("  {}: {}", "Codecs".bold(), codec_summary.join(", "));
     }
 
@@ -305,7 +311,7 @@ impl VideoStats {
         let median = compute_median_u64(&self.bitrates_kbps);
 
         println!(
-            "  {}: {:.2} Mbps (min) — {:.2} Mbps (max) | avg: {:.2} Mbps | median: {:.2} Mbps",
+            "  {}: {:.2} Mbps — {:.2} Mbps | avg: {:.2} Mbps | median: {:.2} Mbps",
             "Bitrates".bold(),
             min_bitrate as f64 / 1000.0,
             max_bitrate as f64 / 1000.0,
