@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -127,6 +128,9 @@ impl VideoInfo {
 }
 
 impl VideoStats {
+    /// Maximum number of resolution entries shown in non-verbose mode.
+    const MAX_RESOLUTION_ROWS: usize = 5;
+
     /// Create a new empty video stats collector.
     #[must_use]
     pub fn new() -> Self {
@@ -159,7 +163,10 @@ impl VideoStats {
     }
 
     /// Print a combined summary of all collected video stats.
-    pub fn print_summary(&self) {
+    ///
+    /// When `verbose` is true, all resolution entries are shown.
+    /// Otherwise, only the top 5 resolutions by count are displayed.
+    pub fn print_summary(&self, verbose: bool) {
         let total_resolutions: usize = self.resolutions.values().sum();
         let total_codecs: usize = self.codecs.values().sum();
         let total = total_resolutions
@@ -175,15 +182,15 @@ impl VideoStats {
         println!();
         println!("{}", format!("Video Statistics ({total} files):").cyan().bold());
 
-        self.print_resolution_stats();
+        self.print_resolution_stats(verbose);
         self.print_duration_stats();
         self.print_codec_stats();
         self.print_bitrate_stats();
         self.print_file_size_stats();
     }
 
-    /// Print resolution statistics.
-    fn print_resolution_stats(&self) {
+    /// Print resolution statistics using fuzzy resolution labels for grouping.
+    fn print_resolution_stats(&self, verbose: bool) {
         if self.resolutions.is_empty() {
             return;
         }
@@ -199,12 +206,46 @@ impl VideoStats {
             .max_by_key(|r| r.pixel_count())
             .expect("non-empty");
 
-        println!("  {}: {smallest} (smallest) — {biggest} (biggest)", "Resolution".bold(),);
+        println!("  {}: {} — {}", "Resolution".bold(), smallest.label(), biggest.label(),);
 
-        let mut sorted_resolutions: Vec<_> = self.resolutions.iter().collect();
-        sorted_resolutions.sort_by_key(|(resolution, _)| resolution.pixel_count());
-        for (resolution, count) in &sorted_resolutions {
-            println!("    {resolution}: {count}");
+        // Aggregate counts by fuzzy resolution label
+        let mut label_counts: HashMap<Cow<'static, str>, (usize, u64)> = HashMap::new();
+        for (resolution, count) in &self.resolutions {
+            let label = resolution.label();
+            let pixel_count = resolution.pixel_count();
+            let entry = label_counts.entry(label).or_insert((0, pixel_count));
+            entry.0 += count;
+            // Track minimum pixel count for sorting
+            entry.1 = entry.1.min(pixel_count);
+        }
+
+        // Sort by count descending, then by pixel count ascending as tiebreaker
+        let mut sorted_labels: Vec<_> = label_counts.into_iter().collect();
+        sorted_labels.sort_by(|(_, (count_a, pixels_a)), (_, (count_b, pixels_b))| {
+            count_b.cmp(count_a).then_with(|| pixels_a.cmp(pixels_b))
+        });
+
+        let total_labels = sorted_labels.len();
+        let display_labels = if verbose {
+            &sorted_labels[..]
+        } else {
+            &sorted_labels[..total_labels.min(Self::MAX_RESOLUTION_ROWS)]
+        };
+
+        for (label, (count, _)) in display_labels {
+            println!("    {label}: {count}");
+        }
+
+        if !verbose && total_labels > Self::MAX_RESOLUTION_ROWS {
+            let remaining_labels = total_labels - Self::MAX_RESOLUTION_ROWS;
+            let remaining_files: usize = sorted_labels[Self::MAX_RESOLUTION_ROWS..]
+                .iter()
+                .map(|(_, (count, _))| count)
+                .sum();
+            println!(
+                "    {} {remaining_labels} more resolution(s) with {remaining_files} file(s)",
+                "...".dimmed()
+            );
         }
     }
 
@@ -281,7 +322,7 @@ impl VideoStats {
         let total: u64 = self.file_sizes.iter().sum();
 
         println!(
-            "  {}: {} (smallest) — {} (biggest) | avg: {} | median: {} | total: {}",
+            "  {}: {} — {} | avg: {} | median: {} | total: {}",
             "File size".bold(),
             crate::format_size(min_size),
             crate::format_size(max_size),

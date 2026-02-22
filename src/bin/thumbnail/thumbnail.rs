@@ -111,7 +111,7 @@ impl ThumbnailCreator {
             error_count.to_string().red()
         );
 
-        stats.print_summary();
+        stats.print_summary(self.config.verbose);
 
         Ok(())
     }

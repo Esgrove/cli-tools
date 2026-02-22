@@ -100,7 +100,7 @@ impl StatsCollector {
             println!("{}", format!("{error_count} file(s) could not be probed").red());
         }
 
-        stats.print_summary();
+        stats.print_summary(self.verbose);
 
         Ok(())
     }
