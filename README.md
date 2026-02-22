@@ -30,7 +30,7 @@ The binary list is read from `Cargo.toml` automatically to get all binaries.
 ### Install completions
 
 ```shell
-./install_completions.sh
+./completions.sh
 ```
 
 ### Generate manually for a single binary
