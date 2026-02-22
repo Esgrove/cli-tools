@@ -50,7 +50,7 @@ pub struct Args {
     swap: bool,
 
     /// Print verbose output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     verbose: bool,
 }
 
@@ -73,7 +73,13 @@ enum FlipDateCommand {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(FlipDateCommand::Completion { shell, install }) = &args.command {
-        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+        return cli_tools::generate_shell_completion(
+            *shell,
+            Args::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        );
     }
     let path = cli_tools::resolve_input_path(args.path.as_deref())?;
     let config = flip_date::Config::from_args(args)?;

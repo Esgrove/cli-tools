@@ -86,7 +86,7 @@ pub(crate) struct VideoConvertArgs {
     sort: Option<SortOrder>,
 
     /// Print verbose output
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     verbose: bool,
 
     /// Process files from database instead of scanning
@@ -158,7 +158,13 @@ enum VideoConvertCommand {
 fn main() -> Result<()> {
     let args = VideoConvertArgs::parse();
     if let Some(VideoConvertCommand::Completion { shell, install }) = &args.command {
-        cli_tools::generate_shell_completion(*shell, VideoConvertArgs::command(), *install, env!("CARGO_BIN_NAME"))
+        cli_tools::generate_shell_completion(
+            *shell,
+            VideoConvertArgs::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        )
     } else {
         VideoConvert::new(args)?.run()
     }

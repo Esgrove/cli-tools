@@ -17,20 +17,28 @@ Automatically detects the platform and installs completions for the appropriate 
   - Linux:   zsh and bash
 
 OPTIONS: All options are optional
-    --help
+    -h | --help
         Display these instructions.
 
-    --verbose
+    -s | --silent
+        Only print binary list and result summary.
+
+    -v | --verbose
         Display commands being executed.
 "
 
+SILENT=false
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --help)
+        -h | --help)
             echo "$USAGE"
             exit 1
             ;;
-        --verbose)
+        -s | --silent)
+            SILENT=true
+            ;;
+        -v | --verbose)
             set -x
             ;;
         *)
@@ -70,19 +78,26 @@ esac
 
 print_magenta "Installing shell completions for: ${SHELLS[*]}"
 echo "Binaries: ${COMPLETION_BINARIES[*]}"
-echo ""
+
+# Build completion command args: pass --verbose unless in silent mode
+COMPLETION_ARGS=(--install)
+if [ "$SILENT" = false ]; then
+    COMPLETION_ARGS+=("--verbose")
+fi
 
 FAILED_BINARIES=()
 INSTALLED_COUNT=0
 
 for binary in "${COMPLETION_BINARIES[@]}"; do
     if [ -z "$(command -v "$binary")" ]; then
-        print_yellow "Skipping $binary: not found in PATH"
+        if [ "$SILENT" = false ]; then
+            print_yellow "Skipping $binary: not found in PATH"
+        fi
         continue
     fi
 
     for shell in "${SHELLS[@]}"; do
-        if "$binary" completion "$shell" -I 2>/dev/null; then
+        if "$binary" completion "$shell" "${COMPLETION_ARGS[@]}" 2>/dev/null; then
             INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
         else
             print_red "Failed to install $shell completion for $binary"
@@ -90,8 +105,6 @@ for binary in "${COMPLETION_BINARIES[@]}"; do
         fi
     done
 done
-
-echo ""
 
 if [ ${#FAILED_BINARIES[@]} -gt 0 ]; then
     print_yellow "Failed completions:"
@@ -107,35 +120,37 @@ fi
 
 print_green "Successfully installed $INSTALLED_COUNT completion(s)"
 
-# Print shell-specific sourcing instructions
-for shell in "${SHELLS[@]}"; do
-    case "$shell" in
-        bash)
-            echo ""
-            print_yellow "Note: For bash completions, ensure your .bashrc sources files from ~/.bash_completion.d/"
-            echo "Add to your .bashrc if not already present:"
-            echo '  for file in ~/.bash_completion.d/*; do'
-            echo '      [ -f "$file" ] && source "$file"'
-            echo '  done'
-            ;;
-        zsh)
-            if [ -d "$HOME/.oh-my-zsh/custom/plugins" ]; then
+# Print shell-specific sourcing instructions unless in silent mode
+if [ "$SILENT" = false ]; then
+    for shell in "${SHELLS[@]}"; do
+        case "$shell" in
+            bash)
                 echo ""
-                print_yellow "Note: oh-my-zsh detected. Add the plugins to your .zshrc plugins list:"
-                echo "  plugins=(... ${COMPLETION_BINARIES[*]})"
-            else
+                print_yellow "Note: For bash completions, ensure your .bashrc sources files from ~/.bash_completion.d/"
+                echo "Add to your .bashrc if not already present:"
+                echo '  for file in ~/.bash_completion.d/*; do'
+                echo '      [ -f "$file" ] && source "$file"'
+                echo '  done'
+                ;;
+            zsh)
+                if [ -d "$HOME/.oh-my-zsh/custom/plugins" ]; then
+                    echo ""
+                    print_yellow "Note: oh-my-zsh detected. Add the plugins to your .zshrc plugins list:"
+                    echo "  plugins=(... ${COMPLETION_BINARIES[*]})"
+                else
+                    echo ""
+                    print_yellow "Note: For zsh completions, ensure your .zshrc includes the completions directory in fpath:"
+                    echo '  fpath=(~/.zsh/completions $fpath)'
+                    echo '  autoload -Uz compinit && compinit'
+                fi
+                ;;
+            powershell)
                 echo ""
-                print_yellow "Note: For zsh completions, ensure your .zshrc includes the completions directory in fpath:"
-                echo '  fpath=(~/.zsh/completions $fpath)'
-                echo '  autoload -Uz compinit && compinit'
-            fi
-            ;;
-        powershell)
-            echo ""
-            print_yellow "Note: PowerShell completions are installed to ~/Documents/PowerShell/completions/"
-            echo "Ensure your PowerShell profile loads completions from that directory."
-            echo 'Add to your $PROFILE if not already present:'
-            echo '  Get-ChildItem "$HOME\Documents\PowerShell\completions\*.ps1" | ForEach-Object { . $_ }'
-            ;;
-    esac
-done
+                print_yellow "Note: PowerShell completions are installed to ~/Documents/PowerShell/completions/"
+                echo "Ensure your PowerShell profile loads completions from that directory."
+                echo 'Add to your $PROFILE if not already present:'
+                echo '  Get-ChildItem "$HOME\Documents\PowerShell\completions\*.ps1" | ForEach-Object { . $_ }'
+                ;;
+        esac
+    done
+fi

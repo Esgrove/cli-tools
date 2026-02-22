@@ -56,7 +56,7 @@ pub(crate) struct ThumbnailArgs {
     quality: Option<u32>,
 
     /// Print verbose output
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     verbose: bool,
 }
 
@@ -79,7 +79,13 @@ enum ThumbnailCommand {
 fn main() -> Result<()> {
     let args = ThumbnailArgs::parse();
     if let Some(ThumbnailCommand::Completion { shell, install }) = &args.command {
-        cli_tools::generate_shell_completion(*shell, ThumbnailArgs::command(), *install, env!("CARGO_BIN_NAME"))
+        cli_tools::generate_shell_completion(
+            *shell,
+            ThumbnailArgs::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        )
     } else {
         ThumbnailCreator::new(&args)?.run()
     }

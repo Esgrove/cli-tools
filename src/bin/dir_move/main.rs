@@ -90,7 +90,7 @@ struct DirMoveArgs {
     show_db: bool,
 
     /// Print verbose output
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     verbose: bool,
 }
 
@@ -113,7 +113,13 @@ enum DirMoveCommand {
 fn main() -> anyhow::Result<()> {
     let args = DirMoveArgs::parse();
     if let Some(DirMoveCommand::Completion { shell, install }) = &args.command {
-        cli_tools::generate_shell_completion(*shell, DirMoveArgs::command(), *install, env!("CARGO_BIN_NAME"))
+        cli_tools::generate_shell_completion(
+            *shell,
+            DirMoveArgs::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        )
     } else {
         DirMove::try_from_args(args)?.run()
     }

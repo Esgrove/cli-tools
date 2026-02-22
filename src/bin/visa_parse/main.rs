@@ -44,7 +44,7 @@ pub struct VisaParseArgs {
     pub number: Option<usize>,
 
     /// Print verbose output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub verbose: bool,
 }
 
@@ -71,6 +71,7 @@ fn main() -> Result<()> {
             *shell,
             VisaParseArgs::command(),
             *install,
+            args.verbose,
             env!("CARGO_BIN_NAME"),
         );
     }

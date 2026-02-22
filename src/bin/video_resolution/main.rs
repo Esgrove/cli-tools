@@ -41,7 +41,7 @@ pub struct Args {
     recurse: bool,
 
     /// Print verbose output
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     verbose: bool,
 }
 
@@ -65,7 +65,13 @@ enum VideoResolutionCommand {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(VideoResolutionCommand::Completion { shell, install }) = &args.command {
-        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+        return cli_tools::generate_shell_completion(
+            *shell,
+            Args::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        );
     }
     let config = Config::try_from_args(&args)?;
     cli::run(config).await

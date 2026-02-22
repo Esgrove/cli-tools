@@ -33,7 +33,7 @@ struct Args {
     single: bool,
 
     /// Print verbose output
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     verbose: bool,
 }
 
@@ -56,7 +56,13 @@ enum VersionTagCommand {
 fn main() -> Result<()> {
     let args = Args::parse();
     if let Some(VersionTagCommand::Completion { shell, install }) = &args.command {
-        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+        return cli_tools::generate_shell_completion(
+            *shell,
+            Args::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        );
     }
     let repo_path = cli_tools::resolve_input_path(args.path.as_deref())?;
     if !repo_path.is_dir() {

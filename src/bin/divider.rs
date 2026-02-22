@@ -26,6 +26,10 @@ struct Args {
     /// Align multiple divider texts to same start position
     #[arg(short, long)]
     align: bool,
+
+    /// Print verbose output
+    #[arg(short, long, global = true)]
+    verbose: bool,
 }
 
 /// Subcommands for div.
@@ -47,7 +51,13 @@ enum DividerCommand {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(DividerCommand::Completion { shell, install }) = &args.command {
-        return cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"));
+        return cli_tools::generate_shell_completion(
+            *shell,
+            Args::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        );
     }
     if args.text.is_empty() {
         println!("{}", format_centered_divider("", args.length, args.character));

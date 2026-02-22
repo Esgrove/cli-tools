@@ -158,9 +158,13 @@ async fn main() -> Result<()> {
     let command = args.command.take();
 
     match command {
-        Some(Command::Completion { shell, install }) => {
-            cli_tools::generate_shell_completion(shell, QtorrentArgs::command(), install, env!("CARGO_BIN_NAME"))
-        }
+        Some(Command::Completion { shell, install }) => cli_tools::generate_shell_completion(
+            shell,
+            QtorrentArgs::command(),
+            install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        ),
         Some(Command::Info { sort, list }) => info::run(args, sort, list).await,
         None => QTorrent::new(args)?.run().await,
     }

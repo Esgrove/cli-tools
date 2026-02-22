@@ -218,7 +218,13 @@ fn main() -> Result<()> {
     let mut cli = DotsCli::parse();
     cli.apply_subcommand();
     if let Some(Command::Completion { shell, install }) = &cli.command {
-        cli_tools::generate_shell_completion(*shell, DotsCli::command(), *install, env!("CARGO_BIN_NAME"))
+        cli_tools::generate_shell_completion(
+            *shell,
+            DotsCli::command(),
+            *install,
+            cli.verbose,
+            env!("CARGO_BIN_NAME"),
+        )
     } else {
         cli.run()
     }

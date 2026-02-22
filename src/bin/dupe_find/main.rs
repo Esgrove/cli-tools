@@ -44,7 +44,7 @@ struct Args {
     default: bool,
 
     /// Print verbose output
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     verbose: bool,
 }
 
@@ -67,7 +67,7 @@ enum DupeFindCommand {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(DupeFindCommand::Completion { shell, install }) = &args.command {
-        cli_tools::generate_shell_completion(*shell, Args::command(), *install, env!("CARGO_BIN_NAME"))
+        cli_tools::generate_shell_completion(*shell, Args::command(), *install, args.verbose, env!("CARGO_BIN_NAME"))
     } else {
         DupeFind::new(args)?.run()
     }

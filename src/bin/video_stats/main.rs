@@ -23,7 +23,7 @@ pub(crate) struct VideoStatsArgs {
     recurse: bool,
 
     /// Print verbose per-file output
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     verbose: bool,
 }
 
@@ -46,7 +46,13 @@ enum VideoStatsCommand {
 fn main() -> Result<()> {
     let args = VideoStatsArgs::parse();
     if let Some(VideoStatsCommand::Completion { shell, install }) = &args.command {
-        cli_tools::generate_shell_completion(*shell, VideoStatsArgs::command(), *install, env!("CARGO_BIN_NAME"))
+        cli_tools::generate_shell_completion(
+            *shell,
+            VideoStatsArgs::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        )
     } else {
         StatsCollector::new(&args)?.run()
     }
