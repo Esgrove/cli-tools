@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "8.16.0"
+version = "9.0.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities"
@@ -90,6 +90,10 @@ path = "src/bin/visa_parse/main.rs"
 [[bin]]
 name = "vtag"
 path = "src/bin/version_tag.rs"
+
+[[bin]]
+name = "vstats"
+path = "src/bin/video_stats/main.rs"
 
 [[bin]]
 name = "qtorrent"

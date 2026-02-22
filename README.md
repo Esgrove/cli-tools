@@ -315,6 +315,29 @@ Options:
   -V, --version            Print version
 ```
 
+## Vstats
+
+Collect and print video file statistics.
+Finds all video files in a directory, probes them with ffprobe in parallel,
+and prints aggregate statistics including resolution distribution,
+duration, codec, bitrate, and file size summaries.
+
+```console
+Collect and print video file statistics
+
+Usage: vstats [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Optional input directory or file
+
+Options:
+  -r, --recurse             Recurse into subdirectories
+  -v, --verbose             Print verbose per-file output
+  -l, --completion <SHELL>  Generate shell completion [possible values: bash, elvish, fish, powershell, zsh]
+  -h, --help                Print help
+  -V, --version             Print version
+```
+
 ## Thumbs
 
 Create thumbnail sheets for video files using ffmpeg.

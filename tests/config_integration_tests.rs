@@ -39,6 +39,7 @@ fn sample_config_has_all_sections() {
         "dupefind",
         "qtorrent",
         "video_convert",
+        "video_stats",
         "resolution",
         "thumbnail",
     ];
@@ -167,6 +168,17 @@ fn flip_date_section_has_expected_structure() {
     assert!(flip_date.get("file_extensions").is_some());
     assert!(flip_date.get("swap_year").is_some());
     assert!(flip_date.get("year_first").is_some());
+}
+
+#[test]
+fn video_stats_section_has_expected_structure() {
+    let config_content = read_sample_config();
+    let value: toml::Value = toml::from_str(&config_content).expect("should parse");
+
+    let video_stats = value.get("video_stats").expect("should have video_stats section");
+
+    assert!(video_stats.get("recurse").is_some());
+    assert!(video_stats.get("verbose").is_some());
 }
 
 #[test]

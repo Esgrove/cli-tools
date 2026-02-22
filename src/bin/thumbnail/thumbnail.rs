@@ -176,6 +176,7 @@ impl ThumbnailCreator {
         }
 
         video_files.sort();
+
         Ok(video_files)
     }
 

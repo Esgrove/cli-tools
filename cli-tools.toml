@@ -345,3 +345,10 @@ replace = [
 
 # How many merchant total sums to print with verbose output
 # number = 20
+
+[video_stats]
+# Recurse into subdirectories
+# recurse = false
+
+# Print verbose per-file output
+# verbose = false

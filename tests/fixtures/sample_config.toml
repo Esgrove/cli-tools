@@ -109,3 +109,7 @@ dryrun = false
 overwrite = false
 recurse = false
 verbose = false
+
+[video_stats]
+recurse = false
+verbose = false
