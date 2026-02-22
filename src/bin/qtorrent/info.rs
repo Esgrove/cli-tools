@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 use colored::Colorize;
 
+use cli_tools::print_dimmed;
+
 use crate::QtorrentArgs;
 use crate::SortOrder;
 use crate::config::Config;
@@ -125,7 +127,7 @@ fn sort_torrents(torrents: &mut [&TorrentListItem], sort: SortOrder) {
 /// Print torrent statistics summary and optionally individual torrent details.
 fn print_statistics(torrents: &HashMap<String, TorrentListItem>, options: &PrintOptions) {
     if torrents.is_empty() {
-        println!("{}", "No torrents found".dimmed());
+        print_dimmed("No torrents found");
         return;
     }
 

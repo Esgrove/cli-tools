@@ -901,6 +901,18 @@ macro_rules! print_bold {
     };
 }
 
+#[inline]
+pub fn print_dimmed(message: &str) {
+    println!("{}", message.dimmed());
+}
+
+#[macro_export]
+macro_rules! print_dimmed {
+    ($($arg:tt)*) => {
+        $crate::print_dimmed(&format!($($arg)*))
+    };
+}
+
 /// Print a stacked diff of the changes.
 pub fn show_diff(old: &str, new: &str) {
     let (old_diff, new_diff) = color_diff(old, new, true);
@@ -1846,5 +1858,10 @@ mod print_function_tests {
     #[test]
     fn print_bold_does_not_panic() {
         print_bold("test bold message");
+    }
+
+    #[test]
+    fn print_dimmed_does_not_panic() {
+        print_dimmed("test dimmed message");
     }
 }

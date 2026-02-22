@@ -6,6 +6,8 @@ use std::process::Command;
 use anyhow::Context;
 use colored::Colorize;
 
+use crate::print_dimmed;
+
 pub use crate::resolution::Resolution;
 
 /// Video file information gathered from filesystem metadata and ffprobe.
@@ -129,7 +131,7 @@ impl VideoInfo {
 
 impl VideoStats {
     /// Maximum number of resolution entries shown in non-verbose mode.
-    const MAX_RESOLUTION_ROWS: usize = 5;
+    const MAX_RESOLUTION_ROWS: usize = 10;
 
     /// Create a new empty video stats collector.
     #[must_use]
@@ -208,21 +210,21 @@ impl VideoStats {
 
         println!("  {}: {smallest} — {biggest}", "Resolutions".bold());
 
-        // Aggregate counts by fuzzy resolution label
-        let mut label_counts: HashMap<Cow<'static, str>, (usize, u64)> = HashMap::new();
+        // Aggregate counts by fuzzy resolution label, tracking max width for proper sorting
+        let mut label_counts: HashMap<Cow<'static, str>, (usize, u32)> = HashMap::new();
         for (resolution, count) in &self.resolutions {
             let label = resolution.to_string();
-            let pixel_count = resolution.pixel_count();
-            let entry = label_counts.entry(Cow::from(label)).or_insert((0, pixel_count));
+            let max_dimension = resolution.width.max(resolution.height);
+            let entry = label_counts.entry(Cow::from(label)).or_insert((0, max_dimension));
             entry.0 += count;
-            // Track minimum pixel count for sorting
-            entry.1 = entry.1.min(pixel_count);
+            // Track maximum width (prefer landscape) for sorting
+            entry.1 = entry.1.max(max_dimension);
         }
 
-        // Sort by count descending, then by pixel count ascending as tiebreaker
+        // Sort by count descending, then by max dimension descending (prefers landscape)
         let mut sorted_labels: Vec<_> = label_counts.into_iter().collect();
-        sorted_labels.sort_by(|(_, (count_a, pixels_a)), (_, (count_b, pixels_b))| {
-            count_b.cmp(count_a).then_with(|| pixels_a.cmp(pixels_b))
+        sorted_labels.sort_by(|(_, (count_a, max_dim_a)), (_, (count_b, max_dim_b))| {
+            count_b.cmp(count_a).then_with(|| max_dim_b.cmp(max_dim_a))
         });
 
         let total_labels = sorted_labels.len();
@@ -232,8 +234,16 @@ impl VideoStats {
             &sorted_labels[..total_labels.min(Self::MAX_RESOLUTION_ROWS)]
         };
 
+        // Calculate max widths for right-alignment
+        let max_label_width = display_labels.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
+        let max_count_width = display_labels
+            .iter()
+            .map(|(_, (count, _))| count.to_string().chars().count())
+            .max()
+            .unwrap_or(0);
+
         for (label, (count, _)) in display_labels {
-            println!("    {label}: {count}");
+            println!("    {label:>max_label_width$}: {count:>max_count_width$}");
         }
 
         if !verbose && total_labels > Self::MAX_RESOLUTION_ROWS {
@@ -242,10 +252,7 @@ impl VideoStats {
                 .iter()
                 .map(|(_, (count, _))| count)
                 .sum();
-            println!(
-                "    {} {remaining_labels} more resolution(s) with {remaining_files} file(s)",
-                "...".dimmed()
-            );
+            print_dimmed!("    ... {remaining_labels} more resolution(s) with {remaining_files} file(s)");
         }
     }
 
