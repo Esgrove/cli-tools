@@ -83,6 +83,9 @@ impl FFProbeResult {
                 let mut new_file_name = format!("{cleaned_name}.{extension}");
                 remove_extra_dots(&mut new_file_name);
                 let new_path = self.file.with_file_name(&new_file_name);
+                if new_path == self.file {
+                    return Ok(None);
+                }
                 Ok(Some(new_path))
             }
         } else {
@@ -91,6 +94,9 @@ impl FFProbeResult {
             let mut new_file_name = format!("{new_name}.{extension}");
             remove_extra_dots(&mut new_file_name);
             let new_path = self.file.with_file_name(&new_file_name);
+            if new_path == self.file {
+                return Ok(None);
+            }
             Ok(Some(new_path))
         }
     }
@@ -1412,6 +1418,50 @@ mod ffprobe_result_tests {
             new_path.to_string_lossy().contains("1080p"),
             "Should add '1080p' label, got: {}",
             new_path.display()
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_nonstandard_resolution_already_labeled() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // Non-standard resolution where the label falls back to the full WxH string.
+        // The file already has the correct label, so no rename should be needed.
+        let file_path = temp_dir.path().join("video.1234x567.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 1234,
+                height: 567,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(
+            new_path.is_none(),
+            "File already has correct non-standard resolution label, should not need renaming"
+        );
+    }
+
+    #[test]
+    fn new_path_if_needed_nonstandard_vertical_resolution_already_labeled() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("video.Vertical.567x1234.mp4");
+        std::fs::File::create(&file_path).expect("Failed to create file");
+
+        let result = FFProbeResult {
+            file: file_path,
+            resolution: Resolution {
+                width: 567,
+                height: 1234,
+            },
+        };
+
+        let new_path = result.new_path_if_needed().unwrap();
+        assert!(
+            new_path.is_none(),
+            "File already has correct non-standard vertical resolution label, should not need renaming"
         );
     }
 }
