@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +9,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use cli_tools::{print_error, print_yellow};
 use colored::Colorize;
-use indicatif::ParallelProgressIterator;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use regex::Regex;
@@ -21,7 +21,7 @@ use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 use crate::types::{
     AnalysisFilter, AnalysisOutput, AnalysisResult, Codec, ProcessResult, ProcessableFile, SkipReason, VideoFile,
-    VideoInfo,
+    VideoInfo, VideoInfoCache,
 };
 use crate::{SortOrder, VideoConvertArgs};
 
@@ -83,7 +83,7 @@ impl VideoConvert {
         }
 
         // Open the database for tracking
-        let database = Database::open_default()?;
+        let mut database = Database::open_default()?;
         if self.config.verbose {
             println!("Database: {}", Database::path().display());
         }
@@ -117,38 +117,34 @@ impl VideoConvert {
         }
 
         // Analyze files to determine required actions
-        let mut analysis_output = self.analyze_files(candidate_files);
+        let mut analysis_output = self.analyze_files(candidate_files, &mut database);
 
         // Process renames: these files are already in a target codec but missing their codec suffix label
         if !analysis_output.renames.is_empty() {
             stats.files_renamed = self.process_renames(&analysis_output.renames);
         }
 
-        // Update the database with files that need processing
-        let mut db_added = 0;
+        // Update the database with files that need processing (single transaction)
+        let mut pending_entries: Vec<(&Path, &str, &VideoInfo, PendingAction)> = Vec::new();
         for file in &analysis_output.remuxes {
-            if database
-                .upsert_pending_file(&file.file.path, &file.file.extension, &file.info, PendingAction::Remux)
-                .is_ok()
-            {
-                db_added += 1;
-            }
+            pending_entries.push((&file.file.path, &file.file.extension, &file.info, PendingAction::Remux));
         }
         for file in &analysis_output.conversions {
-            if database
-                .upsert_pending_file(
-                    &file.file.path,
-                    &file.file.extension,
-                    &file.info,
-                    PendingAction::Convert,
-                )
-                .is_ok()
-            {
-                db_added += 1;
-            }
+            pending_entries.push((
+                &file.file.path,
+                &file.file.extension,
+                &file.info,
+                PendingAction::Convert,
+            ));
         }
-        if self.config.verbose && db_added > 0 {
-            println!("Updated {db_added} files in database");
+        match database.batch_upsert_pending_files(&pending_entries) {
+            Ok(db_added) if self.config.verbose && db_added > 0 => {
+                println!("Updated {db_added} files in database");
+            }
+            Err(error) if self.config.verbose => {
+                print_yellow!("Failed to update pending files in database: {error}");
+            }
+            _ => {}
         }
 
         // Calculate total files to process and truncate lists to respect config limit
@@ -220,7 +216,7 @@ impl VideoConvert {
         let path = &self.config.path;
 
         if path.is_file() {
-            let file = VideoFile::new(path);
+            let file = VideoFile::new_with_metadata(path);
             return if self.should_include_file(&file) {
                 Ok(vec![file])
             } else {
@@ -374,7 +370,7 @@ impl VideoConvert {
             .into_iter()
             .filter(|f| f.full_path.exists())
             .map(|f| {
-                let video_file = VideoFile::new(&f.full_path);
+                let video_file = VideoFile::new_with_metadata(&f.full_path);
                 let info = f.to_video_info();
                 ProcessableFile::new(video_file, info)
             })
@@ -384,7 +380,7 @@ impl VideoConvert {
             .into_iter()
             .filter(|f| f.full_path.exists())
             .map(|f| {
-                let video_file = VideoFile::new(&f.full_path);
+                let video_file = VideoFile::new_with_metadata(&f.full_path);
                 let info = f.to_video_info();
                 ProcessableFile::new(video_file, info)
             })
@@ -746,16 +742,9 @@ impl VideoConvert {
     /// Analyze files in parallel to determine which need processing.
     /// Runs ffprobe on each file concurrently and filters based on video information.
     #[allow(clippy::too_many_lines)]
-    fn analyze_files(&self, files: Vec<VideoFile>) -> AnalysisOutput {
+    fn analyze_files(&self, files: Vec<VideoFile>, database: &mut Database) -> AnalysisOutput {
         let start = Instant::now();
         let total_files = files.len();
-        let progress_bar = ProgressBar::new(total_files as u64);
-        progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template(PROGRESS_BAR_TEMPLATE)
-                .expect("Failed to set progress bar template")
-                .progress_chars(PROGRESS_BAR_CHARS),
-        );
 
         // Extract config values needed for analysis to avoid borrowing self in parallel context
         let filter = AnalysisFilter {
@@ -767,11 +756,69 @@ impl VideoConvert {
             overwrite: self.config.overwrite,
         };
 
-        let results: Vec<AnalysisResult> = files
-            .into_par_iter()
-            .progress_with(progress_bar)
-            .map(|file| Self::analyze_video_file(file, &filter))
+        // Phase 1 (sequential): bulk-load the scan cache into a HashMap for O(1) lookups,
+        // then split files into cache hits (classified immediately) and cache misses.
+        let scan_cache: HashMap<String, VideoInfo> = database.get_all_scanned_files().unwrap_or_default();
+        let mut cache_results: Vec<AnalysisResult> = Vec::new();
+        let mut cache_misses: Vec<VideoFile> = Vec::new();
+
+        for file in files {
+            let path_key = file.path.to_string_lossy();
+            if let Some(cached_info) = scan_cache.get(path_key.as_ref())
+                && cached_info.size_bytes == file.size_bytes
+            {
+                cache_results.push(Self::classify_video_file(file, &filter, cached_info));
+            } else {
+                cache_misses.push(file);
+            }
+        }
+
+        let cache_hit_count = cache_results.len();
+        let cache_miss_count = cache_misses.len();
+        if self.config.verbose && cache_hit_count > 0 {
+            println!(
+                "Scan cache: {cache_hit_count} hit(s), {cache_miss_count} miss(es) — running ffprobe on {cache_miss_count} file(s)"
+            );
+        }
+
+        // Phase 2 (parallel): run ffprobe only on cache misses.
+        let probe_results: Vec<VideoInfoCache> = if cache_misses.is_empty() {
+            Vec::new()
+        } else {
+            let progress_bar = ProgressBar::new(cache_miss_count as u64);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template(PROGRESS_BAR_TEMPLATE)
+                    .expect("Failed to set progress bar template")
+                    .progress_chars(PROGRESS_BAR_CHARS),
+            );
+
+            let results: Vec<VideoInfoCache> = cache_misses
+                .into_par_iter()
+                .map(|file| {
+                    let result = Self::probe_and_classify(file, &filter);
+                    progress_bar.inc(1);
+                    result
+                })
+                .collect();
+            progress_bar.finish_and_clear();
+            results
+        };
+
+        // Phase 3: write new ffprobe results back to the scan cache in a single transaction.
+        let cache_entries: Vec<(&Path, &VideoInfo)> = probe_results
+            .iter()
+            .filter_map(|entry| entry.info.as_ref().map(|info| (entry.path.as_path(), info)))
             .collect();
+        if let Err(error) = database.batch_upsert_scanned_files(&cache_entries)
+            && self.config.verbose
+        {
+            print_yellow!("Failed to write scan cache: {error}");
+        }
+
+        // Combine cache hits (Phase 1) with ffprobe results (Phase 2)
+        let mut results = cache_results;
+        results.extend(probe_results.into_iter().map(|entry| entry.result));
 
         // Collect files into separate vectors
         let mut conversions = Vec::new();
@@ -1176,21 +1223,39 @@ impl VideoConvert {
         Ok(())
     }
 
-    /// Analyze a single file to determine what action to take.
-    /// This is a standalone function to allow parallel execution without borrowing `VideoConvert`.
-    #[allow(clippy::too_many_lines)]
-    fn analyze_video_file(file: VideoFile, filter: &AnalysisFilter) -> AnalysisResult {
-        // Get video info using ffprobe
-        let info = match Self::get_video_info(&file.path) {
-            Ok(info) => info,
-            Err(e) => {
-                return AnalysisResult::Skip {
-                    file,
-                    reason: SkipReason::AnalysisFailed { error: e.to_string() },
-                };
+    /// Run ffprobe on a file and classify the result.
+    ///
+    /// Returns a `VideoInfoCache` containing the analysis result, the file path, and the
+    /// `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
+    fn probe_and_classify(file: VideoFile, filter: &AnalysisFilter) -> VideoInfoCache {
+        let path = file.path.clone();
+        match Self::get_video_info(&file.path) {
+            Ok(info) => {
+                let result = Self::classify_video_file(file, filter, &info);
+                VideoInfoCache {
+                    result,
+                    path,
+                    info: Some(info),
+                }
             }
-        };
+            Err(error) => VideoInfoCache {
+                result: AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::AnalysisFailed {
+                        error: error.to_string(),
+                    },
+                },
+                path,
+                info: None,
+            },
+        }
+    }
 
+    /// Classify a video file given its already-obtained `VideoInfo`.
+    ///
+    /// Takes `info` by reference — only clones into `ProcessableFile` on the minority
+    /// paths that actually need processing (conversion, remux, rename).
+    fn classify_video_file(file: VideoFile, filter: &AnalysisFilter, info: &VideoInfo) -> AnalysisResult {
         let is_target_codec = info.is_target_codec();
         let suffix = info.codec_suffix();
 
@@ -1208,7 +1273,7 @@ impl VideoConvert {
                         },
                     };
                 }
-                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info));
+                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone()));
             }
             return AnalysisResult::Skip {
                 file,
@@ -1298,9 +1363,9 @@ impl VideoConvert {
         }
 
         if is_target_codec {
-            AnalysisResult::NeedsRemux(ProcessableFile::new(file, info))
+            AnalysisResult::NeedsRemux(ProcessableFile::new(file, info.clone()))
         } else {
-            AnalysisResult::NeedsConversion(ProcessableFile::new(file, info))
+            AnalysisResult::NeedsConversion(ProcessableFile::new(file, info.clone()))
         }
     }
 

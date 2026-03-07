@@ -222,6 +222,24 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_pending_bitrate ON pending_files(bitrate_kbps);
                 CREATE INDEX IF NOT EXISTS idx_pending_duration ON pending_files(duration);
 
+                -- Cache of all files that have been scanned with ffprobe.
+                -- Stores results for both pending and skipped files so ffprobe is not
+                -- re-run on unchanged files (identified by path + size_bytes).
+                CREATE TABLE IF NOT EXISTS scanned_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    scanned_time INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
+
                 -- Performance optimizations
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = NORMAL;
@@ -237,6 +255,7 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
+    #[cfg(test)]
     pub fn upsert_pending_file(
         &self,
         path: &Path,
@@ -291,6 +310,78 @@ impl Database {
             .context("Failed to insert pending file")?;
 
         Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Insert or update multiple pending files in a single transaction.
+    ///
+    /// Wrapping all writes in one transaction reduces disk syncs from O(N) to O(1).
+    ///
+    /// Returns the number of entries successfully written.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be started or committed.
+    pub fn batch_upsert_pending_files(
+        &mut self,
+        entries: &[(&Path, &str, &VideoInfo, PendingAction)],
+    ) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let transaction = self.connection.transaction()?;
+        let mut count = 0;
+
+        for (path, extension, info, action) in entries {
+            let path_str = path.to_string_lossy();
+            let modified_time = std::fs::metadata(path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+
+            transaction
+                .execute(
+                    r"
+                    INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, action, created_time, modified_time)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    ON CONFLICT(full_path) DO UPDATE SET
+                        extension = excluded.extension,
+                        codec = excluded.codec,
+                        bitrate_kbps = excluded.bitrate_kbps,
+                        size_bytes = excluded.size_bytes,
+                        duration = excluded.duration,
+                        width = excluded.width,
+                        height = excluded.height,
+                        frames_per_second = excluded.frames_per_second,
+                        action = excluded.action,
+                        modified_time = excluded.modified_time
+                    ",
+                    params![
+                        path_str,
+                        extension.to_lowercase(),
+                        info.codec,
+                        info.bitrate_kbps as i64,
+                        info.size_bytes as i64,
+                        info.duration,
+                        info.width,
+                        info.height,
+                        info.frames_per_second,
+                        action.as_str(),
+                        now,
+                        modified_time,
+                    ],
+                )
+                .context("Failed to insert pending file")?;
+            count += 1;
+        }
+
+        transaction.commit()?;
+        Ok(count)
     }
 
     /// Get pending files with optional filtering.
@@ -464,6 +555,218 @@ impl Database {
         for file in files {
             if !file.full_path.exists() {
                 transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![file.id])?;
+                removed_count += 1;
+            }
+        }
+
+        transaction.commit()?;
+        Ok(removed_count)
+    }
+
+    /// Insert or update a scanned file cache entry.
+    ///
+    /// Called after every ffprobe run so the result can be reused on subsequent scans
+    /// without re-running ffprobe, as long as the file size has not changed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    #[cfg(test)]
+    pub fn upsert_scanned_file(&self, path: &Path, info: &VideoInfo) -> Result<()> {
+        let path_str = path.to_string_lossy();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        self.connection
+            .execute(
+                r"
+                INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                ON CONFLICT(full_path) DO UPDATE SET
+                    size_bytes = excluded.size_bytes,
+                    codec = excluded.codec,
+                    bitrate_kbps = excluded.bitrate_kbps,
+                    duration = excluded.duration,
+                    width = excluded.width,
+                    height = excluded.height,
+                    frames_per_second = excluded.frames_per_second,
+                    scanned_time = excluded.scanned_time
+                ",
+                params![
+                    path_str,
+                    info.size_bytes as i64,
+                    info.codec,
+                    info.bitrate_kbps as i64,
+                    info.duration,
+                    info.width,
+                    info.height,
+                    info.frames_per_second,
+                    now,
+                ],
+            )
+            .context("Failed to upsert scanned file")?;
+
+        Ok(())
+    }
+
+    /// Insert or update multiple scanned file cache entries in a single transaction.
+    ///
+    /// Wrapping all writes in one transaction reduces disk syncs from O(N) to O(1),
+    /// which is significantly faster for large batches.
+    ///
+    /// Returns the number of entries successfully written.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be started or committed.
+    pub fn batch_upsert_scanned_files(&mut self, entries: &[(&Path, &VideoInfo)]) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let transaction = self.connection.transaction()?;
+        let mut count = 0;
+
+        for (path, info) in entries {
+            let path_str = path.to_string_lossy();
+            transaction
+                .execute(
+                    r"
+                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ON CONFLICT(full_path) DO UPDATE SET
+                        size_bytes = excluded.size_bytes,
+                        codec = excluded.codec,
+                        bitrate_kbps = excluded.bitrate_kbps,
+                        duration = excluded.duration,
+                        width = excluded.width,
+                        height = excluded.height,
+                        frames_per_second = excluded.frames_per_second,
+                        scanned_time = excluded.scanned_time
+                    ",
+                    params![
+                        path_str,
+                        info.size_bytes as i64,
+                        info.codec,
+                        info.bitrate_kbps as i64,
+                        info.duration,
+                        info.width,
+                        info.height,
+                        info.frames_per_second,
+                        now,
+                    ],
+                )
+                .context("Failed to upsert scanned file")?;
+            count += 1;
+        }
+
+        transaction.commit()?;
+        Ok(count)
+    }
+
+    /// Look up a previously scanned file by path and size.
+    ///
+    /// Returns the cached `VideoInfo` only when both the path and size match,
+    /// ensuring stale entries for modified files are never used.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    #[cfg(test)]
+    pub fn find_scanned_file(&self, path: &Path, size_bytes: u64) -> Result<Option<VideoInfo>> {
+        let path_str = path.to_string_lossy();
+
+        let mut statement = self.connection.prepare(
+            r"
+            SELECT codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second
+            FROM scanned_files
+            WHERE full_path = ?1 AND size_bytes = ?2
+            ",
+        )?;
+
+        let info = statement
+            .query_row(params![path_str, size_bytes as i64], |row| {
+                Ok(VideoInfo {
+                    codec: row.get(0)?,
+                    bitrate_kbps: row.get::<_, i64>(1)? as u64,
+                    size_bytes: row.get::<_, i64>(2)? as u64,
+                    duration: row.get(3)?,
+                    width: row.get::<_, i64>(4)? as u32,
+                    height: row.get::<_, i64>(5)? as u32,
+                    frames_per_second: row.get(6)?,
+                    warning: None,
+                })
+            })
+            .optional()
+            .context("Failed to query scanned file")?;
+
+        Ok(info)
+    }
+
+    /// Load all scanned file cache entries into a `HashMap` keyed by full path.
+    ///
+    /// This allows O(1) lookups during the analysis phase instead of issuing
+    /// individual SQL queries per file.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn get_all_scanned_files(&self) -> Result<std::collections::HashMap<String, VideoInfo>> {
+        let mut statement = self.connection.prepare(
+            r"
+            SELECT full_path, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second
+            FROM scanned_files
+            ",
+        )?;
+
+        let entries = statement
+            .query_map([], |row| {
+                let path: String = row.get(0)?;
+                let info = VideoInfo {
+                    codec: row.get(1)?,
+                    bitrate_kbps: row.get::<_, i64>(2)? as u64,
+                    size_bytes: row.get::<_, i64>(3)? as u64,
+                    duration: row.get(4)?,
+                    width: row.get::<_, i64>(5)? as u32,
+                    height: row.get::<_, i64>(6)? as u32,
+                    frames_per_second: row.get(7)?,
+                    warning: None,
+                };
+                Ok((path, info))
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Remove scanned cache entries for files that no longer exist on disk.
+    ///
+    /// Returns the number of entries removed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    #[expect(dead_code, reason = "Part of public API for future use")]
+    pub fn remove_missing_scanned_files(&mut self) -> Result<usize> {
+        let paths: Vec<PathBuf> = {
+            let mut statement = self.connection.prepare("SELECT full_path FROM scanned_files")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .filter_map(std::result::Result::ok)
+                .map(PathBuf::from)
+                .collect()
+        };
+
+        let mut removed_count = 0;
+        let transaction = self.connection.transaction()?;
+
+        for path in paths {
+            if !path.exists() {
+                let path_str = path.to_string_lossy();
+                transaction.execute("DELETE FROM scanned_files WHERE full_path = ?1", params![path_str])?;
                 removed_count += 1;
             }
         }
@@ -1533,5 +1836,311 @@ mod tests {
                 .iter()
                 .any(|f| f.full_path.to_string_lossy().contains("convert_mid"))
         );
+    }
+
+    #[test]
+    fn test_upsert_and_find_scanned_file() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/videos/test.mkv");
+
+        database
+            .upsert_scanned_file(&path, &info)
+            .expect("Failed to upsert scanned file");
+
+        let found = database
+            .find_scanned_file(&path, info.size_bytes)
+            .expect("Failed to query scanned file");
+
+        let found = found.expect("Expected a cached result");
+        assert_eq!(found.codec, info.codec);
+        assert_eq!(found.bitrate_kbps, info.bitrate_kbps);
+        assert_eq!(found.size_bytes, info.size_bytes);
+        cli_tools::assert_f64_eq(found.duration, info.duration);
+        assert_eq!(found.width, info.width);
+        assert_eq!(found.height, info.height);
+        cli_tools::assert_f64_eq(found.frames_per_second, info.frames_per_second);
+        assert!(found.warning.is_none());
+    }
+
+    #[test]
+    fn test_find_scanned_file_returns_none_for_unknown_path() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let result = database
+            .find_scanned_file(&PathBuf::from("/videos/unknown.mkv"), 1_000_000)
+            .expect("Failed to query scanned file");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_scanned_file_returns_none_when_size_differs() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/videos/test.mkv");
+
+        database
+            .upsert_scanned_file(&path, &info)
+            .expect("Failed to upsert scanned file");
+
+        // Query with a different size — should not match.
+        let result = database
+            .find_scanned_file(&path, info.size_bytes + 1)
+            .expect("Failed to query scanned file");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_upsert_scanned_file_updates_existing_entry() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let path = PathBuf::from("/videos/test.mkv");
+
+        let original = create_test_video_info();
+        database
+            .upsert_scanned_file(&path, &original)
+            .expect("Failed to upsert original scanned file");
+
+        // Upsert an updated entry with a different codec and size.
+        let updated = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        database
+            .upsert_scanned_file(&path, &updated)
+            .expect("Failed to upsert updated scanned file");
+
+        let found = database
+            .find_scanned_file(&path, updated.size_bytes)
+            .expect("Failed to query scanned file")
+            .expect("Expected a cached result after update");
+
+        assert_eq!(found.codec, "hevc");
+        assert_eq!(found.bitrate_kbps, 4000);
+        assert_eq!(found.size_bytes, 500_000_000);
+
+        // The original size no longer matches.
+        let stale = database
+            .find_scanned_file(&path, original.size_bytes)
+            .expect("Failed to query scanned file");
+        assert!(stale.is_none());
+    }
+
+    #[test]
+    fn test_get_all_scanned_files_returns_all_entries() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let info_a = create_test_video_info();
+        let path_a = PathBuf::from("/videos/a.mkv");
+        database
+            .upsert_scanned_file(&path_a, &info_a)
+            .expect("Failed to upsert scanned file");
+
+        let info_b = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        let path_b = PathBuf::from("/videos/b.mp4");
+        database
+            .upsert_scanned_file(&path_b, &info_b)
+            .expect("Failed to upsert scanned file");
+
+        let all = database
+            .get_all_scanned_files()
+            .expect("Failed to get all scanned files");
+
+        assert_eq!(all.len(), 2);
+
+        let found_a = all.get("/videos/a.mkv").expect("Expected entry for a.mkv");
+        assert_eq!(found_a.codec, info_a.codec);
+        assert_eq!(found_a.size_bytes, info_a.size_bytes);
+
+        let found_b = all.get("/videos/b.mp4").expect("Expected entry for b.mp4");
+        assert_eq!(found_b.codec, "hevc");
+        assert_eq!(found_b.size_bytes, 500_000_000);
+    }
+
+    #[test]
+    fn test_get_all_scanned_files_returns_empty_map_when_no_entries() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let all = database
+            .get_all_scanned_files()
+            .expect("Failed to get all scanned files");
+
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn test_batch_upsert_scanned_files_writes_all_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let info_a = create_test_video_info();
+        let path_a = PathBuf::from("/videos/a.mkv");
+
+        let info_b = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        let path_b = PathBuf::from("/videos/b.mp4");
+
+        let entries: Vec<(&Path, &VideoInfo)> = vec![(path_a.as_path(), &info_a), (path_b.as_path(), &info_b)];
+
+        let count = database
+            .batch_upsert_scanned_files(&entries)
+            .expect("Failed to batch upsert scanned files");
+
+        assert_eq!(count, 2);
+
+        let all = database
+            .get_all_scanned_files()
+            .expect("Failed to get all scanned files");
+
+        assert_eq!(all.len(), 2);
+
+        let found_a = all.get("/videos/a.mkv").expect("Expected entry for a.mkv");
+        assert_eq!(found_a.codec, info_a.codec);
+        assert_eq!(found_a.size_bytes, info_a.size_bytes);
+
+        let found_b = all.get("/videos/b.mp4").expect("Expected entry for b.mp4");
+        assert_eq!(found_b.codec, "hevc");
+        assert_eq!(found_b.size_bytes, 500_000_000);
+    }
+
+    #[test]
+    fn test_batch_upsert_scanned_files_returns_zero_for_empty_input() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let count = database
+            .batch_upsert_scanned_files(&[])
+            .expect("Failed to batch upsert scanned files");
+
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_batch_upsert_scanned_files_updates_existing_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let original = create_test_video_info();
+        let path = PathBuf::from("/videos/test.mkv");
+
+        database
+            .upsert_scanned_file(&path, &original)
+            .expect("Failed to upsert original");
+
+        let updated = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+
+        let entries: Vec<(&Path, &VideoInfo)> = vec![(path.as_path(), &updated)];
+
+        let count = database
+            .batch_upsert_scanned_files(&entries)
+            .expect("Failed to batch upsert");
+
+        assert_eq!(count, 1);
+
+        let found = database
+            .find_scanned_file(&path, updated.size_bytes)
+            .expect("Failed to query scanned file")
+            .expect("Expected a cached result after batch update");
+
+        assert_eq!(found.codec, "hevc");
+        assert_eq!(found.bitrate_kbps, 4000);
+        assert_eq!(found.size_bytes, 500_000_000);
+    }
+
+    #[test]
+    fn test_batch_upsert_pending_files_writes_all_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        let path_a = PathBuf::from("/test/a.mp4");
+        let path_b = PathBuf::from("/test/b.mkv");
+
+        let entries: Vec<(&Path, &str, &VideoInfo, PendingAction)> = vec![
+            (path_a.as_path(), "mp4", &info, PendingAction::Convert),
+            (path_b.as_path(), "mkv", &info, PendingAction::Remux),
+        ];
+
+        let count = database
+            .batch_upsert_pending_files(&entries)
+            .expect("Failed to batch upsert pending files");
+
+        assert_eq!(count, 2);
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get pending files");
+
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|f| f.full_path.to_string_lossy().contains("a.mp4")));
+        assert!(files.iter().any(|f| f.full_path.to_string_lossy().contains("b.mkv")));
+    }
+
+    #[test]
+    fn test_batch_upsert_pending_files_returns_zero_for_empty_input() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let count = database
+            .batch_upsert_pending_files(&[])
+            .expect("Failed to batch upsert pending files");
+
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_batch_upsert_pending_files_updates_existing_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/test/video.mp4");
+
+        database
+            .upsert_pending_file(&path, "mp4", &info, PendingAction::Convert)
+            .expect("Failed to upsert original");
+
+        // Batch update changing action to Remux
+        let entries: Vec<(&Path, &str, &VideoInfo, PendingAction)> =
+            vec![(path.as_path(), "mp4", &info, PendingAction::Remux)];
+
+        let count = database
+            .batch_upsert_pending_files(&entries)
+            .expect("Failed to batch upsert");
+
+        assert_eq!(count, 1);
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get pending files");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].action, PendingAction::Remux);
     }
 }

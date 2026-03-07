@@ -7,7 +7,7 @@ use crate::convert::{RE_AV1, RE_X265, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
 /// Information about a video file from ffprobe
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VideoInfo {
     /// Video codec name (e.g., "hevc", "h264")
     pub(crate) codec: String,
@@ -50,6 +50,22 @@ pub struct VideoFile {
     pub(crate) path: PathBuf,
     pub(crate) name: String,
     pub(crate) extension: String,
+    /// File size in bytes, captured from filesystem metadata during discovery.
+    /// Used for scan cache lookups without additional `stat()` calls.
+    pub(crate) size_bytes: u64,
+}
+
+/// Result of running ffprobe on a cache miss, bundling everything needed to
+/// write the result back to the scan cache and continue with analysis.
+pub struct VideoInfoCache {
+    /// Classification result from `classify_video_file`.
+    pub(crate) result: AnalysisResult,
+    /// Original file path, kept separately so the caller can write the cache
+    /// entry without digging into the `AnalysisResult` enum.
+    pub(crate) path: PathBuf,
+    /// `VideoInfo` from ffprobe to persist in the scan cache.
+    /// `None` only when ffprobe itself failed.
+    pub(crate) info: Option<VideoInfo>,
 }
 
 /// A video file with its analyzed info, ready for processing.
@@ -156,13 +172,26 @@ impl ProcessableFile {
 }
 
 impl VideoFile {
-    /// Create a new `VideoFile` from a path, extracting name and extension.
-    pub(crate) fn new(path: &Path) -> Self {
+    /// Create a new `VideoFile` from a path and pre-fetched file size.
+    pub(crate) fn new(path: &Path, size_bytes: u64) -> Self {
         let path = path.to_owned();
         let name = cli_tools::path_to_file_stem_string(&path);
         let extension = cli_tools::path_to_file_extension_string(&path);
 
-        Self { path, name, extension }
+        Self {
+            path,
+            name,
+            extension,
+            size_bytes,
+        }
+    }
+
+    /// Create a new `VideoFile` from a path, reading file size from filesystem metadata.
+    ///
+    /// Falls back to 0 if the metadata cannot be read.
+    pub(crate) fn new_with_metadata(path: &Path) -> Self {
+        let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        Self::new(path, size_bytes)
     }
 
     /// Compute the output path for the converted file with the given codec suffix.
@@ -410,7 +439,8 @@ impl std::fmt::Display for SkipReason {
 
 impl From<walkdir::DirEntry> for VideoFile {
     fn from(entry: walkdir::DirEntry) -> Self {
-        Self::new(entry.path())
+        let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        Self::new(entry.path(), size_bytes)
     }
 }
 
@@ -420,49 +450,50 @@ mod video_file_tests {
 
     #[test]
     fn new_extracts_name_and_extension() {
-        let file = VideoFile::new(Path::new("/path/to/video.mp4"));
+        let file = VideoFile::new(Path::new("/path/to/video.mp4"), 1000);
         assert_eq!(file.name, "video");
         assert_eq!(file.extension, "mp4");
+        assert_eq!(file.size_bytes, 1000);
     }
 
     #[test]
     fn new_handles_no_extension() {
-        let file = VideoFile::new(Path::new("/path/to/video"));
+        let file = VideoFile::new(Path::new("/path/to/video"), 0);
         assert_eq!(file.name, "video");
         assert_eq!(file.extension, "");
     }
 
     #[test]
     fn output_path_adds_x265_suffix() {
-        let file = VideoFile::new(Path::new("/videos/movie.mkv"));
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let output = file.get_output_path(Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
     fn output_path_preserves_existing_x265() {
-        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"));
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
         let output = file.get_output_path(Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
     fn output_path_adds_av1_suffix() {
-        let file = VideoFile::new(Path::new("/videos/movie.mkv"));
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let output = file.get_output_path(Codec::Av1);
         assert_eq!(output, PathBuf::from("/videos/movie.av1.mp4"));
     }
 
     #[test]
     fn output_path_preserves_existing_av1() {
-        let file = VideoFile::new(Path::new("/videos/movie.av1.mkv"));
+        let file = VideoFile::new(Path::new("/videos/movie.av1.mkv"), 0);
         let output = file.get_output_path(Codec::Av1);
         assert_eq!(output, PathBuf::from("/videos/movie.av1.mp4"));
     }
 
     #[test]
     fn display_shows_path() {
-        let file = VideoFile::new(Path::new("/path/to/video.mp4"));
+        let file = VideoFile::new(Path::new("/path/to/video.mp4"), 0);
         assert_eq!(format!("{file}"), "/path/to/video.mp4");
     }
 }
