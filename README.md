@@ -239,6 +239,7 @@ Options:
   -B, --max-bitrate <MAX_BITRATE>    Maximum bitrate in kbps
   -u, --min-duration <MIN_DURATION>  Minimum duration in seconds
   -U, --max-duration <MAX_DURATION>  Maximum duration in seconds
+  -R, --min-resolution <PIXELS>      Skip files where either width or height is smaller than PIXELS
   -L, --display-limit <LIMIT>        Maximum number of files to display
   -h, --help                         Print help (see more with '--help')
   -V, --version                      Print version
@@ -246,7 +247,7 @@ Options:
 
 ### Filter Options
 
-The filter options (`-b`/`--bitrate`, `-B`/`--max-bitrate`, `-u`/`--min-duration`, `-U`/`--max-duration`, `-t`/`--extension`, `-c`/`--count`) work for both normal scanning mode and database mode (`-D`/`--from-db`, `-S`/`--show-db`).
+The filter options (`-b`/`--bitrate`, `-B`/`--max-bitrate`, `-u`/`--min-duration`, `-U`/`--max-duration`, `-R`/`--min-resolution`, `-t`/`--extension`, `-c`/`--count`) work for both normal scanning mode and database mode (`-D`/`--from-db`, `-S`/`--show-db`).
 
 ### Database Commands
 
@@ -286,6 +287,7 @@ bitrate = 8000           # Minimum bitrate threshold (kbps)
 max_bitrate = 50000      # Maximum bitrate threshold (kbps)
 min_duration = 60        # Minimum duration (seconds)
 max_duration = 7200      # Maximum duration (seconds)
+min_resolution = 1000    # Minimum resolution — skip if width or height is below this
 count = 10               # Limit number of files to process
 sort = "bitrate"         # Sort order (highest bitrate first)
 recurse = true           # Recurse into subdirectories

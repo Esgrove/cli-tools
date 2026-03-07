@@ -117,6 +117,10 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'U', long = "max-duration", name = "MAX_DURATION")]
     max_duration: Option<f64>,
 
+    /// Skip files where either width or height is smaller than PIXELS
+    #[arg(short = 'R', long = "min-resolution", name = "PIXELS")]
+    min_resolution: Option<u32>,
+
     /// Maximum number of files to display
     #[arg(short = 'L', long = "display-limit", name = "LIMIT")]
     display_limit: Option<usize>,

@@ -35,6 +35,8 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     max_duration: Option<f64>,
     #[serde(default)]
+    min_resolution: Option<u32>,
+    #[serde(default)]
     delete: bool,
     #[serde(default)]
     delete_duplicates: bool,
@@ -80,6 +82,7 @@ pub struct Config {
     pub(crate) max_bitrate: Option<u64>,
     pub(crate) max_duration: Option<f64>,
     pub(crate) min_duration: Option<f64>,
+    pub(crate) min_resolution: Option<u32>,
     pub(crate) overwrite: bool,
     pub(crate) path: PathBuf,
     pub(crate) recurse: bool,
@@ -160,6 +163,7 @@ impl Config {
         let max_bitrate = args.max_bitrate.or(user_config.max_bitrate);
         let min_duration = args.min_duration.or(user_config.min_duration);
         let max_duration = args.max_duration.or(user_config.max_duration);
+        let min_resolution = args.min_resolution.or(user_config.min_resolution);
         let count = args.count.or(user_config.count);
         let sort = args.sort.or(user_config.sort).unwrap_or(SortOrder::Name);
 
@@ -199,6 +203,7 @@ impl Config {
             max_bitrate,
             max_duration,
             min_duration,
+            min_resolution,
             overwrite: args.force || user_config.overwrite,
             path,
             recurse: args.recurse || user_config.recurse,

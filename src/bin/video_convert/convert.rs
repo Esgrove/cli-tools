@@ -763,6 +763,7 @@ impl VideoConvert {
             max_bitrate: self.config.max_bitrate,
             min_duration: self.config.min_duration,
             max_duration: self.config.max_duration,
+            min_resolution: self.config.min_resolution,
             overwrite: self.config.overwrite,
         };
 
@@ -810,6 +811,9 @@ impl VideoConvert {
                         }
                         SkipReason::DurationAboveThreshold { .. } => {
                             analysis_stats.skipped_duration_long += 1;
+                        }
+                        SkipReason::ResolutionBelowLimit { .. } => {
+                            analysis_stats.skipped_resolution_low += 1;
                         }
                         SkipReason::OutputExists {
                             path: target_path,
@@ -1262,6 +1266,21 @@ impl VideoConvert {
                         threshold: max_duration,
                     },
                 };
+            }
+
+            // Check minimum resolution threshold
+            if let Some(min_resolution) = filter.min_resolution {
+                let smaller_dimension = info.width.min(info.height);
+                if smaller_dimension < min_resolution {
+                    return AnalysisResult::Skip {
+                        file,
+                        reason: SkipReason::ResolutionBelowLimit {
+                            width: info.width,
+                            height: info.height,
+                            limit: min_resolution,
+                        },
+                    };
+                }
             }
         }
 

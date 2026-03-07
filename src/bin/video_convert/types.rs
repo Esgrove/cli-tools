@@ -38,6 +38,8 @@ pub struct AnalysisFilter {
     pub(crate) min_duration: Option<f64>,
     /// Maximum duration threshold in seconds.
     pub(crate) max_duration: Option<f64>,
+    /// Minimum resolution — both width and height must be at least this many pixels.
+    pub(crate) min_resolution: Option<u32>,
     /// Whether to overwrite existing output files.
     pub(crate) overwrite: bool,
 }
@@ -90,6 +92,8 @@ pub enum SkipReason {
     DurationBelowThreshold { duration: f64, threshold: f64 },
     /// File duration is above the maximum threshold
     DurationAboveThreshold { duration: f64, threshold: f64 },
+    /// Either dimension (width or height) is below the minimum resolution limit
+    ResolutionBelowLimit { width: u32, height: u32, limit: u32 },
     /// Output file already exists
     OutputExists { path: PathBuf, source_duration: f64 },
     /// Failed to get video info
@@ -391,6 +395,9 @@ impl std::fmt::Display for SkipReason {
             Self::DurationAboveThreshold { duration, threshold } => {
                 write!(f, "Duration {duration:.1}s is above threshold {threshold:.1}s")
             }
+            Self::ResolutionBelowLimit { width, height, limit } => {
+                write!(f, "Resolution {width}x{height} is below minimum limit {limit}")
+            }
             Self::OutputExists { path, .. } => {
                 write!(f, "Output file already exists: \"{}\"", path.display())
             }
@@ -683,6 +690,20 @@ mod skip_reason_tests {
     }
 
     #[test]
+    fn display_resolution_below_limit() {
+        let reason = SkipReason::ResolutionBelowLimit {
+            width: 854,
+            height: 480,
+            limit: 1000,
+        };
+        let display = format!("{reason}");
+        assert!(display.contains("854"));
+        assert!(display.contains("480"));
+        assert!(display.contains("1000"));
+        assert!(display.contains("below"));
+    }
+
+    #[test]
     fn display_output_exists() {
         let reason = SkipReason::OutputExists {
             path: PathBuf::from("/path/to/output.mp4"),
@@ -732,6 +753,7 @@ mod analysis_filter_tests {
             max_bitrate: Some(50000),
             min_duration: Some(60.0),
             max_duration: Some(7200.0),
+            min_resolution: Some(1000),
             overwrite: false,
         };
         let debug = format!("{filter:?}");
@@ -739,5 +761,6 @@ mod analysis_filter_tests {
         assert!(debug.contains("50000"));
         assert!(debug.contains("60.0"));
         assert!(debug.contains("7200.0"));
+        assert!(debug.contains("1000"));
     }
 }

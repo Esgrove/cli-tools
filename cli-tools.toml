@@ -203,6 +203,9 @@ replace = [
 # Maximum duration in seconds (files longer than this are skipped)
 # max_duration = 7200
 
+# Minimum resolution in pixels — skip files where either width or height is below this value
+# min_resolution = 1000
+
 # Limit the number of files to convert
 # count = 10
 
