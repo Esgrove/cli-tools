@@ -25,16 +25,33 @@ use walkdir::WalkDir;
 #[cfg(not(test))]
 const PROJECT_NAME: &str = env!("CARGO_PKG_NAME");
 
-/// Path to the user config file: `$HOME/.config/cli-tools.toml`
+/// Path to the user config file: `$HOME/.config/cli-tools.toml`.
 ///
-/// Returns `None` if the home directory cannot be determined.
+/// When the lib itself is compiled under `#[cfg(test)]`, returns the fixture directly at
+/// compile time — no runtime check needed.
+///
+/// For binary tests the lib is compiled in normal mode, so the non-test static detects the
+/// test context at runtime via `CARGO_MANIFEST_DIR`, which Cargo injects as a runtime env var
+/// for every `cargo test` invocation across all binaries.
+///
+/// Returns `None` if the home directory cannot be determined (production path only).
 #[cfg(not(test))]
 static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    // CARGO_MANIFEST_DIR is set at runtime by Cargo for every `cargo test` invocation,
+    // across all binaries and the lib, making this a reliable test-context detector.
+    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+        return Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("sample_config.toml"),
+        );
+    }
     let home_dir = dirs::home_dir()?;
     Some(home_dir.join(".config").join(format!("{PROJECT_NAME}.toml")))
 });
 
-/// Path to the sample config fixture file used during tests.
+/// Path to the sample config fixture, used directly when the lib is compiled under `#[cfg(test)]`.
 #[cfg(test)]
 static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
     Some(

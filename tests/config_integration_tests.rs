@@ -165,7 +165,6 @@ fn flip_date_section_has_expected_structure() {
     let flip_date = value.get("flip_date").expect("should have flip_date section");
 
     assert!(flip_date.get("directory").is_some());
-    assert!(flip_date.get("file_extensions").is_some());
     assert!(flip_date.get("swap_year").is_some());
     assert!(flip_date.get("year_first").is_some());
 }

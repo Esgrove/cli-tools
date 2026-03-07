@@ -750,14 +750,14 @@ mod cli_args_tests {
     fn config_from_args_includes_cli_patterns() {
         let args = DirMoveArgs::try_parse_from(["test", "-n", "*.mp4", "-n", "*.mkv"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
-        // CLI patterns should be included (may also have user config patterns)
+        // CLI patterns should be included (may also have fixture config patterns)
         assert!(config.include.contains(&"*.mp4".to_string()));
         assert!(config.include.contains(&"*.mkv".to_string()));
     }
 
     #[test]
     fn config_from_args_cli_flags_enable_options() {
-        // CLI boolean flags should enable options (OR with user config)
+        // CLI boolean flags should enable options (OR with fixture config)
         let args = DirMoveArgs::try_parse_from(["test", "-a", "-c", "-r", "-v"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         assert!(config.auto);
