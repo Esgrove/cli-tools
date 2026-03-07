@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use walkdir::WalkDir;
 
-use crate::cli::{DatabaseMode, clear_database, list_extensions, show_database_contents};
+use crate::cli::{DatabaseMode, clean_scan_cache, clear_database, list_extensions, show_database_contents};
 use crate::config::{Config, VideoConvertConfig};
 use crate::database::{Database, PendingAction};
 use crate::logger::FileLogger;
@@ -78,6 +78,7 @@ impl VideoConvert {
                 DatabaseMode::Clear => clear_database(),
                 DatabaseMode::Show => show_database_contents(&self.config),
                 DatabaseMode::ListExtensions => list_extensions(self.config.verbose),
+                DatabaseMode::CleanScanCache => clean_scan_cache(self.config.verbose),
                 DatabaseMode::Process => self.run_from_database(),
             };
         }
@@ -1410,5 +1411,994 @@ impl VideoConvert {
             cmd.process_group(0);
         }
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
+    }
+}
+
+#[cfg(test)]
+mod test_classify_already_converted {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
+
+    fn default_filter() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        }
+    }
+
+    fn hevc_info() -> VideoInfo {
+        VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn hevc_mp4_with_x265_suffix_is_already_converted() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mp4"), 0);
+        let info = hevc_info();
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::AlreadyConverted,
+                    ..
+                }
+            ),
+            "Expected AlreadyConverted skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn hevc_mp4_with_x265_suffix_uppercase_is_already_converted() {
+        let file = VideoFile::new(Path::new("/videos/movie.X265.mp4"), 0);
+        let info = hevc_info();
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::AlreadyConverted,
+                    ..
+                }
+            ),
+            "Expected AlreadyConverted skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn av1_mp4_with_av1_suffix_is_already_converted() {
+        let file = VideoFile::new(Path::new("/videos/movie.av1.mp4"), 0);
+        let info = VideoInfo {
+            codec: "av1".to_string(),
+            bitrate_kbps: 3000,
+            size_bytes: 300_000_000,
+            duration: 1800.0,
+            width: 3840,
+            height: 2160,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::AlreadyConverted,
+                    ..
+                }
+            ),
+            "Expected AlreadyConverted skip, got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_needs_rename {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
+
+    fn default_filter() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        }
+    }
+
+    #[test]
+    fn hevc_mp4_without_suffix_needs_rename() {
+        let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRename(..)),
+            "Expected NeedsRename, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn av1_mp4_without_suffix_needs_rename() {
+        let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
+        let info = VideoInfo {
+            codec: "av1".to_string(),
+            bitrate_kbps: 3000,
+            size_bytes: 300_000_000,
+            duration: 1800.0,
+            width: 3840,
+            height: 2160,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRename(..)),
+            "Expected NeedsRename, got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_needs_conversion {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
+
+    fn default_filter() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        }
+    }
+
+    fn h264_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn h264_mkv_needs_conversion() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = h264_info();
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn h264_mp4_needs_conversion() {
+        let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
+        let info = h264_info();
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn mpeg4_avi_needs_conversion() {
+        let file = VideoFile::new(Path::new("/videos/movie.avi"), 0);
+        let info = VideoInfo {
+            codec: "mpeg4".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 2_000_000_000,
+            duration: 7200.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion, got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_needs_remux {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
+
+    fn default_filter() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        }
+    }
+
+    #[test]
+    fn hevc_mkv_needs_remux() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRemux(..)),
+            "Expected NeedsRemux, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn av1_mkv_needs_remux() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            codec: "av1".to_string(),
+            bitrate_kbps: 3000,
+            size_bytes: 300_000_000,
+            duration: 1800.0,
+            width: 3840,
+            height: 2160,
+            frames_per_second: 30.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRemux(..)),
+            "Expected NeedsRemux, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn hevc_avi_needs_remux() {
+        let file = VideoFile::new(Path::new("/videos/movie.avi"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 800_000_000,
+            duration: 5400.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRemux(..)),
+            "Expected NeedsRemux, got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_bitrate_filtering {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
+
+    fn h264_info_with_bitrate(bitrate_kbps: u64) -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn below_min_bitrate_is_skipped() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = h264_info_with_bitrate(5000);
+        let filter = AnalysisFilter {
+            min_bitrate: 8000,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::BitrateBelowThreshold {
+                        bitrate: 5000,
+                        threshold: 8000
+                    },
+                    ..
+                }
+            ),
+            "Expected BitrateBelowThreshold skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn above_max_bitrate_is_skipped() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = h264_info_with_bitrate(60000);
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: Some(50000),
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::BitrateAboveThreshold {
+                        bitrate: 60000,
+                        threshold: 50000
+                    },
+                    ..
+                }
+            ),
+            "Expected BitrateAboveThreshold skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bitrate_at_min_threshold_is_not_skipped() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = h264_info_with_bitrate(8000);
+        let filter = AnalysisFilter {
+            min_bitrate: 8000,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion at exact min threshold, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bitrate_at_max_threshold_is_not_skipped() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = h264_info_with_bitrate(50000);
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: Some(50000),
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion at exact max threshold, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bitrate_filter_does_not_apply_to_remux() {
+        // hevc in mkv needs remux — bitrate limits should not block it
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 500,
+            size_bytes: 100_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 8000,
+            max_bitrate: Some(50000),
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRemux(..)),
+            "Expected NeedsRemux (bitrate filter should not apply to remux), got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_duration_filtering {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
+
+    fn h264_info_with_duration(duration: f64) -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 1_000_000_000,
+            duration,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn below_min_duration_is_skipped() {
+        let file = VideoFile::new(Path::new("/videos/clip.mkv"), 0);
+        let info = h264_info_with_duration(30.0);
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: Some(60.0),
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::DurationBelowThreshold { .. },
+                    ..
+                }
+            ),
+            "Expected DurationBelowThreshold skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn above_max_duration_is_skipped() {
+        let file = VideoFile::new(Path::new("/videos/long.mkv"), 0);
+        let info = h264_info_with_duration(14400.0);
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: Some(7200.0),
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::DurationAboveThreshold { .. },
+                    ..
+                }
+            ),
+            "Expected DurationAboveThreshold skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn duration_filter_does_not_apply_to_remux() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 10.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: Some(60.0),
+            max_duration: Some(7200.0),
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRemux(..)),
+            "Expected NeedsRemux (duration filter should not apply to remux), got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_resolution_filtering {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
+
+    #[test]
+    fn below_min_resolution_is_skipped() {
+        let file = VideoFile::new(Path::new("/videos/low_res.mkv"), 0);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 640,
+            height: 480,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: Some(720),
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::ResolutionBelowLimit {
+                        width: 640,
+                        height: 480,
+                        limit: 720
+                    },
+                    ..
+                }
+            ),
+            "Expected ResolutionBelowLimit skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn at_min_resolution_is_not_skipped() {
+        let file = VideoFile::new(Path::new("/videos/hd.mkv"), 0);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: Some(720),
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion at exact min resolution, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn vertical_video_uses_smaller_dimension() {
+        // 1080x720 vertical — smaller dimension is 720 which is below 1080 min
+        let file = VideoFile::new(Path::new("/videos/vertical.mkv"), 0);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 720,
+            height: 1280,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: Some(1080),
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::ResolutionBelowLimit { .. },
+                    ..
+                }
+            ),
+            "Expected ResolutionBelowLimit for vertical video, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn resolution_filter_does_not_apply_to_remux() {
+        let file = VideoFile::new(Path::new("/videos/small_hevc.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 100_000_000,
+            duration: 3600.0,
+            width: 640,
+            height: 480,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: Some(1080),
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRemux(..)),
+            "Expected NeedsRemux (resolution filter should not apply to remux), got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_output_exists {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
+
+    fn filter_no_overwrite() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        }
+    }
+
+    fn filter_with_overwrite() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: true,
+        }
+    }
+
+    #[test]
+    fn skips_when_output_exists_no_overwrite() {
+        // Use a real path whose output (*.x265.mp4) exists.
+        // We create a temp dir with both source and output files.
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let source = temp_dir.path().join("video.mkv");
+        let output = temp_dir.path().join("video.x265.mp4");
+        std::fs::write(&source, "").expect("Failed to create source");
+        std::fs::write(&output, "").expect("Failed to create output");
+
+        let file = VideoFile::new(&source, 0);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter_no_overwrite(), &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::OutputExists { .. },
+                    ..
+                }
+            ),
+            "Expected OutputExists skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn converts_when_output_exists_with_overwrite() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let source = temp_dir.path().join("video.mkv");
+        let output = temp_dir.path().join("video.x265.mp4");
+        std::fs::write(&source, "").expect("Failed to create source");
+        std::fs::write(&output, "").expect("Failed to create output");
+
+        let file = VideoFile::new(&source, 0);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter_with_overwrite(), &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion with overwrite, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn rename_skipped_when_output_exists_no_overwrite() {
+        // hevc in mp4 without suffix — rename target already exists
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let source = temp_dir.path().join("video.mp4");
+        let output = temp_dir.path().join("video.x265.mp4");
+        std::fs::write(&source, "").expect("Failed to create source");
+        std::fs::write(&output, "").expect("Failed to create output");
+
+        let file = VideoFile::new(&source, 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter_no_overwrite(), &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::OutputExists { .. },
+                    ..
+                }
+            ),
+            "Expected OutputExists skip for rename target, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn rename_proceeds_when_output_exists_with_overwrite() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let source = temp_dir.path().join("video.mp4");
+        let output = temp_dir.path().join("video.x265.mp4");
+        std::fs::write(&source, "").expect("Failed to create source");
+        std::fs::write(&output, "").expect("Failed to create output");
+
+        let file = VideoFile::new(&source, 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter_with_overwrite(), &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsRename(..)),
+            "Expected NeedsRename with overwrite, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn remux_skipped_when_output_exists_no_overwrite() {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+        let source = temp_dir.path().join("video.mkv");
+        let output = temp_dir.path().join("video.x265.mp4");
+        std::fs::write(&source, "").expect("Failed to create source");
+        std::fs::write(&output, "").expect("Failed to create output");
+
+        let file = VideoFile::new(&source, 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter_no_overwrite(), &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::OutputExists { .. },
+                    ..
+                }
+            ),
+            "Expected OutputExists skip for remux, got: {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_classify_combined_filters {
+    use super::*;
+    use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
+
+    #[test]
+    fn first_failing_filter_wins_bitrate_before_duration() {
+        // Both bitrate and duration fail — bitrate check comes first
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 500,
+            size_bytes: 100_000_000,
+            duration: 10.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 8000,
+            max_bitrate: None,
+            min_duration: Some(60.0),
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::BitrateBelowThreshold { .. },
+                    ..
+                }
+            ),
+            "Expected BitrateBelowThreshold (first filter checked), got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn passes_all_filters_gets_converted() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: 8000,
+            max_bitrate: Some(50000),
+            min_duration: Some(60.0),
+            max_duration: Some(7200.0),
+            min_resolution: Some(720),
+            overwrite: false,
+        };
+
+        let result = VideoConvert::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion with all filters passing, got: {result:?}"
+        );
     }
 }

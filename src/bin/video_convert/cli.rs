@@ -46,6 +46,8 @@ pub enum DatabaseMode {
     Show,
     /// List file extension counts in the database.
     ListExtensions,
+    /// Remove stale entries from the scan cache.
+    CleanScanCache,
 }
 
 impl SortOrder {
@@ -100,6 +102,36 @@ impl std::fmt::Display for SortOrder {
         };
         write!(f, "{name}")
     }
+}
+
+/// Remove stale entries from the scan cache whose files no longer exist on disk.
+pub fn clean_scan_cache(verbose: bool) -> Result<()> {
+    let mut database = Database::open_default()?;
+    if verbose {
+        println!("{}", format!("Database: {}", Database::path().display()).bold());
+    }
+
+    let total = database.scanned_file_count()?;
+    if total == 0 {
+        println!("Scan cache is empty");
+        return Ok(());
+    }
+
+    println!("Checking {total} cached scan entries...");
+    let removed = database.remove_missing_scanned_files()?;
+    if removed > 0 {
+        println!(
+            "{}",
+            format!(
+                "Removed {removed} stale entries from scan cache ({} remaining)",
+                total - removed as u64
+            )
+            .green()
+        );
+    } else {
+        println!("{}", "All cached entries are up to date".green());
+    }
+    Ok(())
 }
 
 /// Clear all entries from the database.
@@ -325,7 +357,9 @@ mod database_mode_tests {
         assert_eq!(DatabaseMode::Clear, DatabaseMode::Clear);
         assert_eq!(DatabaseMode::Show, DatabaseMode::Show);
         assert_eq!(DatabaseMode::ListExtensions, DatabaseMode::ListExtensions);
+        assert_eq!(DatabaseMode::CleanScanCache, DatabaseMode::CleanScanCache);
         assert_ne!(DatabaseMode::Process, DatabaseMode::Clear);
+        assert_ne!(DatabaseMode::CleanScanCache, DatabaseMode::Clear);
     }
 
     #[test]

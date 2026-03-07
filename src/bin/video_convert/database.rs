@@ -4,10 +4,12 @@
 
 #![allow(clippy::cast_possible_wrap)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SortOrder;
@@ -745,13 +747,18 @@ impl Database {
 
     /// Remove scanned cache entries for files that no longer exist on disk.
     ///
+    /// Groups paths by drive letter (on Windows) or mount-point prefix so that
+    /// filesystem `exists()` checks for different drives run in parallel via
+    /// Rayon, avoiding head-of-line blocking when one drive is slow or offline.
+    /// The resulting list of missing paths is then deleted in a single database
+    /// transaction.
+    ///
     /// Returns the number of entries removed.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
-    #[expect(dead_code, reason = "Part of public API for future use")]
     pub fn remove_missing_scanned_files(&mut self) -> Result<usize> {
-        let paths: Vec<PathBuf> = {
+        let all_paths: Vec<PathBuf> = {
             let mut statement = self.connection.prepare("SELECT full_path FROM scanned_files")?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))?
@@ -760,19 +767,43 @@ impl Database {
                 .collect()
         };
 
-        let mut removed_count = 0;
-        let transaction = self.connection.transaction()?;
-
-        for path in paths {
-            if !path.exists() {
-                let path_str = path.to_string_lossy();
-                transaction.execute("DELETE FROM scanned_files WHERE full_path = ?1", params![path_str])?;
-                removed_count += 1;
-            }
+        if all_paths.is_empty() {
+            return Ok(0);
         }
 
+        // Group paths by drive root so each drive can be checked in parallel.
+        let drive_groups = group_paths_by_drive(&all_paths);
+
+        // Check existence in parallel, one thread per drive group.
+        let missing_paths: Vec<PathBuf> = drive_groups
+            .into_par_iter()
+            .flat_map(|(_drive, paths)| paths.into_iter().filter(|path| !path.exists()).collect::<Vec<_>>())
+            .collect();
+
+        if missing_paths.is_empty() {
+            return Ok(0);
+        }
+
+        // Batch-delete in a single transaction.
+        let transaction = self.connection.transaction()?;
+        for path in &missing_paths {
+            let path_str = path.to_string_lossy();
+            transaction.execute("DELETE FROM scanned_files WHERE full_path = ?1", params![path_str])?;
+        }
         transaction.commit()?;
-        Ok(removed_count)
+
+        Ok(missing_paths.len())
+    }
+
+    /// Return the total number of entries in the scanned files cache.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn scanned_file_count(&self) -> Result<u64> {
+        let count: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM scanned_files", [], |row| row.get(0))?;
+        Ok(count as u64)
     }
 
     /// Clear all pending files from the database.
@@ -927,6 +958,45 @@ impl std::fmt::Display for ExtensionStats {
             cli_tools::format_size(self.total_size)
         )
     }
+}
+
+/// Extract a drive or mount-point key from a path for grouping.
+///
+/// On Windows this returns the drive prefix (e.g. `C:` or `\\server\share`).
+/// On other platforms it returns `"/"` since all local paths share one root.
+fn drive_key(path: &Path) -> String {
+    let path_str = path.to_string_lossy();
+
+    // UNC paths: \\server\share\...
+    if let Some(without_prefix) = path_str.strip_prefix(r"\\") {
+        // Take server\share as the key
+        let parts: Vec<&str> = without_prefix.splitn(3, '\\').collect();
+        return if parts.len() >= 2 {
+            format!(r"\\{}\{}", parts[0], parts[1])
+        } else {
+            r"\\".to_string()
+        };
+    }
+
+    // Drive letter paths: C:\...
+    if path_str.len() >= 2 && path_str.as_bytes()[1] == b':' {
+        return path_str[..2].to_uppercase();
+    }
+
+    // Unix / fallback — everything is on one root
+    "/".to_string()
+}
+
+/// Group a slice of paths by their drive or mount-point key.
+///
+/// Returns a `Vec` of (key, paths) pairs suitable for parallel iteration.
+fn group_paths_by_drive(paths: &[PathBuf]) -> Vec<(String, Vec<PathBuf>)> {
+    let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for path in paths {
+        let key = drive_key(path);
+        groups.entry(key).or_default().push(path.clone());
+    }
+    groups.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -2142,5 +2212,195 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].action, PendingAction::Remux);
+    }
+
+    #[test]
+    fn test_scanned_file_count_empty() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_scanned_file_count_after_inserts() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_scanned_file(&PathBuf::from("/videos/a.mkv"), &info)
+            .expect("Failed to upsert");
+        database
+            .upsert_scanned_file(&PathBuf::from("/videos/b.mkv"), &info)
+            .expect("Failed to upsert");
+
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_remove_missing_scanned_files_removes_nonexistent() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        // Insert paths that definitely do not exist on disk.
+        database
+            .upsert_scanned_file(&PathBuf::from("/nonexistent/aaa.mkv"), &info)
+            .expect("Failed to upsert");
+        database
+            .upsert_scanned_file(&PathBuf::from("/nonexistent/bbb.mkv"), &info)
+            .expect("Failed to upsert");
+
+        let removed = database
+            .remove_missing_scanned_files()
+            .expect("Failed to remove missing");
+
+        assert_eq!(removed, 2);
+
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_remove_missing_scanned_files_keeps_existing() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        // Use a path that actually exists (the database module source file itself).
+        let existing_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/video_convert/database.rs");
+        assert!(existing_path.exists(), "Test prerequisite: source file must exist");
+
+        database
+            .upsert_scanned_file(&existing_path, &info)
+            .expect("Failed to upsert existing");
+        database
+            .upsert_scanned_file(&PathBuf::from("/nonexistent/gone.mkv"), &info)
+            .expect("Failed to upsert missing");
+
+        let removed = database
+            .remove_missing_scanned_files()
+            .expect("Failed to remove missing");
+
+        assert_eq!(removed, 1);
+
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_remove_missing_scanned_files_returns_zero_when_empty() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let removed = database
+            .remove_missing_scanned_files()
+            .expect("Failed to remove missing");
+
+        assert_eq!(removed, 0);
+    }
+}
+
+#[cfg(test)]
+mod test_drive_key {
+    use super::*;
+
+    #[test]
+    fn windows_drive_letter() {
+        let path = PathBuf::from(r"C:\Users\video.mkv");
+        assert_eq!(drive_key(&path), "C:");
+    }
+
+    #[test]
+    fn windows_drive_letter_lowercase() {
+        let path = PathBuf::from(r"d:\media\video.mkv");
+        assert_eq!(drive_key(&path), "D:");
+    }
+
+    #[test]
+    fn windows_unc_path() {
+        let path = PathBuf::from(r"\\server\share\folder\file.mkv");
+        assert_eq!(drive_key(&path), r"\\server\share");
+    }
+
+    #[test]
+    fn windows_unc_path_server_only() {
+        let path = PathBuf::from(r"\\server");
+        assert_eq!(drive_key(&path), r"\\");
+    }
+
+    #[test]
+    fn unix_path() {
+        let path = PathBuf::from("/home/user/video.mkv");
+        assert_eq!(drive_key(&path), "/");
+    }
+
+    #[test]
+    fn relative_path() {
+        let path = PathBuf::from("videos/file.mkv");
+        assert_eq!(drive_key(&path), "/");
+    }
+}
+
+#[cfg(test)]
+mod test_group_paths_by_drive {
+    use super::*;
+
+    #[test]
+    fn groups_single_drive() {
+        let paths = vec![PathBuf::from(r"C:\a.mkv"), PathBuf::from(r"C:\b.mkv")];
+        let groups = group_paths_by_drive(&paths);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1.len(), 2);
+    }
+
+    #[test]
+    fn groups_multiple_drives() {
+        let paths = vec![
+            PathBuf::from(r"C:\a.mkv"),
+            PathBuf::from(r"D:\b.mkv"),
+            PathBuf::from(r"C:\c.mkv"),
+            PathBuf::from(r"D:\d.mkv"),
+            PathBuf::from(r"E:\e.mkv"),
+        ];
+        let groups = group_paths_by_drive(&paths);
+        assert_eq!(groups.len(), 3);
+
+        let groups_map: HashMap<String, Vec<PathBuf>> = groups.into_iter().collect();
+        assert_eq!(groups_map.get("C:").expect("Expected C: group").len(), 2);
+        assert_eq!(groups_map.get("D:").expect("Expected D: group").len(), 2);
+        assert_eq!(groups_map.get("E:").expect("Expected E: group").len(), 1);
+    }
+
+    #[test]
+    fn groups_empty_input() {
+        let paths: Vec<PathBuf> = vec![];
+        let groups = group_paths_by_drive(&paths);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn groups_unix_paths_into_single_group() {
+        let paths = vec![
+            PathBuf::from("/home/user/a.mkv"),
+            PathBuf::from("/mnt/data/b.mkv"),
+            PathBuf::from("/tmp/c.mkv"),
+        ];
+        let groups = group_paths_by_drive(&paths);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "/");
+        assert_eq!(groups[0].1.len(), 3);
+    }
+
+    #[test]
+    fn groups_mixed_unc_and_drive_paths() {
+        let paths = vec![
+            PathBuf::from(r"C:\local.mkv"),
+            PathBuf::from(r"\\server\share\remote.mkv"),
+            PathBuf::from(r"C:\other.mkv"),
+        ];
+        let groups = group_paths_by_drive(&paths);
+        assert_eq!(groups.len(), 2);
+
+        let groups_map: HashMap<String, Vec<PathBuf>> = groups.into_iter().collect();
+        assert_eq!(groups_map.get("C:").expect("Expected C: group").len(), 2);
+        assert_eq!(groups_map.get(r"\\server\share").expect("Expected UNC group").len(), 1);
     }
 }

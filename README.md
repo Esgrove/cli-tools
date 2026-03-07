@@ -236,6 +236,7 @@ Options:
   -C, --clear-db                     Clear all entries from the database
   -S, --show-db                      Show database statistics and contents
   -E, --list-extensions              List file extension counts in the database
+  -X, --clean-cache                  Remove stale entries from the scan cache
   -B, --max-bitrate <MAX_BITRATE>    Maximum bitrate in kbps
   -u, --min-duration <MIN_DURATION>  Minimum duration in seconds
   -U, --max-duration <MAX_DURATION>  Maximum duration in seconds
@@ -275,6 +276,9 @@ vconvert --from-db --sort bitrate
 
 # Clear the database
 vconvert --clear-db
+
+# Remove stale entries from the scan cache (files that no longer exist on disk)
+vconvert --clean-cache
 ```
 
 ### Configuration

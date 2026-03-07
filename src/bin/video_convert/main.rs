@@ -105,6 +105,10 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'E', long = "list-extensions", group = "db_mode")]
     list_extensions: bool,
 
+    /// Remove stale entries from the scan cache
+    #[arg(short = 'X', long = "clean-cache", group = "db_mode")]
+    clean_cache: bool,
+
     /// Maximum bitrate in kbps
     #[arg(short = 'B', long = "max-bitrate", name = "MAX_BITRATE")]
     max_bitrate: Option<u64>,
@@ -137,6 +141,8 @@ impl VideoConvertArgs {
             Some(DatabaseMode::Show)
         } else if self.list_extensions {
             Some(DatabaseMode::ListExtensions)
+        } else if self.clean_cache {
+            Some(DatabaseMode::CleanScanCache)
         } else {
             None
         }
