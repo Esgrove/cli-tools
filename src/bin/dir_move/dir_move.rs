@@ -1207,18 +1207,21 @@ impl DirMove {
                 );
 
                 let mut valid_candidates: Vec<ValidCandidate> = Vec::new();
+                let file_path = file_info.path_buf();
 
                 // Add file to ALL matching prefix groups, not just the best one
                 for candidate in prefix_candidates {
+                    // Compute normalized key and split parts once per candidate
+                    let key = utils::normalize_prefix(&candidate.prefix);
+                    let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
+
                     // Skip candidates that match ignored group names
-                    let candidate_normalized = utils::normalize_prefix(&candidate.prefix);
-                    if ignored_group_names.contains(&candidate_normalized) {
+                    if ignored_group_names.contains(&key) {
                         continue;
                     }
 
                     // Skip candidates where any part matches an ignored_group_part
                     // This filters out groups like "DL x265 TEST" when "x265" is in ignored_group_parts
-                    let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
                     if candidate_parts.iter().any(|part| {
                         ignored_group_parts
                             .iter()
@@ -1229,17 +1232,15 @@ impl DirMove {
 
                     // Verify this file itself has the prefix parts contiguous in its original name.
                     // This prevents adding files where filtering made non-adjacent parts appear adjacent.
-                    let prefix_parts_vec: Vec<&str> = candidate.prefix.split('.').collect();
-                    if !utils::parts_are_contiguous_in_original(&file_info.original_name, &prefix_parts_vec) {
+                    if !utils::parts_are_contiguous_in_original(&file_info.original_name, &candidate_parts) {
                         continue;
                     }
 
-                    let key = utils::normalize_prefix(&candidate.prefix);
                     let is_concatenated = !candidate.prefix.contains('.');
 
                     valid_candidates.push(ValidCandidate {
                         key,
-                        file_path: file_info.path_buf(),
+                        file_path: file_path.clone(),
                         part_count: candidate.part_count,
                         is_concatenated,
                         start_position: candidate.start_position,
@@ -8506,6 +8507,346 @@ mod test_varied_prefix_grouping {
                 "another_file should not be in Target group"
             );
             assert!(!name.contains("nodots"), "nodots should not be in Target group");
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_second_pass_starts_with_matching {
+    use super::*;
+
+    #[test]
+    fn concatenated_variant_added_to_existing_group() {
+        // Second pass should add JosephExampleTV to the JosephExample group
+        // because "JosephExampleTV" starts with "josephexample" (the normalized group key).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Three files form a "JosephExample" group in the first pass
+        std::fs::write(root.join("JosephExample.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("JosephExample.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("JosephExample.Episode.03.mp4"), "").unwrap();
+        // This file has "JosephExampleTV" which starts with the group prefix
+        std::fs::write(root.join("JosephExampleTV.Episode.04.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Use exact key match to avoid accidentally matching a more specific group
+        // like "JosephExample.Episode" (which only has 3 files).
+        let group = groups
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == "josephexample")
+            .expect("Should find JosephExample group");
+
+        assert_eq!(
+            group.1.files.len(),
+            4,
+            "JosephExampleTV file should be added via second pass starts-with matching"
+        );
+    }
+
+    #[test]
+    fn starts_with_does_not_add_unrelated_files() {
+        // A file that does NOT start with the group prefix should not be added
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("AlphaStudio.Video.01.mp4"), "").unwrap();
+        std::fs::write(root.join("AlphaStudio.Video.02.mp4"), "").unwrap();
+        std::fs::write(root.join("AlphaStudio.Video.03.mp4"), "").unwrap();
+        // "BetaStudio" does NOT start with "alphastudio"
+        std::fs::write(root.join("BetaStudio.Video.04.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        let group = groups
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == "alphastudio")
+            .expect("Should find AlphaStudio group");
+
+        assert_eq!(
+            group.1.files.len(),
+            3,
+            "BetaStudio should NOT be added to AlphaStudio group"
+        );
+        assert!(
+            !group.1.files.iter().any(|f| f.to_string_lossy().contains("BetaStudio")),
+            "BetaStudio file should not be in AlphaStudio group"
+        );
+    }
+
+    #[test]
+    fn already_in_group_not_duplicated() {
+        // A file already added in the first pass should not be duplicated by the second pass
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("ShowName.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("ShowName.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("ShowName.Episode.03.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        let group = groups
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == "showname")
+            .expect("Should find ShowName group");
+
+        // Each file should appear exactly once
+        let mut file_names: Vec<String> = group.1.files.iter().map(|f| f.to_string_lossy().to_string()).collect();
+        file_names.sort();
+        file_names.dedup();
+        assert_eq!(
+            file_names.len(),
+            group.1.files.len(),
+            "No files should be duplicated between first and second pass"
+        );
+    }
+
+    #[test]
+    fn multiple_extended_variants_all_added() {
+        // Multiple files with different extended prefixes should all be added
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("MyShow.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("MyShow.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("MyShow.Episode.03.mp4"), "").unwrap();
+        std::fs::write(root.join("MyShowSpecial.Bonus.01.mp4"), "").unwrap();
+        std::fs::write(root.join("MyShowExtra.Behind.Scenes.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        let group = groups
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == "myshow")
+            .expect("Should find MyShow group");
+
+        // MyShowSpecial and MyShowExtra should both be added via starts-with
+        let file_names: Vec<String> = group.1.files.iter().map(|f| f.to_string_lossy().to_string()).collect();
+        assert!(
+            file_names.iter().any(|f| f.contains("MyShowSpecial")),
+            "MyShowSpecial should be in MyShow group via starts-with"
+        );
+        assert!(
+            file_names.iter().any(|f| f.contains("MyShowExtra")),
+            "MyShowExtra should be in MyShow group via starts-with"
+        );
+        assert_eq!(group.1.files.len(), 5, "All 5 files should be in MyShow group");
+    }
+
+    #[test]
+    fn contiguity_check_prevents_false_positive_in_second_pass() {
+        // Second pass must verify contiguity — a file where the group key appears
+        // only non-contiguously should NOT be added.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Alpha.Video.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Video.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Alpha.Video.03.mp4"), "").unwrap();
+        // This file has "studio" then later "alpha" but not contiguously
+        // After filtering numerics: "Other.Studio.Stuff.Alpha.mp4"
+        // The normalized key "studioalpha" should not match because the parts are not adjacent
+        std::fs::write(root.join("Other.Studio.Stuff.Alpha.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        if let Some(group) = groups.iter().find(|(key, _)| key.to_lowercase() == "studio.alpha") {
+            // If the group exists, the non-contiguous file should not be in it
+            assert!(
+                !group
+                    .1
+                    .files
+                    .iter()
+                    .any(|f| f.to_string_lossy().contains("Other.Studio.Stuff")),
+                "File with non-contiguous parts should not be added in second pass"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_parallel_grouping_consistency {
+    use super::*;
+
+    #[test]
+    fn parallel_produces_deterministic_groups() {
+        // Run collect_all_prefix_groups multiple times and verify the results are identical.
+        // This validates that parallelization does not introduce non-deterministic grouping.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Create a moderately complex set of files to exercise both passes
+        for index in 1..=5 {
+            std::fs::write(root.join(format!("SeriesAlpha.Season1.Episode.{index:02}.mp4")), "").unwrap();
+        }
+        for index in 1..=4 {
+            std::fs::write(root.join(format!("SeriesAlpha.Season2.Episode.{index:02}.mp4")), "").unwrap();
+        }
+        for index in 1..=3 {
+            std::fs::write(root.join(format!("SeriesBeta.Special.{index:02}.mp4")), "").unwrap();
+        }
+        // Extended variant that second pass should pick up
+        std::fs::write(root.join("SeriesAlphaExtras.Behind.Scenes.mp4"), "").unwrap();
+        // Unrelated files
+        std::fs::write(root.join("RandomFile.txt"), "").unwrap();
+        std::fs::write(root.join("AnotherRandom.doc"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+
+        // Run multiple times and compare
+        let first_run = dirmove.collect_all_prefix_groups(&files_with_names);
+        let second_run = dirmove.collect_all_prefix_groups(&files_with_names);
+        let third_run = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Same set of group keys
+        let mut first_keys: Vec<&String> = first_run.keys().collect();
+        let mut second_keys: Vec<&String> = second_run.keys().collect();
+        let mut third_keys: Vec<&String> = third_run.keys().collect();
+        first_keys.sort();
+        second_keys.sort();
+        third_keys.sort();
+        assert_eq!(first_keys, second_keys, "Group keys should be identical across runs");
+        assert_eq!(first_keys, third_keys, "Group keys should be identical across runs");
+
+        // Same file sets per group (sorted for comparison)
+        for key in first_run.keys() {
+            let mut first_files: Vec<String> = first_run[key]
+                .files
+                .iter()
+                .map(|f| f.to_string_lossy().to_string())
+                .collect();
+            let mut second_files: Vec<String> = second_run[key]
+                .files
+                .iter()
+                .map(|f| f.to_string_lossy().to_string())
+                .collect();
+            let mut third_files: Vec<String> = third_run[key]
+                .files
+                .iter()
+                .map(|f| f.to_string_lossy().to_string())
+                .collect();
+            first_files.sort();
+            second_files.sort();
+            third_files.sort();
+            assert_eq!(
+                first_files, second_files,
+                "Files in group '{key}' should be identical across runs"
+            );
+            assert_eq!(
+                first_files, third_files,
+                "Files in group '{key}' should be identical across runs"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_handles_ignored_group_names_correctly() {
+        // Verify that ignored_group_names filtering works correctly under parallel execution
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Episode.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Episode.04.mp4"), "").unwrap();
+
+        let config = Config::test_with_ignored_group_names(vec!["episode"]);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Episode" should be filtered out
+        assert!(
+            !groups.keys().any(|k| k.to_lowercase() == "episode"),
+            "Ignored group name 'episode' should not appear: {:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+        // "Studio" should still be present
+        assert!(
+            groups.keys().any(|k| k.to_lowercase().contains("studio")),
+            "Studio group should still be present"
+        );
+    }
+
+    #[test]
+    fn parallel_handles_ignored_group_parts_correctly() {
+        // Verify that ignored_group_parts filtering works correctly under parallel execution
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Show.S01E01.1080p.DL.x265.TEST.mkv"), "").unwrap();
+        std::fs::write(root.join("Show.S01E02.1080p.DL.x265.TEST.mkv"), "").unwrap();
+        std::fs::write(root.join("Show.S01E03.1080p.DL.x265.TEST.mkv"), "").unwrap();
+
+        let config = Config::test_with_ignored_group_parts(vec!["x265"]);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // No group key should contain x265 as a part
+        for key in groups.keys() {
+            assert!(
+                !key.to_lowercase().contains("x265"),
+                "Group '{key}' should have been filtered by ignored_group_parts"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_large_file_set_stress_test() {
+        // Larger file set to exercise thread pool more thoroughly
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // 5 groups of 10 files each = 50 files
+        for group_index in 1..=5 {
+            for file_index in 1..=10 {
+                std::fs::write(
+                    root.join(format!("Group{group_index:02}.Content.File.{file_index:02}.mp4")),
+                    "",
+                )
+                .unwrap();
+            }
+        }
+        // 5 extended variants (one per group)
+        for group_index in 1..=5 {
+            std::fs::write(root.join(format!("Group{group_index:02}Extra.Bonus.Content.mp4")), "").unwrap();
+        }
+
+        let config = Config::test_with_group_size(3);
+        let dirmove = test_helpers::make_dirmove(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Each GroupNN should exist and contain at least 10 files
+        for group_index in 1..=5 {
+            let group_name = format!("group{group_index:02}");
+            let group = groups.iter().find(|(key, _)| key.to_lowercase() == group_name);
+            assert!(group.is_some(), "Should find group '{group_name}'");
+            assert!(
+                group.unwrap().1.files.len() >= 10,
+                "Group '{group_name}' should have at least 10 files, got {}",
+                group.unwrap().1.files.len()
+            );
         }
     }
 }

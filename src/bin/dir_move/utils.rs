@@ -108,8 +108,12 @@ pub fn find_prefix_candidates<'a>(
             let match_count = all_files
                 .iter()
                 .filter(|f| {
-                    prefix_matches_normalized(&f.filtered_name, &three_part_normalized)
-                        && parts_are_contiguous_in_original(&f.original_name, &prefix_parts)
+                    prefix_matches_normalized_precomputed(
+                        &f.filtered_parts_lower,
+                        &f.filtered_two_parts_lower,
+                        &f.filtered_three_parts_lower,
+                        &three_part_normalized,
+                    ) && parts_are_contiguous_in_original_precomputed(&f.original_parts, &prefix_parts)
                 })
                 .count();
             if match_count >= min_group_size {
@@ -141,8 +145,12 @@ pub fn find_prefix_candidates<'a>(
             let match_count = all_files
                 .iter()
                 .filter(|f| {
-                    prefix_matches_normalized(&f.filtered_name, &two_part_normalized)
-                        && parts_are_contiguous_in_original(&f.original_name, &prefix_parts)
+                    prefix_matches_normalized_precomputed(
+                        &f.filtered_parts_lower,
+                        &f.filtered_two_parts_lower,
+                        &f.filtered_three_parts_lower,
+                        &two_part_normalized,
+                    ) && parts_are_contiguous_in_original_precomputed(&f.original_parts, &prefix_parts)
                 })
                 .count();
             if match_count >= min_group_size {
@@ -166,7 +174,14 @@ pub fn find_prefix_candidates<'a>(
 
             let match_count = all_files
                 .iter()
-                .filter(|f| prefix_matches_normalized(&f.filtered_name, &single_part_normalized))
+                .filter(|f| {
+                    prefix_matches_normalized_precomputed(
+                        &f.filtered_parts_lower,
+                        &f.filtered_two_parts_lower,
+                        &f.filtered_three_parts_lower,
+                        &single_part_normalized,
+                    )
+                })
                 .count();
             if match_count >= min_group_size {
                 candidates.push(PrefixCandidate::new(
@@ -225,6 +240,41 @@ pub fn prefix_matches_normalized(file_name: &str, target_normalized: &str) -> bo
     false
 }
 
+/// Optimized version of [`prefix_matches_normalized`] using pre-computed parts from [`FileInfo`].
+///
+/// Uses the pre-split and pre-lowercased single, 2-part, and 3-part combinations
+/// stored on `FileInfo` to avoid redundant `split('.')`, `to_lowercase()`, and `format!()`
+/// calls in the O(N × K × N) hot loop inside `find_prefix_candidates`.
+pub fn prefix_matches_normalized_precomputed(
+    filtered_parts_lower: &[String],
+    filtered_two_parts_lower: &[String],
+    filtered_three_parts_lower: &[String],
+    target_normalized: &str,
+) -> bool {
+    // Check all single parts (exact match or starts with)
+    for part in filtered_parts_lower {
+        if *part == target_normalized || part.starts_with(target_normalized) {
+            return true;
+        }
+    }
+
+    // Check all 2-part combinations (exact match or starts with)
+    for combined in filtered_two_parts_lower {
+        if *combined == target_normalized || combined.starts_with(target_normalized) {
+            return true;
+        }
+    }
+
+    // Check all 3-part combinations (exact match or starts with)
+    for combined in filtered_three_parts_lower {
+        if *combined == target_normalized || combined.starts_with(target_normalized) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Check if a sequence of parts appears contiguously in the original filename.
 /// This prevents false matches where filtering removes parts and makes
 /// non-adjacent parts appear adjacent.
@@ -267,6 +317,67 @@ pub fn parts_are_contiguous_in_original(original_filename: &str, prefix_parts: &
     // Also matches if the original part STARTS WITH the prefix (extended form)
     // e.g., prefix ["Joseph", "Example"] matches original part "JosephExampleTV"
     for original_part in &original_parts {
+        let original_lower = original_part.to_lowercase();
+        if original_lower == prefix_combined || original_lower.starts_with(&prefix_combined) {
+            return true;
+        }
+    }
+
+    // Also check if prefix parts combined match multiple contiguous original parts combined
+    // e.g., prefix ["PhotoLab"] (single part) matches original ["Photo", "Lab"] (two parts)
+    // Also matches if the combined parts START WITH the prefix
+    for start_idx in 0..original_parts.len() {
+        let mut combined = String::new();
+        for part in original_parts.iter().skip(start_idx) {
+            combined.push_str(part);
+            let combined_lower = combined.to_lowercase();
+            if combined_lower == prefix_combined || combined_lower.starts_with(&prefix_combined) {
+                return true;
+            }
+            // Stop if we've exceeded the target length (but allow starts_with)
+            if combined.len() > prefix_combined.len() + 20 {
+                break;
+            }
+        }
+    }
+
+    false
+}
+
+/// Optimized version of [`parts_are_contiguous_in_original`] using pre-computed original parts
+/// from [`FileInfo`].
+///
+/// Avoids redundant `split('.')` on `original_filename` which is called O(N × K × N) times
+/// in `find_prefix_candidates`. The `prefix_combined` is still computed per-call since it
+/// varies with each candidate prefix.
+pub fn parts_are_contiguous_in_original_precomputed(original_parts: &[String], prefix_parts: &[&str]) -> bool {
+    if prefix_parts.is_empty() {
+        return true;
+    }
+
+    let prefix_combined = prefix_parts.join("").to_lowercase();
+
+    // Check if the prefix parts match contiguous original parts exactly
+    'outer: for start_idx in 0..original_parts.len() {
+        if start_idx + prefix_parts.len() > original_parts.len() {
+            break;
+        }
+
+        for (offset, prefix_part) in prefix_parts.iter().enumerate() {
+            if !original_parts[start_idx + offset].eq_ignore_ascii_case(prefix_part) {
+                continue 'outer;
+            }
+        }
+
+        // Found a contiguous match with exact parts
+        return true;
+    }
+
+    // Also check if prefix parts combined match a single original part (concatenated form)
+    // e.g., prefix ["Photo", "Lab"] matches original part "PhotoLab"
+    // Also matches if the original part STARTS WITH the prefix (extended form)
+    // e.g., prefix ["Joseph", "Example"] matches original part "JosephExampleTV"
+    for original_part in original_parts {
         let original_lower = original_part.to_lowercase();
         if original_lower == prefix_combined || original_lower.starts_with(&prefix_combined) {
             return true;
@@ -2176,6 +2287,238 @@ mod test_file_extension_exclusion {
         assert!(
             !candidates.iter().any(|c| c.prefix.to_lowercase() == "mp4"),
             "Extension in any case should be excluded"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_matches_normalized_precomputed {
+    use super::*;
+
+    /// Helper to build pre-computed parts from a filename string, matching `FileInfo::new` logic.
+    fn precompute(filtered_name: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let parts_lower: Vec<String> = filtered_name.split('.').map(str::to_lowercase).collect();
+        let two: Vec<String> = parts_lower.windows(2).map(|w| format!("{}{}", w[0], w[1])).collect();
+        let three: Vec<String> = parts_lower
+            .windows(3)
+            .map(|w| format!("{}{}{}", w[0], w[1], w[2]))
+            .collect();
+        (parts_lower, two, three)
+    }
+
+    #[test]
+    fn matches_original_on_single_part_exact() {
+        let name = "PhotoLab.Image.jpg";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "photolab"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "photolab"),
+        );
+    }
+
+    #[test]
+    fn matches_original_on_single_part_starts_with() {
+        let name = "PhotoLabTV.Image.jpg";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "photolab"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "photolab"),
+        );
+    }
+
+    #[test]
+    fn matches_original_on_two_part_combined() {
+        let name = "Photo.Lab.Image.jpg";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "photolab"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "photolab"),
+        );
+    }
+
+    #[test]
+    fn matches_original_on_three_part_combined() {
+        let name = "Ph.oto.Lab.Image.jpg";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "photolab"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "photolab"),
+        );
+    }
+
+    #[test]
+    fn matches_original_no_match() {
+        let name = "Other.Album.jpg";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "photolab"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "photolab"),
+        );
+    }
+
+    #[test]
+    fn matches_original_middle_position() {
+        let name = "Extra.StudioName.video.mp4";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "studioname"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "studioname"),
+        );
+    }
+
+    #[test]
+    fn matches_original_two_part_middle_position() {
+        let name = "Extra.Photo.Lab.video.mp4";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "photolab"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "photolab"),
+        );
+    }
+
+    #[test]
+    fn matches_original_case_insensitive() {
+        let name = "PHOTOLAB.Image.jpg";
+        let (one, two, three) = precompute(name);
+        assert_eq!(
+            prefix_matches_normalized(name, "photolab"),
+            prefix_matches_normalized_precomputed(&one, &two, &three, "photolab"),
+        );
+    }
+
+    #[test]
+    fn single_part_file() {
+        let name = "standalone";
+        let (one, two, three) = precompute(name);
+        assert!(!prefix_matches_normalized_precomputed(&one, &two, &three, "other"));
+        assert!(prefix_matches_normalized_precomputed(&one, &two, &three, "standalone"));
+    }
+
+    #[test]
+    fn empty_target_matches_everything() {
+        let name = "Some.File.mp4";
+        let (one, two, three) = precompute(name);
+        // starts_with("") is always true
+        assert_eq!(
+            prefix_matches_normalized(name, ""),
+            prefix_matches_normalized_precomputed(&one, &two, &three, ""),
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_parts_are_contiguous_precomputed {
+    use super::*;
+
+    /// Helper to build pre-computed original parts from a filename string.
+    fn precompute_original(name: &str) -> Vec<String> {
+        name.split('.').map(String::from).collect()
+    }
+
+    #[test]
+    fn matches_original_exact_single_part() {
+        let name = "Studio.Alpha.Video.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["Studio"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["Studio"]),
+        );
+    }
+
+    #[test]
+    fn matches_original_exact_two_parts() {
+        let name = "Studio.Alpha.Video.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["Studio", "Alpha"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["Studio", "Alpha"]),
+        );
+    }
+
+    #[test]
+    fn matches_original_non_contiguous_rejected() {
+        let name = "Site.2023.04.13.Person.video.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["Site", "Person"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["Site", "Person"]),
+        );
+    }
+
+    #[test]
+    fn matches_original_concatenated_form() {
+        let name = "PhotoLab.Video.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["Photo", "Lab"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["Photo", "Lab"]),
+        );
+    }
+
+    #[test]
+    fn matches_original_extended_starts_with() {
+        let name = "JosephExampleTV.Episode.01.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["Joseph", "Example"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["Joseph", "Example"]),
+        );
+    }
+
+    #[test]
+    fn matches_original_reverse_split() {
+        // prefix ["PhotoLab"] matches original ["Photo", "Lab"]
+        let name = "Photo.Lab.Video.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["PhotoLab"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["PhotoLab"]),
+        );
+    }
+
+    #[test]
+    fn matches_original_case_insensitive() {
+        let name = "STUDIO.ALPHA.video.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["studio", "alpha"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["studio", "alpha"]),
+        );
+    }
+
+    #[test]
+    fn empty_prefix_always_matches() {
+        let parts = precompute_original("Anything.Here.mp4");
+        assert!(parts_are_contiguous_in_original_precomputed(&parts, &[]));
+    }
+
+    #[test]
+    fn no_match_returns_false() {
+        let name = "Completely.Different.Name.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["Studio", "Alpha"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["Studio", "Alpha"]),
+        );
+    }
+
+    #[test]
+    fn middle_position_match() {
+        let name = "Extra.Studio.Alpha.Video.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["Studio", "Alpha"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["Studio", "Alpha"]),
+        );
+    }
+
+    #[test]
+    fn three_part_contiguous() {
+        let name = "A.B.C.D.E.mp4";
+        let parts = precompute_original(name);
+        assert_eq!(
+            parts_are_contiguous_in_original(name, &["B", "C", "D"]),
+            parts_are_contiguous_in_original_precomputed(&parts, &["B", "C", "D"]),
         );
     }
 }

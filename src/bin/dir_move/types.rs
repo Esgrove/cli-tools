@@ -15,6 +15,10 @@ pub struct DirectoryInfo {
 
 /// Information about a file for grouping purposes.
 /// Uses `Cow` for efficient string handling - avoids cloning when possible.
+///
+/// Includes pre-computed split and lowercased parts to avoid redundant work
+/// in hot loops where `prefix_matches_normalized` and `parts_are_contiguous_in_original`
+/// are called O(N × K × N) times.
 pub struct FileInfo<'a> {
     /// Path to the file.
     pub(crate) path: Cow<'a, Path>,
@@ -22,6 +26,14 @@ pub struct FileInfo<'a> {
     pub(crate) original_name: Cow<'a, str>,
     /// Filtered filename with numeric/resolution/glue parts removed (used for prefix matching).
     pub(crate) filtered_name: Cow<'a, str>,
+    /// Pre-computed: `original_name` split by `'.'` (owned, for thread safety).
+    pub(crate) original_parts: Vec<String>,
+    /// Pre-computed: `filtered_name` split by `'.'` with each part lowercased.
+    pub(crate) filtered_parts_lower: Vec<String>,
+    /// Pre-computed: all contiguous 2-part combinations from `filtered_name`, lowercased and concatenated.
+    pub(crate) filtered_two_parts_lower: Vec<String>,
+    /// Pre-computed: all contiguous 3-part combinations from `filtered_name`, lowercased and concatenated.
+    pub(crate) filtered_three_parts_lower: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -72,11 +84,30 @@ pub struct UnpackInfo {
 
 impl FileInfo<'_> {
     /// Create a new `FileInfo` with owned strings.
-    pub(crate) const fn new(path: PathBuf, original_name: String, filtered_name: String) -> Self {
+    /// Pre-computes split and lowercased parts for efficient matching in hot loops.
+    pub(crate) fn new(path: PathBuf, original_name: String, filtered_name: String) -> Self {
+        let original_parts: Vec<String> = original_name.split('.').map(String::from).collect();
+
+        let filtered_parts_lower: Vec<String> = filtered_name.split('.').map(str::to_lowercase).collect();
+
+        let filtered_two_parts_lower: Vec<String> = filtered_parts_lower
+            .windows(2)
+            .map(|window| format!("{}{}", window[0], window[1]))
+            .collect();
+
+        let filtered_three_parts_lower: Vec<String> = filtered_parts_lower
+            .windows(3)
+            .map(|window| format!("{}{}{}", window[0], window[1], window[2]))
+            .collect();
+
         Self {
             path: Cow::Owned(path),
             original_name: Cow::Owned(original_name),
             filtered_name: Cow::Owned(filtered_name),
+            original_parts,
+            filtered_parts_lower,
+            filtered_two_parts_lower,
+            filtered_three_parts_lower,
         }
     }
 
