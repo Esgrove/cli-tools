@@ -1342,8 +1342,12 @@ impl DirMove {
         let initial_group_count = groups_to_process.len();
         print_bold!("Found {} group(s) with matching prefixes:\n", initial_group_count);
 
-        // Get parent directory name to avoid offering it as a new directory
-        let parent_dir_name = self.root.file_name().and_then(|n| n.to_str()).map(str::to_lowercase);
+        // Get normalized parent directory name to avoid offering it as a new directory
+        let parent_dir_normalized = self
+            .root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(utils::normalize_name);
 
         while !groups_to_process.is_empty() {
             let (prefix, group) = groups_to_process.remove(0);
@@ -1377,9 +1381,9 @@ impl DirMove {
             }
 
             // Skip if the proposed directory name matches the current parent directory
-            if parent_dir_name
+            if parent_dir_normalized
                 .as_ref()
-                .is_some_and(|parent| parent.eq_ignore_ascii_case(&dir_name))
+                .is_some_and(|parent| *parent == dir_name_normalized)
             {
                 continue;
             }
@@ -2846,12 +2850,71 @@ mod test_parent_directory_skipped {
         assert!(groups.contains_key("MySeries"));
 
         // Parent dir is "MYSERIES", proposed dir would be "MySeries"
-        // These should match case-insensitively
+        // These should match via normalize_name
         let parent_name = root.file_name().unwrap().to_str().unwrap();
         assert_eq!(parent_name, "MYSERIES");
 
         let dir_name = "MySeries";
-        assert!(parent_name.eq_ignore_ascii_case(dir_name));
+        assert_eq!(utils::normalize_name(parent_name), utils::normalize_name(dir_name));
+    }
+
+    #[test]
+    fn parent_dir_name_with_spaces_matches_concatenated() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Parent directory has spaces, proposed name is concatenated
+        let root = tmp.path().join("My Series");
+        std::fs::create_dir(&root).unwrap();
+
+        std::fs::write(root.join("MySeries.ep1.mp4"), "").unwrap();
+        std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
+        std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+
+        let dirmove = DirMove::new(root.clone(), config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Files should form a group
+        assert!(groups.contains_key("MySeries"));
+
+        // Parent dir is "My Series", proposed dir would be "MySeries"
+        // These should match via normalize_name (strips spaces and dots)
+        let parent_name = root.file_name().unwrap().to_str().unwrap();
+        assert_eq!(parent_name, "My Series");
+
+        let dir_name = "MySeries";
+        assert_eq!(utils::normalize_name(parent_name), utils::normalize_name(dir_name));
+    }
+
+    #[test]
+    fn parent_dir_name_with_dots_matches_spaced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Parent directory has dots, proposed name has spaces
+        let root = tmp.path().join("My.Series");
+        std::fs::create_dir(&root).unwrap();
+
+        std::fs::write(root.join("My.Series.ep1.mp4"), "").unwrap();
+        std::fs::write(root.join("My.Series.ep2.mp4"), "").unwrap();
+        std::fs::write(root.join("My.Series.ep3.mp4"), "").unwrap();
+
+        let config = Config::test_with_group_size(3);
+
+        let dirmove = DirMove::new(root.clone(), config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // The prefix "My.Series" becomes dir_name "My Series" after dot replacement
+        // Parent dir is "My.Series" which normalizes to "myseries"
+        // Dir name "My Series" also normalizes to "myseries"
+        let parent_name = root.file_name().unwrap().to_str().unwrap();
+        assert_eq!(parent_name, "My.Series");
+
+        let dir_name = "My Series";
+        assert_eq!(utils::normalize_name(parent_name), utils::normalize_name(dir_name));
+
+        // Verify groups were found
+        assert!(!groups.is_empty());
     }
 
     #[test]
