@@ -152,6 +152,23 @@ impl PrefixGroup {
 }
 
 /// Intermediate data structure for building prefix groups.
+/// A validated prefix candidate ready to be merged into prefix groups.
+/// Produced during the parallel first pass of `collect_all_prefix_groups`.
+pub struct ValidCandidate {
+    /// Normalized group key (lowercase, no dots).
+    pub(crate) key: String,
+    /// Path to the file this candidate belongs to.
+    pub(crate) file_path: PathBuf,
+    /// Number of dot-separated parts in the prefix.
+    pub(crate) part_count: usize,
+    /// Whether the prefix is a concatenated (no-dot) form.
+    pub(crate) is_concatenated: bool,
+    /// Position in the filename where this prefix starts.
+    pub(crate) start_position: usize,
+    /// The original prefix string.
+    pub(crate) prefix: String,
+}
+
 /// Used during the collection phase before converting to final `PrefixGroup`.
 #[derive(Debug)]
 pub struct PrefixGroupBuilder {

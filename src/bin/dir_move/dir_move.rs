@@ -8,6 +8,7 @@ use indicatif::ProgressBar;
 #[cfg(not(test))]
 use indicatif::ProgressStyle;
 use itertools::Itertools;
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use cli_tools::{
@@ -17,7 +18,9 @@ use cli_tools::{
 
 use crate::config::{Config, CustomMapping};
 use crate::database::Database;
-use crate::types::{DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo};
+use crate::types::{
+    DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo, ValidCandidate,
+};
 use crate::{DirMoveArgs, utils};
 
 pub struct DirMove {
@@ -1174,6 +1177,7 @@ impl DirMove {
     /// Collect all possible prefix groups for files.
     /// Files can appear in multiple groups - they are only excluded once actually moved.
     /// Returns a map from display prefix to (files, `prefix_parts`) where `prefix_parts` indicates specificity.
+    #[allow(clippy::too_many_lines)]
     fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, PrefixGroup> {
         // Use normalized keys (no dots, lowercase) for grouping to handle
         // both case variations and dot-separated vs concatenated prefixes
@@ -1181,101 +1185,144 @@ impl DirMove {
 
         let file_count = files_with_names.len() as u64;
 
-        // First pass: collect prefix candidates from each file
+        // Extract config fields needed by parallel closures to avoid capturing
+        // non-Sync `self` (which contains a rusqlite Database).
+        let min_group_size = self.config.min_group_size;
+        let min_prefix_chars = self.config.min_prefix_chars;
+        let ignored_group_names = &self.config.ignored_group_names;
+        let ignored_group_parts = &self.config.ignored_group_parts;
+
+        // First pass: collect prefix candidates from each file (parallelized)
+        // Each file is processed independently, producing a list of valid candidates.
+        // Results are then merged sequentially into the shared HashMap.
         let first_pass_bar = Self::create_progress_bar(file_count, "Collecting prefixes");
-        for file_info in files_with_names {
-            let prefix_candidates = utils::find_prefix_candidates(
-                &file_info.filtered_name,
-                files_with_names,
-                self.config.min_group_size,
-                self.config.min_prefix_chars,
-            );
+        let first_pass_results: Vec<Vec<ValidCandidate>> = files_with_names
+            .par_iter()
+            .map(|file_info| {
+                let prefix_candidates = utils::find_prefix_candidates(
+                    &file_info.filtered_name,
+                    files_with_names,
+                    min_group_size,
+                    min_prefix_chars,
+                );
 
-            // Add file to ALL matching prefix groups, not just the best one
-            for candidate in prefix_candidates {
-                // Skip candidates that match ignored group names
-                let candidate_normalized = utils::normalize_prefix(&candidate.prefix);
-                if self.config.ignored_group_names.contains(&candidate_normalized) {
-                    continue;
-                }
+                let mut valid_candidates: Vec<ValidCandidate> = Vec::new();
 
-                // Skip candidates where any part matches an ignored_group_part
-                // This filters out groups like "DL x265 TEST" when "x265" is in ignored_group_parts
-                let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
-                if candidate_parts.iter().any(|part| {
-                    self.config
-                        .ignored_group_parts
-                        .iter()
-                        .any(|ignored| part.eq_ignore_ascii_case(ignored))
-                }) {
-                    continue;
-                }
+                // Add file to ALL matching prefix groups, not just the best one
+                for candidate in prefix_candidates {
+                    // Skip candidates that match ignored group names
+                    let candidate_normalized = utils::normalize_prefix(&candidate.prefix);
+                    if ignored_group_names.contains(&candidate_normalized) {
+                        continue;
+                    }
 
-                // Verify this file itself has the prefix parts contiguous in its original name.
-                // This prevents adding files where filtering made non-adjacent parts appear adjacent.
-                let prefix_parts_vec: Vec<&str> = candidate.prefix.split('.').collect();
-                if !utils::parts_are_contiguous_in_original(&file_info.original_name, &prefix_parts_vec) {
-                    continue;
-                }
+                    // Skip candidates where any part matches an ignored_group_part
+                    // This filters out groups like "DL x265 TEST" when "x265" is in ignored_group_parts
+                    let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
+                    if candidate_parts.iter().any(|part| {
+                        ignored_group_parts
+                            .iter()
+                            .any(|ignored| part.eq_ignore_ascii_case(ignored))
+                    }) {
+                        continue;
+                    }
 
-                let key = utils::normalize_prefix(&candidate.prefix);
-                let is_concatenated = !candidate.prefix.contains('.');
+                    // Verify this file itself has the prefix parts contiguous in its original name.
+                    // This prevents adding files where filtering made non-adjacent parts appear adjacent.
+                    let prefix_parts_vec: Vec<&str> = candidate.prefix.split('.').collect();
+                    if !utils::parts_are_contiguous_in_original(&file_info.original_name, &prefix_parts_vec) {
+                        continue;
+                    }
 
-                if let Some(builder) = prefix_groups.get_mut(&key) {
-                    builder.add_file(
-                        file_info.path_buf(),
-                        candidate.part_count,
+                    let key = utils::normalize_prefix(&candidate.prefix);
+                    let is_concatenated = !candidate.prefix.contains('.');
+
+                    valid_candidates.push(ValidCandidate {
+                        key,
+                        file_path: file_info.path_buf(),
+                        part_count: candidate.part_count,
                         is_concatenated,
+                        start_position: candidate.start_position,
+                        prefix: candidate.prefix.into_owned(),
+                    });
+                }
+                first_pass_bar.inc(1);
+                valid_candidates
+            })
+            .collect();
+
+        // Merge first pass results into the prefix groups HashMap
+        for file_candidates in first_pass_results {
+            for candidate in file_candidates {
+                if let Some(builder) = prefix_groups.get_mut(&candidate.key) {
+                    builder.add_file(
+                        candidate.file_path,
+                        candidate.part_count,
+                        candidate.is_concatenated,
                         candidate.start_position,
-                        candidate.prefix.into_owned(),
+                        candidate.prefix,
                     );
                 } else {
                     prefix_groups.insert(
-                        key,
+                        candidate.key,
                         PrefixGroupBuilder::new(
-                            candidate.prefix.into_owned(),
-                            file_info.path_buf(),
+                            candidate.prefix,
+                            candidate.file_path,
                             candidate.part_count,
-                            is_concatenated,
+                            candidate.is_concatenated,
                             candidate.start_position,
                         ),
                     );
                 }
             }
-            first_pass_bar.inc(1);
         }
         first_pass_bar.finish_and_clear();
 
         // Second pass: for each file, check if it should be added to existing groups
         // where the file's first part(s) START WITH the group's prefix.
         // This handles cases like JosephExampleTV matching JosephExample group.
+        // Parallelized: each file independently checks all group keys, results merged after.
         let group_keys: Vec<String> = prefix_groups.keys().cloned().collect();
+        let existing_files: HashMap<&str, HashSet<PathBuf>> = prefix_groups
+            .iter()
+            .map(|(key, builder)| (key.as_str(), builder.files.iter().cloned().collect()))
+            .collect();
+
         let second_pass_bar = Self::create_progress_bar(file_count, "Matching files to groups");
-        for file_info in files_with_names {
-            let file_path = file_info.path_buf();
+        let second_pass_results: Vec<Vec<(String, PathBuf)>> = files_with_names
+            .par_iter()
+            .map(|file_info| {
+                let file_path = file_info.path_buf();
+                let mut matches: Vec<(String, PathBuf)> = Vec::new();
 
-            for group_key in &group_keys {
-                // Skip if file is already in this group
-                if let Some(builder) = prefix_groups.get(group_key)
-                    && builder.files.contains(&file_path)
-                {
-                    continue;
-                }
-
-                // Check if the file matches this group via prefix_matches_normalized
-                // (which includes starts_with logic)
-                if utils::prefix_matches_normalized(&file_info.filtered_name, group_key) {
-                    // Also verify contiguity in original
-                    // For this check, we need to reconstruct the prefix parts from the group key
-                    // Since the key is normalized (no dots), we check if the original starts with it
-                    if utils::parts_are_contiguous_in_original(&file_info.original_name, &[group_key.as_str()])
-                        && let Some(builder) = prefix_groups.get_mut(group_key)
+                for group_key in &group_keys {
+                    // Skip if file is already in this group
+                    if let Some(files) = existing_files.get(group_key.as_str())
+                        && files.contains(&file_path)
                     {
-                        builder.files.push(file_path.clone());
+                        continue;
+                    }
+
+                    // Check if the file matches this group via prefix_matches_normalized
+                    // (which includes starts_with logic)
+                    if utils::prefix_matches_normalized(&file_info.filtered_name, group_key)
+                        && utils::parts_are_contiguous_in_original(&file_info.original_name, &[group_key.as_str()])
+                    {
+                        matches.push((group_key.clone(), file_path.clone()));
                     }
                 }
+                second_pass_bar.inc(1);
+                matches
+            })
+            .collect();
+
+        // Merge second pass results into the prefix groups HashMap
+        for file_matches in second_pass_results {
+            for (group_key, file_path) in file_matches {
+                if let Some(builder) = prefix_groups.get_mut(&group_key) {
+                    builder.files.push(file_path);
+                }
             }
-            second_pass_bar.inc(1);
         }
         second_pass_bar.finish_and_clear();
 
