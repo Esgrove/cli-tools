@@ -40,8 +40,16 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         .include
         .clone()
         .into_iter()
-        .chain(replace.iter().map(|(pattern, _)| pattern.clone()))
         .chain(cli.include.clone())
+        .unique()
+        .collect();
+
+    // Substitute and remove patterns use OR logic for pre-filtering:
+    // a file only needs to match at least one pattern to be processed.
+    let include_any: Vec<String> = replace
+        .iter()
+        .chain(removes.iter())
+        .map(|(pattern, _)| pattern.clone())
         .unique()
         .collect();
 
@@ -70,6 +78,7 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         deduplicate_patterns,
         dryrun: cli.print || user_config.dryrun,
         include,
+        include_any,
         exclude: cli.exclude.clone(),
         increment_name: cli.increment || user_config.increment,
         move_date_after_prefix,

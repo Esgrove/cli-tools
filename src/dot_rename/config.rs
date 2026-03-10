@@ -72,6 +72,7 @@ pub struct DotRenameConfig {
     pub deduplicate_patterns: Vec<(Regex, String)>,
     pub dryrun: bool,
     pub include: Vec<String>,
+    pub include_any: Vec<String>,
     pub exclude: Vec<String>,
     pub increment_name: bool,
     pub move_date_after_prefix: Vec<String>,
@@ -234,6 +235,7 @@ impl DotRenameConfig {
             deduplicate_patterns: Vec::new(),
             dryrun: user_config.dryrun,
             include: user_config.include,
+            include_any: Vec::new(),
             exclude: Vec::new(),
             increment_name: user_config.increment,
             move_date_after_prefix,
@@ -266,6 +268,11 @@ impl fmt::Display for DotRenameConfig {
             "include: []".to_string()
         } else {
             "include:\n".to_string() + &*self.include.iter().map(|name| format!("    {name}")).join("\n")
+        };
+        let include_any = if self.include_any.is_empty() {
+            "include_any: []".to_string()
+        } else {
+            "include_any:\n".to_string() + &*self.include_any.iter().map(|name| format!("    {name}")).join("\n")
         };
         let exclude = if self.exclude.is_empty() {
             "exclude: []".to_string()
@@ -301,6 +308,7 @@ impl fmt::Display for DotRenameConfig {
             self.suffix.as_ref().unwrap_or(&String::new())
         )?;
         writeln!(f, "  {include}")?;
+        writeln!(f, "  {include_any}")?;
         writeln!(f, "  {exclude}")?;
         writeln!(f, "  {replace}")?;
         writeln!(f, "  {regex_replace}")

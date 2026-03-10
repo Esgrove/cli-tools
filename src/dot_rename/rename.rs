@@ -191,11 +191,13 @@ impl DotRename {
             .into_par_iter()
             .filter_map(|path| {
                 let result = {
-                    // Filter based on include and exclude lists
+                    // Filter based on include, include_any, and exclude lists
                     let path_str = crate::path_to_string(&path);
                     let include = self.config.include.iter().all(|name| path_str.contains(name));
+                    let include_any = self.config.include_any.is_empty()
+                        || self.config.include_any.iter().any(|name| path_str.contains(name));
                     let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
-                    if include && exclude {
+                    if include && include_any && exclude {
                         self.formatted_filepath(&path)
                             .ok()
                             .filter(|new_path| &path != new_path)
@@ -255,9 +257,12 @@ impl DotRename {
         for path in paths {
             let path_str = crate::path_to_string(&path);
             let include = self.config.include.iter().all(|name| path_str.contains(name));
+            let include_any = self.config.include_any.is_empty()
+                || self.config.include_any.iter().any(|name| path_str.contains(name));
             let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
 
             if include
+                && include_any
                 && exclude
                 && let Some(result) = self.format_file_with_parent_prefix_suffix(&path)
                 && path != result
@@ -319,7 +324,10 @@ impl DotRename {
                         true
                     } else {
                         let path_str = crate::path_to_string(&path);
-                        self.config.include.iter().all(|name| path_str.contains(name))
+                        let include = self.config.include.iter().all(|name| path_str.contains(name));
+                        let include_any = self.config.include_any.is_empty()
+                            || self.config.include_any.iter().any(|name| path_str.contains(name));
+                        include && include_any
                     };
                     if matches_filter {
                         self.formatted_directory_path(&path)
