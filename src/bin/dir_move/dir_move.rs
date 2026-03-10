@@ -4,6 +4,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use colored::Colorize;
+use indicatif::ProgressBar;
+#[cfg(not(test))]
+use indicatif::ProgressStyle;
 use itertools::Itertools;
 use walkdir::WalkDir;
 
@@ -1170,16 +1173,16 @@ impl DirMove {
 
     /// Collect all possible prefix groups for files.
     /// Files can appear in multiple groups - they are only excluded once actually moved.
-    /// Returns a map from display prefix to list of matching file paths.
-    /// Collect all possible prefix groups for files.
-    /// Files can appear in multiple groups - they are only excluded once actually moved.
     /// Returns a map from display prefix to (files, `prefix_parts`) where `prefix_parts` indicates specificity.
     fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, PrefixGroup> {
         // Use normalized keys (no dots, lowercase) for grouping to handle
         // both case variations and dot-separated vs concatenated prefixes
         let mut prefix_groups: HashMap<String, PrefixGroupBuilder> = HashMap::new();
 
+        let file_count = files_with_names.len() as u64;
+
         // First pass: collect prefix candidates from each file
+        let first_pass_bar = Self::create_progress_bar(file_count, "Collecting prefixes");
         for file_info in files_with_names {
             let prefix_candidates = utils::find_prefix_candidates(
                 &file_info.filtered_name,
@@ -1239,12 +1242,15 @@ impl DirMove {
                     );
                 }
             }
+            first_pass_bar.inc(1);
         }
+        first_pass_bar.finish_and_clear();
 
         // Second pass: for each file, check if it should be added to existing groups
         // where the file's first part(s) START WITH the group's prefix.
         // This handles cases like JosephExampleTV matching JosephExample group.
         let group_keys: Vec<String> = prefix_groups.keys().cloned().collect();
+        let second_pass_bar = Self::create_progress_bar(file_count, "Matching files to groups");
         for file_info in files_with_names {
             let file_path = file_info.path_buf();
 
@@ -1269,7 +1275,9 @@ impl DirMove {
                     }
                 }
             }
+            second_pass_bar.inc(1);
         }
+        second_pass_bar.finish_and_clear();
 
         // Convert to final format: display_prefix -> PrefixGroup
         let display_groups: HashMap<String, PrefixGroup> = prefix_groups
@@ -1311,7 +1319,7 @@ impl DirMove {
         // 4. Alphabetically
         // This biases towards prefixes from the start of filenames.
         // Filter out groups smaller than the configured minimum.
-        let mut groups_to_process: Vec<_> = prefix_groups
+        let groups_to_process: Vec<_> = prefix_groups
             .into_iter()
             .filter(|(_, group)| group.files.len() >= self.config.min_group_size)
             .sorted_by(|(prefix_a, group_a), (prefix_b, group_b)| {
@@ -1339,8 +1347,10 @@ impl DirMove {
         }
 
         // Count initial groups for display (before filtering by moved files)
-        let initial_group_count = groups_to_process.len();
-        print_bold!("Found {} group(s) with matching prefixes:\n", initial_group_count);
+        let total_groups = groups_to_process.len();
+        print_bold!("Found {} group(s) with matching prefixes:\n", total_groups);
+
+        let mut group_number: usize = 0;
 
         // Get normalized parent directory name to avoid offering it as a new directory
         let parent_dir_normalized = self
@@ -1349,9 +1359,7 @@ impl DirMove {
             .and_then(|n| n.to_str())
             .map(utils::normalize_name);
 
-        while !groups_to_process.is_empty() {
-            let (prefix, group) = groups_to_process.remove(0);
-
+        for (prefix, group) in groups_to_process {
             // Filter out already moved files
             let available_files: Vec<_> = group.files.into_iter().filter(|f| !moved_files.contains(f)).collect();
 
@@ -1359,77 +1367,103 @@ impl DirMove {
                 continue;
             }
 
-            let dir_name = prefix.replace('.', " ");
-
-            // Strip ignored prefixes from the directory name
-            let dir_name = self.strip_ignored_prefixes(&dir_name).into_owned();
-
-            // Skip if the directory name is empty after stripping
-            if dir_name.is_empty() {
+            let dir_name = self.resolve_group_dir_name(&prefix);
+            if self.should_skip_group(&dir_name, parent_dir_normalized.as_deref()) {
                 continue;
             }
 
-            // Skip if the stripped directory name matches an ignored group name
-            let dir_name_normalized = dir_name.to_lowercase().replace(' ', "");
-            if self.config.ignored_group_names.contains(&dir_name_normalized) {
-                continue;
-            }
-
-            // Skip if the stripped directory name is itself a prefix_ignore
-            if self.is_ignored_prefix(&dir_name) {
-                continue;
-            }
-
-            // Skip if the proposed directory name matches the current parent directory
-            if parent_dir_normalized
-                .as_ref()
-                .is_some_and(|parent| *parent == dir_name_normalized)
-            {
-                continue;
-            }
-            // Check database for a matching suggestion
-            let database_suggestion = self.get_database_suggestion_for_prefix(&dir_name);
-
-            let dir_path = self.root.join(&dir_name);
-            let dir_exists = dir_path.exists();
-
-            println!("{}: {} files", dir_name.cyan().bold(), available_files.len());
-            for file_path in &available_files {
-                println!("  {}", path_to_filename_string(file_path));
-            }
-
-            if dir_exists {
-                println!("  {} Directory already exists", "→".green());
-            } else {
-                println!("  {} Will create directory: {dir_name}", "→".yellow());
-            }
-
-            if !self.config.dryrun {
-                let final_dir_path = if self.config.auto {
-                    Some(dir_path)
-                } else {
-                    self.prompt_for_directory_name_with_suggestion(
-                        &dir_path,
-                        &dir_name,
-                        database_suggestion.as_deref(),
-                    )?
-                };
-
-                if let Some(target_path) = final_dir_path {
-                    if let Err(e) = self.move_files_to_target_dir(&target_path, &available_files) {
-                        print_error!("Failed to process {}: {e}", target_path.display());
-                    } else {
-                        // Mark files as moved
-                        moved_files.extend(available_files);
-                        // Add directory name to database
-                        let final_dir_name = cli_tools::path_to_filename_string(&target_path);
-                        self.add_to_database(&final_dir_name);
-                    }
-                }
-                // Note: "Skipped" message is printed in prompt_for_directory_name
-            }
-            println!();
+            group_number += 1;
+            self.process_single_group(&dir_name, available_files, &mut moved_files, group_number, total_groups)?;
         }
+
+        Ok(())
+    }
+
+    /// Resolve a prefix into a directory name by replacing dots with spaces
+    /// and stripping ignored prefixes.
+    fn resolve_group_dir_name(&self, prefix: &str) -> String {
+        let dir_name = prefix.replace('.', " ");
+        // Strip ignored prefixes from the directory name
+        self.strip_ignored_prefixes(&dir_name).into_owned()
+    }
+
+    /// Check whether a proposed directory name should be skipped.
+    /// Skips empty names, ignored group names, ignored prefixes, and names
+    /// matching the parent directory.
+    fn should_skip_group(&self, dir_name: &str, parent_dir_normalized: Option<&str>) -> bool {
+        // Skip if the directory name is empty after stripping
+        if dir_name.is_empty() {
+            return true;
+        }
+
+        let dir_name_normalized = dir_name.to_lowercase().replace(' ', "");
+
+        // Skip if the stripped directory name matches an ignored group name
+        if self.config.ignored_group_names.contains(&dir_name_normalized) {
+            return true;
+        }
+
+        // Skip if the stripped directory name is itself a prefix_ignore
+        if self.is_ignored_prefix(dir_name) {
+            return true;
+        }
+
+        // Skip if the proposed directory name matches the current parent directory
+        if parent_dir_normalized.is_some_and(|parent| parent == dir_name_normalized) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Print group information, prompt the user, and move files for a single prefix group.
+    fn process_single_group(
+        &self,
+        dir_name: &str,
+        available_files: Vec<PathBuf>,
+        moved_files: &mut HashSet<PathBuf>,
+        group_number: usize,
+        total_groups: usize,
+    ) -> anyhow::Result<()> {
+        // Check database for a matching suggestion
+        let database_suggestion = self.get_database_suggestion_for_prefix(dir_name);
+
+        let dir_path = self.root.join(dir_name);
+        let dir_exists = dir_path.exists();
+
+        let progress = format!("[{group_number}/{total_groups}]").dimmed();
+        println!("{progress} {}: {} files", dir_name.cyan().bold(), available_files.len());
+        for file_path in &available_files {
+            println!("  {}", path_to_filename_string(file_path));
+        }
+
+        if dir_exists {
+            println!("  {} Directory already exists", "→".green());
+        } else {
+            println!("  {} Will create directory: {dir_name}", "→".yellow());
+        }
+
+        if !self.config.dryrun {
+            let final_dir_path = if self.config.auto {
+                Some(dir_path)
+            } else {
+                self.prompt_for_directory_name_with_suggestion(&dir_path, dir_name, database_suggestion.as_deref())?
+            };
+
+            if let Some(target_path) = final_dir_path {
+                if let Err(e) = self.move_files_to_target_dir(&target_path, &available_files) {
+                    print_error!("Failed to process {}: {e}", target_path.display());
+                } else {
+                    // Mark files as moved
+                    moved_files.extend(available_files);
+                    // Add directory name to database
+                    let final_dir_name = cli_tools::path_to_filename_string(&target_path);
+                    self.add_to_database(&final_dir_name);
+                }
+            }
+            // Note: "Skipped" message is printed in prompt_for_directory_name
+        }
+        println!();
 
         Ok(())
     }
@@ -1659,6 +1693,27 @@ impl DirMove {
             Cow::Borrowed(filename)
         } else {
             Cow::Owned(result.to_string())
+        }
+    }
+
+    /// Create a progress bar that is hidden during tests.
+    fn create_progress_bar(length: u64, message: &str) -> ProgressBar {
+        #[cfg(test)]
+        {
+            let _ = (length, message);
+            ProgressBar::hidden()
+        }
+        #[cfg(not(test))]
+        {
+            let progress_bar = ProgressBar::new(length);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+                    .expect("Failed to set progress bar template")
+                    .progress_chars("=> "),
+            );
+            progress_bar.set_message(message.to_string());
+            progress_bar
         }
     }
 
