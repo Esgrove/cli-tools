@@ -22,6 +22,8 @@ enum DuplicateAction {
         keep_index: usize,
         new_name: Option<String>,
     },
+    /// Rename the selected file without deleting any others
+    RenameOnly { rename_index: usize, new_name: String },
     /// Skip this group
     Skip,
     /// Quit the interactive session
@@ -43,6 +45,8 @@ struct TuiState {
     selected: usize,
     /// Whether we're in rename mode
     editing: bool,
+    /// Whether editing is rename-only (keep all files)
+    rename_only: bool,
     /// The new filename being edited
     edit_buffer: String,
     /// Cursor position in edit buffer
@@ -56,6 +60,7 @@ impl TuiState {
         Self {
             selected: 0,
             editing: false,
+            rename_only: false,
             edit_buffer: String::new(),
             cursor_pos: 0,
             confirming: false,
@@ -80,6 +85,7 @@ impl TuiState {
 
     fn stop_editing(&mut self) {
         self.editing = false;
+        self.rename_only = false;
         self.edit_buffer.clear();
         self.cursor_pos = 0;
     }
@@ -172,6 +178,13 @@ fn interactive_loop(
                 });
                 group_index += 1;
             }
+            DuplicateAction::RenameOnly { rename_index, new_name } => {
+                actions.push(GroupAction {
+                    group_index,
+                    action: DuplicateAction::RenameOnly { rename_index, new_name },
+                });
+                group_index += 1;
+            }
         }
     }
 
@@ -216,15 +229,26 @@ fn handle_duplicate_group(
                 match key_event.code {
                     KeyCode::Esc => state.stop_editing(),
                     KeyCode::Enter => {
-                        let new_name = if state.edit_buffer.is_empty() {
-                            None
+                        if state.rename_only {
+                            if state.edit_buffer.is_empty() {
+                                state.stop_editing();
+                            } else {
+                                return Ok(DuplicateAction::RenameOnly {
+                                    rename_index: state.selected,
+                                    new_name: state.edit_buffer.clone(),
+                                });
+                            }
                         } else {
-                            Some(state.edit_buffer.clone())
-                        };
-                        return Ok(DuplicateAction::Keep {
-                            keep_index: state.selected,
-                            new_name,
-                        });
+                            let new_name = if state.edit_buffer.is_empty() {
+                                None
+                            } else {
+                                Some(state.edit_buffer.clone())
+                            };
+                            return Ok(DuplicateAction::Keep {
+                                keep_index: state.selected,
+                                new_name,
+                            });
+                        }
                     }
                     KeyCode::Backspace => state.delete_char(),
                     KeyCode::Delete => state.delete_char_forward(),
@@ -266,6 +290,11 @@ fn handle_duplicate_group(
                     KeyCode::Char('r') => {
                         let selected_file = files[state.selected];
                         state.start_editing(&selected_file.stem);
+                    }
+                    KeyCode::Char('n') => {
+                        let selected_file = files[state.selected];
+                        state.start_editing(&selected_file.stem);
+                        state.rename_only = true;
                     }
                     _ => {}
                 }
@@ -444,14 +473,17 @@ fn render_ui(
         Style::default()
     };
 
-    let status =
-        Paragraph::new(status_content)
-            .style(status_style)
-            .block(Block::default().borders(Borders::ALL).title(if state.editing {
-                "Rename (Enter to confirm, Esc to cancel)"
-            } else {
-                "Status"
-            }));
+    let edit_title = if state.rename_only {
+        "Rename Only (Enter to confirm, Esc to cancel)"
+    } else {
+        "Rename & Keep (Enter to confirm, Esc to cancel)"
+    };
+
+    let status = Paragraph::new(status_content).style(status_style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if state.editing { edit_title } else { "Status" }),
+    );
     frame.render_widget(status, chunks[4]);
 
     // Help
@@ -460,7 +492,7 @@ fn render_ui(
     } else if state.confirming {
         "y: confirm | n: cancel"
     } else {
-        "Enter: keep selected | r: rename & keep | s: skip | q: quit"
+        "Enter: keep selected | r: rename & keep | n: rename only | s: skip | q: quit"
     };
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::DarkGray))
@@ -475,40 +507,57 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
         let group = &duplicates[group_action.group_index];
         let sorted_files: Vec<&FileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
-        if let DuplicateAction::Keep { keep_index, new_name } = &group_action.action {
-            let keep_file = sorted_files[*keep_index];
+        match &group_action.action {
+            DuplicateAction::Keep { keep_index, new_name } => {
+                let keep_file = sorted_files[*keep_index];
 
-            // Handle rename if specified
-            if let Some(new_stem) = new_name {
-                let new_filename = format!("{new_stem}.{}", keep_file.extension);
-                let new_path = keep_file.path.with_file_name(&new_filename);
+                // Handle rename if specified
+                if let Some(new_stem) = new_name {
+                    let new_filename = format!("{new_stem}.{}", keep_file.extension);
+                    let new_path = keep_file.path.with_file_name(&new_filename);
 
-                if new_path != keep_file.path {
-                    println!("{}", colored::Colorize::cyan("Rename:"));
-                    cli_tools::show_diff(
-                        &cli_tools::path_to_string_relative(&keep_file.path),
-                        &cli_tools::path_to_string_relative(&new_path),
-                    );
-                    std::fs::rename(&keep_file.path, &new_path)?;
+                    if new_path != keep_file.path {
+                        println!("{}", colored::Colorize::cyan("Rename:"));
+                        cli_tools::show_diff(
+                            &cli_tools::path_to_string_relative(&keep_file.path),
+                            &cli_tools::path_to_string_relative(&new_path),
+                        );
+                        std::fs::rename(&keep_file.path, &new_path)?;
+                    }
                 }
-            }
 
-            // Delete other files
-            for (i, file) in sorted_files.iter().enumerate() {
-                if i != *keep_index {
-                    // Use direct delete for network paths since trash doesn't work there
-                    let result = if cli_tools::is_network_path(&file.path) {
-                        println!("{}: {}", colored::Colorize::red("Delete"), file.path.display());
-                        std::fs::remove_file(&file.path)
-                    } else {
-                        println!("{}: {}", colored::Colorize::yellow("Trash"), file.path.display());
-                        trash::delete(&file.path).map_err(std::io::Error::other)
-                    };
-                    if let Err(e) = result {
-                        print_yellow!("Failed to delete {}: {e}", file.path.display());
+                // Delete other files
+                for (i, file) in sorted_files.iter().enumerate() {
+                    if i != *keep_index {
+                        // Use direct delete for network paths since trash doesn't work there
+                        let result = if cli_tools::is_network_path(&file.path) {
+                            println!("{}: {}", colored::Colorize::red("Delete"), file.path.display());
+                            std::fs::remove_file(&file.path)
+                        } else {
+                            println!("{}: {}", colored::Colorize::yellow("Trash"), file.path.display());
+                            trash::delete(&file.path).map_err(std::io::Error::other)
+                        };
+                        if let Err(e) = result {
+                            print_yellow!("Failed to delete {}: {e}", file.path.display());
+                        }
                     }
                 }
             }
+            DuplicateAction::RenameOnly { rename_index, new_name } => {
+                let rename_file = sorted_files[*rename_index];
+                let new_filename = format!("{new_name}.{}", rename_file.extension);
+                let new_path = rename_file.path.with_file_name(&new_filename);
+
+                if new_path != rename_file.path {
+                    println!("{}", colored::Colorize::cyan("Rename:"));
+                    cli_tools::show_diff(
+                        &cli_tools::path_to_string_relative(&rename_file.path),
+                        &cli_tools::path_to_string_relative(&new_path),
+                    );
+                    std::fs::rename(&rename_file.path, &new_path)?;
+                }
+            }
+            DuplicateAction::Skip | DuplicateAction::Quit => {}
         }
     }
 
