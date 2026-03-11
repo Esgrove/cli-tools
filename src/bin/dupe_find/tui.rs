@@ -159,7 +159,7 @@ fn interactive_loop(
 
         let action = handle_duplicate_group(
             terminal,
-            &group.key,
+            &group.display_name(),
             &sorted_files,
             group_index,
             duplicates.len(),

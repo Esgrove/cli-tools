@@ -79,12 +79,21 @@ impl DuplicateGroup {
     }
 
     /// Get the display name for this group.
-    /// Uses the pattern match text from the first file if available, otherwise falls back to the key.
+    /// If all files share the same pattern match text, uses that as the identifier.
+    /// Otherwise falls back to the normalized key.
     pub fn display_name(&self) -> String {
-        self.files
-            .first()
-            .and_then(|f| f.pattern_match.map(|range| range.extract_from(&f.filename).to_string()))
-            .unwrap_or_else(|| self.key.clone())
+        let mut pattern_texts = self
+            .files
+            .iter()
+            .filter_map(|f| f.pattern_match.map(|range| range.extract_from(&f.filename)));
+
+        if let Some(first) = pattern_texts.next()
+            && pattern_texts.all(|text| text.eq_ignore_ascii_case(first))
+        {
+            return first.to_string();
+        }
+
+        self.key.clone()
     }
 }
 
@@ -1229,5 +1238,213 @@ mod test_video_info_resolution_string {
             ..Default::default()
         };
         assert_eq!(info.resolution_string(), None);
+    }
+}
+
+#[cfg(test)]
+mod test_display_name {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Helper to create a `FileInfo` with an optional pattern match.
+    fn make_file_with_match(filename: &str, ext: &str, pattern_match: Option<MatchRange>) -> FileInfo {
+        let path = PathBuf::from(filename);
+        let mut file = FileInfo::new(path, ext.to_string());
+        file.pattern_match = pattern_match;
+        file
+    }
+
+    #[test]
+    fn falls_back_to_key_when_no_pattern_matches() {
+        let group = DuplicateGroup::new(
+            "some.movie".to_string(),
+            vec![
+                make_file_with_match("some.movie.mkv", "mkv", None),
+                make_file_with_match("some.movie.mp4", "mp4", None),
+            ],
+        );
+        assert_eq!(group.display_name(), "some.movie");
+    }
+
+    #[test]
+    fn uses_common_pattern_text_when_all_files_match() {
+        // Files: "Show.S01E05.720p.mkv" and "Show.S01E05.1080p.mp4"
+        // Pattern matched "S01E05" in both
+        let group = DuplicateGroup::new(
+            "show.s01e05".to_string(),
+            vec![
+                make_file_with_match("Show.S01E05.720p.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+                make_file_with_match("Show.S01E05.1080p.mp4", "mp4", Some(MatchRange { start: 5, end: 11 })),
+            ],
+        );
+        assert_eq!(group.display_name(), "S01E05");
+    }
+
+    #[test]
+    fn uses_pattern_text_with_different_casing() {
+        // Same pattern matched with different casing across files
+        let group = DuplicateGroup::new(
+            "show.s01e05".to_string(),
+            vec![
+                make_file_with_match("Show.S01E05.720p.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+                make_file_with_match("show.s01e05.1080p.mp4", "mp4", Some(MatchRange { start: 5, end: 11 })),
+            ],
+        );
+        // "S01E05" and "s01e05" match case-insensitively, uses first file's text
+        assert_eq!(group.display_name(), "S01E05");
+    }
+
+    #[test]
+    fn falls_back_to_key_when_pattern_texts_differ() {
+        // Merged group where files matched different pattern texts
+        let group = DuplicateGroup::new(
+            "normalized.key".to_string(),
+            vec![
+                make_file_with_match("Show.S01E05.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+                make_file_with_match("Show.S02E10.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+            ],
+        );
+        // "S01E05" != "S02E10", so falls back to key
+        assert_eq!(group.display_name(), "normalized.key");
+    }
+
+    #[test]
+    fn falls_back_to_key_when_only_some_files_match() {
+        // Group merged from pattern match + normalized name match
+        let group = DuplicateGroup::new(
+            "some.show".to_string(),
+            vec![
+                make_file_with_match("Some.Show.S01E05.mkv", "mkv", Some(MatchRange { start: 10, end: 16 })),
+                make_file_with_match("Some.Show.mkv", "mkv", None),
+            ],
+        );
+        // Not all files have a pattern match, only one matches
+        // The iterator skips the None, finds "S01E05", then has no more items
+        // So it returns the single pattern text
+        assert_eq!(group.display_name(), "S01E05");
+    }
+
+    #[test]
+    fn uses_pattern_text_for_single_file_with_match() {
+        let group = DuplicateGroup::new(
+            "key".to_string(),
+            vec![make_file_with_match(
+                "Show.S01E05.mkv",
+                "mkv",
+                Some(MatchRange { start: 5, end: 11 }),
+            )],
+        );
+        assert_eq!(group.display_name(), "S01E05");
+    }
+
+    #[test]
+    fn falls_back_to_key_for_empty_group() {
+        let group = DuplicateGroup::new("empty.key".to_string(), vec![]);
+        assert_eq!(group.display_name(), "empty.key");
+    }
+
+    #[test]
+    fn matches_episode_pattern_with_letters_and_numbers() {
+        // Pattern like (?i)S\d+E\d+ matching "S01E05" in filenames
+        let group = DuplicateGroup::new(
+            "show.s01e05".to_string(),
+            vec![
+                make_file_with_match("Show.S01E05.720p.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+                make_file_with_match(
+                    "Show.S01E05.REPACK.1080p.mp4",
+                    "mp4",
+                    Some(MatchRange { start: 5, end: 11 }),
+                ),
+                make_file_with_match("show.s01e05.web.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+            ],
+        );
+        assert_eq!(group.display_name(), "S01E05");
+    }
+
+    #[test]
+    fn matches_numeric_only_identifier() {
+        // Pattern like \d{6} matching a numeric ID in filenames
+        let group = DuplicateGroup::new(
+            "clip.483621".to_string(),
+            vec![
+                make_file_with_match("clip.483621.720p.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+                make_file_with_match("clip_483621_1080p.mp4", "mp4", Some(MatchRange { start: 5, end: 11 })),
+            ],
+        );
+        assert_eq!(group.display_name(), "483621");
+    }
+
+    #[test]
+    fn matches_alphabetic_only_identifier() {
+        // Pattern like [A-Za-z]+ matching a word identifier
+        let group = DuplicateGroup::new(
+            "documentary.wildlife".to_string(),
+            vec![
+                make_file_with_match(
+                    "Documentary.Wildlife.720p.mkv",
+                    "mkv",
+                    Some(MatchRange { start: 12, end: 20 }),
+                ),
+                make_file_with_match(
+                    "documentary.wildlife.1080p.mp4",
+                    "mp4",
+                    Some(MatchRange { start: 12, end: 20 }),
+                ),
+            ],
+        );
+        // "Wildlife" and "wildlife" match case-insensitively
+        assert_eq!(group.display_name(), "Wildlife");
+    }
+
+    #[test]
+    fn matches_pattern_at_different_positions_in_filenames() {
+        // Same matched text but at different character positions in each filename
+        // Pattern like (?i)ABC-\d+ matching "ABC-123"
+        let group = DuplicateGroup::new(
+            "normalized.key".to_string(),
+            vec![
+                make_file_with_match("ABC-123.720p.mkv", "mkv", Some(MatchRange { start: 0, end: 7 })),
+                make_file_with_match(
+                    "prefix.ABC-123.1080p.mp4",
+                    "mp4",
+                    Some(MatchRange { start: 7, end: 14 }),
+                ),
+            ],
+        );
+        assert_eq!(group.display_name(), "ABC-123");
+    }
+
+    #[test]
+    fn matches_pattern_with_mixed_separators() {
+        // Pattern matching an identifier like "2024.05.01" across files with different formatting
+        let group = DuplicateGroup::new(
+            "show.2024.05.01".to_string(),
+            vec![
+                make_file_with_match(
+                    "Show.2024.05.01.Episode.mkv",
+                    "mkv",
+                    Some(MatchRange { start: 5, end: 15 }),
+                ),
+                make_file_with_match(
+                    "show.2024.05.01.rerun.mp4",
+                    "mp4",
+                    Some(MatchRange { start: 5, end: 15 }),
+                ),
+            ],
+        );
+        assert_eq!(group.display_name(), "2024.05.01");
+    }
+
+    #[test]
+    fn matches_short_alphanumeric_code() {
+        // Pattern like [A-Z]\d{3} matching codes like "A001"
+        let group = DuplicateGroup::new(
+            "batch.a001".to_string(),
+            vec![
+                make_file_with_match("Batch.A001.v1.mkv", "mkv", Some(MatchRange { start: 6, end: 10 })),
+                make_file_with_match("batch.a001.v2.mp4", "mp4", Some(MatchRange { start: 6, end: 10 })),
+            ],
+        );
+        assert_eq!(group.display_name(), "A001");
     }
 }
