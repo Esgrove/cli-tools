@@ -168,6 +168,7 @@ Options:
   -r, --recurse                Recurse into subdirectories
   -d, --default                Use default paths from config file
   -v, --verbose                Print verbose output
+  -D, --debug                  Print debug output (extensions, patterns, etc.)
   -h, --help                   Print help
   -V, --version                Print version
 ```

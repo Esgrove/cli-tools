@@ -46,6 +46,10 @@ struct Args {
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
+
+    /// Print debug output (extensions, patterns, etc.)
+    #[arg(short = 'D', long, global = true)]
+    debug: bool,
 }
 
 /// Subcommands for dupefind.
@@ -147,6 +151,16 @@ mod cli_args_tests {
         assert!(!args.recurse);
         assert!(!args.default);
         assert!(!args.verbose);
+        assert!(!args.debug);
+    }
+
+    #[test]
+    fn parses_debug_flag() {
+        let args = Args::try_parse_from(["test", "--debug"]).expect("should parse");
+        assert!(args.debug);
+
+        let args = Args::try_parse_from(["test", "-D"]).expect("should parse");
+        assert!(args.debug);
     }
 
     #[test]
@@ -237,5 +251,12 @@ mod config_from_args_tests {
         let args = Args::try_parse_from(["test", "-v"]).expect("should parse");
         let config = Config::from_args(args).expect("should create config");
         assert!(config.verbose);
+    }
+
+    #[test]
+    fn config_debug_flag_enables_debug() {
+        let args = Args::try_parse_from(["test", "--debug"]).expect("should parse");
+        let config = Config::from_args(args).expect("should create config");
+        assert!(config.debug);
     }
 }

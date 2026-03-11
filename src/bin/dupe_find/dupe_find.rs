@@ -160,12 +160,15 @@ impl DupeFind {
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("Scanning paths: {}", paths_display.magenta());
+        }
+
+        if self.config.debug {
             println!("Extensions: {:?}", self.config.extensions);
             if !self.config.patterns.is_empty() {
-                println!(
-                    "Patterns: {:?}",
-                    self.config.patterns.iter().map(Regex::as_str).collect::<Vec<_>>()
-                );
+                println!("Patterns:");
+                for pattern in &self.config.patterns {
+                    println!("  {}", pattern.as_str());
+                }
             }
         }
 
@@ -606,6 +609,7 @@ mod tests_dupe_find {
         DupeFind {
             roots: vec![],
             config: Config {
+                debug: false,
                 dryrun: true,
                 extensions: vec!["mp4".to_string(), "mkv".to_string()],
                 move_files: false,

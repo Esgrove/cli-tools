@@ -44,6 +44,7 @@ struct UserConfig {
 /// Final config created from CLI arguments and user config file.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub(crate) debug: bool,
     pub(crate) dryrun: bool,
     pub(crate) extensions: Vec<String>,
     pub(crate) move_files: bool,
@@ -117,6 +118,7 @@ impl Config {
         }
 
         Ok(Self {
+            debug: args.debug,
             dryrun: args.print || user_config.dryrun,
             extensions,
             move_files: args.move_files || user_config.move_files,
