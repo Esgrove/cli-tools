@@ -503,9 +503,22 @@ fn render_ui(
 
 /// Apply all collected actions
 fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyhow::Result<()> {
-    for group_action in actions {
+    let actionable: Vec<&GroupAction> = actions
+        .iter()
+        .filter(|a| !matches!(a.action, DuplicateAction::Skip | DuplicateAction::Quit))
+        .collect();
+    let total = actionable.len();
+
+    for (number, group_action) in actionable.into_iter().enumerate() {
         let group = &duplicates[group_action.group_index];
         let sorted_files: Vec<&FileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
+
+        println!(
+            "{}",
+            colored::Colorize::bold(colored::Colorize::white(
+                format!("── Group {}/{total} ──", number + 1).as_str()
+            ))
+        );
 
         match &group_action.action {
             DuplicateAction::Keep { keep_index, new_name } => {
@@ -557,7 +570,7 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
                     std::fs::rename(&rename_file.path, &new_path)?;
                 }
             }
-            DuplicateAction::Skip | DuplicateAction::Quit => {}
+            DuplicateAction::Skip | DuplicateAction::Quit => unreachable!(),
         }
     }
 
