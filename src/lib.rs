@@ -1,6 +1,7 @@
 pub mod date;
 pub mod dot_rename;
 pub mod resolution;
+pub mod scan_cache;
 pub mod video_info;
 
 pub use resolution::Resolution;

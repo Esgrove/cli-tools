@@ -13,6 +13,7 @@ use rayon::iter::ParallelIterator;
 use regex::Regex;
 use walkdir::WalkDir;
 
+use cli_tools::scan_cache::ScanCache;
 use cli_tools::video_info::VideoInfo;
 use cli_tools::{create_semaphore_for_io_bound, print_error, print_yellow};
 
@@ -274,8 +275,10 @@ impl DupeFind {
     }
 
     /// Collect metadata for all files in duplicate groups using ffprobe.
-    /// Runs ffprobe calls concurrently with a semaphore to limit parallelism.
-    /// Returns a map from file path to metadata.
+    ///
+    /// Checks the shared scan cache first so that files already analysed by
+    /// `vconvert` (or a previous `dupefind` run) are not re-probed.
+    /// Newly probed results are written back to the cache.
     fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf, VideoInfo> {
         // Collect all unique file paths from duplicate groups
         let all_files: Vec<PathBuf> = groups
@@ -287,8 +290,64 @@ impl DupeFind {
             return HashMap::new();
         }
 
-        let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        runtime.block_on(collect_metadata_async(all_files))
+        // Try to load the scan cache; if it fails, just probe everything
+        let scan_cache = match ScanCache::open() {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                print_yellow!("Could not open scan cache: {error}");
+                None
+            }
+        };
+
+        let cached_entries = scan_cache
+            .as_ref()
+            .and_then(|cache| cache.get_all().ok())
+            .unwrap_or_default();
+
+        // Split files into cache hits and misses (check path + size match)
+        let mut metadata: HashMap<PathBuf, VideoInfo> = HashMap::new();
+        let mut cache_misses: Vec<PathBuf> = Vec::new();
+
+        for path in &all_files {
+            let path_key = path.to_string_lossy();
+            let file_size = std::fs::metadata(path).map(|m| m.len()).ok();
+
+            if let Some(cached) = cached_entries.get(path_key.as_ref())
+                && file_size == Some(cached.size_bytes)
+            {
+                metadata.insert(path.clone(), cached.to_video_info());
+            } else {
+                cache_misses.push(path.clone());
+            }
+        }
+
+        let cache_hit_count = metadata.len();
+        if cache_hit_count > 0 {
+            println!(
+                "Scan cache: {} hit(s), {} miss(es)",
+                cache_hit_count,
+                cache_misses.len()
+            );
+        }
+
+        // Probe remaining files with ffprobe
+        if !cache_misses.is_empty() {
+            let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            let probed = runtime.block_on(collect_metadata_async(cache_misses));
+
+            // Write newly probed results back to the cache
+            if let Some(mut cache) = scan_cache {
+                let entries: Vec<(&Path, &VideoInfo)> =
+                    probed.iter().map(|(path, info)| (path.as_path(), info)).collect();
+                if let Err(error) = cache.batch_upsert(&entries) {
+                    print_yellow!("Failed to write scan cache: {error}");
+                }
+            }
+
+            metadata.extend(probed);
+        }
+
+        metadata
     }
 
     /// Find all duplicates in a single pass using multiple detection methods.
