@@ -23,6 +23,8 @@ pub struct DupeConfig {
     #[serde(default)]
     extensions: Vec<String>,
     #[serde(default)]
+    ignore_matches: Vec<String>,
+    #[serde(default)]
     move_files: bool,
     #[serde(default)]
     pub(crate) paths: Vec<PathBuf>,
@@ -47,6 +49,9 @@ pub struct Config {
     pub(crate) debug: bool,
     pub(crate) dryrun: bool,
     pub(crate) extensions: Vec<String>,
+    /// Pattern match texts to ignore (case-insensitive). Groups whose display name
+    /// matches any of these strings will be skipped.
+    pub(crate) ignore_matches: Vec<String>,
     pub(crate) move_files: bool,
     pub(crate) patterns: Vec<Regex>,
     pub(crate) recurse: bool,
@@ -94,6 +99,13 @@ impl Config {
     pub fn from_args(args: Args) -> anyhow::Result<Self> {
         let user_config = DupeConfig::get_user_config()?;
 
+        // Collect ignore matches from config (stored lowercase for case-insensitive comparison)
+        let ignore_matches: Vec<String> = user_config
+            .ignore_matches
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+
         // Combine patterns from config and CLI
         let pattern_strings: Vec<String> = user_config.patterns.into_iter().chain(args.pattern).unique().collect();
 
@@ -121,6 +133,7 @@ impl Config {
             debug: args.debug,
             dryrun: args.print || user_config.dryrun,
             extensions,
+            ignore_matches,
             move_files: args.move_files || user_config.move_files,
             patterns,
             recurse: args.recurse || user_config.recurse,
@@ -142,6 +155,7 @@ mod dupe_config_tests {
         assert!(!config.recurse);
         assert!(!config.verbose);
         assert!(config.extensions.is_empty());
+        assert!(config.ignore_matches.is_empty());
         assert!(config.patterns.is_empty());
         assert!(config.paths.is_empty());
         assert!(config.default_paths.is_empty());
@@ -200,6 +214,16 @@ default_paths = ["/default/path"]
         let toml = "this is not valid toml {{{";
         let result = DupeConfig::from_toml_str(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_toml_str_parses_ignore_matches() {
+        let toml = r#"
+[dupefind]
+ignore_matches = ["ABC-123", "Some.Show"]
+"#;
+        let config = DupeConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.ignore_matches, vec!["ABC-123", "Some.Show"]);
     }
 
     #[test]

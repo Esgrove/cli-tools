@@ -180,10 +180,14 @@ impl DupeFind {
                     println!("  {}", pattern.as_str());
                 }
             }
+            if !self.config.ignore_matches.is_empty() {
+                println!("Ignore matches: {:?}", self.config.ignore_matches);
+            }
         }
 
         let files = self.gather_files();
         let duplicates = self.find_all_duplicates(&files);
+        let duplicates = self.filter_ignored_groups(duplicates);
 
         if duplicates.is_empty() {
             println!("{}", "No duplicates found".green());
@@ -360,6 +364,26 @@ impl DupeFind {
     }
 
     /// Find all duplicates in a single pass using multiple detection methods.
+    /// Filter out duplicate groups whose display name matches any of the configured ignore strings.
+    /// Comparison is case-insensitive.
+    fn filter_ignored_groups(&self, groups: Vec<DuplicateGroup>) -> Vec<DuplicateGroup> {
+        if self.config.ignore_matches.is_empty() {
+            return groups;
+        }
+
+        groups
+            .into_iter()
+            .filter(|group| {
+                let name = group.display_name().to_lowercase();
+                let contains = self.config.ignore_matches.contains(&name);
+                if contains && self.config.verbose {
+                    println!("Ignoring group: {}", group.display_name());
+                }
+                !contains
+            })
+            .collect()
+    }
+
     /// Files are grouped together if they match any of the criteria:
     /// - Same filename in different directories
     /// - Match the same identifier pattern
@@ -680,6 +704,7 @@ mod tests_dupe_find {
                 debug: false,
                 dryrun: true,
                 extensions: vec!["mp4".to_string(), "mkv".to_string()],
+                ignore_matches: vec![],
                 move_files: false,
                 patterns,
                 recurse: false,
@@ -1446,5 +1471,173 @@ mod test_display_name {
             ],
         );
         assert_eq!(group.display_name(), "A001");
+    }
+}
+
+#[cfg(test)]
+mod test_filter_ignored_groups {
+    use crate::config::Config;
+    use crate::dupe_find::{DupeFind, DuplicateGroup, FileInfo, MatchRange};
+
+    use std::path::PathBuf;
+
+    /// Helper to create a `FileInfo` with an optional pattern match.
+    fn make_file_with_match(filename: &str, ext: &str, pattern_match: Option<MatchRange>) -> FileInfo {
+        let path = PathBuf::from(filename);
+        let mut file = FileInfo::new(path, ext.to_string());
+        file.pattern_match = pattern_match;
+        file
+    }
+
+    /// Helper to create a `DupeFind` with specific ignore matches.
+    fn make_dupe_finder(ignore_matches: Vec<&str>) -> DupeFind {
+        DupeFind {
+            roots: vec![],
+            config: Config {
+                debug: false,
+                dryrun: false,
+                extensions: vec![],
+                ignore_matches: ignore_matches.into_iter().map(str::to_lowercase).collect(),
+                move_files: false,
+                patterns: vec![],
+                recurse: false,
+                verbose: false,
+            },
+        }
+    }
+
+    #[test]
+    fn keeps_all_groups_when_no_ignores_configured() {
+        let finder = make_dupe_finder(vec![]);
+        let groups = vec![
+            DuplicateGroup::new(
+                "movie.one".to_string(),
+                vec![
+                    make_file_with_match("movie.one.mkv", "mkv", None),
+                    make_file_with_match("movie.one.mp4", "mp4", None),
+                ],
+            ),
+            DuplicateGroup::new(
+                "movie.two".to_string(),
+                vec![
+                    make_file_with_match("movie.two.mkv", "mkv", None),
+                    make_file_with_match("movie.two.mp4", "mp4", None),
+                ],
+            ),
+        ];
+        let filtered = finder.filter_ignored_groups(groups);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn filters_group_by_key_match() {
+        let finder = make_dupe_finder(vec!["movie.one"]);
+        let groups = vec![
+            DuplicateGroup::new(
+                "movie.one".to_string(),
+                vec![
+                    make_file_with_match("movie.one.mkv", "mkv", None),
+                    make_file_with_match("movie.one.mp4", "mp4", None),
+                ],
+            ),
+            DuplicateGroup::new(
+                "movie.two".to_string(),
+                vec![
+                    make_file_with_match("movie.two.mkv", "mkv", None),
+                    make_file_with_match("movie.two.mp4", "mp4", None),
+                ],
+            ),
+        ];
+        let filtered = finder.filter_ignored_groups(groups);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].key, "movie.two");
+    }
+
+    #[test]
+    fn filters_group_by_pattern_match_display_name() {
+        let finder = make_dupe_finder(vec!["S01E05"]);
+        let groups = vec![DuplicateGroup::new(
+            "show.s01e05".to_string(),
+            vec![
+                make_file_with_match("Show.S01E05.720p.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+                make_file_with_match("Show.S01E05.1080p.mp4", "mp4", Some(MatchRange { start: 5, end: 11 })),
+            ],
+        )];
+        let filtered = finder.filter_ignored_groups(groups);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn comparison_is_case_insensitive() {
+        let finder = make_dupe_finder(vec!["ABC-123"]);
+        let groups = vec![DuplicateGroup::new(
+            "normalized.key".to_string(),
+            vec![
+                make_file_with_match("prefix.Abc-123.mkv", "mkv", Some(MatchRange { start: 7, end: 14 })),
+                make_file_with_match("prefix.abc-123.mp4", "mp4", Some(MatchRange { start: 7, end: 14 })),
+            ],
+        )];
+        let filtered = finder.filter_ignored_groups(groups);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn does_not_filter_partial_matches() {
+        let finder = make_dupe_finder(vec!["ABC"]);
+        let groups = vec![DuplicateGroup::new(
+            "abc-123".to_string(),
+            vec![
+                make_file_with_match("ABC-123.mkv", "mkv", None),
+                make_file_with_match("ABC-123.mp4", "mp4", None),
+            ],
+        )];
+        // "abc-123" != "abc", so the group should be kept
+        let filtered = finder.filter_ignored_groups(groups);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn filters_multiple_ignored_patterns() {
+        let finder = make_dupe_finder(vec!["movie.one", "movie.three"]);
+        let groups = vec![
+            DuplicateGroup::new(
+                "movie.one".to_string(),
+                vec![
+                    make_file_with_match("movie.one.mkv", "mkv", None),
+                    make_file_with_match("movie.one.mp4", "mp4", None),
+                ],
+            ),
+            DuplicateGroup::new(
+                "movie.two".to_string(),
+                vec![
+                    make_file_with_match("movie.two.mkv", "mkv", None),
+                    make_file_with_match("movie.two.mp4", "mp4", None),
+                ],
+            ),
+            DuplicateGroup::new(
+                "movie.three".to_string(),
+                vec![
+                    make_file_with_match("movie.three.mkv", "mkv", None),
+                    make_file_with_match("movie.three.mp4", "mp4", None),
+                ],
+            ),
+        ];
+        let filtered = finder.filter_ignored_groups(groups);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].key, "movie.two");
+    }
+
+    #[test]
+    fn filters_by_numeric_pattern_display_name() {
+        let finder = make_dupe_finder(vec!["483621"]);
+        let groups = vec![DuplicateGroup::new(
+            "clip.483621".to_string(),
+            vec![
+                make_file_with_match("clip.483621.720p.mkv", "mkv", Some(MatchRange { start: 5, end: 11 })),
+                make_file_with_match("clip_483621_1080p.mp4", "mp4", Some(MatchRange { start: 5, end: 11 })),
+            ],
+        )];
+        let filtered = finder.filter_ignored_groups(groups);
+        assert_eq!(filtered.len(), 0);
     }
 }

@@ -141,6 +141,10 @@ replace = [
 # Identifier patterns to search for (regex) - used to find duplicate video IDs
 # patterns = ["ABC\\d{3,4}", "XYZ\\d{3,4}"]
 
+# Pattern match texts to ignore (case-insensitive).
+# Groups whose display name matches any of these strings will be skipped.
+# ignore_matches = ["ABC-123"]
+
 [flip_date]
 # Only print changes without renaming
 # dryrun = false
