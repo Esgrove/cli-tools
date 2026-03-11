@@ -406,9 +406,9 @@ fn render_ui(
             Constraint::Length(3),                // Header
             Constraint::Length(file_list_height), // File list (compact)
             Constraint::Length(details_height),   // File details
-            Constraint::Min(0),                   // Spacer to push status/help down
             Constraint::Length(3),                // Status/Edit area
             Constraint::Length(3),                // Help
+            Constraint::Min(0),                   // Spacer (unused space below)
         ])
         .split(area);
 
@@ -484,7 +484,7 @@ fn render_ui(
             .borders(Borders::ALL)
             .title(if state.editing { edit_title } else { "Status" }),
     );
-    frame.render_widget(status, chunks[4]);
+    frame.render_widget(status, chunks[3]);
 
     // Help
     let help_text = if state.editing {
@@ -498,7 +498,7 @@ fn render_ui(
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL).title("Help"));
 
-    frame.render_widget(help, chunks[5]);
+    frame.render_widget(help, chunks[4]);
 }
 
 /// Apply all collected actions
