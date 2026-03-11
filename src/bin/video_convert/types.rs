@@ -262,12 +262,20 @@ impl VideoInfo {
                         }
                     }
                     "r_frame_rate" => {
-                        // Parse fractional framerate like "30/1" or "30000/1001"
-                        if let Some((num, den)) = value.split_once('/')
+                        // Parse fractional framerate like "30/1" or "30000/1001".
+                        // Only accept the first valid value within a reasonable range,
+                        // as ffprobe may output multiple streams where later entries
+                        // can have bogus values like 0/1 or 90000/1 (timebase).
+                        if frames_per_second.is_none()
+                            && let Some((num, den)) = value.split_once('/')
                             && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())
                             && d > 0.0
+                            && n > 0.0
                         {
-                            frames_per_second = Some(n / d);
+                            let fps = n / d;
+                            if (1.0..=240.0).contains(&fps) {
+                                frames_per_second = Some(fps);
+                            }
                         }
                     }
                     _ => {}
@@ -569,6 +577,58 @@ mod video_info_tests {
     }
 
     #[test]
+    fn from_ffprobe_output_rejects_zero_framerate() {
+        let output = "codec_name=h264\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      r_frame_rate=0/1\n";
+        let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("framerate"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_rejects_timebase_framerate() {
+        let output = "codec_name=h264\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      r_frame_rate=90000/1\n";
+        let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("framerate"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_takes_first_valid_framerate() {
+        let output = "codec_name=h264\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      r_frame_rate=24/1\n\
+                      r_frame_rate=0/1\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4")).unwrap();
+        assert!((info.frames_per_second - 24.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn from_ffprobe_output_skips_bogus_takes_valid_framerate() {
+        let output = "codec_name=h264\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      r_frame_rate=90000/1\n\
+                      r_frame_rate=25/1\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4")).unwrap();
+        assert!((info.frames_per_second - 25.0).abs() < 0.01);
+    }
+
+    #[test]
     fn quality_level_4k_high_bitrate() {
         let info = VideoInfo {
             codec: "h264".to_string(),
@@ -658,7 +718,7 @@ mod video_info_tests {
         let display = format!("{info}");
         assert!(display.contains("hevc"));
         assert!(display.contains("1.00 GB"));
-        assert!(display.contains("8.00 Mbps"));
+        assert!(display.contains("8.00 Mbps @ 24 FPS"));
         assert!(display.contains("1920x1080"));
         assert!(display.contains("1h 01m 01s"));
     }

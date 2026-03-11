@@ -242,6 +242,11 @@ impl Database {
 
                 CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
 
+                -- Remove entries with invalid fps
+                -- (written by older versions that accepted 0 or timebase values).
+                DELETE FROM scanned_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
+                DELETE FROM pending_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
+
                 -- Performance optimizations
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = NORMAL;
@@ -1407,8 +1412,10 @@ mod tests {
         assert_eq!(info.codec, "h264");
         assert_eq!(info.bitrate_kbps, 8000);
         assert_eq!(info.size_bytes, 1_000_000_000);
+        cli_tools::assert_f64_eq(info.duration, 3600.0);
         assert_eq!(info.width, 1920);
         assert_eq!(info.height, 1080);
+        cli_tools::assert_f64_eq(info.frames_per_second, 24.0);
     }
 
     #[test]
@@ -2037,10 +2044,12 @@ mod tests {
         let found_a = all.get("/videos/a.mkv").expect("Expected entry for a.mkv");
         assert_eq!(found_a.codec, info_a.codec);
         assert_eq!(found_a.size_bytes, info_a.size_bytes);
+        cli_tools::assert_f64_eq(found_a.frames_per_second, info_a.frames_per_second);
 
         let found_b = all.get("/videos/b.mp4").expect("Expected entry for b.mp4");
         assert_eq!(found_b.codec, "hevc");
         assert_eq!(found_b.size_bytes, 500_000_000);
+        cli_tools::assert_f64_eq(found_b.frames_per_second, 30.0);
     }
 
     #[test]
