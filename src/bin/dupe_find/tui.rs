@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use itertools::Itertools;
 use ratatui::prelude::*;
@@ -251,9 +251,6 @@ fn handle_duplicate_group(
             } else {
                 match key_event.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(DuplicateAction::Quit),
-                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(DuplicateAction::Quit);
-                    }
                     KeyCode::Up | KeyCode::Char('k') => {
                         state.select_prev();
                         list_state.select(Some(state.selected));
