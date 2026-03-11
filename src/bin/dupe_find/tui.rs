@@ -314,8 +314,12 @@ fn format_file_detail_lines(
 
         let codec_str = meta.codec.as_deref().unwrap_or("N/A");
 
+        let bitrate_str = meta
+            .bitrate_kbps
+            .map_or_else(|| "N/A".to_string(), |kbps| format!("{:.1} Mbps", kbps as f64 / 1000.0));
+
         let detail_line = Line::from(vec![
-            Span::styled(format!("{prefix}  "), base_style),
+            Span::styled("     ".to_string(), base_style),
             Span::styled("Size: ", label_style),
             Span::styled(format!("{size_str:<12}"), base_style),
             Span::styled("Duration: ", label_style),
@@ -323,12 +327,14 @@ fn format_file_detail_lines(
             Span::styled("Resolution: ", label_style),
             Span::styled(format!("{resolution_str:<12}"), base_style),
             Span::styled("Codec: ", label_style),
-            Span::styled(codec_str.to_string(), base_style),
+            Span::styled(format!("{codec_str:<10}"), base_style),
+            Span::styled("Bitrate: ", label_style),
+            Span::styled(bitrate_str, base_style),
         ]);
         lines.push(detail_line);
     } else {
         lines.push(Line::from(Span::styled(
-            format!("{prefix}  (metadata unavailable)"),
+            "     (metadata unavailable)".to_string(),
             label_style,
         )));
     }
@@ -390,13 +396,12 @@ fn render_ui(
         .enumerate()
         .map(|(i, file)| {
             let prefix = if i == state.selected { "► " } else { "  " };
-            let path_str = file.path.display().to_string();
             let style = if i == state.selected {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            ListItem::new(format!("{prefix}{path_str}")).style(style)
+            ListItem::new(format!("{prefix}{}", file.filename)).style(style)
         })
         .collect();
 
