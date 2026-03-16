@@ -1212,7 +1212,7 @@ impl DirMove {
                 // Add file to ALL matching prefix groups, not just the best one
                 for candidate in prefix_candidates {
                     // Compute normalized key and split parts once per candidate
-                    let key = utils::normalize_prefix(&candidate.prefix);
+                    let key = utils::normalize_name(&candidate.prefix);
                     let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
 
                     // Skip candidates that match ignored group names
@@ -1444,7 +1444,7 @@ impl DirMove {
             return true;
         }
 
-        let dir_name_normalized = dir_name.to_lowercase().replace(' ', "");
+        let dir_name_normalized = utils::normalize_name(dir_name);
 
         // Skip if the stripped directory name matches an ignored group name
         if self.config.ignored_group_names.contains(&dir_name_normalized) {
@@ -2821,6 +2821,91 @@ mod test_ignored_group_names {
             "Ignored group name 'Season.One' should not be offered"
         );
         // But "Studio" should still be offered
+        assert!(
+            groups.contains_key("Studio"),
+            "Non-ignored group name 'Studio' should still be offered"
+        );
+    }
+
+    #[test]
+    fn ignored_multi_part_group_name_with_spaces() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Season.One.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
+
+        // Space-separated form should be normalized and still match
+        let config = Config::test_with_ignored_group_names(vec!["Season One"]);
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(
+            !groups.contains_key("Season.One"),
+            "Ignored group name 'Season One' (with space) should filter 'Season.One'"
+        );
+        assert!(
+            groups.contains_key("Studio"),
+            "Non-ignored group name 'Studio' should still be offered"
+        );
+    }
+
+    #[test]
+    fn ignored_multi_part_group_name_with_dots() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Season.One.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
+
+        // Dot-separated form should be normalized and still match
+        let config = Config::test_with_ignored_group_names(vec!["Season.One"]);
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(
+            !groups.contains_key("Season.One"),
+            "Ignored group name 'Season.One' (with dot) should filter 'Season.One'"
+        );
+        assert!(
+            groups.contains_key("Studio"),
+            "Non-ignored group name 'Studio' should still be offered"
+        );
+    }
+
+    #[test]
+    fn ignored_group_names_mixed_formats_all_match() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Season.One.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Big.Show.01.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Big.Show.02.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Big.Show.03.mp4"), "").unwrap();
+
+        // Mix of space, dot, and concatenated forms should all normalize the same way
+        let config = Config::test_with_ignored_group_names(vec!["Season One", "Big.Show"]);
+
+        let dirmove = DirMove::new(root, config);
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(
+            !groups.contains_key("Season.One"),
+            "Space-separated ignore 'Season One' should filter 'Season.One'"
+        );
+        assert!(
+            !groups.contains_key("Big.Show"),
+            "Dot-separated ignore 'Big.Show' should filter 'Big.Show'"
+        );
         assert!(
             groups.contains_key("Studio"),
             "Non-ignored group name 'Studio' should still be offered"

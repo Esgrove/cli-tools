@@ -5,6 +5,7 @@ use itertools::Itertools;
 use serde::Deserialize;
 
 use crate::DirMoveArgs;
+use crate::utils;
 
 /// A custom mapping pair that maps files containing a pattern to a specific directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +187,7 @@ impl Config {
             .ignored_group_names
             .into_iter()
             .chain(args.ignored_group_name)
-            .map(|s| s.to_lowercase())
+            .map(|s| utils::normalize_name(&s))
             .unique()
             .collect();
 
@@ -194,7 +195,7 @@ impl Config {
             .ignored_group_parts
             .into_iter()
             .chain(args.ignored_group_part)
-            .map(|s| s.to_lowercase())
+            .map(|s| s.trim().to_lowercase())
             .unique()
             .collect();
 
@@ -202,7 +203,7 @@ impl Config {
             .prefix_ignores
             .into_iter()
             .chain(args.prefix_ignore)
-            .map(|s| s.to_lowercase())
+            .map(|s| s.trim().to_lowercase())
             .unique()
             .collect();
 
@@ -217,7 +218,7 @@ impl Config {
             .unpack_directories
             .into_iter()
             .chain(args.unpack_directory)
-            .map(|s| s.to_lowercase())
+            .map(|s| s.trim().to_lowercase())
             .unique()
             .collect();
 
@@ -296,7 +297,7 @@ impl Config {
     /// Create a test config with ignored group names (automatically lowercased).
     pub fn test_with_ignored_group_names(ignored_group_names: Vec<&str>) -> Self {
         Self {
-            ignored_group_names: ignored_group_names.into_iter().map(str::to_lowercase).collect(),
+            ignored_group_names: ignored_group_names.into_iter().map(utils::normalize_name).collect(),
             min_group_size: 3,
             min_prefix_chars: 1,
             dryrun: true,
@@ -345,7 +346,7 @@ impl Config {
     ) -> Self {
         Self {
             prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
-            ignored_group_names: ignored_group_names.into_iter().map(str::to_lowercase).collect(),
+            ignored_group_names: ignored_group_names.into_iter().map(utils::normalize_name).collect(),
             min_group_size: 3,
             min_prefix_chars: 1,
             dryrun: true,
@@ -733,6 +734,26 @@ mod cli_args_tests {
         // CLI ignored group names should be stored as lowercase
         assert!(config.ignored_group_names.contains(&"episode".to_string()));
         assert!(config.ignored_group_names.contains(&"video".to_string()));
+    }
+
+    #[test]
+    fn config_from_args_ignored_group_names_normalized() {
+        let args = DirMoveArgs::try_parse_from(["test", "-I", "Season One", "-I", "Big.Show", "-I", "SeasonTwo"])
+            .expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        // Spaces, dots, and case should all be normalized via normalize_name
+        assert!(
+            config.ignored_group_names.contains(&"seasonone".to_string()),
+            "Space-separated name should be normalized to 'seasonone'"
+        );
+        assert!(
+            config.ignored_group_names.contains(&"bigshow".to_string()),
+            "Dot-separated name should be normalized to 'bigshow'"
+        );
+        assert!(
+            config.ignored_group_names.contains(&"seasontwo".to_string()),
+            "Concatenated name should be normalized to 'seasontwo'"
+        );
     }
 
     #[test]

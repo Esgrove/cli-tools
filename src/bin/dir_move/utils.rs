@@ -16,8 +16,7 @@ const GLUE_WORDS: &[&str] = &[
 /// Directory names that should be deleted when encountered.
 const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
 
-/// Normalize a directory name for storage and comparison.
-/// Converts to lowercase and removes spaces and dots.
+/// Normalize a name for comparison by lowercasing and removing spaces and dots.
 /// This allows matching variations like "Jane Doe", "`JaneDoe`", and "Jane.Doe".
 #[allow(clippy::doc_markdown)]
 pub fn normalize_name(name: &str) -> String {
@@ -97,7 +96,7 @@ pub fn find_prefix_candidates<'a>(
     {
         let char_count = count_prefix_chars(three_part);
         if char_count >= min_prefix_chars {
-            let three_part_normalized = normalize_prefix(three_part);
+            let three_part_normalized = normalize_name(three_part);
             // Skip if we've already processed this normalized form
             if seen_normalized.contains(&three_part_normalized) {
                 continue;
@@ -134,7 +133,7 @@ pub fn find_prefix_candidates<'a>(
     {
         let char_count = count_prefix_chars(two_part);
         if char_count >= min_prefix_chars {
-            let two_part_normalized = normalize_prefix(two_part);
+            let two_part_normalized = normalize_name(two_part);
             // Skip if we've already processed this normalized form
             if seen_normalized.contains(&two_part_normalized) {
                 continue;
@@ -405,12 +404,6 @@ pub fn parts_are_contiguous_in_original_precomputed(original_parts: &[String], p
     false
 }
 
-/// Normalize a prefix for comparison by removing dots and lowercasing.
-/// This allows "Show.TV" and "`ShowTV`" to be treated as equivalent.
-pub fn normalize_prefix(prefix: &str) -> String {
-    prefix.replace('.', "").to_lowercase()
-}
-
 /// Extract all N-part sequences from a filename as string slices.
 /// For `A.B.C.D`, with n=2, returns `["A.B", "B.C", "C.D"]`.
 /// This allows finding common group names that appear anywhere in filenames,
@@ -469,6 +462,7 @@ mod test_normalize_name {
         assert_eq!(normalize_name("Hello.World"), "helloworld");
         assert_eq!(normalize_name("Name.With.Dots"), "namewithdots");
         assert_eq!(normalize_name("Mixed.Dots And Spaces"), "mixeddotsandspaces");
+        assert_eq!(normalize_name("  leading trailing  "), "leadingtrailing");
     }
 }
 
@@ -1362,15 +1356,19 @@ mod test_prefix_candidates {
     }
 
     #[test]
-    fn normalize_prefix_removes_dots_and_lowercases() {
-        assert_eq!(normalize_prefix("PhotoLab"), "photolab");
-        assert_eq!(normalize_prefix("Photo.Lab"), "photolab");
-        assert_eq!(normalize_prefix("photo.lab"), "photolab");
-        assert_eq!(normalize_prefix("Album.Name.Here"), "albumnamehere");
-        assert_eq!(normalize_prefix("StudioTV"), "studiotv");
-        assert_eq!(normalize_prefix("Studio.TV"), "studiotv");
-        assert_eq!(normalize_prefix("studio.tv"), "studiotv");
-        assert_eq!(normalize_prefix("Show.Name.Here"), "shownamehere");
+    fn normalize_name_removes_dots_spaces_and_lowercases() {
+        assert_eq!(normalize_name("PhotoLab"), "photolab");
+        assert_eq!(normalize_name("Photo.Lab"), "photolab");
+        assert_eq!(normalize_name("photo.lab"), "photolab");
+        assert_eq!(normalize_name("Album.Name.Here"), "albumnamehere");
+        assert_eq!(normalize_name("StudioTV"), "studiotv");
+        assert_eq!(normalize_name("Studio.TV"), "studiotv");
+        assert_eq!(normalize_name("studio.tv"), "studiotv");
+        assert_eq!(normalize_name("Show.Name.Here"), "shownamehere");
+        assert_eq!(normalize_name("Photo Lab"), "photolab");
+        assert_eq!(normalize_name("Album Name Here"), "albumnamehere");
+        assert_eq!(normalize_name("Studio TV"), "studiotv");
+        assert_eq!(normalize_name("  Photo Lab  "), "photolab");
     }
 
     #[test]
@@ -2083,7 +2081,7 @@ mod test_position_agnostic_matching {
         ]);
         let candidates = find_prefix_candidates("PhotoLab.Image.One.jpg", &files, 3, 5);
         // PhotoLab should match all (via concatenation normalization)
-        let photolab_candidate = candidates.iter().find(|c| normalize_prefix(&c.prefix) == "photolab");
+        let photolab_candidate = candidates.iter().find(|c| normalize_name(&c.prefix) == "photolab");
         assert!(
             photolab_candidate.is_some(),
             "Expected to find PhotoLab-related candidate, got: {candidates:?}"
