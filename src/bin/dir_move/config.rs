@@ -373,8 +373,9 @@ impl Config {
 
 /// Add a group name to `ignored_group_names` in a TOML document string.
 /// The name is stored as-is (not normalized) so the config stays human-readable.
-/// Returns `Ok(true)` if the name was added, `Ok(false)` if it was already present.
-/// The modified document is written back to the provided string.
+/// Inserts the name in case-insensitive alphabetical order and formats the array
+/// with one entry per line.
+/// Returns the modified document string and whether the name was added.
 fn add_ignored_name_to_toml(content: &str, name: &str) -> Result<(String, bool)> {
     let mut document = content
         .parse::<DocumentMut>()
@@ -407,7 +408,32 @@ fn add_ignored_name_to_toml(content: &str, name: &str) -> Result<(String, bool)>
         return Ok((document.to_string(), false));
     }
 
-    array.push(name);
+    // Find the alphabetically correct insertion position (case-insensitive)
+    let name_lower = name.to_lowercase();
+    let insert_index = array
+        .iter()
+        .position(|item| {
+            item.as_str()
+                .is_some_and(|existing| existing.to_lowercase() > name_lower)
+        })
+        .unwrap_or(array.len());
+
+    // For multiline arrays, use insert_formatted with matching decor so the new entry
+    // gets the same indentation as existing entries. For inline arrays (or empty arrays),
+    // use plain insert which applies default inline formatting.
+    let multiline_decor = array.get(0).and_then(|item| {
+        let decor = item.decor();
+        let prefix = decor.prefix()?.as_str()?;
+        prefix.contains('\n').then(|| decor.clone())
+    });
+
+    if let Some(decor) = multiline_decor {
+        let mut value = toml_edit::Value::from(name);
+        *value.decor_mut() = decor;
+        array.insert_formatted(insert_index, value);
+    } else {
+        array.insert(insert_index, name);
+    }
 
     Ok((document.to_string(), true))
 }
@@ -451,6 +477,7 @@ mod test_add_ignored_name_to_toml {
         assert!(added);
         let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
         assert_eq!(doc.ignored_group_names, vec!["Season One"]);
+        assert!(result.contains("\"Season One\""), "Should contain the name: {result}");
     }
 
     #[test]
@@ -507,7 +534,8 @@ min_group_size = 5
         let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
         assert!(doc.auto);
         assert_eq!(doc.min_group_size, Some(5));
-        assert_eq!(doc.ignored_group_names, vec!["Episode", "Chapter"]);
+        // "Chapter" sorts before "Episode"
+        assert_eq!(doc.ignored_group_names, vec!["Chapter", "Episode"]);
     }
 
     #[test]
@@ -522,12 +550,12 @@ debug = false
     }
 
     #[test]
-    fn adds_multiple_names_sequentially() {
-        let (result, added) = add_ignored_name_to_toml("", "First").expect("should succeed");
+    fn adds_multiple_names_sequentially_in_alphabetical_order() {
+        let (result, added) = add_ignored_name_to_toml("", "Third").expect("should succeed");
+        assert!(added);
+        let (result, added) = add_ignored_name_to_toml(&result, "First").expect("should succeed");
         assert!(added);
         let (result, added) = add_ignored_name_to_toml(&result, "Second").expect("should succeed");
-        assert!(added);
-        let (result, added) = add_ignored_name_to_toml(&result, "Third").expect("should succeed");
         assert!(added);
         let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
         assert_eq!(doc.ignored_group_names, vec!["First", "Second", "Third"]);
@@ -541,6 +569,111 @@ ignored_group_names = ["Episode"]
 "#;
         let (_, added) = add_ignored_name_to_toml(toml, "EPISODE").expect("should succeed");
         assert!(!added);
+    }
+
+    #[test]
+    fn inserts_alphabetically_between_existing() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["Alpha", "Gamma"]
+"#;
+        let (result, added) = add_ignored_name_to_toml(toml, "Beta").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn inserts_alphabetically_case_insensitive() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["alpha", "Gamma"]
+"#;
+        let (result, added) = add_ignored_name_to_toml(toml, "BETA").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["alpha", "BETA", "Gamma"]);
+    }
+
+    #[test]
+    fn inline_array_stays_inline() {
+        let toml = r#"[dirmove]
+auto = true
+ignored_group_names = ["Episode"]
+min_group_size = 5
+"#;
+        let (result, _) = add_ignored_name_to_toml(toml, "Video").expect("should succeed");
+        assert!(
+            result.contains(r#"ignored_group_names = ["Episode", "Video"]"#),
+            "Inline array should stay inline: {result}"
+        );
+        // Other config values should be preserved
+        assert!(result.contains("auto = true"), "Should preserve other config: {result}");
+        assert!(
+            result.contains("min_group_size = 5"),
+            "Should preserve other config: {result}"
+        );
+    }
+
+    #[test]
+    fn multiline_array_stays_multiline() {
+        let toml = r#"[dirmove]
+ignored_group_names = [
+    "Episode",
+    "Video",
+]
+"#;
+        let (result, _) = add_ignored_name_to_toml(toml, "Alpha").expect("should succeed");
+        // Each entry should be on its own indented line
+        assert!(
+            result.contains("\n    \"Alpha\","),
+            "Should be indented on own line: {result}"
+        );
+        assert!(
+            result.contains("\n    \"Episode\","),
+            "Should be indented on own line: {result}"
+        );
+        assert!(
+            result.contains("\n    \"Video\","),
+            "Should be indented on own line: {result}"
+        );
+    }
+
+    #[test]
+    fn multiline_array_multiple_sequential_inserts() {
+        let toml = r#"[dirmove]
+ignored_group_names = [
+    "Delta",
+    "Golf",
+]
+"#;
+        let (result, _) = add_ignored_name_to_toml(toml, "Alpha").expect("should succeed");
+        let (result, _) = add_ignored_name_to_toml(&result, "Echo").expect("should succeed");
+        let (result, _) = add_ignored_name_to_toml(&result, "Zulu").expect("should succeed");
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["Alpha", "Delta", "Echo", "Golf", "Zulu"]);
+        // All entries should be indented on their own lines
+        for name in &["Alpha", "Delta", "Echo", "Golf", "Zulu"] {
+            assert!(
+                result.contains(&format!("\n    \"{name}\",")),
+                "'{name}' should be indented on own line: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_8_space_indentation() {
+        let toml = "[dirmove]\nignored_group_names = [\n        \"Delta\",\n        \"Golf\",\n]\n";
+        let (result, added) = add_ignored_name_to_toml(toml, "Alpha").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["Alpha", "Delta", "Golf"]);
+        for name in &["Alpha", "Delta", "Golf"] {
+            assert!(
+                result.contains(&format!("\n        \"{name}\",")),
+                "'{name}' should have 8-space indentation: {result}"
+            );
+        }
     }
 }
 
