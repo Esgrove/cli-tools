@@ -1216,6 +1216,7 @@ impl DirMove {
                     // Compute normalized key and split parts once per candidate
                     let key = utils::normalize_name(&candidate.prefix);
                     let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
+                    let candidate_combined = candidate_parts.join("").to_lowercase();
 
                     // Skip candidates that match ignored group names
                     if ignored_group_names.contains(&key) {
@@ -1234,7 +1235,11 @@ impl DirMove {
 
                     // Verify this file itself has the prefix parts contiguous in its original name.
                     // This prevents adding files where filtering made non-adjacent parts appear adjacent.
-                    if !utils::parts_are_contiguous_in_original(&file_info.original_name, &candidate_parts) {
+                    if !utils::parts_are_contiguous_with_combined(
+                        &file_info.original_parts,
+                        &candidate_parts,
+                        &candidate_combined,
+                    ) {
                         continue;
                     }
 
@@ -1285,7 +1290,13 @@ impl DirMove {
         // where the file's first part(s) START WITH the group's prefix.
         // This handles cases like JosephExampleTV matching JosephExample group.
         // Parallelized: each file independently checks all group keys, results merged after.
-        let group_keys: Vec<String> = prefix_groups.keys().cloned().collect();
+        let group_keys_with_combined: Vec<(String, String)> = prefix_groups
+            .keys()
+            .map(|key| {
+                let combined = key.to_lowercase().replace('.', "");
+                (key.clone(), combined)
+            })
+            .collect();
         let existing_files: HashMap<&str, HashSet<PathBuf>> = prefix_groups
             .iter()
             .map(|(key, builder)| (key.as_str(), builder.files.iter().cloned().collect()))
@@ -1298,7 +1309,7 @@ impl DirMove {
                 let file_path = file_info.path_buf();
                 let mut matches: Vec<(String, PathBuf)> = Vec::new();
 
-                for group_key in &group_keys {
+                for (group_key, group_combined) in &group_keys_with_combined {
                     // Skip if file is already in this group
                     if let Some(files) = existing_files.get(group_key.as_str())
                         && files.contains(&file_path)
@@ -1306,10 +1317,14 @@ impl DirMove {
                         continue;
                     }
 
-                    // Check if the file matches this group via prefix_matches_normalized
-                    // (which includes starts_with logic)
-                    if utils::prefix_matches_normalized(&file_info.filtered_name, group_key)
-                        && utils::parts_are_contiguous_in_original(&file_info.original_name, &[group_key.as_str()])
+                    // Check if the file matches this group via precomputed prefix matching
+                    // (which includes starts_with logic with word boundary enforcement)
+                    if utils::prefix_matches_normalized_precomputed(file_info, group_key)
+                        && utils::parts_are_contiguous_with_combined(
+                            &file_info.original_parts,
+                            &[group_key.as_str()],
+                            group_combined,
+                        )
                     {
                         matches.push((group_key.clone(), file_path.clone()));
                     }
@@ -7089,9 +7104,10 @@ mod test_realistic_grouping {
 
     #[test]
     fn contiguity_extended_prefix_groups() {
-        // Names that start with the same prefix should all be in the broad group,
-        // while also having their own specific groups.
-        // PhotoLab, PhotoLabs, PhotoLabPro all start with "PhotoLab"
+        // Names that start with the same prefix should be in the broad group only
+        // when the boundary after the prefix is a valid word boundary (CamelCase uppercase).
+        // PhotoLab, PhotoLabPro share "PhotoLab" at a valid CamelCase boundary.
+        // PhotoLabs does NOT: the 's' is lowercase continuation, not a new word.
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -7100,12 +7116,12 @@ mod test_realistic_grouping {
         std::fs::write(root.join("PhotoLab.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("Photo.Lab.Image.03.jpg"), "").unwrap();
 
-        // "PhotoLabs" (starts with PhotoLab)
+        // "PhotoLabs" — lowercase 's' after "PhotoLab", NOT a word boundary
         std::fs::write(root.join("PhotoLabs.Image.01.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabs.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabs.Image.03.jpg"), "").unwrap();
 
-        // "PhotoLabPro" (starts with PhotoLab)
+        // "PhotoLabPro" — uppercase 'P' after "PhotoLab", IS a word boundary
         std::fs::write(root.join("PhotoLabPro.Image.01.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabPro.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabPro.Image.03.jpg"), "").unwrap();
@@ -7114,18 +7130,19 @@ mod test_realistic_grouping {
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
-        // "PhotoLab" should have ALL 9 files (broad group including extended prefixes)
+        // "PhotoLab" should have 6 files: 3 PhotoLab/Photo.Lab + 3 PhotoLabPro (valid boundary)
+        // PhotoLabs files are NOT included because 's' is a lowercase continuation
         let photolab_group = groups
             .iter()
             .find(|(k, _)| k.to_lowercase().replace('.', "") == "photolab");
         assert!(photolab_group.is_some(), "Should find PhotoLab group");
         assert_eq!(
             photolab_group.unwrap().1.files.len(),
-            9,
-            "PhotoLab should have all 9 files (including PhotoLabs and PhotoLabPro)"
+            6,
+            "PhotoLab should have 6 files (PhotoLab + PhotoLabPro, but NOT PhotoLabs)"
         );
 
-        // "PhotoLabs" should have exactly 3 files (specific group)
+        // "PhotoLabs" should have exactly 3 files (specific group, separate from PhotoLab)
         assert!(groups.contains_key("PhotoLabs"), "Should find PhotoLabs group");
         assert_eq!(
             groups.get("PhotoLabs").unwrap().files.len(),
@@ -7198,6 +7215,135 @@ mod test_realistic_grouping {
             alpha_beta_group.unwrap().1.files.len(),
             3,
             "Alpha.Beta should have 3 files"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_word_boundary_grouping {
+    use super::*;
+
+    #[test]
+    fn intense_and_intensely_not_grouped_together() {
+        // "Intense" and "Intensely" share a prefix but are different words.
+        // The 'l' after "Intense" is lowercase, so there is no word boundary.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Intense.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Intense.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Intense.Video.003.mp4"), "").unwrap();
+
+        std::fs::write(root.join("Intensely.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Intensely.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Intensely.Video.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Intense" group should have exactly 3 files, NOT 6
+        assert!(groups.contains_key("Intense"), "Should find Intense group");
+        assert_eq!(
+            groups.get("Intense").unwrap().files.len(),
+            3,
+            "Intense group must NOT include Intensely files"
+        );
+
+        // "Intensely" group should have exactly 3 files
+        assert!(groups.contains_key("Intensely"), "Should find Intensely group");
+        assert_eq!(
+            groups.get("Intensely").unwrap().files.len(),
+            3,
+            "Intensely group must NOT include Intense files"
+        );
+    }
+
+    #[test]
+    fn camel_case_boundary_still_groups_correctly() {
+        // "Studio" and "StudioPro" share a prefix at a valid CamelCase boundary.
+        // The 'P' after "Studio" is uppercase, so it IS a word boundary.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Studio.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Video.003.mp4"), "").unwrap();
+
+        std::fs::write(root.join("StudioPro.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("StudioPro.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("StudioPro.Video.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Studio" broad group should include StudioPro files (CamelCase boundary)
+        assert!(groups.contains_key("Studio"), "Should find Studio group");
+        assert_eq!(
+            groups.get("Studio").unwrap().files.len(),
+            6,
+            "Studio group should include StudioPro files (uppercase boundary)"
+        );
+    }
+
+    #[test]
+    fn lowercase_suffix_not_grouped_with_base() {
+        // "Photo" and "Photos" should NOT be grouped together.
+        // The 's' after "Photo" is lowercase continuation.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Photo.Image.001.jpg"), "").unwrap();
+        std::fs::write(root.join("Photo.Image.002.jpg"), "").unwrap();
+        std::fs::write(root.join("Photo.Image.003.jpg"), "").unwrap();
+
+        std::fs::write(root.join("Photos.Image.001.jpg"), "").unwrap();
+        std::fs::write(root.join("Photos.Image.002.jpg"), "").unwrap();
+        std::fs::write(root.join("Photos.Image.003.jpg"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.contains_key("Photo"), "Should find Photo group");
+        assert_eq!(
+            groups.get("Photo").unwrap().files.len(),
+            3,
+            "Photo group must NOT include Photos files"
+        );
+
+        assert!(groups.contains_key("Photos"), "Should find Photos group");
+        assert_eq!(
+            groups.get("Photos").unwrap().files.len(),
+            3,
+            "Photos group must NOT include Photo files"
+        );
+    }
+
+    #[test]
+    fn digit_boundary_groups_correctly() {
+        // "Alpha" and "Alpha2" should be grouped (digit after letter is a boundary).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        std::fs::write(root.join("Alpha.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Video.003.mp4"), "").unwrap();
+
+        std::fs::write(root.join("Alpha2.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha2.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha2.Video.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size(3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(groups.contains_key("Alpha"), "Should find Alpha group");
+        assert_eq!(
+            groups.get("Alpha").unwrap().files.len(),
+            6,
+            "Alpha group should include Alpha2 files (digit boundary)"
         );
     }
 }

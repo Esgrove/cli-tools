@@ -39,12 +39,29 @@ pub struct FileInfo<'a> {
     pub(crate) filtered_name: Cow<'a, str>,
     /// Pre-computed: `original_name` split by `'.'` (owned, for thread safety).
     pub(crate) original_parts: Vec<String>,
-    /// Pre-computed: `filtered_name` split by `'.'` with each part lowercased.
-    pub(crate) filtered_parts_lower: Vec<String>,
-    /// Pre-computed: all contiguous 2-part combinations from `filtered_name`, lowercased and concatenated.
-    pub(crate) filtered_two_parts_lower: Vec<String>,
-    /// Pre-computed: all contiguous 3-part combinations from `filtered_name`, lowercased and concatenated.
-    pub(crate) filtered_three_parts_lower: Vec<String>,
+    /// Pre-computed filtered name parts and their combinations for efficient prefix matching.
+    pub(crate) filtered_parts: FilteredParts,
+}
+
+/// Pre-computed part combinations from a filtered filename for efficient prefix matching.
+///
+/// Stores single, 2-part, and 3-part combinations in both lowercased and original-cased
+/// forms. This eliminates redundant `split('.')`, `to_lowercase()`, and `format!()` calls
+/// in the O(N × K × N) hot loops inside `find_prefix_candidates` and
+/// `prefix_matches_normalized`.
+pub struct FilteredParts {
+    /// Single parts, lowercased (e.g., `["photo", "lab", "image"]`).
+    pub(crate) parts_lower: Vec<String>,
+    /// Contiguous 2-part combinations, lowercased (e.g., `["photolab", "labimage"]`).
+    pub(crate) two_parts_lower: Vec<String>,
+    /// Contiguous 3-part combinations, lowercased (e.g., `["photolabimage"]`).
+    pub(crate) three_parts_lower: Vec<String>,
+    /// Single parts, original casing (e.g., `["Photo", "Lab", "Image"]`).
+    pub(crate) parts_original: Vec<String>,
+    /// Contiguous 2-part combinations, original casing (e.g., `["PhotoLab", "LabImage"]`).
+    pub(crate) two_parts_original: Vec<String>,
+    /// Contiguous 3-part combinations, original casing (e.g., `["PhotoLabImage"]`).
+    pub(crate) three_parts_original: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -98,27 +115,14 @@ impl FileInfo<'_> {
     /// Pre-computes split and lowercased parts for efficient matching in hot loops.
     pub(crate) fn new(path: PathBuf, original_name: String, filtered_name: String) -> Self {
         let original_parts: Vec<String> = original_name.split('.').map(String::from).collect();
-
-        let filtered_parts_lower: Vec<String> = filtered_name.split('.').map(str::to_lowercase).collect();
-
-        let filtered_two_parts_lower: Vec<String> = filtered_parts_lower
-            .windows(2)
-            .map(|window| format!("{}{}", window[0], window[1]))
-            .collect();
-
-        let filtered_three_parts_lower: Vec<String> = filtered_parts_lower
-            .windows(3)
-            .map(|window| format!("{}{}{}", window[0], window[1], window[2]))
-            .collect();
+        let filtered_parts = FilteredParts::new(&filtered_name);
 
         Self {
             path: Cow::Owned(path),
             original_name: Cow::Owned(original_name),
             filtered_name: Cow::Owned(filtered_name),
             original_parts,
-            filtered_parts_lower,
-            filtered_two_parts_lower,
-            filtered_three_parts_lower,
+            filtered_parts,
         }
     }
 
@@ -135,6 +139,108 @@ impl fmt::Debug for FileInfo<'_> {
             .field("original_name", &self.original_name)
             .field("filtered_name", &self.filtered_name)
             .finish()
+    }
+}
+
+impl FilteredParts {
+    /// Create a new `FilteredParts` by splitting the filtered name on `'.'` and
+    /// pre-computing all single, 2-part, and 3-part combinations in both lowercased
+    /// and original-cased forms.
+    pub(crate) fn new(filtered_name: &str) -> Self {
+        let parts_original: Vec<String> = filtered_name.split('.').map(String::from).collect();
+
+        let parts_lower: Vec<String> = parts_original.iter().map(|p| p.to_lowercase()).collect();
+
+        let two_parts_lower: Vec<String> = parts_lower
+            .windows(2)
+            .map(|window| format!("{}{}", window[0], window[1]))
+            .collect();
+
+        let three_parts_lower: Vec<String> = parts_lower
+            .windows(3)
+            .map(|window| format!("{}{}{}", window[0], window[1], window[2]))
+            .collect();
+
+        let two_parts_original: Vec<String> = parts_original
+            .windows(2)
+            .map(|window| format!("{}{}", window[0], window[1]))
+            .collect();
+
+        let three_parts_original: Vec<String> = parts_original
+            .windows(3)
+            .map(|window| format!("{}{}{}", window[0], window[1], window[2]))
+            .collect();
+
+        Self {
+            parts_lower,
+            two_parts_lower,
+            three_parts_lower,
+            parts_original,
+            two_parts_original,
+            three_parts_original,
+        }
+    }
+
+    /// Check if any pre-computed part combination matches the given normalized target.
+    ///
+    /// Checks single parts, 2-part, and 3-part lowered combinations against
+    /// `target_normalized`, requiring a valid word boundary (checked on the
+    /// corresponding original-cased parts) for `starts_with` matches.
+    pub(crate) fn prefix_matches_normalized(&self, target_normalized: &str) -> bool {
+        if target_normalized.is_empty() {
+            return false;
+        }
+
+        // Check all single parts (exact match or starts with at word boundary)
+        for (part, original) in self.parts_lower.iter().zip(self.parts_original.iter()) {
+            if *part == target_normalized
+                || (part.starts_with(target_normalized)
+                    && Self::has_word_boundary_at(original, target_normalized.len()))
+            {
+                return true;
+            }
+        }
+
+        // Check all 2-part combinations (exact match or starts with at word boundary)
+        for (combined, original) in self.two_parts_lower.iter().zip(self.two_parts_original.iter()) {
+            if *combined == target_normalized
+                || (combined.starts_with(target_normalized)
+                    && Self::has_word_boundary_at(original, target_normalized.len()))
+            {
+                return true;
+            }
+        }
+
+        // Check all 3-part combinations (exact match or starts with at word boundary)
+        for (combined, original) in self.three_parts_lower.iter().zip(self.three_parts_original.iter()) {
+            if *combined == target_normalized
+                || (combined.starts_with(target_normalized)
+                    && Self::has_word_boundary_at(original, target_normalized.len()))
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if there is a valid word boundary at position `prefix_len` in the
+    /// **original-cased** text.
+    ///
+    /// Assumes ASCII-compatible filenames.
+    pub(crate) fn has_word_boundary_at(original_text: &str, prefix_len: usize) -> bool {
+        if prefix_len == 0 || prefix_len >= original_text.len() {
+            return true;
+        }
+        let prev = original_text.as_bytes()[prefix_len - 1];
+        let next = original_text.as_bytes()[prefix_len];
+
+        match next {
+            b'A'..=b'Z' => true,
+            b'0'..=b'9' => !prev.is_ascii_digit(),
+            c if !c.is_ascii_alphanumeric() => true,
+            _ => prev.is_ascii_digit(),
+        }
     }
 }
 
@@ -405,5 +511,224 @@ mod test_is_better_prefix {
     #[test]
     fn same_prefix_not_better() {
         assert!(!PrefixGroupBuilder::is_better_prefix("PhotoLab", "PhotoLab"));
+    }
+}
+
+#[cfg(test)]
+mod test_filtered_parts_new {
+    use super::*;
+
+    #[test]
+    fn single_parts_split_correctly() {
+        let parts = FilteredParts::new("Photo.Lab.Image.jpg");
+        assert_eq!(parts.parts_original, ["Photo", "Lab", "Image", "jpg"]);
+        assert_eq!(parts.parts_lower, ["photo", "lab", "image", "jpg"]);
+    }
+
+    #[test]
+    fn two_part_combinations_computed() {
+        let parts = FilteredParts::new("Photo.Lab.Image");
+        assert_eq!(parts.two_parts_lower, ["photolab", "labimage"]);
+        assert_eq!(parts.two_parts_original, ["PhotoLab", "LabImage"]);
+    }
+
+    #[test]
+    fn three_part_combinations_computed() {
+        let parts = FilteredParts::new("Photo.Lab.Image.Extra");
+        assert_eq!(parts.three_parts_lower, ["photolabimage", "labimageextra"]);
+        assert_eq!(parts.three_parts_original, ["PhotoLabImage", "LabImageExtra"]);
+    }
+
+    #[test]
+    fn single_part_name_has_no_combinations() {
+        let parts = FilteredParts::new("standalone");
+        assert_eq!(parts.parts_original, ["standalone"]);
+        assert_eq!(parts.parts_lower, ["standalone"]);
+        assert!(parts.two_parts_lower.is_empty());
+        assert!(parts.three_parts_lower.is_empty());
+        assert!(parts.two_parts_original.is_empty());
+        assert!(parts.three_parts_original.is_empty());
+    }
+
+    #[test]
+    fn two_part_name_has_no_three_part_combinations() {
+        let parts = FilteredParts::new("Photo.Lab");
+        assert_eq!(parts.two_parts_lower, ["photolab"]);
+        assert_eq!(parts.two_parts_original, ["PhotoLab"]);
+        assert!(parts.three_parts_lower.is_empty());
+        assert!(parts.three_parts_original.is_empty());
+    }
+
+    #[test]
+    fn preserves_original_casing() {
+        let parts = FilteredParts::new("PhotoLab.ImagePRO.Test");
+        assert_eq!(parts.parts_original, ["PhotoLab", "ImagePRO", "Test"]);
+        assert_eq!(parts.two_parts_original, ["PhotoLabImagePRO", "ImagePROTest"]);
+        assert_eq!(parts.three_parts_original, ["PhotoLabImagePROTest"]);
+    }
+
+    #[test]
+    fn lowercased_parts_are_consistent_with_original() {
+        let parts = FilteredParts::new("UPPER.Mixed.lower");
+        assert_eq!(parts.parts_lower, ["upper", "mixed", "lower"]);
+        assert_eq!(parts.two_parts_lower, ["uppermixed", "mixedlower"]);
+        assert_eq!(parts.three_parts_lower, ["uppermixedlower"]);
+    }
+
+    #[test]
+    fn empty_string_produces_single_empty_part() {
+        let parts = FilteredParts::new("");
+        assert_eq!(parts.parts_original, [""]);
+        assert_eq!(parts.parts_lower, [""]);
+        assert!(parts.two_parts_lower.is_empty());
+        assert!(parts.three_parts_lower.is_empty());
+    }
+
+    #[test]
+    fn many_parts_produce_correct_combination_counts() {
+        let parts = FilteredParts::new("A.B.C.D.E");
+        assert_eq!(parts.parts_original.len(), 5);
+        assert_eq!(parts.two_parts_original.len(), 4);
+        assert_eq!(parts.three_parts_original.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod test_filtered_parts_prefix_matches {
+    use super::*;
+
+    #[test]
+    fn single_part_exact_match() {
+        let parts = FilteredParts::new("PhotoLab.Image.jpg");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn single_part_exact_match_case_insensitive() {
+        let parts = FilteredParts::new("PHOTOLAB.Image.jpg");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn two_part_combined_exact_match() {
+        let parts = FilteredParts::new("Photo.Lab.Image.jpg");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn three_part_combined_exact_match() {
+        let parts = FilteredParts::new("Ph.oto.Lab.Image.jpg");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn no_match_returns_false() {
+        let parts = FilteredParts::new("Other.Album.jpg");
+        assert!(!parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn match_at_middle_position() {
+        let parts = FilteredParts::new("Extra.StudioName.video.mp4");
+        assert!(parts.prefix_matches_normalized("studioname"));
+    }
+
+    #[test]
+    fn two_part_match_at_middle_position() {
+        let parts = FilteredParts::new("Extra.Photo.Lab.video.mp4");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn starts_with_at_word_boundary_uppercase() {
+        // "PhotoLabTV" — 'T' after "PhotoLab" is uppercase, valid boundary
+        let parts = FilteredParts::new("PhotoLabTV.Image.jpg");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn starts_with_rejected_at_lowercase_continuation() {
+        // "PhotoLabs" — 's' after "PhotoLab" is lowercase, NOT a boundary
+        let parts = FilteredParts::new("PhotoLabs.Image.jpg");
+        assert!(!parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn starts_with_at_digit_boundary() {
+        // "Studio2" — '2' after "Studio" is a digit following a letter, valid boundary
+        let parts = FilteredParts::new("Studio2.Video.mp4");
+        assert!(parts.prefix_matches_normalized("studio"));
+    }
+
+    #[test]
+    fn two_part_combined_starts_with_at_word_boundary() {
+        // "Photo.LabPro" combined is "PhotoLabPro", starts with "photolab" at uppercase 'P'
+        let parts = FilteredParts::new("Photo.LabPro.Image.jpg");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn two_part_combined_starts_with_rejected_at_lowercase() {
+        // "Photo.Labs" combined is "PhotoLabs", starts with "photolab" but 's' is lowercase
+        let parts = FilteredParts::new("Photo.Labs.Image.jpg");
+        assert!(!parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn three_part_combined_starts_with_at_word_boundary() {
+        // "Al.pha.BetaGamma" combined is "AlphaBetaGamma", starts with "alphabeta" at uppercase 'G'
+        let parts = FilteredParts::new("Al.pha.BetaGamma.video.mp4");
+        assert!(parts.prefix_matches_normalized("alphabeta"));
+    }
+
+    #[test]
+    fn three_part_combined_starts_with_rejected_at_lowercase() {
+        // "Al.pha.Betas" combined is "AlphaBetas", starts with "alphabeta" but 's' is lowercase
+        let parts = FilteredParts::new("Al.pha.Betas.video.mp4");
+        assert!(!parts.prefix_matches_normalized("alphabeta"));
+    }
+
+    #[test]
+    fn single_part_file_exact_match() {
+        let parts = FilteredParts::new("standalone");
+        assert!(parts.prefix_matches_normalized("standalone"));
+    }
+
+    #[test]
+    fn single_part_file_no_match() {
+        let parts = FilteredParts::new("standalone");
+        assert!(!parts.prefix_matches_normalized("other"));
+    }
+
+    #[test]
+    fn empty_target_matches_nothing() {
+        let parts = FilteredParts::new("Some.File.mp4");
+        assert!(!parts.prefix_matches_normalized(""));
+    }
+
+    #[test]
+    fn prefix_not_at_start_of_any_part() {
+        // "XPhotoLab" does not start with "photolab" — "x" comes first
+        let parts = FilteredParts::new("XPhotoLab.Image.jpg");
+        assert!(!parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn all_uppercase_name_with_word_boundary() {
+        // "PHOTOLABPRO" — all uppercase, boundary at position 8 sees 'P' (uppercase) → match
+        let parts = FilteredParts::new("PHOTOLABPRO.Image.jpg");
+        assert!(parts.prefix_matches_normalized("photolab"));
+    }
+
+    #[test]
+    fn intense_not_matched_by_intensely() {
+        let parts = FilteredParts::new("Intensely.Video.001.mp4");
+        assert!(!parts.prefix_matches_normalized("intense"));
+    }
+
+    #[test]
+    fn intense_exact_match() {
+        let parts = FilteredParts::new("Intense.Video.001.mp4");
+        assert!(parts.prefix_matches_normalized("intense"));
     }
 }
