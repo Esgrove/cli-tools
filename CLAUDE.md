@@ -40,6 +40,23 @@ cargo nextest run
 
 # Run tests with coverage report (text output)
 cargo llvm-cov nextest
+
+# Run all benchmarks
+cargo bench
+
+# Run a specific benchmark suite
+cargo bench --bench date
+cargo bench --bench dir_move
+cargo bench --bench dupe_find
+cargo bench --bench format
+cargo bench --bench lib
+cargo bench --bench resolution
+
+# Run benchmarks matching a filter pattern
+cargo bench -- "normalize_stem"
+
+# Quick benchmark run (fewer iterations, faster feedback)
+cargo bench -- --quick
 ```
 
 ### Required tools
@@ -51,11 +68,37 @@ cargo install cargo-nextest
 cargo install cargo-llvm-cov
 ```
 
+## Benchmarks
+
+Benchmarks use [Criterion.rs](https://github.com/criterion-rs/criterion.rs) for
+statistically rigorous microbenchmarking. Benchmark files live in `benches/`.
+
+The core algorithmic functions benchmarked for `dir_move` and `dupe_find` are
+extracted into library modules (`src/dir_move/` and `src/dupe_find/`) so that
+benchmarks can import them directly without duplicating code.
+
+### Benchmark structure
+
+- `benches/date.rs` - Date parsing and reordering
+- `benches/dir_move.rs` - Prefix grouping, file matching, contiguity checks
+- `benches/dupe_find.rs` - Stem normalization, duplicate grouping, regex matching
+- `benches/format.rs` - Dot-rename formatting pipeline
+- `benches/lib.rs` - Shared utility functions
+- `benches/resolution.rs` - Resolution labeling and regex matching
+
+### Adding new benchmarks
+
+When extracting algorithmic code from a binary for benchmarking, move the pure
+functions and types to a library module under `src/` and have the binary
+re-export from the library. Do not duplicate code in benchmark files.
+
 ## Project Structure
 
 - `src/lib.rs` - Shared library code (utilities, macros, common functions)
 - `src/config.rs` - User configuration file handling
 - `src/date.rs` - Date parsing and formatting utilities
+- `src/dir_move/` - Algorithmic types and functions for dir_move (prefix grouping, matching)
+- `src/dupe_find/` - Algorithmic types and functions for dupe_find (normalization, grouping)
 - `src/bin/` - Individual CLI tool binaries:
     - `dir_move.rs` → `dirmove` - Move files to matching directories
     - `divider.rs` → `div` - Print divider comments

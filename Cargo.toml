@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "9.3.0"
+version = "9.4.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities"
@@ -52,6 +52,9 @@ walkdir = "2.5.0"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
 [[bin]]
 name = "div"
 path = "src/bin/divider.rs"
@@ -99,6 +102,30 @@ path = "src/bin/video_stats/main.rs"
 [[bin]]
 name = "qtorrent"
 path = "src/bin/qtorrent/main.rs"
+
+[[bench]]
+name = "date"
+harness = false
+
+[[bench]]
+name = "format"
+harness = false
+
+[[bench]]
+name = "resolution"
+harness = false
+
+[[bench]]
+name = "lib"
+harness = false
+
+[[bench]]
+name = "dir_move"
+harness = false
+
+[[bench]]
+name = "dupe_find"
+harness = false
 
 [profile.dev]
 incremental = true

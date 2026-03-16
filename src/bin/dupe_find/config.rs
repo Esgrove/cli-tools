@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::Args;
-use crate::dupe_find::FILE_EXTENSIONS;
+use cli_tools::dupe_find::FILE_EXTENSIONS;
 
 /// Config from the user config file.
 #[derive(Debug, Default, Deserialize)]

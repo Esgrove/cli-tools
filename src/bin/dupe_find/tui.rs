@@ -12,7 +12,7 @@ use cli_tools::print_yellow;
 
 use cli_tools::video_info::VideoInfo;
 
-use crate::dupe_find::{DuplicateGroup, FileInfo};
+use cli_tools::dupe_find::{DupeFileInfo, DuplicateGroup};
 
 /// Action to perform on a duplicate group
 #[derive(Debug, Clone)]
@@ -155,7 +155,7 @@ fn interactive_loop(
 
     while group_index < duplicates.len() {
         let group = &duplicates[group_index];
-        let sorted_files: Vec<&FileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
+        let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
         let action = handle_duplicate_group(
             terminal,
@@ -195,7 +195,7 @@ fn interactive_loop(
 fn handle_duplicate_group(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     key: &str,
-    files: &[&FileInfo],
+    files: &[&DupeFileInfo],
     current_group: usize,
     total_groups: usize,
     metadata: &HashMap<PathBuf, VideoInfo>,
@@ -305,7 +305,7 @@ fn handle_duplicate_group(
 
 /// Format a metadata detail line for a single file.
 fn format_file_detail_lines(
-    file: &FileInfo,
+    file: &DupeFileInfo,
     index: usize,
     selected: usize,
     metadata: &HashMap<PathBuf, VideoInfo>,
@@ -379,7 +379,7 @@ fn format_file_detail_lines(
 fn render_ui(
     frame: &mut Frame,
     key: &str,
-    files: &[&FileInfo],
+    files: &[&DupeFileInfo],
     state: &TuiState,
     list_state: &mut ListState,
     current_group: usize,
@@ -511,7 +511,7 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
 
     for (number, group_action) in actionable.into_iter().enumerate() {
         let group = &duplicates[group_action.group_index];
-        let sorted_files: Vec<&FileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
+        let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
         println!(
             "{}",
@@ -578,7 +578,7 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
 }
 
 /// Find the index of the best file to preselect based on resolution and codec.
-fn find_best_file_index(files: &[&FileInfo]) -> usize {
+fn find_best_file_index(files: &[&DupeFileInfo]) -> usize {
     files
         .iter()
         .enumerate()
@@ -597,7 +597,7 @@ fn find_best_file_index(files: &[&FileInfo]) -> usize {
 
 /// Score a file based on resolution and codec labels.
 /// Higher score = better quality. Returns (`resolution_score`, `has_x265`).
-fn score_file(file: &FileInfo) -> (u8, bool) {
+fn score_file(file: &DupeFileInfo) -> (u8, bool) {
     let filename_lower = file.filename.to_lowercase();
 
     // Resolution score: higher resolution = higher score

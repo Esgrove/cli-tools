@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use colored::Colorize;
 #[cfg(not(test))]
@@ -10,9 +10,11 @@ use indicatif::{ParallelProgressIterator, ProgressBar};
 use itertools::Itertools;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
-use regex::Regex;
 use walkdir::WalkDir;
 
+use cli_tools::dupe_find::{
+    DupeFileInfo, DuplicateGroup, MatchRange, format_filename_with_highlight, merge_indices_into_groups, normalize_stem,
+};
 use cli_tools::scan_cache::ScanCache;
 use cli_tools::video_info::VideoInfo;
 use cli_tools::{create_semaphore_for_io_bound, print_error, print_yellow};
@@ -20,112 +22,17 @@ use cli_tools::{create_semaphore_for_io_bound, print_error, print_yellow};
 use crate::Args;
 use crate::config::{Config, DupeConfig};
 
-/// Regex to match resolution patterns like 720p, 1080p, or 1234x5678
-static RE_RESOLUTION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
-
-/// Regex to match codec patterns
-static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
-    let pattern = format!(r"(?i)\b({})\b", CODEC_PATTERNS.join("|"));
-    Regex::new(&pattern).expect("Invalid codec regex")
-});
-
-/// Regex to match two or more consecutive dots
-static RE_MULTI_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Invalid dots regex"));
-
-/// Regex to match two or more consecutive whitespace characters
-static RE_MULTI_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}").expect("Invalid spaces regex"));
-
-/// Common codec patterns to remove when normalizing
-const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
 #[cfg(not(test))]
 const PROGRESS_BAR_CHARS: &str = "=>-";
 #[cfg(not(test))]
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 #[cfg(not(test))]
 const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg} ({pos} files found)";
-/// All video extensions
-pub const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
-
-/// Range of a pattern match in a filename.
-#[derive(Debug, Clone, Copy)]
-pub struct MatchRange {
-    /// Start position of the match (inclusive).
-    pub start: usize,
-    /// End position of the match (exclusive).
-    pub end: usize,
-}
-
-impl MatchRange {
-    /// Extract the matched substring from the given text.
-    pub fn extract_from<'a>(&self, text: &'a str) -> &'a str {
-        &text[self.start..self.end]
-    }
-}
-
-/// A group of duplicate files that share a common key.
-#[derive(Debug, Clone)]
-pub struct DuplicateGroup {
-    /// The normalized key that identifies this group.
-    pub key: String,
-    /// Files belonging to this duplicate group.
-    pub files: Vec<FileInfo>,
-}
-
-impl DuplicateGroup {
-    /// Create a new duplicate group.
-    pub const fn new(key: String, files: Vec<FileInfo>) -> Self {
-        Self { key, files }
-    }
-
-    /// Get the display name for this group.
-    /// If all files share the same pattern match text, uses that as the identifier.
-    /// Otherwise falls back to the normalized key.
-    pub fn display_name(&self) -> String {
-        let mut pattern_texts = self
-            .files
-            .iter()
-            .filter_map(|f| f.pattern_match.map(|range| range.extract_from(&f.filename)));
-
-        if let Some(first) = pattern_texts.next()
-            && pattern_texts.all(|text| text.eq_ignore_ascii_case(first))
-        {
-            return first.to_string();
-        }
-
-        self.key.clone()
-    }
-}
-
-/// Information about a found file
-#[derive(Debug, Clone)]
-pub struct FileInfo {
-    pub(crate) path: PathBuf,
-    pub(crate) filename: String,
-    pub(crate) stem: String,
-    pub(crate) extension: String,
-    /// Pattern match range if matched by a pattern.
-    pattern_match: Option<MatchRange>,
-}
 
 /// Duplicate file finder that scans directories for duplicate video files.
 pub struct DupeFind {
     config: Config,
     roots: Vec<PathBuf>,
-}
-
-impl FileInfo {
-    fn new(path: PathBuf, extension: String) -> Self {
-        let filename = cli_tools::path_to_filename_string(&path);
-        let stem = cli_tools::path_to_file_stem_string(&path);
-        Self {
-            path,
-            filename,
-            stem,
-            extension,
-            pattern_match: None,
-        }
-    }
 }
 
 impl DupeFind {
@@ -209,7 +116,7 @@ impl DupeFind {
         for group in &duplicates {
             println!("\n{}:", group.key.cyan());
             for file in group.files.iter().sorted_by_key(|f| &f.path) {
-                let display_name = Self::format_filename_with_highlight(&file.filename, file.pattern_match);
+                let display_name = format_filename_with_highlight(&file.filename, file.pattern_match);
                 println!("  {display_name}");
             }
         }
@@ -223,7 +130,7 @@ impl DupeFind {
 
     /// Collect all video files from all root directories in parallel.
     /// Shows a spinner progress bar while scanning.
-    fn gather_files(&self) -> Vec<FileInfo> {
+    fn gather_files(&self) -> Vec<DupeFileInfo> {
         #[cfg(not(test))]
         let progress_bar = {
             let pb = ProgressBar::new_spinner();
@@ -236,7 +143,7 @@ impl DupeFind {
             pb
         };
 
-        let files: Mutex<Vec<FileInfo>> = Mutex::new(Vec::new());
+        let files: Mutex<Vec<DupeFileInfo>> = Mutex::new(Vec::new());
 
         // Process each root directory in parallel
         self.roots.par_iter().for_each(|root| {
@@ -261,7 +168,7 @@ impl DupeFind {
         &self,
         root: &Path,
         #[cfg(not(test))] progress_bar: &ProgressBar,
-    ) -> Vec<FileInfo> {
+    ) -> Vec<DupeFileInfo> {
         let walker = if self.config.recurse {
             WalkDir::new(root)
         } else {
@@ -279,7 +186,7 @@ impl DupeFind {
                 if self.config.extensions.contains(&extension) {
                     #[cfg(not(test))]
                     progress_bar.inc(1);
-                    Some(FileInfo::new(path.to_path_buf(), extension))
+                    Some(DupeFileInfo::new(path.to_path_buf(), extension))
                 } else {
                     None
                 }
@@ -388,7 +295,7 @@ impl DupeFind {
     /// - Same filename in different directories
     /// - Match the same identifier pattern
     /// - Same normalized name (different resolution / codec / extension)
-    fn find_all_duplicates(&self, files: &[FileInfo]) -> Vec<DuplicateGroup> {
+    fn find_all_duplicates(&self, files: &[DupeFileInfo]) -> Vec<DuplicateGroup> {
         if self.config.verbose {
             println!("Checking {} files for duplicates...", files.len());
         }
@@ -410,7 +317,7 @@ impl DupeFind {
         let normalized_keys: Vec<String> = files
             .par_iter()
             .progress_with(progress_bar)
-            .map(|file| Self::normalize_stem(&file.stem))
+            .map(|file| normalize_stem(&file.stem))
             .collect();
 
         // Use a union-find approach:
@@ -436,7 +343,7 @@ impl DupeFind {
 
         for indices in filename_to_indices.values() {
             if indices.len() > 1 {
-                Self::merge_indices_into_groups(indices, &mut file_to_group, &mut groups);
+                merge_indices_into_groups(indices, &mut file_to_group, &mut groups);
             }
         }
 
@@ -462,7 +369,7 @@ impl DupeFind {
 
             for indices in pattern_to_indices.values() {
                 if indices.len() > 1 {
-                    Self::merge_indices_into_groups(indices, &mut file_to_group, &mut groups);
+                    merge_indices_into_groups(indices, &mut file_to_group, &mut groups);
                 }
             }
         }
@@ -472,7 +379,7 @@ impl DupeFind {
             .into_iter()
             .filter(|(_, indices)| indices.len() > 1)
             .map(|(key, indices)| {
-                let file_refs: Vec<FileInfo> = indices
+                let file_refs: Vec<DupeFileInfo> = indices
                     .iter()
                     .map(|&idx| {
                         let mut file = files[idx].clone();
@@ -484,68 +391,6 @@ impl DupeFind {
             })
             .sorted_by(|a, b| a.key.cmp(&b.key))
             .collect()
-    }
-
-    /// Merge file indices into the same group
-    fn merge_indices_into_groups(
-        indices: &[usize],
-        file_to_group: &mut HashMap<usize, String>,
-        groups: &mut HashMap<String, Vec<usize>>,
-    ) {
-        if indices.len() < 2 {
-            return;
-        }
-
-        // Find the canonical group (use the first one as canonical)
-        let canonical_group = file_to_group[&indices[0]].clone();
-
-        for &idx in &indices[1..] {
-            let current_group = file_to_group[&idx].clone();
-            if current_group != canonical_group {
-                // Move all files from current_group to canonical_group
-                if let Some(to_move) = groups.remove(&current_group) {
-                    for moved_idx in &to_move {
-                        file_to_group.insert(*moved_idx, canonical_group.clone());
-                    }
-                    groups.entry(canonical_group.clone()).or_default().extend(to_move);
-                }
-            }
-        }
-    }
-
-    /// Format filename with optional pattern match highlighting
-    fn format_filename_with_highlight(filename: &str, pattern_match: Option<MatchRange>) -> String {
-        pattern_match.map_or_else(
-            || filename.to_string(),
-            |range| {
-                let before = &filename[..range.start];
-                let matched = range.extract_from(filename).green().to_string();
-                let after = &filename[range.end..];
-                format!("{before}{matched}{after}")
-            },
-        )
-    }
-
-    /// Normalize a file stem by removing resolution and codec patterns
-    fn normalize_stem(stem: &str) -> String {
-        let mut normalized = stem.to_lowercase();
-
-        // Remove resolutions
-        normalized = RE_RESOLUTION.replace_all(&normalized, "").to_string();
-
-        // Remove codec patterns
-        normalized = RE_CODEC.replace_all(&normalized, "").to_string();
-
-        // Clean up multiple dots and spaces
-        normalized = RE_MULTI_DOTS.replace_all(&normalized, ".").to_string();
-        normalized = RE_MULTI_SPACES.replace_all(&normalized, " ").to_string();
-
-        let result = normalized
-            .trim_matches(|c| c == '.' || c == ' ' || c == '_' || c == '-')
-            .to_string();
-
-        // Fallback to lowercase stem if normalization removed everything
-        if result.is_empty() { stem.to_lowercase() } else { result }
     }
 
     /// Move duplicate files to a Duplicates directory
@@ -682,14 +527,15 @@ async fn collect_metadata_async(files: Vec<PathBuf>) -> HashMap<PathBuf, VideoIn
 #[cfg(test)]
 mod tests_dupe_find {
     use crate::config::Config;
-    use crate::dupe_find::{DupeFind, FileInfo};
+    use crate::dupe_find::DupeFind;
+    use cli_tools::dupe_find::{DupeFileInfo, format_filename_with_highlight, normalize_stem};
     use cli_tools::get_unique_path;
     use regex::Regex;
     use std::path::PathBuf;
 
-    /// Helper to create a `FileInfo` for testing
-    fn make_file(path: &str, ext: &str) -> FileInfo {
-        FileInfo::new(PathBuf::from(path), ext.to_string())
+    /// Helper to create a `DupeFileInfo` for testing
+    fn make_file(path: &str, ext: &str) -> DupeFileInfo {
+        DupeFileInfo::new(PathBuf::from(path), ext.to_string())
     }
 
     /// Helper to create a `DupeFind` with specific patterns for testing
@@ -1103,7 +949,7 @@ mod tests_dupe_find {
     #[test]
     fn test_find_duplicates_empty_input() {
         let finder = make_dupe_finder(vec![]);
-        let files: Vec<FileInfo> = vec![];
+        let files: Vec<DupeFileInfo> = vec![];
 
         let duplicates = finder.find_all_duplicates(&files);
 
@@ -1122,47 +968,41 @@ mod tests_dupe_find {
 
     #[test]
     fn test_normalize_stem_removes_resolution() {
-        assert_eq!(DupeFind::normalize_stem("video.1080p"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.1280x720"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.1440p"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.1920x1080"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.2160p"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.3840x2160"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.720p"), "video");
+        assert_eq!(normalize_stem("video.1080p"), "video");
+        assert_eq!(normalize_stem("video.1280x720"), "video");
+        assert_eq!(normalize_stem("video.1440p"), "video");
+        assert_eq!(normalize_stem("video.1920x1080"), "video");
+        assert_eq!(normalize_stem("video.2160p"), "video");
+        assert_eq!(normalize_stem("video.3840x2160"), "video");
+        assert_eq!(normalize_stem("video.720p"), "video");
     }
 
     #[test]
     fn test_normalize_stem_removes_codec() {
-        assert_eq!(DupeFind::normalize_stem("video.h264"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.H264"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.h265"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.x264"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.x265"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.X265"), "video");
+        assert_eq!(normalize_stem("video.h264"), "video");
+        assert_eq!(normalize_stem("video.H264"), "video");
+        assert_eq!(normalize_stem("video.h265"), "video");
+        assert_eq!(normalize_stem("video.x264"), "video");
+        assert_eq!(normalize_stem("video.x265"), "video");
+        assert_eq!(normalize_stem("video.X265"), "video");
     }
 
     #[test]
     fn test_normalize_stem_removes_both() {
-        assert_eq!(DupeFind::normalize_stem("video.1080p.x265"), "video");
-        assert_eq!(DupeFind::normalize_stem("video.720p.x264"), "video");
-        assert_eq!(
-            DupeFind::normalize_stem("Movie.Title.2024.1080p.x265"),
-            "movie.title.2024"
-        );
-        assert_eq!(
-            DupeFind::normalize_stem("Movie.Title.2024.1920x1080.h265"),
-            "movie.title.2024"
-        );
+        assert_eq!(normalize_stem("video.1080p.x265"), "video");
+        assert_eq!(normalize_stem("video.720p.x264"), "video");
+        assert_eq!(normalize_stem("Movie.Title.2024.1080p.x265"), "movie.title.2024");
+        assert_eq!(normalize_stem("Movie.Title.2024.1920x1080.h265"), "movie.title.2024");
     }
 
     #[test]
     fn test_normalize_stem_same_base() {
         // These should all normalize to the same base name
-        let name1 = DupeFind::normalize_stem("Movie.Title.1080p");
-        let name2 = DupeFind::normalize_stem("Movie.Title.720p");
-        let name3 = DupeFind::normalize_stem("Movie.Title.1920x1080");
-        let name4 = DupeFind::normalize_stem("Movie.Title.1080p.x265");
-        let name5 = DupeFind::normalize_stem("Movie.Title.720p.x264");
+        let name1 = normalize_stem("Movie.Title.1080p");
+        let name2 = normalize_stem("Movie.Title.720p");
+        let name3 = normalize_stem("Movie.Title.1920x1080");
+        let name4 = normalize_stem("Movie.Title.1080p.x265");
+        let name5 = normalize_stem("Movie.Title.720p.x264");
 
         assert_eq!(name1, name2);
         assert_eq!(name2, name3);
@@ -1172,7 +1012,7 @@ mod tests_dupe_find {
 
     #[test]
     fn test_normalize_stem_preserves_content() {
-        let normalized = DupeFind::normalize_stem("Some.Movie.2024.1080p.x265");
+        let normalized = normalize_stem("Some.Movie.2024.1080p.x265");
         assert!(!normalized.contains("1080p"));
         assert!(!normalized.contains("x265"));
         assert!(normalized.contains("2024"));
@@ -1182,38 +1022,38 @@ mod tests_dupe_find {
 
     #[test]
     fn test_normalize_stem_cleans_multiple_dots() {
-        assert_eq!(DupeFind::normalize_stem("movie....name"), "movie.name");
-        assert_eq!(DupeFind::normalize_stem("video...title"), "video.title");
-        assert_eq!(DupeFind::normalize_stem("video..1080p"), "video");
+        assert_eq!(normalize_stem("movie....name"), "movie.name");
+        assert_eq!(normalize_stem("video...title"), "video.title");
+        assert_eq!(normalize_stem("video..1080p"), "video");
     }
 
     #[test]
     fn test_normalize_stem_cleans_multiple_spaces() {
-        assert_eq!(DupeFind::normalize_stem("a    b     c"), "a b c");
-        assert_eq!(DupeFind::normalize_stem("movie   name"), "movie name");
-        assert_eq!(DupeFind::normalize_stem("video  title"), "video title");
+        assert_eq!(normalize_stem("a    b     c"), "a b c");
+        assert_eq!(normalize_stem("movie   name"), "movie name");
+        assert_eq!(normalize_stem("video  title"), "video title");
     }
 
     #[test]
     fn test_normalize_stem_trims_separators() {
-        assert_eq!(DupeFind::normalize_stem(" video title "), "video title");
-        assert_eq!(DupeFind::normalize_stem("-video-title-"), "video-title");
-        assert_eq!(DupeFind::normalize_stem(".video.title."), "video.title");
-        assert_eq!(DupeFind::normalize_stem("_video_title_"), "video_title");
+        assert_eq!(normalize_stem(" video title "), "video title");
+        assert_eq!(normalize_stem("-video-title-"), "video-title");
+        assert_eq!(normalize_stem(".video.title."), "video.title");
+        assert_eq!(normalize_stem("_video_title_"), "video_title");
     }
 
     #[test]
     fn test_normalize_stem_fallback_to_original() {
         // When normalization removes everything, fallback to lowercase original
-        assert_eq!(DupeFind::normalize_stem("..."), "...");
-        assert_eq!(DupeFind::normalize_stem("1080p"), "1080p");
-        assert_eq!(DupeFind::normalize_stem("X265"), "x265");
+        assert_eq!(normalize_stem("..."), "...");
+        assert_eq!(normalize_stem("1080p"), "1080p");
+        assert_eq!(normalize_stem("X265"), "x265");
     }
 
     #[test]
     fn test_normalize_stem_case_insensitive() {
-        assert_eq!(DupeFind::normalize_stem("Movie.TITLE"), "movie.title");
-        assert_eq!(DupeFind::normalize_stem("VIDEO.1080P"), "video");
+        assert_eq!(normalize_stem("Movie.TITLE"), "movie.title");
+        assert_eq!(normalize_stem("VIDEO.1080P"), "video");
     }
 
     #[test]
@@ -1232,13 +1072,14 @@ mod tests_dupe_find {
 
     #[test]
     fn test_format_filename_with_highlight_no_match() {
-        let result = DupeFind::format_filename_with_highlight("video.mp4", None);
+        let result = format_filename_with_highlight("video.mp4", None);
         assert_eq!(result, "video.mp4");
     }
 }
 
 #[cfg(test)]
 mod test_video_info_resolution_string {
+    #![allow(unused_imports)]
     use super::*;
     use cli_tools::video_info::Resolution;
 
@@ -1268,13 +1109,13 @@ mod test_video_info_resolution_string {
 
 #[cfg(test)]
 mod test_display_name {
-    use super::*;
+    use cli_tools::dupe_find::{DupeFileInfo, DuplicateGroup, MatchRange};
     use std::path::PathBuf;
 
-    /// Helper to create a `FileInfo` with an optional pattern match.
-    fn make_file_with_match(filename: &str, ext: &str, pattern_match: Option<MatchRange>) -> FileInfo {
+    /// Helper to create a `DupeFileInfo` with an optional pattern match.
+    fn make_file_with_match(filename: &str, ext: &str, pattern_match: Option<MatchRange>) -> DupeFileInfo {
         let path = PathBuf::from(filename);
-        let mut file = FileInfo::new(path, ext.to_string());
+        let mut file = DupeFileInfo::new(path, ext.to_string());
         file.pattern_match = pattern_match;
         file
     }
@@ -1477,14 +1318,15 @@ mod test_display_name {
 #[cfg(test)]
 mod test_filter_ignored_groups {
     use crate::config::Config;
-    use crate::dupe_find::{DupeFind, DuplicateGroup, FileInfo, MatchRange};
+    use crate::dupe_find::DupeFind;
+    use cli_tools::dupe_find::{DupeFileInfo, DuplicateGroup, MatchRange};
 
     use std::path::PathBuf;
 
-    /// Helper to create a `FileInfo` with an optional pattern match.
-    fn make_file_with_match(filename: &str, ext: &str, pattern_match: Option<MatchRange>) -> FileInfo {
+    /// Helper to create a `DupeFileInfo` with an optional pattern match.
+    fn make_file_with_match(filename: &str, ext: &str, pattern_match: Option<MatchRange>) -> DupeFileInfo {
         let path = PathBuf::from(filename);
-        let mut file = FileInfo::new(path, ext.to_string());
+        let mut file = DupeFileInfo::new(path, ext.to_string());
         file.pattern_match = pattern_match;
         file
     }

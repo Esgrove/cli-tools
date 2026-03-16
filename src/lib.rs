@@ -1,5 +1,7 @@
 pub mod date;
+pub mod dir_move;
 pub mod dot_rename;
+pub mod dupe_find;
 pub mod resolution;
 pub mod scan_cache;
 pub mod video_info;
@@ -19,9 +21,14 @@ use clap::Command;
 use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
+use regex::Regex;
 use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
+
+/// Shared regex to match video resolutions like 1080p, 2160p, or 1920x1080.
+pub static RE_RESOLUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
 
 #[cfg(not(test))]
 const PROJECT_NAME: &str = env!("CARGO_PKG_NAME");
