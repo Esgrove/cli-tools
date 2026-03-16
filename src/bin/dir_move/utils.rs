@@ -419,6 +419,51 @@ mod test_word_boundary {
         // "PhotoLabs" at position 8 (len of "photolab") → before 's' → NOT a boundary
         assert!(!FilteredParts::has_word_boundary_at("PhotoLabs", 8));
     }
+
+    #[test]
+    fn scandic_uppercase_after_prefix_is_boundary() {
+        // "StudioÖversikt" → 'Ö' (uppercase, 2 bytes) after "Studio" at position 6
+        assert!(FilteredParts::has_word_boundary_at("StudioÖversikt", 6));
+    }
+
+    #[test]
+    fn scandic_lowercase_after_prefix_is_not_boundary() {
+        // "Studioöversikt" → 'ö' (lowercase, 2 bytes) after "Studio" is not a boundary
+        assert!(!FilteredParts::has_word_boundary_at("Studioöversikt", 6));
+    }
+
+    #[test]
+    fn scandic_uppercase_after_scandic_prefix_is_boundary() {
+        // "ÄventyrÖversikt" → boundary at byte 8 (Ä=2 + v=1 + e=1 + n=1 + t=1 + y=1 + r=1)
+        // before 'Ö' (uppercase)
+        assert!(FilteredParts::has_word_boundary_at("ÄventyrÖversikt", 8));
+    }
+
+    #[test]
+    fn scandic_lowercase_continuation_not_boundary() {
+        // "Ävenyträkning" → boundary check at byte 8 before 'ä' (lowercase)
+        assert!(!FilteredParts::has_word_boundary_at("Äventyräkning", 8));
+    }
+
+    #[test]
+    fn mid_codepoint_position_returns_false() {
+        // 'Ö' is bytes [0xC3, 0x96] — position 7 lands inside the 'Ö' codepoint
+        assert!(!FilteredParts::has_word_boundary_at("StudioÖversikt", 7));
+    }
+
+    #[test]
+    fn digit_after_scandic_letter_is_boundary() {
+        // "Ställe2" → digit '2' after 'e' at byte position 7 (S=1 + t=1 + ä=2 + l=1 + l=1 + e=1)
+        assert!(FilteredParts::has_word_boundary_at("Ställe2", 7));
+    }
+
+    #[test]
+    fn scandic_chars_preserve_boundary_logic_in_prefix() {
+        // "HälsoCenter" → 'C' (uppercase) after "Hälso" at byte 6 (H=1 + ä=2 + l=1 + s=1 + o=1)
+        assert!(FilteredParts::has_word_boundary_at("HälsoCenter", 6));
+        // "Hälsosam" → 's' (lowercase) after "Hälso" — not a boundary
+        assert!(!FilteredParts::has_word_boundary_at("Hälsosam", 6));
+    }
 }
 
 #[cfg(test)]

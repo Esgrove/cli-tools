@@ -224,22 +224,40 @@ impl FilteredParts {
         false
     }
 
-    /// Check if there is a valid word boundary at position `prefix_len` in the
-    /// **original-cased** text.
+    /// Check if there is a valid word boundary at byte position `prefix_len`
+    /// in the **original-cased** text.
     ///
-    /// Assumes ASCII-compatible filenames.
+    /// The position is a byte offset (typically from `str::len()` on a lowercased
+    /// counterpart). If it does not fall on a UTF-8 character boundary in
+    /// `original_text`, the function conservatively returns `false`.
+    ///
+    /// Handles Unicode letters (including Scandic characters such as Ä, Ö, Ü, Å)
+    /// by inspecting the `char` values on either side of the boundary.
     pub(crate) fn has_word_boundary_at(original_text: &str, prefix_len: usize) -> bool {
         if prefix_len == 0 || prefix_len >= original_text.len() {
             return true;
         }
-        let prev = original_text.as_bytes()[prefix_len - 1];
-        let next = original_text.as_bytes()[prefix_len];
 
-        match next {
-            b'A'..=b'Z' => true,
-            b'0'..=b'9' => !prev.is_ascii_digit(),
-            c if !c.is_ascii_alphanumeric() => true,
-            _ => prev.is_ascii_digit(),
+        // If the byte offset lands in the middle of a multi-byte character,
+        // it is not a valid boundary.
+        if !original_text.is_char_boundary(prefix_len) {
+            return false;
+        }
+
+        // Safe to split: both slices are valid UTF-8.
+        let prev = original_text[..prefix_len].chars().next_back().expect("prefix_len > 0");
+        let next = original_text[prefix_len..].chars().next().expect("prefix_len < len");
+
+        if next.is_uppercase() {
+            true
+        } else if next.is_ascii_digit() {
+            !prev.is_ascii_digit()
+        } else if !next.is_alphanumeric() {
+            true
+        } else {
+            // next is a lowercase letter (ASCII or Unicode) — only a boundary
+            // if the previous character was a digit.
+            prev.is_ascii_digit()
         }
     }
 }
@@ -730,5 +748,67 @@ mod test_filtered_parts_prefix_matches {
     fn intense_exact_match() {
         let parts = FilteredParts::new("Intense.Video.001.mp4");
         assert!(parts.prefix_matches_normalized("intense"));
+    }
+
+    #[test]
+    fn scandic_single_part_exact_match() {
+        let parts = FilteredParts::new("Hälso.Video.001.mp4");
+        assert!(parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn scandic_starts_with_uppercase_boundary() {
+        // "HälsoCenter" starts with "hälso" and 'C' is uppercase → valid boundary
+        let parts = FilteredParts::new("HälsoCenter.Video.001.mp4");
+        assert!(parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn scandic_starts_with_lowercase_rejected() {
+        // "Hälsosam" starts with "hälso" but 's' is lowercase → not a boundary
+        let parts = FilteredParts::new("Hälsosam.Video.001.mp4");
+        assert!(!parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn scandic_starts_with_scandic_uppercase_boundary() {
+        // "HälsoÖversikt" starts with "hälso" and 'Ö' is uppercase → valid boundary
+        let parts = FilteredParts::new("HälsoÖversikt.Video.001.mp4");
+        assert!(parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn scandic_starts_with_scandic_lowercase_rejected() {
+        // "Hälsoöversikt" starts with "hälso" but 'ö' is lowercase → not a boundary
+        let parts = FilteredParts::new("Hälsoöversikt.Video.001.mp4");
+        assert!(!parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn scandic_two_part_combined_exact_match() {
+        // "Häl.so" combined is "hälso" (lowered) — exact match
+        let parts = FilteredParts::new("Häl.so.Video.001.mp4");
+        assert!(parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn scandic_two_part_combined_with_uppercase_boundary() {
+        // "Häl.soCenter" combined is "HälsoCenter", starts with "hälso" at uppercase 'C'
+        let parts = FilteredParts::new("Häl.soCenter.Video.001.mp4");
+        assert!(parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn scandic_two_part_combined_with_lowercase_rejected() {
+        // "Häl.sosam" combined is "Hälsosam", starts with "hälso" but 's' is lowercase
+        let parts = FilteredParts::new("Häl.sosam.Video.001.mp4");
+        assert!(!parts.prefix_matches_normalized("hälso"));
+    }
+
+    #[test]
+    fn umlaut_prefix_not_confused_with_ascii() {
+        // "Ställe" should not match "stalle" (different characters)
+        let parts = FilteredParts::new("Ställe.Video.001.mp4");
+        assert!(!parts.prefix_matches_normalized("stalle"));
     }
 }
