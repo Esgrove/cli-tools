@@ -14,10 +14,12 @@ use crate::database::PendingFileFilter;
 const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];
 
 /// Other video extensions excluding mp4
-const OTHER_EXTENSIONS: &[&str] = &["mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
+const OTHER_EXTENSIONS: &[&str] = &["mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm", "mpeg"];
 
 /// All video extensions
-const ALL_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
+const ALL_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm", "mpeg",
+];
 
 /// User configuration from the config file.
 #[derive(Debug, Default, Deserialize)]
