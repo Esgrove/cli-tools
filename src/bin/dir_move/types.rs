@@ -4,6 +4,17 @@ use std::path::{Path, PathBuf};
 
 use cli_tools::path_to_filename_string;
 
+/// Result of prompting the user for a directory name in create mode.
+#[derive(Debug)]
+pub enum PromptResult {
+    /// User confirmed: move files to this directory path.
+    Confirmed(PathBuf),
+    /// User skipped this group.
+    Skipped,
+    /// User chose to skip and save the group name to `ignored_group_names` in the config file.
+    SaveToIgnored,
+}
+
 /// Information about a directory used for matching files to move.
 #[derive(Debug)]
 pub struct DirectoryInfo {

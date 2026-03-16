@@ -42,7 +42,8 @@
 # Pattern matching is case-insensitive and ignores dots/spaces
 # custom_mappings = [["something", "Custom Dir"], ["otherpattern", "Another Directory"]]
 
-# Group names to ignore (exact match, won't be offered as new directory)
+# Group names to ignore (exact match, won't be offered as new directory).
+# In create mode, press "s" at the prompt to skip a group and add it here automatically.
 # ignored_group_names = ["Episode", "Video", "Part", "Chapter", "Scene"]
 
 # Ignore groups containing this part (substring match in any part of group name)

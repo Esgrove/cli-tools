@@ -3,6 +3,7 @@ use std::fs;
 use anyhow::Result;
 use itertools::Itertools;
 use serde::Deserialize;
+use toml_edit::DocumentMut;
 
 use crate::DirMoveArgs;
 use crate::utils;
@@ -367,6 +368,179 @@ impl Config {
             min_prefix_chars: 5,
             ..Default::default()
         }
+    }
+}
+
+/// Add a group name to `ignored_group_names` in a TOML document string.
+/// The name is stored as-is (not normalized) so the config stays human-readable.
+/// Returns `Ok(true)` if the name was added, `Ok(false)` if it was already present.
+/// The modified document is written back to the provided string.
+fn add_ignored_name_to_toml(content: &str, name: &str) -> Result<(String, bool)> {
+    let mut document = content
+        .parse::<DocumentMut>()
+        .map_err(|error| anyhow::anyhow!("Failed to parse config file as TOML: {error}"))?;
+
+    // Find or create the [dirmove] section
+    if !document.contains_table("dirmove") {
+        document["dirmove"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let dirmove_table = document["dirmove"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("'dirmove' is not a table in config"))?;
+
+    // Find or create the ignored_group_names array
+    if !dirmove_table.contains_key("ignored_group_names") {
+        dirmove_table["ignored_group_names"] = toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new()));
+    }
+    let array = dirmove_table["ignored_group_names"]
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("'ignored_group_names' is not an array in config"))?;
+
+    // Check if already present by comparing normalized forms
+    let normalized_new = utils::normalize_name(name);
+    let already_present = array.iter().any(|item| {
+        item.as_str()
+            .is_some_and(|existing| utils::normalize_name(existing) == normalized_new)
+    });
+
+    if already_present {
+        return Ok((document.to_string(), false));
+    }
+
+    array.push(name);
+
+    Ok((document.to_string(), true))
+}
+
+/// Add a group name to `ignored_group_names` in the user config file.
+/// The name is stored as-is (not normalized) so the config stays human-readable.
+/// Returns `Ok(true)` if the name was added, `Ok(false)` if it was already present.
+pub fn add_ignored_group_name_to_config(name: &str) -> Result<bool> {
+    let Some(config_path) = cli_tools::config_path() else {
+        anyhow::bail!("Could not determine config file path");
+    };
+
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                config_path.display()
+            ));
+        }
+    };
+
+    let (new_content, added) = add_ignored_name_to_toml(&content, name)?;
+
+    if added {
+        fs::write(config_path, new_content)
+            .map_err(|error| anyhow::anyhow!("Failed to write config file {}: {error}", config_path.display()))?;
+    }
+
+    Ok(added)
+}
+
+#[cfg(test)]
+mod test_add_ignored_name_to_toml {
+    use super::*;
+
+    #[test]
+    fn adds_to_empty_config() {
+        let (result, added) = add_ignored_name_to_toml("", "Season One").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["Season One"]);
+    }
+
+    #[test]
+    fn adds_to_existing_array() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["Episode"]
+"#;
+        let (result, added) = add_ignored_name_to_toml(toml, "Season One").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["Episode", "Season One"]);
+    }
+
+    #[test]
+    fn skips_duplicate_exact_match() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["Season One"]
+"#;
+        let (_, added) = add_ignored_name_to_toml(toml, "Season One").expect("should succeed");
+        assert!(!added);
+    }
+
+    #[test]
+    fn skips_duplicate_normalized_match() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["SeasonOne"]
+"#;
+        let (_, added) = add_ignored_name_to_toml(toml, "Season One").expect("should succeed");
+        assert!(!added);
+    }
+
+    #[test]
+    fn skips_duplicate_dotted_match() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["Season.One"]
+"#;
+        let (_, added) = add_ignored_name_to_toml(toml, "Season One").expect("should succeed");
+        assert!(!added);
+    }
+
+    #[test]
+    fn preserves_existing_config() {
+        let toml = r#"[dirmove]
+auto = true
+ignored_group_names = ["Episode"]
+min_group_size = 5
+"#;
+        let (result, added) = add_ignored_name_to_toml(toml, "Chapter").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert!(doc.auto);
+        assert_eq!(doc.min_group_size, Some(5));
+        assert_eq!(doc.ignored_group_names, vec!["Episode", "Chapter"]);
+    }
+
+    #[test]
+    fn creates_dirmove_section_if_missing() {
+        let toml = r"[dots]
+debug = false
+";
+        let (result, added) = add_ignored_name_to_toml(toml, "Video").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["Video"]);
+    }
+
+    #[test]
+    fn adds_multiple_names_sequentially() {
+        let (result, added) = add_ignored_name_to_toml("", "First").expect("should succeed");
+        assert!(added);
+        let (result, added) = add_ignored_name_to_toml(&result, "Second").expect("should succeed");
+        assert!(added);
+        let (result, added) = add_ignored_name_to_toml(&result, "Third").expect("should succeed");
+        assert!(added);
+        let doc = DirMoveConfig::from_toml_str(&result).expect("should parse");
+        assert_eq!(doc.ignored_group_names, vec!["First", "Second", "Third"]);
+    }
+
+    #[test]
+    fn case_insensitive_duplicate_detection() {
+        let toml = r#"
+[dirmove]
+ignored_group_names = ["Episode"]
+"#;
+        let (_, added) = add_ignored_name_to_toml(toml, "EPISODE").expect("should succeed");
+        assert!(!added);
     }
 }
 

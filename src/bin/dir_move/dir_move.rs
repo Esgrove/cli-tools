@@ -16,10 +16,12 @@ use cli_tools::{
     print_magenta, print_yellow,
 };
 
+use crate::config::add_ignored_group_name_to_config;
 use crate::config::{Config, CustomMapping};
 use crate::database::Database;
 use crate::types::{
-    DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, UnpackInfo, ValidCandidate,
+    DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, PromptResult, UnpackInfo,
+    ValidCandidate,
 };
 use crate::{DirMoveArgs, utils};
 
@@ -1410,6 +1412,9 @@ impl DirMove {
             .and_then(|n| n.to_str())
             .map(utils::normalize_name);
 
+        // Track group names ignored during this session via "s" prompt
+        let mut runtime_ignored: HashSet<String> = HashSet::new();
+
         for (prefix, group) in groups_to_process {
             // Filter out already moved files
             let available_files: Vec<_> = group.files.into_iter().filter(|f| !moved_files.contains(f)).collect();
@@ -1419,12 +1424,19 @@ impl DirMove {
             }
 
             let dir_name = self.resolve_group_dir_name(&prefix);
-            if self.should_skip_group(&dir_name, parent_dir_normalized.as_deref()) {
+            if self.should_skip_group(&dir_name, parent_dir_normalized.as_deref(), &runtime_ignored) {
                 continue;
             }
 
             group_number += 1;
-            self.process_single_group(&dir_name, available_files, &mut moved_files, group_number, total_groups)?;
+            self.process_single_group(
+                &dir_name,
+                available_files,
+                &mut moved_files,
+                &mut runtime_ignored,
+                group_number,
+                total_groups,
+            )?;
         }
 
         Ok(())
@@ -1439,9 +1451,14 @@ impl DirMove {
     }
 
     /// Check whether a proposed directory name should be skipped.
-    /// Skips empty names, ignored group names, ignored prefixes, and names
-    /// matching the parent directory.
-    fn should_skip_group(&self, dir_name: &str, parent_dir_normalized: Option<&str>) -> bool {
+    /// Skips empty names, ignored group names, ignored prefixes, names
+    /// matching the parent directory, and runtime-ignored names.
+    fn should_skip_group(
+        &self,
+        dir_name: &str,
+        parent_dir_normalized: Option<&str>,
+        runtime_ignored: &HashSet<String>,
+    ) -> bool {
         // Skip if the directory name is empty after stripping
         if dir_name.is_empty() {
             return true;
@@ -1451,6 +1468,11 @@ impl DirMove {
 
         // Skip if the stripped directory name matches an ignored group name
         if self.config.ignored_group_names.contains(&dir_name_normalized) {
+            return true;
+        }
+
+        // Skip if the name was ignored during this session
+        if runtime_ignored.contains(&dir_name_normalized) {
             return true;
         }
 
@@ -1473,6 +1495,7 @@ impl DirMove {
         dir_name: &str,
         available_files: Vec<PathBuf>,
         moved_files: &mut HashSet<PathBuf>,
+        runtime_ignored: &mut HashSet<String>,
         group_number: usize,
         total_groups: usize,
     ) -> anyhow::Result<()> {
@@ -1495,24 +1518,49 @@ impl DirMove {
         }
 
         if !self.config.dryrun {
-            let final_dir_path = if self.config.auto {
-                Some(dir_path)
+            let prompt_result = if self.config.auto {
+                PromptResult::Confirmed(dir_path)
             } else {
                 self.prompt_for_directory_name_with_suggestion(&dir_path, dir_name, database_suggestion.as_deref())?
             };
 
-            if let Some(target_path) = final_dir_path {
-                if let Err(e) = self.move_files_to_target_dir(&target_path, &available_files) {
-                    print_error!("Failed to process {}: {e}", target_path.display());
-                } else {
-                    // Mark files as moved
-                    moved_files.extend(available_files);
-                    // Add directory name to database
-                    let final_dir_name = cli_tools::path_to_filename_string(&target_path);
-                    self.add_to_database(&final_dir_name);
+            match prompt_result {
+                PromptResult::Confirmed(target_path) => {
+                    if let Err(e) = self.move_files_to_target_dir(&target_path, &available_files) {
+                        print_error!("Failed to process {}: {e}", target_path.display());
+                    } else {
+                        // Mark files as moved
+                        moved_files.extend(available_files);
+                        // Add directory name to database
+                        let final_dir_name = cli_tools::path_to_filename_string(&target_path);
+                        self.add_to_database(&final_dir_name);
+                    }
                 }
+                PromptResult::SaveToIgnored => {
+                    match add_ignored_group_name_to_config(dir_name) {
+                        Ok(true) => {
+                            println!(
+                                "  {} Added '{}' to ignored_group_names in config",
+                                "✓".green(),
+                                dir_name.cyan()
+                            );
+                        }
+                        Ok(false) => {
+                            println!(
+                                "  {} '{}' already in ignored_group_names config",
+                                "→".dimmed(),
+                                dir_name.cyan()
+                            );
+                        }
+                        Err(error) => {
+                            print_error!("Failed to update config: {error}");
+                        }
+                    }
+                    // Track in runtime set so subsequent groups with the same name are skipped
+                    runtime_ignored.insert(utils::normalize_name(dir_name));
+                }
+                PromptResult::Skipped => {}
             }
-            // Note: "Skipped" message is printed in prompt_for_directory_name
         }
         println!();
 
@@ -1573,13 +1621,13 @@ impl DirMove {
             }
 
             if !self.config.dryrun {
-                let final_dir_path = if self.config.auto {
-                    Some(dir_path)
+                let prompt_result = if self.config.auto {
+                    PromptResult::Confirmed(dir_path)
                 } else {
                     self.prompt_for_directory_name_with_suggestion(&dir_path, &dir_name, None)?
                 };
 
-                if let Some(target_path) = final_dir_path {
+                if let PromptResult::Confirmed(target_path) = prompt_result {
                     if let Err(e) = self.move_files_to_target_dir(&target_path, &files) {
                         print_error!("Failed to process {}: {e}", target_path.display());
                     } else {
@@ -1604,13 +1652,14 @@ impl DirMove {
     /// Accepts:
     /// - "y" or "yes" to confirm with the effective name (database formatting if available, otherwise suggested)
     /// - "n" or "no" to skip
+    /// - "s" to skip and save the group name to `ignored_group_names` in the config file
     /// - Any other non-empty string as a custom directory name (with confirmation)
     fn prompt_for_directory_name_with_suggestion(
         &self,
         suggested_path: &Path,
         suggested_name: &str,
         database_suggestion: Option<&str>,
-    ) -> anyhow::Result<Option<PathBuf>> {
+    ) -> anyhow::Result<PromptResult> {
         // If database has an exact match (same letters, different formatting), use its formatting silently.
         // This maps e.g. "JaneDoe" -> "Jane Doe" without showing confusing messages.
         let effective_suggestion = database_suggestion.unwrap_or(suggested_name);
@@ -1618,7 +1667,7 @@ impl DirMove {
 
         print!(
             "{}",
-            format!("Create directory and move files? (y/n or custom name) [{effective_suggestion}]: ").magenta()
+            format!("Create directory and move files? (y/n/s or custom name) [{effective_suggestion}]: ").magenta()
         );
         std::io::stdout().flush()?;
 
@@ -1628,20 +1677,25 @@ impl DirMove {
 
         // Empty input or "y"/"yes" confirms the effective suggestion
         if input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
-            return Ok(Some(effective_path));
+            return Ok(PromptResult::Confirmed(effective_path));
         }
 
         // "n"/"no" skips
         if input.eq_ignore_ascii_case("n") || input.eq_ignore_ascii_case("no") {
             println!("  Skipped");
-            return Ok(None);
+            return Ok(PromptResult::Skipped);
+        }
+
+        // "s" skips and saves to ignored_group_names in config
+        if input.eq_ignore_ascii_case("s") {
+            return Ok(PromptResult::SaveToIgnored);
         }
 
         // Any other non-empty input is treated as a custom directory name
         // (input is already trimmed, but we double-check for safety)
         let custom_name = input.trim();
         if custom_name.is_empty() {
-            return Ok(Some(suggested_path.to_path_buf()));
+            return Ok(PromptResult::Confirmed(suggested_path.to_path_buf()));
         }
         let custom_path = self.root.join(custom_name);
 
@@ -1660,10 +1714,10 @@ impl DirMove {
         let confirm_input = confirm_input.trim();
 
         if confirm_input.eq_ignore_ascii_case("y") || confirm_input.eq_ignore_ascii_case("yes") {
-            Ok(Some(custom_path))
+            Ok(PromptResult::Confirmed(custom_path))
         } else {
             println!("  Skipped");
-            Ok(None)
+            Ok(PromptResult::Skipped)
         }
     }
 
