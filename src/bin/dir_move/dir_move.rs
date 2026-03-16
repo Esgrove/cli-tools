@@ -1362,10 +1362,11 @@ impl DirMove {
 
         // Sort groups by:
         // 1. Start position (earlier in filename is better)
-        // 2. File count (descending)
-        // 3. Prefix length (longer is better)
-        // 4. Alphabetically
-        // This biases towards prefixes from the start of filenames.
+        // 2. Part count (descending - more parts = more specific)
+        // 3. Prefix length (descending - longer = more specific)
+        // 4. File count (descending - more files = better)
+        // 5. Alphabetically
+        // This biases towards more specific prefixes from the start of filenames.
         // Filter out groups smaller than the configured minimum.
         let groups_to_process: Vec<_> = prefix_groups
             .into_iter()
@@ -1375,10 +1376,12 @@ impl DirMove {
                 group_a
                     .min_start_position
                     .cmp(&group_b.min_start_position)
+                    // Then by part count (descending - more parts = more specific)
+                    .then_with(|| group_b.part_count.cmp(&group_a.part_count))
+                    // Then by length (descending - longer = more specific)
+                    .then_with(|| prefix_b.chars().count().cmp(&prefix_a.chars().count()))
                     // Then by count (descending - more files = better)
                     .then_with(|| group_b.files.len().cmp(&group_a.files.len()))
-                    // Then by length (descending - longer = better)
-                    .then_with(|| prefix_b.chars().count().cmp(&prefix_a.chars().count()))
                     // Finally alphabetically
                     .then_with(|| prefix_a.cmp(prefix_b))
             })
@@ -6239,7 +6242,7 @@ mod test_realistic_grouping {
 
     #[test]
     fn groups_sorted_by_specificity_longest_prefix_first() {
-        // Verify that when processing, longer prefixes come before shorter ones
+        // Verify that when processing, longer/more specific prefixes come before shorter ones
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -6256,14 +6259,17 @@ mod test_realistic_grouping {
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
         // Convert to sorted vec like create_dirs_and_move_files does
-        // Sorting: position first, then file count (descending), then alphabetically
+        // Sorting: position, part count (desc), length (desc), file count (desc), alphabetically
         let sorted_groups: Vec<_> = groups
             .into_iter()
-            .sorted_by(|a, b| {
-                a.1.min_start_position
-                    .cmp(&b.1.min_start_position)
-                    .then_with(|| b.1.files.len().cmp(&a.1.files.len()))
-                    .then_with(|| a.0.cmp(&b.0))
+            .sorted_by(|(prefix_a, group_a), (prefix_b, group_b)| {
+                group_a
+                    .min_start_position
+                    .cmp(&group_b.min_start_position)
+                    .then_with(|| group_b.part_count.cmp(&group_a.part_count))
+                    .then_with(|| prefix_b.chars().count().cmp(&prefix_a.chars().count()))
+                    .then_with(|| group_b.files.len().cmp(&group_a.files.len()))
+                    .then_with(|| prefix_a.cmp(prefix_b))
             })
             .collect();
 
@@ -6280,16 +6286,24 @@ mod test_realistic_grouping {
         assert!(ghibli_pos.is_some(), "Should have Studio.Ghibli group");
         assert!(studio_pos.is_some(), "Should have Studio group");
 
-        // All prefixes start at position 0, so secondary sort by file count applies:
-        // Studio.Ghibli has 5 files, Studio has 5 files, Films has 3, Shorts has 2
-        // So broader groups (with more files) come first when position is equal
+        // All prefixes start at position 0, so secondary sort by part count applies:
+        // 3-part prefixes (Films, Shorts) come before 2-part (Ghibli) before 1-part (Studio)
         assert!(
-            ghibli_pos.unwrap() < films_pos.unwrap(),
-            "Studio.Ghibli (5 files) should come before Studio.Ghibli.Films (3 files)"
+            films_pos.unwrap() < ghibli_pos.unwrap(),
+            "Studio.Ghibli.Films (3 parts) should come before Studio.Ghibli (2 parts)"
         );
         assert!(
-            ghibli_pos.unwrap() < shorts_pos.unwrap(),
-            "Studio.Ghibli (5 files) should come before Studio.Ghibli.Shorts (2 files)"
+            shorts_pos.unwrap() < ghibli_pos.unwrap(),
+            "Studio.Ghibli.Shorts (3 parts) should come before Studio.Ghibli (2 parts)"
+        );
+        assert!(
+            ghibli_pos.unwrap() < studio_pos.unwrap(),
+            "Studio.Ghibli (2 parts) should come before Studio (1 part)"
+        );
+        // Among same part count, longer prefix first
+        assert!(
+            shorts_pos.unwrap() < films_pos.unwrap(),
+            "Studio.Ghibli.Shorts (longer prefix) should come before Studio.Ghibli.Films"
         );
     }
 
