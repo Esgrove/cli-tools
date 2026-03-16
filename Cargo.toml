@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "9.2.1"
+version = "9.3.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities"
@@ -12,7 +12,7 @@ categories = ["command-line-utilities"]
 rust-version = "1.93"
 
 [dependencies]
-anyhow = "1.0.101"
+anyhow = "1.0.102"
 chrono = "0.4.44"
 clap = { version = "4.6.0", features = ["derive"] }
 clap_complete = "4.6.0"
@@ -23,9 +23,9 @@ difference = "2.0.0"
 dirs = "6.0.0"
 dunce = "1.0.5"
 encoding_rs = "0.8.35"
-futures = "0.3.31"
+futures = "0.3.32"
 git2 = "0.20.4"
-indicatif = { version = "0.18.3", features = ["tokio", "futures", "rayon"] }
+indicatif = { version = "0.18.4", features = ["tokio", "futures", "rayon"] }
 itertools = "0.14.0"
 num_cpus = "1.17.0"
 ratatui = "0.30.0"
@@ -39,10 +39,10 @@ serde_bencode = "0.2.4"
 serde_bytes = "0.11.19"
 serde_json = "1.0"
 sha1 = "0.10.6"
-tempfile = "3.25.0"
+tempfile = "3.27.0"
 titlecase = "3.6.0"
 tokio = { version = "1.50.0", features = ["full"] }
-toml = "1.0.3"
+toml = "1.0.6"
 toml_edit = "0.25.4"
 trash = "5.2.5"
 unicode-normalization = "0.1.25"
