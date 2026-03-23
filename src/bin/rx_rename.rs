@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use walkdir::WalkDir;
 
 use cli_tools::{print_error, print_magenta_bold, resolve_input_path, should_skip_entry, trash_or_delete};
@@ -24,6 +25,9 @@ enum Outcome {
     about = "Recursively remove a trailing '_1' from filenames"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<RxRenameCommand>,
+
     /// Root directory to scan. Defaults to current directory.
     #[arg(value_hint = clap::ValueHint::DirPath)]
     root: Option<PathBuf>,
@@ -31,10 +35,40 @@ struct Args {
     /// Only print what would be done without making changes
     #[arg(short, long)]
     dryrun: bool,
+
+    /// Print verbose output
+    #[arg(short, long, global = true)]
+    verbose: bool,
+}
+
+/// Subcommands for `rx_rename`.
+#[derive(Subcommand)]
+enum RxRenameCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(RxRenameCommand::Completion { shell, install }) = &args.command {
+        return cli_tools::generate_shell_completion(
+            *shell,
+            Args::command(),
+            *install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        );
+    }
 
     let root = resolve_input_path(args.root.as_deref())?;
     if !root.is_dir() {
