@@ -2,10 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
-use itertools::Itertools;
 use walkdir::WalkDir;
 
-use cli_tools::{print_error, print_magenta_bold, resolve_input_path, trash_or_delete};
+use cli_tools::{print_error, print_magenta_bold, resolve_input_path, should_skip_entry, trash_or_delete};
 
 /// Result of processing a single file.
 enum Outcome {
@@ -36,8 +35,9 @@ struct Args {
 
 /// Find all files under `root` whose stem ends with `_1`, sorted by path.
 fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
-    WalkDir::new(root)
+    let mut files: Vec<PathBuf> = WalkDir::new(root)
         .into_iter()
+        .filter_entry(|e| !should_skip_entry(e))
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
@@ -47,14 +47,22 @@ fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
                 .is_some_and(|s| s.ends_with("_1"))
         })
         .map(walkdir::DirEntry::into_path)
-        .sorted()
-        .collect()
+        .collect();
+    files.sort();
+    files
 }
 
 /// Process a single file ending in `_1`.
 ///
 /// If a matching unsuffixed file already exists, trash it first, then rename.
-fn process_file(root: &Path, file_with_suffix: &Path, index: usize, total: usize, dryrun: bool) -> Result<Outcome> {
+fn process_file(
+    root: &Path,
+    file_with_suffix: &Path,
+    index: usize,
+    total: usize,
+    width: usize,
+    dryrun: bool,
+) -> Result<Outcome> {
     let stem = file_with_suffix
         .file_stem()
         .and_then(|s| s.to_str())
@@ -63,11 +71,12 @@ fn process_file(root: &Path, file_with_suffix: &Path, index: usize, total: usize
     let extension = file_with_suffix.extension().and_then(|s| s.to_str());
 
     // Build the unsuffixed name: strip trailing "_1" and re-add extension
-    let new_stem = &stem[..stem.len() - 2];
+    let new_stem = stem
+        .strip_suffix("_1")
+        .ok_or_else(|| anyhow::anyhow!("Filename does not end with '_1': {}", file_with_suffix.display()))?;
     let original_name = extension.map_or_else(|| new_stem.to_string(), |ext| format!("{new_stem}.{ext}"));
     let file_without_suffix = file_with_suffix.with_file_name(&original_name);
 
-    let width = total.to_string().len();
     let relative = file_with_suffix.strip_prefix(root).unwrap_or(file_with_suffix);
 
     print_magenta_bold!("[{index:>width$} / {total}]:");
@@ -84,19 +93,13 @@ fn process_file(root: &Path, file_with_suffix: &Path, index: usize, total: usize
         false
     };
 
-    if dryrun {
-        return Ok(if needs_trash {
-            Outcome::RenamedAndTrashed
-        } else {
-            Outcome::Renamed
-        });
+    if !dryrun {
+        if needs_trash {
+            trash_or_delete(&file_without_suffix)?;
+        }
+        std::fs::rename(file_with_suffix, &file_without_suffix)?;
     }
 
-    if needs_trash {
-        trash_or_delete(&file_without_suffix)?;
-    }
-
-    std::fs::rename(file_with_suffix, &file_without_suffix)?;
     Ok(if needs_trash {
         Outcome::RenamedAndTrashed
     } else {
@@ -112,18 +115,24 @@ fn process_file(root: &Path, file_with_suffix: &Path, index: usize, total: usize
 fn rename_files(root: &Path, dryrun: bool) {
     let files = find_files_with_rx_duplicate_suffix(root);
     let total = files.len();
+    let width = total.to_string().len();
 
-    let (rename_count, trash_count) = files.iter().enumerate().fold((0usize, 0usize), |(rn, tr), (i, file)| {
-        match process_file(root, file, i + 1, total, dryrun) {
-            Ok(Outcome::RenamedAndTrashed) => (rn + 1, tr + 1),
-            Ok(Outcome::Renamed) => (rn + 1, tr),
-            Ok(Outcome::Skipped) => (rn, tr),
+    let mut rename_count: usize = 0;
+    let mut trash_count: usize = 0;
+
+    for (i, file) in files.iter().enumerate() {
+        match process_file(root, file, i + 1, total, width, dryrun) {
+            Ok(Outcome::RenamedAndTrashed) => {
+                rename_count += 1;
+                trash_count += 1;
+            }
+            Ok(Outcome::Renamed) => rename_count += 1,
+            Ok(Outcome::Skipped) => {}
             Err(e) => {
                 print_error!("{}: {e}", file.display());
-                (rn, tr)
             }
         }
-    });
+    }
 
     let rename_action = if dryrun { "would be renamed" } else { "renamed" };
     let trash_action = if dryrun { "would be trashed" } else { "trashed" };
