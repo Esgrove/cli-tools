@@ -7,12 +7,21 @@ use walkdir::WalkDir;
 
 use cli_tools::{print_error, print_magenta_bold, resolve_input_path, should_skip_entry, trash_or_delete};
 
+/// Action to take when a conflicting unsuffixed file already exists.
+#[derive(Clone, Copy)]
+enum ConflictAction {
+    /// Permanently delete the conflicting file.
+    Delete,
+    /// Move the conflicting file to the system trash.
+    Trash,
+}
+
 /// Result of processing a single file.
 enum Outcome {
     /// File was renamed (no conflicting unsuffixed file existed).
     Renamed,
-    /// Conflicting unsuffixed file was trashed and suffixed file was renamed.
-    RenamedAndTrashed,
+    /// Conflicting unsuffixed file was removed and suffixed file was renamed.
+    RenamedAndRemoved,
     /// File was skipped (e.g. unsuffixed path exists but is not a regular file).
     Skipped,
 }
@@ -35,6 +44,10 @@ struct Args {
     /// Only print what would be done without making changes
     #[arg(short, long)]
     dryrun: bool,
+
+    /// Move conflicting files to system trash instead of permanently deleting them
+    #[arg(short, long)]
+    trash: bool,
 
     /// Print verbose output
     #[arg(short, long, global = true)]
@@ -75,28 +88,33 @@ fn main() -> Result<()> {
         anyhow::bail!("Not a directory: {}", root.display());
     }
 
-    rename_files(&root, args.dryrun);
+    let action = if args.trash {
+        ConflictAction::Trash
+    } else {
+        ConflictAction::Delete
+    };
+    rename_files(&root, args.dryrun, action);
     Ok(())
 }
 
 /// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
 ///
-/// When a matching unsuffixed file already exists, it is trashed before renaming.
+/// When a matching unsuffixed file already exists, it is deleted (or trashed) before renaming.
 /// Errors for individual files are printed and skipped without aborting.
-/// Prints a summary of renamed and trashed file counts when finished.
-fn rename_files(root: &Path, dryrun: bool) {
+/// Prints a summary of renamed and removed file counts when finished.
+fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) {
     let files = find_files_with_rx_duplicate_suffix(root);
     let total = files.len();
     let width = total.to_string().len();
 
     let mut rename_count: usize = 0;
-    let mut trash_count: usize = 0;
+    let mut removed_count: usize = 0;
 
     for (i, file) in files.iter().enumerate() {
-        match process_file(root, file, i + 1, total, width, dryrun) {
-            Ok(Outcome::RenamedAndTrashed) => {
+        match process_file(root, file, i + 1, total, width, dryrun, action) {
+            Ok(Outcome::RenamedAndRemoved) => {
                 rename_count += 1;
-                trash_count += 1;
+                removed_count += 1;
             }
             Ok(Outcome::Renamed) => rename_count += 1,
             Ok(Outcome::Skipped) => {}
@@ -107,10 +125,15 @@ fn rename_files(root: &Path, dryrun: bool) {
     }
 
     let rename_action = if dryrun { "would be renamed" } else { "renamed" };
-    let trash_action = if dryrun { "would be trashed" } else { "trashed" };
+    let removed_action = match (dryrun, action) {
+        (true, ConflictAction::Delete) => "would be deleted",
+        (true, ConflictAction::Trash) => "would be trashed",
+        (false, ConflictAction::Delete) => "deleted",
+        (false, ConflictAction::Trash) => "trashed",
+    };
 
     println!("\n{rename_count} files {rename_action}");
-    println!("{trash_count} files {trash_action}");
+    println!("{removed_count} files {removed_action}");
 }
 
 /// Find all files under `root` whose stem ends with `_1`, sorted by path.
@@ -142,6 +165,7 @@ fn process_file(
     total: usize,
     width: usize,
     dryrun: bool,
+    action: ConflictAction,
 ) -> Result<Outcome> {
     let stem = file_with_suffix
         .file_stem()
@@ -175,13 +199,16 @@ fn process_file(
 
     if !dryrun {
         if needs_trash {
-            trash_or_delete(&file_without_suffix)?;
+            match action {
+                ConflictAction::Delete => std::fs::remove_file(&file_without_suffix)?,
+                ConflictAction::Trash => trash_or_delete(&file_without_suffix)?,
+            }
         }
         std::fs::rename(file_with_suffix, &file_without_suffix)?;
     }
 
     Ok(if needs_trash {
-        Outcome::RenamedAndTrashed
+        Outcome::RenamedAndRemoved
     } else {
         Outcome::Renamed
     })
