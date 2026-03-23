@@ -33,6 +33,52 @@ struct Args {
     dryrun: bool,
 }
 
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let root = resolve_input_path(args.root.as_deref())?;
+    if !root.is_dir() {
+        anyhow::bail!("Not a directory: {}", root.display());
+    }
+
+    rename_files(&root, args.dryrun);
+    Ok(())
+}
+
+/// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
+///
+/// When a matching unsuffixed file already exists, it is trashed before renaming.
+/// Errors for individual files are printed and skipped without aborting.
+/// Prints a summary of renamed and trashed file counts when finished.
+fn rename_files(root: &Path, dryrun: bool) {
+    let files = find_files_with_rx_duplicate_suffix(root);
+    let total = files.len();
+    let width = total.to_string().len();
+
+    let mut rename_count: usize = 0;
+    let mut trash_count: usize = 0;
+
+    for (i, file) in files.iter().enumerate() {
+        match process_file(root, file, i + 1, total, width, dryrun) {
+            Ok(Outcome::RenamedAndTrashed) => {
+                rename_count += 1;
+                trash_count += 1;
+            }
+            Ok(Outcome::Renamed) => rename_count += 1,
+            Ok(Outcome::Skipped) => {}
+            Err(e) => {
+                print_error!("{}: {e}", file.display());
+            }
+        }
+    }
+
+    let rename_action = if dryrun { "would be renamed" } else { "renamed" };
+    let trash_action = if dryrun { "would be trashed" } else { "trashed" };
+
+    println!("\n{rename_count} files {rename_action}");
+    println!("{trash_count} files {trash_action}");
+}
+
 /// Find all files under `root` whose stem ends with `_1`, sorted by path.
 fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(root)
@@ -105,50 +151,4 @@ fn process_file(
     } else {
         Outcome::Renamed
     })
-}
-
-/// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
-///
-/// When a matching unsuffixed file already exists, it is trashed before renaming.
-/// Errors for individual files are printed and skipped without aborting.
-/// Prints a summary of renamed and trashed file counts when finished.
-fn rename_files(root: &Path, dryrun: bool) {
-    let files = find_files_with_rx_duplicate_suffix(root);
-    let total = files.len();
-    let width = total.to_string().len();
-
-    let mut rename_count: usize = 0;
-    let mut trash_count: usize = 0;
-
-    for (i, file) in files.iter().enumerate() {
-        match process_file(root, file, i + 1, total, width, dryrun) {
-            Ok(Outcome::RenamedAndTrashed) => {
-                rename_count += 1;
-                trash_count += 1;
-            }
-            Ok(Outcome::Renamed) => rename_count += 1,
-            Ok(Outcome::Skipped) => {}
-            Err(e) => {
-                print_error!("{}: {e}", file.display());
-            }
-        }
-    }
-
-    let rename_action = if dryrun { "would be renamed" } else { "renamed" };
-    let trash_action = if dryrun { "would be trashed" } else { "trashed" };
-
-    println!("\n{rename_count} files {rename_action}");
-    println!("{trash_count} files {trash_action}");
-}
-
-fn main() -> Result<()> {
-    let args = Args::parse();
-
-    let root = resolve_input_path(args.root.as_deref())?;
-    if !root.is_dir() {
-        anyhow::bail!("Not a directory: {}", root.display());
-    }
-
-    rename_files(&root, args.dryrun);
-    Ok(())
 }
