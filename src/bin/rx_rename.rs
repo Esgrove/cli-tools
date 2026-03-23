@@ -7,6 +7,16 @@ use walkdir::WalkDir;
 
 use cli_tools::{print_error, print_magenta_bold, resolve_input_path, trash_or_delete};
 
+/// Result of processing a single file.
+enum Outcome {
+    /// File was renamed (no conflicting unsuffixed file existed).
+    Renamed,
+    /// Conflicting unsuffixed file was trashed and suffixed file was renamed.
+    RenamedAndTrashed,
+    /// File was skipped (e.g. unsuffixed path exists but is not a regular file).
+    Skipped,
+}
+
 #[derive(Parser)]
 #[command(
     author,
@@ -44,14 +54,7 @@ fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
 /// Process a single file ending in `_1`.
 ///
 /// If a matching unsuffixed file already exists, trash it first, then rename.
-/// Returns `(renamed, trashed)`.
-fn process_file(
-    root: &Path,
-    file_with_suffix: &Path,
-    index: usize,
-    total: usize,
-    dry_run: bool,
-) -> Result<(bool, bool)> {
+fn process_file(root: &Path, file_with_suffix: &Path, index: usize, total: usize, dryrun: bool) -> Result<Outcome> {
     let stem = file_with_suffix
         .file_stem()
         .and_then(|s| s.to_str())
@@ -70,9 +73,9 @@ fn process_file(
     print_magenta_bold!("[{index:>width$} / {total}]:");
     println!("{}", relative.display());
 
-    let trashed = if file_without_suffix.exists() {
+    let needs_trash = if file_without_suffix.exists() {
         if !file_without_suffix.is_file() {
-            return Ok((false, false));
+            return Ok(Outcome::Skipped);
         }
         let rel_without = file_without_suffix.strip_prefix(root).unwrap_or(&file_without_suffix);
         println!("{}", rel_without.display());
@@ -81,16 +84,24 @@ fn process_file(
         false
     };
 
-    if dry_run {
-        return Ok((true, trashed));
+    if dryrun {
+        return Ok(if needs_trash {
+            Outcome::RenamedAndTrashed
+        } else {
+            Outcome::Renamed
+        });
     }
 
-    if trashed {
+    if needs_trash {
         trash_or_delete(&file_without_suffix)?;
     }
 
     std::fs::rename(file_with_suffix, &file_without_suffix)?;
-    Ok((true, trashed))
+    Ok(if needs_trash {
+        Outcome::RenamedAndTrashed
+    } else {
+        Outcome::Renamed
+    })
 }
 
 /// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
@@ -101,24 +112,18 @@ fn process_file(
 fn rename_files(root: &Path, dryrun: bool) {
     let files = find_files_with_rx_duplicate_suffix(root);
     let total = files.len();
-    let mut rename_count: usize = 0;
-    let mut trash_count: usize = 0;
 
-    for (i, file) in files.iter().enumerate() {
+    let (rename_count, trash_count) = files.iter().enumerate().fold((0usize, 0usize), |(rn, tr), (i, file)| {
         match process_file(root, file, i + 1, total, dryrun) {
-            Ok((renamed, trashed)) => {
-                if renamed {
-                    rename_count += 1;
-                }
-                if trashed {
-                    trash_count += 1;
-                }
-            }
+            Ok(Outcome::RenamedAndTrashed) => (rn + 1, tr + 1),
+            Ok(Outcome::Renamed) => (rn + 1, tr),
+            Ok(Outcome::Skipped) => (rn, tr),
             Err(e) => {
                 print_error!("{}: {e}", file.display());
+                (rn, tr)
             }
         }
-    }
+    });
 
     let rename_action = if dryrun { "would be renamed" } else { "renamed" };
     let trash_action = if dryrun { "would be trashed" } else { "trashed" };
