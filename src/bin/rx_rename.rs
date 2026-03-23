@@ -1,0 +1,140 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use clap::Parser;
+use itertools::Itertools;
+use walkdir::WalkDir;
+
+use cli_tools::{print_error, print_magenta_bold, resolve_input_path, trash_or_delete};
+
+#[derive(Parser)]
+#[command(
+    author,
+    version,
+    name = env!("CARGO_BIN_NAME"),
+    about = "Recursively remove a trailing '_1' from filenames"
+)]
+struct Args {
+    /// Root directory to scan. Defaults to current directory.
+    #[arg(value_hint = clap::ValueHint::DirPath)]
+    root: Option<PathBuf>,
+
+    /// Only print what would be done without making changes
+    #[arg(short, long)]
+    dryrun: bool,
+}
+
+/// Find all files under `root` whose stem ends with `_1`, sorted by path.
+fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            e.path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.ends_with("_1"))
+        })
+        .map(walkdir::DirEntry::into_path)
+        .sorted()
+        .collect()
+}
+
+/// Process a single file ending in `_1`.
+///
+/// If a matching unsuffixed file already exists, trash it first, then rename.
+/// Returns `(renamed, trashed)`.
+fn process_file(
+    root: &Path,
+    file_with_suffix: &Path,
+    index: usize,
+    total: usize,
+    dry_run: bool,
+) -> Result<(bool, bool)> {
+    let stem = file_with_suffix
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Non-UTF-8 filename: {}", file_with_suffix.display()))?;
+
+    let extension = file_with_suffix.extension().and_then(|s| s.to_str());
+
+    // Build the unsuffixed name: strip trailing "_1" and re-add extension
+    let new_stem = &stem[..stem.len() - 2];
+    let original_name = extension.map_or_else(|| new_stem.to_string(), |ext| format!("{new_stem}.{ext}"));
+    let file_without_suffix = file_with_suffix.with_file_name(&original_name);
+
+    let width = total.to_string().len();
+    let relative = file_with_suffix.strip_prefix(root).unwrap_or(file_with_suffix);
+
+    print_magenta_bold!("[{index:>width$} / {total}]:");
+    println!("{}", relative.display());
+
+    let trashed = if file_without_suffix.exists() {
+        if !file_without_suffix.is_file() {
+            return Ok((false, false));
+        }
+        let rel_without = file_without_suffix.strip_prefix(root).unwrap_or(&file_without_suffix);
+        println!("{}", rel_without.display());
+        true
+    } else {
+        false
+    };
+
+    if dry_run {
+        return Ok((true, trashed));
+    }
+
+    if trashed {
+        trash_or_delete(&file_without_suffix)?;
+    }
+
+    std::fs::rename(file_with_suffix, &file_without_suffix)?;
+    Ok((true, trashed))
+}
+
+/// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
+///
+/// When a matching unsuffixed file already exists, it is trashed before renaming.
+/// Errors for individual files are printed and skipped without aborting.
+/// Prints a summary of renamed and trashed file counts when finished.
+fn rename_files(root: &Path, dryrun: bool) {
+    let files = find_files_with_rx_duplicate_suffix(root);
+    let total = files.len();
+    let mut rename_count: usize = 0;
+    let mut trash_count: usize = 0;
+
+    for (i, file) in files.iter().enumerate() {
+        match process_file(root, file, i + 1, total, dryrun) {
+            Ok((renamed, trashed)) => {
+                if renamed {
+                    rename_count += 1;
+                }
+                if trashed {
+                    trash_count += 1;
+                }
+            }
+            Err(e) => {
+                print_error!("{}: {e}", file.display());
+            }
+        }
+    }
+
+    let rename_action = if dryrun { "would be renamed" } else { "renamed" };
+    let trash_action = if dryrun { "would be trashed" } else { "trashed" };
+
+    println!("\n{rename_count} files {rename_action}");
+    println!("{trash_count} files {trash_action}");
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let root = resolve_input_path(args.root.as_deref())?;
+    if !root.is_dir() {
+        anyhow::bail!("Not a directory: {}", root.display());
+    }
+
+    rename_files(&root, args.dryrun);
+    Ok(())
+}

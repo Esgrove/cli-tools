@@ -103,6 +103,10 @@ path = "src/bin/video_stats/main.rs"
 name = "qtorrent"
 path = "src/bin/qtorrent/main.rs"
 
+[[bin]]
+name = "rx_rename"
+path = "src/bin/rx_rename.rs"
+
 [[bench]]
 name = "date"
 harness = false
