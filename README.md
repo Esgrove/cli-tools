@@ -528,6 +528,6 @@ The HTML report is generated in `target/llvm-cov/html/`.
 ### Required Tools
 
 ```shell
-cargo install cargo-nextest
-cargo install cargo-llvm-cov
+cargo install --locked cargo-nextest
+cargo install --locked cargo-llvm-cov
 ```
