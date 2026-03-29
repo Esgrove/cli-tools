@@ -806,7 +806,14 @@ impl QTorrent {
                 "2" if show_internal && normalized_internal.is_some() => {
                     normalized_internal.expect("normalized_internal checked above")
                 }
-                _ => input.to_string(),
+                _ => {
+                    // For single files, restore the original extension if the custom name doesn't have one
+                    if info.effective_is_multi_file {
+                        input.to_string()
+                    } else {
+                        utils::restore_file_extension(input, &normalized_suggested)
+                    }
+                }
             };
 
             let new_name_label = if info.effective_is_multi_file {

@@ -205,6 +205,71 @@ pub fn format_single_file_name(dot_rename: &DotFormat, name: &str) -> String {
     }
 }
 
+/// Restore the original file extension on a custom name if it's missing a known extension.
+///
+/// When a user enters a custom rename, they may omit the file extension.
+/// This checks if the reference name has a known extension and the custom name does not,
+/// and appends the extension if missing.
+pub fn restore_file_extension(custom_name: &str, reference_name: &str) -> String {
+    if let Some(original_ext) = extract_file_extension(reference_name)
+        && extract_file_extension(custom_name).is_none()
+    {
+        return format!("{custom_name}.{original_ext}");
+    }
+    custom_name.to_string()
+}
+
+#[cfg(test)]
+mod test_restore_file_extension {
+    use super::*;
+
+    #[test]
+    fn appends_extension_when_missing() {
+        assert_eq!(restore_file_extension("My Movie", "Original.Name.mp4"), "My Movie.mp4");
+    }
+
+    #[test]
+    fn appends_mkv_extension() {
+        assert_eq!(
+            restore_file_extension("Custom Name", "Some.Show.mkv"),
+            "Custom Name.mkv"
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_same_extension() {
+        assert_eq!(restore_file_extension("My Movie.mp4", "Original.mp4"), "My Movie.mp4");
+    }
+
+    #[test]
+    fn preserves_different_known_extension() {
+        assert_eq!(restore_file_extension("My Movie.mkv", "Original.mp4"), "My Movie.mkv");
+    }
+
+    #[test]
+    fn no_extension_in_reference() {
+        assert_eq!(restore_file_extension("Custom Name", "Folder Name"), "Custom Name");
+    }
+
+    #[test]
+    fn unknown_extension_in_reference_ignored() {
+        assert_eq!(restore_file_extension("Custom Name", "Some.Name.xyz"), "Custom Name");
+    }
+
+    #[test]
+    fn handles_dotted_custom_name_without_known_extension() {
+        assert_eq!(
+            restore_file_extension("My.Custom.Name", "Original.Name.mp4"),
+            "My.Custom.Name.mp4"
+        );
+    }
+
+    #[test]
+    fn handles_numeric_extension_in_reference() {
+        assert_eq!(restore_file_extension("Custom Name", "Show.2024.01.15"), "Custom Name");
+    }
+}
+
 #[cfg(test)]
 mod test_insert_date_before_extension {
     use super::*;
