@@ -112,6 +112,8 @@ pub enum SkipReason {
     ResolutionBelowLimit { width: u32, height: u32, limit: u32 },
     /// Output file already exists
     OutputExists { path: PathBuf, source_duration: f64 },
+    /// File no longer exists (may have been moved or renamed)
+    FileMissing,
     /// Failed to get video info
     AnalysisFailed { error: String },
 }
@@ -438,6 +440,7 @@ impl std::fmt::Display for SkipReason {
             Self::OutputExists { path, .. } => {
                 write!(f, "Output file already exists: \"{}\"", path.display())
             }
+            Self::FileMissing => write!(f, "File no longer exists"),
             Self::AnalysisFailed { error } => {
                 write!(f, "Failed to analyze: {error}")
             }
@@ -812,6 +815,12 @@ mod skip_reason_tests {
         };
         let display = format!("{reason}");
         assert!(display.contains("ffprobe failed"));
+    }
+
+    #[test]
+    fn display_file_missing() {
+        let reason = SkipReason::FileMissing;
+        assert_eq!(format!("{reason}"), "File no longer exists");
     }
 }
 

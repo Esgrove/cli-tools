@@ -937,6 +937,13 @@ impl VideoConvert {
                                 }
                             }
                         }
+                        SkipReason::FileMissing => {
+                            analysis_stats.file_missing += 1;
+                            print_yellow!(
+                                "{}: File no longer exists (may have been moved or renamed)",
+                                cli_tools::path_to_string_relative(&file.path)
+                            );
+                        }
                         SkipReason::AnalysisFailed { error } => {
                             analysis_stats.analysis_failed += 1;
                             print_error!("{}: {error}", cli_tools::path_to_string_relative(&file.path));
@@ -946,6 +953,7 @@ impl VideoConvert {
                     if self.config.verbose
                         && !matches!(reason, SkipReason::AnalysisFailed { .. })
                         && !matches!(reason, SkipReason::OutputExists { .. })
+                        && !matches!(reason, SkipReason::FileMissing)
                     {
                         print_yellow!("{}: {reason}", cli_tools::path_to_string_relative(&file.path));
                     }
@@ -1230,6 +1238,16 @@ impl VideoConvert {
     /// `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
     fn probe_and_classify(file: VideoFile, filter: &AnalysisFilter) -> VideoInfoCache {
         let path = file.path.clone();
+        if !path.exists() {
+            return VideoInfoCache {
+                result: AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::FileMissing,
+                },
+                path,
+                info: None,
+            };
+        }
         match Self::get_video_info(&file.path) {
             Ok(info) => {
                 let result = Self::classify_video_file(file, filter, &info);

@@ -20,6 +20,7 @@ pub struct AnalysisStats {
     pub(crate) skipped_duplicate: usize,
     pub(crate) duplicates_deleted: usize,
     pub(crate) duplicate_delete_failed: usize,
+    pub(crate) file_missing: usize,
     pub(crate) analysis_failed: usize,
 }
 
@@ -56,6 +57,7 @@ impl AnalysisStats {
             + self.skipped_duplicate
             + self.duplicates_deleted
             + self.duplicate_delete_failed
+            + self.file_missing
     }
 
     /// Print analysis summary.
@@ -92,6 +94,9 @@ impl AnalysisStats {
                     "{}",
                     format!(" - Delete failed:        {}", self.duplicate_delete_failed).red()
                 );
+            }
+            if self.file_missing > 0 {
+                println!(" - File missing:         {}", self.file_missing);
             }
         }
         if self.analysis_failed > 0 {
@@ -339,9 +344,10 @@ mod analysis_stats_tests {
             skipped_duplicate: 6,
             duplicates_deleted: 2,
             duplicate_delete_failed: 1,
+            file_missing: 1,
             analysis_failed: 0,
         };
-        assert_eq!(stats.total_skipped(), 26);
+        assert_eq!(stats.total_skipped(), 27);
     }
 
     #[test]
