@@ -94,6 +94,8 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
     ".Trashes",
     // Linux
     "lost+found",
+    // NAS
+    "#Recycle",
 ];
 
 /// Return the path to the user config file.
@@ -1234,6 +1236,60 @@ mod system_directory_tests {
             let entry = entry.unwrap();
             if entry.file_name().to_string_lossy() == "lost+found" {
                 assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn is_system_directory_nas_recycle() {
+        let dir = tempdir().unwrap();
+        let recycle = dir.path().join("#recycle");
+        std::fs::create_dir(&recycle).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "#recycle" {
+                assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn is_system_directory_nas_recycle_mixed_case() {
+        let dir = tempdir().unwrap();
+        let recycle = dir.path().join("#Recycle");
+        std::fs::create_dir(&recycle).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "#Recycle" {
+                assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn is_system_directory_path_nas_recycle() {
+        let path = Path::new("/volume1/share/#recycle");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    fn is_system_directory_path_nas_recycle_mixed_case() {
+        let path = Path::new("/volume1/share/#Recycle");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    fn should_skip_entry_nas_recycle() {
+        let dir = tempdir().unwrap();
+        let recycle = dir.path().join("#recycle");
+        std::fs::create_dir(&recycle).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "#recycle" {
+                assert!(should_skip_entry(&entry));
             }
         }
     }
