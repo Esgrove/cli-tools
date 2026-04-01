@@ -413,6 +413,13 @@ impl PrefixGroupBuilder {
                 self.original_prefix = prefix;
                 self.has_concatenated_form = true;
             }
+        } else if !self.has_concatenated_form {
+            // Without a concatenated form, still choose a deterministic dotted display prefix.
+            // This avoids platform-dependent directory names caused by filesystem iteration order.
+            let should_replace = Self::is_better_prefix(&prefix, &self.original_prefix);
+            if should_replace {
+                self.original_prefix = prefix;
+            }
         }
     }
 
@@ -469,5 +476,35 @@ impl PrefixGroupBuilder {
             self.original_prefix,
             PrefixGroup::new(self.files, self.part_count, self.min_start_position),
         )
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_group_builder {
+    use super::*;
+
+    #[test]
+    fn dotted_prefix_prefers_stable_display_casing() {
+        let first_file = PathBuf::from("summer.vacation.photo4.jpg");
+        let second_file = PathBuf::from("SUMMER.VACATION.Photo3.jpg");
+        let third_file = PathBuf::from("Summer.Vacation.Photo1.jpg");
+
+        let mut builder = PrefixGroupBuilder::new("summer.vacation".to_string(), first_file, 2, false, 0);
+        builder.add_file(second_file, 2, false, 0, "SUMMER.VACATION".to_string());
+        builder.add_file(third_file, 2, false, 0, "Summer.Vacation".to_string());
+
+        assert_eq!(builder.original_prefix, "Summer.Vacation");
+    }
+
+    #[test]
+    fn concatenated_form_is_not_replaced_by_better_dotted_casing() {
+        let first_file = PathBuf::from("summervacation_photo1.jpg");
+        let second_file = PathBuf::from("Summer.Vacation.Photo2.jpg");
+
+        let mut builder = PrefixGroupBuilder::new("summervacation".to_string(), first_file, 1, true, 0);
+        builder.add_file(second_file, 2, false, 0, "Summer.Vacation".to_string());
+
+        // Concatenated form should be retained
+        assert_eq!(builder.original_prefix, "summervacation");
     }
 }
