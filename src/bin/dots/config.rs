@@ -34,11 +34,10 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
 
     let mut replace = substitutes;
     let mut regex_replace = DotsConfig::parse_regex_substitutes(&cli.regex)?;
-    let config_regex = DotsConfig::compile_regex_patterns(user_config.regex_replace.clone())?;
+    let config_regex = DotsConfig::compile_regex_patterns(user_config.regex_replace)?;
 
     let include: Vec<String> = user_config
         .include
-        .clone()
         .into_iter()
         .chain(cli.include.clone())
         .unique()
@@ -54,14 +53,13 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         .collect();
 
     replace.extend(removes);
-    replace.extend(user_config.replace.clone());
+    replace.extend(user_config.replace);
     let replace: Vec<(String, String)> = replace.into_iter().unique().collect();
 
     regex_replace.extend(config_regex);
 
     let move_date_after_prefix = user_config
         .move_date_after_prefix
-        .clone()
         .into_iter()
         .map(|mut s| {
             if !s.ends_with('.') {
@@ -82,10 +80,10 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         exclude: cli.exclude.clone(),
         increment_name: cli.increment || user_config.increment,
         move_date_after_prefix,
-        move_to_end: user_config.move_to_end.clone(),
-        move_to_start: user_config.move_to_start.clone(),
+        move_to_end: DotsConfig::compile_word_boundary_patterns(user_config.move_to_end)?,
+        move_to_start: DotsConfig::compile_word_boundary_patterns(user_config.move_to_start)?,
         overwrite: cli.force || user_config.overwrite,
-        pre_replace: user_config.pre_replace.clone(),
+        pre_replace: user_config.pre_replace,
         prefix: cli.prefix.clone(),
         prefix_dir: cli.prefix_dir
             || cli.prefix_dir_start
@@ -103,7 +101,7 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
             || user_config.suffix_dir_recursive,
         regex_replace,
         regex_replace_after: Vec::default(),
-        remove_from_start: user_config.remove_from_start.clone(),
+        remove_from_start: user_config.remove_from_start,
         remove_random: cli.random || user_config.remove_random,
         rename_directories: cli.directory || user_config.directory,
         replace,

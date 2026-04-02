@@ -76,8 +76,8 @@ pub struct DotRenameConfig {
     pub exclude: Vec<String>,
     pub increment_name: bool,
     pub move_date_after_prefix: Vec<String>,
-    pub move_to_end: Vec<String>,
-    pub move_to_start: Vec<String>,
+    pub move_to_end: Vec<Regex>,
+    pub move_to_start: Vec<Regex>,
     pub overwrite: bool,
     pub pre_replace: Vec<(String, String)>,
     pub prefix: Option<String>,
@@ -189,6 +189,23 @@ impl DotsConfig {
             .collect()
     }
 
+    /// Compile word boundary regex patterns from strings.
+    ///
+    /// Each string is wrapped in `\b...\b` word boundaries after escaping.
+    ///
+    /// # Errors
+    /// Returns an error if any regex pattern is invalid.
+    pub fn compile_word_boundary_patterns(patterns: Vec<String>) -> anyhow::Result<Vec<Regex>> {
+        patterns
+            .into_iter()
+            .map(|pattern| {
+                let escaped = regex::escape(&pattern);
+                Regex::new(&format!(r"(?i)\b{escaped}\b"))
+                    .with_context(|| format!("Invalid word boundary pattern: {pattern}"))
+            })
+            .collect()
+    }
+
     /// Compile regex patterns from string pairs.
     ///
     /// # Errors
@@ -239,8 +256,8 @@ impl DotRenameConfig {
             exclude: Vec::new(),
             increment_name: user_config.increment,
             move_date_after_prefix,
-            move_to_end: user_config.move_to_end,
-            move_to_start: user_config.move_to_start,
+            move_to_end: DotsConfig::compile_word_boundary_patterns(user_config.move_to_end)?,
+            move_to_start: DotsConfig::compile_word_boundary_patterns(user_config.move_to_start)?,
             overwrite: user_config.overwrite,
             pre_replace: user_config.pre_replace,
             prefix: None,

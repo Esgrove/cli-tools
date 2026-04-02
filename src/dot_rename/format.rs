@@ -328,19 +328,19 @@ impl DotFormat<'_> {
     }
 
     fn move_to_start(&self, name: &mut String) {
-        for pattern in &self.config.move_to_start {
-            let re = Regex::new(&format!(r"\b{}\b", regex::escape(pattern))).expect("Failed to create regex pattern");
-
-            if re.is_match(name) {
-                *name = format!("{}.{}", pattern, re.replace(name, ""));
+        for re in &self.config.move_to_start {
+            if let Some(matched) = re.find(name) {
+                let pattern = matched.as_str();
+                *name = format!("{pattern}.{}", re.replace(name, ""));
             }
         }
     }
 
     fn move_to_end(&self, name: &mut String) {
-        for sub in &self.config.move_to_end {
-            if name.contains(sub) {
-                *name = format!("{}.{}", name.replace(sub, ""), sub);
+        for re in &self.config.move_to_end {
+            if let Some(matched) = re.find(name) {
+                let pattern = matched.as_str();
+                *name = format!("{}.{pattern}", re.replace_all(name, ""));
             }
         }
     }
@@ -797,7 +797,7 @@ mod tests {
     #[test]
     fn test_move_to_start() {
         let config = DotRenameConfig {
-            move_to_start: vec!["Test".to_string()],
+            move_to_start: vec![Regex::new(r"\bTest\b").unwrap()],
             ..Default::default()
         };
         let formatter = DotFormat::new(&config);
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn test_move_to_end() {
         let config = DotRenameConfig {
-            move_to_end: vec!["Test".to_string()],
+            move_to_end: vec![Regex::new(r"\bTest\b").unwrap()],
             ..Default::default()
         };
         let formatter = DotFormat::new(&config);
@@ -835,6 +835,25 @@ mod tests {
         );
         assert_eq!(formatter.format_name("test"), "Test");
         assert_eq!(formatter.format_name("Test"), "Test");
+    }
+
+    #[test]
+    fn test_move_to_end_word_boundary() {
+        let config = DotRenameConfig {
+            move_to_end: vec![Regex::new(r"(?i)\bav1\b").unwrap()],
+            ..Default::default()
+        };
+        let formatter = DotFormat::new(&config);
+        // Should not match "av1" embedded inside a word
+        assert_eq!(
+            formatter.format_name("0habwjvd71npnljav1rl8.1080p"),
+            "0habwjvd71npnljav1rl8.1080p"
+        );
+        // Should match "av1" as a standalone word
+        assert_eq!(
+            formatter.format_name("video.1080p.av1.something"),
+            "Video.1080p.Something.Av1"
+        );
     }
 
     #[test]
