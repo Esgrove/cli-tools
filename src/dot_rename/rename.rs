@@ -12,7 +12,10 @@ use rayon::prelude::*;
 use regex::Regex;
 use walkdir::WalkDir;
 
+use crate::dot_rename::normalize_extension;
 use crate::dot_rename::{DotFormat, DotRenameConfig};
+use crate::get_normalized_file_name_and_extension;
+use crate::os_str_to_string;
 
 #[cfg(not(test))]
 const PROGRESS_BAR_CHARS: &str = "=> ";
@@ -531,8 +534,12 @@ impl DotRename {
             anyhow::bail!("Path is not a file")
         }
 
-        if let Ok((file_name, file_extension)) = crate::get_normalized_file_name_and_extension(path) {
-            let new_file = format!("{}.{}", self.format_name(&file_name), file_extension.to_lowercase());
+        if let Ok((file_name, file_extension)) = get_normalized_file_name_and_extension(path) {
+            let new_file = format!(
+                "{}.{}",
+                self.format_name(&file_name),
+                normalize_extension(&file_extension)
+            );
             let new_path = path.with_file_name(new_file);
             Ok(new_path)
         } else {
@@ -546,7 +553,7 @@ impl DotRename {
             anyhow::bail!("Path is not a directory")
         }
 
-        let directory_name = crate::os_str_to_string(path.file_name().context("Failed to get directory name")?);
+        let directory_name = os_str_to_string(path.file_name().context("Failed to get directory name")?);
         let formatted_name = self.format_directory_name(&directory_name);
 
         Ok(path.with_file_name(formatted_name))
@@ -1430,5 +1437,18 @@ mod test_prefix_suffix_options {
                 "Extension should be lowercase, got: {ext}"
             );
         }
+
+        // JPEG should be normalized to jpg
+        let jpeg_result = files.iter().find(|(old, _)| {
+            old.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("JPEG"))
+        });
+        assert!(jpeg_result.is_some(), "Should find JPEG file in results");
+        let (_, jpeg_new_path) = jpeg_result.expect("JPEG file not found");
+        assert_eq!(
+            jpeg_new_path.extension().unwrap().to_string_lossy(),
+            "jpg",
+            "JPEG should be normalized to jpg"
+        );
     }
 }

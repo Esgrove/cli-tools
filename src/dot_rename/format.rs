@@ -282,14 +282,15 @@ impl DotFormat<'_> {
         let formatted_name = self.format_name_without_prefix_suffix(&file_name);
 
         // Apply prefix or suffix based on config
-        let final_name = if self.config.prefix_dir_recursive {
+        let name = if self.config.prefix_dir_recursive {
             Self::apply_prefix(&formatted_name, &formatted_parent)
         } else {
             self.apply_suffix(&formatted_name, &formatted_parent)
         };
 
-        let new_file = format!("{}.{}", final_name, file_extension.to_lowercase());
-        Some(path.with_file_name(new_file))
+        let extension = normalize_extension(&file_extension);
+        let formatted_filename = format!("{name}.{extension}");
+        Some(path.with_file_name(formatted_filename))
     }
 
     /// Apply suffix to the filename, handling various matching scenarios.
@@ -548,6 +549,18 @@ pub fn collapse_consecutive_dots(text: &str) -> String {
 pub fn remove_extra_dots(text: &mut String) {
     let result = RE_CONSECUTIVE_DOTS.replace_all(text, ".");
     *text = result.trim_start_matches('.').trim_end_matches('.').to_string();
+}
+
+/// Normalize a file extension by lowercasing it and mapping common aliases.
+///
+/// For example, `JPEG` becomes `jpg` and `TXT` becomes `txt`.
+#[must_use]
+pub fn normalize_extension(extension: &str) -> String {
+    let lowered = extension.to_lowercase();
+    match lowered.as_str() {
+        "jpeg" => "jpg".to_string(),
+        _ => lowered,
+    }
 }
 
 #[cfg(test)]
@@ -1361,5 +1374,35 @@ mod test_deduplicate_patterns {
         };
         let formatter = DotFormat::new(&config);
         assert_eq!(formatter.format_name("Test.Test.File"), "Test.File");
+    }
+}
+
+#[cfg(test)]
+mod normalize_extension_tests {
+    use super::*;
+
+    #[test]
+    fn lowercases_extension() {
+        assert_eq!(normalize_extension("TXT"), "txt");
+        assert_eq!(normalize_extension("Mp4"), "mp4");
+    }
+
+    #[test]
+    fn maps_jpeg_to_jpg() {
+        assert_eq!(normalize_extension("jpeg"), "jpg");
+        assert_eq!(normalize_extension("JPEG"), "jpg");
+        assert_eq!(normalize_extension("Jpeg"), "jpg");
+    }
+
+    #[test]
+    fn returns_already_normal_extension() {
+        assert_eq!(normalize_extension("jpg"), "jpg");
+        assert_eq!(normalize_extension("png"), "png");
+        assert_eq!(normalize_extension("mp4"), "mp4");
+    }
+
+    #[test]
+    fn handles_empty_extension() {
+        assert_eq!(normalize_extension(""), "");
     }
 }
