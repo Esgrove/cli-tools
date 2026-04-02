@@ -118,46 +118,7 @@ impl DotRename {
 
         // Non-recursive prefix/suffix: use root directory name for all files
         if self.config.prefix_dir || self.config.suffix_dir {
-            let formatted_dir = if self.root.is_dir() {
-                crate::get_normalized_dir_name(&self.root)?
-            } else {
-                let parent_dir = self.root.parent().context("Failed to get parent dir")?;
-                crate::get_normalized_dir_name(parent_dir)?
-            };
-            let name = self.format_name(&formatted_dir);
-            if self.config.prefix_dir {
-                if self.config.verbose {
-                    println!("Using directory prefix: {name}");
-                }
-                // Only add reordering regexes if prefix_dir_start is not set
-                if !self.config.prefix_dir_start {
-                    let regexes = Self::build_prefix_dir_regexes(&name)?;
-                    self.config.regex_replace_after.extend(regexes);
-                }
-                // Add prefix to deduplication patterns to remove consecutive duplicates
-                let prefix_with_dot = if name.ends_with('.') {
-                    name.clone()
-                } else {
-                    format!("{name}.")
-                };
-                let already_exists = self
-                    .config
-                    .deduplicate_patterns
-                    .iter()
-                    .any(|(_, existing)| existing == &prefix_with_dot);
-                if !already_exists {
-                    let escaped = regex::escape(&prefix_with_dot);
-                    if let Ok(re) = Regex::new(&format!(r"({escaped}){{2,}}")) {
-                        self.config.deduplicate_patterns.push((re, prefix_with_dot));
-                    }
-                }
-                self.config.prefix = Some(name);
-            } else if self.config.suffix_dir {
-                if self.config.verbose {
-                    println!("Using directory suffix: {name}");
-                }
-                self.config.suffix = Option::from(name);
-            }
+            self.configure_prefix_suffix_from_directory()?;
         }
 
         if self.root.is_file() {
@@ -167,7 +128,7 @@ impl DotRename {
             return Ok(self
                 .formatted_filepath(&self.root)
                 .ok()
-                .filter(|new_path| &self.root != new_path)
+                .filter(|new_path| Self::path_changed(&self.root, new_path))
                 .map(|new_path| vec![(self.root.clone(), new_path)])
                 .unwrap_or_default());
         }
@@ -203,7 +164,7 @@ impl DotRename {
                     if include && include_any && exclude {
                         self.formatted_filepath(&path)
                             .ok()
-                            .filter(|new_path| &path != new_path)
+                            .filter(|new_path| Self::path_changed(&path, new_path))
                             .map(|new_path| (path, new_path))
                     } else {
                         None
@@ -268,7 +229,7 @@ impl DotRename {
                 && include_any
                 && exclude
                 && let Some(result) = self.format_file_with_parent_prefix_suffix(&path)
-                && path != result
+                && Self::path_changed(&path, &result)
             {
                 results.push((path, result));
             }
@@ -294,7 +255,7 @@ impl DotRename {
             return self
                 .formatted_directory_path(&self.root)
                 .ok()
-                .filter(|new_path| &self.root != new_path)
+                .filter(|new_path| Self::path_changed(&self.root, new_path))
                 .map(|new_path| (self.root.clone(), new_path))
                 .into_iter()
                 .collect();
@@ -335,7 +296,7 @@ impl DotRename {
                     if matches_filter {
                         self.formatted_directory_path(&path)
                             .ok()
-                            .filter(|new_path| &path != new_path)
+                            .filter(|new_path| Self::path_changed(&path, new_path))
                             .map(|new_path| (path, new_path))
                     } else {
                         None
@@ -559,6 +520,54 @@ impl DotRename {
         Ok(path.with_file_name(formatted_name))
     }
 
+    /// Configure prefix or suffix from the root directory name.
+    ///
+    /// Sets up the prefix/suffix value, deduplication patterns,
+    /// and regex reordering rules based on the directory name.
+    fn configure_prefix_suffix_from_directory(&mut self) -> Result<()> {
+        let formatted_dir = if self.root.is_dir() {
+            crate::get_normalized_dir_name(&self.root)?
+        } else {
+            let parent_dir = self.root.parent().context("Failed to get parent dir")?;
+            crate::get_normalized_dir_name(parent_dir)?
+        };
+        let name = self.format_name(&formatted_dir);
+        if self.config.prefix_dir {
+            if self.config.verbose {
+                println!("Using directory prefix: {name}");
+            }
+            // Only add reordering regexes if prefix_dir_start is not set
+            if !self.config.prefix_dir_start {
+                let regexes = Self::build_prefix_dir_regexes(&name)?;
+                self.config.regex_replace_after.extend(regexes);
+            }
+            // Add prefix to deduplication patterns to remove consecutive duplicates
+            let prefix_with_dot = if name.ends_with('.') {
+                name.clone()
+            } else {
+                format!("{name}.")
+            };
+            let already_exists = self
+                .config
+                .deduplicate_patterns
+                .iter()
+                .any(|(_, existing)| existing == &prefix_with_dot);
+            if !already_exists {
+                let escaped = regex::escape(&prefix_with_dot);
+                if let Ok(re) = Regex::new(&format!(r"({escaped}){{2,}}")) {
+                    self.config.deduplicate_patterns.push((re, prefix_with_dot));
+                }
+            }
+            self.config.prefix = Some(name);
+        } else if self.config.suffix_dir {
+            if self.config.verbose {
+                println!("Using directory suffix: {name}");
+            }
+            self.config.suffix = Option::from(name);
+        }
+        Ok(())
+    }
+
     /// Build regex patterns for prefix directory date reordering.
     fn build_prefix_dir_regexes(name: &str) -> Result<[(Regex, String); 4]> {
         let escaped_name = regex::escape(name);
@@ -589,6 +598,14 @@ impl DotRename {
             (prefix_regex_middle_full_date, "$1.$3.$2.".to_string()),
             (prefix_regex_middle_year, "$1.$3.$2.".to_string()),
         ])
+    }
+
+    /// Compare paths as strings to detect changes on case-insensitive filesystems.
+    ///
+    /// `PathBuf` comparison is case-insensitive on some systems,
+    /// which misses case-only and extension-only changes like `Photo.JPG` → `Photo.jpg`.
+    fn path_changed(old: &Path, new: &Path) -> bool {
+        crate::path_to_string(old) != crate::path_to_string(new)
     }
 
     /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
@@ -1450,5 +1467,99 @@ mod test_prefix_suffix_options {
             "jpg",
             "JPEG should be normalized to jpg"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_extension_only_rename {
+    use super::*;
+    use std::fs::{self, File};
+    use tempfile::TempDir;
+
+    fn create_test_dir(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        fs::create_dir_all(&path).expect("Failed to create test directory");
+        path
+    }
+
+    fn create_test_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        File::create(&path).expect("Failed to create test file");
+        path
+    }
+
+    #[test]
+    fn jpeg_renamed_to_jpg_when_stem_unchanged() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_test_dir(temp_dir.path(), "TestDir");
+
+        create_test_file(&root, "Semireal1.jpeg");
+        create_test_file(&root, "Semireal2.jpeg");
+
+        let mut dots = DotRename {
+            root,
+            config: DotRenameConfig::default(),
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 2, "Both jpeg files should be detected for rename");
+
+        for (old_path, new_path) in &files {
+            assert_eq!(
+                old_path.extension().unwrap().to_string_lossy(),
+                "jpeg",
+                "Original should have jpeg extension"
+            );
+            assert_eq!(
+                new_path.extension().unwrap().to_string_lossy(),
+                "jpg",
+                "New path should have jpg extension"
+            );
+        }
+    }
+
+    #[test]
+    fn uppercase_extension_renamed_when_stem_unchanged() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_test_dir(temp_dir.path(), "TestDir");
+
+        create_test_file(&root, "Photo.JPG");
+        create_test_file(&root, "Video.MP4");
+
+        let mut dots = DotRename {
+            root,
+            config: DotRenameConfig::default(),
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 2, "Both files with uppercase extensions should be renamed");
+
+        for (_, new_path) in &files {
+            let ext = new_path.extension().unwrap().to_string_lossy();
+            assert!(
+                ext.chars().all(|c| c.is_lowercase() || c.is_numeric()),
+                "Extension should be lowercase, got: {ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn already_normalized_extension_skipped() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_test_dir(temp_dir.path(), "TestDir");
+
+        create_test_file(&root, "Semireal1.jpg");
+        create_test_file(&root, "Semireal2.png");
+
+        let mut dots = DotRename {
+            root,
+            config: DotRenameConfig::default(),
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+        assert_eq!(files.len(), 0, "Already normalized files should not be renamed");
     }
 }
