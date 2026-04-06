@@ -79,7 +79,7 @@ pub struct QtorrentArgs {
     #[arg(short = 'p', long)]
     pub dryrun: bool,
 
-    /// Offline mode: skip qBittorrent connection entirely (implies --dryrun)
+    /// Offline mode: skip qBittorrent connection entirely (implies dryrun)
     #[arg(short = 'o', long)]
     pub offline: bool,
 
@@ -87,7 +87,7 @@ pub struct QtorrentArgs {
     #[arg(short = 'y', long)]
     yes: bool,
 
-    /// File extensions to skip (e.g., nfo, txt, jpg)
+    /// File extensions to skip (e.g., nfo, txt)
     #[arg(short = 'e', long = "skip-ext", name = "EXT", value_delimiter = ',')]
     skip_extensions: Vec<String>,
 
@@ -99,11 +99,19 @@ pub struct QtorrentArgs {
     #[arg(short = 'm', long = "min-size", name = "MB")]
     min_file_size_mb: Option<f64>,
 
+    /// Include image files (.jpg, .jpeg, .png)
+    #[arg(short = 'i', long)]
+    include_images: bool,
+
+    /// Minimum image file size in KB
+    #[arg(short = 'M', long = "min-image-size", name = "KB")]
+    min_image_size_kb: Option<f64>,
+
     /// Recurse into subdirectories when searching for torrent files
     #[arg(short = 'r', long)]
     pub recurse: bool,
 
-    /// Skip rename prompts for existing/duplicate torrents
+    /// Skip rename prompts for existing torrents
     #[arg(short = 'x', long)]
     pub skip_existing: bool,
 
@@ -227,6 +235,30 @@ mod cli_args_tests {
     }
 
     #[test]
+    fn parses_include_images() {
+        let args = QtorrentArgs::try_parse_from(["test", "--include-images"]).expect("should parse");
+        assert!(args.include_images);
+    }
+
+    #[test]
+    fn parses_include_images_short_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "-i"]).expect("should parse");
+        assert!(args.include_images);
+    }
+
+    #[test]
+    fn parses_min_image_size() {
+        let args = QtorrentArgs::try_parse_from(["test", "--min-image-size", "3.5"]).expect("should parse");
+        assert_eq!(args.min_image_size_kb, Some(3.5));
+    }
+
+    #[test]
+    fn parses_min_image_size_short_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "-M", "3.5"]).expect("should parse");
+        assert_eq!(args.min_image_size_kb, Some(3.5));
+    }
+
+    #[test]
     fn parses_combined_boolean_flags() {
         let args = QtorrentArgs::try_parse_from(["test", "-apyrxvo"]).expect("should parse");
         assert!(args.paused);
@@ -289,6 +321,8 @@ mod cli_args_tests {
         assert!(args.skip_extensions.is_empty());
         assert!(args.skip_directories.is_empty());
         assert!(args.min_file_size_mb.is_none());
+        assert!(!args.include_images);
+        assert!(args.min_image_size_kb.is_none());
         assert!(!args.paused);
         assert!(!args.dryrun);
         assert!(!args.offline);
@@ -332,6 +366,9 @@ mod cli_args_tests {
             "sample",
             "-m",
             "50",
+            "--include-images",
+            "--min-image-size",
+            "2",
             "-a",
             "-r",
             "-v",
@@ -349,6 +386,8 @@ mod cli_args_tests {
         assert_eq!(args.skip_extensions, vec!["nfo", "txt"]);
         assert_eq!(args.skip_directories, vec!["sample"]);
         assert_eq!(args.min_file_size_mb, Some(50.0));
+        assert!(args.include_images);
+        assert_eq!(args.min_image_size_kb, Some(2.0));
         assert!(args.paused);
         assert!(args.recurse);
         assert!(args.verbose);
@@ -522,6 +561,32 @@ mod config_from_args_tests {
         let config = Config::from_args(args).expect("config should parse");
         // CLI 10 MB = 10 * 1024 * 1024 bytes should take priority
         assert_eq!(config.file_filter.min_size_bytes, Some(10 * 1024 * 1024));
+    }
+
+    #[test]
+    fn config_cli_includes_images() {
+        let args = QtorrentArgs::try_parse_from(["test", "--include-images"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.file_filter.include_images);
+    }
+
+    #[test]
+    fn config_cli_image_min_size_converts_to_bytes() {
+        let args =
+            QtorrentArgs::try_parse_from(["test", "--include-images", "--min-image-size", "2"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert_eq!(config.file_filter.min_image_size_bytes, Some(2 * 1024));
+    }
+
+    #[test]
+    fn config_zero_sizes_disable_size_filters() {
+        let args =
+            QtorrentArgs::try_parse_from(["test", "--include-images", "--min-size", "0", "--min-image-size", "0"])
+                .expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.file_filter.include_images);
+        assert!(config.file_filter.min_size_bytes.is_none());
+        assert!(config.file_filter.min_image_size_bytes.is_none());
     }
 
     #[test]

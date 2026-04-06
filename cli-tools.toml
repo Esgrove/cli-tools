@@ -307,14 +307,21 @@ replace = [
 # Skip rename prompts for existing/duplicate torrents
 # skip_existing = false
 
+# Include image files (.jpg, .jpeg, .png) in multi-file torrents
+# include_images = false
+
 # File extensions to skip when selecting files from multi-file torrents (without dot)
-# skip_extensions = ["nfo", "txt", "jpg", "png", "sfv", "md5", "url"]
+# When include_images is false, keeping jpg/jpeg/png here matches the default behavior.
+# skip_extensions = ["nfo", "txt", "jpg", "jpeg", "png", "sfv", "md5", "url"]
 
 # Directory names to skip in multi-file torrents (case-insensitive full name match)
 # skip_directories = ["sample", "proof", "screens"]
 
-# Minimum file size in MB (files smaller than this will be skipped)
+# Minimum file size in MB for non-image files (0 disables size filtering)
 # min_file_size_mb = 10
+
+# Minimum image file size in KB when include_images is true (0 disables image size filtering)
+# min_image_size_kb = 0
 
 # Substrings to remove from torrent filename when generating suggested name
 # remove_from_name = ["[Example]", "Dummy"]

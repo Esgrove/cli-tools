@@ -78,8 +78,10 @@ fn qtorrent_section_has_expected_structure() {
     assert!(qtorrent.get("password").is_some());
     assert!(qtorrent.get("save_path").is_some());
     assert!(qtorrent.get("skip_extensions").is_some());
-    assert!(qtorrent.get("skip_names").is_some());
+    assert!(qtorrent.get("skip_directories").is_some());
     assert!(qtorrent.get("min_file_size_mb").is_some());
+    assert!(qtorrent.get("include_images").is_some());
+    assert!(qtorrent.get("min_image_size_kb").is_some());
 }
 
 #[test]

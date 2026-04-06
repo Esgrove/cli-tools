@@ -73,6 +73,12 @@ pub struct QtorrentConfig {
     /// Minimum file size in MB. Files smaller than this will be skipped.
     #[serde(default)]
     min_file_size_mb: Option<f64>,
+    /// Include image files (.jpg, .jpeg, .png) in multi-file torrents.
+    #[serde(default)]
+    include_images: bool,
+    /// Minimum image file size in KB. Files smaller than this will be skipped.
+    #[serde(default)]
+    min_image_size_kb: Option<f64>,
     /// Substrings to remove from torrent filename when generating suggested name.
     #[serde(default)]
     remove_from_name: Vec<String>,
@@ -190,6 +196,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns an error if the config file cannot be read or parsed.
+    #[allow(clippy::too_many_lines)]
     pub fn from_args(args: QtorrentArgs) -> Result<Self> {
         let user_config = QtorrentConfig::get_user_config()?;
 
@@ -248,13 +255,26 @@ impl Config {
                 .collect()
         };
 
+        let include_images = args.include_images || user_config.include_images;
+
         // Convert MB to bytes for easier comparison
         let min_file_size_bytes = args
             .min_file_size_mb
             .or(user_config.min_file_size_mb)
-            .map(|mb| (mb * 1024.0 * 1024.0) as u64);
+            .and_then(mb_to_bytes);
 
-        let file_filter = FileFilter::new(skip_extensions, skip_directories, min_file_size_bytes);
+        let min_image_size_bytes = args
+            .min_image_size_kb
+            .or(user_config.min_image_size_kb)
+            .and_then(kb_to_bytes);
+
+        let file_filter = FileFilter::new(
+            skip_extensions,
+            skip_directories,
+            min_file_size_bytes,
+            include_images,
+            min_image_size_bytes,
+        );
 
         // Substrings to remove from suggested name
         let remove_from_name = user_config.remove_from_name;
@@ -413,6 +433,14 @@ impl Config {
     }
 }
 
+fn mb_to_bytes(mb: f64) -> Option<u64> {
+    (mb > 0.0).then_some((mb * 1024.0 * 1024.0) as u64)
+}
+
+fn kb_to_bytes(kb: f64) -> Option<u64> {
+    (kb > 0.0).then_some((kb * 1024.0) as u64)
+}
+
 #[cfg(test)]
 mod qtorrent_config_tests {
     use super::*;
@@ -476,11 +504,15 @@ tags = "hd,new"
 skip_extensions = ["nfo", "txt", "jpg"]
 skip_directories = ["sample", "subs"]
 min_file_size_mb = 50.0
+include_images = true
+min_image_size_kb = 2.5
 "#;
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.skip_extensions, vec!["nfo", "txt", "jpg"]);
         assert_eq!(config.skip_directories, vec!["sample", "subs"]);
         assert_eq!(config.min_file_size_mb, Some(50.0));
+        assert!(config.include_images);
+        assert_eq!(config.min_image_size_kb, Some(2.5));
     }
 
     #[test]

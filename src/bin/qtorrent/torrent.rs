@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::utils::TorrentInfo;
 
 const HEX_CHARS: &[u8] = b"0123456789abcdef";
+const BYTES_PER_KB: u64 = 1024;
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
 /// Represents a parsed `.torrent` file.
@@ -92,7 +93,7 @@ pub struct FileInfo<'a> {
 }
 
 /// File filter configuration.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FileFilter {
     /// File extensions to skip (lowercase, without dot).
     pub skip_extensions: Vec<String>,
@@ -102,6 +103,12 @@ pub struct FileFilter {
     pub min_size_bytes: Option<u64>,
     /// Minimum file size in MB (pre-calculated for display).
     pub min_size_mb: Option<u64>,
+    /// Include image files (.jpg, .jpeg, .png).
+    pub include_images: bool,
+    /// Minimum image file size in bytes.
+    pub min_image_size_bytes: Option<u64>,
+    /// Minimum image file size in KB (pre-calculated for display).
+    pub min_image_size_kb: Option<u64>,
 }
 
 /// Result of filtering files in a multi-file torrent.
@@ -212,22 +219,36 @@ impl Torrent {
 }
 
 impl FileFilter {
-    /// Create a new file filter from the given configuration.
+    /// Create a new file filter including image handling settings.
     #[must_use]
-    pub fn new(skip_extensions: Vec<String>, skip_directories: Vec<String>, min_size_bytes: Option<u64>) -> Self {
+    pub fn new(
+        skip_extensions: Vec<String>,
+        skip_directories: Vec<String>,
+        min_size_bytes: Option<u64>,
+        include_images: bool,
+        min_image_size_bytes: Option<u64>,
+    ) -> Self {
         let min_size_mb = min_size_bytes.map(|bytes| bytes / BYTES_PER_MB);
+        let min_image_size_kb = min_image_size_bytes.map(|bytes| bytes / BYTES_PER_KB);
         Self {
             skip_extensions,
             skip_directories,
             min_size_bytes,
             min_size_mb,
+            include_images,
+            min_image_size_bytes,
+            min_image_size_kb,
         }
     }
 
     /// Check if any filters are configured.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.skip_extensions.is_empty() && self.skip_directories.is_empty() && self.min_size_bytes.is_none()
+        self.skip_extensions.is_empty()
+            && self.skip_directories.is_empty()
+            && self.min_size_bytes.is_none()
+            && self.include_images
+            && self.min_image_size_bytes.is_none()
     }
 
     /// Check if a file should be excluded. Returns the reason if excluded.
@@ -252,20 +273,46 @@ impl FileFilter {
         // Check extension
         if let Some(extension) = Path::new(file.path.as_ref()).extension() {
             let ext_lower = extension.to_string_lossy().to_lowercase();
+
+            if is_image_extension(&ext_lower) {
+                if !self.include_images {
+                    return Some(format!("images disabled: .{ext_lower}"));
+                }
+
+                if let Some(reason) =
+                    image_size_exclusion_reason(file.size, self.min_image_size_bytes, self.min_image_size_kb)
+                {
+                    return Some(reason);
+                }
+
+                return None;
+            }
+
             if self.skip_extensions.contains(&ext_lower) {
                 return Some(format!("extension: .{ext_lower}"));
             }
         }
 
         // Check minimum size
-        if let Some(min_size) = self.min_size_bytes
-            && let Some(min_size_mb) = self.min_size_mb
-            && file.size < min_size
-        {
-            return Some(format!("size < {min_size_mb} MB"));
+        if let Some(reason) = size_exclusion_reason(file.size, self.min_size_bytes, self.min_size_mb, false) {
+            return Some(reason);
         }
 
         None
+    }
+}
+
+impl Default for FileFilter {
+    fn default() -> Self {
+        Self {
+            skip_extensions: Vec::new(),
+            skip_directories: Vec::new(),
+            min_size_bytes: None,
+            min_size_mb: None,
+            include_images: true,
+            min_image_size_bytes: None,
+            min_image_size_kb: None,
+        }
     }
 }
 
@@ -445,6 +492,42 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
         }
         other => bail!("Unknown bencode type: {}", other as char),
     }
+}
+
+fn is_image_extension(extension: &str) -> bool {
+    matches!(extension, "jpg" | "jpeg" | "png")
+}
+
+fn size_exclusion_reason(
+    file_size: u64,
+    min_size_bytes: Option<u64>,
+    min_size_mb: Option<u64>,
+    is_image: bool,
+) -> Option<String> {
+    if let Some(min_size) = min_size_bytes
+        && let Some(min_size_mb) = min_size_mb
+        && file_size < min_size
+    {
+        let label = if is_image { "image size" } else { "size" };
+        return Some(format!("{label} < {min_size_mb} MB"));
+    }
+
+    None
+}
+
+fn image_size_exclusion_reason(
+    file_size: u64,
+    min_size_bytes: Option<u64>,
+    min_size_kb: Option<u64>,
+) -> Option<String> {
+    if let Some(min_size) = min_size_bytes
+        && let Some(min_size_kb) = min_size_kb
+        && file_size < min_size
+    {
+        return Some(format!("image size < {min_size_kb} KB"));
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -637,7 +720,7 @@ mod test_file_filter {
 
     #[test]
     fn excludes_by_extension() {
-        let filter = FileFilter::new(vec!["txt".to_string(), "nfo".to_string()], vec![], None);
+        let filter = FileFilter::new(vec!["txt".to_string(), "nfo".to_string()], vec![], None, true, None);
 
         let file = make_file_info("movie/sample.txt", 1000);
         let reason = filter.should_exclude(&file);
@@ -648,7 +731,7 @@ mod test_file_filter {
 
     #[test]
     fn excludes_by_directory_name() {
-        let filter = FileFilter::new(vec![], vec!["sample".to_string()], None);
+        let filter = FileFilter::new(vec![], vec!["sample".to_string()], None, true, None);
 
         let file = make_file_info("movie/sample/video.mp4", 1_000_000);
         let reason = filter.should_exclude(&file);
@@ -660,7 +743,7 @@ mod test_file_filter {
     #[test]
     fn excludes_by_size() {
         let min_size = 10 * 1024 * 1024; // 10 MB
-        let filter = FileFilter::new(vec![], vec![], Some(min_size));
+        let filter = FileFilter::new(vec![], vec![], Some(min_size), true, None);
 
         let file = make_file_info("movie/small.mp4", 1_000_000); // 1 MB
         let reason = filter.should_exclude(&file);
@@ -670,8 +753,47 @@ mod test_file_filter {
     }
 
     #[test]
+    fn excludes_images_when_disabled() {
+        let filter = FileFilter::new(vec![], vec![], None, false, None);
+
+        let file = make_file_info("movie/poster.jpg", 1_000_000);
+        let reason = filter.should_exclude(&file);
+
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("images disabled"));
+    }
+
+    #[test]
+    fn includes_images_when_enabled() {
+        let filter = FileFilter::new(vec!["jpg".to_string()], vec![], None, true, None);
+
+        let file = make_file_info("movie/poster.jpeg", 1_000_000);
+        let reason = filter.should_exclude(&file);
+
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn applies_image_size_limit_when_enabled() {
+        let min_size = 2 * 1024 * 1024;
+        let filter = FileFilter::new(vec![], vec![], None, true, Some(min_size));
+
+        let file = make_file_info("movie/poster.png", 1_000_000);
+        let reason = filter.should_exclude(&file);
+
+        assert!(reason.is_some());
+        assert!(reason.unwrap().contains("image size"));
+    }
+
+    #[test]
     fn includes_when_no_filter_matches() {
-        let filter = FileFilter::new(vec!["nfo".to_string()], vec!["sample".to_string()], Some(100));
+        let filter = FileFilter::new(
+            vec!["nfo".to_string()],
+            vec!["sample".to_string()],
+            Some(100),
+            true,
+            None,
+        );
 
         let file = make_file_info("movie/video.mp4", 1_000_000);
         let reason = filter.should_exclude(&file);
@@ -687,13 +809,19 @@ mod test_file_filter {
 
     #[test]
     fn is_empty_returns_false_with_extension_filter() {
-        let filter = FileFilter::new(vec!["txt".to_string()], vec![], None);
+        let filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None);
         assert!(!filter.is_empty());
     }
 
     #[test]
     fn is_empty_returns_false_with_size_filter() {
-        let filter = FileFilter::new(vec![], vec![], Some(100));
+        let filter = FileFilter::new(vec![], vec![], Some(100), true, None);
+        assert!(!filter.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_false_when_images_are_disabled() {
+        let filter = FileFilter::new(vec![], vec![], None, false, None);
         assert!(!filter.is_empty());
     }
 }
@@ -905,7 +1033,7 @@ mod test_torrent_parsing_from_file {
         let buffer = read_dummy_torrent();
         let torrent = Torrent::from_buffer(&buffer).expect("should parse torrent");
 
-        let filter = FileFilter::new(vec!["txt".to_string()], vec![], None);
+        let filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None);
         let result = torrent.filter_files(&filter);
 
         assert_eq!(result.included.len(), 0);
@@ -926,7 +1054,7 @@ mod test_torrent_parsing_from_file {
 
         // File is 7 bytes, set minimum to 1MB
         let min_size = 1024 * 1024;
-        let filter = FileFilter::new(vec![], vec![], Some(min_size));
+        let filter = FileFilter::new(vec![], vec![], Some(min_size), true, None);
         let result = torrent.filter_files(&filter);
 
         assert_eq!(result.included.len(), 0);
@@ -1161,7 +1289,7 @@ mod test_parse_torrent_all_files_excluded {
         let torrent_path = create_multi_file_torrent(temp_dir.path(), "test.torrent");
 
         let mut config = default_config();
-        config.file_filter = FileFilter::new(vec!["txt".to_string()], vec![], None);
+        config.file_filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None);
 
         let info = parse_torrent(&torrent_path, &config).expect("should parse");
         assert!(info.all_files_excluded());
@@ -1176,7 +1304,7 @@ mod test_parse_torrent_all_files_excluded {
 
         let mut config = default_config();
         // Both files are 500 bytes; require at least 1 MB
-        config.file_filter = FileFilter::new(vec![], vec![], Some(1024 * 1024));
+        config.file_filter = FileFilter::new(vec![], vec![], Some(1024 * 1024), true, None);
 
         let info = parse_torrent(&torrent_path, &config).expect("should parse");
         assert!(info.all_files_excluded());
@@ -1217,7 +1345,7 @@ mod test_parse_torrent_all_files_excluded {
         std::fs::write(&torrent_path, &bytes).expect("should write torrent file");
 
         let mut config = default_config();
-        config.file_filter = FileFilter::new(vec!["txt".to_string()], vec![], None);
+        config.file_filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None);
 
         let info = parse_torrent(&torrent_path, &config).expect("should parse");
         assert!(!info.all_files_excluded());

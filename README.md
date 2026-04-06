@@ -432,13 +432,15 @@ Options:
   -t, --tags <TAGS>          Tags for the torrent (comma-separated)
   -a, --paused               Add torrent in paused state
   -p, --dryrun               Print what would be done without actually adding torrents
-  -o, --offline              Offline mode: skip qBittorrent connection entirely (implies --dryrun)
+  -o, --offline              Offline mode: skip qBittorrent connection entirely (implies dryrun)
   -y, --yes                  Skip confirmation prompts
-  -e, --skip-ext <EXT>       File extensions to skip (e.g., nfo, txt, jpg)
+  -e, --skip-ext <EXT>       File extensions to skip (e.g., nfo, txt)
   -k, --skip-dir <NAME>      Directory names to skip (case-insensitive full name match)
   -m, --min-size <MB>        Minimum file size in MB (files smaller than this will be skipped)
+  -i, --include-images       Include image files (.jpg, .jpeg, .png)
+  -M, --min-image-size <KB>  Minimum image file size in KB
   -r, --recurse              Recurse into subdirectories when searching for torrent files
-  -x, --skip-existing        Skip rename prompts for existing/duplicate torrents
+  -x, --skip-existing        Skip rename prompts for existing torrents
   -v, --verbose              Print verbose output
   -h, --help                 Print help (see more with '--help')
   -V, --version              Print version

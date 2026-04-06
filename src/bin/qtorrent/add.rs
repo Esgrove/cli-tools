@@ -689,6 +689,15 @@ impl QTorrent {
 
         if !self.config.file_filter.is_empty() {
             println!("{}", "File filters:".bold());
+            println!(
+                "  {} {}",
+                "Include images:".dimmed(),
+                if self.config.file_filter.include_images {
+                    "yes".green()
+                } else {
+                    "no".yellow()
+                }
+            );
             if !self.config.file_filter.skip_extensions.is_empty() {
                 println!(
                     "  {} {}",
@@ -705,6 +714,11 @@ impl QTorrent {
             }
             if let Some(min_size_mb) = self.config.file_filter.min_size_mb {
                 println!("  {} {} MB", "Min file size:".dimmed(), min_size_mb);
+            }
+            if self.config.file_filter.include_images
+                && let Some(min_image_size_kb) = self.config.file_filter.min_image_size_kb
+            {
+                println!("  {} {} KB", "Min image size:".dimmed(), min_image_size_kb);
             }
         }
     }
