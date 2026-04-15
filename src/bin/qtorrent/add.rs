@@ -15,7 +15,7 @@ use cli_tools::{print_bold, print_cyan, print_magenta_bold};
 
 use crate::QtorrentArgs;
 use crate::config::Config;
-use crate::qbittorrent::{AddTorrentParams, QBittorrentClient, TorrentListItem};
+use crate::qbittorrent::{AddTorrentParams, QBittorrentClient, TorrentFileItem, TorrentListItem};
 use crate::stats::TorrentStats;
 use crate::torrent::{FileInfo, FilteredFiles, parse_torrent};
 use crate::utils;
@@ -266,42 +266,9 @@ impl QTorrent {
 
         // Set file priorities to skip excluded files
         if !excluded_indices.is_empty() {
-            // Wait a moment for the torrent to be fully added (if we haven't already waited for rename)
-            if rename_to.is_none() || original_name.is_none() {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
-
-            let mut priority_success = false;
-            let mut last_error = None;
-
-            // Try twice with a delay between attempts
-            for attempt in 0..2 {
-                if attempt > 0 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                }
-
-                match client.set_file_priorities(&info_hash, &excluded_indices, 0).await {
-                    Ok(()) => {
-                        println!("  {} Set {} file(s) to skip", "✓".green(), excluded_indices.len());
-                        priority_success = true;
-                        break;
-                    }
-                    Err(error) => {
-                        last_error = Some(error);
-                    }
-                }
-            }
-
-            if !priority_success {
-                if let Some(error) = last_error {
-                    cli_tools::print_yellow!("Could not set file priorities (torrent may still be loading): {error}");
-                }
-                println!(
-                    "  {} You may need to manually skip {} file(s) in qBittorrent",
-                    "⚠".yellow(),
-                    excluded_indices.len()
-                );
-            }
+            let wait_for_metadata = rename_to.is_none() || original_name.is_none();
+            self.apply_excluded_file_priorities(client, &info_hash, &excluded_indices, wait_for_metadata)
+                .await;
         }
 
         Ok(info.included_size)
@@ -1113,6 +1080,81 @@ impl QTorrent {
         }
     }
 
+    /// Set file priorities to skip excluded files in qBittorrent.
+    ///
+    /// Retries with increasing delays until the API confirms the priorities are applied.
+    /// If `wait_for_metadata` is true, waits before the first attempt for the torrent to load.
+    async fn apply_excluded_file_priorities(
+        &self,
+        client: &QBittorrentClient,
+        info_hash: &str,
+        excluded_indices: &[usize],
+        wait_for_metadata: bool,
+    ) {
+        const EXCLUDED_PRIORITY: u8 = 0;
+        const RETRY_DELAYS_MS: [u64; 5] = [500, 750, 1000, 1500, 2000];
+
+        if wait_for_metadata {
+            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAYS_MS[0])).await;
+        }
+
+        let mut last_error: Option<String> = None;
+
+        for (attempt, delay_ms) in RETRY_DELAYS_MS.iter().enumerate() {
+            if attempt > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(*delay_ms)).await;
+            }
+
+            let api_files = match client.get_torrent_files(info_hash).await {
+                Ok(files) => files,
+                Err(error) => {
+                    last_error = Some(format!("Could not read torrent files yet: {error}"));
+                    continue;
+                }
+            };
+
+            if !excluded_indices_exist(&api_files, excluded_indices) {
+                last_error = Some("Torrent metadata is not fully available yet".to_string());
+                continue;
+            }
+
+            match client
+                .set_file_priorities(info_hash, excluded_indices, EXCLUDED_PRIORITY)
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    last_error = Some(format!("Could not set file priorities: {error}"));
+                    continue;
+                }
+            }
+
+            let updated_files = match client.get_torrent_files(info_hash).await {
+                Ok(files) => files,
+                Err(error) => {
+                    last_error = Some(format!("Could not verify file priorities: {error}"));
+                    continue;
+                }
+            };
+
+            if excluded_indices_have_priority(&updated_files, excluded_indices, EXCLUDED_PRIORITY) {
+                println!("  {} Set {} file(s) to skip", "✓".green(), excluded_indices.len());
+                return;
+            }
+
+            last_error = Some("qBittorrent has not applied the skip priorities yet".to_string());
+        }
+
+        if let Some(error) = last_error {
+            cli_tools::print_yellow!("{error}");
+        }
+        println!(
+            "  {} You may need to manually skip {} file(s) in qBittorrent",
+            "⚠".yellow(),
+            excluded_indices.len()
+        );
+    }
+
     /// Check if a torrent already exists in qBittorrent by comparing info hashes.
     ///
     /// Returns the existing `TorrentListItem` if found, `None` otherwise.
@@ -1123,6 +1165,23 @@ impl QTorrent {
         let hash_lower = info.info_hash.to_lowercase();
         existing_torrents.get(&hash_lower)
     }
+}
+
+/// Check that all excluded file indices are present in the API response.
+fn excluded_indices_exist(api_files: &[TorrentFileItem], excluded_indices: &[usize]) -> bool {
+    excluded_indices
+        .iter()
+        .all(|index| api_files.iter().any(|file| file.index == *index))
+}
+
+/// Check that all excluded file indices have the expected priority value.
+fn excluded_indices_have_priority(api_files: &[TorrentFileItem], excluded_indices: &[usize], priority: u8) -> bool {
+    excluded_indices.iter().all(|index| {
+        api_files
+            .iter()
+            .find(|file| file.index == *index)
+            .is_some_and(|file| file.priority == priority)
+    })
 }
 
 #[cfg(test)]
@@ -1224,6 +1283,109 @@ mod normalize_rename_options {
         let (suggested, internal) = QTorrent::normalize_rename_options("Show.Name.One", Some("Show.Name.Two"));
         assert_eq!(suggested, "Show.Name.One");
         assert_eq!(internal.as_deref(), Some("Show.Name.Two"));
+    }
+}
+
+#[cfg(test)]
+mod test_excluded_file_priorities {
+    use super::*;
+
+    fn make_torrent_file(index: usize, priority: u8) -> TorrentFileItem {
+        TorrentFileItem {
+            index,
+            name: format!("file-{index}.bin"),
+            size: 1024,
+            priority,
+        }
+    }
+
+    #[test]
+    fn empty_excluded_indices_always_exist() {
+        let api_files = vec![make_torrent_file(0, 1), make_torrent_file(1, 1)];
+        assert!(excluded_indices_exist(&api_files, &[]));
+    }
+
+    #[test]
+    fn empty_excluded_indices_always_have_priority() {
+        let api_files = vec![make_torrent_file(0, 1), make_torrent_file(1, 1)];
+        assert!(excluded_indices_have_priority(&api_files, &[], 0));
+    }
+
+    #[test]
+    fn empty_api_files_means_no_indices_exist() {
+        assert!(!excluded_indices_exist(&[], &[0, 1]));
+    }
+
+    #[test]
+    fn single_excluded_index_present() {
+        let api_files = vec![make_torrent_file(0, 1), make_torrent_file(1, 1)];
+        assert!(excluded_indices_exist(&api_files, &[1]));
+    }
+
+    #[test]
+    fn single_excluded_index_missing() {
+        let api_files = vec![make_torrent_file(0, 1), make_torrent_file(1, 1)];
+        assert!(!excluded_indices_exist(&api_files, &[5]));
+    }
+
+    #[test]
+    fn all_excluded_indices_present_with_non_contiguous_ids() {
+        let api_files = vec![
+            make_torrent_file(0, 1),
+            make_torrent_file(2, 1),
+            make_torrent_file(4, 1),
+            make_torrent_file(7, 1),
+        ];
+
+        assert!(excluded_indices_exist(&api_files, &[0, 4, 7]));
+    }
+
+    #[test]
+    fn returns_false_when_any_excluded_index_missing() {
+        let api_files = vec![make_torrent_file(0, 1), make_torrent_file(2, 1)];
+
+        assert!(!excluded_indices_exist(&api_files, &[0, 4]));
+    }
+
+    #[test]
+    fn all_excluded_indices_have_matching_priority() {
+        let api_files = vec![
+            make_torrent_file(0, 0),
+            make_torrent_file(1, 1),
+            make_torrent_file(2, 0),
+            make_torrent_file(3, 1),
+            make_torrent_file(4, 0),
+        ];
+
+        assert!(excluded_indices_have_priority(&api_files, &[0, 2, 4], 0));
+    }
+
+    #[test]
+    fn priority_check_fails_when_one_index_has_wrong_priority() {
+        let api_files = vec![
+            make_torrent_file(0, 0),
+            make_torrent_file(2, 1),
+            make_torrent_file(4, 0),
+        ];
+
+        // Index 2 has priority 1, but we check for priority 0
+        assert!(!excluded_indices_have_priority(&api_files, &[0, 2, 4], 0));
+    }
+
+    #[test]
+    fn priority_check_fails_when_index_does_not_exist() {
+        let api_files = vec![make_torrent_file(0, 0), make_torrent_file(1, 0)];
+
+        // Index 5 doesn't exist, so find returns None and is_some_and returns false
+        assert!(!excluded_indices_have_priority(&api_files, &[0, 5], 0));
+    }
+
+    #[test]
+    fn priority_check_with_single_file() {
+        let api_files = vec![make_torrent_file(3, 0)];
+
+        assert!(excluded_indices_have_priority(&api_files, &[3], 0));
+        assert!(!excluded_indices_have_priority(&api_files, &[3], 1));
     }
 }
 

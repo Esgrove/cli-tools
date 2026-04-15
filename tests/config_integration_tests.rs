@@ -200,6 +200,7 @@ fn config_values_have_correct_types() {
     // Check float types
     let qtorrent = value.get("qtorrent").expect("should have qtorrent section");
     assert!(qtorrent.get("min_file_size_mb").unwrap().is_float());
+    assert!(qtorrent.get("min_image_size_kb").unwrap().is_integer());
 
     // Check string types
     assert!(qtorrent.get("host").unwrap().is_str());

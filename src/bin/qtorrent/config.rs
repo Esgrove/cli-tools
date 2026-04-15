@@ -78,7 +78,7 @@ pub struct QtorrentConfig {
     include_images: bool,
     /// Minimum image file size in KB. Files smaller than this will be skipped.
     #[serde(default)]
-    min_image_size_kb: Option<f64>,
+    min_image_size_kb: Option<u64>,
     /// Substrings to remove from torrent filename when generating suggested name.
     #[serde(default)]
     remove_from_name: Vec<String>,
@@ -89,11 +89,12 @@ pub struct QtorrentConfig {
     #[serde(default)]
     ignore_torrent_names: Vec<String>,
     /// Prefix-to-tag pairs for overwriting tags based on torrent filename.
-    /// Each entry is `[prefix, tag]`. If a torrent filename starts with the prefix
-    /// (case-insensitive), the corresponding tag is used instead of the default `tags` value.
+    /// Each entry is `[prefix, tag]`.
+    /// If a torrent filename starts with the prefix (case-insensitive),
+    /// the corresponding tag is used instead of the default `tags` value.
     /// Longer prefixes are checked first to allow more specific matches.
-    #[serde(default)]
-    tag_overwrite_prefixes: Vec<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_tag_overwrite_prefixes")]
+    tag_overwrite_prefixes: Vec<TagOverwrite>,
 }
 
 /// A tag overwrite rule:
@@ -199,7 +200,12 @@ impl Config {
     #[allow(clippy::too_many_lines)]
     pub fn from_args(args: QtorrentArgs) -> Result<Self> {
         let user_config = QtorrentConfig::get_user_config()?;
+        Ok(Self::from_args_with_user_config(args, user_config))
+    }
 
+    /// Create config by merging CLI arguments with a pre-loaded user config.
+    #[allow(clippy::too_many_lines)]
+    fn from_args_with_user_config(args: QtorrentArgs, user_config: QtorrentConfig) -> Self {
         // Get credentials from args or config, with args taking priority
         let host = args
             .host
@@ -263,10 +269,11 @@ impl Config {
             .or(user_config.min_file_size_mb)
             .and_then(mb_to_bytes);
 
-        let min_image_size_bytes = args
+        let min_image_size_kb = args
             .min_image_size_kb
-            .or(user_config.min_image_size_kb)
-            .and_then(kb_to_bytes);
+            .or_else(|| user_config.min_image_size_kb.map(|kb| kb as f64));
+
+        let min_image_size_bytes = min_image_size_kb.and_then(kb_to_bytes);
 
         let file_filter = FileFilter::new(
             skip_extensions,
@@ -285,29 +292,9 @@ impl Config {
         // Filename ignore patterns
         let ignore_torrent_names = user_config.ignore_torrent_names;
 
-        // Tag overwrite prefixes: parse [prefix, tag] pairs, pre-lowercase prefix,
-        // and sort by length descending for longest-match-first
-        let mut tag_overwrite_prefixes: Vec<TagOverwrite> = user_config
-            .tag_overwrite_prefixes
-            .into_iter()
-            .filter_map(|pair| {
-                if pair.len() == 2 {
-                    Some(TagOverwrite {
-                        lowercase_prefix: pair[0].to_lowercase(),
-                        tag: pair[1].clone(),
-                    })
-                } else {
-                    cli_tools::print_yellow!(
-                        "Ignoring invalid tag_overwrite_prefixes entry: expected [prefix, tag] pair"
-                    );
-                    None
-                }
-            })
-            .collect();
+        let tag_overwrite_prefixes = user_config.tag_overwrite_prefixes;
 
-        tag_overwrite_prefixes.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.lowercase_prefix.chars().count()));
-
-        Ok(Self {
+        Self {
             host,
             port,
             username,
@@ -328,7 +315,7 @@ impl Config {
             use_dots_formatting,
             ignore_torrent_names,
             tag_overwrite_prefixes,
-        })
+        }
     }
 
     /// Check if credentials are provided.
@@ -441,9 +428,73 @@ fn kb_to_bytes(kb: f64) -> Option<u64> {
     (kb > 0.0).then_some((kb * 1024.0) as u64)
 }
 
+/// Deserialize `[[prefix, tag], ...]` pairs into sorted `TagOverwrite` rules.
+///
+/// Lowercases prefixes for case-insensitive matching and sorts by prefix length
+/// descending for longest-match-first semantics.
+fn deserialize_tag_overwrite_prefixes<'de, D>(deserializer: D) -> std::result::Result<Vec<TagOverwrite>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let pairs: Vec<[String; 2]> = Vec::deserialize(deserializer)?;
+    let mut prefixes: Vec<TagOverwrite> = pairs
+        .into_iter()
+        .map(|[prefix, tag]| TagOverwrite {
+            lowercase_prefix: prefix.to_lowercase(),
+            tag,
+        })
+        .collect();
+
+    prefixes.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.lowercase_prefix.chars().count()));
+    Ok(prefixes)
+}
+
 #[cfg(test)]
 mod qtorrent_config_tests {
+    use std::borrow::Cow;
+
+    use clap::Parser;
+
+    use crate::torrent::FileInfo;
+
     use super::*;
+
+    fn make_image_file_info(path: &str, size: u64) -> FileInfo<'static> {
+        FileInfo {
+            index: 0,
+            path: Cow::Owned(path.to_string()),
+            size,
+            exclusion_reason: None,
+        }
+    }
+
+    fn make_config_with_image_size_limit(min_image_size_kb: u64) -> Config {
+        let user_config = QtorrentConfig::from_toml_str(&format!(
+            "\n[qtorrent]\ninclude_images = true\nmin_image_size_kb = {min_image_size_kb}\n"
+        ))
+        .expect("should parse config");
+        let args = crate::QtorrentArgs::try_parse_from(["test"]).expect("should parse args");
+        Config::from_args_with_user_config(args, user_config)
+    }
+
+    fn make_config_with_filters(
+        skip_extensions: &[&str],
+        min_file_size_mb: Option<f64>,
+        include_images: bool,
+        min_image_size_kb: Option<u64>,
+    ) -> Config {
+        let skip_ext_toml: Vec<String> = skip_extensions.iter().map(|ext| format!("\"{ext}\" ")).collect();
+        let toml = format!(
+            "[qtorrent]\nskip_extensions = [{}]\ninclude_images = {}\n{}{}\n",
+            skip_ext_toml.join(", "),
+            include_images,
+            min_file_size_mb.map_or(String::new(), |mb| format!("min_file_size_mb = {mb}\n")),
+            min_image_size_kb.map_or(String::new(), |kb| format!("min_image_size_kb = {kb}\n")),
+        );
+        let user_config = QtorrentConfig::from_toml_str(&toml).expect("should parse config");
+        let args = crate::QtorrentArgs::try_parse_from(["test"]).expect("should parse args");
+        Config::from_args_with_user_config(args, user_config)
+    }
 
     #[test]
     fn from_toml_str_parses_empty_config() {
@@ -505,14 +556,179 @@ skip_extensions = ["nfo", "txt", "jpg"]
 skip_directories = ["sample", "subs"]
 min_file_size_mb = 50.0
 include_images = true
-min_image_size_kb = 2.5
+min_image_size_kb = 500
 "#;
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.skip_extensions, vec!["nfo", "txt", "jpg"]);
         assert_eq!(config.skip_directories, vec!["sample", "subs"]);
         assert_eq!(config.min_file_size_mb, Some(50.0));
         assert!(config.include_images);
-        assert_eq!(config.min_image_size_kb, Some(2.5));
+        assert_eq!(config.min_image_size_kb, Some(500));
+    }
+
+    #[test]
+    fn from_toml_str_parses_integer_file_filtering_options() {
+        let toml = r"
+[qtorrent]
+include_images = true
+min_image_size_kb = 500
+    ";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.include_images);
+        assert_eq!(config.min_image_size_kb, Some(500));
+    }
+
+    #[test]
+    fn excludes_undersized_images_with_lowercase_extensions() {
+        let config = make_config_with_image_size_limit(500);
+        let files = [
+            make_image_file_info("movie/snapshot.jpg", 226 * 1024),
+            make_image_file_info("movie/snapshot.jpeg", 159 * 1024),
+            make_image_file_info("movie/snapshot.png", 200 * 1024),
+        ];
+
+        assert_eq!(config.file_filter.min_image_size_bytes, Some(500 * 1024));
+        let excluded_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_some())
+            .count();
+        assert_eq!(excluded_count, 3);
+    }
+
+    #[test]
+    fn excludes_undersized_images_with_uppercase_extensions() {
+        let config = make_config_with_image_size_limit(500);
+        let files = [
+            make_image_file_info("movie/snapshot.JPG", 100 * 1024),
+            make_image_file_info("movie/snapshot.JPEG", 200 * 1024),
+            make_image_file_info("movie/snapshot.PNG", 300 * 1024),
+        ];
+
+        let excluded_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_some())
+            .count();
+        assert_eq!(excluded_count, 3);
+    }
+
+    #[test]
+    fn excludes_undersized_images_with_titlecase_extensions() {
+        let config = make_config_with_image_size_limit(500);
+        let files = [
+            make_image_file_info("movie/snapshot.Jpg", 100 * 1024),
+            make_image_file_info("movie/snapshot.Jpeg", 200 * 1024),
+            make_image_file_info("movie/snapshot.Png", 300 * 1024),
+        ];
+
+        let excluded_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_some())
+            .count();
+        assert_eq!(excluded_count, 3);
+    }
+
+    #[test]
+    fn keeps_images_at_or_above_size_limit() {
+        let config = make_config_with_image_size_limit(500);
+
+        let exact_limit = make_image_file_info("movie/exact.jpg", 500 * 1024);
+        let above_limit = make_image_file_info("movie/large.JPEG", 600 * 1024);
+        let well_above = make_image_file_info("movie/poster.Png", 2000 * 1024);
+
+        assert!(config.file_filter.should_exclude(&exact_limit).is_none());
+        assert!(config.file_filter.should_exclude(&above_limit).is_none());
+        assert!(config.file_filter.should_exclude(&well_above).is_none());
+    }
+
+    #[test]
+    fn image_size_limit_does_not_apply_to_non_image_files() {
+        let config = make_config_with_image_size_limit(500);
+        let files = [
+            make_image_file_info("movie/video.mp4", 10 * 1024),
+            make_image_file_info("movie/readme.txt", 2 * 1024),
+            make_image_file_info("movie/info.nfo", 1024),
+            make_image_file_info("movie/subs.srt", 50 * 1024),
+        ];
+
+        let included_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_none())
+            .count();
+        assert_eq!(included_count, 4);
+    }
+
+    #[test]
+    fn mixed_files_with_image_size_and_skip_extensions() {
+        let config = make_config_with_filters(&["nfo", "txt"], None, true, Some(500));
+
+        let files = [
+            // Included: large image above limit
+            make_image_file_info("movie/poster.jpg", 600 * 1024),
+            // Included: video file (no size limit configured)
+            make_image_file_info("movie/video.mkv", 700 * 1024 * 1024),
+            // Excluded: small image below limit
+            make_image_file_info("movie/thumb.PNG", 100 * 1024),
+            // Excluded: skipped extension
+            make_image_file_info("movie/info.nfo", 512),
+            // Excluded: skipped extension
+            make_image_file_info("movie/readme.txt", 2 * 1024),
+            // Included: non-filtered extension
+            make_image_file_info("movie/subs.srt", 50 * 1024),
+            // Excluded: small image below limit
+            make_image_file_info("movie/screen.Jpeg", 200 * 1024),
+        ];
+
+        let included_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_none())
+            .count();
+        let excluded_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_some())
+            .count();
+
+        assert_eq!(included_count, 3);
+        assert_eq!(excluded_count, 4);
+    }
+
+    #[test]
+    fn skip_extensions_exclude_regardless_of_case() {
+        let config = make_config_with_filters(&["nfo", "txt"], None, true, None);
+
+        let files = [
+            make_image_file_info("movie/info.NFO", 512),
+            make_image_file_info("movie/readme.Txt", 1024),
+            make_image_file_info("movie/notes.txt", 2048),
+        ];
+
+        let excluded_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_some())
+            .count();
+        assert_eq!(excluded_count, 3);
+    }
+
+    #[test]
+    fn images_excluded_entirely_when_include_images_disabled() {
+        let config = make_config_with_filters(&[], None, false, None);
+
+        let files = [
+            make_image_file_info("movie/poster.jpg", 5 * 1024 * 1024),
+            make_image_file_info("movie/cover.PNG", 2 * 1024 * 1024),
+            make_image_file_info("movie/video.mkv", 700 * 1024 * 1024),
+        ];
+
+        let excluded_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_some())
+            .count();
+        let included_count = files
+            .iter()
+            .filter(|f| config.file_filter.should_exclude(f).is_none())
+            .count();
+
+        assert_eq!(excluded_count, 2);
+        assert_eq!(included_count, 1);
     }
 
     #[test]
@@ -537,8 +753,11 @@ tag_overwrite_prefixes = [["LongPrefix", "longtag"], ["Short", "shorttag"]]
 "#;
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.tag_overwrite_prefixes.len(), 2);
-        assert_eq!(config.tag_overwrite_prefixes[0], vec!["LongPrefix", "longtag"]);
-        assert_eq!(config.tag_overwrite_prefixes[1], vec!["Short", "shorttag"]);
+        // Sorted by prefix length descending
+        assert_eq!(config.tag_overwrite_prefixes[0].lowercase_prefix, "longprefix");
+        assert_eq!(config.tag_overwrite_prefixes[0].tag, "longtag");
+        assert_eq!(config.tag_overwrite_prefixes[1].lowercase_prefix, "short");
+        assert_eq!(config.tag_overwrite_prefixes[1].tag, "shorttag");
     }
 
     #[test]
@@ -600,7 +819,8 @@ tag_overwrite_prefixes = [["SpecialPrefix", "special"], ["Other", "othertag"]]
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.tags, Some("default-tag".to_string()));
         assert_eq!(config.tag_overwrite_prefixes.len(), 2);
-        assert_eq!(config.tag_overwrite_prefixes[0], vec!["SpecialPrefix", "special"]);
+        assert_eq!(config.tag_overwrite_prefixes[0].lowercase_prefix, "specialprefix");
+        assert_eq!(config.tag_overwrite_prefixes[0].tag, "special");
     }
 
     #[test]
