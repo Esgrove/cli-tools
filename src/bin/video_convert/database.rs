@@ -273,8 +273,7 @@ impl Database {
         let path_str = path.to_string_lossy();
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |duration| duration.as_secs() as i64);
 
         let modified_time = std::fs::metadata(path)
             .ok()
@@ -337,8 +336,7 @@ impl Database {
 
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |duration| duration.as_secs() as i64);
 
         let transaction = self.connection.transaction()?;
         let mut count = 0;
@@ -582,8 +580,7 @@ impl Database {
         let path_str = path.to_string_lossy();
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |duration| duration.as_secs() as i64);
 
         self.connection
             .execute(
@@ -633,8 +630,7 @@ impl Database {
 
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |duration| duration.as_secs() as i64);
 
         let transaction = self.connection.transaction()?;
         let mut count = 0;

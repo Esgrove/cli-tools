@@ -102,7 +102,7 @@ fn classify_torrent(torrent: &TorrentListItem) -> TorrentStatus {
 fn sort_torrents(torrents: &mut [&TorrentListItem], sort: SortOrder) {
     match sort {
         SortOrder::Name => {
-            torrents.sort_unstable_by(|first, second| first.name.to_lowercase().cmp(&second.name.to_lowercase()));
+            torrents.sort_unstable_by_key(|torrent| torrent.name.to_lowercase());
         }
         SortOrder::Size => {
             torrents.sort_unstable_by(|first, second| {

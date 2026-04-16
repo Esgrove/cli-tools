@@ -100,7 +100,7 @@ impl QTorrent {
 
             // Skip torrent when all files are excluded by filters
             if info.all_files_excluded() {
-                println!("  {} All files excluded by filters, skipping torrent", "⊘".yellow(),);
+                println!("  {} All files excluded by filters, skipping torrent", "⊘".yellow());
                 stats.inc_skipped();
                 continue;
             }
@@ -226,7 +226,7 @@ impl QTorrent {
 
                 match rename_result {
                     Ok(()) => {
-                        println!("  {} Renamed on disk:", "✓".green(),);
+                        println!("  {} Renamed on disk:", "✓".green());
                         cli_tools::show_diff(old_name, new_name);
                         folder_renamed = true;
                         break;
@@ -837,13 +837,13 @@ impl QTorrent {
         // Collect all items to display: included files, other excluded files, and directory summaries
         // Sort included and other excluded files by size descending
         let mut included_files: Vec<_> = filtered.included.iter().collect();
-        included_files.sort_by(|a, b| b.size.cmp(&a.size));
+        included_files.sort_by_key(|file| std::cmp::Reverse(file.size));
 
-        other_excluded.sort_by(|a, b| b.size.cmp(&a.size));
+        other_excluded.sort_by_key(|file| std::cmp::Reverse(file.size));
 
         // Sort skipped directories by total size descending
         let mut skipped_dirs_sorted: Vec<_> = skipped_directories.into_iter().collect();
-        skipped_dirs_sorted.sort_by(|a, b| b.1.total_size.cmp(&a.1.total_size));
+        skipped_dirs_sorted.sort_by_key(|entry| std::cmp::Reverse(entry.1.total_size));
 
         // Find the widest formatted size string for right-alignment
         let all_sizes: Vec<String> = included_files

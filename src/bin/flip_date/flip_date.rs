@@ -54,7 +54,7 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
     }
 
     // Case-insensitive sort by filename
-    files_to_rename.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+    files_to_rename.sort_by_key(|rename_item| rename_item.filename.to_lowercase());
 
     let heading = if config.dryrun {
         "Dryrun:".cyan().bold()
@@ -171,7 +171,7 @@ fn directories_to_rename(path: PathBuf, recurse: bool) -> Result<Vec<RenameItem>
     }
 
     // Case-insensitive sort by filename
-    directories_to_rename.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+    directories_to_rename.sort_by_key(|rename_item| rename_item.filename.to_lowercase());
 
     Ok(directories_to_rename)
 }

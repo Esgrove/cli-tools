@@ -1010,7 +1010,7 @@ impl DirMove {
         if self.config.debug {
             eprintln!("Directory match groups:");
             let mut sorted_matches: Vec<_> = matches.iter().collect();
-            sorted_matches.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            sorted_matches.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
             for (&idx, matched_files) in sorted_matches {
                 eprintln!("  {} -> {} file(s)", dirs[idx].name, matched_files.len());
             }

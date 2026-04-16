@@ -192,7 +192,7 @@ impl VideoFile {
     ///
     /// Falls back to 0 if the metadata cannot be read.
     pub(crate) fn new_with_metadata(path: &Path) -> Self {
-        let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let size_bytes = fs::metadata(path).map_or(0, |metadata| metadata.len());
         Self::new(path, size_bytes)
     }
 
@@ -312,7 +312,7 @@ impl VideoInfo {
         };
 
         // Fall back to file metadata for size if not in ffprobe output
-        let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+        let size_bytes = size_bytes.unwrap_or_else(|| fs::metadata(path).map_or(0, |metadata| metadata.len()));
 
         Ok(Self {
             codec,
@@ -450,7 +450,7 @@ impl std::fmt::Display for SkipReason {
 
 impl From<walkdir::DirEntry> for VideoFile {
     fn from(entry: walkdir::DirEntry) -> Self {
-        let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let size_bytes = entry.metadata().map_or(0, |metadata| metadata.len());
         Self::new(entry.path(), size_bytes)
     }
 }

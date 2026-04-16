@@ -991,13 +991,13 @@ impl VideoConvert {
     fn sort_processable_files(files: &mut [ProcessableFile], sort_order: SortOrder) {
         match sort_order {
             SortOrder::Bitrate => {
-                files.sort_unstable_by(|a, b| b.info.bitrate_kbps.cmp(&a.info.bitrate_kbps));
+                files.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.bitrate_kbps));
             }
             SortOrder::Size => {
-                files.sort_unstable_by(|a, b| b.info.size_bytes.cmp(&a.info.size_bytes));
+                files.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.size_bytes));
             }
             SortOrder::SizeAsc => {
-                files.sort_unstable_by(|a, b| a.info.size_bytes.cmp(&b.info.size_bytes));
+                files.sort_unstable_by_key(|file| file.info.size_bytes);
             }
             SortOrder::Duration => {
                 files.sort_unstable_by(|a, b| {

@@ -1348,14 +1348,14 @@ mod format_duration_tests {
 
     #[test]
     fn minutes_and_seconds() {
-        assert_eq!(format_duration(Duration::from_secs(60)), "1m 00s");
+        assert_eq!(format_duration(Duration::from_mins(1)), "1m 00s");
         assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
         assert_eq!(format_duration(Duration::from_secs(3599)), "59m 59s");
     }
 
     #[test]
     fn hours_minutes_seconds() {
-        assert_eq!(format_duration(Duration::from_secs(3600)), "1h 00m 00s");
+        assert_eq!(format_duration(Duration::from_hours(1)), "1h 00m 00s");
         assert_eq!(format_duration(Duration::from_secs(3661)), "1h 01m 01s");
         assert_eq!(format_duration(Duration::from_secs(7325)), "2h 02m 05s");
     }

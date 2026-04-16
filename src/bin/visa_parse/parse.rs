@@ -659,11 +659,9 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     let totals_sheet = workbook.add_worksheet().set_name("TOTALS")?;
     totals_sheet.write_string_with_format(0, 0, "Name", &header_format)?;
     totals_sheet.write_string_with_format(0, 1, "Total sum", &header_format)?;
-    let mut totals_row: RowNum = 1;
-    for (name, sum) in totals {
+    for (totals_row, (name, sum)) in (1_u32..).zip(totals) {
         totals_sheet.write_string(totals_row, 0, name)?;
         totals_sheet.write_string_with_format(totals_row, 1, format!("{sum:.2}").replace('.', ","), &sum_format)?;
-        totals_row += 1;
     }
     totals_sheet.autofit();
 
