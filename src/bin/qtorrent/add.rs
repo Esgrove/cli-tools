@@ -400,7 +400,7 @@ impl QTorrent {
         let new_name = match input {
             "1" => suggested,
             "2" if internal_formatted.is_some() => internal_formatted.expect("internal_formatted checked above"),
-            _ => input.to_string(),
+            _ => self.format_custom_name(input, info.effective_is_multi_file),
         };
 
         // Rename the existing torrent
@@ -474,6 +474,20 @@ impl QTorrent {
         }
 
         name
+    }
+
+    /// Apply dots formatting to a custom name entered by the user if `format_custom_name` is enabled.
+    fn format_custom_name(&self, name: &str, is_multi_file: bool) -> String {
+        if self.config.format_custom_name
+            && let Some(dot_rename) = self.dot_formatter()
+        {
+            return if is_multi_file {
+                dot_rename.format_directory_name(name)
+            } else {
+                utils::format_single_file_name(&dot_rename, name)
+            };
+        }
+        name.to_string()
     }
 
     /// Format the internal torrent name with dots formatting applied.
@@ -789,11 +803,13 @@ impl QTorrent {
                 }
                 _ => {
                     // For single files, restore the original extension if the custom name doesn't have one
-                    if info.effective_is_multi_file {
+                    let custom = if info.effective_is_multi_file {
                         input.to_string()
                     } else {
                         utils::restore_file_extension(input, &normalized_suggested)
-                    }
+                    };
+                    // Apply dots formatting to custom name if configured
+                    self.format_custom_name(&custom, info.effective_is_multi_file)
                 }
             };
 

@@ -85,6 +85,9 @@ pub struct QtorrentConfig {
     /// Apply dots formatting to suggested name (uses dots config from config file).
     #[serde(default)]
     use_dots_formatting: bool,
+    /// Apply dots formatting to custom names entered by the user in rename prompts.
+    #[serde(default)]
+    format_custom_name: bool,
     /// If torrent filename contains any of these strings, ignore it and use internal name instead.
     #[serde(default)]
     ignore_torrent_names: Vec<String>,
@@ -147,6 +150,8 @@ pub struct Config {
     pub remove_from_name: Vec<String>,
     /// Apply dots formatting to suggested name (uses dots config from config file).
     pub use_dots_formatting: bool,
+    /// Apply dots formatting to custom names entered by the user in rename prompts.
+    pub format_custom_name: bool,
     /// If torrent filename contains any of these strings, ignore it and use internal name instead.
     pub ignore_torrent_names: Vec<String>,
     /// Prefixes to match against torrent filenames for tag overwriting.
@@ -289,6 +294,9 @@ impl Config {
         // Dots formatting option
         let use_dots_formatting = user_config.use_dots_formatting;
 
+        // Format custom names with dots formatting
+        let format_custom_name = user_config.format_custom_name;
+
         // Filename ignore patterns
         let ignore_torrent_names = user_config.ignore_torrent_names;
 
@@ -313,6 +321,7 @@ impl Config {
             file_filter,
             remove_from_name,
             use_dots_formatting,
+            format_custom_name,
             ignore_torrent_names,
             tag_overwrite_prefixes,
         }
@@ -874,6 +883,7 @@ mod test_resolve_tags {
             file_filter: FileFilter::default(),
             remove_from_name: Vec::new(),
             use_dots_formatting: false,
+            format_custom_name: false,
             ignore_torrent_names: Vec::new(),
             tag_overwrite_prefixes,
         }
