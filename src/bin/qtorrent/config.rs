@@ -19,6 +19,9 @@ const DEFAULT_HOST: &str = "localhost";
 /// Default qBittorrent `WebUI` port.
 const DEFAULT_PORT: u16 = 8080;
 
+/// Default minimum number of image files required before including images.
+const DEFAULT_MIN_IMAGE_FILE_COUNT: usize = 10;
+
 /// User configuration from the config file.
 #[derive(Debug, Default, Deserialize)]
 pub struct QtorrentConfig {
@@ -76,6 +79,10 @@ pub struct QtorrentConfig {
     /// Include image files (.jpg, .jpeg, .png) in multi-file torrents.
     #[serde(default)]
     include_images: bool,
+    /// Minimum number of image files required before images are included.
+    /// If fewer images are present, images are skipped as if `include_images` were false.
+    #[serde(default)]
+    min_image_file_count: Option<usize>,
     /// Minimum image file size in KB. Files smaller than this will be skipped.
     #[serde(default)]
     min_image_size_kb: Option<u64>,
@@ -279,6 +286,8 @@ impl Config {
             .or_else(|| user_config.min_image_size_kb.map(|kb| kb as f64));
 
         let min_image_size_bytes = min_image_size_kb.and_then(kb_to_bytes);
+        let min_image_file_count =
+            include_images.then_some(user_config.min_image_file_count.unwrap_or(DEFAULT_MIN_IMAGE_FILE_COUNT));
 
         let file_filter = FileFilter::new(
             skip_extensions,
@@ -286,6 +295,7 @@ impl Config {
             min_file_size_bytes,
             include_images,
             min_image_size_bytes,
+            min_image_file_count,
         );
 
         // Substrings to remove from suggested name
@@ -479,7 +489,7 @@ mod qtorrent_config_tests {
 
     fn make_config_with_image_size_limit(min_image_size_kb: u64) -> Config {
         let user_config = QtorrentConfig::from_toml_str(&format!(
-            "\n[qtorrent]\ninclude_images = true\nmin_image_size_kb = {min_image_size_kb}\n"
+            "\n[qtorrent]\ninclude_images = true\nmin_image_size_kb = {min_image_size_kb}\nmin_image_file_count = 0\n"
         ))
         .expect("should parse config");
         let args = crate::QtorrentArgs::try_parse_from(["test"]).expect("should parse args");
@@ -491,14 +501,16 @@ mod qtorrent_config_tests {
         min_file_size_mb: Option<f64>,
         include_images: bool,
         min_image_size_kb: Option<u64>,
+        min_image_file_count: Option<usize>,
     ) -> Config {
         let skip_ext_toml: Vec<String> = skip_extensions.iter().map(|ext| format!("\"{ext}\" ")).collect();
         let toml = format!(
-            "[qtorrent]\nskip_extensions = [{}]\ninclude_images = {}\n{}{}\n",
+            "[qtorrent]\nskip_extensions = [{}]\ninclude_images = {}\n{}{}{}\n",
             skip_ext_toml.join(", "),
             include_images,
             min_file_size_mb.map_or(String::new(), |mb| format!("min_file_size_mb = {mb}\n")),
             min_image_size_kb.map_or(String::new(), |kb| format!("min_image_size_kb = {kb}\n")),
+            min_image_file_count.map_or(String::new(), |count| format!("min_image_file_count = {count}\n")),
         );
         let user_config = QtorrentConfig::from_toml_str(&toml).expect("should parse config");
         let args = crate::QtorrentArgs::try_parse_from(["test"]).expect("should parse args");
@@ -565,6 +577,7 @@ skip_extensions = ["nfo", "txt", "jpg"]
 skip_directories = ["sample", "subs"]
 min_file_size_mb = 50.0
 include_images = true
+min_image_file_count = 12
 min_image_size_kb = 500
 "#;
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
@@ -572,6 +585,7 @@ min_image_size_kb = 500
         assert_eq!(config.skip_directories, vec!["sample", "subs"]);
         assert_eq!(config.min_file_size_mb, Some(50.0));
         assert!(config.include_images);
+        assert_eq!(config.min_image_file_count, Some(12));
         assert_eq!(config.min_image_size_kb, Some(500));
     }
 
@@ -580,11 +594,26 @@ min_image_size_kb = 500
         let toml = r"
 [qtorrent]
 include_images = true
+min_image_file_count = 3
 min_image_size_kb = 500
     ";
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.include_images);
+        assert_eq!(config.min_image_file_count, Some(3));
         assert_eq!(config.min_image_size_kb, Some(500));
+    }
+
+    #[test]
+    fn include_images_defaults_min_image_file_count_to_ten() {
+        let user_config =
+            QtorrentConfig::from_toml_str("[qtorrent]\ninclude_images = true\n").expect("should parse config");
+        let args = crate::QtorrentArgs::try_parse_from(["test"]).expect("should parse args");
+        let config = Config::from_args_with_user_config(args, user_config);
+
+        assert_eq!(
+            config.file_filter.min_image_file_count,
+            Some(DEFAULT_MIN_IMAGE_FILE_COUNT)
+        );
     }
 
     #[test]
@@ -668,7 +697,7 @@ min_image_size_kb = 500
 
     #[test]
     fn mixed_files_with_image_size_and_skip_extensions() {
-        let config = make_config_with_filters(&["nfo", "txt"], None, true, Some(500));
+        let config = make_config_with_filters(&["nfo", "txt"], None, true, Some(500), Some(0));
 
         let files = [
             // Included: large image above limit
@@ -702,7 +731,7 @@ min_image_size_kb = 500
 
     #[test]
     fn skip_extensions_exclude_regardless_of_case() {
-        let config = make_config_with_filters(&["nfo", "txt"], None, true, None);
+        let config = make_config_with_filters(&["nfo", "txt"], None, true, None, Some(0));
 
         let files = [
             make_image_file_info("movie/info.NFO", 512),
@@ -719,7 +748,7 @@ min_image_size_kb = 500
 
     #[test]
     fn images_excluded_entirely_when_include_images_disabled() {
-        let config = make_config_with_filters(&[], None, false, None);
+        let config = make_config_with_filters(&[], None, false, None, None);
 
         let files = [
             make_image_file_info("movie/poster.jpg", 5 * 1024 * 1024),

@@ -697,6 +697,12 @@ impl QTorrent {
                 println!("  {} {} MB", "Min file size:".dimmed(), min_size_mb);
             }
             if self.config.file_filter.include_images
+                && let Some(min_image_file_count) = self.config.file_filter.min_image_file_count
+                && min_image_file_count > 1
+            {
+                println!("  {} {}", "Min image count:".dimmed(), min_image_file_count);
+            }
+            if self.config.file_filter.include_images
                 && let Some(min_image_size_kb) = self.config.file_filter.min_image_size_kb
             {
                 println!("  {} {} KB", "Min image size:".dimmed(), min_image_size_kb);

@@ -310,6 +310,10 @@ replace = [
 # Include image files (.jpg, .jpeg, .png) in multi-file torrents
 # include_images = false
 
+# Minimum number of image files required before images are included.
+# Torrents with fewer images behave as if include_images is false.
+# min_image_file_count = 10
+
 # File extensions to skip when selecting files from multi-file torrents (without dot)
 # When include_images is false, keeping jpg/jpeg/png here matches the default behavior.
 # skip_extensions = ["nfo", "txt", "jpg", "jpeg", "png", "sfv", "md5", "url"]

@@ -826,6 +826,14 @@ pub fn path_to_file_extension_string(path: &Path) -> String {
     os_str_to_string(path.extension().unwrap_or_default()).to_lowercase()
 }
 
+/// Get the file extension from a string path and return it in lowercase.
+#[must_use]
+pub fn lowercase_extension(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase())
+}
+
 /// Get relative path and convert to string with invalid unicode handling.
 #[must_use]
 pub fn path_to_string_relative(path: &Path) -> String {
@@ -1505,6 +1513,16 @@ mod path_utility_tests {
     fn path_to_file_extension_string_no_extension() {
         let path = Path::new("README");
         assert_eq!(path_to_file_extension_string(path), "");
+    }
+
+    #[test]
+    fn lowercase_extension_basic() {
+        assert_eq!(lowercase_extension("test/path/file.TXT"), Some("txt".to_string()));
+    }
+
+    #[test]
+    fn lowercase_extension_no_extension() {
+        assert_eq!(lowercase_extension("README"), None);
     }
 
     #[test]
