@@ -106,7 +106,7 @@ re-export from the library. Do not duplicate code in benchmark files.
     - `flip_date.rs` → `flipdate` - Flip dates in filenames
     - `qtorrent` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming, show torrent stats
     - `resolution.rs` → `vres` - Add video resolution to file names
-    - `version_tag.rs` → `vtag` - Create git version tags for Rust projects
+    - `version_tag.rs` → `vtag` - Create git version tags for a project (Rust, C++, Python)
     - `video_convert` → `vconvert` - Video conversion to HEVC/MP4
     - `video_stats` → `vstats` - Collect and print video file statistics
     - `visa_parse.rs` → `visaparse` - Parse Finvoice XML credit card statements and collect data

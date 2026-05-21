@@ -479,9 +479,13 @@ Options:
 ## Vtag
 
 ```console
-Create git version tags for a Rust project
+Create git version tags for a project (Rust, C++, Python)
 
-Usage: vtag [OPTIONS] [PATH]
+Usage: vtag [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional git repository path. Defaults to current directory
