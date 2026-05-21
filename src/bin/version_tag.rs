@@ -271,7 +271,7 @@ fn push_all_tags(repo: &Repository, tags: &[String], dryrun: bool) -> Result<()>
 /// Check if the tag already exists locally.
 fn tag_name_exists(repo: &Repository, tag_name: &str) -> Result<bool> {
     for tag in repo.tag_names(Some("v*"))?.iter().flatten() {
-        if tag == tag_name {
+        if tag == Some(tag_name) {
             return Ok(true);
         }
     }
