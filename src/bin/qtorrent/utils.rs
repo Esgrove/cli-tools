@@ -1,9 +1,13 @@
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use cli_tools::dot_rename::DotFormat;
 
 use crate::torrent::Torrent;
+
+/// Name of the directory used to store torrent files that have been added to qBittorrent.
+pub const DOWNLOADED_DIRECTORY_NAME: &str = "downloaded";
 
 // List of known media file extensions
 const KNOWN_EXTENSIONS: &[&str] = &[
@@ -217,6 +221,181 @@ pub fn restore_file_extension(custom_name: &str, reference_name: &str) -> String
         return format!("{custom_name}.{original_ext}");
     }
     custom_name.to_string()
+}
+
+/// Find a "downloaded" directory next to the torrent file or in its parent directory.
+///
+/// Checks the directory containing `torrent_path` first, then its parent directory.
+/// Returns the path to the first matching directory, or `None` if neither exists.
+pub fn find_downloaded_directory(torrent_path: &Path) -> Option<PathBuf> {
+    let parent = torrent_path.parent()?;
+    let direct = parent.join(DOWNLOADED_DIRECTORY_NAME);
+    if direct.is_dir() {
+        return Some(direct);
+    }
+    let grandparent = parent.parent()?;
+    let in_parent = grandparent.join(DOWNLOADED_DIRECTORY_NAME);
+    if in_parent.is_dir() {
+        return Some(in_parent);
+    }
+    None
+}
+
+/// Return the path of a torrent file in `downloaded_directory` sharing the same file name as
+/// `torrent_path`, if one exists.
+pub fn existing_torrent_in_downloaded(downloaded_directory: &Path, torrent_path: &Path) -> Option<PathBuf> {
+    let file_name = torrent_path.file_name()?;
+    let target = downloaded_directory.join(file_name);
+    target.is_file().then_some(target)
+}
+
+/// Move a torrent file into `downloaded_directory`, preserving its file name.
+///
+/// Overwrites any existing file at the destination.
+///
+/// # Errors
+/// Returns an error if the torrent path has no file name or the rename operation fails.
+pub fn move_torrent_to_downloaded(torrent_path: &Path, downloaded_directory: &Path) -> Result<PathBuf> {
+    let file_name = torrent_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Torrent path has no file name: {}", torrent_path.display()))?;
+    let destination = downloaded_directory.join(file_name);
+    std::fs::rename(torrent_path, &destination)
+        .with_context(|| format!("Failed to move {} to {}", torrent_path.display(), destination.display()))?;
+    Ok(destination)
+}
+
+#[cfg(test)]
+mod test_find_downloaded_directory {
+    use super::*;
+
+    #[test]
+    fn returns_directory_when_present_next_to_torrent() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let root = temporary.path();
+        let downloaded = root.join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let torrent = root.join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert_eq!(find_downloaded_directory(&torrent), Some(downloaded));
+    }
+
+    #[test]
+    fn returns_directory_when_present_in_parent() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let root = temporary.path();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).expect("create nested dir");
+        let downloaded = root.join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let torrent = nested.join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert_eq!(find_downloaded_directory(&torrent), Some(downloaded));
+    }
+
+    #[test]
+    fn prefers_sibling_directory_over_parent_directory() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let root = temporary.path();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).expect("create nested dir");
+        let downloaded_sibling = nested.join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded_sibling).expect("create sibling dir");
+        let downloaded_parent = root.join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded_parent).expect("create parent dir");
+        let torrent = nested.join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert_eq!(find_downloaded_directory(&torrent), Some(downloaded_sibling));
+    }
+
+    #[test]
+    fn returns_none_when_not_found() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let torrent = temporary.path().join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert!(find_downloaded_directory(&torrent).is_none());
+    }
+
+    #[test]
+    fn ignores_files_named_downloaded() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let root = temporary.path();
+        let fake = root.join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::write(&fake, b"").expect("write fake file");
+        let torrent = root.join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert!(find_downloaded_directory(&torrent).is_none());
+    }
+}
+
+#[cfg(test)]
+mod test_existing_torrent_in_downloaded {
+    use super::*;
+
+    #[test]
+    fn returns_path_when_file_with_same_name_exists() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let existing = downloaded.join("example.torrent");
+        std::fs::write(&existing, b"").expect("write existing file");
+        let torrent = temporary.path().join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert_eq!(existing_torrent_in_downloaded(&downloaded, &torrent), Some(existing));
+    }
+
+    #[test]
+    fn returns_none_when_no_matching_file() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let torrent = temporary.path().join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert!(existing_torrent_in_downloaded(&downloaded, &torrent).is_none());
+    }
+}
+
+#[cfg(test)]
+mod test_move_torrent_to_downloaded {
+    use super::*;
+
+    #[test]
+    fn moves_file_into_downloaded_directory() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let torrent = temporary.path().join("example.torrent");
+        std::fs::write(&torrent, b"data").expect("write torrent");
+
+        let destination = move_torrent_to_downloaded(&torrent, &downloaded).expect("move succeeds");
+        assert_eq!(destination, downloaded.join("example.torrent"));
+        assert!(!torrent.exists());
+        assert!(destination.exists());
+    }
+
+    #[test]
+    fn overwrites_existing_file_at_destination() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let existing = downloaded.join("example.torrent");
+        std::fs::write(&existing, b"old").expect("write existing");
+        let torrent = temporary.path().join("example.torrent");
+        std::fs::write(&torrent, b"new").expect("write torrent");
+
+        let destination = move_torrent_to_downloaded(&torrent, &downloaded).expect("move succeeds");
+        assert_eq!(destination, existing);
+        assert!(!torrent.exists());
+        let contents = std::fs::read(&destination).expect("read destination");
+        assert_eq!(contents, b"new");
+    }
 }
 
 #[cfg(test)]

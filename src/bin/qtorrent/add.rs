@@ -74,6 +74,7 @@ impl QTorrent {
 
     /// Connect to qBittorrent and add torrents one by one with individual confirmation.
     #[allow(clippy::similar_names)]
+    #[allow(clippy::too_many_lines)]
     async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<()> {
         let mut client = self.connect_to_client().await?;
 
@@ -133,8 +134,26 @@ impl QTorrent {
             // Print final details before confirmation
             self.print_final_details(&info);
 
+            // Determine destination "downloaded" directory and detect name collisions before adding
+            let torrent_path = info.path.clone();
+            let downloaded_directory = utils::find_downloaded_directory(&torrent_path);
+            let collision = downloaded_directory
+                .as_deref()
+                .and_then(|directory| utils::existing_torrent_in_downloaded(directory, &torrent_path));
+
             // Ask for confirmation unless --yes flag is set
-            let should_add = if self.config.yes {
+            let should_add = if let Some(existing) = collision.as_ref() {
+                cli_tools::print_yellow!(
+                    "A torrent file with the same name already exists in the downloaded directory:\n  {}",
+                    existing.display()
+                );
+                if self.config.yes {
+                    true
+                } else {
+                    cli_tools::get_user_confirmation("Add anyway?", false)
+                        .map_err(|error| anyhow::anyhow!("Failed to get confirmation: {error}"))?
+                }
+            } else if self.config.yes {
                 true
             } else {
                 cli_tools::get_user_confirmation("Add this torrent?", true)
@@ -148,7 +167,25 @@ impl QTorrent {
             }
 
             match self.add_single_torrent(&client, info).await {
-                Ok(size) => stats.inc_success(size),
+                Ok(size) => {
+                    stats.inc_success(size);
+                    if let Some(directory) = downloaded_directory.as_deref() {
+                        match utils::move_torrent_to_downloaded(&torrent_path, directory) {
+                            Ok(destination) => {
+                                println!(
+                                    "  {} Moved torrent file to: {}",
+                                    "\u{2192}".green(),
+                                    destination.display().to_string().cyan()
+                                );
+                            }
+                            Err(error) => {
+                                cli_tools::print_yellow!(
+                                    "Failed to move torrent file to downloaded directory: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
                 Err(error) => {
                     stats.inc_error();
                     cli_tools::print_error!("{error}");
