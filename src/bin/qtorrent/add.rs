@@ -106,6 +106,10 @@ impl QTorrent {
                 continue;
             }
 
+            // Determine destination "downloaded" directory once per torrent
+            let torrent_path = info.path.clone();
+            let downloaded_directory = utils::find_downloaded_directory(&torrent_path);
+
             // Check if a torrent already exists in qBittorrent
             if let Some(existing_item) = Self::check_existing_torrent(&info, &existing_torrents) {
                 println!(
@@ -123,6 +127,12 @@ impl QTorrent {
                         stats.inc_duplicate();
                     }
                 }
+
+                // Even though we did not add a new torrent, the .torrent file has been processed
+                // (it already exists in qBittorrent), so move it into the downloaded directory.
+                if let Some(directory) = downloaded_directory.as_deref() {
+                    Self::move_torrent_file(&torrent_path, directory);
+                }
                 continue;
             }
 
@@ -134,9 +144,7 @@ impl QTorrent {
             // Print final details before confirmation
             self.print_final_details(&info);
 
-            // Determine destination "downloaded" directory and detect name collisions before adding
-            let torrent_path = info.path.clone();
-            let downloaded_directory = utils::find_downloaded_directory(&torrent_path);
+            // Detect name collisions in the downloaded directory before adding
             let collision = downloaded_directory
                 .as_deref()
                 .and_then(|directory| utils::existing_torrent_in_downloaded(directory, &torrent_path));
@@ -170,20 +178,7 @@ impl QTorrent {
                 Ok(size) => {
                     stats.inc_success(size);
                     if let Some(directory) = downloaded_directory.as_deref() {
-                        match utils::move_torrent_to_downloaded(&torrent_path, directory) {
-                            Ok(destination) => {
-                                println!(
-                                    "  {} Moved torrent file to: {}",
-                                    "\u{2192}".green(),
-                                    destination.display().to_string().cyan()
-                                );
-                            }
-                            Err(error) => {
-                                cli_tools::print_yellow!(
-                                    "Failed to move torrent file to downloaded directory: {error}"
-                                );
-                            }
-                        }
+                        Self::move_torrent_file(&torrent_path, directory);
                     }
                 }
                 Err(error) => {
@@ -1212,6 +1207,24 @@ impl QTorrent {
             "⚠".yellow(),
             excluded_indices.len()
         );
+    }
+
+    /// Move the torrent file into the downloaded directory and log the outcome.
+    ///
+    /// Errors are reported as warnings; they do not abort the surrounding workflow.
+    fn move_torrent_file(torrent_path: &Path, downloaded_directory: &Path) {
+        match utils::move_torrent_to_downloaded(torrent_path, downloaded_directory) {
+            Ok(destination) => {
+                println!(
+                    "  {} Moved torrent file to: {}",
+                    "\u{2192}".green(),
+                    destination.display().to_string().cyan()
+                );
+            }
+            Err(error) => {
+                cli_tools::print_yellow!("Failed to move torrent file to downloaded directory: {error}");
+            }
+        }
     }
 
     /// Check if a torrent already exists in qBittorrent by comparing info hashes.
