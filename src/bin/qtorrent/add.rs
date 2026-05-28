@@ -109,6 +109,9 @@ impl QTorrent {
             // Determine destination "downloaded" directory once per torrent
             let torrent_path = info.path.clone();
             let downloaded_directory = utils::find_downloaded_directory(&torrent_path);
+            let downloaded_collision = downloaded_directory
+                .as_deref()
+                .and_then(|directory| utils::existing_torrent_in_downloaded(directory, &torrent_path));
 
             // Check if a torrent already exists in qBittorrent
             if let Some(existing_item) = Self::check_existing_torrent(&info, &existing_torrents) {
@@ -117,6 +120,14 @@ impl QTorrent {
                     "⊘".yellow(),
                     existing_item.name.cyan()
                 );
+
+                if let Some(existing) = downloaded_collision.as_deref()
+                    && !self.confirm_downloaded_collision(existing, "Continue anyway?")?
+                {
+                    println!("{}", "Skipped.".yellow());
+                    stats.inc_skipped();
+                    continue;
+                }
 
                 // Offer to rename the existing torrent
                 match self.prompt_rename_existing(&info, &existing_item.name, &client).await {
@@ -136,6 +147,17 @@ impl QTorrent {
                 continue;
             }
 
+            let add_confirmed_by_collision = if let Some(existing) = downloaded_collision.as_deref() {
+                if !self.confirm_downloaded_collision(existing, "Add anyway?")? {
+                    println!("{}", "Skipped.".yellow());
+                    stats.inc_skipped();
+                    continue;
+                }
+                true
+            } else {
+                false
+            };
+
             // Offer to rename the output name/folder
             if let Some(new_name) = self.prompt_rename(&info)? {
                 info.rename_to = Some(new_name);
@@ -144,24 +166,8 @@ impl QTorrent {
             // Print final details before confirmation
             self.print_final_details(&info);
 
-            // Detect name collisions in the downloaded directory before adding
-            let collision = downloaded_directory
-                .as_deref()
-                .and_then(|directory| utils::existing_torrent_in_downloaded(directory, &torrent_path));
-
-            // Ask for confirmation unless --yes flag is set
-            let should_add = if let Some(existing) = collision.as_ref() {
-                cli_tools::print_yellow!(
-                    "A torrent file with the same name already exists in the downloaded directory:\n  {}",
-                    existing.display()
-                );
-                if self.config.yes {
-                    true
-                } else {
-                    cli_tools::get_user_confirmation("Add anyway?", false)
-                        .map_err(|error| anyhow::anyhow!("Failed to get confirmation: {error}"))?
-                }
-            } else if self.config.yes {
+            // Ask for confirmation unless --yes flag is set or the downloaded collision was already confirmed
+            let should_add = if self.config.yes || add_confirmed_by_collision {
                 true
             } else {
                 cli_tools::get_user_confirmation("Add this torrent?", true)
@@ -378,6 +384,21 @@ impl QTorrent {
         }
 
         Ok(client)
+    }
+
+    /// Warn about an existing torrent file in the downloaded directory and ask whether to continue.
+    fn confirm_downloaded_collision(&self, existing: &Path, prompt: &str) -> Result<bool> {
+        cli_tools::print_yellow!(
+            "A torrent file with the same name already exists in the downloaded directory:\n  {}",
+            existing.display()
+        );
+
+        if self.config.yes {
+            return Ok(true);
+        }
+
+        cli_tools::get_user_confirmation(prompt, false)
+            .map_err(|error| anyhow::anyhow!("Failed to get confirmation: {error}"))
     }
 
     /// Prompt user to rename an existing torrent in qBittorrent.
