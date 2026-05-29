@@ -43,7 +43,7 @@ tempfile = "3.27.0"
 titlecase = "3.6.0"
 tokio = { version = "1.52.3", features = ["full"] }
 toml = "1.1.2"
-toml_edit = "0.25.11"
+toml_edit = "0.25.12"
 trash = "5.2.6"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.2"
