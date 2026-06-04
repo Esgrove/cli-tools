@@ -46,7 +46,7 @@ toml = "1.1.2"
 toml_edit = "0.25.12"
 trash = "5.2.6"
 unicode-normalization = "0.1.25"
-unicode-segmentation = "1.13.2"
+unicode-segmentation = "1.13.3"
 walkdir = "2.5.0"
 
 [target.'cfg(windows)'.dependencies]
