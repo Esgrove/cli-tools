@@ -95,11 +95,18 @@ impl ThumbnailCreator {
         let mut error_count = 0;
         let mut stats = VideoStats::new();
 
-        for video_file in &video_files {
-            match self.create_thumbnail(video_file, &mut stats) {
+        let total_count = video_files.len();
+        let progress_width = total_count.to_string().len();
+
+        for (index, video_file) in video_files.iter().enumerate() {
+            let progress_prefix = Self::format_progress_prefix(index + 1, total_count, progress_width);
+            match self.create_thumbnail(video_file, &mut stats, &progress_prefix) {
                 Ok(()) => success_count += 1,
                 Err(e) => {
-                    print_error!("Failed to create thumbnail for {}: {e}", video_file.display());
+                    print_error!(
+                        "Failed to create thumbnail for {progress_prefix} {}: {e}",
+                        video_file.display()
+                    );
                     error_count += 1;
                 }
             }
@@ -190,7 +197,7 @@ impl ThumbnailCreator {
     }
 
     /// Create a thumbnail for a single video file.
-    fn create_thumbnail(&self, video_path: &Path, stats: &mut VideoStats) -> Result<()> {
+    fn create_thumbnail(&self, video_path: &Path, stats: &mut VideoStats, progress_prefix: &str) -> Result<()> {
         let filename = video_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -207,47 +214,26 @@ impl ThumbnailCreator {
         let output_path = screens_dir.join(format!("{file_stem}.jpg"));
 
         if output_path.exists() && !self.config.overwrite {
-            print_yellow!("Thumbnail already exists: {}", output_path.display());
+            print_yellow!(
+                "Thumbnail already exists for {progress_prefix} {filename}: {}",
+                output_path.display()
+            );
             return Ok(());
         }
 
-        println!("{}", format!("Creating thumbnail for: {filename}").magenta().bold());
+        println!(
+            "{}",
+            format!("Creating thumbnail for: {progress_prefix} {filename}")
+                .magenta()
+                .bold()
+        );
 
         // Get video info
         let video_info = VideoInfo::from_path(video_path)?;
         stats.add(&video_info);
 
-        if video_info.resolution.is_none() {
-            print_yellow!("Could not detect video resolution for: {filename}");
-        }
-        if video_info.duration.is_none() {
-            print_yellow!("Could not detect duration for: {filename}");
-        }
-        if video_info.codec.is_none() {
-            print_yellow!("Could not detect codec for: {filename}");
-        }
-        if video_info.bitrate_kbps.is_none() {
-            print_yellow!("Could not detect bitrate for: {filename}");
-        }
-
-        if self.config.verbose {
-            let mut info_parts = Vec::new();
-            if let Some(resolution) = video_info.resolution {
-                info_parts.push(format!("resolution: {resolution}"));
-            }
-            if let Some(duration) = video_info.duration {
-                info_parts.push(format!("duration: {duration:.2}s"));
-            }
-            if let Some(ref codec) = video_info.codec {
-                info_parts.push(format!("codec: {codec}"));
-            }
-            if let Some(bitrate_kbps) = video_info.bitrate_kbps {
-                info_parts.push(format!("bitrate: {:.2} Mbps", bitrate_kbps as f64 / 1000.0));
-            }
-            if !info_parts.is_empty() {
-                println!("  {}", info_parts.join(", "));
-            }
-        }
+        Self::print_missing_video_info_warnings(&video_info, filename, progress_prefix);
+        self.print_verbose_video_info(&video_info);
 
         // Determine layout based on aspect ratio (default to landscape if dimensions unknown)
         let is_landscape = video_info.resolution.is_none_or(|r| r.is_landscape());
@@ -314,6 +300,51 @@ impl ThumbnailCreator {
         }
 
         Ok(())
+    }
+
+    /// Format a progress prefix with current index aligned to the total digit width.
+    fn format_progress_prefix(index: usize, total: usize, width: usize) -> String {
+        format!("[{index:>width$} / {total}]")
+    }
+
+    /// Print warnings for video metadata that could not be detected.
+    fn print_missing_video_info_warnings(video_info: &VideoInfo, filename: &str, progress_prefix: &str) {
+        if video_info.resolution.is_none() {
+            print_yellow!("Could not detect video resolution for: {progress_prefix} {filename}");
+        }
+        if video_info.duration.is_none() {
+            print_yellow!("Could not detect duration for: {progress_prefix} {filename}");
+        }
+        if video_info.codec.is_none() {
+            print_yellow!("Could not detect codec for: {progress_prefix} {filename}");
+        }
+        if video_info.bitrate_kbps.is_none() {
+            print_yellow!("Could not detect bitrate for: {progress_prefix} {filename}");
+        }
+    }
+
+    /// Print detected video metadata when verbose output is enabled.
+    fn print_verbose_video_info(&self, video_info: &VideoInfo) {
+        if !self.config.verbose {
+            return;
+        }
+
+        let mut info_parts = Vec::new();
+        if let Some(resolution) = video_info.resolution {
+            info_parts.push(format!("resolution: {resolution}"));
+        }
+        if let Some(duration) = video_info.duration {
+            info_parts.push(format!("duration: {duration:.2}s"));
+        }
+        if let Some(ref codec) = video_info.codec {
+            info_parts.push(format!("codec: {codec}"));
+        }
+        if let Some(bitrate_kbps) = video_info.bitrate_kbps {
+            info_parts.push(format!("bitrate: {:.2} Mbps", bitrate_kbps as f64 / 1000.0));
+        }
+        if !info_parts.is_empty() {
+            println!("  {}", info_parts.join(", "));
+        }
     }
 
     /// Calculate appropriate font size based on video aspect ratio.
@@ -412,5 +443,16 @@ impl ThumbnailCreator {
             .replace(':', "\\:")
             .replace('\'', "\\'")
             .replace('|', "\\|")
+    }
+}
+
+#[cfg(test)]
+mod thumbnail_progress_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn right_aligns_index_to_total_width() {
+        assert_eq!(ThumbnailCreator::format_progress_prefix(12, 100, 3), "[ 12 / 100]");
+        assert_eq!(ThumbnailCreator::format_progress_prefix(1, 100, 3), "[  1 / 100]");
     }
 }
