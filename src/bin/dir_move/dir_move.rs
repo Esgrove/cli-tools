@@ -1616,8 +1616,16 @@ impl DirMove {
 
         print_bold!("Found {} custom mapping group(s):\n", mapping_groups.len());
 
+        let parent_dir_normalized = self
+            .root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(utils::normalize_name);
+        let runtime_ignored = HashSet::new();
+
         for (dir_name, files) in mapping_groups.into_iter().sorted_by(|a, b| a.0.cmp(&b.0)) {
-            if files.is_empty() {
+            if files.is_empty() || self.should_skip_group(&dir_name, parent_dir_normalized.as_deref(), &runtime_ignored)
+            {
                 continue;
             }
 
@@ -2146,6 +2154,34 @@ mod test_custom_mappings {
 
         // File should be matched to first mapping
         assert!(remaining.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn create_mode_custom_mapping_skips_current_dir_name() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir(&root)?;
+
+        std::fs::write(root.join("Example.one.mp4"), "")?;
+        std::fs::write(root.join("Example.two.mp4"), "")?;
+        std::fs::write(root.join("Example.three.mp4"), "")?;
+
+        let config = Config {
+            auto: true,
+            create: true,
+            custom_mappings: vec![CustomMapping::new("example", "Example")],
+            min_group_size: 10,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove(root.clone(), config);
+
+        dirmove.create_dirs_and_move_files()?;
+
+        assert_not_exists(&root.join("Example"));
+        assert_exists(&root.join("Example.one.mp4"));
+        assert_exists(&root.join("Example.two.mp4"));
+        assert_exists(&root.join("Example.three.mp4"));
         Ok(())
     }
 }
