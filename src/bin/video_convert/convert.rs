@@ -586,7 +586,7 @@ impl VideoConvert {
         println!("{info}");
 
         let quality_level = if self.config.movie_mode {
-            info.quality_level().saturating_sub(1)
+            info.quality_level().saturating_sub(2)
         } else {
             info.quality_level()
         };
