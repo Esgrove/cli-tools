@@ -77,7 +77,7 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'x', long)]
     delete_duplicates: bool,
 
-    /// Movie mode: preserve MKV container, streams, and metadata while converting video
+    /// Movie mode: preserve MKV container, metadata, and selected stream languages
     #[arg(short = 'm', long)]
     movie: bool,
 

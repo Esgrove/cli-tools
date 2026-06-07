@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,8 @@ pub static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b
 pub static RE_AV1: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bav1\b").expect("Invalid av1 regex"));
 
 const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
+const MOVIE_AUDIO_LANGUAGES: &[&str] = &["eng", "fin", "jpn", "swe", "nog", "nor"];
+const MOVIE_SUBTITLE_LANGUAGES: &[&str] = &["eng", "fin", "swe"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
@@ -604,7 +606,14 @@ impl VideoConvert {
         let mut use_cuda_filters = true;
 
         let mut ffmpeg_command =
-            Self::build_ffmpeg_command(input, output, quality_level, copy_audio, true, self.config.movie_mode);
+            match Self::build_ffmpeg_command(input, output, quality_level, copy_audio, true, self.config.movie_mode) {
+                Ok(command) => command,
+                Err(e) => {
+                    return ProcessResult::Failed {
+                        error: format!("Failed to build ffmpeg command: {e}"),
+                    };
+                }
+            };
 
         if self.config.dryrun {
             println!("[DRYRUN] {ffmpeg_command:#?}");
@@ -628,8 +637,21 @@ impl VideoConvert {
             // Retry without CUDA filters (fallback for format compatibility issues)
             print_error!("CUDA filter failed, retrying with CPU-based filtering...");
             use_cuda_filters = false;
-            ffmpeg_command =
-                Self::build_ffmpeg_command(input, output, quality_level, copy_audio, false, self.config.movie_mode);
+            ffmpeg_command = match Self::build_ffmpeg_command(
+                input,
+                output,
+                quality_level,
+                copy_audio,
+                false,
+                self.config.movie_mode,
+            ) {
+                Ok(command) => command,
+                Err(e) => {
+                    return ProcessResult::Failed {
+                        error: format!("Failed to build retry ffmpeg command: {e}"),
+                    };
+                }
+            };
             let status = match Self::run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
@@ -669,14 +691,21 @@ impl VideoConvert {
             );
             let _ = std::fs::remove_file(output);
 
-            ffmpeg_command = Self::build_ffmpeg_command(
+            ffmpeg_command = match Self::build_ffmpeg_command(
                 input,
                 output,
                 new_quality_level,
                 copy_audio,
                 use_cuda_filters,
                 self.config.movie_mode,
-            );
+            ) {
+                Ok(command) => command,
+                Err(e) => {
+                    let error = format!("Failed to build reconvert ffmpeg command: {e}");
+                    self.log_failure(input, "convert", file_index, &error);
+                    return ProcessResult::Failed { error };
+                }
+            };
             let status = match Self::run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1115,7 +1144,7 @@ impl VideoConvert {
         copy_audio: bool,
         use_cuda_filters: bool,
         movie_mode: bool,
-    ) -> Command {
+    ) -> Result<Command> {
         // GPU tuning for RTX 4090 to use more VRAM and improve performance
         let extra_hw_frames = "64";
         let lookahead = "48";
@@ -1132,7 +1161,9 @@ impl VideoConvert {
         cmd.arg("-i").arg(input);
 
         if movie_mode {
-            cmd.args(["-map", "0", "-map_metadata", "0", "-map_chapters", "0", "-c", "copy"]);
+            let audio_languages = Self::probe_stream_languages(input, "a")?;
+            let subtitle_languages = Self::probe_stream_languages(input, "s")?;
+            Self::add_movie_mode_stream_maps(&mut cmd, &audio_languages, &subtitle_languages);
         }
 
         if use_cuda_filters {
@@ -1160,7 +1191,63 @@ impl VideoConvert {
         }
 
         cmd.arg(output);
-        cmd
+        Ok(cmd)
+    }
+
+    /// Add movie-mode stream mapping that keeps all video streams and only selected language tracks.
+    fn add_movie_mode_stream_maps(
+        cmd: &mut Command,
+        audio_languages: &BTreeSet<String>,
+        subtitle_languages: &BTreeSet<String>,
+    ) {
+        cmd.args(["-map", "0:v"]);
+
+        for &language in MOVIE_AUDIO_LANGUAGES {
+            if audio_languages.contains(language) {
+                cmd.arg("-map").arg(format!("0:a:m:language:{language}"));
+            }
+        }
+
+        for &language in MOVIE_SUBTITLE_LANGUAGES {
+            if subtitle_languages.contains(language) {
+                cmd.arg("-map").arg(format!("0:s:m:language:{language}"));
+            }
+        }
+
+        cmd.args(["-map_metadata", "0", "-map_chapters", "0", "-c", "copy"]);
+    }
+
+    /// Probe unique language tags for one ffmpeg stream type.
+    fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSet<String>> {
+        let output = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                stream_type,
+                "-show_entries",
+                "stream_tags=language",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(input)
+            .output()
+            .context("Failed to execute ffprobe")?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            anyhow::bail!(
+                "ffprobe failed while probing {stream_type} stream languages: {}",
+                stderr.trim()
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
@@ -1478,6 +1565,52 @@ impl VideoConvert {
             cmd.process_group(0);
         }
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
+    }
+}
+
+#[cfg(test)]
+mod test_build_ffmpeg_command {
+    use super::*;
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn has_arg_pair(args: &[String], option: &str, value: &str) -> bool {
+        args.windows(2).any(|pair| pair[0] == option && pair[1] == value)
+    }
+
+    #[test]
+    fn movie_mode_maps_only_allowed_audio_and_subtitle_languages_that_exist() {
+        let mut command = Command::new("ffmpeg");
+        let audio_languages = BTreeSet::from([
+            "eng".to_string(),
+            "fin".to_string(),
+            "jpn".to_string(),
+            "ger".to_string(),
+        ]);
+        let subtitle_languages = BTreeSet::from(["eng".to_string(), "swe".to_string(), "spa".to_string()]);
+
+        VideoConvert::add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
+        let args = command_args(&command);
+
+        assert!(has_arg_pair(&args, "-map", "0:v"));
+        assert!(!has_arg_pair(&args, "-map", "0"));
+        assert!(has_arg_pair(&args, "-map", "0:a:m:language:eng"));
+        assert!(has_arg_pair(&args, "-map", "0:a:m:language:fin"));
+        assert!(has_arg_pair(&args, "-map", "0:a:m:language:jpn"));
+        assert!(!has_arg_pair(&args, "-map", "0:a:m:language:swe"));
+        assert!(!has_arg_pair(&args, "-map", "0:a:m:language:ger"));
+        assert!(has_arg_pair(&args, "-map", "0:s:m:language:eng"));
+        assert!(!has_arg_pair(&args, "-map", "0:s:m:language:fin"));
+        assert!(has_arg_pair(&args, "-map", "0:s:m:language:swe"));
+        assert!(!has_arg_pair(&args, "-map", "0:s:m:language:spa"));
+        assert!(has_arg_pair(&args, "-map_metadata", "0"));
+        assert!(has_arg_pair(&args, "-map_chapters", "0"));
+        assert!(has_arg_pair(&args, "-c", "copy"));
     }
 }
 

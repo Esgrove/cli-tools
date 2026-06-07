@@ -231,7 +231,7 @@ Options:
   -r, --recurse                      Recurse into subdirectories
   -k, --skip-convert                 Skip conversion
   -x, --delete-duplicates            Delete source file if converted x265 file already exists
-  -m, --movie                        Movie mode: preserve MKV container, streams, and metadata while converting video
+  -m, --movie                        Movie mode: preserve MKV container, metadata, and selected stream languages
   -M, --skip-remux                   Skip remuxing
   -s, --sort [<ORDER>]               Sort files [possible values: bitrate, size, size-asc, duration, duration-asc, resolution, resolution-asc, impact, name]
   -v, --verbose                      Print verbose output
