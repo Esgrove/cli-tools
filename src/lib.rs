@@ -792,6 +792,19 @@ pub fn get_unique_path(dir: &Path, filename: &str, stem: &str, extension: &str) 
     path
 }
 
+/// Check whether two paths refer to the same filesystem entry.
+#[must_use]
+pub fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 /// Convert `OsStr` to String with invalid Unicode handling.
 pub fn os_str_to_string(name: &OsStr) -> String {
     name.to_str().map_or_else(
@@ -1483,6 +1496,36 @@ mod path_utility_tests {
 
         let result = get_unique_path(dir.path(), "README", "README", "");
         assert_eq!(result, dir.path().join("README.1"));
+    }
+
+    #[test]
+    fn paths_refer_to_same_file_for_same_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "content").unwrap();
+
+        assert!(paths_refer_to_same_file(&path, &path));
+    }
+
+    #[test]
+    fn paths_refer_to_same_file_for_equivalent_paths() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "content").unwrap();
+        let equivalent = dir.path().join(".").join("test.txt");
+
+        assert!(paths_refer_to_same_file(&path, &equivalent));
+    }
+
+    #[test]
+    fn paths_refer_to_same_file_returns_false_for_different_paths() {
+        let dir = tempdir().unwrap();
+        let left = dir.path().join("left.txt");
+        let right = dir.path().join("right.txt");
+        std::fs::write(&left, "left").unwrap();
+        std::fs::write(&right, "right").unwrap();
+
+        assert!(!paths_refer_to_same_file(&left, &right));
     }
 
     #[test]

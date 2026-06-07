@@ -242,11 +242,11 @@ pub fn find_downloaded_directory(torrent_path: &Path) -> Option<PathBuf> {
 }
 
 /// Return the path of a torrent file in `downloaded_directory` sharing the same file name as
-/// `torrent_path`, if one exists.
+/// `torrent_path`, if one exists and is not `torrent_path` itself.
 pub fn existing_torrent_in_downloaded(downloaded_directory: &Path, torrent_path: &Path) -> Option<PathBuf> {
     let file_name = torrent_path.file_name()?;
     let target = downloaded_directory.join(file_name);
-    target.is_file().then_some(target)
+    (target.is_file() && !cli_tools::paths_refer_to_same_file(&target, torrent_path)).then_some(target)
 }
 
 /// Move a torrent file into `downloaded_directory`, preserving its file name.
@@ -260,6 +260,9 @@ pub fn move_torrent_to_downloaded(torrent_path: &Path, downloaded_directory: &Pa
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("Torrent path has no file name: {}", torrent_path.display()))?;
     let destination = downloaded_directory.join(file_name);
+    if cli_tools::paths_refer_to_same_file(torrent_path, &destination) {
+        return Ok(destination);
+    }
     std::fs::rename(torrent_path, &destination)
         .with_context(|| format!("Failed to move {} to {}", torrent_path.display(), destination.display()))?;
     Ok(destination)
@@ -360,6 +363,17 @@ mod test_existing_torrent_in_downloaded {
 
         assert!(existing_torrent_in_downloaded(&downloaded, &torrent).is_none());
     }
+
+    #[test]
+    fn returns_none_when_torrent_is_already_in_downloaded() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let torrent = downloaded.join("example.torrent");
+        std::fs::write(&torrent, b"").expect("write torrent");
+
+        assert!(existing_torrent_in_downloaded(&downloaded, &torrent).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +409,21 @@ mod test_move_torrent_to_downloaded {
         assert!(!torrent.exists());
         let contents = std::fs::read(&destination).expect("read destination");
         assert_eq!(contents, b"new");
+    }
+
+    #[test]
+    fn leaves_file_in_place_when_already_in_downloaded_directory() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let torrent = downloaded.join("example.torrent");
+        std::fs::write(&torrent, b"data").expect("write torrent");
+
+        let destination = move_torrent_to_downloaded(&torrent, &downloaded).expect("move succeeds");
+        assert_eq!(destination, torrent);
+        assert!(destination.exists());
+        let contents = std::fs::read(&destination).expect("read destination");
+        assert_eq!(contents, b"data");
     }
 }
 

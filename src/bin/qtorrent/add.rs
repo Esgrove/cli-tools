@@ -126,6 +126,7 @@ impl QTorrent {
                 {
                     println!("{}", "Skipped.".yellow());
                     stats.inc_skipped();
+                    Self::trash_duplicate_torrent_file(&torrent_path);
                     continue;
                 }
 
@@ -151,6 +152,7 @@ impl QTorrent {
                 if !self.confirm_downloaded_collision(existing, "Add anyway?")? {
                     println!("{}", "Skipped.".yellow());
                     stats.inc_skipped();
+                    Self::trash_duplicate_torrent_file(&torrent_path);
                     continue;
                 }
                 true
@@ -1244,6 +1246,27 @@ impl QTorrent {
             }
             Err(error) => {
                 cli_tools::print_yellow!("Failed to move torrent file to downloaded directory: {error}");
+            }
+        }
+    }
+
+    /// Move a skipped duplicate torrent file to the trash and log the outcome.
+    ///
+    /// Errors are reported as warnings; they do not abort the surrounding workflow.
+    fn trash_duplicate_torrent_file(torrent_path: &Path) {
+        match trash::delete(torrent_path) {
+            Ok(()) => {
+                println!(
+                    "  {} Trashed duplicate torrent file: {}",
+                    "\u{1f5d1}".yellow(),
+                    torrent_path.display().to_string().cyan()
+                );
+            }
+            Err(error) => {
+                cli_tools::print_yellow!(
+                    "Failed to trash duplicate torrent file {}: {error}",
+                    torrent_path.display()
+                );
             }
         }
     }
