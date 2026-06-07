@@ -68,6 +68,7 @@ impl FileLogger {
         }
         let _ = writeln!(self.writer, "  extensions: {:?}", config.extensions);
         let _ = writeln!(self.writer, "  recurse: {}", config.recurse);
+        let _ = writeln!(self.writer, "  movie_mode: {}", config.movie_mode);
         let _ = writeln!(self.writer, "  delete: {}", config.delete);
         let _ = writeln!(self.writer, "  overwrite: {}", config.overwrite);
         let _ = writeln!(self.writer, "  dryrun: {}", config.dryrun);

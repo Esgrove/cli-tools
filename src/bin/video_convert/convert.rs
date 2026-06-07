@@ -373,7 +373,7 @@ impl VideoConvert {
             .map(|f| {
                 let video_file = VideoFile::new_with_metadata(&f.full_path);
                 let info = f.to_video_info();
-                ProcessableFile::new(video_file, info)
+                self.processable_file(video_file, info)
             })
             .collect();
 
@@ -383,7 +383,7 @@ impl VideoConvert {
             .map(|f| {
                 let video_file = VideoFile::new_with_metadata(&f.full_path);
                 let info = f.to_video_info();
-                ProcessableFile::new(video_file, info)
+                self.processable_file(video_file, info)
             })
             .collect();
 
@@ -583,7 +583,11 @@ impl VideoConvert {
         );
         println!("{info}");
 
-        let quality_level = info.quality_level();
+        let quality_level = if self.config.movie_mode {
+            info.quality_level().saturating_sub(1)
+        } else {
+            info.quality_level()
+        };
 
         if self.config.verbose {
             println!("Output: {}", cli_tools::path_to_string_relative(output));
@@ -599,7 +603,8 @@ impl VideoConvert {
         // Track whether CUDA filters worked for potential reconversion
         let mut use_cuda_filters = true;
 
-        let mut ffmpeg_command = Self::build_ffmpeg_command(input, output, quality_level, copy_audio, true);
+        let mut ffmpeg_command =
+            Self::build_ffmpeg_command(input, output, quality_level, copy_audio, true, self.config.movie_mode);
 
         if self.config.dryrun {
             println!("[DRYRUN] {ffmpeg_command:#?}");
@@ -623,7 +628,8 @@ impl VideoConvert {
             // Retry without CUDA filters (fallback for format compatibility issues)
             print_error!("CUDA filter failed, retrying with CPU-based filtering...");
             use_cuda_filters = false;
-            ffmpeg_command = Self::build_ffmpeg_command(input, output, quality_level, copy_audio, false);
+            ffmpeg_command =
+                Self::build_ffmpeg_command(input, output, quality_level, copy_audio, false, self.config.movie_mode);
             let status = match Self::run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
@@ -663,7 +669,14 @@ impl VideoConvert {
             );
             let _ = std::fs::remove_file(output);
 
-            ffmpeg_command = Self::build_ffmpeg_command(input, output, new_quality_level, copy_audio, use_cuda_filters);
+            ffmpeg_command = Self::build_ffmpeg_command(
+                input,
+                output,
+                new_quality_level,
+                copy_audio,
+                use_cuda_filters,
+                self.config.movie_mode,
+            );
             let status = match Self::run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
@@ -756,6 +769,7 @@ impl VideoConvert {
             min_resolution: self.config.min_resolution,
             overwrite: self.config.overwrite,
         };
+        let movie_mode = self.config.movie_mode;
 
         // Phase 1 (sequential): bulk-load the scan cache into a HashMap for O(1) lookups,
         // then split files into cache hits (classified immediately) and cache misses.
@@ -768,7 +782,12 @@ impl VideoConvert {
             if let Some(cached_info) = scan_cache.get(path_key.as_ref())
                 && cached_info.size_bytes == file.size_bytes
             {
-                cache_results.push(Self::classify_video_file(file, &filter, cached_info));
+                cache_results.push(Self::classify_video_file_with_mode(
+                    file,
+                    &filter,
+                    cached_info,
+                    movie_mode,
+                ));
             } else {
                 cache_misses.push(file);
             }
@@ -797,7 +816,7 @@ impl VideoConvert {
             let results: Vec<VideoInfoCache> = cache_misses
                 .into_par_iter()
                 .map(|file| {
-                    let result = Self::probe_and_classify(file, &filter);
+                    let result = Self::probe_and_classify(file, &filter, movie_mode);
                     progress_bar.inc(1);
                     result
                 })
@@ -986,6 +1005,12 @@ impl VideoConvert {
         }
     }
 
+    /// Create a processable file using the converter's output path rules.
+    fn processable_file(&self, file: VideoFile, info: VideoInfo) -> ProcessableFile {
+        let output_path = file.get_output_path_for_mode(info.codec_suffix(), self.config.movie_mode);
+        ProcessableFile::new(file, info, output_path)
+    }
+
     /// Sort processable files according to the specified sort order.
     #[inline]
     fn sort_processable_files(files: &mut [ProcessableFile], sort_order: SortOrder) {
@@ -1089,6 +1114,7 @@ impl VideoConvert {
         quality_level: u8,
         copy_audio: bool,
         use_cuda_filters: bool,
+        movie_mode: bool,
     ) -> Command {
         // GPU tuning for RTX 4090 to use more VRAM and improve performance
         let extra_hw_frames = "64";
@@ -1105,6 +1131,10 @@ impl VideoConvert {
 
         cmd.arg("-i").arg(input);
 
+        if movie_mode {
+            cmd.args(["-map", "0", "-map_metadata", "0", "-map_chapters", "0", "-c", "copy"]);
+        }
+
         if use_cuda_filters {
             cmd.args(["-vf", "hwupload_cuda,scale_cuda=format=nv12"]);
         }
@@ -1115,13 +1145,18 @@ impl VideoConvert {
             .args(["-preset", preset])
             .args(["-b:v", "0"])
             .args(["-rc-lookahead", lookahead])
-            .args(["-spatial_aq", "1", "-temporal_aq", "1"])
-            .args(["-tag:v", "hvc1"]);
+            .args(["-spatial_aq", "1", "-temporal_aq", "1"]);
 
-        if copy_audio {
-            cmd.args(["-c:a", "copy"]);
-        } else {
-            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
+        if cli_tools::path_to_file_extension_string(output) == TARGET_EXTENSION {
+            cmd.args(["-tag:v", "hvc1"]);
+        }
+
+        if !movie_mode {
+            if copy_audio {
+                cmd.args(["-c:a", "copy"]);
+            } else {
+                cmd.args(["-c:a", "aac", "-b:a", "128k"]);
+            }
         }
 
         cmd.arg(output);
@@ -1131,7 +1166,9 @@ impl VideoConvert {
     /// Check if a file should be converted based on extension and include/exclude patterns.
     fn should_include_file(&self, file: &VideoFile) -> bool {
         // Skip files with "x265" or "av1" in the filename (already converted)
-        if (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name)) && file.extension == TARGET_EXTENSION {
+        if (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name))
+            && file.extension == file.target_extension(self.config.movie_mode)
+        {
             return false;
         }
 
@@ -1236,7 +1273,7 @@ impl VideoConvert {
     ///
     /// Returns a `VideoInfoCache` containing the analysis result, the file path, and the
     /// `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
-    fn probe_and_classify(file: VideoFile, filter: &AnalysisFilter) -> VideoInfoCache {
+    fn probe_and_classify(file: VideoFile, filter: &AnalysisFilter, movie_mode: bool) -> VideoInfoCache {
         let path = file.path.clone();
         if !path.exists() {
             return VideoInfoCache {
@@ -1250,7 +1287,7 @@ impl VideoConvert {
         }
         match Self::get_video_info(&file.path) {
             Ok(info) => {
-                let result = Self::classify_video_file(file, filter, &info);
+                let result = Self::classify_video_file_with_mode(file, filter, &info, movie_mode);
                 VideoInfoCache {
                     result,
                     path,
@@ -1274,15 +1311,27 @@ impl VideoConvert {
     ///
     /// Takes `info` by reference — only clones into `ProcessableFile` on the minority
     /// paths that actually need processing (conversion, remux, rename).
+    #[cfg(test)]
     fn classify_video_file(file: VideoFile, filter: &AnalysisFilter, info: &VideoInfo) -> AnalysisResult {
+        Self::classify_video_file_with_mode(file, filter, info, false)
+    }
+
+    /// Classify a video file with explicit movie-mode output rules.
+    fn classify_video_file_with_mode(
+        file: VideoFile,
+        filter: &AnalysisFilter,
+        info: &VideoInfo,
+        movie_mode: bool,
+    ) -> AnalysisResult {
         let is_target_codec = info.is_target_codec();
         let suffix = info.codec_suffix();
+        let target_extension = file.target_extension(movie_mode);
 
-        // Check if already converted (target codec in MP4 with matching suffix marker)
-        if is_target_codec && file.extension == TARGET_EXTENSION {
+        // Check if already converted (target codec in the target container with matching suffix marker)
+        if is_target_codec && file.extension == target_extension {
             if !suffix.regex().is_match(&file.name) {
                 // Needs rename to add codec suffix
-                let output_path = file.get_output_path(suffix);
+                let output_path = file.get_output_path_for_mode(suffix, movie_mode);
                 if output_path.exists() && !filter.overwrite {
                     return AnalysisResult::Skip {
                         file,
@@ -1292,7 +1341,7 @@ impl VideoConvert {
                         },
                     };
                 }
-                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone()));
+                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone(), output_path));
             }
             return AnalysisResult::Skip {
                 file,
@@ -1368,7 +1417,7 @@ impl VideoConvert {
             }
         }
 
-        let output_path = file.get_output_path(suffix);
+        let output_path = file.get_output_path_for_mode(suffix, movie_mode);
 
         // Check if output already exists
         if output_path.exists() && !filter.overwrite {
@@ -1382,9 +1431,9 @@ impl VideoConvert {
         }
 
         if is_target_codec {
-            AnalysisResult::NeedsRemux(ProcessableFile::new(file, info.clone()))
+            AnalysisResult::NeedsRemux(ProcessableFile::new(file, info.clone(), output_path))
         } else {
-            AnalysisResult::NeedsConversion(ProcessableFile::new(file, info.clone()))
+            AnalysisResult::NeedsConversion(ProcessableFile::new(file, info.clone(), output_path))
         }
     }
 
@@ -1638,6 +1687,20 @@ mod test_classify_needs_conversion {
     }
 
     #[test]
+    fn h264_mkv_movie_mode_converts_to_mkv() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = h264_info();
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true);
+
+        let AnalysisResult::NeedsConversion(processable) = result else {
+            panic!("Expected NeedsConversion");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.x265.mkv"));
+    }
+
+    #[test]
     fn h264_mp4_needs_conversion() {
         let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
         let info = h264_info();
@@ -1735,6 +1798,58 @@ mod test_classify_needs_remux {
             matches!(result, AnalysisResult::NeedsRemux(..)),
             "Expected NeedsRemux, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn hevc_mkv_movie_mode_with_suffix_is_already_converted() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::AlreadyConverted,
+                    ..
+                }
+            ),
+            "Expected AlreadyConverted skip, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn hevc_mkv_movie_mode_without_suffix_needs_rename() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true);
+
+        let AnalysisResult::NeedsRename(processable) = result else {
+            panic!("Expected NeedsRename");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.x265.mkv"));
     }
 
     #[test]

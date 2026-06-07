@@ -162,9 +162,8 @@ impl ProcessResult {
 }
 
 impl ProcessableFile {
-    /// Create a new `ProcessableFile`, computing the output path from file and info.
-    pub(crate) fn new(file: VideoFile, info: VideoInfo) -> Self {
-        let output_path = file.get_output_path(info.codec_suffix());
+    /// Create a new `ProcessableFile` with its resolved output path.
+    pub(crate) const fn new(file: VideoFile, info: VideoInfo, output_path: PathBuf) -> Self {
         Self {
             file,
             info,
@@ -197,15 +196,31 @@ impl VideoFile {
     }
 
     /// Compute the output path for the converted file with the given codec suffix.
+    #[cfg(test)]
     pub(crate) fn get_output_path(&self, suffix: Codec) -> PathBuf {
+        self.get_output_path_for_mode(suffix, false)
+    }
+
+    /// Compute the output path using movie-mode container rules when requested.
+    pub(crate) fn get_output_path_for_mode(&self, suffix: Codec, movie_mode: bool) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let target_extension = self.target_extension(movie_mode);
         // Only add suffix if the filename doesn't already contain it
         let new_name = if suffix.regex().is_match(&self.name) {
-            format!("{}.{TARGET_EXTENSION}", self.name)
+            format!("{}.{target_extension}", self.name)
         } else {
-            format!("{}.{suffix}.{TARGET_EXTENSION}", self.name)
+            format!("{}.{suffix}.{target_extension}", self.name)
         };
         parent.join(new_name)
+    }
+
+    /// Return the target container extension for this file.
+    pub(crate) fn target_extension(&self, movie_mode: bool) -> &'static str {
+        if movie_mode && self.extension == "mkv" {
+            "mkv"
+        } else {
+            TARGET_EXTENSION
+        }
     }
 }
 
@@ -421,7 +436,7 @@ impl std::fmt::Display for VideoFile {
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AlreadyConverted => write!(f, "Already target codec in MP4 container"),
+            Self::AlreadyConverted => write!(f, "Already target codec in target container"),
             Self::BitrateBelowThreshold { bitrate, threshold } => {
                 write!(f, "Bitrate {bitrate} kbps is below threshold {threshold} kbps")
             }
@@ -493,6 +508,27 @@ mod video_file_tests {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let output = file.get_output_path(Codec::Av1);
         assert_eq!(output, PathBuf::from("/videos/movie.av1.mp4"));
+    }
+
+    #[test]
+    fn movie_mode_output_path_keeps_mkv_container() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let output = file.get_output_path_for_mode(Codec::X265, true);
+        assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
+    }
+
+    #[test]
+    fn movie_mode_output_path_preserves_existing_x265() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
+        let output = file.get_output_path_for_mode(Codec::X265, true);
+        assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
+    }
+
+    #[test]
+    fn movie_mode_output_path_keeps_mp4_for_mp4_input() {
+        let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
+        let output = file.get_output_path_for_mode(Codec::X265, true);
+        assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
@@ -734,7 +770,7 @@ mod skip_reason_tests {
     #[test]
     fn display_already_converted() {
         let reason = SkipReason::AlreadyConverted;
-        assert_eq!(format!("{reason}"), "Already target codec in MP4 container");
+        assert_eq!(format!("{reason}"), "Already target codec in target container");
     }
 
     #[test]

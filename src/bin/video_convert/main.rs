@@ -77,8 +77,12 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'x', long)]
     delete_duplicates: bool,
 
-    /// Skip remuxing
+    /// Movie mode: preserve MKV container, streams, and metadata while converting video
     #[arg(short = 'm', long)]
+    movie: bool,
+
+    /// Skip remuxing
+    #[arg(short = 'M', long)]
     skip_remux: bool,
 
     /// Sort files
