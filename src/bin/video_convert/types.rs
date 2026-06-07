@@ -344,27 +344,41 @@ impl VideoInfo {
     /// Determine quality level based on resolution and bitrate.
     /// Quality level 1 to 51, lower is better quality and bigger file size.
     pub(crate) fn quality_level(&self) -> u8 {
-        let is_4k = self.width.max(self.height) >= 2160;
+        let shorter_edge = self.width.min(self.height);
         let bitrate_mbps = self.bitrate_kbps as f64 / 1000.0;
 
-        if is_4k {
-            if bitrate_mbps > 26.0 {
+        if shorter_edge >= 2160 {
+            if bitrate_mbps > 34.0 {
+                29
+            } else if bitrate_mbps > 26.0 {
                 30
             } else if bitrate_mbps > 18.0 {
                 31
-            } else if bitrate_mbps > 10.0 {
+            } else if bitrate_mbps > 12.0 {
                 32
             } else {
                 33
             }
-        } else if bitrate_mbps > 16.0 {
-            28
-        } else if bitrate_mbps > 12.0 {
+        } else if shorter_edge >= 1080 {
+            if bitrate_mbps > 20.0 {
+                27
+            } else if bitrate_mbps > 16.0 {
+                28
+            } else if bitrate_mbps > 12.0 {
+                29
+            } else if bitrate_mbps > 6.0 {
+                30
+            } else {
+                31
+            }
+        } else if bitrate_mbps > 8.0 {
             29
         } else if bitrate_mbps > 6.0 {
             30
-        } else {
+        } else if bitrate_mbps > 3.0 {
             31
+        } else {
+            32
         }
     }
 
@@ -667,79 +681,83 @@ mod video_info_tests {
         assert!((info.frames_per_second - 25.0).abs() < 0.01);
     }
 
-    #[test]
-    fn quality_level_4k_high_bitrate() {
-        let info = VideoInfo {
+    fn video_info_for_quality_level(bitrate_kbps: u64, width: u32, height: u32) -> VideoInfo {
+        VideoInfo {
             codec: "h264".to_string(),
-            bitrate_kbps: 28000,
+            bitrate_kbps,
             size_bytes: 1_000_000_000,
             duration: 3600.0,
-            width: 3840,
-            height: 2160,
+            width,
+            height,
             frames_per_second: 30.0,
             warning: None,
-        };
+        }
+    }
+
+    #[test]
+    fn quality_level_4k_extreme_bitrate() {
+        let info = video_info_for_quality_level(36_000, 3840, 2160);
+        assert_eq!(info.quality_level(), 29);
+    }
+
+    #[test]
+    fn quality_level_4k_high_bitrate() {
+        let info = video_info_for_quality_level(28_000, 3840, 2160);
         assert_eq!(info.quality_level(), 30);
     }
 
     #[test]
     fn quality_level_4k_medium_bitrate() {
-        let info = VideoInfo {
-            codec: "h264".to_string(),
-            bitrate_kbps: 20000,
-            size_bytes: 1_000_000_000,
-            duration: 3600.0,
-            width: 3840,
-            height: 2160,
-            frames_per_second: 30.0,
-            warning: None,
-        };
+        let info = video_info_for_quality_level(20_000, 3840, 2160);
         assert_eq!(info.quality_level(), 31);
     }
 
     #[test]
     fn quality_level_4k_low_bitrate() {
-        let info = VideoInfo {
-            codec: "h264".to_string(),
-            bitrate_kbps: 8000,
-            size_bytes: 1_000_000_000,
-            duration: 3600.0,
-            width: 3840,
-            height: 2160,
-            frames_per_second: 30.0,
-            warning: None,
-        };
+        let info = video_info_for_quality_level(8_000, 3840, 2160);
         assert_eq!(info.quality_level(), 33);
     }
 
     #[test]
+    fn quality_level_1440p_uses_1080p_bucket() {
+        let info = video_info_for_quality_level(18_000, 2560, 1440);
+        assert_eq!(info.quality_level(), 28);
+    }
+
+    #[test]
+    fn quality_level_1080p_extreme_bitrate() {
+        let info = video_info_for_quality_level(22_000, 1920, 1080);
+        assert_eq!(info.quality_level(), 27);
+    }
+
+    #[test]
     fn quality_level_1080p_high_bitrate() {
-        let info = VideoInfo {
-            codec: "h264".to_string(),
-            bitrate_kbps: 18000,
-            size_bytes: 500_000_000,
-            duration: 3600.0,
-            width: 1920,
-            height: 1080,
-            frames_per_second: 30.0,
-            warning: None,
-        };
+        let info = video_info_for_quality_level(18_000, 1920, 1080);
         assert_eq!(info.quality_level(), 28);
     }
 
     #[test]
     fn quality_level_1080p_low_bitrate() {
-        let info = VideoInfo {
-            codec: "h264".to_string(),
-            bitrate_kbps: 5000,
-            size_bytes: 500_000_000,
-            duration: 3600.0,
-            width: 1920,
-            height: 1080,
-            frames_per_second: 30.0,
-            warning: None,
-        };
+        let info = video_info_for_quality_level(5_000, 1920, 1080);
         assert_eq!(info.quality_level(), 31);
+    }
+
+    #[test]
+    fn quality_level_720p_high_bitrate() {
+        let info = video_info_for_quality_level(9_000, 1280, 720);
+        assert_eq!(info.quality_level(), 29);
+    }
+
+    #[test]
+    fn quality_level_720p_medium_bitrate() {
+        let info = video_info_for_quality_level(7_000, 1280, 720);
+        assert_eq!(info.quality_level(), 30);
+    }
+
+    #[test]
+    fn quality_level_720p_low_bitrate() {
+        let info = video_info_for_quality_level(2_000, 1280, 720);
+        assert_eq!(info.quality_level(), 32);
     }
 
     #[test]
