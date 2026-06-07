@@ -794,9 +794,6 @@ impl DirMove {
     }
 
     fn move_files_to_dir(&self) -> anyhow::Result<()> {
-        // TODO: implement recurse option for dirs
-        let _ = self.config.recurse;
-
         let directories = self.collect_directories_in_root()?;
         if directories.is_empty() {
             return Ok(());
@@ -922,38 +919,35 @@ impl DirMove {
 
     fn collect_directories_in_root(&self) -> anyhow::Result<Vec<DirectoryInfo>> {
         let mut dirs = Vec::new();
-        for entry in std::fs::read_dir(&self.output_root)? {
+        let max_depth = if self.config.recurse { usize::MAX } else { 1 };
+
+        for entry in WalkDir::new(&self.output_root)
+            .min_depth(1)
+            .max_depth(max_depth)
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || (!cli_tools::should_skip_entry(entry)
+                        && !utils::is_unwanted_directory(&cli_tools::os_str_to_string(entry.file_name())))
+            })
+        {
             let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let path = entry.path();
-                // Skip system directories like $RECYCLE.BIN and unwanted directories
-                if cli_tools::is_system_directory_path(&path) {
-                    continue;
-                }
-                let file_name = entry.file_name();
-                let dir_name = file_name.to_string_lossy();
-
-                // Skip hidden directories (starting with dot)
-                if dir_name.starts_with('.') {
-                    continue;
-                }
-
-                if utils::is_unwanted_directory(&dir_name) {
-                    continue;
-                }
-                let dir_name = dir_name.to_lowercase();
-                // Note: exclude patterns are already lowercase from config creation
-                if !self.config.exclude.is_empty()
-                    && self.config.exclude.iter().any(|pattern| dir_name.contains(pattern))
-                {
-                    if self.config.verbose {
-                        println!("Excluding directory: {}", path_to_string_relative(&entry.path()));
-                    }
-                    continue;
-                }
-                dirs.push(DirectoryInfo::new(entry.path()));
+            if !entry.file_type().is_dir() {
+                continue;
             }
+
+            let dir_name = cli_tools::os_str_to_string(entry.file_name()).to_lowercase();
+            // Note: exclude patterns are already lowercase from config creation
+            if !self.config.exclude.is_empty() && self.config.exclude.iter().any(|pattern| dir_name.contains(pattern)) {
+                if self.config.verbose {
+                    println!("Excluding directory: {}", path_to_string_relative(entry.path()));
+                }
+                continue;
+            }
+
+            dirs.push(DirectoryInfo::new(entry.path().to_path_buf()));
         }
+
         Ok(dirs)
     }
 
@@ -962,7 +956,7 @@ impl DirMove {
         for entry in std::fs::read_dir(&self.root)? {
             let entry = entry?;
             if entry.file_type()?.is_file() {
-                let file_name = entry.file_name().to_string_lossy().to_lowercase();
+                let file_name = cli_tools::os_str_to_string(&entry.file_name()).to_lowercase();
 
                 // Skip files that don't match include patterns (if any specified)
                 // Note: include patterns are already lowercase from config creation
@@ -990,9 +984,15 @@ impl DirMove {
     fn match_files_to_directories(&self, files: &[PathBuf], dirs: &[DirectoryInfo]) -> HashMap<usize, Vec<PathBuf>> {
         let mut matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
 
-        // Sort directory indices by name length (longest first) to match more specific names first
+        // Sort directory indices by depth first, then name length, so recursive scans prefer
+        // nested destinations and same-depth matches prefer more specific directory names.
         let mut dir_indices: Vec<usize> = (0..dirs.len()).collect();
-        dir_indices.sort_by_key(|&i| std::cmp::Reverse(dirs[i].name.len()));
+        dir_indices.sort_by(|&left, &right| {
+            self.directory_match_depth(&dirs[right])
+                .cmp(&self.directory_match_depth(&dirs[left]))
+                .then_with(|| dirs[right].name.chars().count().cmp(&dirs[left].name.chars().count()))
+                .then_with(|| dirs[left].name.cmp(&dirs[right].name))
+        });
 
         for file_path in files {
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
@@ -1055,6 +1055,14 @@ impl DirMove {
         }
 
         matches
+    }
+
+    fn directory_match_depth(&self, dir: &DirectoryInfo) -> usize {
+        dir.path
+            .strip_prefix(&self.output_root)
+            .unwrap_or(&dir.path)
+            .components()
+            .count()
     }
 
     fn strip_ignored_dot_prefixes(&self, filename: &str) -> String {
@@ -2259,6 +2267,107 @@ mod test_output_root {
 
         assert_not_exists(&input_root.join("Example.Show.S01E01.mp4"));
         assert_exists(&output_root.join("Example Show").join("Example.Show.S01E01.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_matching_ignores_nested_output_dirs_without_recurse() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        let nested_target = output_root.join("something").join("example");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir_all(&nested_target)?;
+        std::fs::write(input_root.join("Example.S01E01.mp4"), "video")?;
+
+        let config = Config {
+            auto: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove_with_output(input_root.clone(), output_root, config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_exists(&input_root.join("Example.S01E01.mp4"));
+        assert_not_exists(&nested_target.join("Example.S01E01.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_matching_recurses_output_root_when_enabled() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        let nested_target = output_root.join("something").join("example");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir_all(&nested_target)?;
+        std::fs::write(input_root.join("Example.S01E01.mp4"), "video")?;
+
+        let config = Config {
+            auto: true,
+            recurse: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove_with_output(input_root.clone(), output_root, config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_not_exists(&input_root.join("Example.S01E01.mp4"));
+        assert_exists(&nested_target.join("Example.S01E01.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_matching_prefers_deeper_recursive_match() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        let root_target = output_root.join("example");
+        let nested_target = output_root.join("something").join("example");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir_all(&root_target)?;
+        std::fs::create_dir_all(&nested_target)?;
+        std::fs::write(input_root.join("Example.S01E01.mp4"), "video")?;
+
+        let config = Config {
+            auto: true,
+            recurse: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove_with_output(input_root.clone(), output_root, config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_not_exists(&input_root.join("Example.S01E01.mp4"));
+        assert_not_exists(&root_target.join("Example.S01E01.mp4"));
+        assert_exists(&nested_target.join("Example.S01E01.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_matching_prefers_longer_match_at_same_depth() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        let shorter_target = output_root.join("something").join("example");
+        let longer_target = output_root.join("something").join("example show");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir_all(&shorter_target)?;
+        std::fs::create_dir_all(&longer_target)?;
+        std::fs::write(input_root.join("Example.Show.S01E01.mp4"), "video")?;
+
+        let config = Config {
+            auto: true,
+            recurse: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove_with_output(input_root.clone(), output_root, config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_not_exists(&input_root.join("Example.Show.S01E01.mp4"));
+        assert_not_exists(&shorter_target.join("Example.Show.S01E01.mp4"));
+        assert_exists(&longer_target.join("Example.Show.S01E01.mp4"));
         Ok(())
     }
 
