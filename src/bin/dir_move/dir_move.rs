@@ -1,3 +1,8 @@
+//! Main orchestration for the `dirmove` binary.
+//!
+//! Handles scanning input files, selecting target directories, prompting users,
+//! and delegating reliable file moves to the shared library mover.
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -16,23 +21,37 @@ use cli_tools::{
     print_magenta, print_yellow,
 };
 
-use crate::config::add_ignored_group_name_to_config;
-use crate::config::{Config, CustomMapping};
-use crate::database::Database;
-use crate::types::{
+use cli_tools::dir_move::mover;
+use cli_tools::dir_move::types::{
     DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, PromptResult, UnpackInfo,
     ValidCandidate,
 };
-use crate::{DirMoveArgs, utils};
+use cli_tools::dir_move::utils;
+
+use crate::DirMoveArgs;
+use crate::config::add_ignored_group_name_to_config;
+use crate::config::{Config, CustomMapping};
+use crate::database::Database;
+
+#[cfg(test)]
+const HIDE_MOVE_PROGRESS: bool = true;
+#[cfg(not(test))]
+const HIDE_MOVE_PROGRESS: bool = false;
 
 pub struct DirMove {
     root: PathBuf,
+    output_root: PathBuf,
     config: Config,
     database: Option<Database>,
 }
 
 impl DirMove {
+    #[cfg(test)]
     pub fn new(root: PathBuf, config: Config) -> Self {
+        Self::new_with_output(root.clone(), root, config)
+    }
+
+    pub fn new_with_output(root: PathBuf, output_root: PathBuf, config: Config) -> Self {
         let database = match Database::open_default() {
             Ok(db) => Some(db),
             Err(e) => {
@@ -40,30 +59,27 @@ impl DirMove {
                 None
             }
         };
-        Self { root, config, database }
+        Self {
+            root,
+            output_root,
+            config,
+            database,
+        }
     }
 
     pub fn try_from_args(args: DirMoveArgs) -> anyhow::Result<Self> {
-        let root = cli_tools::resolve_input_path(args.path.as_deref())?;
+        let (root, output_root) = Self::resolve_roots(args.path.as_deref(), args.output.as_deref())?;
         let config = Config::from_args(args)?;
         if config.debug {
             eprintln!("Config: {config:#?}");
-            eprintln!("Root: {}", root.display());
+            eprintln!("Input root: {}", root.display());
+            eprintln!("Output root: {}", output_root.display());
         }
-        let dirmove = Self::new(root, config);
+        let dirmove = Self::new_with_output(root, output_root, config);
         if dirmove.config.debug {
             dirmove.print_database_debug_info();
         }
         Ok(dirmove)
-    }
-
-    /// Print debug information about the database contents.
-    fn print_database_debug_info(&self) {
-        if let Some(ref db) = self.database {
-            db.print_debug_info();
-        } else {
-            eprintln!("Database not available");
-        }
     }
 
     pub fn run(&self) -> anyhow::Result<()> {
@@ -99,6 +115,24 @@ impl DirMove {
         }
 
         Ok(())
+    }
+
+    fn resolve_roots(input: Option<&Path>, output: Option<&Path>) -> anyhow::Result<(PathBuf, PathBuf)> {
+        let root = cli_tools::resolve_input_path(input)?;
+        let output_root = match output {
+            Some(output) => cli_tools::resolve_input_path(Some(output))?,
+            None => root.clone(),
+        };
+        Ok((root, output_root))
+    }
+
+    /// Print debug information about the database contents.
+    fn print_database_debug_info(&self) {
+        if let Some(ref db) = self.database {
+            db.print_debug_info();
+        } else {
+            eprintln!("Database not available");
+        }
     }
 
     /// Update the database with directory names found in the root directory.
@@ -888,7 +922,7 @@ impl DirMove {
 
     fn collect_directories_in_root(&self) -> anyhow::Result<Vec<DirectoryInfo>> {
         let mut dirs = Vec::new();
-        for entry in std::fs::read_dir(&self.root)? {
+        for entry in std::fs::read_dir(&self.output_root)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 let path = entry.path();
@@ -1056,7 +1090,7 @@ impl DirMove {
     }
 
     fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<()> {
-        let dir_display = get_relative_path_or_filename(&dir.path, &self.root);
+        let dir_display = get_relative_path_or_filename(&dir.path, &self.output_root);
         println!("{}: {} file(s)", dir_display.cyan().bold(), files.len());
 
         for file_path in files {
@@ -1092,37 +1126,13 @@ impl DirMove {
 
     /// Move files to the target directory, creating it if needed.
     fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
-        if !dir_path.exists() {
-            std::fs::create_dir(dir_path)?;
-            println!("  Created directory: {}", path_to_filename_string(dir_path));
-        }
-
-        let mut moved_count = 0;
-        for file_path in files {
-            let file_name = path_to_filename_string(file_path);
-            if file_name.is_empty() {
-                print_error!("Could not get file name for path: {}", file_path.display());
-                continue;
-            }
-            let new_path = dir_path.join(&file_name);
-
-            if new_path.exists() && !self.config.overwrite {
-                print_yellow!("Skipping existing file: {}", new_path.display());
-                continue;
-            }
-
-            match std::fs::rename(file_path, &new_path) {
-                Ok(()) => {
-                    if self.config.verbose {
-                        println!("  Moved: {file_name}");
-                    }
-                    moved_count += 1;
-                }
-                Err(e) => print_error!("Failed to move {}: {e}", file_path.display()),
-            }
-        }
-        println!("  Moved {moved_count} files");
-
+        mover::move_files_to_target_dir(
+            dir_path,
+            files,
+            self.config.overwrite,
+            self.config.verbose,
+            HIDE_MOVE_PROGRESS,
+        )?;
         Ok(())
     }
 
@@ -1420,9 +1430,9 @@ impl DirMove {
 
         let mut group_number: usize = 0;
 
-        // Get normalized parent directory name to avoid offering it as a new directory
+        // Get normalized output directory name to avoid offering it as a nested directory.
         let parent_dir_normalized = self
-            .root
+            .output_root
             .file_name()
             .and_then(|n| n.to_str())
             .map(utils::normalize_name);
@@ -1517,7 +1527,7 @@ impl DirMove {
         // Check database for a matching suggestion
         let database_suggestion = self.get_database_suggestion_for_prefix(dir_name);
 
-        let dir_path = self.root.join(dir_name);
+        let dir_path = self.output_root.join(dir_name);
         let dir_exists = dir_path.exists();
 
         let progress = format!("[{group_number}/{total_groups}]").dimmed();
@@ -1617,7 +1627,7 @@ impl DirMove {
         print_bold!("Found {} custom mapping group(s):\n", mapping_groups.len());
 
         let parent_dir_normalized = self
-            .root
+            .output_root
             .file_name()
             .and_then(|name| name.to_str())
             .map(utils::normalize_name);
@@ -1629,7 +1639,7 @@ impl DirMove {
                 continue;
             }
 
-            let dir_path = self.root.join(&dir_name);
+            let dir_path = self.output_root.join(&dir_name);
             let dir_exists = dir_path.exists();
 
             println!("{}: {} files (custom mapping)", dir_name.cyan().bold(), files.len());
@@ -1686,7 +1696,7 @@ impl DirMove {
         // If database has an exact match (same letters, different formatting), use its formatting silently.
         // This maps e.g. "JaneDoe" -> "Jane Doe" without showing confusing messages.
         let effective_suggestion = database_suggestion.unwrap_or(suggested_name);
-        let effective_path = self.root.join(effective_suggestion);
+        let effective_path = self.output_root.join(effective_suggestion);
 
         print!(
             "{}",
@@ -1720,7 +1730,7 @@ impl DirMove {
         if custom_name.is_empty() {
             return Ok(PromptResult::Confirmed(suggested_path.to_path_buf()));
         }
-        let custom_path = self.root.join(custom_name);
+        let custom_path = self.output_root.join(custom_name);
 
         // Show what will happen and ask for confirmation
         if custom_path.exists() {
@@ -1857,12 +1867,17 @@ impl DirMove {
 #[cfg(test)]
 pub mod test_helpers {
     use super::*;
-    use crate::types::PrefixCandidate;
+    use cli_tools::dir_move::types::PrefixCandidate;
 
     /// Create a `DirMove` for testing with no database.
     pub fn make_dirmove(root: PathBuf, config: Config) -> DirMove {
+        make_dirmove_with_output(root.clone(), root, config)
+    }
+
+    pub fn make_dirmove_with_output(root: PathBuf, output_root: PathBuf, config: Config) -> DirMove {
         DirMove {
             root,
+            output_root,
             config,
             database: None,
         }
@@ -2187,6 +2202,126 @@ mod test_custom_mappings {
 }
 
 #[cfg(test)]
+mod test_output_root {
+    use super::test_helpers::*;
+    use super::*;
+    use crate::config::CustomMapping;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolve_roots_defaults_both_to_current_dir() -> anyhow::Result<()> {
+        let (input_root, output_root) = DirMove::resolve_roots(None, None)?;
+        let current_dir = cli_tools::resolve_input_path(None)?;
+
+        assert_eq!(input_root, current_dir);
+        assert_eq!(output_root, current_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_roots_defaults_output_to_input() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let (input_root, output_root) = DirMove::resolve_roots(Some(tmp.path()), None)?;
+
+        assert_eq!(input_root, output_root);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_roots_defaults_input_to_current_dir_when_only_output_given() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let (input_root, output_root) = DirMove::resolve_roots(None, Some(tmp.path()))?;
+        let current_dir = cli_tools::resolve_input_path(None)?;
+        let expected_output = cli_tools::resolve_input_path(Some(tmp.path()))?;
+
+        assert_eq!(input_root, current_dir);
+        assert_eq!(output_root, expected_output);
+        Ok(())
+    }
+
+    #[test]
+    fn directory_matching_reads_dirs_from_output_root() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir(&output_root)?;
+        std::fs::create_dir(output_root.join("Example Show"))?;
+        std::fs::write(input_root.join("Example.Show.S01E01.mp4"), "video")?;
+
+        let config = Config {
+            auto: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove_with_output(input_root.clone(), output_root.clone(), config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_not_exists(&input_root.join("Example.Show.S01E01.mp4"));
+        assert_exists(&output_root.join("Example Show").join("Example.Show.S01E01.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn create_mode_creates_directories_in_output_root() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir(&output_root)?;
+        std::fs::write(input_root.join("Show.Name.S01E01.mp4"), "one")?;
+        std::fs::write(input_root.join("Show.Name.S01E02.mp4"), "two")?;
+        std::fs::write(input_root.join("Show.Name.S01E03.mp4"), "three")?;
+
+        let config = Config {
+            auto: true,
+            create: true,
+            min_group_size: 3,
+            min_prefix_chars: 4,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove_with_output(input_root.clone(), output_root.clone(), config);
+
+        dirmove.create_dirs_and_move_files()?;
+
+        assert_not_exists(&input_root.join("Show.Name.S01E01.mp4"));
+        assert_exists(&output_root.join("Show Name").join("Show.Name.S01E01.mp4"));
+        assert_exists(&output_root.join("Show Name").join("Show.Name.S01E02.mp4"));
+        assert_exists(&output_root.join("Show Name").join("Show.Name.S01E03.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn custom_mapping_create_mode_uses_output_root() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        std::fs::create_dir(&input_root)?;
+        std::fs::create_dir(&output_root)?;
+        std::fs::write(input_root.join("Example.one.mp4"), "one")?;
+        std::fs::write(input_root.join("Example.two.mp4"), "two")?;
+        std::fs::write(input_root.join("Example.three.mp4"), "three")?;
+
+        let config = Config {
+            auto: true,
+            create: true,
+            custom_mappings: vec![CustomMapping::new("example", "Example")],
+            min_group_size: 10,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove_with_output(input_root.clone(), output_root.clone(), config);
+
+        dirmove.create_dirs_and_move_files()?;
+
+        assert_not_exists(&input_root.join("Example.one.mp4"));
+        assert_exists(&output_root.join("Example").join("Example.one.mp4"));
+        assert_exists(&output_root.join("Example").join("Example.two.mp4"));
+        assert_exists(&output_root.join("Example").join("Example.three.mp4"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod test_database_suggestion {
     use super::*;
     use crate::database::Database;
@@ -2199,6 +2334,7 @@ mod test_database_suggestion {
         }
         DirMove {
             root: PathBuf::from("."),
+            output_root: PathBuf::from("."),
             config: Config::default(),
             database: Some(db),
         }
@@ -2289,6 +2425,7 @@ mod test_database_suggestion {
     fn no_database_returns_none() {
         let dirmove = DirMove {
             root: PathBuf::from("."),
+            output_root: PathBuf::from("."),
             config: Config::default(),
             database: None,
         };

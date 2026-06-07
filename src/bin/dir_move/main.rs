@@ -1,8 +1,8 @@
+//! Entry point and CLI argument definitions for `dirmove`.
+
 mod config;
 mod database;
 mod dir_move;
-mod types;
-mod utils;
 
 use std::path::PathBuf;
 
@@ -20,6 +20,10 @@ struct DirMoveArgs {
     /// Optional input directory or file
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
+
+    /// Optional output directory, defaults to the input directory
+    #[arg(short = 'O', long, value_hint = clap::ValueHint::DirPath)]
+    output: Option<PathBuf>,
 
     /// Auto-confirm all prompts without asking
     #[arg(short = 'a', long)]

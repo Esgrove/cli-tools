@@ -1,3 +1,5 @@
+//! Configuration parsing and test helpers for the `dirmove` binary.
+
 use std::fs;
 
 use anyhow::Result;
@@ -5,27 +7,9 @@ use itertools::Itertools;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
+use cli_tools::dir_move::utils;
+
 use crate::DirMoveArgs;
-use crate::utils;
-
-/// A custom mapping pair that maps files containing a pattern to a specific directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CustomMapping {
-    /// Pattern to match in filename (case-insensitive, normalized).
-    pub(crate) pattern: String,
-    /// Target directory name for matching files.
-    pub(crate) directory: String,
-}
-
-impl CustomMapping {
-    /// Create a new custom mapping with normalized pattern (lowercase, no dots/spaces).
-    pub(crate) fn new(pattern: &str, directory: &str) -> Self {
-        Self {
-            pattern: pattern.to_lowercase().replace(['.', ' '], ""),
-            directory: directory.to_string(),
-        }
-    }
-}
 
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug, Default)]
@@ -94,6 +78,25 @@ struct DirMoveConfig {
 struct UserConfig {
     #[serde(default)]
     dirmove: DirMoveConfig,
+}
+
+/// A custom mapping pair that maps files containing a pattern to a specific directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomMapping {
+    /// Pattern to match in filename (case-insensitive, normalized).
+    pub(crate) pattern: String,
+    /// Target directory name for matching files.
+    pub(crate) directory: String,
+}
+
+impl CustomMapping {
+    /// Create a new custom mapping with normalized pattern (lowercase, no dots/spaces).
+    pub(crate) fn new(pattern: &str, directory: &str) -> Self {
+        Self {
+            pattern: pattern.to_lowercase().replace(['.', ' '], ""),
+            directory: directory.to_string(),
+        }
+    }
 }
 
 impl DirMoveConfig {
@@ -989,6 +992,20 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "/some/path"]).expect("should parse");
         assert!(args.path.is_some());
         assert_eq!(args.path.unwrap().to_string_lossy(), "/some/path");
+    }
+
+    #[test]
+    fn parses_output_argument() {
+        let args = DirMoveArgs::try_parse_from(["test", "--output", "/output/path"]).expect("should parse");
+        assert!(args.output.is_some());
+        assert_eq!(args.output.unwrap().to_string_lossy(), "/output/path");
+    }
+
+    #[test]
+    fn parses_output_short_argument() {
+        let args = DirMoveArgs::try_parse_from(["test", "-O", "/output/path"]).expect("should parse");
+        assert!(args.output.is_some());
+        assert_eq!(args.output.unwrap().to_string_lossy(), "/output/path");
     }
 
     #[test]

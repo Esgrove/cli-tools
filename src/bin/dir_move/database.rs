@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
-use crate::utils;
+use cli_tools::dir_move::utils;
 
 /// Default database filename.
 const DATABASE_FILENAME: &str = "dirmove.db";

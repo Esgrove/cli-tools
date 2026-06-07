@@ -82,6 +82,7 @@ Options:
   -c, --create                    Create directories for files with matching prefixes
   -D, --debug                     Print debug information
   -f, --force                     Overwrite existing files
+  -O, --output <OUTPUT>           Output directory containing target folders
   -n, --include <INCLUDE>         Include files that match the given pattern
   -e, --exclude <EXCLUDE>         Exclude files that match the given pattern
   -i, --ignore <IGNORE>           Ignore prefix when matching filenames
