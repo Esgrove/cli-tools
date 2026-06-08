@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
-use crate::convert::{RE_AV1, RE_X265, TARGET_EXTENSION};
+use crate::convert::{RE_AV1, RE_SOURCE_CODEC, RE_X265, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
 /// Information about a video file from ffprobe
@@ -205,13 +205,14 @@ impl VideoFile {
     pub(crate) fn get_output_path_for_mode(&self, suffix: Codec, movie_mode: bool) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let target_extension = self.target_extension(movie_mode);
-        // Only add suffix if the filename doesn't already contain it
-        let new_name = if suffix.regex().is_match(&self.name) {
-            format!("{}.{target_extension}", self.name)
+        let new_stem = if suffix.regex().is_match(&self.name) {
+            self.name.clone()
+        } else if RE_SOURCE_CODEC.is_match(&self.name) {
+            RE_SOURCE_CODEC.replace_all(&self.name, suffix.as_str()).into_owned()
         } else {
-            format!("{}.{suffix}.{target_extension}", self.name)
+            format!("{}.{suffix}", self.name)
         };
-        parent.join(new_name)
+        parent.join(format!("{new_stem}.{target_extension}"))
     }
 
     /// Return the target container extension for this file.
@@ -536,6 +537,20 @@ mod video_file_tests {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
         let output = file.get_output_path_for_mode(Codec::X265, true);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
+    }
+
+    #[test]
+    fn movie_mode_output_path_replaces_existing_x264() {
+        let file = VideoFile::new(Path::new("/videos/Movie.Title.2024.1080p.x264.mkv"), 0);
+        let output = file.get_output_path_for_mode(Codec::X265, true);
+        assert_eq!(output, PathBuf::from("/videos/Movie.Title.2024.1080p.x265.mkv"));
+    }
+
+    #[test]
+    fn output_path_replaces_existing_x264() {
+        let file = VideoFile::new(Path::new("/videos/movie.x264.mkv"), 0);
+        let output = file.get_output_path(Codec::X265);
+        assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]

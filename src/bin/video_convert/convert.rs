@@ -33,6 +33,10 @@ pub static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b
 /// Regex to match AV1 codec identifier in filenames (case-insensitive, word boundary).
 pub static RE_AV1: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bav1\b").expect("Invalid av1 regex"));
 
+/// Regex to match source codec identifiers that should be replaced in output filenames.
+pub static RE_SOURCE_CODEC: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:x264|h\.?264)\b").expect("Invalid source codec regex"));
+
 const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
 const MOVIE_AUDIO_LANGUAGES: &[&str] = &["eng", "fin", "jpn", "swe", "nog", "nor"];
 const MOVIE_SUBTITLE_LANGUAGES: &[&str] = &["eng", "fin", "swe"];
