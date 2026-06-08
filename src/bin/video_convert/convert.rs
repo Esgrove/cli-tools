@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,8 +20,8 @@ use crate::database::{Database, PendingAction};
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 use crate::types::{
-    AnalysisFilter, AnalysisOutput, AnalysisResult, Codec, ProcessResult, ProcessableFile, SkipReason, VideoFile,
-    VideoInfo, VideoInfoCache,
+    AnalysisFilter, AnalysisOutput, AnalysisResult, Codec, ProcessResult, ProcessableFile, SkipReason, SubtitleFile,
+    VideoFile, VideoInfo, VideoInfoCache, movie_subtitle_match_score,
 };
 use crate::{SortOrder, VideoConvertArgs};
 
@@ -119,12 +119,18 @@ impl VideoConvert {
             println!("No video files found");
             return Ok(());
         }
+        let subtitle_matches = if self.config.movie_mode {
+            let subtitle_files = self.gather_subtitle_files_to_process();
+            Self::match_subtitle_files(&candidate_files, subtitle_files, self.config.verbose)
+        } else {
+            HashMap::new()
+        };
         if self.config.verbose {
             println!("Found {} candidate file(s), analyzing...", candidate_files.len());
         }
 
         // Analyze files to determine required actions
-        let mut analysis_output = self.analyze_files(candidate_files, &mut database);
+        let mut analysis_output = self.analyze_files(candidate_files, &mut database, subtitle_matches);
 
         // Process renames: these files are already in a target codec but missing their codec suffix label
         if !analysis_output.renames.is_empty() {
@@ -135,6 +141,14 @@ impl VideoConvert {
         let mut pending_entries: Vec<(&Path, &str, &VideoInfo, PendingAction)> = Vec::new();
         for file in &analysis_output.remuxes {
             pending_entries.push((&file.file.path, &file.file.extension, &file.info, PendingAction::Remux));
+        }
+        for file in &analysis_output.subtitle_muxes {
+            pending_entries.push((
+                &file.file.path,
+                &file.file.extension,
+                &file.info,
+                PendingAction::SubtitleMux,
+            ));
         }
         for file in &analysis_output.conversions {
             pending_entries.push((
@@ -160,12 +174,17 @@ impl VideoConvert {
         } else {
             analysis_output.remuxes.len()
         };
+        let subtitle_mux_count = if self.config.skip_remux {
+            0
+        } else {
+            analysis_output.subtitle_muxes.len()
+        };
         let convert_count = if self.config.skip_convert {
             0
         } else {
             analysis_output.conversions.len()
         };
-        let total_available = remux_count + convert_count;
+        let total_available = remux_count + subtitle_mux_count + convert_count;
         let total_limit = self.config.count.map_or(total_available, |c| total_available.min(c));
 
         // Truncate lists if they exceed the limit
@@ -175,6 +194,9 @@ impl VideoConvert {
             let remux_limit = remux_count.min(count);
             analysis_output.remuxes.truncate(remux_limit);
             let remaining = count.saturating_sub(remux_limit);
+            let subtitle_mux_limit = subtitle_mux_count.min(remaining);
+            analysis_output.subtitle_muxes.truncate(subtitle_mux_limit);
+            let remaining = remaining.saturating_sub(subtitle_mux_limit);
             analysis_output.conversions.truncate(remaining);
         }
 
@@ -189,6 +211,20 @@ impl VideoConvert {
                 Self::remux_to_mp4,
             );
             stats += remux_stats;
+            aborted = was_aborted;
+        }
+
+        // Process subtitle muxes
+        if !self.config.skip_remux && !analysis_output.subtitle_muxes.is_empty() && !aborted {
+            let (subtitle_mux_stats, was_aborted) = self.process_files_with_db_cleanup(
+                analysis_output.subtitle_muxes,
+                &abort_flag,
+                &mut processed_count,
+                total_limit,
+                &database,
+                Self::mux_subtitles,
+            );
+            stats += subtitle_mux_stats;
             aborted = was_aborted;
         }
 
@@ -255,6 +291,118 @@ impl VideoConvert {
         Ok(files)
     }
 
+    /// Gather supported external subtitle sidecars for movie-mode matching.
+    fn gather_subtitle_files_to_process(&self) -> Vec<SubtitleFile> {
+        let path = &self.config.path;
+        if path.is_file() {
+            let Some(parent) = path.parent() else {
+                return Vec::new();
+            };
+            return Self::gather_subtitle_files_from_root(parent, 1);
+        }
+
+        if !path.is_dir() {
+            return Vec::new();
+        }
+
+        let max_depth = if self.config.recurse { usize::MAX } else { 1 };
+        Self::gather_subtitle_files_from_root(path, max_depth)
+    }
+
+    /// Gather subtitle sidecars from the directories containing the given video files.
+    fn gather_subtitle_files_for_video_files(video_files: &[VideoFile]) -> Vec<SubtitleFile> {
+        let mut subtitle_files = Vec::new();
+        let mut seen_directories = HashSet::new();
+
+        for video_file in video_files {
+            let Some(parent) = video_file.path.parent() else {
+                continue;
+            };
+            if seen_directories.insert(parent.to_path_buf()) {
+                subtitle_files.extend(Self::gather_subtitle_files_from_root(parent, 1));
+            }
+        }
+
+        subtitle_files
+    }
+
+    /// Gather supported subtitle sidecar files below a root path.
+    fn gather_subtitle_files_from_root(root: &Path, max_depth: usize) -> Vec<SubtitleFile> {
+        let subtitle_paths: Vec<PathBuf> = WalkDir::new(root)
+            .max_depth(max_depth)
+            .into_iter()
+            .filter_entry(|entry| !cli_tools::should_skip_entry(entry))
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(walkdir::DirEntry::into_path)
+            .filter(|path| SubtitleFile::is_supported_extension(&cli_tools::path_to_file_extension_string(path)))
+            .collect();
+
+        let idx_stems: HashSet<PathBuf> = subtitle_paths
+            .iter()
+            .filter(|path| cli_tools::path_to_file_extension_string(path) == "idx")
+            .map(|path| path_without_extension(path))
+            .collect();
+
+        let mut subtitle_files: Vec<SubtitleFile> = subtitle_paths
+            .into_iter()
+            .filter_map(|path| {
+                let extension = cli_tools::path_to_file_extension_string(&path);
+                if extension == "sub" && idx_stems.contains(&path_without_extension(&path)) {
+                    return None;
+                }
+                let paired_sub_path = if extension == "idx" {
+                    let pair = path.with_extension("sub");
+                    pair.exists().then_some(pair)
+                } else {
+                    None
+                };
+                Some(SubtitleFile::new(&path, paired_sub_path))
+            })
+            .collect();
+        subtitle_files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        subtitle_files
+    }
+
+    /// Match subtitle sidecars to video files in the same directory using normalized title tokens.
+    fn match_subtitle_files(
+        video_files: &[VideoFile],
+        subtitle_files: Vec<SubtitleFile>,
+        verbose: bool,
+    ) -> HashMap<PathBuf, Vec<SubtitleFile>> {
+        let mut matches: HashMap<PathBuf, Vec<SubtitleFile>> = HashMap::new();
+
+        for subtitle_file in subtitle_files {
+            let subtitle_stem = cli_tools::path_to_file_stem_string(&subtitle_file.path);
+            let mut candidates: Vec<(usize, &VideoFile)> = video_files
+                .iter()
+                .filter(|video_file| video_file.path.parent() == subtitle_file.path.parent())
+                .filter_map(|video_file| {
+                    movie_subtitle_match_score(&video_file.name, &subtitle_stem).map(|score| (score, video_file))
+                })
+                .collect();
+
+            candidates.sort_unstable_by_key(|(score, _)| std::cmp::Reverse(*score));
+            let Some((best_score, best_video)) = candidates.first() else {
+                if verbose {
+                    print_yellow!("No matching video found for subtitle: {}", subtitle_file.path.display());
+                }
+                continue;
+            };
+
+            if candidates.iter().filter(|(score, _)| score == best_score).count() > 1 {
+                if verbose {
+                    print_yellow!("Ambiguous subtitle match skipped: {}", subtitle_file.path.display());
+                }
+                continue;
+            }
+
+            matches.entry(best_video.path.clone()).or_default().push(subtitle_file);
+        }
+
+        matches
+    }
+
     /// Process files and remove them from the database after successful processing.
     fn process_files_with_db_cleanup<F>(
         &self,
@@ -301,7 +449,7 @@ impl VideoConvert {
                 ProcessResult::Failed { error } => {
                     print_error!("{}: {error}", cli_tools::path_to_string_relative(&file.file.path));
                 }
-                ProcessResult::Converted { .. } | ProcessResult::Remuxed {} => {
+                ProcessResult::Converted { .. } | ProcessResult::Remuxed {} | ProcessResult::SubtitlesMuxed {} => {
                     *processed_count += 1;
                     // Remove from database after successful processing
                     let _ = database.remove_pending_file(&file.file.path);
@@ -361,40 +509,65 @@ impl VideoConvert {
         let mut aborted = false;
         let mut processed_count: usize = 0;
 
-        // Separate files by action type
-        let (remuxes, conversions): (Vec<_>, Vec<_>) = pending_files
-            .into_iter()
-            .partition(|f| f.action == PendingAction::Remux);
-
         // Calculate limits
-        let remux_count = if self.config.skip_remux { 0 } else { remuxes.len() };
-        let convert_count = if self.config.skip_convert { 0 } else { conversions.len() };
-        let total_available = remux_count + convert_count;
+        let remux_count = if self.config.skip_remux {
+            0
+        } else {
+            pending_files
+                .iter()
+                .filter(|file| file.action == PendingAction::Remux)
+                .count()
+        };
+        let subtitle_mux_count = if self.config.skip_remux {
+            0
+        } else {
+            pending_files
+                .iter()
+                .filter(|file| file.action == PendingAction::SubtitleMux)
+                .count()
+        };
+        let convert_count = if self.config.skip_convert {
+            0
+        } else {
+            pending_files
+                .iter()
+                .filter(|file| file.action == PendingAction::Convert)
+                .count()
+        };
+        let total_available = remux_count + subtitle_mux_count + convert_count;
         let total_limit = self.config.count.map_or(total_available, |c| total_available.min(c));
 
-        // Convert to processable files
-        let mut remux_files: Vec<ProcessableFile> = remuxes
-            .into_iter()
-            .filter(|f| f.full_path.exists())
-            .map(|f| {
-                let video_file = VideoFile::new_with_metadata(&f.full_path);
-                let info = f.to_video_info();
-                self.processable_file(video_file, info)
-            })
+        let video_files: Vec<VideoFile> = pending_files
+            .iter()
+            .filter(|file| file.full_path.exists())
+            .map(|file| VideoFile::new_with_metadata(&file.full_path))
             .collect();
+        let mut subtitle_matches = if self.config.movie_mode {
+            let subtitle_files = Self::gather_subtitle_files_for_video_files(&video_files);
+            Self::match_subtitle_files(&video_files, subtitle_files, self.config.verbose)
+        } else {
+            HashMap::new()
+        };
 
-        let mut conversion_files: Vec<ProcessableFile> = conversions
-            .into_iter()
-            .filter(|f| f.full_path.exists())
-            .map(|f| {
-                let video_file = VideoFile::new_with_metadata(&f.full_path);
-                let info = f.to_video_info();
-                self.processable_file(video_file, info)
-            })
-            .collect();
+        // Convert to processable files
+        let mut remux_files = Vec::new();
+        let mut subtitle_mux_files = Vec::new();
+        let mut conversion_files = Vec::new();
+
+        for pending_file in pending_files.into_iter().filter(|file| file.full_path.exists()) {
+            let video_file = VideoFile::new_with_metadata(&pending_file.full_path);
+            let subtitles = subtitle_matches.remove(&video_file.path).unwrap_or_default();
+            let processable = self.processable_file(video_file, pending_file.to_video_info(), subtitles);
+            match pending_file.action {
+                PendingAction::Convert => conversion_files.push(processable),
+                PendingAction::Remux => remux_files.push(processable),
+                PendingAction::SubtitleMux => subtitle_mux_files.push(processable),
+            }
+        }
 
         // Sort files
         Self::sort_processable_files(&mut remux_files, self.config.sort);
+        Self::sort_processable_files(&mut subtitle_mux_files, self.config.sort);
         Self::sort_processable_files(&mut conversion_files, self.config.sort);
 
         // Truncate lists if they exceed the limit
@@ -404,6 +577,9 @@ impl VideoConvert {
             let remux_limit = remux_files.len().min(count);
             remux_files.truncate(remux_limit);
             let remaining = count.saturating_sub(remux_limit);
+            let subtitle_mux_limit = subtitle_mux_files.len().min(remaining);
+            subtitle_mux_files.truncate(subtitle_mux_limit);
+            let remaining = remaining.saturating_sub(subtitle_mux_limit);
             conversion_files.truncate(remaining);
         }
 
@@ -418,6 +594,20 @@ impl VideoConvert {
                 Self::remux_to_mp4,
             );
             stats += remux_stats;
+            aborted = was_aborted;
+        }
+
+        // Process subtitle muxes
+        if !self.config.skip_remux && !subtitle_mux_files.is_empty() && !aborted {
+            let (subtitle_mux_stats, was_aborted) = self.process_files_with_db_cleanup(
+                subtitle_mux_files,
+                &abort_flag,
+                &mut processed_count,
+                total_limit,
+                &database,
+                Self::mux_subtitles,
+            );
+            stats += subtitle_mux_stats;
             aborted = was_aborted;
         }
 
@@ -573,6 +763,96 @@ impl VideoConvert {
         ProcessResult::Remuxed {}
     }
 
+    /// Embed external subtitle sidecars into a movie container without converting video.
+    fn mux_subtitles(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
+        if file.subtitle_files.is_empty() {
+            return ProcessResult::Failed {
+                error: "No matching subtitle sidecars found".to_string(),
+            };
+        }
+
+        let input = &file.file.path;
+        let final_output = &file.output_path;
+        let command_output = if input == final_output {
+            Self::temporary_output_path(final_output)
+        } else {
+            final_output.clone()
+        };
+        let info = &file.info;
+
+        println!(
+            "{}",
+            format!(
+                "{file_index} Mux subtitles: {}",
+                cli_tools::path_to_string_relative(input)
+            )
+            .bold()
+            .cyan()
+        );
+        println!("{info}");
+
+        if self.config.verbose {
+            println!("Output: {}", cli_tools::path_to_string_relative(final_output));
+            Self::print_subtitle_files(&file.subtitle_files);
+        }
+
+        self.log_start(input, "subtitle-mux", file_index, info, None);
+        let start = Instant::now();
+
+        let mut cmd = match Self::build_subtitle_mux_command(input, &command_output, &file.subtitle_files) {
+            Ok(command) => command,
+            Err(error) => {
+                return ProcessResult::Failed {
+                    error: format!("Failed to build subtitle mux command: {error}"),
+                };
+            }
+        };
+
+        if self.config.dryrun {
+            println!("[DRYRUN] {cmd:#?}");
+            return ProcessResult::SubtitlesMuxed {};
+        }
+
+        let status = match Self::run_command_isolated(&mut cmd) {
+            Ok(status) => status,
+            Err(error) => {
+                return ProcessResult::Failed {
+                    error: format!("Failed to execute ffmpeg: {error}"),
+                };
+            }
+        };
+
+        if !status.success() {
+            let _ = std::fs::remove_file(&command_output);
+            let error = format!(
+                "ffmpeg subtitle mux failed with status: {}",
+                status.code().unwrap_or(-1)
+            );
+            self.log_failure(input, "subtitle-mux", file_index, &error);
+            return ProcessResult::Failed { error };
+        }
+
+        if input == final_output {
+            if let Err(error) = self.replace_input_with_output(input, &command_output) {
+                let error = error.to_string();
+                self.log_failure(input, "subtitle-mux", file_index, &error);
+                return ProcessResult::Failed { error };
+            }
+        } else if let Err(error) = self.delete_file(input) {
+            print_error!("Failed to delete original file: {error}");
+        }
+
+        self.delete_subtitle_files(&file.subtitle_files);
+
+        let duration = start.elapsed();
+        println!(
+            "{}",
+            format!("✓ Muxed subtitles in {}", cli_tools::format_duration(duration)).green()
+        );
+        self.log_success(final_output, "subtitle-mux", file_index, duration, None);
+        ProcessResult::SubtitlesMuxed {}
+    }
+
     /// Convert video to HEVC using NVENC
     #[allow(clippy::too_many_lines)]
     fn convert_to_hevc(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
@@ -598,6 +878,7 @@ impl VideoConvert {
         if self.config.verbose {
             println!("Output: {}", cli_tools::path_to_string_relative(output));
             println!("Using quality level: {quality_level}");
+            Self::print_subtitle_files(&file.subtitle_files);
         }
 
         self.log_start(input, "convert", file_index, info, Some(quality_level));
@@ -609,15 +890,22 @@ impl VideoConvert {
         // Track whether CUDA filters worked for potential reconversion
         let mut use_cuda_filters = true;
 
-        let mut ffmpeg_command =
-            match Self::build_ffmpeg_command(input, output, quality_level, copy_audio, true, self.config.movie_mode) {
-                Ok(command) => command,
-                Err(e) => {
-                    return ProcessResult::Failed {
-                        error: format!("Failed to build ffmpeg command: {e}"),
-                    };
-                }
-            };
+        let mut ffmpeg_command = match Self::build_ffmpeg_command(
+            input,
+            output,
+            quality_level,
+            copy_audio,
+            true,
+            self.config.movie_mode,
+            &file.subtitle_files,
+        ) {
+            Ok(command) => command,
+            Err(e) => {
+                return ProcessResult::Failed {
+                    error: format!("Failed to build ffmpeg command: {e}"),
+                };
+            }
+        };
 
         if self.config.dryrun {
             println!("[DRYRUN] {ffmpeg_command:#?}");
@@ -648,6 +936,7 @@ impl VideoConvert {
                 copy_audio,
                 false,
                 self.config.movie_mode,
+                &file.subtitle_files,
             ) {
                 Ok(command) => command,
                 Err(e) => {
@@ -702,6 +991,7 @@ impl VideoConvert {
                 copy_audio,
                 use_cuda_filters,
                 self.config.movie_mode,
+                &file.subtitle_files,
             ) {
                 Ok(command) => command,
                 Err(e) => {
@@ -760,6 +1050,7 @@ impl VideoConvert {
         if let Err(e) = self.delete_file(input) {
             print_error!("Failed to delete original file: {e}");
         }
+        self.delete_subtitle_files(&file.subtitle_files);
 
         let conversion_stats = ConversionStats::new(
             info.size_bytes,
@@ -789,7 +1080,12 @@ impl VideoConvert {
     /// Analyze files in parallel to determine which need processing.
     /// Runs ffprobe on each file concurrently and filters based on video information.
     #[allow(clippy::too_many_lines)]
-    fn analyze_files(&self, files: Vec<VideoFile>, database: &mut Database) -> AnalysisOutput {
+    fn analyze_files(
+        &self,
+        files: Vec<VideoFile>,
+        database: &mut Database,
+        mut subtitle_matches: HashMap<PathBuf, Vec<SubtitleFile>>,
+    ) -> AnalysisOutput {
         let start = Instant::now();
         let total_files = files.len();
 
@@ -808,10 +1104,11 @@ impl VideoConvert {
         // then split files into cache hits (classified immediately) and cache misses.
         let scan_cache: HashMap<String, VideoInfo> = database.get_all_scanned_files().unwrap_or_default();
         let mut cache_results: Vec<AnalysisResult> = Vec::new();
-        let mut cache_misses: Vec<VideoFile> = Vec::new();
+        let mut cache_misses: Vec<(VideoFile, Vec<SubtitleFile>)> = Vec::new();
 
         for file in files {
             let path_key = file.path.to_string_lossy();
+            let subtitles = subtitle_matches.remove(&file.path).unwrap_or_default();
             if let Some(cached_info) = scan_cache.get(path_key.as_ref())
                 && cached_info.size_bytes == file.size_bytes
             {
@@ -820,9 +1117,10 @@ impl VideoConvert {
                     &filter,
                     cached_info,
                     movie_mode,
+                    subtitles,
                 ));
             } else {
-                cache_misses.push(file);
+                cache_misses.push((file, subtitles));
             }
         }
 
@@ -848,8 +1146,8 @@ impl VideoConvert {
 
             let results: Vec<VideoInfoCache> = cache_misses
                 .into_par_iter()
-                .map(|file| {
-                    let result = Self::probe_and_classify(file, &filter, movie_mode);
+                .map(|(file, subtitles)| {
+                    let result = Self::probe_and_classify(file, subtitles, &filter, movie_mode);
                     progress_bar.inc(1);
                     result
                 })
@@ -877,6 +1175,7 @@ impl VideoConvert {
         let mut conversions = Vec::new();
         let mut remuxes = Vec::new();
         let mut renames: Vec<ProcessableFile> = Vec::new();
+        let mut subtitle_muxes = Vec::new();
         let mut analysis_stats = AnalysisStats::default();
         // Collect duplicate pairs for verbose output when not deleting
         let mut duplicate_pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -894,6 +1193,10 @@ impl VideoConvert {
                 AnalysisResult::NeedsRename(processable) => {
                     analysis_stats.to_rename += 1;
                     renames.push(processable);
+                }
+                AnalysisResult::NeedsSubtitleMux(processable) => {
+                    analysis_stats.to_subtitle_mux += 1;
+                    subtitle_muxes.push(processable);
                 }
                 AnalysisResult::Skip { file, reason } => {
                     match &reason {
@@ -1027,6 +1330,7 @@ impl VideoConvert {
         // Sort conversions based on configured sort order
         Self::sort_processable_files(&mut conversions, self.config.sort);
         Self::sort_processable_files(&mut remuxes, self.config.sort);
+        Self::sort_processable_files(&mut subtitle_muxes, self.config.sort);
 
         self.log_analysis_stats(&analysis_stats, total_files, start.elapsed());
         analysis_stats.print_summary();
@@ -1035,13 +1339,15 @@ impl VideoConvert {
             conversions,
             remuxes,
             renames,
+            subtitle_muxes,
         }
     }
 
     /// Create a processable file using the converter's output path rules.
-    fn processable_file(&self, file: VideoFile, info: VideoInfo) -> ProcessableFile {
-        let output_path = file.get_output_path_for_mode(info.codec_suffix(), self.config.movie_mode);
-        ProcessableFile::new(file, info, output_path)
+    fn processable_file(&self, file: VideoFile, info: VideoInfo, subtitle_files: Vec<SubtitleFile>) -> ProcessableFile {
+        let output_path =
+            file.get_output_path_for_mode(info.codec_suffix(), self.config.movie_mode, !subtitle_files.is_empty());
+        ProcessableFile::new(file, info, output_path, subtitle_files)
     }
 
     /// Sort processable files according to the specified sort order.
@@ -1148,6 +1454,7 @@ impl VideoConvert {
         copy_audio: bool,
         use_cuda_filters: bool,
         movie_mode: bool,
+        subtitle_files: &[SubtitleFile],
     ) -> Result<Command> {
         // GPU tuning for RTX 4090 to use more VRAM and improve performance
         let extra_hw_frames = "64";
@@ -1163,11 +1470,15 @@ impl VideoConvert {
         }
 
         cmd.arg("-i").arg(input);
+        for subtitle_file in subtitle_files {
+            cmd.arg("-i").arg(&subtitle_file.path);
+        }
 
         if movie_mode {
             let audio_languages = Self::probe_stream_languages(input, "a")?;
             let subtitle_languages = Self::probe_stream_languages(input, "s")?;
             Self::add_movie_mode_stream_maps(&mut cmd, &audio_languages, &subtitle_languages);
+            Self::add_external_subtitle_maps(&mut cmd, subtitle_files, 1);
         }
 
         if use_cuda_filters {
@@ -1198,6 +1509,22 @@ impl VideoConvert {
         Ok(cmd)
     }
 
+    /// Build an ffmpeg command that embeds external subtitles without converting video.
+    fn build_subtitle_mux_command(input: &Path, output: &Path, subtitle_files: &[SubtitleFile]) -> Result<Command> {
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input);
+        for subtitle_file in subtitle_files {
+            cmd.arg("-i").arg(&subtitle_file.path);
+        }
+
+        let audio_languages = Self::probe_stream_languages(input, "a")?;
+        let subtitle_languages = Self::probe_stream_languages(input, "s")?;
+        Self::add_movie_mode_stream_maps(&mut cmd, &audio_languages, &subtitle_languages);
+        Self::add_external_subtitle_maps(&mut cmd, subtitle_files, 1);
+        cmd.arg(output);
+        Ok(cmd)
+    }
+
     /// Add movie-mode stream mapping that keeps all video streams and only selected language tracks.
     fn add_movie_mode_stream_maps(
         cmd: &mut Command,
@@ -1219,6 +1546,13 @@ impl VideoConvert {
         }
 
         cmd.args(["-map_metadata", "0", "-map_chapters", "0", "-c", "copy"]);
+    }
+
+    /// Add stream maps for external subtitle inputs.
+    fn add_external_subtitle_maps(cmd: &mut Command, subtitle_files: &[SubtitleFile], first_input_index: usize) {
+        for input_index in first_input_index..first_input_index + subtitle_files.len() {
+            cmd.arg("-map").arg(format!("{input_index}:s?"));
+        }
     }
 
     /// Probe unique language tags for one ffmpeg stream type.
@@ -1256,9 +1590,11 @@ impl VideoConvert {
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
     fn should_include_file(&self, file: &VideoFile) -> bool {
-        // Skip files with "x265" or "av1" in the filename (already converted)
-        if (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name))
-            && file.extension == file.target_extension(self.config.movie_mode)
+        // In normal mode, skip files already marked with a target codec suffix.
+        // Movie mode still analyzes them because loose subtitle sidecars may need muxing.
+        if !self.config.movie_mode
+            && (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name))
+            && file.extension == file.target_extension(false, false)
         {
             return false;
         }
@@ -1360,11 +1696,50 @@ impl VideoConvert {
         Ok(())
     }
 
+    fn delete_subtitle_files(&self, subtitle_files: &[SubtitleFile]) {
+        for subtitle_file in subtitle_files {
+            for path in subtitle_file.paths_to_delete() {
+                if let Err(error) = self.delete_file(path) {
+                    print_error!("Failed to delete subtitle file {}: {error}", path.display());
+                }
+            }
+        }
+    }
+
+    fn replace_input_with_output(&self, input: &Path, output: &Path) -> Result<()> {
+        self.delete_file(input)?;
+        std::fs::rename(output, input).context("Failed to move muxed subtitle output into place")
+    }
+
+    fn temporary_output_path(output: &Path) -> PathBuf {
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        let stem = cli_tools::path_to_file_stem_string(output);
+        let extension = cli_tools::path_to_file_extension_string(output);
+        let temporary_stem = format!("{stem}.vconvert-tmp");
+        let temporary_filename = format!("{temporary_stem}.{extension}");
+        cli_tools::get_unique_path(parent, &temporary_filename, &temporary_stem, &extension)
+    }
+
+    fn print_subtitle_files(subtitle_files: &[SubtitleFile]) {
+        if subtitle_files.is_empty() {
+            return;
+        }
+        println!("Subtitles:");
+        for subtitle_file in subtitle_files {
+            println!("  - {}", cli_tools::path_to_string_relative(&subtitle_file.path));
+        }
+    }
+
     /// Run ffprobe on a file and classify the result.
     ///
     /// Returns a `VideoInfoCache` containing the analysis result, the file path, and the
     /// `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
-    fn probe_and_classify(file: VideoFile, filter: &AnalysisFilter, movie_mode: bool) -> VideoInfoCache {
+    fn probe_and_classify(
+        file: VideoFile,
+        subtitle_files: Vec<SubtitleFile>,
+        filter: &AnalysisFilter,
+        movie_mode: bool,
+    ) -> VideoInfoCache {
         let path = file.path.clone();
         if !path.exists() {
             return VideoInfoCache {
@@ -1378,7 +1753,7 @@ impl VideoConvert {
         }
         match Self::get_video_info(&file.path) {
             Ok(info) => {
-                let result = Self::classify_video_file_with_mode(file, filter, &info, movie_mode);
+                let result = Self::classify_video_file_with_mode(file, filter, &info, movie_mode, subtitle_files);
                 VideoInfoCache {
                     result,
                     path,
@@ -1404,25 +1779,48 @@ impl VideoConvert {
     /// paths that actually need processing (conversion, remux, rename).
     #[cfg(test)]
     fn classify_video_file(file: VideoFile, filter: &AnalysisFilter, info: &VideoInfo) -> AnalysisResult {
-        Self::classify_video_file_with_mode(file, filter, info, false)
+        Self::classify_video_file_with_mode(file, filter, info, false, Vec::new())
     }
 
     /// Classify a video file with explicit movie-mode output rules.
+    #[allow(clippy::too_many_lines)]
     fn classify_video_file_with_mode(
         file: VideoFile,
         filter: &AnalysisFilter,
         info: &VideoInfo,
         movie_mode: bool,
+        subtitle_files: Vec<SubtitleFile>,
     ) -> AnalysisResult {
         let is_target_codec = info.is_target_codec();
         let suffix = info.codec_suffix();
-        let target_extension = file.target_extension(movie_mode);
+        let has_external_subtitles = !subtitle_files.is_empty();
+        let target_extension = file.target_extension(movie_mode, false);
+
+        // Target-codec files with external subtitles need a mux pass, even if otherwise already converted.
+        if is_target_codec && has_external_subtitles {
+            let output_path = file.get_output_path_for_mode(suffix, movie_mode, true);
+            if output_path.exists() && output_path != file.path && !filter.overwrite {
+                return AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::OutputExists {
+                        path: output_path,
+                        source_duration: info.duration,
+                    },
+                };
+            }
+            return AnalysisResult::NeedsSubtitleMux(ProcessableFile::new(
+                file,
+                info.clone(),
+                output_path,
+                subtitle_files,
+            ));
+        }
 
         // Check if already converted (target codec in the target container with matching suffix marker)
         if is_target_codec && file.extension == target_extension {
             if !suffix.regex().is_match(&file.name) {
                 // Needs rename to add codec suffix
-                let output_path = file.get_output_path_for_mode(suffix, movie_mode);
+                let output_path = file.get_output_path_for_mode(suffix, movie_mode, false);
                 if output_path.exists() && !filter.overwrite {
                     return AnalysisResult::Skip {
                         file,
@@ -1432,7 +1830,7 @@ impl VideoConvert {
                         },
                     };
                 }
-                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone(), output_path));
+                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone(), output_path, Vec::new()));
             }
             return AnalysisResult::Skip {
                 file,
@@ -1508,7 +1906,7 @@ impl VideoConvert {
             }
         }
 
-        let output_path = file.get_output_path_for_mode(suffix, movie_mode);
+        let output_path = file.get_output_path_for_mode(suffix, movie_mode, has_external_subtitles);
 
         // Check if output already exists
         if output_path.exists() && !filter.overwrite {
@@ -1522,9 +1920,9 @@ impl VideoConvert {
         }
 
         if is_target_codec {
-            AnalysisResult::NeedsRemux(ProcessableFile::new(file, info.clone(), output_path))
+            AnalysisResult::NeedsRemux(ProcessableFile::new(file, info.clone(), output_path, subtitle_files))
         } else {
-            AnalysisResult::NeedsConversion(ProcessableFile::new(file, info.clone(), output_path))
+            AnalysisResult::NeedsConversion(ProcessableFile::new(file, info.clone(), output_path, subtitle_files))
         }
     }
 
@@ -1570,6 +1968,12 @@ impl VideoConvert {
         }
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
     }
+}
+
+fn path_without_extension(path: &Path) -> PathBuf {
+    let mut path = path.to_owned();
+    path.set_extension("");
+    path
 }
 
 #[cfg(test)]
@@ -1829,7 +2233,7 @@ mod test_classify_needs_conversion {
         let info = h264_info();
         let filter = default_filter();
 
-        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true);
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
 
         let AnalysisResult::NeedsConversion(processable) = result else {
             panic!("Expected NeedsConversion");
@@ -1952,7 +2356,7 @@ mod test_classify_needs_remux {
         };
         let filter = default_filter();
 
-        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true);
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
 
         assert!(
             matches!(
@@ -1981,12 +2385,37 @@ mod test_classify_needs_remux {
         };
         let filter = default_filter();
 
-        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true);
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
 
         let AnalysisResult::NeedsRename(processable) = result else {
             panic!("Expected NeedsRename");
         };
         assert_eq!(processable.output_path, PathBuf::from("/videos/movie.x265.mkv"));
+    }
+
+    #[test]
+    fn hevc_mkv_movie_mode_with_external_subtitle_needs_subtitle_mux() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            warning: None,
+        };
+        let filter = default_filter();
+        let subtitles = vec![SubtitleFile::new(Path::new("/videos/movie.English.x265.srt"), None)];
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, subtitles);
+
+        let AnalysisResult::NeedsSubtitleMux(processable) = result else {
+            panic!("Expected NeedsSubtitleMux");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.x265.mkv"));
+        assert_eq!(processable.subtitle_files.len(), 1);
     }
 
     #[test]

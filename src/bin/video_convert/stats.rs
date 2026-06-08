@@ -10,6 +10,7 @@ use crate::types::ProcessResult;
 pub struct AnalysisStats {
     pub(crate) to_rename: usize,
     pub(crate) to_remux: usize,
+    pub(crate) to_subtitle_mux: usize,
     pub(crate) to_convert: usize,
     pub(crate) skipped_converted: usize,
     pub(crate) skipped_bitrate_low: usize,
@@ -29,6 +30,7 @@ pub struct AnalysisStats {
 pub struct RunStats {
     pub(crate) files_renamed: usize,
     pub(crate) files_remuxed: usize,
+    pub(crate) files_subtitle_muxed: usize,
     pub(crate) files_converted: usize,
     pub(crate) files_failed: usize,
     pub(crate) total_original_size: u64,
@@ -64,6 +66,7 @@ impl AnalysisStats {
     pub(crate) fn print_summary(&self) {
         println!("To rename:               {}", self.to_rename);
         println!("To remux:                {}", self.to_remux);
+        println!("To subtitle mux:         {}", self.to_subtitle_mux);
         println!("To convert:              {}", self.to_convert);
         if self.total_skipped() > 0 {
             println!("Skipped:                 {}", self.total_skipped());
@@ -148,6 +151,9 @@ impl RunStats {
             ProcessResult::Remuxed { .. } => {
                 self.files_remuxed += 1;
             }
+            ProcessResult::SubtitlesMuxed { .. } => {
+                self.files_subtitle_muxed += 1;
+            }
             ProcessResult::Failed { .. } => {
                 self.files_failed += 1;
             }
@@ -165,6 +171,7 @@ impl RunStats {
         println!("{}", "\n--- Conversion Summary ---".bold().magenta());
         println!("Files renamed:           {}", self.files_renamed);
         println!("Files remuxed:           {}", self.files_remuxed);
+        println!("Files subtitle muxed:    {}", self.files_subtitle_muxed);
         println!("Files converted:         {}", self.files_converted);
         println!(
             "Files failed:            {}",
@@ -233,6 +240,7 @@ impl AddAssign<Self> for RunStats {
     fn add_assign(&mut self, other: Self) {
         self.files_converted += other.files_converted;
         self.files_remuxed += other.files_remuxed;
+        self.files_subtitle_muxed += other.files_subtitle_muxed;
         self.files_renamed += other.files_renamed;
         self.files_failed += other.files_failed;
         self.total_original_size += other.total_original_size;
@@ -245,6 +253,7 @@ impl AddAssign<&Self> for RunStats {
     fn add_assign(&mut self, other: &Self) {
         self.files_converted += other.files_converted;
         self.files_remuxed += other.files_remuxed;
+        self.files_subtitle_muxed += other.files_subtitle_muxed;
         self.files_renamed += other.files_renamed;
         self.files_failed += other.files_failed;
         self.total_original_size += other.total_original_size;
@@ -334,6 +343,7 @@ mod analysis_stats_tests {
         let stats = AnalysisStats {
             to_rename: 0,
             to_remux: 0,
+            to_subtitle_mux: 0,
             to_convert: 0,
             skipped_converted: 5,
             skipped_bitrate_low: 3,
@@ -369,6 +379,7 @@ mod run_stats_tests {
         let stats = RunStats::default();
         assert_eq!(stats.files_renamed, 0);
         assert_eq!(stats.files_remuxed, 0);
+        assert_eq!(stats.files_subtitle_muxed, 0);
         assert_eq!(stats.files_converted, 0);
         assert_eq!(stats.files_failed, 0);
         assert_eq!(stats.total_original_size, 0);
@@ -447,6 +458,7 @@ mod run_stats_tests {
         let mut stats1 = RunStats {
             files_converted: 5,
             files_remuxed: 3,
+            files_subtitle_muxed: 1,
             files_renamed: 2,
             files_failed: 1,
             total_original_size: 1_000_000,
@@ -456,6 +468,7 @@ mod run_stats_tests {
         let stats2 = RunStats {
             files_converted: 3,
             files_remuxed: 2,
+            files_subtitle_muxed: 4,
             files_renamed: 1,
             files_failed: 0,
             total_original_size: 500_000,
@@ -466,6 +479,7 @@ mod run_stats_tests {
 
         assert_eq!(stats1.files_converted, 8);
         assert_eq!(stats1.files_remuxed, 5);
+        assert_eq!(stats1.files_subtitle_muxed, 5);
         assert_eq!(stats1.files_renamed, 3);
         assert_eq!(stats1.files_failed, 1);
         assert_eq!(stats1.total_original_size, 1_500_000);

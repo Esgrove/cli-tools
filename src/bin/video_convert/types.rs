@@ -74,6 +74,15 @@ pub struct ProcessableFile {
     pub(crate) file: VideoFile,
     pub(crate) info: VideoInfo,
     pub(crate) output_path: PathBuf,
+    pub(crate) subtitle_files: Vec<SubtitleFile>,
+}
+
+/// A subtitle sidecar file that can be embedded into a movie-mode output file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitleFile {
+    pub(crate) path: PathBuf,
+    pub(crate) extension: String,
+    pub(crate) paired_sub_path: Option<PathBuf>,
 }
 
 /// Output from the analysis phase.
@@ -84,6 +93,8 @@ pub struct AnalysisOutput {
     pub(crate) remuxes: Vec<ProcessableFile>,
     /// Files that need to be renamed (target codec MP4 without codec suffix).
     pub(crate) renames: Vec<ProcessableFile>,
+    /// Files that only need external subtitle sidecars muxed in.
+    pub(crate) subtitle_muxes: Vec<ProcessableFile>,
 }
 
 /// Codec used in output filenames to identify the video codec.
@@ -125,6 +136,8 @@ pub enum ProcessResult {
     Converted { stats: ConversionStats },
     /// File was remuxed (already HEVC, just changed container to MP4)
     Remuxed {},
+    /// External subtitle sidecars were embedded without video conversion.
+    SubtitlesMuxed {},
     /// Failed to process file
     Failed { error: String },
 }
@@ -138,6 +151,8 @@ pub enum AnalysisResult {
     NeedsRemux(ProcessableFile),
     /// File should be renamed to add codec suffix
     NeedsRename(ProcessableFile),
+    /// File needs external subtitle sidecars muxed in without video conversion.
+    NeedsSubtitleMux(ProcessableFile),
     /// File should be skipped
     Skip { file: VideoFile, reason: SkipReason },
 }
@@ -163,12 +178,43 @@ impl ProcessResult {
 
 impl ProcessableFile {
     /// Create a new `ProcessableFile` with its resolved output path.
-    pub(crate) const fn new(file: VideoFile, info: VideoInfo, output_path: PathBuf) -> Self {
+    pub(crate) const fn new(
+        file: VideoFile,
+        info: VideoInfo,
+        output_path: PathBuf,
+        subtitle_files: Vec<SubtitleFile>,
+    ) -> Self {
         Self {
             file,
             info,
             output_path,
+            subtitle_files,
         }
+    }
+}
+
+impl SubtitleFile {
+    /// Create a subtitle sidecar file from a path and optional paired `.sub` file.
+    pub(crate) fn new(path: &Path, paired_sub_path: Option<PathBuf>) -> Self {
+        Self {
+            path: path.to_owned(),
+            extension: cli_tools::path_to_file_extension_string(path),
+            paired_sub_path,
+        }
+    }
+
+    /// Return true when the extension is a supported external subtitle format.
+    pub(crate) fn is_supported_extension(extension: &str) -> bool {
+        matches!(extension, "idx" | "srt" | "sub")
+    }
+
+    /// Return all sidecar paths that should be removed after successful muxing.
+    pub(crate) fn paths_to_delete(&self) -> Vec<&Path> {
+        let mut paths = vec![self.path.as_path()];
+        if let Some(path) = &self.paired_sub_path {
+            paths.push(path.as_path());
+        }
+        paths
     }
 }
 
@@ -198,13 +244,18 @@ impl VideoFile {
     /// Compute the output path for the converted file with the given codec suffix.
     #[cfg(test)]
     pub(crate) fn get_output_path(&self, suffix: Codec) -> PathBuf {
-        self.get_output_path_for_mode(suffix, false)
+        self.get_output_path_for_mode(suffix, false, false)
     }
 
     /// Compute the output path using movie-mode container rules when requested.
-    pub(crate) fn get_output_path_for_mode(&self, suffix: Codec, movie_mode: bool) -> PathBuf {
+    pub(crate) fn get_output_path_for_mode(
+        &self,
+        suffix: Codec,
+        movie_mode: bool,
+        has_external_subtitles: bool,
+    ) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let target_extension = self.target_extension(movie_mode);
+        let target_extension = self.target_extension(movie_mode, has_external_subtitles);
         let new_stem = if suffix.regex().is_match(&self.name) {
             self.name.clone()
         } else if RE_SOURCE_CODEC.is_match(&self.name) {
@@ -216,8 +267,8 @@ impl VideoFile {
     }
 
     /// Return the target container extension for this file.
-    pub(crate) fn target_extension(&self, movie_mode: bool) -> &'static str {
-        if movie_mode && self.extension == "mkv" {
+    pub(crate) fn target_extension(&self, movie_mode: bool, has_external_subtitles: bool) -> &'static str {
+        if movie_mode && (self.extension == "mkv" || has_external_subtitles) {
             "mkv"
         } else {
             TARGET_EXTENSION
@@ -423,6 +474,94 @@ impl std::fmt::Display for Codec {
     }
 }
 
+/// Return a match score when a subtitle sidecar stem appears to belong to a video stem.
+pub fn movie_subtitle_match_score(video_stem: &str, subtitle_stem: &str) -> Option<usize> {
+    let video_tokens = normalized_movie_tokens(video_stem);
+    let subtitle_tokens = normalized_movie_tokens(subtitle_stem);
+
+    if video_tokens.is_empty() || subtitle_tokens.is_empty() {
+        return None;
+    }
+
+    if video_tokens == subtitle_tokens {
+        return Some(10_000 + video_tokens.len());
+    }
+
+    if contains_tokens(&subtitle_tokens, &video_tokens) {
+        return Some(5_000 + video_tokens.len());
+    }
+
+    if subtitle_tokens.len() >= 2 && contains_tokens(&video_tokens, &subtitle_tokens) {
+        return Some(2_000 + subtitle_tokens.len());
+    }
+
+    None
+}
+
+fn normalized_movie_tokens(stem: &str) -> Vec<String> {
+    stem.to_lowercase()
+        .replace("h.264", "h264")
+        .replace("h.265", "h265")
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .filter(|token| !is_ignored_movie_token(token))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn contains_tokens(haystack: &[String], needle: &[String]) -> bool {
+    haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+fn is_ignored_movie_token(token: &str) -> bool {
+    matches!(
+        token,
+        "3d" | "4k"
+            | "480p"
+            | "576p"
+            | "720p"
+            | "1080p"
+            | "1440p"
+            | "2160p"
+            | "aac"
+            | "atmos"
+            | "av1"
+            | "bluray"
+            | "brrip"
+            | "cc"
+            | "dts"
+            | "dv"
+            | "eng"
+            | "english"
+            | "fin"
+            | "finnish"
+            | "forced"
+            | "h264"
+            | "h265"
+            | "hdr"
+            | "hevc"
+            | "japanese"
+            | "jpn"
+            | "nor"
+            | "norwegian"
+            | "sdh"
+            | "sub"
+            | "subs"
+            | "subtitle"
+            | "subtitles"
+            | "suomi"
+            | "swe"
+            | "swedish"
+            | "truehd"
+            | "uhd"
+            | "web"
+            | "webdl"
+            | "webrip"
+            | "x264"
+            | "x265"
+    )
+}
+
 impl std::fmt::Display for VideoInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Codec:      {}", self.codec)?;
@@ -528,21 +667,21 @@ mod video_file_tests {
     #[test]
     fn movie_mode_output_path_keeps_mkv_container() {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true);
+        let output = file.get_output_path_for_mode(Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
     }
 
     #[test]
     fn movie_mode_output_path_preserves_existing_x265() {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true);
+        let output = file.get_output_path_for_mode(Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
     }
 
     #[test]
     fn movie_mode_output_path_replaces_existing_x264() {
         let file = VideoFile::new(Path::new("/videos/Movie.Title.2024.1080p.x264.mkv"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true);
+        let output = file.get_output_path_for_mode(Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/Movie.Title.2024.1080p.x265.mkv"));
     }
 
@@ -556,8 +695,15 @@ mod video_file_tests {
     #[test]
     fn movie_mode_output_path_keeps_mp4_for_mp4_input() {
         let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true);
+        let output = file.get_output_path_for_mode(Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
+    }
+
+    #[test]
+    fn movie_mode_output_path_uses_mkv_for_external_subtitles() {
+        let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
+        let output = file.get_output_path_for_mode(Codec::X265, true, true);
+        assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
     }
 
     #[test]
@@ -571,6 +717,38 @@ mod video_file_tests {
     fn display_shows_path() {
         let file = VideoFile::new(Path::new("/path/to/video.mp4"), 0);
         assert_eq!(format!("{file}"), "/path/to/video.mp4");
+    }
+}
+
+#[cfg(test)]
+mod subtitle_match_tests {
+    use super::*;
+
+    #[test]
+    fn matches_subtitle_with_extra_language_token() {
+        let score = movie_subtitle_match_score(
+            "Last.Night.in.Soho.2021.1080p.x265",
+            "Last.Night.in.Soho.2021.English.1080p.x265",
+        );
+        assert!(score.is_some());
+    }
+
+    #[test]
+    fn matches_multiple_language_subtitles_to_same_movie() {
+        let english =
+            movie_subtitle_match_score("Dangerous.Liasons.1988.1080p.x264", "Dangerous.Liasons.1988.1080p.x264");
+        let finnish = movie_subtitle_match_score(
+            "Dangerous.Liasons.1988.1080p.x264",
+            "Dangerous.Liasons.1988.Finnish.1080p.x264",
+        );
+        assert!(english.is_some());
+        assert!(finnish.is_some());
+    }
+
+    #[test]
+    fn rejects_unrelated_subtitle() {
+        let score = movie_subtitle_match_score("Movie.Title.2024.1080p.x265", "Different.Movie.2024.English");
+        assert!(score.is_none());
     }
 }
 

@@ -234,6 +234,7 @@ pub fn show_database_contents(config: &Config) -> Result<()> {
             let action_str = match file.action {
                 crate::database::PendingAction::Convert => "CONVERT".yellow(),
                 crate::database::PendingAction::Remux => "REMUX".cyan(),
+                crate::database::PendingAction::SubtitleMux => "SUBS".purple(),
             };
             println!(
                 "  [{action_str}] {:<5} {:>10} {:>10} {:>10} - {}",

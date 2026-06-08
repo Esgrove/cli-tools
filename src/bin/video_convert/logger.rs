@@ -164,6 +164,7 @@ impl FileLogger {
         );
         let _ = writeln!(self.writer, "  Files to convert:      {}", stats.to_convert);
         let _ = writeln!(self.writer, "  Files to remux:        {}", stats.to_remux);
+        let _ = writeln!(self.writer, "  Files to subtitle mux: {}", stats.to_subtitle_mux);
         let _ = writeln!(self.writer, "  Files to rename:       {}", stats.to_rename);
         let _ = writeln!(self.writer, "  Files skipped:         {}", stats.total_skipped());
         if stats.total_skipped() > 0 {
@@ -197,8 +198,9 @@ impl FileLogger {
     pub(crate) fn log_stats(&mut self, stats: &RunStats) {
         let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
         let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
-        let _ = writeln!(self.writer, "  Files remuxed:   {}", stats.files_remuxed);
-        let _ = writeln!(self.writer, "  Files failed:    {}", stats.files_failed);
+        let _ = writeln!(self.writer, "  Files remuxed:        {}", stats.files_remuxed);
+        let _ = writeln!(self.writer, "  Files subtitle muxed: {}", stats.files_subtitle_muxed);
+        let _ = writeln!(self.writer, "  Files failed:         {}", stats.files_failed);
 
         if stats.files_converted > 0 {
             let _ = writeln!(

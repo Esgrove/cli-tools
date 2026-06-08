@@ -63,6 +63,8 @@ pub enum PendingAction {
     Convert,
     /// File is already HEVC but needs remuxing to MP4 container.
     Remux,
+    /// File needs external subtitle sidecars muxed into the movie container.
+    SubtitleMux,
 }
 
 /// Statistics about the database contents.
@@ -74,6 +76,8 @@ pub struct DatabaseStats {
     pub convert_count: u64,
     /// Number of files needing remux.
     pub remux_count: u64,
+    /// Number of files needing external subtitle muxing.
+    pub subtitle_mux_count: u64,
     /// Total size of all pending files in bytes.
     pub total_size: u64,
 }
@@ -116,6 +120,7 @@ impl PendingAction {
         match self {
             Self::Convert => "convert",
             Self::Remux => "remux",
+            Self::SubtitleMux => "subtitle_mux",
         }
     }
 
@@ -123,6 +128,7 @@ impl PendingAction {
     fn from_str(value: &str) -> Self {
         match value {
             "remux" => Self::Remux,
+            "subtitle_mux" => Self::SubtitleMux,
             // Default to Convert for unknown values
             _ => Self::Convert,
         }
@@ -418,8 +424,8 @@ impl Database {
         if let Some(min_bitrate) = filter.min_bitrate {
             params_vec.push(Box::new(min_bitrate as i64));
             conditions.push(format!(
-                "(action = '{}' OR bitrate_kbps >= ?{})",
-                PendingAction::Remux.as_str(),
+                "(action != '{}' OR bitrate_kbps >= ?{})",
+                PendingAction::Convert.as_str(),
                 params_vec.len()
             ));
         }
@@ -427,8 +433,8 @@ impl Database {
         if let Some(max_bitrate) = filter.max_bitrate {
             params_vec.push(Box::new(max_bitrate as i64));
             conditions.push(format!(
-                "(action = '{}' OR bitrate_kbps <= ?{})",
-                PendingAction::Remux.as_str(),
+                "(action != '{}' OR bitrate_kbps <= ?{})",
+                PendingAction::Convert.as_str(),
                 params_vec.len()
             ));
         }
@@ -437,8 +443,8 @@ impl Database {
         if let Some(min_duration) = filter.min_duration {
             params_vec.push(Box::new(min_duration));
             conditions.push(format!(
-                "(action = '{}' OR duration >= ?{})",
-                PendingAction::Remux.as_str(),
+                "(action != '{}' OR duration >= ?{})",
+                PendingAction::Convert.as_str(),
                 params_vec.len()
             ));
         }
@@ -446,8 +452,8 @@ impl Database {
         if let Some(max_duration) = filter.max_duration {
             params_vec.push(Box::new(max_duration));
             conditions.push(format!(
-                "(action = '{}' OR duration <= ?{})",
-                PendingAction::Remux.as_str(),
+                "(action != '{}' OR duration <= ?{})",
+                PendingAction::Convert.as_str(),
                 params_vec.len()
             ));
         }
@@ -848,6 +854,7 @@ impl Database {
             match action.as_str() {
                 "convert" => stats.convert_count = count as u64,
                 "remux" => stats.remux_count = count as u64,
+                "subtitle_mux" => stats.subtitle_mux_count = count as u64,
                 _ => {}
             }
         }
@@ -945,6 +952,7 @@ impl std::fmt::Display for DatabaseStats {
         writeln!(f, "  Total files:    {}", self.total_files)?;
         writeln!(f, "  To convert:     {}", self.convert_count)?;
         writeln!(f, "  To remux:       {}", self.remux_count)?;
+        writeln!(f, "  To subtitle mux: {}", self.subtitle_mux_count)?;
         write!(f, "  Total size:     {}", cli_tools::format_size(self.total_size))
     }
 }
@@ -1377,12 +1385,14 @@ mod tests {
     fn test_pending_action_display() {
         assert_eq!(PendingAction::Convert.to_string(), "convert");
         assert_eq!(PendingAction::Remux.to_string(), "remux");
+        assert_eq!(PendingAction::SubtitleMux.to_string(), "subtitle_mux");
     }
 
     #[test]
     fn test_pending_action_from_str() {
         assert_eq!(PendingAction::from_str("convert"), PendingAction::Convert);
         assert_eq!(PendingAction::from_str("remux"), PendingAction::Remux);
+        assert_eq!(PendingAction::from_str("subtitle_mux"), PendingAction::SubtitleMux);
         assert_eq!(PendingAction::from_str("unknown"), PendingAction::Convert);
     }
 
