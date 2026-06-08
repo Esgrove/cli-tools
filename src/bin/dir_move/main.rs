@@ -11,19 +11,36 @@ use clap_complete::Shell;
 
 use crate::dir_move::DirMove;
 
+/// Subcommands for dirmove.
+#[derive(Subcommand)]
+enum DirMoveCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
+/// Command-line arguments for the `dirmove` binary.
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Move files to directories based on name")]
 struct DirMoveArgs {
     #[command(subcommand)]
     command: Option<DirMoveCommand>,
 
-    /// Optional input directory or file
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
-    path: Option<PathBuf>,
+    /// Optional input directories or files
+    #[arg(value_hint = clap::ValueHint::AnyPath, num_args = 0..)]
+    path: Vec<PathBuf>,
 
     /// Optional output directory, defaults to the input directory
-    #[arg(short = 'O', long, value_hint = clap::ValueHint::DirPath)]
-    output: Option<PathBuf>,
+    #[arg(short = 'O', long, value_hint = clap::ValueHint::DirPath, num_args = 1, action = clap::ArgAction::Append)]
+    output: Vec<PathBuf>,
 
     /// Auto-confirm all prompts without asking
     #[arg(short = 'a', long)]
@@ -40,6 +57,10 @@ struct DirMoveArgs {
     /// Overwrite existing files
     #[arg(short = 'f', long)]
     force: bool,
+
+    /// Only match input files, do not offer directory merges
+    #[arg(short = 'F', long)]
+    files_only: bool,
 
     /// Include files that match the given pattern
     #[arg(short = 'n', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
@@ -98,22 +119,7 @@ struct DirMoveArgs {
     verbose: bool,
 }
 
-/// Subcommands for dirmove.
-#[derive(Subcommand)]
-enum DirMoveCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
-}
-
+/// Parse CLI arguments and run the requested `dirmove` command.
 fn main() -> anyhow::Result<()> {
     let args = DirMoveArgs::parse();
     if let Some(DirMoveCommand::Completion { shell, install }) = &args.command {

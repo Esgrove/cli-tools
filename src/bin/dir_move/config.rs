@@ -12,13 +12,14 @@ use cli_tools::dir_move::utils;
 use crate::DirMoveArgs;
 
 /// Final config combined from CLI arguments and user config file.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     pub(crate) auto: bool,
     pub(crate) create: bool,
     pub(crate) custom_mappings: Vec<CustomMapping>,
     pub(crate) debug: bool,
     pub(crate) dryrun: bool,
+    pub(crate) files_only: bool,
     pub(crate) include: Vec<String>,
     pub(crate) exclude: Vec<String>,
     pub(crate) ignored_group_names: Vec<String>,
@@ -232,6 +233,7 @@ impl Config {
             custom_mappings,
             debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
+            files_only: args.files_only,
             include,
             exclude,
             ignored_group_names,
@@ -990,22 +992,39 @@ mod cli_args_tests {
     #[test]
     fn parses_path_argument() {
         let args = DirMoveArgs::try_parse_from(["test", "/some/path"]).expect("should parse");
-        assert!(args.path.is_some());
-        assert_eq!(args.path.unwrap().to_string_lossy(), "/some/path");
+        assert_eq!(args.path.len(), 1);
+        assert_eq!(args.path[0].to_string_lossy(), "/some/path");
+    }
+
+    #[test]
+    fn parses_multiple_path_arguments() {
+        let args = DirMoveArgs::try_parse_from(["test", "/some/path", "/other/path"]).expect("should parse");
+        assert_eq!(args.path.len(), 2);
+        assert_eq!(args.path[0].to_string_lossy(), "/some/path");
+        assert_eq!(args.path[1].to_string_lossy(), "/other/path");
     }
 
     #[test]
     fn parses_output_argument() {
         let args = DirMoveArgs::try_parse_from(["test", "--output", "/output/path"]).expect("should parse");
-        assert!(args.output.is_some());
-        assert_eq!(args.output.unwrap().to_string_lossy(), "/output/path");
+        assert_eq!(args.output.len(), 1);
+        assert_eq!(args.output[0].to_string_lossy(), "/output/path");
     }
 
     #[test]
     fn parses_output_short_argument() {
         let args = DirMoveArgs::try_parse_from(["test", "-O", "/output/path"]).expect("should parse");
-        assert!(args.output.is_some());
-        assert_eq!(args.output.unwrap().to_string_lossy(), "/output/path");
+        assert_eq!(args.output.len(), 1);
+        assert_eq!(args.output[0].to_string_lossy(), "/output/path");
+    }
+
+    #[test]
+    fn parses_multiple_output_arguments() {
+        let args =
+            DirMoveArgs::try_parse_from(["test", "-O", "/output/path", "-O", "/other/output"]).expect("should parse");
+        assert_eq!(args.output.len(), 2);
+        assert_eq!(args.output[0].to_string_lossy(), "/output/path");
+        assert_eq!(args.output[1].to_string_lossy(), "/other/output");
     }
 
     #[test]
@@ -1132,6 +1151,13 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "-f"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         assert!(config.overwrite);
+    }
+
+    #[test]
+    fn config_from_args_files_only_enables_option() {
+        let args = DirMoveArgs::try_parse_from(["test", "-F"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.files_only);
     }
 
     #[test]

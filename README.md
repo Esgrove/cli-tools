@@ -68,21 +68,22 @@ Options:
 ```console
 Move files to directories based on name
 
-Usage: dirmove [OPTIONS] [PATH] [COMMAND]
+Usage: dirmove [OPTIONS] [PATH]... [COMMAND]
 
 Commands:
   completion  Generate shell completion script
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
-  [PATH]  Optional input directory or file
+  [PATH]...  Optional input directories or files
 
 Options:
+  -O, --output <OUTPUT>           Optional output directory, defaults to the input directory
   -a, --auto                      Auto-confirm all prompts without asking
   -c, --create                    Create directories for files with matching prefixes
   -D, --debug                     Print debug information
   -f, --force                     Overwrite existing files
-  -O, --output <OUTPUT>           Output directory containing target folders
+  -F, --files-only                Only match input files; do not offer whole-directory merges
   -n, --include <INCLUDE>         Include files that match the given pattern
   -e, --exclude <EXCLUDE>         Exclude files that match the given pattern
   -i, --ignore <IGNORE>           Ignore prefix when matching filenames
