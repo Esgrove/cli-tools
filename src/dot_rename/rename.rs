@@ -708,6 +708,30 @@ mod test_prefix_suffix_options {
     }
 
     #[test]
+    fn gather_files_skips_serato_directory() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let root = create_subdir(temp_dir.path(), "Music Library");
+        let serato = create_subdir(&root, "_Serato_");
+        let skipped_file = create_test_file(&serato, "skip me.txt");
+        let normal_file = create_test_file(&root, "rename me.txt");
+
+        let mut dots = DotRename {
+            root,
+            config: DotRenameConfig {
+                prefix: Some("Test".to_string()),
+                recurse: true,
+                ..Default::default()
+            },
+            path_given: true,
+        };
+
+        let files = dots.gather_files_to_rename().expect("Failed to gather files");
+
+        assert!(files.iter().any(|(path, _)| path == &normal_file));
+        assert!(!files.iter().any(|(path, _)| path == &skipped_file));
+    }
+
+    #[test]
     fn test_prefix_dir_uses_root_directory_name() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let root = create_subdir(temp_dir.path(), "Test Directory");

@@ -6648,6 +6648,8 @@ mod test_unwanted_directories {
         std::fs::create_dir_all(&root)?;
         let unwanted = root.join(".unwanted");
         std::fs::create_dir(&unwanted)?;
+        let serato = root.join("_Serato_");
+        std::fs::create_dir(&serato)?;
         let normal = root.join("normal");
         std::fs::create_dir(&normal)?;
 
@@ -6657,6 +6659,24 @@ mod test_unwanted_directories {
 
         assert_eq!(dirs.len(), 1);
         assert_eq!(dirs[0].path, normal);
+        Ok(())
+    }
+
+    #[test]
+    fn serato_skipped_as_input_directory_for_merge() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let serato = root.join("_Serato_");
+        std::fs::create_dir(&serato)?;
+        let normal = root.join("normal");
+        std::fs::create_dir(&normal)?;
+
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec![], false, true, false));
+
+        let directories = dirmove.collect_input_directories_for_merge()?;
+
+        assert_eq!(directories, vec![normal]);
         Ok(())
     }
 

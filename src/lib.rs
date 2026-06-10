@@ -96,6 +96,8 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
     "lost+found",
     // NAS
     "#Recycle",
+    // Serato DJ library metadata
+    "_Serato_",
 ];
 
 /// Return the path to the user config file.
@@ -1257,6 +1259,40 @@ mod system_directory_tests {
             let entry = entry.unwrap();
             if entry.file_name().to_string_lossy() == "lost+found" {
                 assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn is_system_directory_serato() {
+        let dir = tempdir().unwrap();
+        let serato = dir.path().join("_Serato_");
+        std::fs::create_dir(&serato).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "_Serato_" {
+                assert!(is_system_directory(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn is_system_directory_path_serato() {
+        let path = Path::new("/music/_Serato_");
+        assert!(is_system_directory_path(path));
+    }
+
+    #[test]
+    fn should_skip_entry_serato() {
+        let dir = tempdir().unwrap();
+        let serato = dir.path().join("_Serato_");
+        std::fs::create_dir(&serato).unwrap();
+
+        for entry in WalkDir::new(dir.path()).min_depth(1) {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy() == "_Serato_" {
+                assert!(should_skip_entry(&entry));
             }
         }
     }
