@@ -1497,12 +1497,12 @@ impl VideoConvert {
             cmd.args(["-tag:v", "hvc1"]);
         }
 
-        if !movie_mode {
-            if copy_audio {
-                cmd.args(["-c:a", "copy"]);
-            } else {
-                cmd.args(["-c:a", "aac", "-b:a", "128k"]);
-            }
+        if movie_mode {
+            Self::add_movie_mode_passthrough_codecs(&mut cmd);
+        } else if copy_audio {
+            cmd.args(["-c:a", "copy"]);
+        } else {
+            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
         }
 
         cmd.arg(output);
@@ -1521,6 +1521,7 @@ impl VideoConvert {
         let subtitle_languages = Self::probe_stream_languages(input, "s")?;
         Self::add_movie_mode_stream_maps(&mut cmd, &audio_languages, &subtitle_languages);
         Self::add_external_subtitle_maps(&mut cmd, subtitle_files, 1);
+        cmd.args(["-c", "copy"]);
         cmd.arg(output);
         Ok(cmd)
     }
@@ -1545,7 +1546,12 @@ impl VideoConvert {
             }
         }
 
-        cmd.args(["-map_metadata", "0", "-map_chapters", "0", "-c", "copy"]);
+        cmd.args(["-map_metadata", "0", "-map_chapters", "0"]);
+    }
+
+    /// Copy non-video streams while movie mode converts video.
+    fn add_movie_mode_passthrough_codecs(cmd: &mut Command) {
+        cmd.args(["-c:a", "copy", "-c:s", "copy"]);
     }
 
     /// Add stream maps for external subtitle inputs.
@@ -2018,7 +2024,19 @@ mod test_build_ffmpeg_command {
         assert!(!has_arg_pair(&args, "-map", "0:s:m:language:spa"));
         assert!(has_arg_pair(&args, "-map_metadata", "0"));
         assert!(has_arg_pair(&args, "-map_chapters", "0"));
-        assert!(has_arg_pair(&args, "-c", "copy"));
+        assert!(!has_arg_pair(&args, "-c", "copy"));
+    }
+
+    #[test]
+    fn movie_mode_conversion_copies_audio_and_subtitles_without_generic_codec() {
+        let mut command = Command::new("ffmpeg");
+
+        VideoConvert::add_movie_mode_passthrough_codecs(&mut command);
+        let args = command_args(&command);
+
+        assert!(has_arg_pair(&args, "-c:a", "copy"));
+        assert!(has_arg_pair(&args, "-c:s", "copy"));
+        assert!(!has_arg_pair(&args, "-c", "copy"));
     }
 }
 
