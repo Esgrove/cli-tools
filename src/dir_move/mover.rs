@@ -15,6 +15,25 @@ use crate::{path_to_filename_string, print_error, print_yellow};
 /// Size of chunks used when copying files across devices.
 pub const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 
+/// Summary of a batch move operation.
+#[derive(Debug, Default)]
+pub struct MoveReport {
+    /// Source paths that were moved successfully.
+    pub moved_files: Vec<PathBuf>,
+    /// Source paths left in place because the destination already exists.
+    pub skipped_files: Vec<PathBuf>,
+    /// Source paths that could not be moved.
+    pub failed_files: Vec<PathBuf>,
+}
+
+impl MoveReport {
+    /// Return the number of files moved successfully.
+    #[must_use]
+    pub const fn moved_count(&self) -> usize {
+        self.moved_files.len()
+    }
+}
+
 /// Move files to the target directory, creating it if needed.
 ///
 /// Uses `rename` first for fast same-device moves, then falls back to
@@ -29,7 +48,7 @@ pub fn move_files_to_target_dir(
     overwrite: bool,
     verbose: bool,
     hide_progress: bool,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<MoveReport> {
     if !dir_path.exists() {
         fs::create_dir_all(dir_path)?;
         println!("  Created directory: {}", path_to_filename_string(dir_path));
@@ -41,13 +60,14 @@ pub fn move_files_to_target_dir(
     let total_size = file_sizes.values().sum();
     let progress_bar = create_move_progress_bar(total_size, hide_progress);
 
-    let mut moved_count = 0;
+    let mut report = MoveReport::default();
     for (index, file_path) in files.iter().enumerate() {
         let file_name = path_to_filename_string(file_path);
         if file_name.is_empty() {
             progress_bar.suspend(|| {
                 print_error(&format!("Could not get file name for path: {}", file_path.display()));
             });
+            report.failed_files.push(file_path.clone());
             continue;
         }
 
@@ -60,6 +80,7 @@ pub fn move_files_to_target_dir(
                 print_yellow(&format!("Skipping existing file: {}", new_path.display()));
             });
             progress_bar.inc(expected_size);
+            report.skipped_files.push(file_path.clone());
             continue;
         }
 
@@ -74,6 +95,7 @@ pub fn move_files_to_target_dir(
                 ));
             });
             progress_bar.inc(expected_size);
+            report.failed_files.push(file_path.clone());
             continue;
         }
 
@@ -84,7 +106,7 @@ pub fn move_files_to_target_dir(
                         println!("  Moved: {file_name}");
                     });
                 }
-                moved_count += 1;
+                report.moved_files.push(file_path.clone());
             }
             Err(error) => {
                 progress_bar.suspend(|| {
@@ -93,13 +115,14 @@ pub fn move_files_to_target_dir(
                 if expected_size > 0 {
                     progress_bar.inc(expected_size);
                 }
+                report.failed_files.push(file_path.clone());
             }
         }
     }
     progress_bar.finish_and_clear();
-    println!("  Moved {moved_count} files");
+    println!("  Moved {} files", report.moved_count());
 
-    Ok(moved_count)
+    Ok(report)
 }
 
 /// Move a single file, falling back to copy-verify-delete when rename cannot cross devices.
@@ -278,9 +301,12 @@ mod tests {
         fs::write(input.join("two.txt"), "two")?;
 
         let files = vec![input.join("one.txt"), input.join("two.txt")];
-        let moved = move_files_to_target_dir(&output, &files, false, false, true)?;
+        let report = move_files_to_target_dir(&output, &files, false, false, true)?;
 
-        assert_eq!(moved, 2);
+        assert_eq!(report.moved_count(), 2);
+        assert_eq!(report.moved_files, files);
+        assert!(report.skipped_files.is_empty());
+        assert!(report.failed_files.is_empty());
         assert!(!input.join("one.txt").exists());
         assert!(!input.join("two.txt").exists());
         assert_eq!(fs::read_to_string(output.join("one.txt"))?, "one");
@@ -298,9 +324,13 @@ mod tests {
         fs::write(input.join("one.txt"), "new")?;
         fs::write(output.join("one.txt"), "old")?;
 
-        let moved = move_files_to_target_dir(&output, &[input.join("one.txt")], false, false, true)?;
+        let source = input.join("one.txt");
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
 
-        assert_eq!(moved, 0);
+        assert_eq!(report.moved_count(), 0);
+        assert!(report.moved_files.is_empty());
+        assert_eq!(report.skipped_files, vec![source]);
+        assert!(report.failed_files.is_empty());
         assert_eq!(fs::read_to_string(input.join("one.txt"))?, "new");
         assert_eq!(fs::read_to_string(output.join("one.txt"))?, "old");
         Ok(())

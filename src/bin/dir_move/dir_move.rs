@@ -38,6 +38,14 @@ const HIDE_MOVE_PROGRESS: bool = true;
 #[cfg(not(test))]
 const HIDE_MOVE_PROGRESS: bool = false;
 
+/// Result of offering one directory match group to the user.
+enum DirectoryMatchOutcome {
+    /// Files were moved, or would be moved in dry-run mode, and should not be offered again.
+    Consumed(Vec<PathBuf>),
+    /// Files are still available for lower-priority matches.
+    Available,
+}
+
 /// Precomputed destination directory name variants used while matching files.
 struct DestinationMatchInfo<'a> {
     /// Index into the original destination directory list.
@@ -62,6 +70,15 @@ pub struct DirMove {
     output_roots: Vec<PathBuf>,
     config: Config,
     database: Option<Database>,
+}
+
+impl DirectoryMatchOutcome {
+    fn consumed_files(self) -> Vec<PathBuf> {
+        match self {
+            Self::Consumed(files) => files,
+            Self::Available => Vec::new(),
+        }
+    }
 }
 
 impl DestinationMatchInfo<'_> {
@@ -996,56 +1013,66 @@ impl DirMove {
             return Ok(());
         }
 
-        // Process custom mappings first - these take priority
-        let remaining_files = self.process_custom_mapping_matches(&files_in_root, &directories)?;
+        // Process custom mappings first - these take priority.
+        // Files remain available for normal matching if a custom suggestion is skipped or fails.
+        let mut consumed_files = HashSet::new();
+        let remaining_files = self.process_custom_mapping_matches(&files_in_root, &directories, &mut consumed_files)?;
 
         if remaining_files.is_empty() {
             return Ok(());
         }
 
-        let matches = self.match_files_to_directories(&remaining_files, &directories);
+        let mut matches = self.match_files_to_directories(&remaining_files, &directories);
         if matches.is_empty() {
             return Ok(());
         }
 
-        // Sort by directory name and process
-        let groups_to_process: Vec<_> = matches
-            .into_iter()
-            .map(|(idx, files)| (&directories[idx], files))
-            .sorted_by(|a, b| a.0.name.cmp(&b.0.name))
-            .collect();
+        let sorted_directory_indices = self.sorted_directory_indices(&directories);
+        let group_count = matches.len();
 
         if self.config.verbose {
-            print_bold!(
-                "Found {} directory match(es) with files to move:\n",
-                groups_to_process.len()
-            );
+            print_bold!("Found {group_count} directory match(es) with files to move:\n");
         }
 
-        for (dir, files) in groups_to_process {
-            self.process_directory_match(dir, &files)?;
+        for directory_index in sorted_directory_indices {
+            let Some(file_indices) = matches.remove(&directory_index) else {
+                continue;
+            };
+
+            let available_files: Vec<_> = file_indices
+                .into_iter()
+                .filter(|&file_index| {
+                    Self::file_is_available_for_matching(&remaining_files[file_index], &consumed_files)
+                })
+                .map(|file_index| remaining_files[file_index].clone())
+                .collect();
+            if available_files.is_empty() {
+                continue;
+            }
+
+            let outcome = self.process_directory_match(&directories[directory_index], &available_files)?;
+            consumed_files.extend(outcome.consumed_files());
         }
 
         Ok(())
     }
 
     /// Process custom mapping matches - move files matching custom patterns to their target directories.
-    /// Returns the list of files that were NOT matched by any custom mapping.
+    /// Returns files that are still available for later suggestions.
     fn process_custom_mapping_matches(
         &self,
         files: &[PathBuf],
         directories: &[DirectoryInfo],
+        consumed_files: &mut HashSet<PathBuf>,
     ) -> anyhow::Result<Vec<PathBuf>> {
         if self.config.custom_mappings.is_empty() {
             return Ok(files.to_vec());
         }
 
-        let mut remaining_files: Vec<PathBuf> = Vec::new();
-        let mut custom_matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
+        let mut custom_matches: HashMap<usize, Vec<usize>> = HashMap::new();
 
-        for file_path in files {
+        for (file_index, file_path) in files.iter().enumerate() {
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
-                remaining_files.push(file_path.clone());
                 continue;
             };
 
@@ -1053,47 +1080,54 @@ impl DirMove {
             let file_name_normalized = file_name.to_lowercase().replace(['.', ' '], "");
 
             // Check if file matches any custom mapping
-            let mut matched = false;
             for mapping in &self.config.custom_mappings {
-                if file_name_normalized.contains(&mapping.pattern) {
-                    // Find target directory
-                    if let Some(directory_index) = self.find_directory_for_custom_mapping(mapping, directories) {
-                        custom_matches
-                            .entry(directory_index)
-                            .or_default()
-                            .push(file_path.clone());
-                        matched = true;
-                        break;
-                    }
+                if file_name_normalized.contains(&mapping.pattern)
+                    && let Some(directory_index) = self.find_directory_for_custom_mapping(mapping, directories)
+                {
+                    custom_matches.entry(directory_index).or_default().push(file_index);
+                    break;
                 }
-            }
-
-            if !matched {
-                remaining_files.push(file_path.clone());
             }
         }
 
         // Process custom mapping matches
         if !custom_matches.is_empty() {
-            let groups_to_process: Vec<_> = custom_matches
-                .into_iter()
-                .map(|(directory_index, matched_files)| (&directories[directory_index], matched_files))
-                .sorted_by(|left, right| left.0.name.cmp(&right.0.name))
-                .collect();
+            let group_count = custom_matches.len();
 
             if self.config.verbose {
-                print_bold!(
-                    "Found {} custom mapping match(es) with files to move:\n",
-                    groups_to_process.len()
-                );
+                print_bold!("Found {group_count} custom mapping match(es) with files to move:\n");
             }
 
-            for (directory, matched_files) in groups_to_process {
-                self.process_directory_match(directory, &matched_files)?;
+            for directory_index in self.sorted_directory_indices(directories) {
+                let Some(matched_file_indices) = custom_matches.remove(&directory_index) else {
+                    continue;
+                };
+
+                let available_files: Vec<_> = matched_file_indices
+                    .into_iter()
+                    .filter(|&file_index| Self::file_is_available_for_matching(&files[file_index], consumed_files))
+                    .map(|file_index| files[file_index].clone())
+                    .collect();
+                if available_files.is_empty() {
+                    continue;
+                }
+
+                let outcome = self.process_directory_match(&directories[directory_index], &available_files)?;
+                consumed_files.extend(outcome.consumed_files());
             }
         }
 
+        let remaining_files = files
+            .iter()
+            .filter(|file_path| Self::file_is_available_for_matching(file_path, consumed_files))
+            .cloned()
+            .collect();
         Ok(remaining_files)
+    }
+
+    /// Return whether a file can still be offered by another matching group.
+    fn file_is_available_for_matching(file_path: &Path, consumed_files: &HashSet<PathBuf>) -> bool {
+        !consumed_files.contains(file_path) && file_path.exists()
     }
 
     /// Find the highest-priority output directory for a custom mapping target name.
@@ -1245,19 +1279,19 @@ impl DirMove {
 
     /// Match files to directories based on normalized name matching.
     ///
-    /// Returns a map from directory index into `directories` to the list of matching file paths.
+    /// Returns a map from directory index into `directories` to the matching indices in `files`.
     /// Directory priority is controlled by `sorted_directory_indices`, so recursive scans prefer
     /// deeper destinations before broader shallow matches.
     fn match_files_to_directories(
         &self,
         files: &[PathBuf],
         directories: &[DirectoryInfo],
-    ) -> HashMap<usize, Vec<PathBuf>> {
-        let mut matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
+    ) -> HashMap<usize, Vec<usize>> {
+        let mut matches: HashMap<usize, Vec<usize>> = HashMap::new();
 
         let destination_match_info = self.collect_destination_match_info(directories);
 
-        for file_path in files {
+        for (file_index, file_path) in files.iter().enumerate() {
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
@@ -1272,12 +1306,7 @@ impl DirMove {
 
             for destination_info in &destination_match_info {
                 if destination_info.matches_file(&file_name_spaced, &file_name_spaced_stripped, &file_name_concat) {
-                    matches
-                        .entry(destination_info.index)
-                        .or_default()
-                        .push(file_path.clone());
-                    // Only match to first directory found
-                    break;
+                    matches.entry(destination_info.index).or_default().push(file_index);
                 }
             }
         }
@@ -1371,7 +1400,7 @@ impl DirMove {
         result
     }
 
-    fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<()> {
+    fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<DirectoryMatchOutcome> {
         let dir_display = self.get_directory_display_path(dir);
         println!("{}: {} file(s)", dir_display.cyan().bold(), files.len());
 
@@ -1381,29 +1410,38 @@ impl DirMove {
 
         println!("  {} Move to: {dir_display}", "→".green());
 
-        if !self.config.dryrun {
-            let confirmed = if self.config.auto {
-                true
-            } else {
-                print!("{}", "Move files to this directory? (y/n): ".magenta());
-                std::io::stdout().flush()?;
-
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                input.trim().eq_ignore_ascii_case("y")
-            };
-
-            if confirmed {
-                if let Err(e) = self.move_files_to_target_dir(&dir.path, files) {
-                    print_error!("Failed to move files to {}: {e}", dir.path.display());
-                }
-            } else {
-                println!("  Skipped");
-            }
+        if self.config.dryrun {
+            println!();
+            return Ok(DirectoryMatchOutcome::Consumed(files.to_vec()));
         }
+
+        let confirmed = if self.config.auto {
+            true
+        } else {
+            print!("{}", "Move files to this directory? (y/n): ".magenta());
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            input.trim().eq_ignore_ascii_case("y")
+        };
+
+        let outcome = if confirmed {
+            match self.move_files_to_target_dir(&dir.path, files) {
+                Ok(report) => DirectoryMatchOutcome::Consumed(report.moved_files),
+                Err(e) => {
+                    print_error!("Failed to move files to {}: {e}", dir.path.display());
+                    DirectoryMatchOutcome::Available
+                }
+            }
+        } else {
+            println!("  Skipped");
+            DirectoryMatchOutcome::Available
+        };
+
         println!();
 
-        Ok(())
+        Ok(outcome)
     }
 
     /// Format a destination directory for prompts relative to the nearest output root.
@@ -1427,15 +1465,14 @@ impl DirMove {
     }
 
     /// Move files to the target directory, creating it if needed.
-    fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
+    fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<mover::MoveReport> {
         mover::move_files_to_target_dir(
             dir_path,
             files,
             self.config.overwrite,
             self.config.verbose,
             HIDE_MOVE_PROGRESS,
-        )?;
-        Ok(())
+        )
     }
 
     /// Collect files with their processed names for create-mode grouping.
@@ -1792,7 +1829,7 @@ impl DirMove {
             group_number += 1;
             self.process_single_group(
                 &dir_name,
-                available_files,
+                &available_files,
                 &mut moved_files,
                 &mut runtime_ignored,
                 group_number,
@@ -1854,7 +1891,7 @@ impl DirMove {
     fn process_single_group(
         &self,
         dir_name: &str,
-        available_files: Vec<PathBuf>,
+        available_files: &[PathBuf],
         moved_files: &mut HashSet<PathBuf>,
         runtime_ignored: &mut HashSet<String>,
         group_number: usize,
@@ -1868,7 +1905,7 @@ impl DirMove {
 
         let progress = format!("[{group_number}/{total_groups}]").dimmed();
         println!("{progress} {}: {} files", dir_name.cyan().bold(), available_files.len());
-        for file_path in &available_files {
+        for file_path in available_files {
             println!("  {}", path_to_filename_string(file_path));
         }
 
@@ -1887,14 +1924,15 @@ impl DirMove {
 
             match prompt_result {
                 PromptResult::Confirmed(target_path) => {
-                    if let Err(e) = self.move_files_to_target_dir(&target_path, &available_files) {
-                        print_error!("Failed to process {}: {e}", target_path.display());
-                    } else {
-                        // Mark files as moved
-                        moved_files.extend(available_files);
-                        // Add directory name to database
-                        let final_dir_name = cli_tools::path_to_filename_string(&target_path);
-                        self.add_to_database(&final_dir_name);
+                    match self.move_files_to_target_dir(&target_path, available_files) {
+                        Ok(report) => {
+                            moved_files.extend(report.moved_files);
+                            let final_dir_name = cli_tools::path_to_filename_string(&target_path);
+                            self.add_to_database(&final_dir_name);
+                        }
+                        Err(e) => {
+                            print_error!("Failed to process {}: {e}", target_path.display());
+                        }
                     }
                 }
                 PromptResult::SaveToIgnored => {
@@ -1997,12 +2035,15 @@ impl DirMove {
                 };
 
                 if let PromptResult::Confirmed(target_path) = prompt_result {
-                    if let Err(e) = self.move_files_to_target_dir(&target_path, &files) {
-                        print_error!("Failed to process {}: {e}", target_path.display());
-                    } else {
-                        moved_files.extend(files);
-                        let final_dir_name = cli_tools::path_to_filename_string(&target_path);
-                        self.add_to_database(&final_dir_name);
+                    match self.move_files_to_target_dir(&target_path, &files) {
+                        Ok(report) => {
+                            moved_files.extend(report.moved_files);
+                            let final_dir_name = cli_tools::path_to_filename_string(&target_path);
+                            self.add_to_database(&final_dir_name);
+                        }
+                        Err(e) => {
+                            print_error!("Failed to process {}: {e}", target_path.display());
+                        }
                     }
                 }
             }
@@ -2468,8 +2509,8 @@ mod test_custom_mappings {
             .map(|(pattern, dir)| CustomMapping::new(pattern, dir))
             .collect();
         let config = Config {
+            auto: true,
             custom_mappings,
-            dryrun: true,
             min_group_size: 1,
             min_prefix_chars: 1,
             ..Default::default()
@@ -2580,11 +2621,101 @@ mod test_custom_mappings {
         let files = vec![root.join("something.video.mp4"), root.join("other.file.mp4")];
         let directories = dirmove.collect_directories_in_root()?;
 
-        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+        let mut moved_files = HashSet::new();
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         // "other.file.mp4" should remain since it doesn't match the pattern
         assert_eq!(remaining.len(), 1);
         assert!(remaining[0].ends_with("other.file.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn custom_mapping_success_prevents_later_normal_match() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+        let file_name = "Show.Name.something.mp4";
+        std::fs::write(root.join(file_name), "video")?;
+        std::fs::create_dir(root.join("Custom Dir"))?;
+        std::fs::create_dir(root.join("Show Name"))?;
+
+        let config = Config {
+            auto: true,
+            files_only: true,
+            custom_mappings: vec![CustomMapping::new("something", "Custom Dir")],
+            ..Default::default()
+        };
+        let dirmove = make_dirmove(root.clone(), config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_not_exists(&root.join(file_name));
+        assert_exists(&root.join("Custom Dir").join(file_name));
+        assert_not_exists(&root.join("Show Name").join(file_name));
+        Ok(())
+    }
+
+    #[test]
+    fn dryrun_custom_mapping_consumes_file_for_later_suggestions() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+        let file_name = "Show.Name.something.mp4";
+        let file_path = root.join(file_name);
+        std::fs::write(&file_path, "video")?;
+        std::fs::create_dir(root.join("Custom Dir"))?;
+        std::fs::create_dir(root.join("Show Name"))?;
+
+        let config = Config {
+            dryrun: true,
+            custom_mappings: vec![CustomMapping::new("something", "Custom Dir")],
+            ..Default::default()
+        };
+        let dirmove = make_dirmove(root.clone(), config);
+        let directories = dirmove.collect_directories_in_root()?;
+        let mut consumed_files = HashSet::new();
+
+        let remaining = dirmove.process_custom_mapping_matches(
+            std::slice::from_ref(&file_path),
+            &directories,
+            &mut consumed_files,
+        )?;
+
+        assert!(remaining.is_empty());
+        assert!(consumed_files.contains(&file_path));
+        assert_exists(&file_path);
+        assert_not_exists(&root.join("Custom Dir").join(file_name));
+        Ok(())
+    }
+
+    #[test]
+    fn custom_mapping_skipped_existing_file_can_match_normal_directory() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+        let file_name = "Show.Name.something.mp4";
+        std::fs::write(root.join(file_name), "source")?;
+        std::fs::create_dir(root.join("Custom Dir"))?;
+        std::fs::write(root.join("Custom Dir").join(file_name), "existing")?;
+        std::fs::create_dir(root.join("Show Name"))?;
+
+        let config = Config {
+            auto: true,
+            files_only: true,
+            custom_mappings: vec![CustomMapping::new("something", "Custom Dir")],
+            ..Default::default()
+        };
+        let dirmove = make_dirmove(root.clone(), config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_not_exists(&root.join(file_name));
+        assert_eq!(
+            std::fs::read_to_string(root.join("Custom Dir").join(file_name))?,
+            "existing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("Show Name").join(file_name))?,
+            "source"
+        );
         Ok(())
     }
 
@@ -2605,7 +2736,8 @@ mod test_custom_mappings {
         let files = vec![root.join("file1.mp4"), root.join("file2.mp4")];
         let directories = vec![];
 
-        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+        let mut moved_files = HashSet::new();
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         // All files should remain since there are no mappings
         assert_eq!(remaining.len(), 2);
@@ -2625,7 +2757,8 @@ mod test_custom_mappings {
         let files = vec![root.join("SOMETHING.Video.mp4")];
         let directories = dirmove.collect_directories_in_root()?;
 
-        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+        let mut moved_files = HashSet::new();
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         // File should be matched despite case difference
         assert!(remaining.is_empty());
@@ -2646,7 +2779,8 @@ mod test_custom_mappings {
         let files = vec![root.join("Some.Thing.Video.mp4")];
         let directories = dirmove.collect_directories_in_root()?;
 
-        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+        let mut moved_files = HashSet::new();
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         assert!(remaining.is_empty());
         Ok(())
@@ -2664,7 +2798,8 @@ mod test_custom_mappings {
         let files = vec![root.join("something.video.mp4")];
         let directories = vec![];
 
-        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+        let mut moved_files = HashSet::new();
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         // File should remain since target directory doesn't exist
         assert_eq!(remaining.len(), 1);
@@ -2685,7 +2820,8 @@ mod test_custom_mappings {
         let files = vec![root.join("abc.xyz.video.mp4")];
         let directories = dirmove.collect_directories_in_root()?;
 
-        let remaining = dirmove.process_custom_mapping_matches(&files, &directories)?;
+        let mut moved_files = HashSet::new();
+        let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         // File should be matched to first mapping
         assert!(remaining.is_empty());
@@ -5261,13 +5397,68 @@ mod test_directory_matching {
     }
 
     #[test]
-    fn longer_match_wins() {
+    fn file_can_match_multiple_directories() {
         let dirmove = make_test_dirmove(Vec::new());
         let dirs = make_test_dirs(&["Show", "Show Name"]);
         let files = make_file_paths(&["Show.Name.Episode.mp4"]);
+
         let result = dirmove.match_files_to_directories(&files, &dirs);
-        assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&1));
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get(&0).unwrap().len(), 1);
+        assert_eq!(result.get(&1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn moved_file_is_not_offered_to_later_directory_match() -> anyhow::Result<()> {
+        let tmp = tempfile::TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir(root.join("Show"))?;
+        std::fs::create_dir(root.join("Show Name"))?;
+        let file_name = "Show.Name.Episode.mp4";
+        std::fs::write(root.join(file_name), "video")?;
+
+        let config = Config {
+            auto: true,
+            files_only: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove(root.clone(), config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert!(!root.join(file_name).exists());
+        assert!(root.join("Show Name").join(file_name).exists());
+        assert!(!root.join("Show").join(file_name).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn later_directory_match_can_move_file_skipped_by_preferred_match() -> anyhow::Result<()> {
+        let tmp = tempfile::TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+        let file_name = "Show.Name.Episode.mp4";
+        std::fs::write(root.join(file_name), "source")?;
+        std::fs::create_dir(root.join("Show"))?;
+        std::fs::create_dir(root.join("Show Name"))?;
+        std::fs::write(root.join("Show Name").join(file_name), "existing")?;
+
+        let config = Config {
+            auto: true,
+            files_only: true,
+            ..Default::default()
+        };
+        let dirmove = make_dirmove(root.clone(), config);
+
+        dirmove.move_files_to_dir()?;
+
+        assert_not_exists(&root.join(file_name));
+        assert_eq!(
+            std::fs::read_to_string(root.join("Show Name").join(file_name))?,
+            "existing"
+        );
+        assert_eq!(std::fs::read_to_string(root.join("Show").join(file_name))?, "source");
+        Ok(())
     }
 
     #[test]
