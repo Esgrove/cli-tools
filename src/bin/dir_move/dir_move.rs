@@ -38,6 +38,20 @@ const HIDE_MOVE_PROGRESS: bool = true;
 #[cfg(not(test))]
 const HIDE_MOVE_PROGRESS: bool = false;
 
+/// Precomputed destination directory name variants used while matching files.
+struct DestinationMatchInfo<'a> {
+    /// Index into the original destination directory list.
+    index: usize,
+    /// Lowercase directory name with dots converted to spaces.
+    spaced_name: &'a str,
+    /// Lowercase directory name with spaces and dots removed.
+    normalized_name: String,
+    /// Prefix-stripped spaced name, present only when stripping changed the name.
+    stripped_spaced_name: Option<String>,
+    /// Prefix-stripped normalized name, present only when stripping changed the name.
+    stripped_normalized_name: Option<String>,
+}
+
 /// Runtime state and configuration for a `dirmove` invocation.
 ///
 /// `input_roots` and `output_roots` are independent sets: files and source directories are gathered
@@ -48,6 +62,20 @@ pub struct DirMove {
     output_roots: Vec<PathBuf>,
     config: Config,
     database: Option<Database>,
+}
+
+impl DestinationMatchInfo<'_> {
+    fn matches_file(&self, file_name_spaced: &str, file_name_spaced_stripped: &str, file_name_concat: &str) -> bool {
+        file_name_spaced_stripped.contains(self.spaced_name)
+            || file_name_concat.contains(&self.normalized_name)
+            || self.stripped_spaced_name.as_deref().is_some_and(|stripped_name| {
+                file_name_spaced_stripped.contains(stripped_name) || file_name_spaced.contains(stripped_name)
+            })
+            || self
+                .stripped_normalized_name
+                .as_ref()
+                .is_some_and(|stripped_name| file_name_concat.contains(stripped_name))
+    }
 }
 
 #[cfg(test)]
@@ -162,15 +190,15 @@ impl DirMove {
             return false;
         }
 
-        let normalized = name.to_lowercase().replace(' ', "");
-
         // Skip if it matches a prefix_ignore
         if self.is_ignored_prefix(name) {
             return false;
         }
 
+        let normalized_name = utils::normalize_name(name);
+
         // Skip if it matches an ignored_group_name
-        if self.config.ignored_group_names.contains(&normalized) {
+        if self.ignored_group_name_matches_normalized(&normalized_name) {
             return false;
         }
 
@@ -1077,14 +1105,11 @@ impl DirMove {
         mapping: &CustomMapping,
         directories: &[DirectoryInfo],
     ) -> Option<usize> {
-        let target_normalized = mapping.directory.to_lowercase().replace(['.', ' '], "");
+        let target_normalized = utils::normalize_name(&mapping.directory);
 
         self.sorted_directory_indices(directories)
             .into_iter()
-            .find(|&directory_index| {
-                let directory_normalized = directories[directory_index].name.replace(' ', "");
-                directory_normalized == target_normalized
-            })
+            .find(|&directory_index| utils::normalize_name(&directories[directory_index].name) == target_normalized)
     }
 
     /// Collect candidate destination directories from every output root.
@@ -1137,6 +1162,7 @@ impl DirMove {
             }
         }
 
+        let directories = self.filter_ignored_destination_directories(directories);
         Ok(directories)
     }
 
@@ -1186,6 +1212,37 @@ impl DirMove {
         }
     }
 
+    /// Precompute destination directory name variants used by file matching.
+    fn collect_destination_match_info<'a>(&self, directories: &'a [DirectoryInfo]) -> Vec<DestinationMatchInfo<'a>> {
+        self.sorted_directory_indices(directories)
+            .into_iter()
+            .filter_map(|directory_index| {
+                let directory_name = directories[directory_index].name.as_str();
+                if self.is_ignored_prefix(directory_name) {
+                    return None;
+                }
+
+                let normalized_name = utils::normalize_name(directory_name);
+                let stripped_name = self.strip_ignored_prefixes(directory_name);
+                let (stripped_spaced_name, stripped_normalized_name) = if stripped_name.as_ref() == directory_name {
+                    (None, None)
+                } else {
+                    let stripped_name = stripped_name.into_owned();
+                    let stripped_normalized_name = utils::normalize_name(&stripped_name);
+                    (Some(stripped_name), Some(stripped_normalized_name))
+                };
+
+                Some(DestinationMatchInfo {
+                    index: directory_index,
+                    spaced_name: directory_name,
+                    normalized_name,
+                    stripped_spaced_name,
+                    stripped_normalized_name,
+                })
+            })
+            .collect()
+    }
+
     /// Match files to directories based on normalized name matching.
     ///
     /// Returns a map from directory index into `directories` to the list of matching file paths.
@@ -1198,7 +1255,7 @@ impl DirMove {
     ) -> HashMap<usize, Vec<PathBuf>> {
         let mut matches: HashMap<usize, Vec<PathBuf>> = HashMap::new();
 
-        let directory_indices = self.sorted_directory_indices(directories);
+        let destination_match_info = self.collect_destination_match_info(directories);
 
         for file_path in files {
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
@@ -1213,33 +1270,12 @@ impl DirMove {
             // Apply prefix ignores: strip ignored prefixes from the normalized filename
             let file_name_spaced_stripped = self.strip_ignored_prefixes(&file_name_spaced);
 
-            for &directory_index in &directory_indices {
-                // directory.name is already lowercase with spaces
-                let directory_name = &directories[directory_index].name;
-                // Also strip ignored prefixes from directory name for matching
-                let directory_name_stripped = self.strip_ignored_prefixes(directory_name);
-                // Create concatenated version of directory name (no spaces)
-                let directory_name_concat = directory_name.replace(' ', "");
-                let directory_name_stripped_concat = directory_name_stripped.replace(' ', "");
-
-                // Skip directories whose name is exactly an ignored prefix
-                // (after stripping, the directory name would be empty or unchanged if it's just the prefix)
-                if self.is_ignored_prefix(directory_name) {
-                    continue;
-                }
-
-                // Check multiple matching strategies:
-                // 1. Spaced filename contains spaced directory name (e.g., "some name ep1" contains "some name")
-                // 2. Concatenated filename contains concatenated directory name (e.g., "somename" contains "somename")
-                // 3. With prefix stripping applied to both
-                let is_match = file_name_spaced_stripped.contains(&*directory_name_stripped)
-                    || file_name_spaced.contains(&*directory_name_stripped)
-                    || file_name_spaced_stripped.contains(&**directory_name)
-                    || file_name_concat.contains(&directory_name_concat)
-                    || file_name_concat.contains(&directory_name_stripped_concat);
-
-                if is_match {
-                    matches.entry(directory_index).or_default().push(file_path.clone());
+            for destination_info in &destination_match_info {
+                if destination_info.matches_file(&file_name_spaced, &file_name_spaced_stripped, &file_name_concat) {
+                    matches
+                        .entry(destination_info.index)
+                        .or_default()
+                        .push(file_path.clone());
                     // Only match to first directory found
                     break;
                 }
@@ -1792,7 +1828,7 @@ impl DirMove {
         let dir_name_normalized = utils::normalize_name(dir_name);
 
         // Skip if the stripped directory name matches an ignored group name
-        if self.config.ignored_group_names.contains(&dir_name_normalized) {
+        if self.should_skip_destination_directory(dir_name, &dir_name_normalized) {
             return true;
         }
 
@@ -2134,6 +2170,56 @@ impl DirMove {
         }
     }
 
+    /// Filter ignored destination directories from a complete candidate list.
+    fn filter_ignored_destination_directories(&self, directories: Vec<DirectoryInfo>) -> Vec<DirectoryInfo> {
+        if self.config.ignored_group_names.is_empty() {
+            return directories;
+        }
+
+        directories
+            .into_iter()
+            .filter(|directory_info| {
+                let directory_name_normalized = utils::normalize_name(&directory_info.name);
+                let should_keep =
+                    !self.should_skip_destination_directory(&directory_info.name, &directory_name_normalized);
+                if !should_keep && self.config.verbose {
+                    println!("Ignoring directory: {}", path_to_string_relative(&directory_info.path));
+                }
+                should_keep
+            })
+            .collect()
+    }
+
+    /// Check whether an existing destination directory should be skipped.
+    ///
+    /// `directory_name_normalized` must be precomputed by the caller to avoid repeated normalization
+    /// while filtering the full destination directory list.
+    fn should_skip_destination_directory(&self, directory_name: &str, directory_name_normalized: &str) -> bool {
+        if self.config.ignored_group_names.is_empty() {
+            return false;
+        }
+
+        if self.ignored_group_name_matches_normalized(directory_name_normalized) {
+            return true;
+        }
+
+        let stripped_name = self.strip_ignored_prefixes(directory_name);
+        if stripped_name.as_ref() == directory_name {
+            return false;
+        }
+
+        let stripped_name_normalized = utils::normalize_name(stripped_name.as_ref());
+        self.ignored_group_name_matches_normalized(&stripped_name_normalized)
+    }
+
+    /// Check whether a normalized name matches a configured ignored group name.
+    fn ignored_group_name_matches_normalized(&self, normalized_name: &str) -> bool {
+        self.config
+            .ignored_group_names
+            .iter()
+            .any(|ignored_name| ignored_name == normalized_name)
+    }
+
     /// Create a progress bar that is hidden during tests.
     fn create_progress_bar(length: u64, message: &str) -> ProgressBar {
         #[cfg(test)]
@@ -2436,6 +2522,23 @@ mod test_custom_mappings {
             name: "other dir".to_string(),
         }];
         let result = dirmove.find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_directory_skips_ignored_group_name() {
+        let dirmove = make_dirmove(
+            PathBuf::from("."),
+            Config::test_with_ignored_group_names(vec!["target dir"]),
+        );
+        let mapping = CustomMapping::new("pattern", "Target Dir");
+        let directories = dirmove.filter_ignored_destination_directories(vec![DirectoryInfo {
+            path: PathBuf::from("Target Dir"),
+            name: "target dir".to_string(),
+        }]);
+
+        let result = dirmove.find_directory_for_custom_mapping(&mapping, &directories);
+
         assert_eq!(result, None);
     }
 
@@ -3926,6 +4029,70 @@ mod test_ignored_group_names {
     }
 
     #[test]
+    fn collect_directories_filters_ignored_group_names_and_keeps_other_names() -> anyhow::Result<()> {
+        let tmp = tempfile::TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+        for directory_name in [
+            "Episode",
+            "Season One",
+            "Season.One",
+            "SeasonOne",
+            "Studio",
+            "Studio Archive",
+        ] {
+            std::fs::create_dir(root.join(directory_name))?;
+        }
+
+        let config = Config::test_with_ignored_group_names(vec!["EPISODE", "season one"]);
+        let dirmove = DirMove::new(root, config);
+
+        let mut directory_names: Vec<_> = dirmove
+            .collect_directories_in_root()?
+            .iter()
+            .map(|directory| path_to_filename_string(&directory.path))
+            .collect();
+        directory_names.sort();
+
+        assert_eq!(
+            directory_names,
+            vec!["Studio".to_string(), "Studio Archive".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn collect_directories_filters_prefix_stripped_ignored_group_names() -> anyhow::Result<()> {
+        let tmp = tempfile::TempDir::new()?;
+        let root = tmp.path().to_path_buf();
+        for directory_name in [
+            "DL Studio",
+            "WEB DL Episode",
+            "WEB.DL.Episode",
+            "DL Studio Archive",
+            "Other",
+        ] {
+            std::fs::create_dir(root.join(directory_name))?;
+        }
+
+        let config =
+            Config::test_with_prefix_ignores_and_ignored_group_names(vec!["web", "dl"], vec!["studio", "episode"]);
+        let dirmove = DirMove::new(root, config);
+
+        let mut directory_names: Vec<_> = dirmove
+            .collect_directories_in_root()?
+            .iter()
+            .map(|directory| path_to_filename_string(&directory.path))
+            .collect();
+        directory_names.sort();
+
+        assert_eq!(
+            directory_names,
+            vec!["DL Studio Archive".to_string(), "Other".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ignored_group_name_with_common_words() {
         // Test realistic scenario with common words to ignore
         let tmp = tempfile::TempDir::new().unwrap();
@@ -5034,6 +5201,34 @@ mod test_directory_matching {
         let dirs = make_test_dirs(&["Unknown Dir"]);
         let files = make_file_paths(&["Some.File.mp4", "Other.File.mp4"]);
         let result = dirmove.match_files_to_directories(&files, &dirs);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn ignored_group_name_directory_not_offered() {
+        let dirmove = make_dirmove(
+            PathBuf::from("."),
+            Config::test_with_ignored_group_names(vec!["episode"]),
+        );
+        let dirs = dirmove.filter_ignored_destination_directories(make_test_dirs(&["Episode"]));
+        let files = make_file_paths(&["Studio.Episode.01.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn prefix_stripped_ignored_group_name_directory_not_offered() {
+        let dirmove = make_dirmove(
+            PathBuf::from("."),
+            Config::test_with_prefix_ignores_and_ignored_group_names(vec!["dl"], vec!["studio"]),
+        );
+        let dirs = dirmove.filter_ignored_destination_directories(make_test_dirs(&["DL Studio"]));
+        let files = make_file_paths(&["DL.Studio.Episode.01.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
         assert!(result.is_empty());
     }
 
