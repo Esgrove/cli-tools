@@ -266,12 +266,34 @@ impl VideoFile {
         parent.join(format!("{new_stem}.{target_extension}"))
     }
 
+    /// Compute the output path after removing stale target codec labels.
+    pub(crate) fn get_output_path_without_target_codec_label(&self) -> Option<PathBuf> {
+        let cleaned_stem = self.name_without_target_codec_labels()?;
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        Some(parent.join(format!("{cleaned_stem}.{}", self.extension)))
+    }
+
     /// Return the target container extension for this file.
     pub(crate) fn target_extension(&self, movie_mode: bool, has_external_subtitles: bool) -> &'static str {
         if movie_mode && (self.extension == "mkv" || has_external_subtitles) {
             "mkv"
         } else {
             TARGET_EXTENSION
+        }
+    }
+
+    fn name_without_target_codec_labels(&self) -> Option<String> {
+        if !RE_X265.is_match(&self.name) && !RE_AV1.is_match(&self.name) {
+            return None;
+        }
+
+        let without_x265 = RE_X265.replace_all(&self.name, "");
+        let without_target_labels = RE_AV1.replace_all(&without_x265, "");
+        let cleaned = cli_tools::collapse_repeated_separators(&without_target_labels);
+        if cleaned.is_empty() || cleaned == self.name {
+            None
+        } else {
+            Some(cleaned)
         }
     }
 }
@@ -655,6 +677,34 @@ mod video_file_tests {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
         let output = file.get_output_path(Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
+    }
+
+    #[test]
+    fn output_path_without_target_codec_label_removes_x265() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
+        let output = file.get_output_path_without_target_codec_label();
+        assert_eq!(output, Some(PathBuf::from("/videos/movie.mkv")));
+    }
+
+    #[test]
+    fn output_path_without_target_codec_label_removes_av1() {
+        let file = VideoFile::new(Path::new("/videos/movie.av1.mkv"), 0);
+        let output = file.get_output_path_without_target_codec_label();
+        assert_eq!(output, Some(PathBuf::from("/videos/movie.mkv")));
+    }
+
+    #[test]
+    fn output_path_without_target_codec_label_collapses_separators() {
+        let file = VideoFile::new(Path::new("/videos/movie..x265..1080p.mkv"), 0);
+        let output = file.get_output_path_without_target_codec_label();
+        assert_eq!(output, Some(PathBuf::from("/videos/movie.1080p.mkv")));
+    }
+
+    #[test]
+    fn output_path_without_target_codec_label_returns_none_without_label() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let output = file.get_output_path_without_target_codec_label();
+        assert_eq!(output, None);
     }
 
     #[test]

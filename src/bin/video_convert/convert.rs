@@ -46,6 +46,9 @@ const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {
 /// Minimum ratio of output duration to input duration for a conversion to be considered successful.
 const MIN_DURATION_RATIO: f64 = 0.85;
 
+/// Minimum ratio of muxed output duration to input duration before deleting any source files.
+const MIN_MUX_DURATION_RATIO: f64 = 0.99;
+
 /// Windows API constant for creating a new process group.
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -832,6 +835,15 @@ impl VideoConvert {
             return ProcessResult::Failed { error };
         }
 
+        if let Err(error) = Self::validate_mux_output(input, &command_output, info) {
+            if let Err(delete_error) = self.delete_file(&command_output) {
+                print_error!("Failed to delete invalid subtitle mux output: {delete_error}");
+            }
+            let error = error.to_string();
+            self.log_failure(input, "subtitle-mux", file_index, &error);
+            return ProcessResult::Failed { error };
+        }
+
         if input == final_output {
             if let Err(error) = self.replace_input_with_output(input, &command_output) {
                 let error = error.to_string();
@@ -1223,26 +1235,44 @@ impl VideoConvert {
                             source_duration,
                         } => {
                             if self.config.delete_duplicates {
+                                if Self::paths_refer_to_same_file(&file.path, target_path) {
+                                    print_error!(
+                                        "Refusing to delete duplicate because source and target are the same file:\n  {}",
+                                        cli_tools::path_to_string_relative(&file.path)
+                                    );
+                                    analysis_stats.duplicate_delete_failed += 1;
+                                    continue;
+                                }
+
                                 // Check target duration and delete source if within 10%
                                 match Self::get_video_info(target_path) {
                                     Ok(target_info) => {
-                                        let duration_ratio = if *source_duration > 0.0 {
-                                            (target_info.duration - source_duration).abs() / source_duration
-                                        } else {
-                                            1.0
-                                        };
+                                        if !target_info.is_target_codec() {
+                                            print_error!(
+                                                "Refusing to delete duplicate because target is not HEVC/AV1:\n  Source: {}\n  Target: {}",
+                                                cli_tools::path_to_string_relative(&file.path),
+                                                cli_tools::path_to_string_relative(target_path)
+                                            );
+                                            analysis_stats.duplicate_delete_failed += 1;
+                                            continue;
+                                        }
+
+                                        let duration_ratio =
+                                            Self::duration_difference_ratio(*source_duration, target_info.duration);
                                         if duration_ratio <= 0.1 {
+                                            let duration_message = Self::format_duplicate_duration_match(
+                                                *source_duration,
+                                                target_info.duration,
+                                            );
                                             // Duration within 10%, safe to delete source
                                             if self.config.dryrun {
                                                 println!(
-                                                    "{} (duration match: {:.1}s vs {:.1}s)",
+                                                    "{} ({duration_message})",
                                                     format!(
                                                         "Would delete duplicate: {}",
                                                         cli_tools::path_to_string_relative(&file.path)
                                                     )
-                                                    .yellow(),
-                                                    source_duration,
-                                                    target_info.duration
+                                                    .yellow()
                                                 );
                                                 analysis_stats.duplicates_deleted += 1;
                                             } else if let Err(error) = self.delete_file(&file.path) {
@@ -1253,21 +1283,19 @@ impl VideoConvert {
                                                 analysis_stats.duplicate_delete_failed += 1;
                                             } else {
                                                 println!(
-                                                    "{} (duration match: {:.1}s vs {:.1}s)",
+                                                    "{} ({duration_message})",
                                                     format!(
                                                         "Deleted duplicate: {}",
                                                         cli_tools::path_to_string_relative(&file.path)
                                                     )
-                                                    .green(),
-                                                    source_duration,
-                                                    target_info.duration
+                                                    .green()
                                                 );
                                                 analysis_stats.duplicates_deleted += 1;
                                             }
                                         } else {
                                             // Duration mismatch, log error
                                             print_error!(
-                                                "Duration mismatch for duplicate - source: {:.1}s, target: {:.1}s ({:.1}% difference)\n  Source: {}\n  Target: {}",
+                                                "Duration mismatch for duplicate - source: {:.1}s, target: {:.1}s ({:.3}% difference)\n  Source: {}\n  Target: {}",
                                                 source_duration,
                                                 target_info.duration,
                                                 duration_ratio * 100.0,
@@ -1534,10 +1562,15 @@ impl VideoConvert {
     ) {
         cmd.args(["-map", "0:v"]);
 
+        let mut mapped_audio = false;
         for &language in MOVIE_AUDIO_LANGUAGES {
             if audio_languages.contains(language) {
                 cmd.arg("-map").arg(format!("0:a:m:language:{language}"));
+                mapped_audio = true;
             }
+        }
+        if !mapped_audio {
+            cmd.args(["-map", "0:a?"]);
         }
 
         for &language in MOVIE_SUBTITLE_LANGUAGES {
@@ -1592,6 +1625,96 @@ impl VideoConvert {
             .filter(|language| !language.is_empty())
             .map(ToOwned::to_owned)
             .collect())
+    }
+
+    /// Probe how many streams of one ffmpeg stream type exist in a file.
+    fn probe_stream_count(input: &Path, stream_type: &str) -> Result<usize> {
+        let output = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                stream_type,
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(input)
+            .output()
+            .context("Failed to execute ffprobe")?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            anyhow::bail!("ffprobe failed while counting {stream_type} streams: {}", stderr.trim());
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count())
+    }
+
+    /// Validate subtitle mux output before deleting or replacing any source files.
+    fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) -> Result<()> {
+        let output_info = Self::get_video_info(output).context("Failed to get subtitle mux output info")?;
+        if output_info.duration < input_info.duration * MIN_MUX_DURATION_RATIO {
+            anyhow::bail!(
+                "Muxed output duration {:.1}s is less than {:.0}% of original {:.1}s",
+                output_info.duration,
+                MIN_MUX_DURATION_RATIO * 100.0,
+                input_info.duration
+            );
+        }
+
+        let input_audio_streams = Self::probe_stream_count(input, "a")?;
+        if input_audio_streams > 0 {
+            let output_audio_streams = Self::probe_stream_count(output, "a")?;
+            if output_audio_streams == 0 {
+                anyhow::bail!("Muxed output has no audio streams, but input has {input_audio_streams} audio stream(s)");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Return true when two paths resolve to the same filesystem entry.
+    fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+        if left == right {
+            return true;
+        }
+
+        let Ok(left) = std::fs::canonicalize(left) else {
+            return false;
+        };
+        let Ok(right) = std::fs::canonicalize(right) else {
+            return false;
+        };
+        left == right
+    }
+
+    /// Return the absolute duration difference divided by the source duration.
+    fn duration_difference_ratio(source_duration: f64, target_duration: f64) -> f64 {
+        if source_duration > 0.0 {
+            (target_duration - source_duration).abs() / source_duration
+        } else {
+            1.0
+        }
+    }
+
+    /// Format the duplicate duration detail for human-readable output.
+    fn format_duplicate_duration_match(source_duration: f64, target_duration: f64) -> String {
+        let source_tenths = (source_duration * 10.0).round() as i64;
+        let target_tenths = (target_duration * 10.0).round() as i64;
+        if source_tenths == target_tenths {
+            "duration match".to_string()
+        } else {
+            let duration_ratio = Self::duration_difference_ratio(source_duration, target_duration);
+            format!(
+                "duration match: {source_duration:.1}s vs {target_duration:.1}s ({:.3}% difference)",
+                duration_ratio * 100.0
+            )
+        }
     }
 
     /// Check if a file should be converted based on extension and include/exclude patterns.
@@ -1713,8 +1836,31 @@ impl VideoConvert {
     }
 
     fn replace_input_with_output(&self, input: &Path, output: &Path) -> Result<()> {
-        self.delete_file(input)?;
-        std::fs::rename(output, input).context("Failed to move muxed subtitle output into place")
+        let backup = Self::backup_output_path(input);
+        std::fs::rename(input, &backup).context("Failed to move original file aside before replacement")?;
+
+        if let Err(error) = std::fs::rename(output, input) {
+            if let Err(restore_error) = std::fs::rename(&backup, input) {
+                anyhow::bail!(
+                    "Failed to move muxed subtitle output into place: {error}, failed to restore original file: {restore_error}"
+                );
+            }
+            return Err(error).context("Failed to move muxed subtitle output into place");
+        }
+
+        if let Err(error) = self.delete_file(&backup) {
+            print_error!("Failed to delete replaced original file {}: {error}", backup.display());
+        }
+        Ok(())
+    }
+
+    fn backup_output_path(output: &Path) -> PathBuf {
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        let stem = cli_tools::path_to_file_stem_string(output);
+        let extension = cli_tools::path_to_file_extension_string(output);
+        let backup_stem = format!("{stem}.vconvert-backup");
+        let backup_filename = format!("{backup_stem}.{extension}");
+        cli_tools::get_unique_path(parent, &backup_filename, &backup_stem, &extension)
     }
 
     fn temporary_output_path(output: &Path) -> PathBuf {
@@ -1844,6 +1990,19 @@ impl VideoConvert {
             };
         }
 
+        if !is_target_codec && let Some(output_path) = file.get_output_path_without_target_codec_label() {
+            if output_path.exists() && !filter.overwrite {
+                return AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::OutputExists {
+                        path: output_path,
+                        source_duration: info.duration,
+                    },
+                };
+            }
+            return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone(), output_path, Vec::new()));
+        }
+
         // Bitrate and duration limits only apply to conversions, not remuxes
         if !is_target_codec {
             // Check minimum bitrate threshold
@@ -1913,6 +2072,15 @@ impl VideoConvert {
         }
 
         let output_path = file.get_output_path_for_mode(suffix, movie_mode, has_external_subtitles);
+
+        if output_path == file.path {
+            return AnalysisResult::Skip {
+                file,
+                reason: SkipReason::AnalysisFailed {
+                    error: "Output path resolves to the input file; refusing in-place conversion/remux".to_string(),
+                },
+            };
+        }
 
         // Check if output already exists
         if output_path.exists() && !filter.overwrite {
@@ -2016,6 +2184,7 @@ mod test_build_ffmpeg_command {
         assert!(has_arg_pair(&args, "-map", "0:a:m:language:eng"));
         assert!(has_arg_pair(&args, "-map", "0:a:m:language:fin"));
         assert!(has_arg_pair(&args, "-map", "0:a:m:language:jpn"));
+        assert!(!has_arg_pair(&args, "-map", "0:a?"));
         assert!(!has_arg_pair(&args, "-map", "0:a:m:language:swe"));
         assert!(!has_arg_pair(&args, "-map", "0:a:m:language:ger"));
         assert!(has_arg_pair(&args, "-map", "0:s:m:language:eng"));
@@ -2025,6 +2194,34 @@ mod test_build_ffmpeg_command {
         assert!(has_arg_pair(&args, "-map_metadata", "0"));
         assert!(has_arg_pair(&args, "-map_chapters", "0"));
         assert!(!has_arg_pair(&args, "-c", "copy"));
+    }
+
+    #[test]
+    fn movie_mode_falls_back_to_all_audio_when_no_preferred_language_exists() {
+        let mut command = Command::new("ffmpeg");
+        let audio_languages = BTreeSet::from(["und".to_string()]);
+        let subtitle_languages = BTreeSet::new();
+
+        VideoConvert::add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
+        let args = command_args(&command);
+
+        assert!(has_arg_pair(&args, "-map", "0:v"));
+        assert!(has_arg_pair(&args, "-map", "0:a?"));
+        assert!(!has_arg_pair(&args, "-map", "0:a:m:language:und"));
+    }
+
+    #[test]
+    fn duplicate_duration_match_hides_equal_rounded_durations() {
+        let message = VideoConvert::format_duplicate_duration_match(5414.84, 5414.83);
+
+        assert_eq!(message, "duration match");
+    }
+
+    #[test]
+    fn duplicate_duration_match_reports_percentage_when_rounded_duration_differs() {
+        let message = VideoConvert::format_duplicate_duration_match(100.0, 100.2);
+
+        assert_eq!(message, "duration match: 100.0s vs 100.2s (0.200% difference)");
     }
 
     #[test]
@@ -2257,6 +2454,20 @@ mod test_classify_needs_conversion {
             panic!("Expected NeedsConversion");
         };
         assert_eq!(processable.output_path, PathBuf::from("/videos/movie.x265.mkv"));
+    }
+
+    #[test]
+    fn h264_file_already_named_x265_renames_to_remove_stale_label() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
+        let info = h264_info();
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
+
+        let AnalysisResult::NeedsRename(processable) = result else {
+            panic!("Expected NeedsRename");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.mkv"));
     }
 
     #[test]

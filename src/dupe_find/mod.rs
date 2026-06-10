@@ -14,12 +14,6 @@ static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&pattern).expect("Invalid codec regex")
 });
 
-/// Regex to match two or more consecutive dots.
-static RE_MULTI_DOTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.{2,}").expect("Invalid dots regex"));
-
-/// Regex to match two or more consecutive whitespace characters.
-static RE_MULTI_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2,}").expect("Invalid spaces regex"));
-
 /// Common codec patterns to remove when normalizing.
 pub const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
 
@@ -113,10 +107,10 @@ impl DupeFileInfo {
 
 /// Normalize a file stem by removing resolution and codec patterns.
 ///
-/// Converts to lowercase and strips resolution tags (e.g. `1080p`), codec tags
-/// (e.g. `x265`), then cleans up leftover consecutive dots, spaces, and
-/// trailing separators. Falls back to the lowercased original stem if
-/// normalization would produce an empty string.
+/// Converts to lowercase and strips resolution tags (e.g. `1080p`),
+/// codec tags (e.g. `x265`),
+/// then cleans up leftover consecutive dots, spaces, and trailing separators.
+/// Falls back to the lowercased original stem if normalization would produce an empty string.
 pub fn normalize_stem(stem: &str) -> String {
     let mut normalized = stem.to_lowercase();
 
@@ -126,13 +120,7 @@ pub fn normalize_stem(stem: &str) -> String {
     // Remove codec patterns
     normalized = RE_CODEC.replace_all(&normalized, "").to_string();
 
-    // Clean up multiple dots and spaces
-    normalized = RE_MULTI_DOTS.replace_all(&normalized, ".").to_string();
-    normalized = RE_MULTI_SPACES.replace_all(&normalized, " ").to_string();
-
-    let result = normalized
-        .trim_matches(|character| character == '.' || character == ' ' || character == '_' || character == '-')
-        .to_string();
+    let result = crate::collapse_repeated_separators(&normalized);
 
     // Fallback to lowercase stem if normalization removed everything
     if result.is_empty() { stem.to_lowercase() } else { result }

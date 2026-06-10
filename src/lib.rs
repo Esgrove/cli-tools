@@ -30,6 +30,10 @@ use walkdir::WalkDir;
 pub static RE_RESOLUTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid resolution regex"));
 
+/// Shared regex to match repeated filename separators.
+pub static RE_REPEATED_SEPARATORS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[.\-_\s]{2,}").expect("Invalid repeated separators regex"));
+
 #[cfg(not(test))]
 const PROJECT_NAME: &str = env!("CARGO_PKG_NAME");
 
@@ -199,6 +203,34 @@ pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
     }
 
     (old_diff, new_diff)
+}
+
+/// Collapse repeated filename separators and trim separators from both ends.
+///
+/// This is useful when producing a cleaned display filename
+/// after removing tokens such as codecs, resolutions, or release tags.
+/// Consecutive separators made from dots, hyphens, underscores, or whitespace
+/// are reduced to the first separator in each sequence,
+/// then any remaining separator is trimmed from both ends.
+///
+/// # Examples
+///
+/// ```
+/// let cleaned = cli_tools::collapse_repeated_separators("Movie..Title__x265--1080p ");
+/// assert_eq!(cleaned, "Movie.Title_x265-1080p");
+/// ```
+#[must_use]
+pub fn collapse_repeated_separators(text: &str) -> String {
+    let collapsed = RE_REPEATED_SEPARATORS.replace_all(text, |captures: &regex::Captures<'_>| {
+        captures[0]
+            .chars()
+            .next()
+            .map_or_else(String::new, |character| character.to_string())
+    });
+
+    collapsed
+        .trim_matches(|character: char| matches!(character, '.' | '-' | '_') || character.is_whitespace())
+        .to_string()
 }
 
 /// Format bytes as human-readable size.
@@ -1349,6 +1381,100 @@ mod system_directory_tests {
                 assert!(should_skip_entry(&entry));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod repeated_separator_tests {
+    use super::*;
+
+    #[test]
+    fn leaves_empty_string_empty() {
+        assert_eq!(collapse_repeated_separators(""), "");
+    }
+
+    #[test]
+    fn leaves_string_without_separators_unchanged() {
+        assert_eq!(collapse_repeated_separators("MovieTitle2024"), "MovieTitle2024");
+    }
+
+    #[test]
+    fn collapses_repeated_dots() {
+        assert_eq!(collapse_repeated_separators("movie..title"), "movie.title");
+        assert_eq!(collapse_repeated_separators("movie....title"), "movie.title");
+    }
+
+    #[test]
+    fn collapses_repeated_hyphens() {
+        assert_eq!(collapse_repeated_separators("movie--title"), "movie-title");
+        assert_eq!(collapse_repeated_separators("movie----title"), "movie-title");
+    }
+
+    #[test]
+    fn collapses_repeated_underscores() {
+        assert_eq!(collapse_repeated_separators("movie__title"), "movie_title");
+        assert_eq!(collapse_repeated_separators("movie____title"), "movie_title");
+    }
+
+    #[test]
+    fn collapses_repeated_spaces() {
+        assert_eq!(collapse_repeated_separators("movie  title"), "movie title");
+        assert_eq!(collapse_repeated_separators("movie    title"), "movie title");
+    }
+
+    #[test]
+    fn collapses_repeated_tabs_and_newlines() {
+        assert_eq!(collapse_repeated_separators("movie\t\ttitle"), "movie\ttitle");
+        assert_eq!(collapse_repeated_separators("movie\n\n\ntitle"), "movie\ntitle");
+    }
+
+    #[test]
+    fn collapses_mixed_separator_sequence_to_first_separator() {
+        assert_eq!(collapse_repeated_separators("movie.-_ title"), "movie.title");
+        assert_eq!(collapse_repeated_separators("movie_-. title"), "movie_title");
+        assert_eq!(collapse_repeated_separators("movie -_.title"), "movie title");
+    }
+
+    #[test]
+    fn collapses_multiple_sequences_independently() {
+        assert_eq!(
+            collapse_repeated_separators("movie..title__2024--1080p"),
+            "movie.title_2024-1080p"
+        );
+    }
+
+    #[test]
+    fn trims_separators_from_ends() {
+        assert_eq!(collapse_repeated_separators("--movie.title__"), "movie.title");
+        assert_eq!(collapse_repeated_separators("  movie.title  "), "movie.title");
+        assert_eq!(collapse_repeated_separators("..movie.title.."), "movie.title");
+    }
+
+    #[test]
+    fn all_separators_becomes_empty() {
+        assert_eq!(collapse_repeated_separators("..."), "");
+        assert_eq!(collapse_repeated_separators("---___   "), "");
+    }
+
+    #[test]
+    fn preserves_single_inner_separators() {
+        assert_eq!(
+            collapse_repeated_separators("movie-title_part one.two"),
+            "movie-title_part one.two"
+        );
+    }
+
+    #[test]
+    fn preserves_unicode_text() {
+        assert_eq!(collapse_repeated_separators("Tähtien..Sota"), "Tähtien.Sota");
+        assert_eq!(collapse_repeated_separators("映画__タイトル"), "映画_タイトル");
+    }
+
+    #[test]
+    fn handles_realistic_codec_label_removal_leftovers() {
+        assert_eq!(collapse_repeated_separators("Movie..Title..1080p"), "Movie.Title.1080p");
+        assert_eq!(collapse_repeated_separators("Movie.Title."), "Movie.Title");
+        assert_eq!(collapse_repeated_separators(".Movie.Title"), "Movie.Title");
     }
 }
 
