@@ -505,6 +505,13 @@ Options:
 
 ## Development
 
+### Required Tools
+
+```shell
+cargo install --locked cargo-nextest
+cargo install --locked cargo-llvm-cov
+```
+
 ### Testing
 
 This project uses [cargo-nextest](https://nexte.st/) for faster test execution with better output.
@@ -534,9 +541,27 @@ cargo llvm-cov nextest --html --open
 
 The HTML report is generated in `target/llvm-cov/html/`.
 
-### Required Tools
+### Benchmarks
+
+Benchmarks use [Criterion.rs](https://github.com/criterion-rs/criterion.rs) and live in `benches/`.
 
 ```shell
-cargo install --locked cargo-nextest
-cargo install --locked cargo-llvm-cov
+# Run all benchmarks
+cargo bench
+
+# Run a specific benchmark suite
+cargo bench --bench date
+cargo bench --bench dir_move
+cargo bench --bench dupe_find
+cargo bench --bench format
+cargo bench --bench lib
+cargo bench --bench resolution
+
+# Run benchmarks matching a filter pattern
+cargo bench -- normalize_stem
+
+# Quick benchmark run for faster local feedback
+cargo bench -- --quick
 ```
+
+Criterion reports are generated under `target/criterion/`.
