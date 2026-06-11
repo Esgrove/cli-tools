@@ -33,6 +33,10 @@ pub static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b
 /// Regex to match AV1 codec identifier in filenames (case-insensitive, word boundary).
 pub static RE_AV1: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bav1\b").expect("Invalid av1 regex"));
 
+/// Regex to match 10-bit labels in filenames.
+pub static RE_10BIT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b10[.\-_\s]*bit\b").expect("Invalid 10-bit regex"));
+
 /// Regex to match source codec identifiers that should be replaced in output filenames.
 pub static RE_SOURCE_CODEC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:x264|h\.?264)\b").expect("Invalid source codec regex"));
@@ -560,7 +564,12 @@ impl VideoConvert {
         for pending_file in pending_files.into_iter().filter(|file| file.full_path.exists()) {
             let video_file = VideoFile::new_with_metadata(&pending_file.full_path);
             let subtitles = subtitle_matches.remove(&video_file.path).unwrap_or_default();
-            let processable = self.processable_file(video_file, pending_file.to_video_info(), subtitles);
+            let info = if pending_file.bit_depth >= 8 {
+                pending_file.to_video_info()
+            } else {
+                Self::get_video_info(&pending_file.full_path).unwrap_or_else(|_| pending_file.to_video_info())
+            };
+            let processable = self.processable_file(video_file, info, subtitles);
             match pending_file.action {
                 PendingAction::Convert => conversion_files.push(processable),
                 PendingAction::Remux => remux_files.push(processable),
@@ -655,7 +664,7 @@ impl VideoConvert {
                 "-select_streams",
                 "V:0",
                 "-show_entries",
-                "stream=codec_name,bit_rate,width,height,r_frame_rate:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
+                "stream=codec_name,bit_rate,width,height,r_frame_rate,pix_fmt,bits_per_raw_sample:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
                 "-output_format",
                 "default=nokey=0:noprint_wrappers=1",
             ])
@@ -910,6 +919,7 @@ impl VideoConvert {
             true,
             self.config.movie_mode,
             &file.subtitle_files,
+            info.bit_depth,
         ) {
             Ok(command) => command,
             Err(e) => {
@@ -949,6 +959,7 @@ impl VideoConvert {
                 false,
                 self.config.movie_mode,
                 &file.subtitle_files,
+                info.bit_depth,
             ) {
                 Ok(command) => command,
                 Err(e) => {
@@ -1004,6 +1015,7 @@ impl VideoConvert {
                 use_cuda_filters,
                 self.config.movie_mode,
                 &file.subtitle_files,
+                info.bit_depth,
             ) {
                 Ok(command) => command,
                 Err(e) => {
@@ -1123,6 +1135,7 @@ impl VideoConvert {
             let subtitles = subtitle_matches.remove(&file.path).unwrap_or_default();
             if let Some(cached_info) = scan_cache.get(path_key.as_ref())
                 && cached_info.size_bytes == file.size_bytes
+                && cached_info.bit_depth >= 8
             {
                 cache_results.push(Self::classify_video_file_with_mode(
                     file,
@@ -1373,8 +1386,12 @@ impl VideoConvert {
 
     /// Create a processable file using the converter's output path rules.
     fn processable_file(&self, file: VideoFile, info: VideoInfo, subtitle_files: Vec<SubtitleFile>) -> ProcessableFile {
-        let output_path =
-            file.get_output_path_for_mode(info.codec_suffix(), self.config.movie_mode, !subtitle_files.is_empty());
+        let output_path = file.get_output_path_for_mode_and_bit_depth(
+            info.codec_suffix(),
+            self.config.movie_mode,
+            !subtitle_files.is_empty(),
+            info.bit_depth,
+        );
         ProcessableFile::new(file, info, output_path, subtitle_files)
     }
 
@@ -1475,6 +1492,7 @@ impl VideoConvert {
     /// Build the ffmpeg command for HEVC conversion.
     /// When `use_cuda_filters` is true, uses `hwupload_cuda` and `scale_cuda` for GPU-accelerated filtering.
     /// When false, uses CPU-based filtering which is more compatible but slightly slower.
+    #[allow(clippy::too_many_arguments)]
     fn build_ffmpeg_command(
         input: &Path,
         output: &Path,
@@ -1483,6 +1501,7 @@ impl VideoConvert {
         use_cuda_filters: bool,
         movie_mode: bool,
         subtitle_files: &[SubtitleFile],
+        bit_depth: u8,
     ) -> Result<Command> {
         // GPU tuning for RTX 4090 to use more VRAM and improve performance
         let extra_hw_frames = "64";
@@ -1510,7 +1529,8 @@ impl VideoConvert {
         }
 
         if use_cuda_filters {
-            cmd.args(["-vf", "hwupload_cuda,scale_cuda=format=nv12"]);
+            let pixel_format = if bit_depth > 8 { "p010le" } else { "nv12" };
+            cmd.args(["-vf", &format!("hwupload_cuda,scale_cuda=format={pixel_format}")]);
         }
 
         cmd.args(["-c:v", "hevc_nvenc"])
@@ -1520,6 +1540,10 @@ impl VideoConvert {
             .args(["-b:v", "0"])
             .args(["-rc-lookahead", lookahead])
             .args(["-spatial_aq", "1", "-temporal_aq", "1"]);
+
+        if bit_depth > 8 {
+            cmd.args(["-profile:v", "main10", "-pix_fmt", "p010le"]);
+        }
 
         if cli_tools::path_to_file_extension_string(output) == TARGET_EXTENSION {
             cmd.args(["-tag:v", "hvc1"]);
@@ -1947,10 +1971,28 @@ impl VideoConvert {
         let suffix = info.codec_suffix();
         let has_external_subtitles = !subtitle_files.is_empty();
         let target_extension = file.target_extension(movie_mode, false);
+        let remove_target_codec_label = !is_target_codec && file.has_target_codec_label();
+        let remove_10bit_label = !info.is_10_bit() && file.has_10bit_label();
+
+        if (remove_target_codec_label || remove_10bit_label)
+            && let Some(output_path) =
+                file.get_output_path_without_stale_labels(remove_target_codec_label, remove_10bit_label)
+        {
+            if output_path.exists() && !filter.overwrite {
+                return AnalysisResult::Skip {
+                    file,
+                    reason: SkipReason::OutputExists {
+                        path: output_path,
+                        source_duration: info.duration,
+                    },
+                };
+            }
+            return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone(), output_path, Vec::new()));
+        }
 
         // Target-codec files with external subtitles need a mux pass, even if otherwise already converted.
         if is_target_codec && has_external_subtitles {
-            let output_path = file.get_output_path_for_mode(suffix, movie_mode, true);
+            let output_path = file.get_output_path_for_mode_and_bit_depth(suffix, movie_mode, true, info.bit_depth);
             if output_path.exists() && output_path != file.path && !filter.overwrite {
                 return AnalysisResult::Skip {
                     file,
@@ -1972,7 +2014,22 @@ impl VideoConvert {
         if is_target_codec && file.extension == target_extension {
             if !suffix.regex().is_match(&file.name) {
                 // Needs rename to add codec suffix
-                let output_path = file.get_output_path_for_mode(suffix, movie_mode, false);
+                let output_path =
+                    file.get_output_path_for_mode_and_bit_depth(suffix, movie_mode, false, info.bit_depth);
+                if output_path.exists() && !filter.overwrite {
+                    return AnalysisResult::Skip {
+                        file,
+                        reason: SkipReason::OutputExists {
+                            path: output_path,
+                            source_duration: info.duration,
+                        },
+                    };
+                }
+                return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone(), output_path, Vec::new()));
+            }
+            if info.is_10_bit() && !file.has_10bit_label() {
+                let output_path =
+                    file.get_output_path_for_mode_and_bit_depth(suffix, movie_mode, false, info.bit_depth);
                 if output_path.exists() && !filter.overwrite {
                     return AnalysisResult::Skip {
                         file,
@@ -1988,19 +2045,6 @@ impl VideoConvert {
                 file,
                 reason: SkipReason::AlreadyConverted,
             };
-        }
-
-        if !is_target_codec && let Some(output_path) = file.get_output_path_without_target_codec_label() {
-            if output_path.exists() && !filter.overwrite {
-                return AnalysisResult::Skip {
-                    file,
-                    reason: SkipReason::OutputExists {
-                        path: output_path,
-                        source_duration: info.duration,
-                    },
-                };
-            }
-            return AnalysisResult::NeedsRename(ProcessableFile::new(file, info.clone(), output_path, Vec::new()));
         }
 
         // Bitrate and duration limits only apply to conversions, not remuxes
@@ -2071,7 +2115,8 @@ impl VideoConvert {
             }
         }
 
-        let output_path = file.get_output_path_for_mode(suffix, movie_mode, has_external_subtitles);
+        let output_path =
+            file.get_output_path_for_mode_and_bit_depth(suffix, movie_mode, has_external_subtitles, info.bit_depth);
 
         if output_path == file.path {
             return AnalysisResult::Skip {
@@ -2225,6 +2270,46 @@ mod test_build_ffmpeg_command {
     }
 
     #[test]
+    fn conversion_uses_8bit_pixel_format_for_8bit_source() {
+        let command = VideoConvert::build_ffmpeg_command(
+            Path::new("input.mkv"),
+            Path::new("output.mp4"),
+            28,
+            true,
+            true,
+            false,
+            &[],
+            8,
+        )
+        .unwrap();
+        let args = command_args(&command);
+
+        assert!(has_arg_pair(&args, "-vf", "hwupload_cuda,scale_cuda=format=nv12"));
+        assert!(!has_arg_pair(&args, "-profile:v", "main10"));
+        assert!(!has_arg_pair(&args, "-pix_fmt", "p010le"));
+    }
+
+    #[test]
+    fn conversion_preserves_10bit_for_10bit_source() {
+        let command = VideoConvert::build_ffmpeg_command(
+            Path::new("input.mkv"),
+            Path::new("output.mp4"),
+            28,
+            true,
+            true,
+            false,
+            &[],
+            10,
+        )
+        .unwrap();
+        let args = command_args(&command);
+
+        assert!(has_arg_pair(&args, "-vf", "hwupload_cuda,scale_cuda=format=p010le"));
+        assert!(has_arg_pair(&args, "-profile:v", "main10"));
+        assert!(has_arg_pair(&args, "-pix_fmt", "p010le"));
+    }
+
+    #[test]
     fn movie_mode_conversion_copies_audio_and_subtitles_without_generic_codec() {
         let mut command = Command::new("ffmpeg");
 
@@ -2262,6 +2347,7 @@ mod test_classify_already_converted {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         }
     }
@@ -2317,6 +2403,7 @@ mod test_classify_already_converted {
             width: 3840,
             height: 2160,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2363,6 +2450,7 @@ mod test_classify_needs_rename {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2386,6 +2474,7 @@ mod test_classify_needs_rename {
             width: 3840,
             height: 2160,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2424,6 +2513,7 @@ mod test_classify_needs_conversion {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         }
     }
@@ -2471,6 +2561,35 @@ mod test_classify_needs_conversion {
     }
 
     #[test]
+    fn h264_8bit_file_named_10bit_renames_to_remove_stale_label() {
+        let file = VideoFile::new(Path::new("/videos/movie.10bit.mkv"), 0);
+        let info = h264_info();
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
+
+        let AnalysisResult::NeedsRename(processable) = result else {
+            panic!("Expected NeedsRename");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.mkv"));
+    }
+
+    #[test]
+    fn h264_10bit_file_converts_to_output_with_10bit_label() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let mut info = h264_info();
+        info.bit_depth = 10;
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
+
+        let AnalysisResult::NeedsConversion(processable) = result else {
+            panic!("Expected NeedsConversion");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.10bit.x265.mkv"));
+    }
+
+    #[test]
     fn h264_mp4_needs_conversion() {
         let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
         let info = h264_info();
@@ -2495,6 +2614,7 @@ mod test_classify_needs_conversion {
             width: 1280,
             height: 720,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2535,6 +2655,7 @@ mod test_classify_needs_remux {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2558,6 +2679,7 @@ mod test_classify_needs_remux {
             width: 3840,
             height: 2160,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2581,6 +2703,7 @@ mod test_classify_needs_remux {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2600,6 +2723,54 @@ mod test_classify_needs_remux {
     }
 
     #[test]
+    fn hevc_10bit_mkv_movie_mode_without_10bit_label_needs_rename() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 10,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
+
+        let AnalysisResult::NeedsRename(processable) = result else {
+            panic!("Expected NeedsRename");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.10bit.x265.mkv"));
+    }
+
+    #[test]
+    fn hevc_8bit_mkv_movie_mode_with_10bit_label_needs_rename() {
+        let file = VideoFile::new(Path::new("/videos/movie.10bit.x265.mkv"), 0);
+        let info = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+        let filter = default_filter();
+
+        let result = VideoConvert::classify_video_file_with_mode(file, &filter, &info, true, Vec::new());
+
+        let AnalysisResult::NeedsRename(processable) = result else {
+            panic!("Expected NeedsRename");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.x265.mkv"));
+    }
+
+    #[test]
     fn hevc_mkv_movie_mode_without_suffix_needs_rename() {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let info = VideoInfo {
@@ -2610,6 +2781,7 @@ mod test_classify_needs_remux {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2633,6 +2805,7 @@ mod test_classify_needs_remux {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2658,6 +2831,7 @@ mod test_classify_needs_remux {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = default_filter();
@@ -2685,6 +2859,7 @@ mod test_classify_bitrate_filtering {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         }
     }
@@ -2803,6 +2978,7 @@ mod test_classify_bitrate_filtering {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {
@@ -2837,6 +3013,7 @@ mod test_classify_duration_filtering {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         }
     }
@@ -2906,6 +3083,7 @@ mod test_classify_duration_filtering {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {
@@ -2942,6 +3120,7 @@ mod test_classify_resolution_filtering {
             width: 640,
             height: 480,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {
@@ -2982,6 +3161,7 @@ mod test_classify_resolution_filtering {
             width: 1280,
             height: 720,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {
@@ -3013,6 +3193,7 @@ mod test_classify_resolution_filtering {
             width: 720,
             height: 1280,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {
@@ -3049,6 +3230,7 @@ mod test_classify_resolution_filtering {
             width: 640,
             height: 480,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {
@@ -3115,6 +3297,7 @@ mod test_classify_output_exists {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -3149,6 +3332,7 @@ mod test_classify_output_exists {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -3178,6 +3362,7 @@ mod test_classify_output_exists {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -3212,6 +3397,7 @@ mod test_classify_output_exists {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -3240,6 +3426,7 @@ mod test_classify_output_exists {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -3275,6 +3462,7 @@ mod test_classify_combined_filters {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {
@@ -3311,6 +3499,7 @@ mod test_classify_combined_filters {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let filter = AnalysisFilter {

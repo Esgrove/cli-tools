@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
-use crate::convert::{RE_AV1, RE_SOURCE_CODEC, RE_X265, TARGET_EXTENSION};
+use crate::convert::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
 /// Information about a video file from ffprobe
@@ -23,6 +23,8 @@ pub struct VideoInfo {
     pub(crate) height: u32,
     /// Framerate in frames per second
     pub(crate) frames_per_second: f64,
+    /// Video bit depth per color channel.
+    pub(crate) bit_depth: u8,
     /// Warning message from ffprobe stderr (if any)
     pub(crate) warning: Option<String>,
 }
@@ -241,18 +243,13 @@ impl VideoFile {
         Self::new(path, size_bytes)
     }
 
-    /// Compute the output path for the converted file with the given codec suffix.
-    #[cfg(test)]
-    pub(crate) fn get_output_path(&self, suffix: Codec) -> PathBuf {
-        self.get_output_path_for_mode(suffix, false, false)
-    }
-
-    /// Compute the output path using movie-mode container rules when requested.
-    pub(crate) fn get_output_path_for_mode(
+    /// Compute the output path using movie-mode and bit-depth filename rules.
+    pub(crate) fn get_output_path_for_mode_and_bit_depth(
         &self,
         suffix: Codec,
         movie_mode: bool,
         has_external_subtitles: bool,
+        bit_depth: u8,
     ) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let target_extension = self.target_extension(movie_mode, has_external_subtitles);
@@ -263,12 +260,21 @@ impl VideoFile {
         } else {
             format!("{}.{suffix}", self.name)
         };
+        let new_stem = if bit_depth > 8 {
+            Self::add_10bit_label(&new_stem, suffix)
+        } else {
+            new_stem
+        };
         parent.join(format!("{new_stem}.{target_extension}"))
     }
 
-    /// Compute the output path after removing stale target codec labels.
-    pub(crate) fn get_output_path_without_target_codec_label(&self) -> Option<PathBuf> {
-        let cleaned_stem = self.name_without_target_codec_labels()?;
+    /// Compute the output path after removing stale labels.
+    pub(crate) fn get_output_path_without_stale_labels(
+        &self,
+        remove_target_codec_labels: bool,
+        remove_10bit_label: bool,
+    ) -> Option<PathBuf> {
+        let cleaned_stem = self.name_without_stale_labels(remove_target_codec_labels, remove_10bit_label)?;
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         Some(parent.join(format!("{cleaned_stem}.{}", self.extension)))
     }
@@ -282,24 +288,53 @@ impl VideoFile {
         }
     }
 
-    fn name_without_target_codec_labels(&self) -> Option<String> {
-        if !RE_X265.is_match(&self.name) && !RE_AV1.is_match(&self.name) {
+    pub(crate) fn has_10bit_label(&self) -> bool {
+        RE_10BIT.is_match(&self.name)
+    }
+
+    pub(crate) fn has_target_codec_label(&self) -> bool {
+        RE_X265.is_match(&self.name) || RE_AV1.is_match(&self.name)
+    }
+
+    fn name_without_stale_labels(&self, remove_target_codec_labels: bool, remove_10bit_label: bool) -> Option<String> {
+        if (!remove_target_codec_labels || !self.has_target_codec_label())
+            && (!remove_10bit_label || !self.has_10bit_label())
+        {
             return None;
         }
 
-        let without_x265 = RE_X265.replace_all(&self.name, "");
-        let without_target_labels = RE_AV1.replace_all(&without_x265, "");
-        let cleaned = cli_tools::collapse_repeated_separators(&without_target_labels);
+        let mut cleaned = self.name.clone();
+        if remove_target_codec_labels {
+            cleaned = RE_X265.replace_all(&cleaned, "").into_owned();
+            cleaned = RE_AV1.replace_all(&cleaned, "").into_owned();
+        }
+        if remove_10bit_label {
+            cleaned = RE_10BIT.replace_all(&cleaned, "").into_owned();
+        }
+
+        let cleaned = cli_tools::collapse_repeated_separators(&cleaned);
         if cleaned.is_empty() || cleaned == self.name {
             None
         } else {
             Some(cleaned)
         }
     }
+
+    fn add_10bit_label(stem: &str, suffix: Codec) -> String {
+        if RE_10BIT.is_match(stem) {
+            return stem.to_string();
+        }
+        if suffix.regex().is_match(stem) {
+            suffix.regex().replace(stem, format!("10bit.{suffix}")).into_owned()
+        } else {
+            format!("{stem}.10bit")
+        }
+    }
 }
 
 impl VideoInfo {
     /// Parse `VideoInfo` from ffprobe output.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn from_ffprobe_output(stdout: &str, stderr: &str, path: &Path) -> anyhow::Result<Self> {
         let mut codec = String::new();
         let mut bitrate_kbps: Option<u64> = None;
@@ -308,6 +343,7 @@ impl VideoInfo {
         let mut width: Option<u32> = None;
         let mut height: Option<u32> = None;
         let mut frames_per_second: Option<f64> = None;
+        let mut bit_depth: Option<u8> = None;
 
         // Parse key=value pairs from output
         // Example output:
@@ -360,6 +396,19 @@ impl VideoInfo {
                             height = Some(h);
                         }
                     }
+                    "bits_per_raw_sample" => {
+                        if bit_depth.is_none()
+                            && let Ok(depth) = value.parse::<u8>()
+                            && depth > 0
+                        {
+                            bit_depth = Some(depth);
+                        }
+                    }
+                    "pix_fmt" => {
+                        if bit_depth.is_none() {
+                            bit_depth = Self::bit_depth_from_pixel_format(value);
+                        }
+                    }
                     "r_frame_rate" => {
                         // Parse fractional framerate like "30/1" or "30000/1001".
                         // Only accept the first valid value within a reasonable range,
@@ -402,6 +451,8 @@ impl VideoInfo {
             anyhow::bail!("failed to detect framerate");
         };
 
+        let bit_depth = bit_depth.unwrap_or(8);
+
         let warning = if stderr.is_empty() {
             None
         } else {
@@ -419,8 +470,23 @@ impl VideoInfo {
             width,
             height,
             frames_per_second,
+            bit_depth,
             warning,
         })
+    }
+
+    fn bit_depth_from_pixel_format(pixel_format: &str) -> Option<u8> {
+        if pixel_format.contains("10") {
+            Some(10)
+        } else if pixel_format.contains("12") {
+            Some(12)
+        } else if pixel_format.contains("16") {
+            Some(16)
+        } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") || pixel_format == "nv12" {
+            Some(8)
+        } else {
+            None
+        }
     }
 
     /// Determine quality level based on resolution and bitrate.
@@ -467,6 +533,11 @@ impl VideoInfo {
     /// Check if the codec is a target codec that does not need conversion.
     pub(crate) fn is_target_codec(&self) -> bool {
         matches!(self.codec.as_str(), "hevc" | "h265" | "av1")
+    }
+
+    /// Return true when the source video uses more than 8 bits per color channel.
+    pub(crate) const fn is_10_bit(&self) -> bool {
+        self.bit_depth > 8
     }
 
     /// Get the codec suffix for this video's codec.
@@ -603,7 +674,8 @@ impl std::fmt::Display for VideoInfo {
             self.frames_per_second
         )?;
         writeln!(f, "Duration:   {}", cli_tools::format_duration_seconds(self.duration))?;
-        write!(f, "Resolution: {}x{}", self.width, self.height)?;
+        writeln!(f, "Resolution: {}x{}", self.width, self.height)?;
+        write!(f, "Bit depth:  {}-bit", self.bit_depth)?;
         if let Some(warning) = &self.warning {
             write!(f, "\nWarning:    {warning}")?;
         }
@@ -658,6 +730,19 @@ impl From<walkdir::DirEntry> for VideoFile {
 mod video_file_tests {
     use super::*;
 
+    fn output_path(file: &VideoFile, suffix: Codec) -> PathBuf {
+        file.get_output_path_for_mode_and_bit_depth(suffix, false, false, 8)
+    }
+
+    fn output_path_for_mode(
+        file: &VideoFile,
+        suffix: Codec,
+        movie_mode: bool,
+        has_external_subtitles: bool,
+    ) -> PathBuf {
+        file.get_output_path_for_mode_and_bit_depth(suffix, movie_mode, has_external_subtitles, 8)
+    }
+
     #[test]
     fn new_extracts_name_and_extension() {
         let file = VideoFile::new(Path::new("/path/to/video.mp4"), 1000);
@@ -676,98 +761,126 @@ mod video_file_tests {
     #[test]
     fn output_path_adds_x265_suffix() {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
-        let output = file.get_output_path(Codec::X265);
+        let output = output_path(&file, Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
     fn output_path_preserves_existing_x265() {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
-        let output = file.get_output_path(Codec::X265);
+        let output = output_path(&file, Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
     fn output_path_without_target_codec_label_removes_x265() {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
-        let output = file.get_output_path_without_target_codec_label();
+        let output = file.get_output_path_without_stale_labels(true, false);
         assert_eq!(output, Some(PathBuf::from("/videos/movie.mkv")));
     }
 
     #[test]
     fn output_path_without_target_codec_label_removes_av1() {
         let file = VideoFile::new(Path::new("/videos/movie.av1.mkv"), 0);
-        let output = file.get_output_path_without_target_codec_label();
+        let output = file.get_output_path_without_stale_labels(true, false);
         assert_eq!(output, Some(PathBuf::from("/videos/movie.mkv")));
     }
 
     #[test]
     fn output_path_without_target_codec_label_collapses_separators() {
         let file = VideoFile::new(Path::new("/videos/movie..x265..1080p.mkv"), 0);
-        let output = file.get_output_path_without_target_codec_label();
+        let output = file.get_output_path_without_stale_labels(true, false);
         assert_eq!(output, Some(PathBuf::from("/videos/movie.1080p.mkv")));
     }
 
     #[test]
     fn output_path_without_target_codec_label_returns_none_without_label() {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
-        let output = file.get_output_path_without_target_codec_label();
+        let output = file.get_output_path_without_stale_labels(true, false);
         assert_eq!(output, None);
+    }
+
+    #[test]
+    fn output_path_without_10bit_label_removes_stale_label() {
+        let file = VideoFile::new(Path::new("/videos/movie.10bit.mkv"), 0);
+        let output = file.get_output_path_without_stale_labels(false, true);
+        assert_eq!(output, Some(PathBuf::from("/videos/movie.mkv")));
+    }
+
+    #[test]
+    fn output_path_without_stale_labels_removes_codec_and_10bit_labels() {
+        let file = VideoFile::new(Path::new("/videos/movie.10bit.x265.mkv"), 0);
+        let output = file.get_output_path_without_stale_labels(true, true);
+        assert_eq!(output, Some(PathBuf::from("/videos/movie.mkv")));
+    }
+
+    #[test]
+    fn output_path_for_10bit_adds_label_before_codec_suffix() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let output = file.get_output_path_for_mode_and_bit_depth(Codec::X265, true, false, 10);
+        assert_eq!(output, PathBuf::from("/videos/movie.10bit.x265.mkv"));
+    }
+
+    #[test]
+    fn output_path_for_10bit_does_not_duplicate_existing_label() {
+        let file = VideoFile::new(Path::new("/videos/movie.10bit.mkv"), 0);
+        let output = file.get_output_path_for_mode_and_bit_depth(Codec::X265, true, false, 10);
+        assert_eq!(output, PathBuf::from("/videos/movie.10bit.x265.mkv"));
     }
 
     #[test]
     fn output_path_adds_av1_suffix() {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
-        let output = file.get_output_path(Codec::Av1);
+        let output = output_path(&file, Codec::Av1);
         assert_eq!(output, PathBuf::from("/videos/movie.av1.mp4"));
     }
 
     #[test]
     fn movie_mode_output_path_keeps_mkv_container() {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true, false);
+        let output = output_path_for_mode(&file, Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
     }
 
     #[test]
     fn movie_mode_output_path_preserves_existing_x265() {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true, false);
+        let output = output_path_for_mode(&file, Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
     }
 
     #[test]
     fn movie_mode_output_path_replaces_existing_x264() {
         let file = VideoFile::new(Path::new("/videos/Movie.Title.2024.1080p.x264.mkv"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true, false);
+        let output = output_path_for_mode(&file, Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/Movie.Title.2024.1080p.x265.mkv"));
     }
 
     #[test]
     fn output_path_replaces_existing_x264() {
         let file = VideoFile::new(Path::new("/videos/movie.x264.mkv"), 0);
-        let output = file.get_output_path(Codec::X265);
+        let output = output_path(&file, Codec::X265);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
     fn movie_mode_output_path_keeps_mp4_for_mp4_input() {
         let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true, false);
+        let output = output_path_for_mode(&file, Codec::X265, true, false);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mp4"));
     }
 
     #[test]
     fn movie_mode_output_path_uses_mkv_for_external_subtitles() {
         let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
-        let output = file.get_output_path_for_mode(Codec::X265, true, true);
+        let output = output_path_for_mode(&file, Codec::X265, true, true);
         assert_eq!(output, PathBuf::from("/videos/movie.x265.mkv"));
     }
 
     #[test]
     fn output_path_preserves_existing_av1() {
         let file = VideoFile::new(Path::new("/videos/movie.av1.mkv"), 0);
-        let output = file.get_output_path(Codec::Av1);
+        let output = output_path(&file, Codec::Av1);
         assert_eq!(output, PathBuf::from("/videos/movie.av1.mp4"));
     }
 
@@ -834,6 +947,7 @@ mod video_info_tests {
         assert_eq!(info.width, 1920);
         assert_eq!(info.height, 1080);
         assert!((info.frames_per_second - 30.0).abs() < 0.01);
+        assert_eq!(info.bit_depth, 8);
         assert!(info.warning.is_none());
     }
 
@@ -866,6 +980,33 @@ mod video_info_tests {
         let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("duration"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_parses_10bit_from_pixel_format() {
+        let output = "codec_name=hevc\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      pix_fmt=yuv420p10le\n\
+                      r_frame_rate=24000/1001\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mkv")).unwrap();
+        assert_eq!(info.bit_depth, 10);
+    }
+
+    #[test]
+    fn from_ffprobe_output_prefers_raw_sample_bit_depth() {
+        let output = "codec_name=hevc\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      bits_per_raw_sample=10\n\
+                      pix_fmt=yuv420p\n\
+                      r_frame_rate=24000/1001\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mkv")).unwrap();
+        assert_eq!(info.bit_depth, 10);
     }
 
     #[test]
@@ -915,6 +1056,7 @@ mod video_info_tests {
                       size=53340514337\n\
                       width=3840\n\
                       height=1504\n\
+                      pix_fmt=yuv420p10le\n\
                       r_frame_rate=24000/1001\n\
                       codec_name=mjpeg\n\
                       width=4050\n\
@@ -924,6 +1066,7 @@ mod video_info_tests {
         assert_eq!(info.codec, "hevc");
         assert_eq!(info.width, 3840);
         assert_eq!(info.height, 1504);
+        assert_eq!(info.bit_depth, 10);
         assert!((info.frames_per_second - 23.98).abs() < 0.01);
     }
 
@@ -963,6 +1106,7 @@ mod video_info_tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
         let display = format!("{info}");

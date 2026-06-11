@@ -46,6 +46,8 @@ pub struct PendingFile {
     pub height: u32,
     /// Framerate in frames per second.
     pub frames_per_second: f64,
+    /// Video bit depth per color channel.
+    pub bit_depth: u8,
     /// Action to perform: "convert" or "remux".
     pub action: PendingAction,
     /// When the entry was added to the database.
@@ -219,6 +221,7 @@ impl Database {
                     width INTEGER NOT NULL,
                     height INTEGER NOT NULL,
                     frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 0,
                     action TEXT NOT NULL,
                     created_time INTEGER NOT NULL,
                     modified_time INTEGER
@@ -243,6 +246,7 @@ impl Database {
                     width INTEGER NOT NULL,
                     height INTEGER NOT NULL,
                     frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 0,
                     scanned_time INTEGER NOT NULL
                 );
 
@@ -261,6 +265,33 @@ impl Database {
             )
             .context("Failed to initialize database schema")?;
 
+        self.add_column_if_missing("pending_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("scanned_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.connection
+            .execute("DELETE FROM scanned_files WHERE bit_depth < 8", [])
+            .context("Failed to remove stale scan cache entries without bit depth")?;
+
+        Ok(())
+    }
+
+    fn add_column_if_missing(&self, table_name: &str, column_name: &str, column_definition: &str) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("PRAGMA table_info({table_name})"))
+            .with_context(|| format!("Failed to inspect table schema: {table_name}"))?;
+        let column_exists = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|name| name == column_name);
+
+        if !column_exists {
+            self.connection
+                .execute(
+                    &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
+                    [],
+                )
+                .with_context(|| format!("Failed to add {column_name} column to {table_name}"))?;
+        }
         Ok(())
     }
 
@@ -290,8 +321,8 @@ impl Database {
         self.connection
             .execute(
                 r"
-                INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, action, created_time, modified_time)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 ON CONFLICT(full_path) DO UPDATE SET
                     extension = excluded.extension,
                     codec = excluded.codec,
@@ -301,6 +332,7 @@ impl Database {
                     width = excluded.width,
                     height = excluded.height,
                     frames_per_second = excluded.frames_per_second,
+                    bit_depth = excluded.bit_depth,
                     action = excluded.action,
                     modified_time = excluded.modified_time
                 ",
@@ -314,6 +346,7 @@ impl Database {
                     info.width,
                     info.height,
                     info.frames_per_second,
+                    i64::from(info.bit_depth),
                     action.as_str(),
                     now,
                     modified_time,
@@ -358,8 +391,8 @@ impl Database {
             transaction
                 .execute(
                     r"
-                    INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, action, created_time, modified_time)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                     ON CONFLICT(full_path) DO UPDATE SET
                         extension = excluded.extension,
                         codec = excluded.codec,
@@ -369,6 +402,7 @@ impl Database {
                         width = excluded.width,
                         height = excluded.height,
                         frames_per_second = excluded.frames_per_second,
+                        bit_depth = excluded.bit_depth,
                         action = excluded.action,
                         modified_time = excluded.modified_time
                     ",
@@ -382,6 +416,7 @@ impl Database {
                         info.width,
                         info.height,
                         info.frames_per_second,
+                        i64::from(info.bit_depth),
                         action.as_str(),
                         now,
                         modified_time,
@@ -473,7 +508,7 @@ impl Database {
 
         let sql = format!(
             r"
-            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, action, created_time, modified_time
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time
             FROM pending_files
             {where_clause}
             {order_clause}
@@ -504,7 +539,7 @@ impl Database {
 
         let mut statement = self.connection.prepare(
             r"
-            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, action, created_time, modified_time
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time
             FROM pending_files
             WHERE full_path = ?1
             ",
@@ -591,8 +626,8 @@ impl Database {
         self.connection
             .execute(
                 r"
-                INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 ON CONFLICT(full_path) DO UPDATE SET
                     size_bytes = excluded.size_bytes,
                     codec = excluded.codec,
@@ -601,6 +636,7 @@ impl Database {
                     width = excluded.width,
                     height = excluded.height,
                     frames_per_second = excluded.frames_per_second,
+                    bit_depth = excluded.bit_depth,
                     scanned_time = excluded.scanned_time
                 ",
                 params![
@@ -612,6 +648,7 @@ impl Database {
                     info.width,
                     info.height,
                     info.frames_per_second,
+                    i64::from(info.bit_depth),
                     now,
                 ],
             )
@@ -646,8 +683,8 @@ impl Database {
             transaction
                 .execute(
                     r"
-                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     ON CONFLICT(full_path) DO UPDATE SET
                         size_bytes = excluded.size_bytes,
                         codec = excluded.codec,
@@ -656,6 +693,7 @@ impl Database {
                         width = excluded.width,
                         height = excluded.height,
                         frames_per_second = excluded.frames_per_second,
+                        bit_depth = excluded.bit_depth,
                         scanned_time = excluded.scanned_time
                     ",
                     params![
@@ -667,6 +705,7 @@ impl Database {
                         info.width,
                         info.height,
                         info.frames_per_second,
+                        i64::from(info.bit_depth),
                         now,
                     ],
                 )
@@ -691,7 +730,7 @@ impl Database {
 
         let mut statement = self.connection.prepare(
             r"
-            SELECT codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second
+            SELECT codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth
             FROM scanned_files
             WHERE full_path = ?1 AND size_bytes = ?2
             ",
@@ -707,6 +746,7 @@ impl Database {
                     width: row.get::<_, i64>(4)? as u32,
                     height: row.get::<_, i64>(5)? as u32,
                     frames_per_second: row.get(6)?,
+                    bit_depth: row.get::<_, i64>(7)? as u8,
                     warning: None,
                 })
             })
@@ -726,7 +766,7 @@ impl Database {
     pub fn get_all_scanned_files(&self) -> Result<std::collections::HashMap<String, VideoInfo>> {
         let mut statement = self.connection.prepare(
             r"
-            SELECT full_path, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second
+            SELECT full_path, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth
             FROM scanned_files
             ",
         )?;
@@ -742,6 +782,7 @@ impl Database {
                     width: row.get::<_, i64>(5)? as u32,
                     height: row.get::<_, i64>(6)? as u32,
                     frames_per_second: row.get(7)?,
+                    bit_depth: row.get::<_, i64>(8)? as u8,
                     warning: None,
                 };
                 Ok((path, info))
@@ -924,9 +965,10 @@ fn row_to_pending_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingFile>
         width: row.get::<_, i64>(7)? as u32,
         height: row.get::<_, i64>(8)? as u32,
         frames_per_second: row.get(9)?,
-        action: PendingAction::from_str(&row.get::<_, String>(10)?),
-        created_time: row.get(11)?,
-        modified_time: row.get(12)?,
+        bit_depth: row.get::<_, i64>(10)? as u8,
+        action: PendingAction::from_str(&row.get::<_, String>(11)?),
+        created_time: row.get(12)?,
+        modified_time: row.get(13)?,
     })
 }
 
@@ -941,6 +983,7 @@ impl PendingFile {
             width: self.width,
             height: self.height,
             frames_per_second: self.frames_per_second,
+            bit_depth: self.bit_depth.max(8),
             warning: None,
         }
     }
@@ -1021,6 +1064,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         }
     }
@@ -1063,6 +1107,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1078,6 +1123,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1169,6 +1215,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1180,6 +1227,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1231,6 +1279,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1242,6 +1291,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1409,6 +1459,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 10,
             action: PendingAction::Convert,
             created_time: 0,
             modified_time: None,
@@ -1422,6 +1473,7 @@ mod tests {
         assert_eq!(info.width, 1920);
         assert_eq!(info.height, 1080);
         cli_tools::assert_f64_eq(info.frames_per_second, 24.0);
+        assert_eq!(info.bit_depth, 10);
     }
 
     #[test]
@@ -1461,6 +1513,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1472,6 +1525,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1518,6 +1572,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1529,6 +1584,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1540,6 +1596,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1628,6 +1685,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 60.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1641,6 +1699,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1654,6 +1713,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1707,6 +1767,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1718,6 +1779,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1805,6 +1867,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1816,6 +1879,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1827,6 +1891,7 @@ mod tests {
             width: 1920,
             height: 1080,
             frames_per_second: 24.0,
+            bit_depth: 8,
             warning: None,
         };
 
@@ -1994,6 +2059,7 @@ mod tests {
             width: 1280,
             height: 720,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
         database
@@ -2034,6 +2100,7 @@ mod tests {
             width: 1280,
             height: 720,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
         let path_b = PathBuf::from("/videos/b.mp4");
@@ -2084,6 +2151,7 @@ mod tests {
             width: 1280,
             height: 720,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
         let path_b = PathBuf::from("/videos/b.mp4");
@@ -2141,6 +2209,7 @@ mod tests {
             width: 1280,
             height: 720,
             frames_per_second: 30.0,
+            bit_depth: 8,
             warning: None,
         };
 
