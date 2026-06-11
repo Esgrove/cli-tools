@@ -416,13 +416,15 @@ impl DirMove {
     /// Handles file conflicts based on the overwrite config flag.
     /// Deletes the source directory if it becomes empty.
     fn merge_directory_contents(&self, source: &Path, target: &Path) -> anyhow::Result<()> {
-        let source_display = path_to_string_relative(source);
-        let target_display = path_to_string_relative(target);
+        let source_display = self.get_merge_display_path(source);
+        let target_display = self.get_merge_display_path(target);
 
         print_magenta!("{}", format!("Merging: {source_display} -> {target_display}").bold());
 
         let mut skipped_files = Vec::new();
         let mut moved_count = 0;
+        let mut file_entries = Vec::new();
+        let mut directory_entries = Vec::new();
 
         let entries: Vec<_> = std::fs::read_dir(source)?.filter_map(Result::ok).collect();
 
@@ -453,23 +455,31 @@ impl DirMove {
                 continue;
             }
 
-            // Move the entry (file or directory)
             if entry_path.is_dir() {
-                if target_path.exists() && self.config.overwrite {
-                    std::fs::remove_dir_all(&target_path)?;
-                }
-                if std::fs::rename(&entry_path, &target_path).is_err() {
-                    utils::copy_dir_recursive(&entry_path, &target_path)?;
-                    std::fs::remove_dir_all(&entry_path)?;
-                }
+                directory_entries.push((entry_path, target_path));
             } else {
-                if target_path.exists() && self.config.overwrite {
+                file_entries.push(entry_path);
+            }
+        }
+
+        // File moves are delegated to the shared mover, which prints its own progress and summary,
+        // so their count is intentionally not added to `moved_count` to avoid a duplicate summary line.
+        if !file_entries.is_empty() {
+            let report = self.move_files_to_target_dir(target, &file_entries)?;
+            skipped_files.extend(report.skipped_files.iter().map(|path| path_to_filename_string(path)));
+        }
+
+        for (entry_path, target_path) in directory_entries {
+            if target_path.exists() && self.config.overwrite {
+                if target_path.is_dir() {
+                    std::fs::remove_dir_all(&target_path)?;
+                } else {
                     std::fs::remove_file(&target_path)?;
                 }
-                if std::fs::rename(&entry_path, &target_path).is_err() {
-                    std::fs::copy(&entry_path, &target_path)?;
-                    std::fs::remove_file(&entry_path)?;
-                }
+            }
+            if std::fs::rename(&entry_path, &target_path).is_err() {
+                utils::copy_dir_recursive(&entry_path, &target_path)?;
+                std::fs::remove_dir_all(&entry_path)?;
             }
             moved_count += 1;
         }
@@ -953,7 +963,7 @@ impl DirMove {
         target_directory: &DirectoryInfo,
         source_directories: &[PathBuf],
     ) -> anyhow::Result<()> {
-        let target_display = self.get_directory_display_path(target_directory);
+        let target_display = self.get_merge_display_path(&target_directory.path);
         println!(
             "{}: {} directorie(s)",
             target_display.cyan().bold(),
@@ -961,7 +971,7 @@ impl DirMove {
         );
 
         for source_directory in source_directories {
-            println!("  {}", path_to_string_relative(source_directory));
+            println!("  {}", self.get_merge_display_path(source_directory));
         }
 
         println!("  {} Merge to: {target_display}", "→".green());
@@ -1462,6 +1472,29 @@ impl DirMove {
                 || get_relative_path_or_filename(&dir.path, self.first_output_root()),
                 |(output_root, _)| get_relative_path_or_filename(&dir.path, output_root),
             )
+    }
+
+    /// Format paths for whole-directory merge prompts.
+    ///
+    /// Input-root paths stay compact, but output-only roots are shown in full so source and target
+    /// directories with the same name are not visually ambiguous.
+    fn get_merge_display_path(&self, path: &Path) -> String {
+        if let Some(input_root) = Self::nearest_containing_root(path, &self.input_roots) {
+            return get_relative_path_or_filename(path, input_root);
+        }
+
+        if let Some(output_root) = Self::nearest_containing_root(path, &self.output_roots) {
+            if self
+                .input_roots
+                .iter()
+                .any(|input_root| cli_tools::paths_refer_to_same_file(input_root, output_root))
+            {
+                return get_relative_path_or_filename(path, output_root);
+            }
+            return path.display().to_string();
+        }
+
+        path_to_string_relative(path)
     }
 
     /// Move files to the target directory, creating it if needed.
@@ -2289,6 +2322,15 @@ impl DirMove {
             .iter()
             .any(|ignore| ignore.eq_ignore_ascii_case(name))
     }
+
+    /// Return the root that most closely contains `path`, preferring the deepest matching root.
+    fn nearest_containing_root<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
+        roots
+            .iter()
+            .filter_map(|root| path.strip_prefix(root).ok().map(|relative| (root.as_path(), relative)))
+            .min_by_key(|(_, relative)| relative.components().count())
+            .map(|(root, _)| root)
+    }
 }
 
 impl DirMove {
@@ -3104,6 +3146,26 @@ mod test_output_root {
 
         assert_not_exists(&input_directory);
         assert_exists(&output_directory.join("Example.S01E01.mp4"));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_merge_display_uses_full_output_path_when_roots_differ() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        let input_directory = input_root.join("Example");
+        let output_directory = output_root.join("Example");
+        std::fs::create_dir_all(&input_directory)?;
+        std::fs::create_dir_all(&output_directory)?;
+
+        let dirmove = make_dirmove_with_output(input_root, output_root, Config::default());
+
+        assert_eq!(dirmove.get_merge_display_path(&input_directory), "Example");
+        assert_eq!(
+            dirmove.get_merge_display_path(&output_directory),
+            output_directory.display().to_string()
+        );
         Ok(())
     }
 
