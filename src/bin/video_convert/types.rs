@@ -323,7 +323,11 @@ impl VideoInfo {
             let line = line.trim();
             if let Some((key, value)) = line.split_once('=') {
                 match key {
-                    "codec_name" => codec = value.to_lowercase(),
+                    "codec_name" => {
+                        if codec.is_empty() {
+                            codec = value.to_lowercase();
+                        }
+                    }
                     "bit_rate" | "BPS" | "BPS-eng" => {
                         if bitrate_kbps.is_none()
                             && let Ok(bps) = value.parse::<u64>()
@@ -343,12 +347,16 @@ impl VideoInfo {
                         }
                     }
                     "width" => {
-                        if let Ok(w) = value.parse::<u32>() {
+                        if width.is_none()
+                            && let Ok(w) = value.parse::<u32>()
+                        {
                             width = Some(w);
                         }
                     }
                     "height" => {
-                        if let Ok(h) = value.parse::<u32>() {
+                        if height.is_none()
+                            && let Ok(h) = value.parse::<u32>()
+                        {
                             height = Some(h);
                         }
                     }
@@ -896,6 +904,27 @@ mod video_info_tests {
         let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("framerate"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_takes_first_video_metadata_when_later_stream_is_cover_art() {
+        let output = "codec_name=hevc\n\
+                      bit_rate=N/A\n\
+                      BPS=55592880\n\
+                      duration=7675.877\n\
+                      size=53340514337\n\
+                      width=3840\n\
+                      height=1504\n\
+                      r_frame_rate=24000/1001\n\
+                      codec_name=mjpeg\n\
+                      width=4050\n\
+                      height=6000\n\
+                      r_frame_rate=90000/1\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mkv")).unwrap();
+        assert_eq!(info.codec, "hevc");
+        assert_eq!(info.width, 3840);
+        assert_eq!(info.height, 1504);
+        assert!((info.frames_per_second - 23.98).abs() < 0.01);
     }
 
     #[test]

@@ -653,7 +653,7 @@ impl VideoConvert {
                 "-v",
                 "error",
                 "-select_streams",
-                "v",
+                "V:0",
                 "-show_entries",
                 "stream=codec_name,bit_rate,width,height,r_frame_rate:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
                 "-output_format",
@@ -2077,7 +2077,7 @@ impl VideoConvert {
             return AnalysisResult::Skip {
                 file,
                 reason: SkipReason::AnalysisFailed {
-                    error: "Output path resolves to the input file; refusing in-place conversion/remux".to_string(),
+                    error: "Output path resolves to the input file, refusing in-place conversion/remux".to_string(),
                 },
             };
         }
