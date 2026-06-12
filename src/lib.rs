@@ -507,6 +507,53 @@ pub const fn is_network_path(_path: &Path) -> bool {
     false
 }
 
+/// Get the available disk space in bytes for the volume containing the given path.
+///
+/// When `path` is a file, the space is measured for the volume of its parent directory.
+/// Returns `None` if the available space could not be determined.
+#[cfg(windows)]
+#[must_use]
+pub fn available_disk_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    // `GetDiskFreeSpaceExW` expects a directory; use the parent directory for file paths.
+    let directory = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+
+    let mut wide: Vec<u16> = directory.as_os_str().encode_wide().collect();
+    wide.push(0); // null terminator
+
+    let mut free_bytes_available: u64 = 0;
+    // SAFETY: GetDiskFreeSpaceExW reads the null-terminated directory path and writes the
+    // number of free bytes available to the caller into the out-parameter. The remaining
+    // out-parameters are null, which the API explicitly allows.
+    #[allow(unsafe_code)]
+    let result = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &raw mut free_bytes_available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    (result != 0).then_some(free_bytes_available)
+}
+
+/// Get the available disk space in bytes for the volume containing the given path.
+///
+/// On non-Windows platforms the available space cannot be determined without an
+/// additional dependency, so this always returns `None`.
+#[cfg(not(windows))]
+#[must_use]
+pub const fn available_disk_space(_path: &Path) -> Option<u64> {
+    None
+}
+
 /// Check if entry should be skipped (hidden or system directory).
 /// Combines `is_hidden` and `is_system_directory` checks.
 #[must_use]

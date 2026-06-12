@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use colored::Colorize;
 use regex::Regex;
 
 use crate::convert::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265, TARGET_EXTENSION};
@@ -142,6 +143,17 @@ pub enum ProcessResult {
     SubtitlesMuxed {},
     /// Failed to process file
     Failed { error: String },
+}
+
+/// Outcome of processing a batch of files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingOutcome {
+    /// All files in the batch were processed, or the configured limit was reached.
+    Completed,
+    /// Processing was aborted by the user with Ctrl+C.
+    Aborted,
+    /// Processing was stopped because the disk does not have enough free space.
+    OutOfDiskSpace,
 }
 
 /// Result of analyzing a video file to determine what action to take.
@@ -715,6 +727,17 @@ impl std::fmt::Display for SkipReason {
             Self::AnalysisFailed { error } => {
                 write!(f, "Failed to analyze: {error}")
             }
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessingOutcome {
+    /// Format the reason processing stopped. `Completed` formats as an empty string.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed => Ok(()),
+            Self::Aborted => write!(f, "{}", "Aborted by user".bold().red()),
+            Self::OutOfDiskSpace => write!(f, "{}", "Stopped: not enough free disk space".bold().red()),
         }
     }
 }

@@ -20,8 +20,8 @@ use crate::database::{Database, PendingAction};
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 use crate::types::{
-    AnalysisFilter, AnalysisOutput, AnalysisResult, Codec, ProcessResult, ProcessableFile, SkipReason, SubtitleFile,
-    VideoFile, VideoInfo, VideoInfoCache, movie_subtitle_match_score,
+    AnalysisFilter, AnalysisOutput, AnalysisResult, Codec, ProcessResult, ProcessableFile, ProcessingOutcome,
+    SkipReason, SubtitleFile, VideoFile, VideoInfo, VideoInfoCache, movie_subtitle_match_score,
 };
 use crate::{SortOrder, VideoConvertArgs};
 
@@ -56,6 +56,10 @@ const MIN_MUX_DURATION_RATIO: f64 = 0.99;
 /// Windows API constant for creating a new process group.
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Minimum free disk space required before converting a file, as a multiple of the
+/// original file size.
+const MIN_DISK_SPACE_FACTOR: u64 = 2;
 
 /// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert {
@@ -117,7 +121,7 @@ impl VideoConvert {
         .expect("Failed to set Ctrl+C handler");
 
         let mut stats = RunStats::default();
-        let mut aborted = false;
+        let mut outcome = ProcessingOutcome::Completed;
         let mut processed_count: usize = 0;
 
         // Gather candidate files
@@ -209,7 +213,7 @@ impl VideoConvert {
 
         // Process remuxes
         if !self.config.skip_remux && !analysis_output.remuxes.is_empty() {
-            let (remux_stats, was_aborted) = self.process_files_with_db_cleanup(
+            let (remux_stats, batch_outcome) = self.process_files_with_db_cleanup(
                 analysis_output.remuxes,
                 &abort_flag,
                 &mut processed_count,
@@ -218,12 +222,15 @@ impl VideoConvert {
                 Self::remux_to_mp4,
             );
             stats += remux_stats;
-            aborted = was_aborted;
+            outcome = batch_outcome;
         }
 
         // Process subtitle muxes
-        if !self.config.skip_remux && !analysis_output.subtitle_muxes.is_empty() && !aborted {
-            let (subtitle_mux_stats, was_aborted) = self.process_files_with_db_cleanup(
+        if !self.config.skip_remux
+            && !analysis_output.subtitle_muxes.is_empty()
+            && outcome == ProcessingOutcome::Completed
+        {
+            let (subtitle_mux_stats, batch_outcome) = self.process_files_with_db_cleanup(
                 analysis_output.subtitle_muxes,
                 &abort_flag,
                 &mut processed_count,
@@ -232,12 +239,15 @@ impl VideoConvert {
                 Self::mux_subtitles,
             );
             stats += subtitle_mux_stats;
-            aborted = was_aborted;
+            outcome = batch_outcome;
         }
 
         // Process conversions
-        if !self.config.skip_convert && !analysis_output.conversions.is_empty() && !aborted {
-            let (convert_stats, was_aborted) = self.process_files_with_db_cleanup(
+        if !self.config.skip_convert
+            && !analysis_output.conversions.is_empty()
+            && outcome == ProcessingOutcome::Completed
+        {
+            let (convert_stats, batch_outcome) = self.process_files_with_db_cleanup(
                 analysis_output.conversions,
                 &abort_flag,
                 &mut processed_count,
@@ -246,13 +256,13 @@ impl VideoConvert {
                 Self::convert_to_hevc,
             );
             stats += convert_stats;
-            aborted = was_aborted;
+            outcome = batch_outcome;
         }
 
         self.log_stats(&stats);
 
-        if aborted {
-            println!("\n{}", "Aborted by user".bold().red());
+        if outcome != ProcessingOutcome::Completed {
+            println!("\n{outcome}");
         }
 
         stats.print_summary();
@@ -411,6 +421,11 @@ impl VideoConvert {
     }
 
     /// Process files and remove them from the database after successful processing.
+    ///
+    /// Before each file the free disk space at the output location is verified:
+    /// at least `MIN_DISK_SPACE_FACTOR` times the original file size must be available,
+    /// otherwise processing stops gracefully with an out-of-disk-space outcome
+    /// so the run statistics can still be printed.
     fn process_files_with_db_cleanup<F>(
         &self,
         files: Vec<ProcessableFile>,
@@ -419,18 +434,18 @@ impl VideoConvert {
         total_limit: usize,
         database: &Database,
         process_fn: F,
-    ) -> (RunStats, bool)
+    ) -> (RunStats, ProcessingOutcome)
     where
         F: Fn(&Self, &ProcessableFile, &str) -> ProcessResult,
     {
         let mut stats = RunStats::default();
         let num_digits = total_limit.checked_ilog10().map_or(1, |d| d as usize + 1);
-        let mut aborted = false;
+        let mut outcome = ProcessingOutcome::Completed;
 
         for file in files {
             // Check abort flag before starting a new file
             if abort_flag.load(Ordering::SeqCst) {
-                aborted = true;
+                outcome = ProcessingOutcome::Aborted;
                 break;
             }
 
@@ -444,6 +459,12 @@ impl VideoConvert {
                 print_yellow!("File no longer exists: {}", file.file.path.display());
                 let _ = database.remove_pending_file(&file.file.path);
                 continue;
+            }
+
+            // Ensure there is enough free disk space before starting the conversion
+            if !Self::has_enough_disk_space(&file) {
+                outcome = ProcessingOutcome::OutOfDiskSpace;
+                break;
             }
 
             let file_index = format!("[{:>width$}/{total_limit}]", *processed_count + 1, width = num_digits);
@@ -466,7 +487,32 @@ impl VideoConvert {
             stats.add_result(&result, duration);
         }
 
-        (stats, aborted)
+        (stats, outcome)
+    }
+
+    /// Check that the output volume has enough free space for the given file.
+    ///
+    /// Requires at least `MIN_DISK_SPACE_FACTOR` times the original file size to be free.
+    /// Prints an out-of-disk-space error and returns `false` when the space is insufficient.
+    /// If the available space cannot be determined, the check passes.
+    fn has_enough_disk_space(file: &ProcessableFile) -> bool {
+        let original_size = file.info.size_bytes;
+        let required = original_size.saturating_mul(MIN_DISK_SPACE_FACTOR);
+        let Some(available) = cli_tools::available_disk_space(&file.output_path) else {
+            return true;
+        };
+
+        if available < required {
+            print_error!(
+                "Out of disk space: converting {} needs {} free but only {} is available",
+                cli_tools::path_to_string_relative(&file.file.path),
+                cli_tools::format_size(required),
+                cli_tools::format_size(available),
+            );
+            return false;
+        }
+
+        true
     }
 
     /// Run video conversion from files stored in the database.
@@ -513,7 +559,7 @@ impl VideoConvert {
         .expect("Failed to set Ctrl+C handler");
 
         let mut stats = RunStats::default();
-        let mut aborted = false;
+        let mut outcome = ProcessingOutcome::Completed;
         let mut processed_count: usize = 0;
 
         // Calculate limits
@@ -597,7 +643,7 @@ impl VideoConvert {
 
         // Process remuxes
         if !self.config.skip_remux && !remux_files.is_empty() {
-            let (remux_stats, was_aborted) = self.process_files_with_db_cleanup(
+            let (remux_stats, batch_outcome) = self.process_files_with_db_cleanup(
                 remux_files,
                 &abort_flag,
                 &mut processed_count,
@@ -606,12 +652,12 @@ impl VideoConvert {
                 Self::remux_to_mp4,
             );
             stats += remux_stats;
-            aborted = was_aborted;
+            outcome = batch_outcome;
         }
 
         // Process subtitle muxes
-        if !self.config.skip_remux && !subtitle_mux_files.is_empty() && !aborted {
-            let (subtitle_mux_stats, was_aborted) = self.process_files_with_db_cleanup(
+        if !self.config.skip_remux && !subtitle_mux_files.is_empty() && outcome == ProcessingOutcome::Completed {
+            let (subtitle_mux_stats, batch_outcome) = self.process_files_with_db_cleanup(
                 subtitle_mux_files,
                 &abort_flag,
                 &mut processed_count,
@@ -620,12 +666,12 @@ impl VideoConvert {
                 Self::mux_subtitles,
             );
             stats += subtitle_mux_stats;
-            aborted = was_aborted;
+            outcome = batch_outcome;
         }
 
         // Process conversions
-        if !self.config.skip_convert && !conversion_files.is_empty() && !aborted {
-            let (convert_stats, was_aborted) = self.process_files_with_db_cleanup(
+        if !self.config.skip_convert && !conversion_files.is_empty() && outcome == ProcessingOutcome::Completed {
+            let (convert_stats, batch_outcome) = self.process_files_with_db_cleanup(
                 conversion_files,
                 &abort_flag,
                 &mut processed_count,
@@ -634,13 +680,13 @@ impl VideoConvert {
                 Self::convert_to_hevc,
             );
             stats += convert_stats;
-            aborted = was_aborted;
+            outcome = batch_outcome;
         }
 
         self.log_stats(&stats);
 
-        if aborted {
-            println!("\n{}", "Aborted by user".bold().red());
+        if outcome != ProcessingOutcome::Completed {
+            println!("\n{outcome}");
         }
 
         stats.print_summary();
