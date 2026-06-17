@@ -1449,7 +1449,7 @@ impl DirMove {
             println!("  {}", path_to_filename_string(file_path));
         }
 
-        println!("  {} Move to: {move_to_display}", "→".green());
+        println!("{} Move to: {move_to_display}", "→".green());
 
         if self.config.dryrun {
             println!();
