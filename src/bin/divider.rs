@@ -12,7 +12,7 @@ struct Args {
     #[command(subcommand)]
     command: Option<DividerCommand>,
 
-    /// Optional divider text(s)
+    /// Optional divider texts
     text: Vec<String>,
 
     /// Divider length in number of characters

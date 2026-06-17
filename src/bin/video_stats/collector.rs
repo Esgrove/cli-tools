@@ -66,7 +66,12 @@ impl StatsCollector {
         if self.verbose {
             println!(
                 "{}",
-                format!("Found {} video file(s)", video_files.len()).green().bold()
+                format!(
+                    "Found {}",
+                    cli_tools::count_label(video_files.len(), "video file", "video files")
+                )
+                .green()
+                .bold()
             );
         }
 
@@ -101,7 +106,14 @@ impl StatsCollector {
         }
 
         if error_count > 0 {
-            println!("{}", format!("{error_count} file(s) could not be probed").red());
+            println!(
+                "{}",
+                format!(
+                    "{} could not be probed",
+                    cli_tools::count_label(error_count, "file", "files")
+                )
+                .red()
+            );
         }
 
         stats.print_summary(self.verbose);

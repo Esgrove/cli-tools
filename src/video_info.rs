@@ -252,7 +252,11 @@ impl VideoStats {
                 .iter()
                 .map(|(_, (count, _))| count)
                 .sum();
-            print_dimmed!("    ... {remaining_labels} more resolution(s) with {remaining_files} file(s)");
+            print_dimmed!(
+                "    ... {} with {}",
+                crate::count_label(remaining_labels, "more resolution", "more resolutions"),
+                crate::count_label(remaining_files, "file", "files")
+            );
         }
     }
 

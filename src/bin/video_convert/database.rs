@@ -100,7 +100,7 @@ pub struct ExtensionStats {
 pub struct PendingFileFilter {
     /// Filter by action type.
     pub action: Option<PendingAction>,
-    /// Filter by file extension(s).
+    /// Filter by file extensions.
     pub extensions: Vec<String>,
     /// Minimum bitrate in kbps.
     pub min_bitrate: Option<u64>,

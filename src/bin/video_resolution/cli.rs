@@ -97,7 +97,7 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) {
         }
         return;
     } else if config.verbose {
-        print_bold!("Renaming {num_files} file(s)");
+        print_bold!("Renaming {}", cli_tools::count_label(num_files, "file", "files"));
     }
 
     print_bold!("Resolution               Label   Path");
@@ -108,7 +108,7 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) {
         }
     }
 
-    print_green!("Renamed {num_files} file(s)");
+    print_green!("Renamed {}", cli_tools::count_label(num_files, "file", "files"));
 }
 
 /// Deletes files with resolution smaller than the given limit.
@@ -121,9 +121,15 @@ fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: 
     if !to_delete.is_empty() {
         let num_delete = to_delete.len();
         if config.dryrun {
-            print_bold!("DRYRUN: Would delete {num_delete} file(s) smaller than {limit}:");
+            print_bold!(
+                "DRYRUN: Would delete {} smaller than {limit}:",
+                cli_tools::count_label(num_delete, "file", "files")
+            );
         } else if config.verbose {
-            print_bold!("Deleting {num_delete} file(s) smaller than {limit}:");
+            print_bold!(
+                "Deleting {} smaller than {limit}:",
+                cli_tools::count_label(num_delete, "file", "files")
+            );
         }
 
         print_bold!("Resolution            Path");

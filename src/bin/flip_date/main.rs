@@ -29,7 +29,7 @@ pub struct Args {
     #[arg(short, long)]
     force: bool,
 
-    /// Specify file extension(s)
+    /// Specify file extensions
     #[arg(short, long, num_args = 1, action = clap::ArgAction::Append, value_name = "EXTENSION", conflicts_with = "dir")]
     extensions: Option<Vec<String>>,
 

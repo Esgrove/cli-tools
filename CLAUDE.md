@@ -134,6 +134,16 @@ re-export from the library. Do not duplicate code in benchmark files.
 - Create docstrings for structs and functions.
 - Avoid trailing comments.
 
+### Comments and documentation formatting
+
+Use semantic line breaks for comments, docstrings, and documentation.
+Start a new line at sentence boundaries or natural clause boundaries.
+Target about 120 characters per line, but prefer a clean sentence break over a strict width.
+Avoid dashes and semicolons in prose.
+Use commas and periods to separate ideas.
+Quote literal user input values, for example "y", "yes", "n", "no", and "s".
+Do not wrap prose by splitting a sentence at an arbitrary point in the middle.
+
 ## Testing
 
 - **NEVER use nested modules inside test modules** - all test modules must be separate root-level `#[cfg(test)]` modules

@@ -365,14 +365,15 @@ pub fn generate_shell_completion(
     Ok(())
 }
 
-/// Prompt the user for confirmation with a yes/no question.
+/// Prompt the user for confirmation with a yes or no question.
 ///
-/// Returns `true` if the user answers yes (y/Y), `false` otherwise.
+/// Returns `true` if the user answers "y" or "yes".
+/// Returns `false` if the user answers anything else.
 /// The default value is used when the user presses Enter without input.
 ///
 /// # Errors
 /// Returns an error if reading from stdin fails.
-pub fn get_user_confirmation(message: &str, default: bool) -> io::Result<bool> {
+pub fn get_user_confirmation(message: &str, default: bool) -> std::io::Result<bool> {
     let hint = if default { "[Y/n]" } else { "[y/N]" };
     print!("{message} {hint} ");
     io::stdout().flush()?;
@@ -386,6 +387,18 @@ pub fn get_user_confirmation(message: &str, default: bool) -> io::Result<bool> {
     } else {
         Ok(trimmed == "y" || trimmed == "yes")
     }
+}
+
+/// Return the singular or plural noun for a count.
+#[must_use]
+pub const fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if count > 1 { plural } else { singular }
+}
+
+/// Format a count and noun with a plural only when the count is greater than one.
+#[must_use]
+pub fn count_label(count: usize, singular: &'static str, plural: &'static str) -> String {
+    format!("{count} {}", pluralize(count, singular, plural))
 }
 
 /// Get filename from Path with special characters retained instead of decomposed.
@@ -770,7 +783,7 @@ pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Re
             dunce::simplified(Path::new(&path)).to_path_buf()
         }
     };
-    Ok(output_path)
+    Ok(dunce::simplified(&output_path).to_path_buf())
 }
 
 /// Gets the relative path or filename from a full path based on a root directory.
@@ -880,6 +893,68 @@ pub fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
         return true;
     }
 
+    paths_refer_to_same_file_by_metadata(left, right) || paths_refer_to_same_file_by_canonical_path(left, right)
+}
+
+#[cfg(windows)]
+fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
+    let Some(left_id) = windows_file_id(left) else {
+        return false;
+    };
+    let Some(right_id) = windows_file_id(right) else {
+        return false;
+    };
+
+    left_id == right_id
+}
+
+#[cfg(windows)]
+fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+    };
+
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+
+    // SAFETY: The path buffer is null terminated and lives for the duration of the calls.
+    // The handle returned by CreateFileW is closed before returning when it is valid.
+    #[allow(unsafe_code)]
+    unsafe {
+        let handle = CreateFileW(
+            path_wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+
+        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
+        let result = GetFileInformationByHandle(handle, &raw mut information);
+        _ = CloseHandle(handle);
+
+        (result != 0).then_some((
+            information.dwVolumeSerialNumber,
+            information.nFileIndexHigh,
+            information.nFileIndexLow,
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn paths_refer_to_same_file_by_metadata(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
+fn paths_refer_to_same_file_by_canonical_path(left: &Path, right: &Path) -> bool {
     match (dunce::canonicalize(left), dunce::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,

@@ -88,7 +88,12 @@ impl ThumbnailCreator {
 
         println!(
             "{}",
-            format!("Found {} video file(s)", video_files.len()).green().bold()
+            format!(
+                "Found {}",
+                cli_tools::count_label(video_files.len(), "video file", "video files")
+            )
+            .green()
+            .bold()
         );
 
         let mut success_count = 0;

@@ -17,8 +17,8 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use cli_tools::{
-    get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold, print_error,
-    print_magenta, print_yellow,
+    count_label, get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold,
+    print_error, print_magenta, print_yellow,
 };
 
 use cli_tools::dir_move::mover;
@@ -487,8 +487,8 @@ impl DirMove {
         // Print skipped files warning
         if !skipped_files.is_empty() {
             print_yellow!(
-                "Skipped {} file(s) that already exist (use -f to overwrite):",
-                skipped_files.len()
+                "Skipped {} that already exist (use -f to overwrite):",
+                count_label(skipped_files.len(), "file", "files")
             );
             for file in &skipped_files {
                 println!("    {file}");
@@ -498,7 +498,7 @@ impl DirMove {
         // Print summary
         if moved_count > 0 || !skipped_files.is_empty() {
             let action = if self.config.dryrun { "Would move" } else { "Moved" };
-            println!("  {action} {moved_count} item(s)");
+            println!("  {action} {}", count_label(moved_count, "item", "items"));
         }
 
         // Remove source directory if empty (and not in dryrun mode)
@@ -942,8 +942,12 @@ impl DirMove {
             .collect();
 
         print_bold!(
-            "Found {} directory merge match(es) with directories to merge:\n",
-            groups_to_process.len()
+            "Found {} with directories to merge:\n",
+            count_label(
+                groups_to_process.len(),
+                "directory merge match",
+                "directory merge matches"
+            )
         );
 
         for (target_directory, source_directories) in groups_to_process {
@@ -964,14 +968,26 @@ impl DirMove {
         source_directories: &[PathBuf],
     ) -> anyhow::Result<()> {
         let target_display = self.get_merge_display_path(&target_directory.path);
+        let source_file_counts: Vec<_> = source_directories
+            .iter()
+            .map(|source_directory| (source_directory, Self::count_files_in_directory(source_directory)))
+            .collect();
+        let file_count = source_file_counts.iter().map(|(_, count)| *count).sum();
         println!(
-            "{}: {} directorie(s)",
+            "{}: {}, {}",
             target_display.cyan().bold(),
-            source_directories.len()
+            count_label(source_directories.len(), "directory", "directories"),
+            count_label(file_count, "file", "files")
         );
 
-        for source_directory in source_directories {
-            println!("  {}", self.get_merge_display_path(source_directory));
+        if source_file_counts.len() > 1 {
+            for (source_directory, source_file_count) in source_file_counts {
+                println!(
+                    "  {} ({})",
+                    self.get_merge_display_path(source_directory),
+                    count_label(source_file_count, "file", "files")
+                );
+            }
         }
 
         println!("  {} Merge to: {target_display}", "→".green());
@@ -980,12 +996,7 @@ impl DirMove {
             let confirmed = if self.config.auto {
                 true
             } else {
-                print!("{}", "Merge directories to this directory? (y/n): ".magenta());
-                std::io::stdout().flush()?;
-
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                input.trim().eq_ignore_ascii_case("y")
+                cli_tools::get_user_confirmation("Merge directories to this directory?", false)?
             };
 
             if confirmed {
@@ -1041,7 +1052,10 @@ impl DirMove {
         let group_count = matches.len();
 
         if self.config.verbose {
-            print_bold!("Found {group_count} directory match(es) with files to move:\n");
+            print_bold!(
+                "Found {} with files to move:\n",
+                count_label(group_count, "directory match", "directory matches")
+            );
         }
 
         for directory_index in sorted_directory_indices {
@@ -1105,7 +1119,10 @@ impl DirMove {
             let group_count = custom_matches.len();
 
             if self.config.verbose {
-                print_bold!("Found {group_count} custom mapping match(es) with files to move:\n");
+                print_bold!(
+                    "Found {} with files to move:\n",
+                    count_label(group_count, "custom mapping match", "custom mapping matches")
+                );
             }
 
             for directory_index in self.sorted_directory_indices(directories) {
@@ -1328,9 +1345,9 @@ impl DirMove {
             sorted_matches.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
             for (&directory_index, matched_files) in sorted_matches {
                 eprintln!(
-                    "  {} -> {} file(s)",
+                    "  {} -> {}",
                     directories[directory_index].name,
-                    matched_files.len()
+                    count_label(matched_files.len(), "file", "files")
                 );
             }
             if matches.is_empty() {
@@ -1412,13 +1429,18 @@ impl DirMove {
 
     fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<DirectoryMatchOutcome> {
         let dir_display = self.get_directory_display_path(dir);
-        println!("{}: {} file(s)", dir_display.cyan().bold(), files.len());
+        let move_to_display = self.get_move_to_display_path(&dir.path, files);
+        println!(
+            "{}: {}",
+            dir_display.cyan().bold(),
+            count_label(files.len(), "file", "files")
+        );
 
         for file_path in files {
             println!("  {}", path_to_filename_string(file_path));
         }
 
-        println!("  {} Move to: {dir_display}", "→".green());
+        println!("  {} Move to: {move_to_display}", "→".green());
 
         if self.config.dryrun {
             println!();
@@ -1428,12 +1450,7 @@ impl DirMove {
         let confirmed = if self.config.auto {
             true
         } else {
-            print!("{}", "Move files to this directory? (y/n): ".magenta());
-            std::io::stdout().flush()?;
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            input.trim().eq_ignore_ascii_case("y")
+            cli_tools::get_user_confirmation("Move files to this directory?", false)?
         };
 
         let outcome = if confirmed {
@@ -1474,10 +1491,99 @@ impl DirMove {
             )
     }
 
-    /// Format paths for whole-directory merge prompts.
+    /// Format a destination directory label.
     ///
-    /// Input-root paths stay compact, but output-only roots are shown in full so source and target
-    /// directories with the same name are not visually ambiguous.
+    /// The compact relative form is used only when every offered source file is being moved within that file's input root.
+    /// If any file would cross to a different root, the full destination path is shown.
+    /// This keeps the drive letter, UNC path, or mapped drive location visible.
+    fn get_move_to_display_path(&self, target: &Path, files: &[PathBuf]) -> String {
+        if files.is_empty() {
+            return target.display().to_string();
+        }
+
+        let source_roots: Vec<PathBuf> = files
+            .iter()
+            .map(|file_path| self.source_root_for_file(file_path))
+            .collect();
+        if source_roots
+            .iter()
+            .any(|source_root| Self::relative_path_from_root(target, source_root).is_none())
+        {
+            return target.display().to_string();
+        }
+
+        Self::relative_display_path_from_nearest_root(target, &source_roots)
+            .unwrap_or_else(|| target.display().to_string())
+    }
+
+    /// Return the input root associated with a source file.
+    ///
+    /// Explicit file inputs use their parent directory as the display root.
+    /// Directory inputs use the nearest containing input root.
+    /// Filesystem identity checks cover Windows mapped drive aliases that do not share the same textual prefix.
+    fn source_root_for_file(&self, file_path: &Path) -> PathBuf {
+        self.input_roots
+            .iter()
+            .filter_map(|input_root| Self::source_root_candidate_for_file(input_root, file_path))
+            .min_by_key(|(_, relative_depth)| *relative_depth)
+            .map(|(source_root, _)| source_root)
+            .or_else(|| file_path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Return a candidate source root and file depth for one configured input root.
+    fn source_root_candidate_for_file(input_root: &Path, file_path: &Path) -> Option<(PathBuf, usize)> {
+        if input_root.is_file() {
+            return cli_tools::paths_refer_to_same_file(input_root, file_path)
+                .then(|| input_root.parent().map(|parent| (parent.to_path_buf(), 0)))
+                .flatten();
+        }
+
+        Self::relative_path_from_root(file_path, input_root)
+            .map(|relative_path| (input_root.to_path_buf(), relative_path.components().count()))
+    }
+
+    /// Return `path` relative to `root`, using filesystem identity when textual prefixes differ.
+    fn relative_path_from_root(path: &Path, root: &Path) -> Option<PathBuf> {
+        if cli_tools::paths_refer_to_same_file(path, root) {
+            return Some(PathBuf::new());
+        }
+
+        if let Ok(relative_path) = path.strip_prefix(root) {
+            return Some(relative_path.to_path_buf());
+        }
+
+        path.ancestors()
+            .find(|ancestor| cli_tools::paths_refer_to_same_file(ancestor, root))
+            .and_then(|matching_root| path.strip_prefix(matching_root).ok())
+            .map(Path::to_path_buf)
+    }
+
+    /// Format `path` relative to the nearest root that contains the same filesystem location.
+    fn relative_display_path_from_nearest_root(path: &Path, roots: &[PathBuf]) -> Option<String> {
+        roots
+            .iter()
+            .filter_map(|root| {
+                let relative_path = Self::relative_path_from_root(path, root)?;
+                Some((relative_path.components().count(), relative_path))
+            })
+            .min_by_key(|(relative_depth, _)| *relative_depth)
+            .map(|(_, relative_path)| Self::relative_path_to_display(path, &relative_path))
+    }
+
+    /// Format a relative path, falling back to the original path's file name for an empty relative path.
+    fn relative_path_to_display(path: &Path, relative_path: &Path) -> String {
+        if relative_path.as_os_str().is_empty() {
+            path_to_filename_string(path)
+        } else {
+            relative_path.display().to_string()
+        }
+    }
+
+    /// Format paths for whole directory merge prompts.
+    ///
+    /// Input root paths stay compact.
+    /// Output only roots are shown in full, so source and target directories with the same name are not visually ambiguous.
     fn get_merge_display_path(&self, path: &Path) -> String {
         if let Some(input_root) = Self::nearest_containing_root(path, &self.input_roots) {
             return get_relative_path_or_filename(path, input_root);
@@ -1703,7 +1809,7 @@ impl DirMove {
         first_pass_bar.finish_and_clear();
 
         // Second pass: for each file, check if it should be added to existing groups
-        // where the file's first part(s) START WITH the group's prefix.
+        // where the file's first parts START WITH the group's prefix.
         // This handles cases like JosephExampleTV matching JosephExample group.
         // Parallelized: each file independently checks all group keys, results merged after.
         let group_keys_with_combined: Vec<(String, String)> = prefix_groups
@@ -1832,7 +1938,10 @@ impl DirMove {
 
         // Count initial groups for display (before filtering by moved files)
         let total_groups = groups_to_process.len();
-        print_bold!("Found {} group(s) with matching prefixes:\n", total_groups);
+        print_bold!(
+            "Found {} with matching prefixes:\n",
+            count_label(total_groups, "group", "groups")
+        );
 
         let mut group_number: usize = 0;
 
@@ -1937,7 +2046,11 @@ impl DirMove {
         let dir_exists = dir_path.exists();
 
         let progress = format!("[{group_number}/{total_groups}]").dimmed();
-        println!("{progress} {}: {} files", dir_name.cyan().bold(), available_files.len());
+        println!(
+            "{progress} {}: {}",
+            dir_name.cyan().bold(),
+            count_label(available_files.len(), "file", "files")
+        );
         for file_path in available_files {
             println!("  {}", path_to_filename_string(file_path));
         }
@@ -2031,7 +2144,10 @@ impl DirMove {
             return Ok(());
         }
 
-        print_bold!("Found {} custom mapping group(s):\n", mapping_groups.len());
+        print_bold!(
+            "Found {}:\n",
+            count_label(mapping_groups.len(), "custom mapping group", "custom mapping groups")
+        );
 
         let parent_dir_normalized = self
             .first_output_root()
@@ -2049,7 +2165,11 @@ impl DirMove {
             let dir_path = self.first_output_root().join(&dir_name);
             let dir_exists = dir_path.exists();
 
-            println!("{}: {} files (custom mapping)", dir_name.cyan().bold(), files.len());
+            println!(
+                "{}: {} (custom mapping)",
+                dir_name.cyan().bold(),
+                count_label(files.len(), "file", "files")
+            );
             for file_path in &files {
                 println!("  {}", path_to_filename_string(file_path));
             }
@@ -2087,30 +2207,29 @@ impl DirMove {
     }
 
     /// Prompt the user for directory name confirmation with optional database formatting.
-    /// Returns `Some(path)` if confirmed (with original, database, or custom name), `None` if skipped.
+    /// Returns a confirmed path, a skipped result, or a request to save the group as ignored.
     ///
-    /// If a database suggestion is provided (an exact match with different formatting),
-    /// it will be used silently as the default without showing any extra messages.
+    /// If a database suggestion is provided as an exact match with different formatting, it is used silently as the default.
     ///
     /// Accepts:
-    /// - "y" or "yes" to confirm with the effective name (database formatting if available, otherwise suggested)
-    /// - "n" or "no" to skip
-    /// - "s" to skip and save the group name to `ignored_group_names` in the config file
-    /// - Any other non-empty string as a custom directory name (with confirmation)
+    /// - "y" or "yes" to confirm with the effective name, database formatting if available, otherwise suggested.
+    /// - "n" or "no" to skip.
+    /// - "s" to skip and save the group name to `ignored_group_names` in the config file.
+    /// - Any other non-empty string as a custom directory name, with confirmation.
     fn prompt_for_directory_name_with_suggestion(
         &self,
         suggested_path: &Path,
         suggested_name: &str,
         database_suggestion: Option<&str>,
     ) -> anyhow::Result<PromptResult> {
-        // If database has an exact match (same letters, different formatting), use its formatting silently.
-        // This maps e.g. "JaneDoe" -> "Jane Doe" without showing confusing messages.
+        // If the database has an exact match with the same letters and different formatting, use it silently.
+        // This maps names like "JaneDoe" to "Jane Doe" without showing confusing messages.
         let effective_suggestion = database_suggestion.unwrap_or(suggested_name);
         let effective_path = self.first_output_root().join(effective_suggestion);
 
         print!(
             "{}",
-            format!("Create directory and move files? (y/n/s or custom name) [{effective_suggestion}]: ").magenta()
+            format!("Create directory and move files? [Y/n/s or custom name] [{effective_suggestion}]: ").magenta()
         );
         std::io::stdout().flush()?;
 
@@ -2118,45 +2237,38 @@ impl DirMove {
         std::io::stdin().read_line(&mut input)?;
         let input = input.trim();
 
-        // Empty input or "y"/"yes" confirms the effective suggestion
+        // Empty input, "y", or "yes" confirms the effective suggestion.
         if input.is_empty() || input.eq_ignore_ascii_case("y") || input.eq_ignore_ascii_case("yes") {
             return Ok(PromptResult::Confirmed(effective_path));
         }
 
-        // "n"/"no" skips
+        // "n" or "no" skips the group.
         if input.eq_ignore_ascii_case("n") || input.eq_ignore_ascii_case("no") {
             println!("  Skipped");
             return Ok(PromptResult::Skipped);
         }
 
-        // "s" skips and saves to ignored_group_names in config
+        // "s" skips the group and saves it to ignored_group_names in config.
         if input.eq_ignore_ascii_case("s") {
             return Ok(PromptResult::SaveToIgnored);
         }
 
-        // Any other non-empty input is treated as a custom directory name
-        // (input is already trimmed, but we double-check for safety)
+        // Any other non empty input is treated as a custom directory name.
+        // The input is already trimmed, but this keeps the fallback safe.
         let custom_name = input.trim();
         if custom_name.is_empty() {
             return Ok(PromptResult::Confirmed(suggested_path.to_path_buf()));
         }
         let custom_path = self.first_output_root().join(custom_name);
 
-        // Show what will happen and ask for confirmation
+        // Show what will happen and ask for confirmation.
         if custom_path.exists() {
             println!("  {} Directory '{}' already exists", "→".green(), custom_name.cyan());
         } else {
             println!("  {} Will create directory: {}", "→".yellow(), custom_name.cyan());
         }
 
-        print!("{}", format!("Confirm using '{custom_name}'? (y/n): ").magenta());
-        std::io::stdout().flush()?;
-
-        let mut confirm_input = String::new();
-        std::io::stdin().read_line(&mut confirm_input)?;
-        let confirm_input = confirm_input.trim();
-
-        if confirm_input.eq_ignore_ascii_case("y") || confirm_input.eq_ignore_ascii_case("yes") {
+        if cli_tools::get_user_confirmation(&format!("Confirm using '{custom_name}'?"), true)? {
             Ok(PromptResult::Confirmed(custom_path))
         } else {
             println!("  Skipped");
@@ -2292,6 +2404,15 @@ impl DirMove {
             .ignored_group_names
             .iter()
             .any(|ignored_name| ignored_name == normalized_name)
+    }
+
+    /// Count regular files under a directory recursively.
+    fn count_files_in_directory(directory: &Path) -> usize {
+        WalkDir::new(directory)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .count()
     }
 
     /// Create a progress bar that is hidden during tests.
@@ -3170,6 +3291,70 @@ mod test_output_root {
     }
 
     #[test]
+    fn move_to_display_uses_full_output_path_when_roots_differ() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        let output_directory = output_root.join("Example");
+        let input_file = input_root.join("Example.S01E01.mp4");
+        std::fs::create_dir_all(&input_root)?;
+        std::fs::create_dir_all(&output_directory)?;
+        std::fs::write(&input_file, "video")?;
+
+        let dirmove = make_dirmove_with_output(input_root, output_root, Config::default());
+
+        assert_eq!(
+            dirmove.get_move_to_display_path(&output_directory, &[input_file]),
+            output_directory.display().to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn move_to_display_stays_relative_when_target_is_in_input_root() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_directory = input_root.join("Example");
+        let input_file = input_root.join("Example.S01E01.mp4");
+        std::fs::create_dir_all(&output_directory)?;
+        std::fs::write(&input_file, "video")?;
+
+        let dirmove = make_dirmove(input_root, Config::default());
+
+        assert_eq!(
+            dirmove.get_move_to_display_path(&output_directory, &[input_file]),
+            "Example"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn move_to_display_uses_full_path_when_any_file_has_a_different_root() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root_a = tmp.path().join("input_a");
+        let input_root_b = tmp.path().join("input_b");
+        let output_directory = input_root_a.join("Example");
+        let input_file_a = input_root_a.join("Example.S01E01.mp4");
+        let input_file_b = input_root_b.join("Example.S01E02.mp4");
+        std::fs::create_dir_all(&output_directory)?;
+        std::fs::create_dir_all(&input_root_b)?;
+        std::fs::write(&input_file_a, "one")?;
+        std::fs::write(&input_file_b, "two")?;
+
+        let dirmove = make_dirmove_with_roots(
+            vec![input_root_a, input_root_b],
+            vec![output_directory.clone()],
+            Config::default(),
+        );
+
+        assert_eq!(
+            dirmove.get_move_to_display_path(&output_directory, &[input_file_a, input_file_b]),
+            output_directory.display().to_string()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn files_only_skips_same_named_input_directory_merge() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let input_root = tmp.path().join("input");
@@ -3901,7 +4086,7 @@ mod test_prefix_groups {
             groups.get("ShowB").unwrap().files.len() >= 2,
             "ShowB should have at least 2 entries"
         );
-        // ShowC has no override, should have its own group(s)
+        // ShowC has no override, should have its own groups
         let has_showc_group = groups.keys().any(|k| k.starts_with("ShowC"));
         assert!(has_showc_group, "ShowC should have a group");
     }

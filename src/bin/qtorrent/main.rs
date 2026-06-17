@@ -39,7 +39,7 @@ pub struct QtorrentArgs {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Optional input path(s) with torrent files or directories
+    /// Optional input paths with torrent files or directories
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub path: Vec<PathBuf>,
 

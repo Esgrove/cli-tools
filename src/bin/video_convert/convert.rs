@@ -137,7 +137,10 @@ impl VideoConvert {
             HashMap::new()
         };
         if self.config.verbose {
-            println!("Found {} candidate file(s), analyzing...", candidate_files.len());
+            println!(
+                "Found {}, analyzing...",
+                cli_tools::count_label(candidate_files.len(), "candidate file", "candidate files")
+            );
         }
 
         // Analyze files to determine required actions
@@ -542,7 +545,10 @@ impl VideoConvert {
         }
 
         if self.config.verbose {
-            println!("Processing {} pending file(s) from database", pending_files.len());
+            println!(
+                "Processing {} from database",
+                cli_tools::count_label(pending_files.len(), "pending file", "pending files")
+            );
         }
 
         // Set up Ctrl+C handler for graceful abort
@@ -1199,7 +1205,10 @@ impl VideoConvert {
         let cache_miss_count = cache_misses.len();
         if self.config.verbose && cache_hit_count > 0 {
             println!(
-                "Scan cache: {cache_hit_count} hit(s), {cache_miss_count} miss(es) — running ffprobe on {cache_miss_count} file(s)"
+                "Scan cache: {}, {} — running ffprobe on {}",
+                cli_tools::count_label(cache_hit_count, "hit", "hits"),
+                cli_tools::count_label(cache_miss_count, "miss", "misses"),
+                cli_tools::count_label(cache_miss_count, "file", "files")
             );
         }
 
@@ -1741,7 +1750,10 @@ impl VideoConvert {
         if input_audio_streams > 0 {
             let output_audio_streams = Self::probe_stream_count(output, "a")?;
             if output_audio_streams == 0 {
-                anyhow::bail!("Muxed output has no audio streams, but input has {input_audio_streams} audio stream(s)");
+                anyhow::bail!(
+                    "Muxed output has no audio streams, but input has {}",
+                    cli_tools::count_label(input_audio_streams, "audio stream", "audio streams")
+                );
             }
         }
 

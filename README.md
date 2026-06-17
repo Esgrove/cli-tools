@@ -53,7 +53,7 @@ Print divider comment with centered text
 Usage: div [OPTIONS] [TEXT]...
 
 Arguments:
-  [TEXT]...  Optional divider text(s)
+  [TEXT]...  Optional divider texts
 
 Options:
   -l, --length <LENGTH>   Divider length in number of characters [default: 120]
@@ -191,7 +191,7 @@ Arguments:
 Options:
   -d, --dir                     Use directory rename mode
   -f, --force                   Overwrite existing
-  -e, --extensions <EXTENSION>  Specify file extension(s)
+  -e, --extensions <EXTENSION>  Specify file extensions
   -y, --year                    Assume year is first in short dates
   -p, --print                   Only print changes without renaming
   -r, --recurse                 Recurse into subdirectories
@@ -423,7 +423,7 @@ Commands:
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
-  [PATH]...  Optional input path(s) with torrent files or directories
+  [PATH]...  Optional input paths with torrent files or directories
 
 Options:
   -H, --host <HOST>          qBittorrent WebUI host

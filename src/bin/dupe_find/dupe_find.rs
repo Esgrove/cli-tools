@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -244,9 +243,9 @@ impl DupeFind {
         let cache_hit_count = metadata.len();
         if cache_hit_count > 0 {
             println!(
-                "Scan cache: {} hit(s), {} miss(es)",
-                cache_hit_count,
-                cache_misses.len()
+                "Scan cache: {}, {}",
+                cli_tools::count_label(cache_hit_count, "hit", "hits"),
+                cli_tools::count_label(cache_misses.len(), "miss", "misses")
             );
         }
 
@@ -438,13 +437,7 @@ impl DupeFind {
                     continue;
                 }
 
-                print!("{}", "Move file? (y/n): ".magenta());
-                std::io::stdout().flush()?;
-
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-
-                if input.trim().eq_ignore_ascii_case("y") {
+                if cli_tools::get_user_confirmation("Move file?", false)? {
                     // Create directory if needed
                     if let Err(e) = std::fs::create_dir_all(&target_dir) {
                         print_yellow!("Failed to create directory {}: {e}", target_dir.display());

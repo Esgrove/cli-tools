@@ -1143,9 +1143,9 @@ impl QTorrent {
 
         if total_renamed > 0 {
             println!(
-                "  {} Renamed {} file(s) with dot formatting",
+                "  {} Renamed {} with dot formatting",
                 "✓".green(),
-                total_renamed
+                cli_tools::count_label(total_renamed, "file", "files")
             );
         }
         if let Some(ref pending) = pending_indices
@@ -1153,7 +1153,10 @@ impl QTorrent {
             && !self.config.verbose
         {
             let count = pending.len();
-            cli_tools::print_yellow!("  Failed to dot-rename {count} file(s) (use --verbose for details)");
+            cli_tools::print_yellow!(
+                "  Failed to dot-rename {} (use --verbose for details)",
+                cli_tools::count_label(count, "file", "files")
+            );
         }
     }
 
@@ -1215,7 +1218,11 @@ impl QTorrent {
             };
 
             if excluded_indices_have_priority(&updated_files, excluded_indices, EXCLUDED_PRIORITY) {
-                println!("  {} Set {} file(s) to skip", "✓".green(), excluded_indices.len());
+                println!(
+                    "  {} Set {} to skip",
+                    "✓".green(),
+                    cli_tools::count_label(excluded_indices.len(), "file", "files")
+                );
                 return;
             }
 
@@ -1226,9 +1233,9 @@ impl QTorrent {
             cli_tools::print_yellow!("{error}");
         }
         println!(
-            "  {} You may need to manually skip {} file(s) in qBittorrent",
+            "  {} You may need to manually skip {} in qBittorrent",
             "⚠".yellow(),
-            excluded_indices.len()
+            cli_tools::count_label(excluded_indices.len(), "file", "files")
         );
     }
 

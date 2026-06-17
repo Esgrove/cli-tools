@@ -457,9 +457,9 @@ fn render_ui(
         format!("New name: {before_cursor}│{after_cursor}.{extension}")
     } else if state.confirming {
         format!(
-            "Keep '{}' and delete {} other file(s)? (y/n)",
+            "Keep '{}' and delete {}? [y/N]",
             files[state.selected].filename,
-            files.len() - 1
+            cli_tools::count_label(files.len() - 1, "other file", "other files")
         )
     } else {
         format!("Selected: {}", files[state.selected].filename)
