@@ -970,12 +970,18 @@ impl DirMove {
         let target_display = self.get_merge_display_path(&target_directory.path);
         let source_file_counts: Vec<_> = source_directories
             .iter()
-            .map(|source_directory| (source_directory, Self::count_files_in_directory(source_directory)))
+            .map(|source_directory| {
+                (
+                    source_directory.as_path(),
+                    Self::count_files_in_directory(source_directory),
+                )
+            })
             .collect();
         let file_count = source_file_counts.iter().map(|(_, count)| *count).sum();
+        let title_display = Self::get_directory_merge_title_display(&source_file_counts);
         println!(
             "{}: {}, {}",
-            target_display.cyan().bold(),
+            title_display.cyan().bold(),
             count_label(source_directories.len(), "directory", "directories"),
             count_label(file_count, "file", "files")
         );
@@ -984,7 +990,7 @@ impl DirMove {
             for (source_directory, source_file_count) in source_file_counts {
                 println!(
                     "  {} ({})",
-                    self.get_merge_display_path(source_directory),
+                    source_directory.display(),
                     count_label(source_file_count, "file", "files")
                 );
             }
@@ -996,7 +1002,10 @@ impl DirMove {
             let confirmed = if self.config.auto {
                 true
             } else {
-                cli_tools::get_user_confirmation("Merge directories to this directory?", false)?
+                cli_tools::get_user_confirmation(
+                    Self::directory_merge_confirmation_prompt(source_directories.len()),
+                    false,
+                )?
             };
 
             if confirmed {
@@ -1489,6 +1498,24 @@ impl DirMove {
                 || get_relative_path_or_filename(&dir.path, self.first_output_root()),
                 |(output_root, _)| get_relative_path_or_filename(&dir.path, output_root),
             )
+    }
+
+    /// Format the title for a whole directory merge offer.
+    fn get_directory_merge_title_display(source_file_counts: &[(&Path, usize)]) -> String {
+        source_file_counts
+            .first()
+            .map_or_else(String::new, |(source_directory, _)| {
+                path_to_filename_string(source_directory)
+            })
+    }
+
+    /// Return the confirmation prompt for a whole directory merge offer.
+    const fn directory_merge_confirmation_prompt(source_directory_count: usize) -> &'static str {
+        if source_directory_count == 1 {
+            "Merge directory to this directory?"
+        } else {
+            "Merge directories to this directory?"
+        }
     }
 
     /// Format a destination directory label.
@@ -3288,6 +3315,62 @@ mod test_output_root {
             output_directory.display().to_string()
         );
         Ok(())
+    }
+
+    #[test]
+    fn directory_merge_title_uses_single_source_directory() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root = tmp.path().join("input");
+        let output_root = tmp.path().join("output");
+        let input_directory = input_root.join("Example");
+        std::fs::create_dir_all(&input_directory)?;
+        std::fs::create_dir_all(&output_root)?;
+
+        let _dirmove = make_dirmove_with_output(input_root, output_root, Config::default());
+        let source_file_counts = [(input_directory.as_path(), 0)];
+
+        assert_eq!(
+            DirMove::get_directory_merge_title_display(&source_file_counts),
+            "Example"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn directory_merge_title_uses_plain_name_for_multiple_sources() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let input_root_a = tmp.path().join("input_a");
+        let input_root_b = tmp.path().join("input_b");
+        let output_root = tmp.path().join("output");
+        let input_directory_a = input_root_a.join("Example");
+        let input_directory_b = input_root_b.join("Example");
+        std::fs::create_dir_all(&input_directory_a)?;
+        std::fs::create_dir_all(&input_directory_b)?;
+        std::fs::create_dir_all(&output_root)?;
+
+        let source_file_counts = [(input_directory_a.as_path(), 0), (input_directory_b.as_path(), 0)];
+
+        assert_eq!(
+            DirMove::get_directory_merge_title_display(&source_file_counts),
+            "Example"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn directory_merge_confirmation_prompt_uses_singular_for_one_source() {
+        assert_eq!(
+            DirMove::directory_merge_confirmation_prompt(1),
+            "Merge directory to this directory?"
+        );
+    }
+
+    #[test]
+    fn directory_merge_confirmation_prompt_uses_plural_for_multiple_sources() {
+        assert_eq!(
+            DirMove::directory_merge_confirmation_prompt(2),
+            "Merge directories to this directory?"
+        );
     }
 
     #[test]
