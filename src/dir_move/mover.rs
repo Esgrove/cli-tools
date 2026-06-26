@@ -165,18 +165,8 @@ fn move_single_file(
         }
     }
 
-    copy_file_with_progress(source, destination, expected_size, progress_bar)?;
-
-    let copied_size = fs::metadata(destination)?.len();
-    if copied_size != expected_size {
-        let _ = fs::remove_file(destination);
-        anyhow::bail!(
-            "Size verification failed for {}: expected {} bytes, got {} bytes. Original file preserved.",
-            source.display(),
-            expected_size,
-            copied_size
-        );
-    }
+    let source_hash = copy_file_with_progress(source, destination, expected_size, progress_bar)?;
+    verify_copied_file(source, destination, expected_size, source_hash)?;
 
     fs::remove_file(source).map_err(|error| {
         anyhow::Error::new(error).context(format!(
@@ -194,12 +184,19 @@ fn copy_file_with_progress(
     destination: &Path,
     expected_size: u64,
     progress_bar: &ProgressBar,
-) -> anyhow::Result<()> {
-    let result = copy_file_inner(source, destination, expected_size, progress_bar);
-    if result.is_err() {
-        let _ = fs::remove_file(destination);
+) -> anyhow::Result<blake3::Hash> {
+    match copy_file_inner(source, destination, expected_size, progress_bar) {
+        Ok(hash) => Ok(hash),
+        Err(copy_error) => {
+            if let Err(cleanup_error) = remove_failed_destination(destination) {
+                anyhow::bail!(
+                    "{copy_error:#}. Also failed to remove partial destination {}: {cleanup_error:#}. Original file preserved.",
+                    destination.display()
+                );
+            }
+            Err(copy_error)
+        }
     }
-    result
 }
 
 /// Inner copy loop. File handles are dropped before cleanup can run.
@@ -208,9 +205,10 @@ fn copy_file_inner(
     destination: &Path,
     expected_size: u64,
     progress_bar: &ProgressBar,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<blake3::Hash> {
     let mut source_file = File::open(source)?;
     let mut destination_file = File::create(destination)?;
+    let mut source_hasher = blake3::Hasher::new();
     let mut buffer = vec![0; COPY_BUFFER_SIZE];
     let mut bytes_copied = 0;
 
@@ -219,6 +217,7 @@ fn copy_file_inner(
         if bytes_read == 0 {
             break;
         }
+        source_hasher.update(&buffer[..bytes_read]);
         destination_file.write_all(&buffer[..bytes_read])?;
         bytes_copied += bytes_read as u64;
         progress_bar.inc(bytes_read as u64);
@@ -235,7 +234,72 @@ fn copy_file_inner(
         );
     }
 
+    Ok(source_hasher.finalize())
+}
+
+/// Verify that a copied file has the expected size and BLAKE3 hash.
+fn verify_copied_file(
+    source: &Path,
+    destination: &Path,
+    expected_size: u64,
+    expected_hash: blake3::Hash,
+) -> anyhow::Result<()> {
+    let copied_size = fs::metadata(destination)?.len();
+    if copied_size != expected_size {
+        if let Err(cleanup_error) = remove_failed_destination(destination) {
+            anyhow::bail!(
+                "Size verification failed for {}: expected {} bytes, got {} bytes. Also failed to remove invalid destination {}: {cleanup_error:#}. Original file preserved.",
+                source.display(),
+                expected_size,
+                copied_size,
+                destination.display()
+            );
+        }
+        anyhow::bail!(
+            "Size verification failed for {}: expected {} bytes, got {} bytes. Original file preserved.",
+            source.display(),
+            expected_size,
+            copied_size
+        );
+    }
+
+    let copied_hash = hash_file(destination)?;
+    if copied_hash != expected_hash {
+        if let Err(cleanup_error) = remove_failed_destination(destination) {
+            anyhow::bail!(
+                "Hash verification failed for {} -> {}. Expected BLAKE3 {}, got {}. Also failed to remove invalid destination: {cleanup_error:#}. Original file preserved.",
+                source.display(),
+                destination.display(),
+                expected_hash,
+                copied_hash
+            );
+        }
+        anyhow::bail!(
+            "Hash verification failed for {} -> {}. Expected BLAKE3 {}, got {}. Original file preserved.",
+            source.display(),
+            destination.display(),
+            expected_hash,
+            copied_hash
+        );
+    }
+
     Ok(())
+}
+
+/// Remove a destination file after a failed copy or verification step.
+fn remove_failed_destination(destination: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => anyhow::bail!("{}: {error}", destination.display()),
+    }
+}
+
+/// Calculate the BLAKE3 hash for a file.
+fn hash_file(path: &Path) -> anyhow::Result<blake3::Hash> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_mmap_rayon(path)?;
+    Ok(hasher.finalize())
 }
 
 /// Check if an I/O error indicates a cross-device move attempt.
@@ -287,6 +351,22 @@ mod tests {
 
         assert_eq!(fs::read(destination)?, contents);
         assert!(source.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_copied_file_rejects_hash_mismatch() -> anyhow::Result<()> {
+        let tmp = tempfile::TempDir::new()?;
+        let source = tmp.path().join("source.bin");
+        let destination = tmp.path().join("destination.bin");
+        fs::write(&source, b"source")?;
+        fs::write(&destination, b"target")?;
+
+        let result = verify_copied_file(&source, &destination, 6, blake3::hash(b"source"));
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!destination.exists());
         Ok(())
     }
 
