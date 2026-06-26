@@ -13,7 +13,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::{path_to_filename_string, print_error, print_yellow};
 
 /// Size of chunks used when copying files across devices.
-pub const COPY_BUFFER_SIZE: usize = 1024 * 1024;
+pub const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 /// Summary of a batch move operation.
 #[derive(Debug, Default)]
@@ -99,7 +99,7 @@ pub fn move_files_to_target_dir(
             continue;
         }
 
-        match move_single_file(file_path, &new_path, expected_size, &progress_bar) {
+        match move_single_file(file_path, &new_path, expected_size, &progress_bar, verbose) {
             Ok(()) => {
                 if verbose {
                     progress_bar.suspend(|| {
@@ -131,7 +131,9 @@ fn move_single_file(
     destination: &Path,
     expected_size: u64,
     progress_bar: &ProgressBar,
+    verbose: bool,
 ) -> anyhow::Result<()> {
+    // This returns an error for cross-drive moves, which then fall back to the custom copy path.
     match fs::rename(source, destination) {
         Ok(()) => {
             progress_bar.inc(expected_size);
@@ -166,7 +168,14 @@ fn move_single_file(
     }
 
     let source_hash = copy_file_with_progress(source, destination, expected_size, progress_bar)?;
-    verify_copied_file(source, destination, expected_size, source_hash)?;
+    finish_progress_if_complete(progress_bar);
+
+    verify_copied_file(source, destination, expected_size, &source_hash)?;
+    if verbose {
+        progress_bar.suspend(|| {
+            println!("  Hash verified: BLAKE3 {}", short_hash(&source_hash));
+        });
+    }
 
     fs::remove_file(source).map_err(|error| {
         anyhow::Error::new(error).context(format!(
@@ -242,7 +251,7 @@ fn verify_copied_file(
     source: &Path,
     destination: &Path,
     expected_size: u64,
-    expected_hash: blake3::Hash,
+    expected_hash: &blake3::Hash,
 ) -> anyhow::Result<()> {
     let copied_size = fs::metadata(destination)?.len();
     if copied_size != expected_size {
@@ -264,7 +273,7 @@ fn verify_copied_file(
     }
 
     let copied_hash = hash_file(destination)?;
-    if copied_hash != expected_hash {
+    if copied_hash != *expected_hash {
         if let Err(cleanup_error) = remove_failed_destination(destination) {
             anyhow::bail!(
                 "Hash verification failed for {} -> {}. Expected BLAKE3 {}, got {}. Also failed to remove invalid destination: {cleanup_error:#}. Original file preserved.",
@@ -284,6 +293,21 @@ fn verify_copied_file(
     }
 
     Ok(())
+}
+
+/// Finish the progress bar once its tracked byte count is complete.
+fn finish_progress_if_complete(progress_bar: &ProgressBar) {
+    if progress_bar
+        .length()
+        .is_some_and(|length| progress_bar.position() >= length)
+    {
+        progress_bar.finish();
+    }
+}
+
+/// Format a BLAKE3 hash for compact verbose output.
+fn short_hash(hash: &blake3::Hash) -> String {
+    hash.to_string().chars().take(12).collect()
 }
 
 /// Remove a destination file after a failed copy or verification step.
@@ -362,7 +386,7 @@ mod tests {
         fs::write(&source, b"source")?;
         fs::write(&destination, b"target")?;
 
-        let result = verify_copied_file(&source, &destination, 6, blake3::hash(b"source"));
+        let result = verify_copied_file(&source, &destination, 6, &blake3::hash(b"source"));
 
         assert!(result.is_err());
         assert!(source.exists());
