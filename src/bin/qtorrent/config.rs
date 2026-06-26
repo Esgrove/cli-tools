@@ -105,6 +105,12 @@ pub struct QtorrentConfig {
     /// Longer prefixes are checked first to allow more specific matches.
     #[serde(default, deserialize_with = "deserialize_tag_overwrite_prefixes")]
     tag_overwrite_prefixes: Vec<TagOverwrite>,
+    /// Path-to-tag pairs for overwriting tags based on the torrent file location.
+    /// Each entry is `[path, tag]`.
+    /// Paths are matched case-insensitively against directory components.
+    /// More specific paths are checked first.
+    #[serde(default, deserialize_with = "deserialize_tag_overwrite_paths")]
+    tag_overwrite_paths: Vec<TagPathOverwrite>,
 }
 
 /// A tag overwrite rule:
@@ -116,6 +122,19 @@ pub struct TagOverwrite {
     pub tag: String,
     /// Lowercase prefix for case-insensitive matching.
     lowercase_prefix: String,
+}
+
+/// A path tag overwrite rule:
+/// if a torrent file is in a matching directory,
+/// use the associated tag value.
+#[derive(Debug, Clone)]
+pub struct TagPathOverwrite {
+    /// Tag value to use when the path matches.
+    pub tag: String,
+    /// Lowercase normalized path for sorting and diagnostics.
+    lowercase_path: String,
+    /// Lowercase path components for case-insensitive matching.
+    lowercase_components: Vec<String>,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -163,8 +182,11 @@ pub struct Config {
     pub ignore_torrent_names: Vec<String>,
     /// Prefixes to match against torrent filenames for tag overwriting.
     /// If a torrent filename starts with one of these prefixes (case-insensitive),
-    /// use the prefix as the tag string instead of the default `tags` value.
+    /// use the associated tag string instead of the default `tags` value.
     pub tag_overwrite_prefixes: Vec<TagOverwrite>,
+    /// Paths to match against torrent file locations for tag overwriting.
+    /// Prefix rules take precedence over path rules.
+    pub tag_overwrite_paths: Vec<TagPathOverwrite>,
 }
 
 /// Wrapper needed for parsing the config file section.
@@ -311,6 +333,7 @@ impl Config {
         let ignore_torrent_names = user_config.ignore_torrent_names;
 
         let tag_overwrite_prefixes = user_config.tag_overwrite_prefixes;
+        let tag_overwrite_paths = user_config.tag_overwrite_paths;
 
         Self {
             host,
@@ -334,6 +357,7 @@ impl Config {
             format_custom_name,
             ignore_torrent_names,
             tag_overwrite_prefixes,
+            tag_overwrite_paths,
         }
     }
 
@@ -347,19 +371,38 @@ impl Config {
     ///
     /// If the torrent filename (without extension) starts with one of the configured
     /// `tag_overwrite_prefixes` (case-insensitive), returns the associated tag value.
+    /// Prefix rules take precedence over path rules.
+    /// If no prefix matches, `tag_overwrite_paths` can match the torrent file's directory path.
     /// Otherwise, returns the default `tags` value from config.
     #[must_use]
     pub fn resolve_tags(&self, torrent_path: &std::path::Path) -> Option<String> {
         if !self.tag_overwrite_prefixes.is_empty() {
-            let filename = torrent_path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
+            let filename = lowercase_torrent_file_stem(torrent_path);
 
             for entry in &self.tag_overwrite_prefixes {
                 if filename.starts_with(&entry.lowercase_prefix) {
                     return Some(entry.tag.clone());
                 }
+            }
+        }
+
+        if !self.tag_overwrite_paths.is_empty() {
+            let directory_components = lowercase_directory_components(torrent_path);
+            let mut best_match: Option<(&TagPathOverwrite, (usize, usize, usize))> = None;
+
+            for entry in &self.tag_overwrite_paths {
+                let Some(score) = path_components_match_score(&directory_components, &entry.lowercase_components)
+                else {
+                    continue;
+                };
+
+                if best_match.is_none_or(|(_, best_score)| score > best_score) {
+                    best_match = Some((entry, score));
+                }
+            }
+
+            if let Some((entry, _score)) = best_match {
+                return Some(entry.tag.clone());
             }
         }
 
@@ -447,6 +490,63 @@ fn kb_to_bytes(kb: f64) -> Option<u64> {
     (kb > 0.0).then_some((kb * 1024.0) as u64)
 }
 
+/// Return the torrent file stem in lowercase.
+fn lowercase_torrent_file_stem(torrent_path: &Path) -> String {
+    let path_text = torrent_path.to_string_lossy();
+    let filename = path_text.rsplit(['/', '\\']).next().unwrap_or_default();
+    let lowercase_filename = filename.to_lowercase();
+
+    lowercase_filename
+        .strip_suffix(".torrent")
+        .unwrap_or(&lowercase_filename)
+        .to_string()
+}
+
+/// Return lowercase directory components for a torrent file path.
+fn lowercase_directory_components(torrent_path: &Path) -> Vec<String> {
+    let path_text = torrent_path.to_string_lossy();
+    let Some((directory, _filename)) = path_text.rsplit_once(['/', '\\']) else {
+        return Vec::new();
+    };
+
+    lowercase_path_components(directory)
+}
+
+/// Return lowercase path components after normalizing Windows and Unix separators.
+fn lowercase_path_components(path: &str) -> Vec<String> {
+    path.trim()
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|component| !component.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Return a match score when all rule components appear as a contiguous directory segment.
+fn path_components_match_score(
+    path_components: &[String],
+    rule_components: &[String],
+) -> Option<(usize, usize, usize)> {
+    if rule_components.is_empty() {
+        return None;
+    }
+
+    let mut best_score: Option<(usize, usize, usize)> = None;
+
+    for (index, components) in path_components.windows(rule_components.len()).enumerate() {
+        if components != rule_components {
+            continue;
+        }
+
+        let end_index = index + rule_components.len();
+        let character_count = rule_components.iter().map(|component| component.chars().count()).sum();
+        let score = (end_index, rule_components.len(), character_count);
+        best_score = Some(best_score.map_or(score, |current_score| current_score.max(score)));
+    }
+
+    best_score
+}
+
 /// Deserialize `[[prefix, tag], ...]` pairs into sorted `TagOverwrite` rules.
 ///
 /// Lowercases prefixes for case-insensitive matching and sorts by prefix length
@@ -466,6 +566,33 @@ where
 
     prefixes.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.lowercase_prefix.chars().count()));
     Ok(prefixes)
+}
+
+/// Deserialize `[[path, tag], ...]` pairs into sorted `TagPathOverwrite` rules.
+///
+/// Paths are split into lowercase components and sorted by specificity.
+/// Rules with more components are checked first, then longer paths.
+fn deserialize_tag_overwrite_paths<'de, D>(deserializer: D) -> std::result::Result<Vec<TagPathOverwrite>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let pairs: Vec<[String; 2]> = Vec::deserialize(deserializer)?;
+    let mut paths: Vec<TagPathOverwrite> = pairs
+        .into_iter()
+        .filter_map(|[path, tag]| {
+            let lowercase_components = lowercase_path_components(&path);
+            (!lowercase_components.is_empty()).then(|| TagPathOverwrite {
+                lowercase_path: lowercase_components.join("/"),
+                lowercase_components,
+                tag,
+            })
+        })
+        .collect();
+
+    paths.sort_unstable_by_key(|entry| {
+        std::cmp::Reverse((entry.lowercase_components.len(), entry.lowercase_path.chars().count()))
+    });
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -819,6 +946,32 @@ verbose = true
     }
 
     #[test]
+    fn from_toml_str_parses_tag_overwrite_paths() {
+        let toml = r"
+[qtorrent]
+tag_overwrite_paths = [['Media\Movies\priority', 'priority-tag'], ['C:\Archive\Media\Movies', 'movie-tag'], ['Series', 'series-tag']]
+";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(config.tag_overwrite_paths.len(), 3);
+        assert_eq!(config.tag_overwrite_paths[0].lowercase_path, "c:/archive/media/movies");
+        assert_eq!(config.tag_overwrite_paths[0].tag, "movie-tag");
+        assert_eq!(config.tag_overwrite_paths[1].lowercase_path, "media/movies/priority");
+        assert_eq!(config.tag_overwrite_paths[1].tag, "priority-tag");
+        assert_eq!(config.tag_overwrite_paths[2].lowercase_path, "series");
+        assert_eq!(config.tag_overwrite_paths[2].tag, "series-tag");
+    }
+
+    #[test]
+    fn from_toml_str_defaults_tag_overwrite_paths_to_empty() {
+        let toml = r"
+[qtorrent]
+verbose = true
+";
+        let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.tag_overwrite_paths.is_empty());
+    }
+
+    #[test]
     fn from_toml_str_parses_recurse_and_skip_existing() {
         let toml = r"
 [qtorrent]
@@ -915,7 +1068,29 @@ mod test_resolve_tags {
             format_custom_name: false,
             ignore_torrent_names: Vec::new(),
             tag_overwrite_prefixes,
+            tag_overwrite_paths: Vec::new(),
         }
+    }
+
+    /// Helper to create a minimal `Config` with given tags, prefix rules, and path rules.
+    fn make_config_with_paths(tags: Option<&str>, prefixes: Vec<(&str, &str)>, paths: Vec<(&str, &str)>) -> Config {
+        let mut config = make_config(tags, prefixes);
+        let mut tag_overwrite_paths: Vec<TagPathOverwrite> = paths
+            .into_iter()
+            .filter_map(|(path, tag)| {
+                let lowercase_components = lowercase_path_components(path);
+                (!lowercase_components.is_empty()).then(|| TagPathOverwrite {
+                    lowercase_path: lowercase_components.join("/"),
+                    lowercase_components,
+                    tag: tag.to_string(),
+                })
+            })
+            .collect();
+        tag_overwrite_paths.sort_unstable_by_key(|entry| {
+            std::cmp::Reverse((entry.lowercase_components.len(), entry.lowercase_path.chars().count()))
+        });
+        config.tag_overwrite_paths = tag_overwrite_paths;
+        config
     }
 
     #[test]
@@ -992,6 +1167,81 @@ mod test_resolve_tags {
         let config = make_config(None, vec![]);
         let result = config.resolve_tags(Path::new("something.torrent"));
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn prefix_match_takes_precedence_over_path_match() {
+        let config = make_config_with_paths(
+            Some("default-tag"),
+            vec![("Special", "prefix-tag")],
+            vec![(r"Media\Movies", "path-tag")],
+        );
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Movies\Special.Show.torrent"));
+        assert_eq!(result, Some("prefix-tag".to_string()));
+    }
+
+    #[test]
+    fn path_match_overrides_default_tags() {
+        let config = make_config_with_paths(Some("default-tag"), vec![], vec![(r"Media\Movies", "movie-tag")]);
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Movies\Show.torrent"));
+        assert_eq!(result, Some("movie-tag".to_string()));
+    }
+
+    #[test]
+    fn path_match_handles_partial_path_from_right() {
+        let config = make_config_with_paths(
+            Some("default-tag"),
+            vec![],
+            vec![(r"Media\Movies\priority", "priority-tag")],
+        );
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Movies\priority\Show.torrent"));
+        assert_eq!(result, Some("priority-tag".to_string()));
+    }
+
+    #[test]
+    fn path_match_handles_single_directory_name() {
+        let config = make_config_with_paths(Some("default-tag"), vec![], vec![("Series", "series-tag")]);
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Series\Show.torrent"));
+        assert_eq!(result, Some("series-tag".to_string()));
+    }
+
+    #[test]
+    fn deepest_path_match_wins() {
+        let config = make_config_with_paths(
+            Some("default-tag"),
+            vec![],
+            vec![
+                (r"C:\Archive\Media\Movies", "movie-tag"),
+                (r"Media\Movies\priority", "priority-tag"),
+            ],
+        );
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Movies\priority\Show.torrent"));
+        assert_eq!(result, Some("priority-tag".to_string()));
+    }
+
+    #[test]
+    fn longer_path_match_wins_when_matches_end_at_same_directory() {
+        let config = make_config_with_paths(
+            Some("default-tag"),
+            vec![],
+            vec![("Movies", "short"), (r"Media\Movies", "long")],
+        );
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Movies\Show.torrent"));
+        assert_eq!(result, Some("long".to_string()));
+    }
+
+    #[test]
+    fn path_match_is_case_insensitive() {
+        let config = make_config_with_paths(Some("default-tag"), vec![], vec![(r"media\movies", "movie-tag")]);
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Movies\Show.torrent"));
+        assert_eq!(result, Some("movie-tag".to_string()));
+    }
+
+    #[test]
+    fn returns_default_tags_when_no_path_matches() {
+        let config = make_config_with_paths(Some("default-tag"), vec![], vec![("Series", "series-tag")]);
+        let result = config.resolve_tags(Path::new(r"C:\Archive\Media\Movies\Show.torrent"));
+        assert_eq!(result, Some("default-tag".to_string()));
     }
 
     #[test]

@@ -950,7 +950,7 @@ fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
 }
 
 #[cfg(not(windows))]
-fn paths_refer_to_same_file_by_metadata(_left: &Path, _right: &Path) -> bool {
+const fn paths_refer_to_same_file_by_metadata(_left: &Path, _right: &Path) -> bool {
     false
 }
 

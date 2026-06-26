@@ -341,9 +341,15 @@ replace = [
 
 # Overwrite tags based on torrent filename prefix.
 # If a torrent filename starts with one of these prefixes (case-insensitive),
-# use the prefix as the tag string instead of the default "tags" value.
+# use the mapped tag string instead of the default "tags" value.
 # Longer prefixes are checked first to allow more specific matches.
-# tag_overwrite_prefixes = ["SomePrefix", "Other"]
+# tag_overwrite_prefixes = [["SomePrefix", "special"], ["Other", "other"]]
+
+# Overwrite tags based on the torrent file's directory path.
+# Prefix rules above take precedence over these path rules.
+# Match a full path, path components from the right, or a single directory name.
+# Use TOML literal strings for Windows paths so backslashes do not need escaping.
+# tag_overwrite_paths = [["Media/Movies", "movies"], ['D:\Torrents\Series', "series"]]
 
 [resolution]
 # Enable debug prints
