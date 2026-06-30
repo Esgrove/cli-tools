@@ -1633,13 +1633,13 @@ impl VideoConvert {
         Ok(cmd)
     }
 
-    /// Add movie-mode stream mapping that keeps all video streams and only selected language tracks.
+    /// Add movie-mode stream mapping that keeps real video streams and only selected language tracks.
     fn add_movie_mode_stream_maps(
         cmd: &mut Command,
         audio_languages: &BTreeSet<String>,
         subtitle_languages: &BTreeSet<String>,
     ) {
-        cmd.args(["-map", "0:v"]);
+        cmd.args(["-map", "0:V"]);
 
         let mut mapped_audio = false;
         for &language in MOVIE_AUDIO_LANGUAGES {
@@ -2282,7 +2282,8 @@ mod test_build_ffmpeg_command {
         VideoConvert::add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
         let args = command_args(&command);
 
-        assert!(has_arg_pair(&args, "-map", "0:v"));
+        assert!(has_arg_pair(&args, "-map", "0:V"));
+        assert!(!has_arg_pair(&args, "-map", "0:v"));
         assert!(!has_arg_pair(&args, "-map", "0"));
         assert!(has_arg_pair(&args, "-map", "0:a:m:language:eng"));
         assert!(has_arg_pair(&args, "-map", "0:a:m:language:fin"));
@@ -2308,7 +2309,7 @@ mod test_build_ffmpeg_command {
         VideoConvert::add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
         let args = command_args(&command);
 
-        assert!(has_arg_pair(&args, "-map", "0:v"));
+        assert!(has_arg_pair(&args, "-map", "0:V"));
         assert!(has_arg_pair(&args, "-map", "0:a?"));
         assert!(!has_arg_pair(&args, "-map", "0:a:m:language:und"));
     }
