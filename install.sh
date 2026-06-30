@@ -66,7 +66,7 @@ if [ "$FORCE" = true ]; then
     find src/bin -name "*.rs" -exec touch {} \;
 fi
 
-cargo install --force --path "$REPO_ROOT"
+cargo install --force --locked --path "$REPO_ROOT"
 echo ""
 
 print_green "Installed binaries:"
