@@ -209,6 +209,72 @@ pub fn format_single_file_name(dot_rename: &DotFormat, name: &str) -> String {
     }
 }
 
+/// Sanitize a custom name pasted into a rename prompt.
+///
+/// Removes terminal escape sequences and control characters,
+/// and replaces characters that are invalid in file names with spaces
+/// so text on both sides of path separators is preserved.
+pub fn sanitize_custom_name(name: &str) -> String {
+    let mut characters = name.chars();
+    let mut sanitized = String::with_capacity(name.len());
+    let mut needs_separator = false;
+
+    while let Some(character) = characters.next() {
+        match character {
+            '\u{1b}' => {
+                let Some(sequence_type) = characters.next() else {
+                    break;
+                };
+                match sequence_type {
+                    '[' => skip_control_sequence(&mut characters),
+                    ']' | 'P' | 'X' | '^' | '_' => skip_string_sequence(&mut characters),
+                    _ => {}
+                }
+            }
+            '\u{009b}' => skip_control_sequence(&mut characters),
+            '\u{0090}' | '\u{009d}' | '\u{009e}' | '\u{009f}' => skip_string_sequence(&mut characters),
+            character
+                if character.is_whitespace()
+                    || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') =>
+            {
+                needs_separator = !sanitized.is_empty();
+            }
+            character if character.is_control() => {}
+            character => {
+                if needs_separator && !sanitized.ends_with(' ') {
+                    sanitized.push(' ');
+                }
+                sanitized.push(character);
+                needs_separator = false;
+            }
+        }
+    }
+
+    sanitized
+        .trim_matches(|character: char| character.is_whitespace() || character == '.')
+        .to_string()
+}
+
+/// Consume a terminal control sequence through its final byte.
+fn skip_control_sequence(characters: &mut impl Iterator<Item = char>) {
+    for character in characters {
+        if ('@'..='~').contains(&character) {
+            break;
+        }
+    }
+}
+
+/// Consume an OSC or related terminal string sequence through its BEL or string terminator.
+fn skip_string_sequence(characters: &mut impl Iterator<Item = char>) {
+    let mut previous_was_escape = false;
+    for character in characters {
+        if matches!(character, '\u{7}' | '\u{009c}') || (previous_was_escape && character == '\\') {
+            break;
+        }
+        previous_was_escape = character == '\u{1b}';
+    }
+}
+
 /// Restore the original file extension on a custom name if it's missing a known extension.
 ///
 /// When a user enters a custom rename, they may omit the file extension.
@@ -424,6 +490,197 @@ mod test_move_torrent_to_downloaded {
         assert!(destination.exists());
         let contents = std::fs::read(&destination).expect("read destination");
         assert_eq!(contents, b"data");
+    }
+}
+
+#[cfg(test)]
+mod test_sanitize_custom_name {
+    use super::*;
+
+    #[test]
+    fn preserves_empty_name() {
+        assert_eq!(sanitize_custom_name(""), "");
+    }
+
+    #[test]
+    fn preserves_plain_name() {
+        assert_eq!(sanitize_custom_name("A Plain Name.mkv"), "A Plain Name.mkv");
+    }
+
+    #[test]
+    fn preserves_unicode_brackets_and_valid_punctuation() {
+        assert_eq!(
+            sanitize_custom_name("Tést 日本語 [Group] (2026) - Part_1! & #1.mkv"),
+            "Tést 日本語 [Group] (2026) - Part_1! & #1.mkv"
+        );
+    }
+
+    #[test]
+    fn preserves_internal_periods_but_trims_edge_periods() {
+        assert_eq!(
+            sanitize_custom_name("...Show.Name.S01E01.mkv..."),
+            "Show.Name.S01E01.mkv"
+        );
+    }
+
+    #[test]
+    fn trims_leading_and_trailing_whitespace() {
+        assert_eq!(sanitize_custom_name(" \t\r\n Name \u{a0} "), "Name");
+    }
+
+    #[test]
+    fn collapses_mixed_whitespace_between_words() {
+        assert_eq!(sanitize_custom_name("One \t\r\n  Two\u{a0}Three"), "One Two Three");
+    }
+
+    #[test]
+    fn replaces_every_invalid_windows_filename_character() {
+        assert_eq!(
+            sanitize_custom_name("one<two>three:four\"five/six\\seven|eight?nine*ten"),
+            "one two three four five six seven eight nine ten"
+        );
+    }
+
+    #[test]
+    fn collapses_runs_of_invalid_characters() {
+        assert_eq!(sanitize_custom_name("One /\\:*?\"<>| Two"), "One Two");
+    }
+
+    #[test]
+    fn does_not_add_spaces_for_invalid_characters_at_edges() {
+        assert_eq!(sanitize_custom_name("/:*Name?<>|"), "Name");
+    }
+
+    #[test]
+    fn preserves_text_around_path_separators_and_brackets() {
+        assert_eq!(sanitize_custom_name("Creator / [Site] Title"), "Creator [Site] Title");
+    }
+
+    #[test]
+    fn removes_non_whitespace_c0_control_characters() {
+        assert_eq!(sanitize_custom_name("A\0\u{1}\u{8}\u{7}B\u{7f}C"), "ABC");
+    }
+
+    #[test]
+    fn removes_standalone_c1_control_characters() {
+        assert_eq!(sanitize_custom_name("A\u{0080}B\u{0085}C\u{009c}D"), "AB CD");
+    }
+
+    #[test]
+    fn removes_bracketed_paste_and_ansi_sequences() {
+        let input = "\u{1b}[200~\u{1b}[31mCreator / [Site] Title\u{1b}[0m\u{1b}[201~";
+
+        assert_eq!(sanitize_custom_name(input), "Creator [Site] Title");
+    }
+
+    #[test]
+    fn removes_csi_sequences_with_multiple_parameters() {
+        let input = "Before \u{1b}[1;38;5;214mcolored\u{1b}[0m after";
+
+        assert_eq!(sanitize_custom_name(input), "Before colored after");
+    }
+
+    #[test]
+    fn removes_non_sgr_csi_sequences() {
+        let input = "Name\u{1b}[2K\u{1b}[10C End";
+
+        assert_eq!(sanitize_custom_name(input), "Name End");
+    }
+
+    #[test]
+    fn removes_eight_bit_csi_sequences() {
+        let input = "\u{009b}200~\u{009b}32mPasted Name\u{009b}0m\u{009b}201~";
+
+        assert_eq!(sanitize_custom_name(input), "Pasted Name");
+    }
+
+    #[test]
+    fn removes_multiple_adjacent_escape_sequences() {
+        let input = "A\u{1b}[1m\u{1b}[4m\u{1b}[31mB\u{1b}[0mC";
+
+        assert_eq!(sanitize_custom_name(input), "ABC");
+    }
+
+    #[test]
+    fn removes_terminal_links_terminated_by_bell() {
+        let input = "\u{1b}]8;;https://example.com\u{7}Linked Title\u{1b}]8;;\u{7}";
+
+        assert_eq!(sanitize_custom_name(input), "Linked Title");
+    }
+
+    #[test]
+    fn removes_terminal_links_terminated_by_escape_sequence() {
+        let input = "\u{1b}]8;;https://example.com\u{1b}\\Linked Title\u{1b}]8;;\u{1b}\\";
+
+        assert_eq!(sanitize_custom_name(input), "Linked Title");
+    }
+
+    #[test]
+    fn removes_eight_bit_osc_terminated_by_string_terminator() {
+        let input = "\u{009d}8;;https://example.com\u{009c}Linked Title\u{009d}8;;\u{009c}";
+
+        assert_eq!(sanitize_custom_name(input), "Linked Title");
+    }
+
+    #[test]
+    fn removes_device_control_and_application_program_sequences() {
+        let input = "A\u{1b}Pignored\u{1b}\\B\u{1b}_ignored\u{1b}\\C";
+
+        assert_eq!(sanitize_custom_name(input), "ABC");
+    }
+
+    #[test]
+    fn removes_eight_bit_string_sequences() {
+        let input = "A\u{0090}ignored\u{009c}B\u{009e}ignored\u{7}C\u{009f}ignored\u{009c}D";
+
+        assert_eq!(sanitize_custom_name(input), "ABCD");
+    }
+
+    #[test]
+    fn removes_two_character_escape_sequence() {
+        assert_eq!(sanitize_custom_name("Before\u{1b}7After"), "BeforeAfter");
+    }
+
+    #[test]
+    fn discards_incomplete_csi_sequence() {
+        assert_eq!(sanitize_custom_name("Name\u{1b}[31"), "Name");
+    }
+
+    #[test]
+    fn discards_incomplete_string_sequence() {
+        assert_eq!(sanitize_custom_name("Name\u{1b}]8;;https://example.com"), "Name");
+    }
+
+    #[test]
+    fn ignores_trailing_escape_character() {
+        assert_eq!(sanitize_custom_name("Name\u{1b}"), "Name");
+    }
+
+    #[test]
+    fn preserves_separator_when_escape_sequence_follows_invalid_character() {
+        assert_eq!(sanitize_custom_name("One/\u{1b}[31mTwo\u{1b}[0m"), "One Two");
+    }
+
+    #[test]
+    fn returns_empty_for_only_invalid_and_control_characters() {
+        assert_eq!(sanitize_custom_name(" /\\:*?\"<>|\0\u{1b}[31m\u{1b}[0m "), "");
+    }
+
+    #[test]
+    fn is_idempotent() {
+        let sanitized = sanitize_custom_name(" Creator / [Site]\tTitle... ");
+
+        assert_eq!(sanitize_custom_name(&sanitized), sanitized);
+    }
+
+    #[test]
+    fn preserves_custom_name_before_restoring_extension() {
+        let sanitized = sanitize_custom_name("Creator / [Site] Title");
+
+        assert_eq!(
+            restore_file_extension(&sanitized, "Suggested.Name.mkv"),
+            "Creator [Site] Title.mkv"
+        );
     }
 }
 

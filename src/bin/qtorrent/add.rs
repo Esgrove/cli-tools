@@ -531,18 +531,19 @@ impl QTorrent {
         name
     }
 
-    /// Apply dots formatting to a custom name entered by the user if `format_custom_name` is enabled.
+    /// Sanitize a custom name entered by the user and apply dots formatting when enabled.
     fn format_custom_name(&self, name: &str, is_multi_file: bool) -> String {
+        let name = utils::sanitize_custom_name(name);
         if self.config.format_custom_name
             && let Some(dot_rename) = self.dot_formatter()
         {
             return if is_multi_file {
-                dot_rename.format_directory_name(name)
+                dot_rename.format_directory_name(&name)
             } else {
-                utils::format_single_file_name(&dot_rename, name)
+                utils::format_single_file_name(&dot_rename, &name)
             };
         }
-        name.to_string()
+        name
     }
 
     /// Format the internal torrent name with dots formatting applied.
@@ -863,11 +864,12 @@ impl QTorrent {
                     normalized_internal.expect("normalized_internal checked above")
                 }
                 _ => {
+                    let sanitized = utils::sanitize_custom_name(input);
                     // For single files, restore the original extension if the custom name doesn't have one
                     let custom = if info.effective_is_multi_file {
-                        input.to_string()
+                        sanitized
                     } else {
-                        utils::restore_file_extension(input, &normalized_suggested)
+                        utils::restore_file_extension(&sanitized, &normalized_suggested)
                     };
                     // Apply dots formatting to custom name if configured
                     self.format_custom_name(&custom, info.effective_is_multi_file)
