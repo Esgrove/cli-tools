@@ -571,7 +571,7 @@ impl QTorrent {
             .filter_map(|path| {
                 parse_torrent(path, &self.config)
                     .inspect_err(|error| {
-                        cli_tools::print_error!("Failed to parse {}: {error}", path.display());
+                        cli_tools::print_error!("Failed to parse {}: {error:#}", path.display());
                     })
                     .ok()
             })

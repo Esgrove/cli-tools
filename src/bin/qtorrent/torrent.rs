@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
 
@@ -26,10 +26,11 @@ pub struct Torrent {
     #[serde(default)]
     #[serde(rename = "announce-list")]
     pub announce_list: Option<Vec<Vec<String>>>,
-    #[serde(rename = "comment")]
+    #[serde(default)]
+    #[serde(rename = "comment", deserialize_with = "lossy_string_option")]
     pub comment: Option<String>,
     #[serde(default)]
-    #[serde(rename = "created by")]
+    #[serde(rename = "created by", deserialize_with = "lossy_string_option")]
     pub created_by: Option<String>,
     #[serde(default)]
     #[serde(rename = "creation date")]
@@ -52,8 +53,11 @@ pub struct Info {
     pub length: Option<i64>,
     #[serde(default)]
     pub md5sum: Option<String>,
+    #[serde(default)]
+    #[serde(deserialize_with = "lossy_string_option")]
     pub name: Option<String>,
     #[serde(default)]
+    #[serde(deserialize_with = "lossy_string_vec_option")]
     pub path: Option<Vec<String>>,
     #[serde(rename = "piece length")]
     pub piece_length: i64,
@@ -70,6 +74,7 @@ pub struct Info {
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct File {
     pub length: i64,
+    #[serde(deserialize_with = "lossy_string_vec")]
     pub path: Vec<String>,
     #[serde(default)]
     pub md5sum: Option<String>,
@@ -127,8 +132,10 @@ impl Torrent {
     ///
     /// # Errors
     /// Returns an error if the bytes cannot be parsed as a torrent.
+    /// The error message includes the path to the field where parsing failed, for example "info.files[3].path".
     pub fn from_buffer(buffer: &[u8]) -> Result<Self> {
-        serde_bencode::from_bytes(buffer).context("Failed to parse torrent file")
+        let mut deserializer = serde_bencode::de::Deserializer::new(buffer);
+        serde_path_to_error::deserialize(&mut deserializer).context("Failed to parse torrent file")
     }
 
     /// Calculate SHA-1 info hash directly from raw torrent bytes.
@@ -182,7 +189,7 @@ impl Torrent {
                 // Single-file torrent
                 vec![FileInfo {
                     index: 0,
-                    path: Cow::Borrowed(self.info.name.as_deref().unwrap_or_default()),
+                    path: Cow::Borrowed(self.name().unwrap_or_default()),
                     size: self.info.length.unwrap_or(0) as u64,
                     exclusion_reason: None,
                 }]
@@ -421,6 +428,58 @@ pub fn parse_torrent(path: &Path, config: &Config) -> Result<TorrentInfo> {
         original_name: effective_original_name,
         tags: config.resolve_tags(path),
     })
+}
+
+/// Convert a byte string to a `String`, dropping any invalid UTF-8 sequences.
+///
+/// Torrent files created by legacy clients may contain file names in non UTF-8 encodings,
+/// for example Windows-1251, or invalid UTF-8 such as CESU-8 encoded surrogate pairs.
+/// Strict UTF-8 decoding would fail on such files even though they are otherwise valid.
+/// Invalid sequences are removed entirely so the resulting names contain only valid characters.
+fn string_from_bytes_dropping_invalid_utf8(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if text.contains(char::REPLACEMENT_CHARACTER) {
+        text.replace(char::REPLACEMENT_CHARACTER, "")
+    } else {
+        text.into_owned()
+    }
+}
+
+/// Deserialize a bencode byte string into a `String`, dropping invalid UTF-8 sequences.
+fn lossy_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = ByteBuf::deserialize(deserializer)?;
+    Ok(string_from_bytes_dropping_invalid_utf8(&bytes))
+}
+
+/// Deserialize an optional bencode byte string into a `String`, dropping invalid UTF-8 sequences.
+fn lossy_string_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    lossy_string(deserializer).map(Some)
+}
+
+/// Deserialize a list of bencode byte strings into strings, dropping invalid UTF-8 sequences.
+fn lossy_string_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let parts = Vec::<ByteBuf>::deserialize(deserializer)?;
+    Ok(parts
+        .iter()
+        .map(|bytes| string_from_bytes_dropping_invalid_utf8(bytes))
+        .collect())
+}
+
+/// Deserialize an optional list of bencode byte strings into strings, dropping invalid UTF-8 sequences.
+fn lossy_string_vec_option<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    lossy_string_vec(deserializer).map(Some)
 }
 
 /// Convert bytes to a hex string.
@@ -812,7 +871,7 @@ mod test_file_filter {
                         .map(|(path, length)| File {
                             length: *length,
                             path: vec![(*path).to_string()],
-                            md5sum: None,
+                            ..File::default()
                         })
                         .collect(),
                 ),
@@ -1224,6 +1283,48 @@ mod test_torrent_parsing_from_file {
 }
 
 #[cfg(test)]
+mod test_lossy_utf8_parsing {
+    use super::*;
+
+    #[test]
+    fn parses_file_path_with_invalid_utf8_byte() {
+        // The file path contains "\x85", a Windows-1251 ellipsis, which is not valid UTF-8.
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(b"d4:infod5:filesld6:lengthi100e4:pathl13:One Love\x85.mp4eee");
+        data.extend_from_slice(b"4:name4:test12:piece lengthi16384e6:pieces0:ee");
+
+        let torrent = Torrent::from_buffer(&data).expect("should parse with lossy decoding");
+        let files = torrent.files();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path.as_ref(), "One Love.mp4");
+    }
+
+    #[test]
+    fn parses_name_with_cesu8_surrogate_pair() {
+        // "\xed\xa0\xbd\xed\xb8\x9d" is a CESU-8 encoded surrogate pair (an emoji), invalid UTF-8.
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(b"d4:infod6:lengthi100e4:name13:hi \xed\xa0\xbd\xed\xb8\x9d.mp4");
+        data.extend_from_slice(b"12:piece lengthi16384e6:pieces0:ee");
+
+        let torrent = Torrent::from_buffer(&data).expect("should parse with lossy decoding");
+
+        assert_eq!(torrent.name(), Some("hi .mp4"));
+    }
+
+    #[test]
+    fn keeps_valid_utf8_unchanged() {
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(b"d4:infod6:lengthi100e4:name12:file\xe2\x80\xa6.mp4x");
+        data.extend_from_slice(b"12:piece lengthi16384e6:pieces0:ee");
+
+        let torrent = Torrent::from_buffer(&data).expect("should parse");
+
+        assert_eq!(torrent.name(), Some("file\u{2026}.mp4x"));
+    }
+}
+
+#[cfg(test)]
 mod test_torrent_struct_methods {
     use super::*;
 
@@ -1424,12 +1525,12 @@ mod test_parse_torrent_all_files_excluded {
                     File {
                         length: 500,
                         path: vec!["file1.txt".to_string()],
-                        md5sum: None,
+                        ..File::default()
                     },
                     File {
                         length: 500,
                         path: vec!["file2.txt".to_string()],
-                        md5sum: None,
+                        ..File::default()
                     },
                 ]),
                 ..Info::default()
@@ -1487,12 +1588,12 @@ mod test_parse_torrent_all_files_excluded {
                     File {
                         length: 500,
                         path: vec!["readme.txt".to_string()],
-                        md5sum: None,
+                        ..File::default()
                     },
                     File {
                         length: 1_000_000,
                         path: vec!["video.mp4".to_string()],
-                        md5sum: None,
+                        ..File::default()
                     },
                 ]),
                 ..Info::default()

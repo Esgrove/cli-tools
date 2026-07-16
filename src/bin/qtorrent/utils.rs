@@ -959,7 +959,7 @@ mod test_torrent_info_helpers {
                 .map(|file_name| File {
                     length: 500,
                     path: vec![(*file_name).to_string()],
-                    md5sum: None,
+                    ..File::default()
                 })
                 .collect(),
         );
