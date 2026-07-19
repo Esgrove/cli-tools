@@ -300,8 +300,7 @@ impl QTorrent {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             }
 
-            self.rename_torrent_files(client, &info_hash, &excluded_indices, &dot_rename)
-                .await;
+            self.rename_torrent_files(client, &info_hash, &dot_rename).await;
         }
 
         // Set file priorities to skip excluded files
@@ -1049,17 +1048,12 @@ impl QTorrent {
 
     /// Rename individual files within a multi-file torrent using dot formatting.
     ///
-    /// Queries the qBittorrent API for the actual file paths (which reflect any folder renames
-    /// that have already been applied), then renames each included file with dot formatting.
-    /// Retries with a fresh file list if renames fail (paths can change asynchronously after
-    /// a folder rename propagates).
-    async fn rename_torrent_files(
-        &self,
-        client: &QBittorrentClient,
-        info_hash: &str,
-        excluded_indices: &[usize],
-        dot_rename: &DotFormat<'_>,
-    ) {
+    /// Queries the qBittorrent API for the actual file paths
+    /// (which reflect any folder renames that have already been applied),
+    /// then renames every file with dot formatting.
+    /// Retries with a fresh file list if renames fail
+    /// (paths can change asynchronously after a folder rename propagates).
+    async fn rename_torrent_files(&self, client: &QBittorrentClient, info_hash: &str, dot_rename: &DotFormat<'_>) {
         print_cyan("Renaming files...");
         let max_attempts = 3;
         let mut total_renamed: usize = 0;
@@ -1084,10 +1078,6 @@ impl QTorrent {
             let mut failed_indices: Vec<usize> = Vec::new();
 
             for file in &api_files {
-                if excluded_indices.contains(&file.index) {
-                    continue;
-                }
-
                 // On retries, only process previously failed indices
                 if let Some(ref pending) = pending_indices
                     && !pending.contains(&file.index)
