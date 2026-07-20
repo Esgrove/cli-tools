@@ -9,6 +9,7 @@ use colored::Colorize;
 use regex::Regex;
 
 use crate::classification::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265};
+use crate::cli::SortOrder;
 use crate::config::{Config, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
@@ -103,6 +104,12 @@ pub struct AnalysisOutput {
     pub(crate) renames: Vec<ProcessableFile>,
     /// Files that only need external subtitle sidecars muxed in.
     pub(crate) subtitle_muxes: Vec<ProcessableFile>,
+}
+
+/// Sorting operations for a slice of processable files.
+pub trait ProcessableFileSliceExt {
+    /// Sort processable files according to the specified sort order.
+    fn sort_by_order(&mut self, sort_order: SortOrder);
 }
 
 /// Codec used in output filenames to identify the video codec.
@@ -232,6 +239,68 @@ impl ProcessableFile {
             info,
             output_path,
             subtitle_files,
+        }
+    }
+}
+
+impl ProcessableFileSliceExt for [ProcessableFile] {
+    #[inline]
+    fn sort_by_order(&mut self, sort_order: SortOrder) {
+        match sort_order {
+            SortOrder::Bitrate => {
+                self.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.bitrate_kbps));
+            }
+            SortOrder::Size => {
+                self.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.size_bytes));
+            }
+            SortOrder::SizeAsc => {
+                self.sort_unstable_by_key(|file| file.info.size_bytes);
+            }
+            SortOrder::Duration => {
+                self.sort_unstable_by(|left, right| {
+                    right
+                        .info
+                        .duration
+                        .partial_cmp(&left.info.duration)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::DurationAsc => {
+                self.sort_unstable_by(|left, right| {
+                    left.info
+                        .duration
+                        .partial_cmp(&right.info.duration)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::Resolution => {
+                self.sort_unstable_by(|left, right| {
+                    let left_pixels = u64::from(left.info.width) * u64::from(left.info.height);
+                    let right_pixels = u64::from(right.info.width) * u64::from(right.info.height);
+                    right_pixels.cmp(&left_pixels)
+                });
+            }
+            SortOrder::ResolutionAsc => {
+                self.sort_unstable_by(|left, right| {
+                    let left_pixels = u64::from(left.info.width) * u64::from(left.info.height);
+                    let right_pixels = u64::from(right.info.width) * u64::from(right.info.height);
+                    left_pixels.cmp(&right_pixels)
+                });
+            }
+            SortOrder::Impact => {
+                self.sort_unstable_by(|left, right| {
+                    let left_impact =
+                        (left.info.bitrate_kbps as f64 / left.info.frames_per_second) * left.info.duration;
+                    let right_impact =
+                        (right.info.bitrate_kbps as f64 / right.info.frames_per_second) * right.info.duration;
+                    right_impact
+                        .partial_cmp(&left_impact)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::Name => {
+                self.sort_unstable_by(|left, right| left.file.path.cmp(&right.file.path));
+            }
         }
     }
 }
@@ -617,6 +686,17 @@ impl std::fmt::Display for Codec {
 }
 
 /// Return a match score when a subtitle sidecar stem appears to belong to a video stem.
+/// Print the paths of all supplied subtitle sidecar files.
+pub fn print_subtitle_files(subtitle_files: &[SubtitleFile]) {
+    if subtitle_files.is_empty() {
+        return;
+    }
+    println!("Subtitles:");
+    for subtitle_file in subtitle_files {
+        println!("  - {}", cli_tools::path_to_string_relative(&subtitle_file.path));
+    }
+}
+
 pub fn movie_subtitle_match_score(video_stem: &str, subtitle_stem: &str) -> Option<usize> {
     let video_tokens = normalized_movie_tokens(video_stem);
     let subtitle_tokens = normalized_movie_tokens(subtitle_stem);

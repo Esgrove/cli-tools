@@ -16,7 +16,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::classification::{ClassificationRequest, RE_AV1, RE_X265};
+use crate::VideoConvertArgs;
+use crate::classification::{ClassificationRequest, RE_AV1, RE_X265, probe_and_classify};
 use crate::cli::{DatabaseMode, clean_scan_cache, clear_database, list_extensions, show_database_contents};
 use crate::config::{Config, VideoConvertConfig};
 use crate::database::{Database, PendingAction};
@@ -25,25 +26,22 @@ use crate::ffmpeg::{
     run_command_isolated, validate_mux_output,
 };
 use crate::helpers::{
-    duration_difference_ratio, format_duplicate_duration_match, path_without_extension, paths_refer_to_same_file,
+    backup_output_path, duration_difference_ratio, format_duplicate_duration_match, has_enough_disk_space,
+    path_without_extension, paths_refer_to_same_file, temporary_output_path,
 };
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 use crate::types::{
-    AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessResult, ProcessableFile, ProcessingOutcome, SkipReason,
-    SubtitleFile, VideoFile, VideoInfo, VideoInfoCache, movie_subtitle_match_score,
+    AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessResult, ProcessableFile, ProcessableFileSliceExt,
+    ProcessingOutcome, SkipReason, SubtitleFile, VideoFile, VideoInfo, VideoInfoCache, movie_subtitle_match_score,
+    print_subtitle_files,
 };
-use crate::{SortOrder, VideoConvertArgs};
 
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
 /// Minimum ratio of output duration to input duration for a conversion to be considered successful.
 const MIN_DURATION_RATIO: f64 = 0.85;
-
-/// Minimum free disk space required before converting a file, as a multiple of the
-/// original file size.
-const MIN_DISK_SPACE_FACTOR: u64 = 2;
 
 /// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert {
@@ -449,7 +447,7 @@ impl VideoConvert {
             }
 
             // Ensure there is enough free disk space before starting the conversion
-            if !Self::has_enough_disk_space(&file) {
+            if !has_enough_disk_space(&file) {
                 outcome = ProcessingOutcome::OutOfDiskSpace;
                 break;
             }
@@ -475,31 +473,6 @@ impl VideoConvert {
         }
 
         (stats, outcome)
-    }
-
-    /// Check that the output volume has enough free space for the given file.
-    ///
-    /// Requires at least `MIN_DISK_SPACE_FACTOR` times the original file size to be free.
-    /// Prints an out-of-disk-space error and returns `false` when the space is insufficient.
-    /// If the available space cannot be determined, the check passes.
-    fn has_enough_disk_space(file: &ProcessableFile) -> bool {
-        let original_size = file.info.size_bytes;
-        let required = original_size.saturating_mul(MIN_DISK_SPACE_FACTOR);
-        let Some(available) = cli_tools::available_disk_space(&file.output_path) else {
-            return true;
-        };
-
-        if available < required {
-            print_error!(
-                "Out of disk space: converting {} needs {} free but only {} is available",
-                cli_tools::path_to_string_relative(&file.file.path),
-                cli_tools::format_size(required),
-                cli_tools::format_size(available),
-            );
-            return false;
-        }
-
-        true
     }
 
     /// Run video conversion from files stored in the database.
@@ -614,9 +587,9 @@ impl VideoConvert {
         }
 
         // Sort files
-        Self::sort_processable_files(&mut remux_files, self.config.sort);
-        Self::sort_processable_files(&mut subtitle_mux_files, self.config.sort);
-        Self::sort_processable_files(&mut conversion_files, self.config.sort);
+        remux_files.sort_by_order(self.config.sort);
+        subtitle_mux_files.sort_by_order(self.config.sort);
+        conversion_files.sort_by_order(self.config.sort);
 
         // Truncate lists if they exceed the limit
         if let Some(count) = self.config.count
@@ -789,7 +762,7 @@ impl VideoConvert {
         let input = &file.file.path;
         let final_output = &file.output_path;
         let command_output = if input == final_output {
-            Self::temporary_output_path(final_output)
+            temporary_output_path(final_output)
         } else {
             final_output.clone()
         };
@@ -808,7 +781,7 @@ impl VideoConvert {
 
         if self.config.verbose {
             println!("Output: {}", cli_tools::path_to_string_relative(final_output));
-            Self::print_subtitle_files(&file.subtitle_files);
+            print_subtitle_files(&file.subtitle_files);
         }
 
         self.log_start(input, "subtitle-mux", file_index, info, None);
@@ -902,7 +875,7 @@ impl VideoConvert {
         if self.config.verbose {
             println!("Output: {}", cli_tools::path_to_string_relative(output));
             println!("Using quality level: {quality_level}");
-            Self::print_subtitle_files(&file.subtitle_files);
+            print_subtitle_files(&file.subtitle_files);
         }
 
         self.log_start(input, "convert", file_index, info, Some(quality_level));
@@ -1146,7 +1119,7 @@ impl VideoConvert {
             let results: Vec<VideoInfoCache> = cache_misses
                 .into_par_iter()
                 .map(|(file, subtitles)| {
-                    let result = Self::probe_and_classify(file, subtitles, &filter, movie_mode);
+                    let result = probe_and_classify(file, subtitles, &filter, movie_mode);
                     progress_bar.inc(1);
                     result
                 })
@@ -1341,9 +1314,9 @@ impl VideoConvert {
         }
 
         // Sort conversions based on configured sort order
-        Self::sort_processable_files(&mut conversions, self.config.sort);
-        Self::sort_processable_files(&mut remuxes, self.config.sort);
-        Self::sort_processable_files(&mut subtitle_muxes, self.config.sort);
+        conversions.sort_by_order(self.config.sort);
+        remuxes.sort_by_order(self.config.sort);
+        subtitle_muxes.sort_by_order(self.config.sort);
 
         self.log_analysis_stats(&analysis_stats, total_files, start.elapsed());
         analysis_stats.print_summary();
@@ -1365,65 +1338,6 @@ impl VideoConvert {
             info.bit_depth,
         );
         ProcessableFile::new(file, info, output_path, subtitle_files)
-    }
-
-    /// Sort processable files according to the specified sort order.
-    #[inline]
-    fn sort_processable_files(files: &mut [ProcessableFile], sort_order: SortOrder) {
-        match sort_order {
-            SortOrder::Bitrate => {
-                files.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.bitrate_kbps));
-            }
-            SortOrder::Size => {
-                files.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.size_bytes));
-            }
-            SortOrder::SizeAsc => {
-                files.sort_unstable_by_key(|file| file.info.size_bytes);
-            }
-            SortOrder::Duration => {
-                files.sort_unstable_by(|a, b| {
-                    b.info
-                        .duration
-                        .partial_cmp(&a.info.duration)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            SortOrder::DurationAsc => {
-                files.sort_unstable_by(|a, b| {
-                    a.info
-                        .duration
-                        .partial_cmp(&b.info.duration)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            SortOrder::Resolution => {
-                // Sort by total pixels (width * height) descending
-                files.sort_unstable_by(|a, b| {
-                    let pixels_a = u64::from(a.info.width) * u64::from(a.info.height);
-                    let pixels_b = u64::from(b.info.width) * u64::from(b.info.height);
-                    pixels_b.cmp(&pixels_a)
-                });
-            }
-            SortOrder::ResolutionAsc => {
-                // Sort by total pixels (width * height) ascending
-                files.sort_unstable_by(|a, b| {
-                    let pixels_a = u64::from(a.info.width) * u64::from(a.info.height);
-                    let pixels_b = u64::from(b.info.width) * u64::from(b.info.height);
-                    pixels_a.cmp(&pixels_b)
-                });
-            }
-            SortOrder::Impact => {
-                // Sort by potential savings (bitrate / fps * duration) descending
-                files.sort_unstable_by(|a, b| {
-                    let impact_a = (a.info.bitrate_kbps as f64 / a.info.frames_per_second) * a.info.duration;
-                    let impact_b = (b.info.bitrate_kbps as f64 / b.info.frames_per_second) * b.info.duration;
-                    impact_b.partial_cmp(&impact_a).unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            SortOrder::Name => {
-                files.sort_unstable_by(|a, b| a.file.path.cmp(&b.file.path));
-            }
-        }
     }
 
     /// Process all files that need renaming. Returns the number of files successfully renamed.
@@ -1580,7 +1494,7 @@ impl VideoConvert {
     }
 
     fn replace_input_with_output(&self, input: &Path, output: &Path) -> Result<()> {
-        let backup = Self::backup_output_path(input);
+        let backup = backup_output_path(input);
         std::fs::rename(input, &backup).context("Failed to move original file aside before replacement")?;
 
         if let Err(error) = std::fs::rename(output, input) {
@@ -1596,76 +1510,5 @@ impl VideoConvert {
             print_error!("Failed to delete replaced original file {}: {error}", backup.display());
         }
         Ok(())
-    }
-
-    fn backup_output_path(output: &Path) -> PathBuf {
-        let parent = output.parent().unwrap_or_else(|| Path::new("."));
-        let stem = cli_tools::path_to_file_stem_string(output);
-        let extension = cli_tools::path_to_file_extension_string(output);
-        let backup_stem = format!("{stem}.vconvert-backup");
-        let backup_filename = format!("{backup_stem}.{extension}");
-        cli_tools::get_unique_path(parent, &backup_filename, &backup_stem, &extension)
-    }
-
-    fn temporary_output_path(output: &Path) -> PathBuf {
-        let parent = output.parent().unwrap_or_else(|| Path::new("."));
-        let stem = cli_tools::path_to_file_stem_string(output);
-        let extension = cli_tools::path_to_file_extension_string(output);
-        let temporary_stem = format!("{stem}.vconvert-tmp");
-        let temporary_filename = format!("{temporary_stem}.{extension}");
-        cli_tools::get_unique_path(parent, &temporary_filename, &temporary_stem, &extension)
-    }
-
-    fn print_subtitle_files(subtitle_files: &[SubtitleFile]) {
-        if subtitle_files.is_empty() {
-            return;
-        }
-        println!("Subtitles:");
-        for subtitle_file in subtitle_files {
-            println!("  - {}", cli_tools::path_to_string_relative(&subtitle_file.path));
-        }
-    }
-
-    /// Run ffprobe on a file and classify the result.
-    ///
-    /// Returns a `VideoInfoCache` containing the analysis result, the file path, and the
-    /// `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
-    fn probe_and_classify(
-        file: VideoFile,
-        subtitle_files: Vec<SubtitleFile>,
-        filter: &AnalysisFilter,
-        movie_mode: bool,
-    ) -> VideoInfoCache {
-        let path = file.path.clone();
-        if !path.exists() {
-            return VideoInfoCache {
-                result: AnalysisResult::Skip {
-                    file,
-                    reason: SkipReason::FileMissing,
-                },
-                path,
-                info: None,
-            };
-        }
-        match probe_video_info(&file.path) {
-            Ok(info) => {
-                let result = ClassificationRequest::new(filter, &info, movie_mode, subtitle_files).classify(file);
-                VideoInfoCache {
-                    result,
-                    path,
-                    info: Some(info),
-                }
-            }
-            Err(error) => VideoInfoCache {
-                result: AnalysisResult::Skip {
-                    file,
-                    reason: SkipReason::AnalysisFailed {
-                        error: error.to_string(),
-                    },
-                },
-                path,
-                info: None,
-            },
-        }
     }
 }

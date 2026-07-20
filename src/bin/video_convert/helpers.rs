@@ -1,14 +1,42 @@
 //! General helpers for the video conversion pipeline.
 //!
-//! Provides reusable path comparison and duration formatting utilities that do not depend on conversion orchestration.
+//! Provides reusable path comparison, duration formatting, and disk space validation utilities.
 
 use std::path::{Path, PathBuf};
+
+use cli_tools::print_error;
+
+use crate::types::ProcessableFile;
+
+/// Minimum free disk space required before converting a file, as a multiple of the
+/// original file size.
+const MIN_DISK_SPACE_FACTOR: u64 = 2;
 
 /// Return a copy of a path with its extension removed.
 pub fn path_without_extension(path: &Path) -> PathBuf {
     let mut path = path.to_owned();
     path.set_extension("");
     path
+}
+
+/// Return a unique backup path beside the given output path.
+pub fn backup_output_path(output: &Path) -> PathBuf {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = cli_tools::path_to_file_stem_string(output);
+    let extension = cli_tools::path_to_file_extension_string(output);
+    let backup_stem = format!("{stem}.vconvert-backup");
+    let backup_filename = format!("{backup_stem}.{extension}");
+    cli_tools::get_unique_path(parent, &backup_filename, &backup_stem, &extension)
+}
+
+/// Return a unique temporary path beside the given output path.
+pub fn temporary_output_path(output: &Path) -> PathBuf {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = cli_tools::path_to_file_stem_string(output);
+    let extension = cli_tools::path_to_file_extension_string(output);
+    let temporary_stem = format!("{stem}.vconvert-tmp");
+    let temporary_filename = format!("{temporary_stem}.{extension}");
+    cli_tools::get_unique_path(parent, &temporary_filename, &temporary_stem, &extension)
 }
 
 /// Return true when two paths resolve to the same filesystem entry.
@@ -25,6 +53,31 @@ pub fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
     };
 
     left == right
+}
+
+/// Check that the output volume has enough free space for the given file.
+///
+/// Requires at least `MIN_DISK_SPACE_FACTOR` times the original file size to be free.
+/// Prints an out-of-disk-space error and returns `false` when the space is insufficient.
+/// If the available space cannot be determined, the check passes.
+pub fn has_enough_disk_space(file: &ProcessableFile) -> bool {
+    let original_size = file.info.size_bytes;
+    let required = original_size.saturating_mul(MIN_DISK_SPACE_FACTOR);
+    let Some(available) = cli_tools::available_disk_space(&file.output_path) else {
+        return true;
+    };
+
+    if available < required {
+        print_error!(
+            "Out of disk space: converting {} needs {} free but only {} is available",
+            cli_tools::path_to_string_relative(&file.file.path),
+            cli_tools::format_size(required),
+            cli_tools::format_size(available),
+        );
+        return false;
+    }
+
+    true
 }
 
 /// Return the absolute duration difference divided by the source duration.

@@ -8,8 +8,10 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use regex::Regex;
 
-use crate::ffmpeg::movie_stream_processing_required;
-use crate::types::{AnalysisFilter, AnalysisResult, ProcessableFile, SkipReason, SubtitleFile, VideoFile, VideoInfo};
+use crate::ffmpeg::{movie_stream_processing_required, probe_video_info};
+use crate::types::{
+    AnalysisFilter, AnalysisResult, ProcessableFile, SkipReason, SubtitleFile, VideoFile, VideoInfo, VideoInfoCache,
+};
 
 /// Regex to match x265 codec identifier in filenames (case-insensitive, word boundary).
 pub static RE_X265: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bx265\b").expect("Invalid x265 regex"));
@@ -243,6 +245,49 @@ impl<'a> ClassificationRequest<'a> {
                 source_duration: self.info.duration,
             },
         }
+    }
+}
+
+/// Run ffprobe on a file and classify the result.
+///
+/// Returns a `VideoInfoCache` containing the analysis result, the file path, and the
+/// `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
+pub fn probe_and_classify(
+    file: VideoFile,
+    subtitle_files: Vec<SubtitleFile>,
+    filter: &AnalysisFilter,
+    movie_mode: bool,
+) -> VideoInfoCache {
+    let path = file.path.clone();
+    if !path.exists() {
+        return VideoInfoCache {
+            result: AnalysisResult::Skip {
+                file,
+                reason: SkipReason::FileMissing,
+            },
+            path,
+            info: None,
+        };
+    }
+    match probe_video_info(&file.path) {
+        Ok(info) => {
+            let result = ClassificationRequest::new(filter, &info, movie_mode, subtitle_files).classify(file);
+            VideoInfoCache {
+                result,
+                path,
+                info: Some(info),
+            }
+        }
+        Err(error) => VideoInfoCache {
+            result: AnalysisResult::Skip {
+                file,
+                reason: SkipReason::AnalysisFailed {
+                    error: error.to_string(),
+                },
+            },
+            path,
+            info: None,
+        },
     }
 }
 
