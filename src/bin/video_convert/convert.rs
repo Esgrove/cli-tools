@@ -3,9 +3,8 @@
 //! Discovers input files, runs ffmpeg operations, manages processing batches, and validates their outputs.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -17,31 +16,30 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::classification::{ClassificationRequest, RE_AV1, RE_X265, probe_stream_languages};
+use crate::classification::{ClassificationRequest, RE_AV1, RE_X265};
 use crate::cli::{DatabaseMode, clean_scan_cache, clear_database, list_extensions, show_database_contents};
-use crate::config::{Config, MOVIE_AUDIO_LANGUAGES, MOVIE_SUBTITLE_LANGUAGES, TARGET_EXTENSION, VideoConvertConfig};
+use crate::config::{Config, VideoConvertConfig};
 use crate::database::{Database, PendingAction};
+use crate::ffmpeg::{
+    ConversionOptions, build_conversion_command, build_remux_command, build_subtitle_mux_command, probe_video_info,
+    run_command_isolated, validate_mux_output,
+};
+use crate::helpers::{
+    duration_difference_ratio, format_duplicate_duration_match, path_without_extension, paths_refer_to_same_file,
+};
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
 use crate::types::{
-    AnalysisFilter, AnalysisOutput, AnalysisResult, Codec, ProcessResult, ProcessableFile, ProcessingOutcome,
-    SkipReason, SubtitleFile, VideoFile, VideoInfo, VideoInfoCache, movie_subtitle_match_score,
+    AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessResult, ProcessableFile, ProcessingOutcome, SkipReason,
+    SubtitleFile, VideoFile, VideoInfo, VideoInfoCache, movie_subtitle_match_score,
 };
 use crate::{SortOrder, VideoConvertArgs};
 
-const FFMPEG_DEFAULT_ARGS: &[&str] = &["-hide_banner", "-nostdin", "-stats", "-loglevel", "info", "-y"];
 const PROGRESS_BAR_CHARS: &str = "=>-";
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 
 /// Minimum ratio of output duration to input duration for a conversion to be considered successful.
 const MIN_DURATION_RATIO: f64 = 0.85;
-
-/// Minimum ratio of muxed output duration to input duration before deleting any source files.
-const MIN_MUX_DURATION_RATIO: f64 = 0.99;
-
-/// Windows API constant for creating a new process group.
-#[cfg(windows)]
-const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// Minimum free disk space required before converting a file, as a multiple of the
 /// original file size.
@@ -605,7 +603,7 @@ impl VideoConvert {
             let info = if pending_file.bit_depth >= 8 {
                 pending_file.to_video_info()
             } else {
-                Self::get_video_info(&pending_file.full_path).unwrap_or_else(|_| pending_file.to_video_info())
+                probe_video_info(&pending_file.full_path).unwrap_or_else(|_| pending_file.to_video_info())
             };
             let processable = self.processable_file(video_file, info, subtitles);
             match pending_file.action {
@@ -693,33 +691,6 @@ impl VideoConvert {
         Ok(())
     }
 
-    /// Get video information using ffprobe.
-    fn get_video_info(path: &Path) -> Result<VideoInfo> {
-        let output = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                "V:0",
-                "-show_entries",
-                "stream=codec_name,bit_rate,width,height,r_frame_rate,pix_fmt,bits_per_raw_sample:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
-                "-output_format",
-                "default=nokey=0:noprint_wrappers=1",
-            ])
-            .arg(path)
-            .output()
-            .context("Failed to execute ffprobe")?;
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
-            anyhow::bail!("ffprobe failed: {}", stderr.trim());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        VideoInfo::from_ffprobe_output(&stdout, &stderr, path)
-    }
-
     /// Remux HEVC or AV1 to MP4 container
     fn remux_to_mp4(&self, file: &ProcessableFile, file_index: &str) -> ProcessResult {
         let input = &file.file.path;
@@ -742,14 +713,14 @@ impl VideoConvert {
         self.log_start(input, "remux", file_index, info, None);
         let start = Instant::now();
 
-        let mut cmd = Self::build_remux_command(input, output, false, codec);
+        let mut cmd = build_remux_command(input, output, false, codec);
 
         if self.config.dryrun {
             println!("[DRYRUN] {cmd:#?}");
             return ProcessResult::Remuxed {};
         }
 
-        let status = match Self::run_command_isolated(&mut cmd) {
+        let status = match run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -779,9 +750,9 @@ impl VideoConvert {
             let _ = std::fs::remove_file(output);
         }
 
-        let mut cmd = Self::build_remux_command(input, output, true, codec);
+        let mut cmd = build_remux_command(input, output, true, codec);
 
-        let status = match Self::run_command_isolated(&mut cmd) {
+        let status = match run_command_isolated(&mut cmd) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -843,7 +814,7 @@ impl VideoConvert {
         self.log_start(input, "subtitle-mux", file_index, info, None);
         let start = Instant::now();
 
-        let mut cmd = match Self::build_subtitle_mux_command(input, &command_output, &file.subtitle_files) {
+        let mut cmd = match build_subtitle_mux_command(input, &command_output, &file.subtitle_files) {
             Ok(command) => command,
             Err(error) => {
                 return ProcessResult::Failed {
@@ -857,7 +828,7 @@ impl VideoConvert {
             return ProcessResult::SubtitlesMuxed {};
         }
 
-        let status = match Self::run_command_isolated(&mut cmd) {
+        let status = match run_command_isolated(&mut cmd) {
             Ok(status) => status,
             Err(error) => {
                 return ProcessResult::Failed {
@@ -876,7 +847,7 @@ impl VideoConvert {
             return ProcessResult::Failed { error };
         }
 
-        if let Err(error) = Self::validate_mux_output(input, &command_output, info) {
+        if let Err(error) = validate_mux_output(input, &command_output, info) {
             if let Err(delete_error) = self.delete_file(&command_output) {
                 print_error!("Failed to delete invalid subtitle mux output: {delete_error}");
             }
@@ -940,19 +911,16 @@ impl VideoConvert {
         // Determine audio codec: copy for mp4/mkv, transcode for others
         let copy_audio = extension == "mp4" || extension == "mkv";
 
-        // Track whether CUDA filters worked for potential reconversion
-        let mut use_cuda_filters = true;
-
-        let mut ffmpeg_command = match Self::build_ffmpeg_command(
+        let mut conversion_options = ConversionOptions::new(
             input,
             output,
             quality_level,
             copy_audio,
-            true,
             self.config.movie_mode,
             &file.subtitle_files,
             info.bit_depth,
-        ) {
+        );
+        let mut ffmpeg_command = match build_conversion_command(&conversion_options) {
             Ok(command) => command,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -967,7 +935,7 @@ impl VideoConvert {
         }
 
         // First attempt: try with CUDA filters for better performance
-        let status = match Self::run_command_isolated(&mut ffmpeg_command) {
+        let status = match run_command_isolated(&mut ffmpeg_command) {
             Ok(s) => s,
             Err(e) => {
                 return ProcessResult::Failed {
@@ -982,17 +950,8 @@ impl VideoConvert {
 
             // Retry without CUDA filters (fallback for format compatibility issues)
             print_error!("CUDA filter failed, retrying with CPU-based filtering...");
-            use_cuda_filters = false;
-            ffmpeg_command = match Self::build_ffmpeg_command(
-                input,
-                output,
-                quality_level,
-                copy_audio,
-                false,
-                self.config.movie_mode,
-                &file.subtitle_files,
-                info.bit_depth,
-            ) {
+            conversion_options = conversion_options.without_cuda_filters();
+            ffmpeg_command = match build_conversion_command(&conversion_options) {
                 Ok(command) => command,
                 Err(e) => {
                     return ProcessResult::Failed {
@@ -1000,7 +959,7 @@ impl VideoConvert {
                     };
                 }
             };
-            let status = match Self::run_command_isolated(&mut ffmpeg_command) {
+            let status = match run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
                     return ProcessResult::Failed {
@@ -1018,7 +977,7 @@ impl VideoConvert {
         }
 
         // Get output file info and validate
-        let output_info = match Self::get_video_info(output) {
+        let output_info = match probe_video_info(output) {
             Ok(info) => info,
             Err(e) => {
                 let _ = std::fs::remove_file(output);
@@ -1039,16 +998,8 @@ impl VideoConvert {
             );
             let _ = std::fs::remove_file(output);
 
-            ffmpeg_command = match Self::build_ffmpeg_command(
-                input,
-                output,
-                new_quality_level,
-                copy_audio,
-                use_cuda_filters,
-                self.config.movie_mode,
-                &file.subtitle_files,
-                info.bit_depth,
-            ) {
+            conversion_options = conversion_options.with_quality_level(new_quality_level);
+            ffmpeg_command = match build_conversion_command(&conversion_options) {
                 Ok(command) => command,
                 Err(e) => {
                     let error = format!("Failed to build reconvert ffmpeg command: {e}");
@@ -1056,7 +1007,7 @@ impl VideoConvert {
                     return ProcessResult::Failed { error };
                 }
             };
-            let status = match Self::run_command_isolated(&mut ffmpeg_command) {
+            let status = match run_command_isolated(&mut ffmpeg_command) {
                 Ok(s) => s,
                 Err(e) => {
                     let error = format!("Failed to execute ffmpeg (reconvert): {e}");
@@ -1075,7 +1026,7 @@ impl VideoConvert {
                 return ProcessResult::Failed { error };
             }
 
-            match Self::get_video_info(output) {
+            match probe_video_info(output) {
                 Ok(info) => info,
                 Err(e) => {
                     let _ = std::fs::remove_file(output);
@@ -1146,14 +1097,7 @@ impl VideoConvert {
         let total_files = files.len();
 
         // Extract config values needed for analysis to avoid borrowing self in parallel context
-        let filter = AnalysisFilter {
-            min_bitrate: self.config.bitrate_limit,
-            max_bitrate: self.config.max_bitrate,
-            min_duration: self.config.min_duration,
-            max_duration: self.config.max_duration,
-            min_resolution: self.config.min_resolution,
-            overwrite: self.config.overwrite,
-        };
+        let filter = AnalysisFilter::from(&self.config);
         let movie_mode = self.config.movie_mode;
 
         // Phase 1 (sequential): bulk-load the scan cache into a HashMap for O(1) lookups,
@@ -1278,7 +1222,7 @@ impl VideoConvert {
                             source_duration,
                         } => {
                             if self.config.delete_duplicates {
-                                if Self::paths_refer_to_same_file(&file.path, target_path) {
+                                if paths_refer_to_same_file(&file.path, target_path) {
                                     print_error!(
                                         "Refusing to delete duplicate because source and target are the same file:\n  {}",
                                         cli_tools::path_to_string_relative(&file.path)
@@ -1288,7 +1232,7 @@ impl VideoConvert {
                                 }
 
                                 // Check target duration and delete source if within 10%
-                                match Self::get_video_info(target_path) {
+                                match probe_video_info(target_path) {
                                     Ok(target_info) => {
                                         if !target_info.is_target_codec() {
                                             print_error!(
@@ -1301,12 +1245,10 @@ impl VideoConvert {
                                         }
 
                                         let duration_ratio =
-                                            Self::duration_difference_ratio(*source_duration, target_info.duration);
+                                            duration_difference_ratio(*source_duration, target_info.duration);
                                         if duration_ratio <= 0.1 {
-                                            let duration_message = Self::format_duplicate_duration_match(
-                                                *source_duration,
-                                                target_info.duration,
-                                            );
+                                            let duration_message =
+                                                format_duplicate_duration_match(*source_duration, target_info.duration);
                                             // Duration within 10%, safe to delete source
                                             if self.config.dryrun {
                                                 println!(
@@ -1519,228 +1461,6 @@ impl VideoConvert {
         renamed_count
     }
 
-    /// Build the ffmpeg command for HEVC conversion.
-    /// When `use_cuda_filters` is true, uses `hwupload_cuda` and `scale_cuda` for GPU-accelerated filtering.
-    /// When false, uses CPU-based filtering which is more compatible but slightly slower.
-    #[allow(clippy::too_many_arguments)]
-    fn build_ffmpeg_command(
-        input: &Path,
-        output: &Path,
-        quality_level: u8,
-        copy_audio: bool,
-        use_cuda_filters: bool,
-        movie_mode: bool,
-        subtitle_files: &[SubtitleFile],
-        bit_depth: u8,
-    ) -> Result<Command> {
-        // GPU tuning for RTX 4090 to use more VRAM and improve performance
-        let extra_hw_frames = "64";
-        let lookahead = "48";
-        let preset = "p5"; // slow (good quality)
-
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(FFMPEG_DEFAULT_ARGS)
-            .args(["-probesize", "50M", "-analyzeduration", "1M"]);
-
-        if use_cuda_filters {
-            cmd.args(["-extra_hw_frames", extra_hw_frames]);
-        }
-
-        cmd.arg("-i").arg(input);
-        for subtitle_file in subtitle_files {
-            cmd.arg("-i").arg(&subtitle_file.path);
-        }
-
-        if movie_mode {
-            let audio_languages = probe_stream_languages(input, "a")?;
-            let subtitle_languages = probe_stream_languages(input, "s")?;
-            Self::add_movie_mode_stream_maps(&mut cmd, &audio_languages, &subtitle_languages);
-            Self::add_external_subtitle_maps(&mut cmd, subtitle_files, 1);
-        }
-
-        if use_cuda_filters {
-            let pixel_format = if bit_depth > 8 { "p010le" } else { "nv12" };
-            cmd.args(["-vf", &format!("hwupload_cuda,scale_cuda=format={pixel_format}")]);
-        }
-
-        cmd.args(["-c:v", "hevc_nvenc"])
-            .args(["-rc:v", "vbr"])
-            .args(["-cq:v", &quality_level.to_string()])
-            .args(["-preset", preset])
-            .args(["-b:v", "0"])
-            .args(["-rc-lookahead", lookahead])
-            .args(["-spatial_aq", "1", "-temporal_aq", "1"]);
-
-        if bit_depth > 8 {
-            cmd.args(["-profile:v", "main10", "-pix_fmt", "p010le"]);
-        }
-
-        if cli_tools::path_to_file_extension_string(output) == TARGET_EXTENSION {
-            cmd.args(["-tag:v", "hvc1"]);
-        }
-
-        if movie_mode {
-            Self::add_movie_mode_passthrough_codecs(&mut cmd);
-        } else if copy_audio {
-            cmd.args(["-c:a", "copy"]);
-        } else {
-            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
-        }
-
-        cmd.arg(output);
-        Ok(cmd)
-    }
-
-    /// Build an ffmpeg command that embeds external subtitles without converting video.
-    fn build_subtitle_mux_command(input: &Path, output: &Path, subtitle_files: &[SubtitleFile]) -> Result<Command> {
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input);
-        for subtitle_file in subtitle_files {
-            cmd.arg("-i").arg(&subtitle_file.path);
-        }
-
-        let audio_languages = probe_stream_languages(input, "a")?;
-        let subtitle_languages = probe_stream_languages(input, "s")?;
-        Self::add_movie_mode_stream_maps(&mut cmd, &audio_languages, &subtitle_languages);
-        Self::add_external_subtitle_maps(&mut cmd, subtitle_files, 1);
-        cmd.args(["-c", "copy"]);
-        cmd.arg(output);
-        Ok(cmd)
-    }
-
-    /// Add movie-mode stream mapping that keeps real video streams and only selected language tracks.
-    fn add_movie_mode_stream_maps(
-        cmd: &mut Command,
-        audio_languages: &BTreeSet<String>,
-        subtitle_languages: &BTreeSet<String>,
-    ) {
-        cmd.args(["-map", "0:V"]);
-
-        let mut mapped_audio = false;
-        for &language in MOVIE_AUDIO_LANGUAGES {
-            if audio_languages.contains(language) {
-                cmd.arg("-map").arg(format!("0:a:m:language:{language}"));
-                mapped_audio = true;
-            }
-        }
-        if !mapped_audio {
-            cmd.args(["-map", "0:a?"]);
-        }
-
-        for &language in MOVIE_SUBTITLE_LANGUAGES {
-            if subtitle_languages.contains(language) {
-                cmd.arg("-map").arg(format!("0:s:m:language:{language}"));
-            }
-        }
-
-        cmd.args(["-map_metadata", "0", "-map_chapters", "0"]);
-    }
-
-    /// Copy non-video streams while movie mode converts video.
-    fn add_movie_mode_passthrough_codecs(cmd: &mut Command) {
-        cmd.args(["-c:a", "copy", "-c:s", "copy"]);
-    }
-
-    /// Add stream maps for external subtitle inputs.
-    fn add_external_subtitle_maps(cmd: &mut Command, subtitle_files: &[SubtitleFile], first_input_index: usize) {
-        for input_index in first_input_index..first_input_index + subtitle_files.len() {
-            cmd.arg("-map").arg(format!("{input_index}:s?"));
-        }
-    }
-
-    /// Probe how many streams of one ffmpeg stream type exist in a file.
-    fn probe_stream_count(input: &Path, stream_type: &str) -> Result<usize> {
-        let output = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-select_streams",
-                stream_type,
-                "-show_entries",
-                "stream=index",
-                "-of",
-                "csv=p=0",
-            ])
-            .arg(input)
-            .output()
-            .context("Failed to execute ffprobe")?;
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
-            anyhow::bail!("ffprobe failed while counting {stream_type} streams: {}", stderr.trim());
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count())
-    }
-
-    /// Validate subtitle mux output before deleting or replacing any source files.
-    fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) -> Result<()> {
-        let output_info = Self::get_video_info(output).context("Failed to get subtitle mux output info")?;
-        if output_info.duration < input_info.duration * MIN_MUX_DURATION_RATIO {
-            anyhow::bail!(
-                "Muxed output duration {:.1}s is less than {:.0}% of original {:.1}s",
-                output_info.duration,
-                MIN_MUX_DURATION_RATIO * 100.0,
-                input_info.duration
-            );
-        }
-
-        let input_audio_streams = Self::probe_stream_count(input, "a")?;
-        if input_audio_streams > 0 {
-            let output_audio_streams = Self::probe_stream_count(output, "a")?;
-            if output_audio_streams == 0 {
-                anyhow::bail!(
-                    "Muxed output has no audio streams, but input has {}",
-                    cli_tools::count_label(input_audio_streams, "audio stream", "audio streams")
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Return true when two paths resolve to the same filesystem entry.
-    fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
-        if left == right {
-            return true;
-        }
-
-        let Ok(left) = std::fs::canonicalize(left) else {
-            return false;
-        };
-        let Ok(right) = std::fs::canonicalize(right) else {
-            return false;
-        };
-        left == right
-    }
-
-    /// Return the absolute duration difference divided by the source duration.
-    fn duration_difference_ratio(source_duration: f64, target_duration: f64) -> f64 {
-        if source_duration > 0.0 {
-            (target_duration - source_duration).abs() / source_duration
-        } else {
-            1.0
-        }
-    }
-
-    /// Format the duplicate duration detail for human-readable output.
-    fn format_duplicate_duration_match(source_duration: f64, target_duration: f64) -> String {
-        let source_tenths = (source_duration * 10.0).round() as i64;
-        let target_tenths = (target_duration * 10.0).round() as i64;
-        if source_tenths == target_tenths {
-            "duration match".to_string()
-        } else {
-            let duration_ratio = Self::duration_difference_ratio(source_duration, target_duration);
-            format!(
-                "duration match: {source_duration:.1}s vs {target_duration:.1}s ({:.3}% difference)",
-                duration_ratio * 100.0
-            )
-        }
-    }
-
     /// Check if a file should be converted based on extension and include/exclude patterns.
     fn should_include_file(&self, file: &VideoFile) -> bool {
         // In normal mode, skip files already marked with a target codec suffix.
@@ -1927,7 +1647,7 @@ impl VideoConvert {
                 info: None,
             };
         }
-        match Self::get_video_info(&file.path) {
+        match probe_video_info(&file.path) {
             Ok(info) => {
                 let result = ClassificationRequest::new(filter, &info, movie_mode, subtitle_files).classify(file);
                 VideoInfoCache {
@@ -1947,186 +1667,5 @@ impl VideoConvert {
                 info: None,
             },
         }
-    }
-
-    /// Build ffmpeg command for remuxing with stream copy.
-    fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool, codec: Codec) -> Command {
-        // -map 0:v:0   -> first video stream only
-        // -map 0:a?    -> all audio streams (optional, if any)
-        // -map -0:t    -> drop attachments
-        // -map -0:d    -> drop data streams
-        // -sn          -> drop subtitles (avoids failures with non-mov_text subs)
-        let mut cmd = Command::new("ffmpeg");
-        cmd.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input).args([
-            "-map", "0:v:0", "-map", "0:a?", "-map", "-0:t", "-map", "-0:d", "-sn", "-c:v", "copy",
-        ]);
-
-        if transcode_audio {
-            cmd.args(["-c:a", "aac", "-b:a", "128k"]);
-        } else {
-            cmd.args(["-c:a", "copy"]);
-        }
-
-        cmd.args(["-movflags", "+faststart"]);
-        if codec == Codec::X265 {
-            cmd.args(["-tag:v", "hvc1"]);
-        }
-        cmd.arg(output);
-        cmd
-    }
-
-    /// Run a command in a new process group to prevent Ctrl+C from propagating to it.
-    /// This allows the main program to handle the signal and finish the current file gracefully.
-    fn run_command_isolated(cmd: &mut Command) -> std::io::Result<ExitStatus> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
-        }
-        #[cfg(unix)]
-        {
-            // Set process group to 0 to prevent SIGINT propagation
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
-    }
-}
-
-fn path_without_extension(path: &Path) -> PathBuf {
-    let mut path = path.to_owned();
-    path.set_extension("");
-    path
-}
-
-#[cfg(test)]
-mod test_build_ffmpeg_command {
-    use super::*;
-
-    fn command_args(command: &Command) -> Vec<String> {
-        command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect()
-    }
-
-    fn has_arg_pair(args: &[String], option: &str, value: &str) -> bool {
-        args.windows(2).any(|pair| pair[0] == option && pair[1] == value)
-    }
-
-    #[test]
-    fn movie_mode_maps_only_allowed_audio_and_subtitle_languages_that_exist() {
-        let mut command = Command::new("ffmpeg");
-        let audio_languages = BTreeSet::from([
-            "eng".to_string(),
-            "fin".to_string(),
-            "fra".to_string(),
-            "fre".to_string(),
-            "jpn".to_string(),
-            "ger".to_string(),
-        ]);
-        let subtitle_languages = BTreeSet::from(["eng".to_string(), "swe".to_string(), "spa".to_string()]);
-
-        VideoConvert::add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
-        let args = command_args(&command);
-
-        assert!(has_arg_pair(&args, "-map", "0:V"));
-        assert!(!has_arg_pair(&args, "-map", "0:v"));
-        assert!(!has_arg_pair(&args, "-map", "0"));
-        assert!(has_arg_pair(&args, "-map", "0:a:m:language:eng"));
-        assert!(has_arg_pair(&args, "-map", "0:a:m:language:fin"));
-        assert!(has_arg_pair(&args, "-map", "0:a:m:language:fra"));
-        assert!(has_arg_pair(&args, "-map", "0:a:m:language:fre"));
-        assert!(has_arg_pair(&args, "-map", "0:a:m:language:jpn"));
-        assert!(!has_arg_pair(&args, "-map", "0:a?"));
-        assert!(!has_arg_pair(&args, "-map", "0:a:m:language:swe"));
-        assert!(!has_arg_pair(&args, "-map", "0:a:m:language:ger"));
-        assert!(has_arg_pair(&args, "-map", "0:s:m:language:eng"));
-        assert!(!has_arg_pair(&args, "-map", "0:s:m:language:fin"));
-        assert!(has_arg_pair(&args, "-map", "0:s:m:language:swe"));
-        assert!(!has_arg_pair(&args, "-map", "0:s:m:language:spa"));
-        assert!(has_arg_pair(&args, "-map_metadata", "0"));
-        assert!(has_arg_pair(&args, "-map_chapters", "0"));
-        assert!(!has_arg_pair(&args, "-c", "copy"));
-    }
-
-    #[test]
-    fn movie_mode_falls_back_to_all_audio_when_no_preferred_language_exists() {
-        let mut command = Command::new("ffmpeg");
-        let audio_languages = BTreeSet::from(["und".to_string()]);
-        let subtitle_languages = BTreeSet::new();
-
-        VideoConvert::add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
-        let args = command_args(&command);
-
-        assert!(has_arg_pair(&args, "-map", "0:V"));
-        assert!(has_arg_pair(&args, "-map", "0:a?"));
-        assert!(!has_arg_pair(&args, "-map", "0:a:m:language:und"));
-    }
-
-    #[test]
-    fn duplicate_duration_match_hides_equal_rounded_durations() {
-        let message = VideoConvert::format_duplicate_duration_match(5414.84, 5414.83);
-
-        assert_eq!(message, "duration match");
-    }
-
-    #[test]
-    fn duplicate_duration_match_reports_percentage_when_rounded_duration_differs() {
-        let message = VideoConvert::format_duplicate_duration_match(100.0, 100.2);
-
-        assert_eq!(message, "duration match: 100.0s vs 100.2s (0.200% difference)");
-    }
-
-    #[test]
-    fn conversion_uses_8bit_pixel_format_for_8bit_source() {
-        let command = VideoConvert::build_ffmpeg_command(
-            Path::new("input.mkv"),
-            Path::new("output.mp4"),
-            28,
-            true,
-            true,
-            false,
-            &[],
-            8,
-        )
-        .unwrap();
-        let args = command_args(&command);
-
-        assert!(has_arg_pair(&args, "-vf", "hwupload_cuda,scale_cuda=format=nv12"));
-        assert!(!has_arg_pair(&args, "-profile:v", "main10"));
-        assert!(!has_arg_pair(&args, "-pix_fmt", "p010le"));
-    }
-
-    #[test]
-    fn conversion_preserves_10bit_for_10bit_source() {
-        let command = VideoConvert::build_ffmpeg_command(
-            Path::new("input.mkv"),
-            Path::new("output.mp4"),
-            28,
-            true,
-            true,
-            false,
-            &[],
-            10,
-        )
-        .unwrap();
-        let args = command_args(&command);
-
-        assert!(has_arg_pair(&args, "-vf", "hwupload_cuda,scale_cuda=format=p010le"));
-        assert!(has_arg_pair(&args, "-profile:v", "main10"));
-        assert!(has_arg_pair(&args, "-pix_fmt", "p010le"));
-    }
-
-    #[test]
-    fn movie_mode_conversion_copies_audio_and_subtitles_without_generic_codec() {
-        let mut command = Command::new("ffmpeg");
-
-        VideoConvert::add_movie_mode_passthrough_codecs(&mut command);
-        let args = command_args(&command);
-
-        assert!(has_arg_pair(&args, "-c:a", "copy"));
-        assert!(has_arg_pair(&args, "-c:s", "copy"));
-        assert!(!has_arg_pair(&args, "-c", "copy"));
     }
 }

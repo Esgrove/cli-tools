@@ -7,6 +7,8 @@ mod cli;
 mod config;
 mod convert;
 mod database;
+mod ffmpeg;
+mod helpers;
 mod logger;
 mod stats;
 mod types;

@@ -9,7 +9,7 @@ use colored::Colorize;
 use regex::Regex;
 
 use crate::classification::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265};
-use crate::config::TARGET_EXTENSION;
+use crate::config::{Config, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
 /// Information about a video file from ffprobe
@@ -174,6 +174,30 @@ pub enum AnalysisResult {
     NeedsSubtitleMux(ProcessableFile),
     /// File should be skipped
     Skip { file: VideoFile, reason: SkipReason },
+}
+
+impl AnalysisResult {
+    /// Create a skipped analysis result for a file that could not be analyzed.
+    pub(crate) const fn analysis_failed(file: VideoFile, error: String) -> Self {
+        Self::Skip {
+            file,
+            reason: SkipReason::AnalysisFailed { error },
+        }
+    }
+}
+
+impl From<&Config> for AnalysisFilter {
+    /// Create analysis filters from the resolved runtime configuration.
+    fn from(config: &Config) -> Self {
+        Self {
+            min_bitrate: config.bitrate_limit,
+            max_bitrate: config.max_bitrate,
+            min_duration: config.min_duration,
+            max_duration: config.max_duration,
+            min_resolution: config.min_resolution,
+            overwrite: config.overwrite,
+        }
+    }
 }
 
 impl ProcessResult {

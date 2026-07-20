@@ -34,6 +34,9 @@ const ALL_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm", "mpeg",
 ];
 
+/// Default display limit for showing pending files.
+const DEFAULT_DISPLAY_LIMIT: usize = 100;
+
 /// User configuration from the config file.
 #[derive(Debug, Default, Deserialize)]
 pub struct VideoConvertConfig {
@@ -74,9 +77,6 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     verbose: bool,
 }
-
-/// Default display limit for showing pending files.
-const DEFAULT_DISPLAY_LIMIT: usize = 100;
 
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug, Default)]

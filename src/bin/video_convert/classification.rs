@@ -2,15 +2,13 @@
 //!
 //! Determines whether files should be skipped, renamed, remuxed, or converted, and selects movie-mode streams.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 
-use crate::config::{MOVIE_AUDIO_LANGUAGES, MOVIE_SUBTITLE_LANGUAGES};
+use crate::ffmpeg::movie_stream_processing_required;
 use crate::types::{AnalysisFilter, AnalysisResult, ProcessableFile, SkipReason, SubtitleFile, VideoFile, VideoInfo};
 
 /// Regex to match x265 codec identifier in filenames (case-insensitive, word boundary).
@@ -62,7 +60,7 @@ impl<'a> ClassificationRequest<'a> {
         let is_target_codec = self.info.is_target_codec();
         let movie_stream_processing_required = match self.movie_stream_processing_required(&file, is_target_codec) {
             Ok(required) => required,
-            Err(error) => return Self::analysis_failed(file, error.to_string()),
+            Err(error) => return AnalysisResult::analysis_failed(file, error.to_string()),
         };
 
         if let Some(result) = self.stale_label_result(&file, is_target_codec) {
@@ -205,7 +203,7 @@ impl<'a> ClassificationRequest<'a> {
             self.info.bit_depth,
         );
         if output_path == file.path {
-            return Self::analysis_failed(
+            return AnalysisResult::analysis_failed(
                 file,
                 "Output path resolves to the input file, refusing in-place conversion/remux".to_string(),
             );
@@ -245,115 +243,6 @@ impl<'a> ClassificationRequest<'a> {
                 source_duration: self.info.duration,
             },
         }
-    }
-
-    /// Build an analysis-failed result.
-    const fn analysis_failed(file: VideoFile, error: String) -> AnalysisResult {
-        AnalysisResult::Skip {
-            file,
-            reason: SkipReason::AnalysisFailed { error },
-        }
-    }
-}
-
-/// Probe unique language tags for one ffmpeg stream type.
-pub fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSet<String>> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            stream_type,
-            "-show_entries",
-            "stream=index:stream_tags=language",
-            "-of",
-            "csv=p=0",
-        ])
-        .arg(input)
-        .output()
-        .context("Failed to execute ffprobe")?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        anyhow::bail!(
-            "ffprobe failed while probing {stream_type} stream languages: {}",
-            stderr.trim()
-        );
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|line| {
-            let language = line.trim().split_once(',').map_or("", |(_, language)| language.trim());
-            if language.is_empty() { "und" } else { language }
-        })
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-/// Return whether applying movie-mode stream maps would remove any internal tracks.
-fn movie_stream_processing_required(input: &Path) -> Result<bool> {
-    let audio_languages = probe_stream_languages(input, "a")?;
-    let subtitle_languages = probe_stream_languages(input, "s")?;
-    Ok(stream_languages_require_movie_processing(
-        &audio_languages,
-        &subtitle_languages,
-    ))
-}
-
-/// Return whether applying movie-mode stream maps would remove any internal tracks.
-fn stream_languages_require_movie_processing(
-    audio_languages: &BTreeSet<String>,
-    subtitle_languages: &BTreeSet<String>,
-) -> bool {
-    let has_preferred_audio = audio_languages
-        .iter()
-        .any(|language| MOVIE_AUDIO_LANGUAGES.contains(&language.as_str()));
-    let removes_audio = has_preferred_audio
-        && audio_languages
-            .iter()
-            .any(|language| !MOVIE_AUDIO_LANGUAGES.contains(&language.as_str()));
-    let removes_subtitles = subtitle_languages
-        .iter()
-        .any(|language| !MOVIE_SUBTITLE_LANGUAGES.contains(&language.as_str()));
-    removes_audio || removes_subtitles
-}
-
-#[cfg(test)]
-mod test_stream_languages_require_movie_processing {
-    use super::*;
-
-    #[test]
-    fn allowed_movie_stream_languages_do_not_require_processing() {
-        let audio_languages = BTreeSet::from(["eng".to_string(), "fra".to_string()]);
-        let subtitle_languages = BTreeSet::from(["eng".to_string(), "fin".to_string()]);
-
-        assert!(!stream_languages_require_movie_processing(
-            &audio_languages,
-            &subtitle_languages,
-        ));
-    }
-
-    #[test]
-    fn disallowed_movie_stream_languages_require_processing() {
-        let audio_languages = BTreeSet::from(["eng".to_string(), "ger".to_string()]);
-        let subtitle_languages = BTreeSet::from(["eng".to_string(), "spa".to_string()]);
-
-        assert!(stream_languages_require_movie_processing(
-            &audio_languages,
-            &subtitle_languages,
-        ));
-    }
-
-    #[test]
-    fn fallback_audio_languages_do_not_require_ineffective_processing() {
-        let audio_languages = BTreeSet::from(["ger".to_string(), "und".to_string()]);
-        let subtitle_languages = BTreeSet::new();
-
-        assert!(!stream_languages_require_movie_processing(
-            &audio_languages,
-            &subtitle_languages,
-        ));
     }
 }
 
