@@ -1,3 +1,8 @@
+//! Command-line entry point for the video conversion tool.
+//!
+//! Defines CLI arguments and subcommands, initializes logging, and dispatches conversion or completion generation.
+
+pub(crate) mod classification;
 mod cli;
 mod config;
 mod convert;

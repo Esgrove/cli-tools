@@ -1,10 +1,15 @@
+//! Core data types for video analysis and processing.
+//!
+//! Defines media metadata, file actions, processing results, subtitle sidecars, and output path rules.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 use regex::Regex;
 
-use crate::convert::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265, TARGET_EXTENSION};
+use crate::classification::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265};
+use crate::config::TARGET_EXTENSION;
 use crate::stats::ConversionStats;
 
 /// Information about a video file from ffprobe
@@ -61,7 +66,7 @@ pub struct VideoFile {
 /// Result of running ffprobe on a cache miss, bundling everything needed to
 /// write the result back to the scan cache and continue with analysis.
 pub struct VideoInfoCache {
-    /// Classification result from `classify_video_file`.
+    /// Classification result for the file.
     pub(crate) result: AnalysisResult,
     /// Original file path, kept separately so the caller can write the cache
     /// entry without digging into the `AnalysisResult` enum.

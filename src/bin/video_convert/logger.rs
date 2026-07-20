@@ -1,3 +1,7 @@
+//! File logging for video conversion runs.
+//!
+//! Records configuration, analysis summaries, processing outcomes, and conversion statistics.
+
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};

@@ -1,3 +1,7 @@
+//! Configuration loading and resolution for video conversion.
+//!
+//! Defines file and runtime settings, and combines command-line arguments with user configuration.
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -9,6 +13,15 @@ use crate::DatabaseMode;
 use crate::SortOrder;
 use crate::VideoConvertArgs;
 use crate::database::PendingFileFilter;
+
+/// Audio languages preserved by movie mode.
+pub const MOVIE_AUDIO_LANGUAGES: &[&str] = &["eng", "fin", "fra", "fre", "jpn", "swe", "nog", "nor"];
+
+/// Subtitle languages preserved by movie mode.
+pub const MOVIE_SUBTITLE_LANGUAGES: &[&str] = &["eng", "fin", "swe"];
+
+/// Output container used when movie mode does not preserve MKV.
+pub const TARGET_EXTENSION: &str = "mp4";
 
 /// Default video extensions
 const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];

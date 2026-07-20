@@ -1,4 +1,6 @@
-//! CLI types and helper functions for video convert.
+//! Command-line support for video conversion.
+//!
+//! Defines sort and database modes, and implements helpers for displaying database contents.
 
 use std::str::FromStr;
 

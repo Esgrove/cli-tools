@@ -1,6 +1,6 @@
 //! `SQLite` database operations for video convert.
 //!
-//! Stores pending video files that need conversion or remuxing.
+//! Stores scan metadata and pending files that need conversion, remuxing, or subtitle processing.
 
 #![allow(clippy::cast_possible_wrap)]
 

@@ -136,6 +136,10 @@ re-export from the library. Do not duplicate code in benchmark files.
 
 ### Comments and documentation formatting
 
+Every Rust source file must start with module-level `//!` documentation.
+Briefly describe the module's purpose, its main contents, and what it implements.
+Always add this documentation when creating a new Rust source file.
+
 Use semantic line breaks for comments, docstrings, and documentation.
 Start a new line at sentence boundaries or natural clause boundaries.
 Target about 120 characters per line, but prefer a clean sentence break over a strict width.

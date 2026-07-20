@@ -1,3 +1,7 @@
+//! Analysis and conversion statistics for video processing.
+//!
+//! Collects per-file and aggregate outcomes, and implements formatted run summaries.
+
 use std::ops::AddAssign;
 use std::time::Duration;
 
