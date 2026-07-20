@@ -509,3 +509,133 @@ mod run_stats_tests {
         assert_eq!(stats1.total_original_size, 1_500_000);
     }
 }
+
+#[cfg(test)]
+mod test_additional_run_results {
+    use super::*;
+
+    #[test]
+    fn add_result_increments_subtitle_muxed() {
+        let mut stats = RunStats::default();
+
+        stats.add_result(&ProcessResult::SubtitlesMuxed {}, Duration::from_millis(250));
+
+        assert_eq!(stats.files_subtitle_muxed, 1);
+        assert_eq!(stats.total_duration, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn add_result_accumulates_mixed_outcomes_and_durations() {
+        let mut stats = RunStats::default();
+        let converted = ProcessResult::Converted {
+            stats: ConversionStats::new(2_000, 8_000, 1_000, 4_000),
+        };
+        let remuxed = ProcessResult::Remuxed {};
+        let subtitle_muxed = ProcessResult::SubtitlesMuxed {};
+        let failed = ProcessResult::Failed {
+            error: "invalid stream".to_string(),
+        };
+
+        stats.add_result(&converted, Duration::from_secs(4));
+        stats.add_result(&remuxed, Duration::from_secs(3));
+        stats.add_result(&subtitle_muxed, Duration::from_secs(2));
+        stats.add_result(&failed, Duration::from_secs(1));
+
+        assert_eq!(stats.files_converted, 1);
+        assert_eq!(stats.files_remuxed, 1);
+        assert_eq!(stats.files_subtitle_muxed, 1);
+        assert_eq!(stats.files_failed, 1);
+        assert_eq!(stats.total_original_size, 2_000);
+        assert_eq!(stats.total_converted_size, 1_000);
+        assert_eq!(stats.total_duration, Duration::from_secs(10));
+    }
+}
+
+#[cfg(test)]
+mod test_summary_branches {
+    use super::*;
+
+    #[test]
+    fn analysis_summary_handles_every_reported_category() {
+        let stats = AnalysisStats {
+            to_rename: 1,
+            to_remux: 2,
+            to_subtitle_mux: 3,
+            to_convert: 4,
+            skipped_converted: 5,
+            skipped_bitrate_low: 6,
+            skipped_bitrate_high: 7,
+            skipped_duration_short: 8,
+            skipped_duration_long: 9,
+            skipped_resolution_low: 10,
+            skipped_duplicate: 11,
+            duplicates_deleted: 12,
+            duplicate_delete_failed: 13,
+            file_missing: 14,
+            analysis_failed: 15,
+        };
+
+        assert_eq!(stats.total_skipped(), 95);
+        stats.print_summary();
+    }
+
+    #[test]
+    fn analysis_summary_handles_no_skips_or_failures() {
+        let stats = AnalysisStats::default();
+
+        assert_eq!(stats.total_skipped(), 0);
+        stats.print_summary();
+    }
+
+    #[test]
+    fn run_summary_handles_saved_increased_and_zero_original_sizes() {
+        let saved = RunStats {
+            files_converted: 1,
+            total_original_size: 2_097_152,
+            total_converted_size: 1_048_576,
+            ..Default::default()
+        };
+        let increased = RunStats {
+            files_converted: 1,
+            files_failed: 1,
+            total_original_size: 524_288,
+            total_converted_size: 1_048_576,
+            ..Default::default()
+        };
+        let zero_original = RunStats {
+            files_converted: 1,
+            total_converted_size: 1_024,
+            ..Default::default()
+        };
+
+        assert_eq!(saved.space_saved(), 1_048_576);
+        assert_eq!(increased.space_saved(), -524_288);
+        assert_eq!(zero_original.space_saved(), -1_024);
+        saved.print_summary();
+        increased.print_summary();
+        zero_original.print_summary();
+        RunStats::default().print_summary();
+    }
+}
+
+#[cfg(test)]
+mod test_additional_conversion_display {
+    use super::*;
+
+    #[test]
+    fn display_formats_size_increase() {
+        let stats = ConversionStats::new(524_288, 4_000, 1_048_576, 8_000);
+
+        assert_eq!(
+            stats.to_string(),
+            "512.00 KB @ 4.00 Mbps -> 1.00 MB @ 8.00 Mbps (100.0%)"
+        );
+    }
+
+    #[test]
+    fn display_formats_zero_sized_conversion() {
+        let stats = ConversionStats::new(0, 0, 0, 0);
+
+        assert_eq!(stats.to_string(), "0 B @ 0.00 Mbps -> 0 B @ 0.00 Mbps (0.0%)");
+    }
+}

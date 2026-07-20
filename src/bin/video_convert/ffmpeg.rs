@@ -379,6 +379,24 @@ fn add_external_subtitle_maps(command: &mut Command, subtitle_files: &[SubtitleF
 }
 
 #[cfg(test)]
+mod test_helpers {
+    use super::*;
+
+    /// Collect a command's arguments as owned strings for assertions.
+    pub fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Return whether adjacent command arguments contain an option and value pair.
+    pub fn has_arg_pair(args: &[String], option: &str, value: &str) -> bool {
+        args.windows(2).any(|pair| pair[0] == option && pair[1] == value)
+    }
+}
+
+#[cfg(test)]
 mod test_stream_languages_require_movie_processing {
     use super::*;
 
@@ -414,24 +432,23 @@ mod test_stream_languages_require_movie_processing {
             &subtitle_languages,
         ));
     }
+
+    #[test]
+    fn disallowed_subtitle_language_requires_processing_without_audio_changes() {
+        let audio_languages = BTreeSet::from(["eng".to_string()]);
+        let subtitle_languages = BTreeSet::from(["spa".to_string()]);
+
+        assert!(stream_languages_require_movie_processing(
+            &audio_languages,
+            &subtitle_languages,
+        ));
+    }
 }
 
 #[cfg(test)]
 mod test_command_helpers {
+    use super::test_helpers::{command_args, has_arg_pair};
     use super::*;
-
-    /// Collect a command's arguments as owned strings for assertions.
-    fn command_args(command: &Command) -> Vec<String> {
-        command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect()
-    }
-
-    /// Return whether adjacent command arguments contain an option and value pair.
-    fn has_arg_pair(args: &[String], option: &str, value: &str) -> bool {
-        args.windows(2).any(|pair| pair[0] == option && pair[1] == value)
-    }
 
     #[test]
     fn movie_mode_maps_only_allowed_audio_and_subtitle_languages_that_exist() {
@@ -486,7 +503,7 @@ mod test_command_helpers {
     #[test]
     fn conversion_uses_8bit_pixel_format_for_8bit_source() {
         let options = ConversionOptions::new(Path::new("input.mkv"), Path::new("output.mp4"), 28, true, false, &[], 8);
-        let command = build_conversion_command(&options).unwrap();
+        let command = build_conversion_command(&options).expect("conversion command should be constructed");
         let args = command_args(&command);
 
         assert!(has_arg_pair(&args, "-vf", "hwupload_cuda,scale_cuda=format=nv12"));
@@ -505,7 +522,7 @@ mod test_command_helpers {
             &[],
             10,
         );
-        let command = build_conversion_command(&options).unwrap();
+        let command = build_conversion_command(&options).expect("conversion command should be constructed");
         let args = command_args(&command);
 
         assert!(has_arg_pair(&args, "-vf", "hwupload_cuda,scale_cuda=format=p010le"));
@@ -523,5 +540,202 @@ mod test_command_helpers {
         assert!(has_arg_pair(&args, "-c:a", "copy"));
         assert!(has_arg_pair(&args, "-c:s", "copy"));
         assert!(!has_arg_pair(&args, "-c", "copy"));
+    }
+}
+
+#[cfg(test)]
+mod test_conversion_command {
+    use super::test_helpers::{command_args, has_arg_pair};
+    use super::*;
+
+    #[test]
+    fn cpu_conversion_builds_expected_transcoding_command() {
+        let options = ConversionOptions::new(
+            Path::new("input.mkv"),
+            Path::new("output.mp4"),
+            30,
+            false,
+            false,
+            &[],
+            8,
+        )
+        .without_cuda_filters()
+        .with_quality_level(24);
+
+        let command = build_conversion_command(&options).expect("conversion command should be constructed");
+
+        assert_eq!(command.get_program(), "ffmpeg");
+        assert_eq!(
+            command_args(&command),
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-stats",
+                "-loglevel",
+                "info",
+                "-y",
+                "-probesize",
+                "50M",
+                "-analyzeduration",
+                "1M",
+                "-i",
+                "input.mkv",
+                "-c:v",
+                "hevc_nvenc",
+                "-rc:v",
+                "vbr",
+                "-cq:v",
+                "24",
+                "-preset",
+                "p5",
+                "-b:v",
+                "0",
+                "-rc-lookahead",
+                "48",
+                "-spatial_aq",
+                "1",
+                "-temporal_aq",
+                "1",
+                "-tag:v",
+                "hvc1",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "output.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn non_target_container_copies_audio_without_hevc_tag() {
+        let options = ConversionOptions::new(Path::new("input.mp4"), Path::new("output.mkv"), 28, true, false, &[], 8);
+
+        let command = build_conversion_command(&options).expect("conversion command should be constructed");
+        let args = command_args(&command);
+
+        assert!(has_arg_pair(&args, "-extra_hw_frames", "64"));
+        assert!(has_arg_pair(&args, "-c:a", "copy"));
+        assert!(!has_arg_pair(&args, "-tag:v", "hvc1"));
+        assert_eq!(args.last().map(String::as_str), Some("output.mkv"));
+    }
+}
+
+#[cfg(test)]
+mod test_remux_command {
+    use super::test_helpers::command_args;
+    use super::*;
+
+    #[test]
+    fn x265_remux_transcodes_audio_and_sets_compatibility_tag() {
+        let command = build_remux_command(Path::new("input.mkv"), Path::new("output.mp4"), true, Codec::X265);
+
+        assert_eq!(command.get_program(), "ffmpeg");
+        assert_eq!(
+            command_args(&command),
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-stats",
+                "-loglevel",
+                "info",
+                "-y",
+                "-i",
+                "input.mkv",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-map",
+                "-0:t",
+                "-map",
+                "-0:d",
+                "-sn",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                "-tag:v",
+                "hvc1",
+                "output.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn av1_remux_copies_audio_without_hevc_tag() {
+        let command = build_remux_command(Path::new("input.mkv"), Path::new("output.mp4"), false, Codec::Av1);
+
+        assert_eq!(
+            command_args(&command),
+            [
+                "-hide_banner",
+                "-nostdin",
+                "-stats",
+                "-loglevel",
+                "info",
+                "-y",
+                "-i",
+                "input.mkv",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-map",
+                "-0:t",
+                "-map",
+                "-0:d",
+                "-sn",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "output.mp4",
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_external_subtitle_maps {
+    use std::path::PathBuf;
+
+    use super::test_helpers::command_args;
+    use super::*;
+
+    #[test]
+    fn maps_each_external_subtitle_from_its_input_index() {
+        let subtitle_files = [
+            SubtitleFile {
+                path: PathBuf::from("movie.en.srt"),
+                extension: "srt".to_string(),
+                paired_sub_path: None,
+            },
+            SubtitleFile {
+                path: PathBuf::from("movie.fi.srt"),
+                extension: "srt".to_string(),
+                paired_sub_path: None,
+            },
+        ];
+        let mut command = Command::new("ffmpeg");
+
+        add_external_subtitle_maps(&mut command, &subtitle_files, 2);
+
+        assert_eq!(command_args(&command), ["-map", "2:s?", "-map", "3:s?"]);
+    }
+
+    #[test]
+    fn empty_external_subtitle_list_adds_no_arguments() {
+        let mut command = Command::new("ffmpeg");
+
+        add_external_subtitle_maps(&mut command, &[], 1);
+
+        assert!(command_args(&command).is_empty());
     }
 }

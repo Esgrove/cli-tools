@@ -533,7 +533,7 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
-    #[expect(dead_code, reason = "Part of public API for future use")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Part of public API for future use"))]
     pub fn get_pending_file(&self, path: &Path) -> Result<Option<PendingFile>> {
         let path_str = path.to_string_lossy();
 
@@ -576,7 +576,7 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
-    #[expect(dead_code, reason = "Part of public API for future use")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Part of public API for future use"))]
     pub fn remove_pending_file_by_id(&self, id: i64) -> Result<bool> {
         let rows_affected = self
             .connection
@@ -2486,5 +2486,287 @@ mod test_group_paths_by_drive {
         let groups_map: HashMap<String, Vec<PathBuf>> = groups.into_iter().collect();
         assert_eq!(groups_map.get("C:").expect("Expected C: group").len(), 2);
         assert_eq!(groups_map.get(r"\\server\share").expect("Expected UNC group").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod test_schema_updates {
+    use super::*;
+
+    #[test]
+    fn add_column_if_missing_adds_column_only_once() {
+        let database = Database {
+            connection: Connection::open_in_memory().expect("Failed to open in-memory database"),
+        };
+        database
+            .connection
+            .execute("CREATE TABLE legacy_files (id INTEGER PRIMARY KEY)", [])
+            .expect("Failed to create legacy table");
+
+        database
+            .add_column_if_missing("legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
+            .expect("Failed to add missing column");
+        database
+            .add_column_if_missing("legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
+            .expect("Existing column should be left unchanged");
+
+        let mut statement = database
+            .connection
+            .prepare("PRAGMA table_info(legacy_files)")
+            .expect("Failed to inspect legacy table");
+        let bit_depth_columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("Failed to query legacy columns")
+            .filter_map(std::result::Result::ok)
+            .filter(|name| name == "bit_depth")
+            .count();
+
+        assert_eq!(bit_depth_columns, 1);
+    }
+
+    #[test]
+    fn initialize_removes_entries_with_invalid_frame_rates() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let invalid_info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_000,
+            duration: 60.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 0.5,
+            bit_depth: 8,
+            warning: None,
+        };
+        let pending_path = PathBuf::from("invalid-pending.mkv");
+        let scanned_path = PathBuf::from("invalid-scanned.mkv");
+        database
+            .upsert_pending_file(&pending_path, "mkv", &invalid_info, PendingAction::Convert)
+            .expect("Failed to insert invalid pending entry");
+        database
+            .upsert_scanned_file(&scanned_path, &invalid_info)
+            .expect("Failed to insert invalid scanned entry");
+
+        database.initialize().expect("Failed to reinitialize database");
+
+        assert!(
+            database
+                .get_pending_files(&PendingFileFilter::default())
+                .expect("Failed to query pending entries")
+                .is_empty()
+        );
+        assert_eq!(
+            database.scanned_file_count().expect("Failed to count scanned entries"),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_pending_file_lookup_and_removal {
+    use super::*;
+
+    fn video_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_048_576,
+            duration: 90.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 10,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn gets_pending_file_by_path_and_returns_none_for_unknown_path() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let path = PathBuf::from("known-video.mkv");
+        database
+            .upsert_pending_file(&path, "MKV", &video_info(), PendingAction::SubtitleMux)
+            .expect("Failed to insert pending file");
+
+        let pending = database
+            .get_pending_file(&path)
+            .expect("Failed to query pending file")
+            .expect("Expected pending file");
+
+        assert_eq!(pending.full_path, path);
+        assert_eq!(pending.extension, "mkv");
+        assert_eq!(pending.bit_depth, 10);
+        assert_eq!(pending.action, PendingAction::SubtitleMux);
+        assert!(
+            database
+                .get_pending_file(Path::new("unknown-video.mkv"))
+                .expect("Failed to query unknown path")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn removes_pending_file_by_id_and_reports_missing_entries() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let path = PathBuf::from("remove-by-id.mkv");
+        database
+            .upsert_pending_file(&path, "mkv", &video_info(), PendingAction::Convert)
+            .expect("Failed to insert pending file");
+        let pending = database
+            .get_pending_file(&path)
+            .expect("Failed to query pending file")
+            .expect("Expected pending file");
+
+        assert!(
+            database
+                .remove_pending_file_by_id(pending.id)
+                .expect("Failed to remove pending file by ID")
+        );
+        assert!(
+            !database
+                .remove_pending_file_by_id(pending.id)
+                .expect("Repeated removal should not fail")
+        );
+        assert!(
+            !database
+                .remove_pending_file(Path::new("unknown-video.mkv"))
+                .expect("Unknown path removal should not fail")
+        );
+    }
+
+    #[test]
+    fn remove_missing_files_keeps_existing_paths() {
+        let temporary_directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let existing_path = temporary_directory.path().join("existing.mkv");
+        let missing_path = temporary_directory.path().join("missing.mkv");
+        std::fs::write(&existing_path, b"video").expect("Failed to create existing test file");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = video_info();
+        database
+            .upsert_pending_file(&existing_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert existing path");
+        database
+            .upsert_pending_file(&missing_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert missing path");
+
+        assert_eq!(
+            database.remove_missing_files().expect("Failed to remove missing files"),
+            1
+        );
+        assert_eq!(
+            database
+                .remove_missing_files()
+                .expect("Failed to recheck pending files"),
+            0
+        );
+
+        let remaining = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to query remaining files");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].full_path, existing_path);
+        assert!(remaining[0].modified_time.is_some());
+    }
+}
+
+#[cfg(test)]
+mod test_database_statistics_display {
+    use super::*;
+
+    fn video_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_048_576,
+            duration: 90.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn statistics_count_subtitle_mux_and_ignore_unknown_actions() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = video_info();
+        for (name, action) in [
+            ("convert.mkv", PendingAction::Convert),
+            ("remux.mkv", PendingAction::Remux),
+            ("subtitles.mkv", PendingAction::SubtitleMux),
+            ("unknown.mkv", PendingAction::Convert),
+        ] {
+            database
+                .upsert_pending_file(Path::new(name), "mkv", &info, action)
+                .expect("Failed to insert pending file");
+        }
+        database
+            .connection
+            .execute(
+                "UPDATE pending_files SET action = 'future_action' WHERE full_path = 'unknown.mkv'",
+                [],
+            )
+            .expect("Failed to set unknown action");
+
+        let stats = database.get_stats().expect("Failed to query database statistics");
+
+        assert_eq!(stats.total_files, 4);
+        assert_eq!(stats.convert_count, 1);
+        assert_eq!(stats.remux_count, 1);
+        assert_eq!(stats.subtitle_mux_count, 1);
+        assert_eq!(stats.total_size, 4_194_304);
+    }
+
+    #[test]
+    fn database_stats_display_includes_all_totals() {
+        let stats = DatabaseStats {
+            total_files: 6,
+            convert_count: 3,
+            remux_count: 2,
+            subtitle_mux_count: 1,
+            total_size: 1_048_576,
+        };
+
+        assert_eq!(
+            stats.to_string(),
+            "Database Statistics:\n  Total files:    6\n  To convert:     3\n  To remux:       2\n  To subtitle mux: 1\n  Total size:     1.00 MB"
+        );
+    }
+
+    #[test]
+    fn extension_stats_display_formats_extension_count_and_size() {
+        let stats = ExtensionStats {
+            extension: "mkv".to_string(),
+            count: 2,
+            total_size: 1_048_576,
+        };
+        let displayed = stats.to_string();
+
+        assert!(displayed.starts_with(".mkv"));
+        assert!(displayed.contains("2 files"));
+        assert!(displayed.ends_with("1.00 MB"));
+    }
+
+    #[test]
+    fn pending_file_video_info_uses_minimum_bit_depth() {
+        let pending = PendingFile {
+            id: 1,
+            full_path: PathBuf::from("legacy.mkv"),
+            extension: "mkv".to_string(),
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_048_576,
+            duration: 90.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 0,
+            action: PendingAction::Convert,
+            created_time: 0,
+            modified_time: None,
+        };
+
+        assert_eq!(pending.to_video_info().bit_depth, 8);
     }
 }

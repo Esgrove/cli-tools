@@ -190,3 +190,152 @@ fn main() -> Result<()> {
         VideoConvert::new(args)?.run()
     }
 }
+
+#[cfg(test)]
+mod test_video_convert_args_parsing {
+    use super::*;
+
+    #[test]
+    fn uses_expected_defaults() {
+        let args = VideoConvertArgs::try_parse_from(["vconvert"]).expect("Failed to parse default arguments");
+
+        assert!(args.command.is_none());
+        assert!(args.path.is_none());
+        assert_eq!(args.bitrate, 8000);
+        assert!(args.count.is_none());
+        assert!(args.include.is_empty());
+        assert!(args.exclude.is_empty());
+        assert!(args.extension.is_empty());
+        assert!(args.sort.is_none());
+        assert!(!args.verbose);
+        assert_eq!(args.database_mode(), None);
+    }
+
+    #[test]
+    fn parses_paths_filters_and_limits() {
+        let args = VideoConvertArgs::try_parse_from([
+            "vconvert",
+            "movies",
+            "--bitrate",
+            "9000",
+            "--count",
+            "4",
+            "--include",
+            "Director",
+            "--include",
+            "Extended",
+            "--exclude",
+            "Sample",
+            "--extension",
+            "MKV",
+            "--extension",
+            "MP4",
+            "--max-bitrate",
+            "20000",
+            "--min-duration",
+            "60.5",
+            "--max-duration",
+            "7200",
+            "--min-resolution",
+            "720",
+            "--display-limit",
+            "25",
+            "--recurse",
+            "--movie",
+            "--verbose",
+        ])
+        .expect("Failed to parse filtering arguments");
+
+        assert_eq!(args.path, Some(PathBuf::from("movies")));
+        assert_eq!(args.bitrate, 9000);
+        assert_eq!(args.count, Some(4));
+        assert_eq!(args.include, ["Director", "Extended"]);
+        assert_eq!(args.exclude, ["Sample"]);
+        assert_eq!(args.extension, ["MKV", "MP4"]);
+        assert_eq!(args.max_bitrate, Some(20_000));
+        assert_eq!(args.min_duration, Some(60.5));
+        assert_eq!(args.max_duration, Some(7200.0));
+        assert_eq!(args.min_resolution, Some(720));
+        assert_eq!(args.display_limit, Some(25));
+        assert!(args.recurse);
+        assert!(args.movie);
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn sort_flag_uses_bitrate_when_value_is_omitted() {
+        let args = VideoConvertArgs::try_parse_from(["vconvert", "--sort"])
+            .expect("Failed to parse sort flag without a value");
+
+        assert_eq!(args.sort, Some(SortOrder::Bitrate));
+    }
+
+    #[test]
+    fn parses_explicit_sort_order() {
+        let args = VideoConvertArgs::try_parse_from(["vconvert", "--sort", "duration-asc"])
+            .expect("Failed to parse explicit sort order");
+
+        assert_eq!(args.sort, Some(SortOrder::DurationAsc));
+    }
+
+    #[test]
+    fn rejects_conflicting_extension_modes() {
+        let result = VideoConvertArgs::try_parse_from(["vconvert", "--all", "--other"]);
+
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_database_mode_selection {
+    use super::*;
+
+    #[test]
+    fn maps_each_database_flag_to_its_mode() {
+        let cases = [
+            ("--from-db", DatabaseMode::Process),
+            ("--clear-db", DatabaseMode::Clear),
+            ("--show-db", DatabaseMode::Show),
+            ("--list-extensions", DatabaseMode::ListExtensions),
+            ("--clean-cache", DatabaseMode::CleanScanCache),
+        ];
+
+        for (flag, expected_mode) in cases {
+            let args =
+                VideoConvertArgs::try_parse_from(["vconvert", flag]).expect("Failed to parse database mode argument");
+            assert_eq!(args.database_mode(), Some(expected_mode));
+        }
+    }
+
+    #[test]
+    fn rejects_multiple_database_modes() {
+        let result = VideoConvertArgs::try_parse_from(["vconvert", "--from-db", "--show-db"]);
+
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_completion_command_parsing {
+    use super::*;
+
+    #[test]
+    fn parses_shell_and_install_option() {
+        let args = VideoConvertArgs::try_parse_from(["vconvert", "--verbose", "completion", "bash", "--install"])
+            .expect("Failed to parse completion command");
+
+        assert!(args.verbose);
+        assert!(matches!(
+            args.command,
+            Some(VideoConvertCommand::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+    }
+
+    #[test]
+    fn command_definition_is_valid() {
+        VideoConvertArgs::command().debug_assert();
+    }
+}

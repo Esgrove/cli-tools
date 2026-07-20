@@ -105,6 +105,119 @@ pub fn format_duplicate_duration_match(source_duration: f64, target_duration: f6
 }
 
 #[cfg(test)]
+mod test_path_without_extension {
+    use super::*;
+
+    #[test]
+    fn removes_only_the_final_extension() {
+        let path = Path::new("library").join("movie.release.mkv");
+
+        assert_eq!(
+            path_without_extension(&path),
+            Path::new("library").join("movie.release")
+        );
+    }
+
+    #[test]
+    fn leaves_extensionless_path_unchanged() {
+        let path = Path::new("library").join("README");
+
+        assert_eq!(path_without_extension(&path), path);
+    }
+}
+
+#[cfg(test)]
+mod test_unique_output_paths {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn backup_path_uses_backup_suffix_beside_output() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let output = directory.path().join("movie.mp4");
+
+        assert_eq!(
+            backup_output_path(&output),
+            directory.path().join("movie.vconvert-backup.mp4")
+        );
+    }
+
+    #[test]
+    fn backup_path_increments_suffix_when_candidate_exists() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let output = directory.path().join("movie.mp4");
+        std::fs::write(directory.path().join("movie.vconvert-backup.mp4"), [])
+            .expect("conflicting backup should be created");
+
+        assert_eq!(
+            backup_output_path(&output),
+            directory.path().join("movie.vconvert-backup.1.mp4")
+        );
+    }
+
+    #[test]
+    fn temporary_path_uses_temporary_suffix_beside_output() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let output = directory.path().join("movie.mp4");
+
+        assert_eq!(
+            temporary_output_path(&output),
+            directory.path().join("movie.vconvert-tmp.mp4")
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_path_identity {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn identical_nonexistent_paths_refer_to_same_file() {
+        let path = Path::new("missing-video.mkv");
+
+        assert!(paths_refer_to_same_file(path, path));
+    }
+
+    #[test]
+    fn distinct_nonexistent_paths_do_not_refer_to_same_file() {
+        assert!(!paths_refer_to_same_file(
+            Path::new("missing-left.mkv"),
+            Path::new("missing-right.mkv"),
+        ));
+    }
+
+    #[test]
+    fn canonical_aliases_refer_to_same_existing_file() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let nested_directory = directory.path().join("nested");
+        std::fs::create_dir(&nested_directory).expect("nested directory should be created");
+        let file = directory.path().join("movie.mkv");
+        std::fs::write(&file, []).expect("video fixture should be created");
+        let alias = nested_directory.join("..").join("movie.mkv");
+
+        assert!(paths_refer_to_same_file(&file, &alias));
+    }
+}
+
+#[cfg(test)]
+mod test_duration_difference_ratio {
+    use super::*;
+
+    #[test]
+    fn calculates_absolute_ratio_for_longer_and_shorter_targets() {
+        assert!((duration_difference_ratio(100.0, 125.0) - 0.25).abs() < f64::EPSILON);
+        assert!((duration_difference_ratio(100.0, 75.0) - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn non_positive_source_duration_returns_full_difference() {
+        assert!((duration_difference_ratio(0.0, 10.0) - 1.0).abs() < f64::EPSILON);
+        assert!((duration_difference_ratio(-10.0, 10.0) - 1.0).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
 mod test_duration_formatting {
     use super::*;
 

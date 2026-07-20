@@ -273,46 +273,69 @@ mod sort_order_tests {
 
     #[test]
     fn from_str_parses_bitrate() {
-        assert_eq!(parse("bitrate").unwrap(), SortOrder::Bitrate);
-        assert_eq!(parse("BITRATE").unwrap(), SortOrder::Bitrate);
+        assert_eq!(parse("bitrate").expect("bitrate should parse"), SortOrder::Bitrate);
+        assert_eq!(
+            parse("BITRATE").expect("uppercase bitrate should parse"),
+            SortOrder::Bitrate
+        );
     }
 
     #[test]
     fn from_str_parses_size() {
-        assert_eq!(parse("size").unwrap(), SortOrder::Size);
-        assert_eq!(parse("size_asc").unwrap(), SortOrder::SizeAsc);
-        assert_eq!(parse("size-asc").unwrap(), SortOrder::SizeAsc);
+        assert_eq!(parse("size").expect("size should parse"), SortOrder::Size);
+        assert_eq!(
+            parse("size_asc").expect("snake case size ascending should parse"),
+            SortOrder::SizeAsc
+        );
+        assert_eq!(
+            parse("size-asc").expect("kebab case size ascending should parse"),
+            SortOrder::SizeAsc
+        );
     }
 
     #[test]
     fn from_str_parses_duration() {
-        assert_eq!(parse("duration").unwrap(), SortOrder::Duration);
-        assert_eq!(parse("duration_asc").unwrap(), SortOrder::DurationAsc);
-        assert_eq!(parse("duration-asc").unwrap(), SortOrder::DurationAsc);
+        assert_eq!(parse("duration").expect("duration should parse"), SortOrder::Duration);
+        assert_eq!(
+            parse("duration_asc").expect("snake case duration ascending should parse"),
+            SortOrder::DurationAsc
+        );
+        assert_eq!(
+            parse("duration-asc").expect("kebab case duration ascending should parse"),
+            SortOrder::DurationAsc
+        );
     }
 
     #[test]
     fn from_str_parses_resolution() {
-        assert_eq!(parse("resolution").unwrap(), SortOrder::Resolution);
-        assert_eq!(parse("resolution_asc").unwrap(), SortOrder::ResolutionAsc);
-        assert_eq!(parse("resolution-asc").unwrap(), SortOrder::ResolutionAsc);
+        assert_eq!(
+            parse("resolution").expect("resolution should parse"),
+            SortOrder::Resolution
+        );
+        assert_eq!(
+            parse("resolution_asc").expect("snake case resolution ascending should parse"),
+            SortOrder::ResolutionAsc
+        );
+        assert_eq!(
+            parse("resolution-asc").expect("kebab case resolution ascending should parse"),
+            SortOrder::ResolutionAsc
+        );
     }
 
     #[test]
     fn from_str_parses_impact() {
-        assert_eq!(parse("impact").unwrap(), SortOrder::Impact);
+        assert_eq!(parse("impact").expect("impact should parse"), SortOrder::Impact);
     }
 
     #[test]
     fn from_str_parses_name() {
-        assert_eq!(parse("name").unwrap(), SortOrder::Name);
+        assert_eq!(parse("name").expect("name should parse"), SortOrder::Name);
     }
 
     #[test]
     fn from_str_returns_error_for_unknown() {
-        let result = parse("unknown");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown sort order"));
+        let error = parse("unknown").expect_err("unknown sort order should fail");
+        assert_eq!(error, "Unknown sort order: unknown");
     }
 
     #[test]

@@ -239,3 +239,175 @@ impl FileLogger {
         let _ = self.writer.flush();
     }
 }
+
+#[cfg(test)]
+mod test_file_logger {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
+
+    fn create_logger() -> (NamedTempFile, FileLogger) {
+        let log_file = NamedTempFile::new().expect("Failed to create temporary log file");
+        let writer = BufWriter::new(log_file.reopen().expect("Failed to reopen temporary log file"));
+        (log_file, FileLogger { writer })
+    }
+
+    fn read_log(log_file: &NamedTempFile, logger: FileLogger) -> String {
+        drop(logger);
+        fs::read_to_string(log_file.path()).expect("Failed to read temporary log file")
+    }
+
+    fn video_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_500,
+            size_bytes: 1_048_576,
+            duration: 120.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 23.976,
+            bit_depth: 10,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn logs_complete_initial_configuration() {
+        let (log_file, mut logger) = create_logger();
+        let config = Config {
+            bitrate_limit: 6_000,
+            convert_all: true,
+            convert_other: true,
+            count: Some(12),
+            delete: true,
+            dryrun: true,
+            exclude: vec!["sample".to_string()],
+            extensions: vec!["mp4".to_string(), "mkv".to_string()],
+            include: vec!["movie".to_string()],
+            movie_mode: true,
+            overwrite: true,
+            path: PathBuf::from("videos"),
+            recurse: true,
+            verbose: true,
+            ..Default::default()
+        };
+
+        logger.log_init(&config);
+        let contents = read_log(&log_file, logger);
+
+        assert!(contents.contains("INIT \"videos\""));
+        assert!(contents.contains("bitrate_limit: 6000"));
+        assert!(contents.contains("convert_all: true"));
+        assert!(contents.contains("convert_other: true"));
+        assert!(contents.contains("include: [\"movie\"]"));
+        assert!(contents.contains("exclude: [\"sample\"]"));
+        assert!(contents.contains("extensions: [\"mp4\", \"mkv\"]"));
+        assert!(contents.contains("recurse: true"));
+        assert!(contents.contains("movie_mode: true"));
+        assert!(contents.contains("delete: true"));
+        assert!(contents.contains("overwrite: true"));
+        assert!(contents.contains("dryrun: true"));
+        assert!(contents.contains("count: 12"));
+        assert!(contents.contains("verbose: true"));
+    }
+
+    #[test]
+    fn logs_processing_events_with_and_without_optional_details() {
+        let (log_file, mut logger) = create_logger();
+        let info = video_info();
+        let conversion_stats = ConversionStats::new(1_048_576, 8_500, 524_288, 4_000);
+
+        logger.log_gathered_files(3, Duration::from_millis(1_500));
+        logger.log_start(Path::new("movie.mkv"), "convert", "1/2", &info, Some(23));
+        logger.log_start(Path::new("bonus.mkv"), "remux", "2/2", &info, None);
+        logger.log_success(
+            Path::new("movie.mkv"),
+            "convert",
+            "1/2",
+            Duration::from_secs(65),
+            Some(&conversion_stats),
+        );
+        logger.log_success(Path::new("bonus.mkv"), "remux", "2/2", Duration::from_secs(2), None);
+        logger.log_failure(Path::new("broken.mkv"), "convert", "3/3", "invalid stream");
+        logger.log_renames(2, 3, Duration::from_secs(1));
+
+        let contents = read_log(&log_file, logger);
+        assert!(contents.contains("GATHER FILES | 3 files found"));
+        assert!(contents.contains("START   CONVERT 1/2 - \"movie.mkv\""));
+        assert!(contents.contains("h264 1920x1080 8.50 Mbps 24 FPS | Level: 23"));
+
+        let remux_start = contents
+            .lines()
+            .find(|line| line.contains("START   REMUX"))
+            .expect("Expected remux start entry");
+        assert!(!remux_start.contains("Level:"));
+
+        assert!(contents.contains("SUCCESS CONVERT 1/2 - \"movie.mkv\""));
+        assert!(contents.contains("1.00 MB @ 8.50 Mbps -> 512.00 KB @ 4.00 Mbps (-50.0%)"));
+
+        let remux_success = contents
+            .lines()
+            .find(|line| line.contains("SUCCESS REMUX"))
+            .expect("Expected remux success entry");
+        assert!(!remux_success.contains("->"));
+
+        assert!(contents.contains("ERROR   CONVERT 3/3 - \"broken.mkv\" | invalid stream"));
+        assert!(contents.contains("RENAMES COMPLETE | 2/3 files renamed"));
+    }
+
+    #[test]
+    fn logs_analysis_and_run_statistic_branches() {
+        let (log_file, mut logger) = create_logger();
+        let analysis_stats = AnalysisStats {
+            to_convert: 4,
+            to_remux: 3,
+            to_subtitle_mux: 2,
+            to_rename: 1,
+            skipped_converted: 1,
+            skipped_bitrate_low: 2,
+            skipped_bitrate_high: 3,
+            skipped_duration_short: 4,
+            skipped_duration_long: 5,
+            skipped_duplicate: 6,
+            analysis_failed: 7,
+            ..Default::default()
+        };
+
+        logger.log_analysis_stats(&analysis_stats, 38, Duration::from_secs(3));
+        logger.log_analysis_stats(&AnalysisStats::default(), 0, Duration::ZERO);
+        logger.log_stats(&RunStats::default());
+        logger.log_stats(&RunStats {
+            files_converted: 2,
+            files_remuxed: 1,
+            files_subtitle_muxed: 1,
+            files_failed: 1,
+            total_original_size: 2_097_152,
+            total_converted_size: 1_048_576,
+            total_duration: Duration::from_secs(90),
+            ..Default::default()
+        });
+        logger.log_stats(&RunStats {
+            files_converted: 1,
+            total_original_size: 524_288,
+            total_converted_size: 1_048_576,
+            total_duration: Duration::from_secs(4),
+            ..Default::default()
+        });
+
+        let contents = read_log(&log_file, logger);
+        assert!(contents.contains("ANALYSE FILES | 38 files"));
+        assert!(contents.contains("Files to convert:      4"));
+        assert!(contents.contains("Files to remux:        3"));
+        assert!(contents.contains("Files to subtitle mux: 2"));
+        assert!(contents.contains("Files skipped:         21"));
+        assert!(contents.contains("Analysis failed:       7"));
+        assert_eq!(contents.matches("STATISTICS").count(), 3);
+        assert!(contents.contains("Files converted: 2"));
+        assert!(contents.contains("Files remuxed:        1"));
+        assert!(contents.contains("Files subtitle muxed: 1"));
+        assert!(contents.contains("Files failed:         1"));
+        assert!(contents.contains("Space saved: 1.00 MB"));
+        assert!(contents.contains("Space increased: 512.00 KB"));
+        assert_eq!(contents.matches(" END").count(), 3);
+    }
+}

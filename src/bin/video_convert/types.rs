@@ -227,6 +227,22 @@ impl ProcessResult {
 }
 
 impl ProcessableFile {
+    /// Create a processable file using the output path rules for the selected mode.
+    pub(crate) fn for_mode(
+        file: VideoFile,
+        info: VideoInfo,
+        subtitle_files: Vec<SubtitleFile>,
+        movie_mode: bool,
+    ) -> Self {
+        let output_path = file.get_output_path_for_mode_and_bit_depth(
+            info.codec_suffix(),
+            movie_mode,
+            !subtitle_files.is_empty(),
+            info.bit_depth,
+        );
+        Self::new(file, info, output_path, subtitle_files)
+    }
+
     /// Create a new `ProcessableFile` with its resolved output path.
     pub(crate) const fn new(
         file: VideoFile,
@@ -590,7 +606,12 @@ impl VideoInfo {
             Some(10)
         } else if pixel_format.contains("12") {
             Some(12)
-        } else if pixel_format.contains("16") {
+        } else if pixel_format.contains("16")
+            || pixel_format.starts_with("rgb48")
+            || pixel_format.starts_with("bgr48")
+            || pixel_format.starts_with("rgba64")
+            || pixel_format.starts_with("bgra64")
+        {
             Some(16)
         } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") || pixel_format == "nv12" {
             Some(8)
@@ -1385,5 +1406,354 @@ mod analysis_filter_tests {
         assert!(debug.contains("60.0"));
         assert!(debug.contains("7200.0"));
         assert!(debug.contains("1000"));
+    }
+}
+
+#[cfg(test)]
+mod processable_file_creation_tests {
+    use super::*;
+
+    fn video_info(bit_depth: u8) -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_000,
+            duration: 60.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn for_mode_resolves_output_path_and_preserves_inputs() {
+        let file = VideoFile::new(Path::new("movies/movie.mp4"), 1_000);
+        let subtitle = SubtitleFile::new(Path::new("movies/movie.srt"), None);
+
+        let processable = ProcessableFile::for_mode(file.clone(), video_info(10), vec![subtitle.clone()], true);
+
+        assert_eq!(processable.file, file);
+        assert_eq!(processable.info.bit_depth, 10);
+        assert_eq!(processable.output_path, PathBuf::from("movies/movie.10bit.x265.mkv"));
+        assert_eq!(processable.subtitle_files, vec![subtitle]);
+    }
+}
+
+#[cfg(test)]
+mod processable_file_sort_tests {
+    use super::*;
+
+    fn processable_file(
+        name: &str,
+        bitrate_kbps: u64,
+        size_bytes: u64,
+        duration: f64,
+        width: u32,
+        height: u32,
+        frames_per_second: f64,
+    ) -> ProcessableFile {
+        let file = VideoFile::new(Path::new(name), size_bytes);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps,
+            size_bytes,
+            duration,
+            width,
+            height,
+            frames_per_second,
+            bit_depth: 8,
+            warning: None,
+        };
+        ProcessableFile::new(file, info, PathBuf::from("output.mp4"), Vec::new())
+    }
+
+    fn names(files: &[ProcessableFile]) -> Vec<&str> {
+        files.iter().map(|file| file.file.name.as_str()).collect()
+    }
+
+    #[test]
+    fn bitrate_sort_orders_files_descending() {
+        let mut files = vec![
+            processable_file("medium.mkv", 5_000, 20, 20.0, 1280, 720, 24.0),
+            processable_file("low.mkv", 1_000, 10, 10.0, 640, 480, 24.0),
+            processable_file("high.mkv", 9_000, 30, 30.0, 1920, 1080, 24.0),
+        ];
+
+        files.sort_by_order(SortOrder::Bitrate);
+
+        assert_eq!(names(&files), ["high", "medium", "low"]);
+    }
+
+    #[test]
+    fn size_sorts_support_both_directions() {
+        let mut files = vec![
+            processable_file("medium.mkv", 1, 20, 1.0, 1, 1, 1.0),
+            processable_file("low.mkv", 1, 10, 1.0, 1, 1, 1.0),
+            processable_file("high.mkv", 1, 30, 1.0, 1, 1, 1.0),
+        ];
+
+        files.sort_by_order(SortOrder::SizeAsc);
+        assert_eq!(names(&files), ["low", "medium", "high"]);
+
+        files.sort_by_order(SortOrder::Size);
+        assert_eq!(names(&files), ["high", "medium", "low"]);
+    }
+
+    #[test]
+    fn duration_sorts_support_both_directions() {
+        let mut files = vec![
+            processable_file("medium.mkv", 1, 1, 20.0, 1, 1, 1.0),
+            processable_file("low.mkv", 1, 1, 10.0, 1, 1, 1.0),
+            processable_file("high.mkv", 1, 1, 30.0, 1, 1, 1.0),
+        ];
+
+        files.sort_by_order(SortOrder::DurationAsc);
+        assert_eq!(names(&files), ["low", "medium", "high"]);
+
+        files.sort_by_order(SortOrder::Duration);
+        assert_eq!(names(&files), ["high", "medium", "low"]);
+    }
+
+    #[test]
+    fn resolution_sorts_use_total_pixel_count_in_both_directions() {
+        let mut files = vec![
+            processable_file("medium.mkv", 1, 1, 1.0, 1280, 720, 1.0),
+            processable_file("low.mkv", 1, 1, 1.0, 640, 480, 1.0),
+            processable_file("high.mkv", 1, 1, 1.0, 720, 1920, 1.0),
+        ];
+
+        files.sort_by_order(SortOrder::ResolutionAsc);
+        assert_eq!(names(&files), ["low", "medium", "high"]);
+
+        files.sort_by_order(SortOrder::Resolution);
+        assert_eq!(names(&files), ["high", "medium", "low"]);
+    }
+
+    #[test]
+    fn impact_sort_uses_bitrate_framerate_and_duration() {
+        let mut files = vec![
+            processable_file("medium.mkv", 1_000, 1, 10.0, 1, 1, 10.0),
+            processable_file("high.mkv", 2_000, 1, 20.0, 1, 1, 20.0),
+            processable_file("low.mkv", 9_000, 1, 3.0, 1, 1, 30.0),
+        ];
+
+        files.sort_by_order(SortOrder::Impact);
+
+        assert_eq!(names(&files), ["high", "medium", "low"]);
+    }
+
+    #[test]
+    fn name_sort_orders_files_by_path() {
+        let mut files = vec![
+            processable_file("charlie.mkv", 1, 1, 1.0, 1, 1, 1.0),
+            processable_file("alpha.mkv", 1, 1, 1.0, 1, 1, 1.0),
+            processable_file("bravo.mkv", 1, 1, 1.0, 1, 1, 1.0),
+        ];
+
+        files.sort_by_order(SortOrder::Name);
+
+        assert_eq!(names(&files), ["alpha", "bravo", "charlie"]);
+    }
+}
+
+#[cfg(test)]
+mod subtitle_file_helper_tests {
+    use super::*;
+
+    #[test]
+    fn new_extracts_extension_and_retains_paired_path() {
+        let paired_path = PathBuf::from("/videos/movie.sub");
+        let subtitle = SubtitleFile::new(Path::new("/videos/movie.idx"), Some(paired_path.clone()));
+
+        assert_eq!(subtitle.extension, "idx");
+        assert_eq!(subtitle.paired_sub_path, Some(paired_path));
+    }
+
+    #[test]
+    fn supported_extension_accepts_only_configured_lowercase_formats() {
+        for extension in ["idx", "srt", "sub"] {
+            assert!(SubtitleFile::is_supported_extension(extension));
+        }
+        for extension in ["ass", "IDX", ""] {
+            assert!(!SubtitleFile::is_supported_extension(extension));
+        }
+    }
+
+    #[test]
+    fn paths_to_delete_includes_primary_and_paired_files() {
+        let primary_path = PathBuf::from("/videos/movie.idx");
+        let paired_path = PathBuf::from("/videos/movie.sub");
+        let subtitle = SubtitleFile::new(&primary_path, Some(paired_path.clone()));
+
+        assert_eq!(
+            subtitle.paths_to_delete(),
+            [primary_path.as_path(), paired_path.as_path()]
+        );
+    }
+
+    #[test]
+    fn paths_to_delete_contains_only_primary_for_unpaired_subtitle() {
+        let primary_path = PathBuf::from("/videos/movie.srt");
+        let subtitle = SubtitleFile::new(&primary_path, None);
+
+        assert_eq!(subtitle.paths_to_delete(), [primary_path.as_path()]);
+    }
+}
+
+#[cfg(test)]
+mod video_file_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn new_with_metadata_reads_size_and_defaults_missing_file_to_zero() {
+        let temp_directory = tempfile::TempDir::new().expect("Failed to create temporary directory");
+        let existing_path = temp_directory.path().join("video.mkv");
+        std::fs::write(&existing_path, [1, 2, 3, 4]).expect("Failed to create video file");
+
+        let existing_file = VideoFile::new_with_metadata(&existing_path);
+        let missing_file = VideoFile::new_with_metadata(&temp_directory.path().join("missing.mkv"));
+
+        assert_eq!(existing_file.size_bytes, 4);
+        assert_eq!(missing_file.size_bytes, 0);
+    }
+}
+
+#[cfg(test)]
+mod video_info_quality_tests {
+    use super::*;
+
+    fn video_info(width: u32, height: u32, bitrate_kbps: u64) -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps,
+            size_bytes: 1,
+            duration: 1.0,
+            width,
+            height,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn quality_level_selects_expected_value_for_each_resolution_band() {
+        let cases = [
+            (3840, 2160, 35_000, 28),
+            (3840, 2160, 27_000, 29),
+            (3840, 2160, 19_000, 30),
+            (3840, 2160, 13_000, 31),
+            (3840, 2160, 12_000, 32),
+            (1920, 1080, 21_000, 26),
+            (1920, 1080, 17_000, 27),
+            (1920, 1080, 13_000, 28),
+            (1920, 1080, 7_000, 29),
+            (1920, 1080, 6_000, 30),
+            (1280, 720, 9_000, 29),
+            (1280, 720, 7_000, 30),
+            (1280, 720, 4_000, 31),
+            (1280, 720, 3_000, 32),
+        ];
+
+        for (width, height, bitrate_kbps, expected_quality) in cases {
+            let info = video_info(width, height, bitrate_kbps);
+            assert_eq!(
+                info.quality_level(),
+                expected_quality,
+                "Unexpected quality for {width}x{height} at {bitrate_kbps} kbps"
+            );
+        }
+    }
+
+    #[test]
+    fn codec_and_bit_depth_helpers_distinguish_supported_values() {
+        let mut info = video_info(1920, 1080, 8_000);
+        assert!(!info.is_target_codec());
+        assert!(!info.is_10_bit());
+        assert_eq!(info.codec_suffix(), Codec::X265);
+
+        info.codec = "h265".to_string();
+        info.bit_depth = 10;
+        assert!(info.is_target_codec());
+        assert!(info.is_10_bit());
+        assert_eq!(info.codec_suffix(), Codec::X265);
+
+        info.codec = "av1".to_string();
+        assert!(info.is_target_codec());
+        assert_eq!(info.codec_suffix(), Codec::Av1);
+    }
+
+    #[test]
+    fn pixel_format_bit_depth_recognizes_supported_formats() {
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("yuv420p12le"), Some(12));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("gbrp16le"), Some(16));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("rgb48le"), Some(16));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("rgba64be"), Some(16));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("yuv420p"), Some(8));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("unknown"), None);
+    }
+}
+
+#[cfg(test)]
+mod video_info_metadata_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn from_ffprobe_output_uses_file_metadata_when_size_is_absent() {
+        let temp_directory = tempfile::TempDir::new().expect("Failed to create temporary directory");
+        let video_path = temp_directory.path().join("video.mkv");
+        std::fs::write(&video_path, [1, 2, 3, 4, 5]).expect("Failed to create video file");
+        let output = "codec_name=h264\n\
+                      bit_rate=7345573\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      r_frame_rate=24/1\n";
+
+        let info = VideoInfo::from_ffprobe_output(output, "", &video_path).expect("Expected valid video info");
+
+        assert_eq!(info.size_bytes, 5);
+    }
+}
+
+#[cfg(test)]
+mod movie_subtitle_match_score_tests {
+    use super::*;
+
+    #[test]
+    fn exact_normalized_match_receives_highest_score() {
+        let score = movie_subtitle_match_score("Movie.Title.2024.1080p.x265", "movie-title-2024-English");
+
+        assert_eq!(score, Some(10_003));
+    }
+
+    #[test]
+    fn subtitle_with_additional_title_tokens_receives_containment_score() {
+        let score = movie_subtitle_match_score("Alien.1979", "Alien.1979.Directors.Cut");
+
+        assert_eq!(score, Some(5_002));
+    }
+
+    #[test]
+    fn multi_token_subtitle_contained_in_video_receives_partial_score() {
+        let score = movie_subtitle_match_score("Alien.Directors.Cut.1979", "Directors.Cut");
+
+        assert_eq!(score, Some(2_002));
+    }
+
+    #[test]
+    fn single_token_subtitle_does_not_partially_match_longer_video_name() {
+        let score = movie_subtitle_match_score("Alien.Directors.Cut.1979", "Alien");
+
+        assert_eq!(score, None);
+    }
+
+    #[test]
+    fn stems_containing_only_ignored_tokens_do_not_match() {
+        let score = movie_subtitle_match_score("1080p.x265", "English.x265");
+
+        assert_eq!(score, None);
     }
 }

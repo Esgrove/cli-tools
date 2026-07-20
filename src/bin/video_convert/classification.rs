@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use regex::Regex;
 
+use crate::config::Config;
 use crate::ffmpeg::{movie_stream_processing_required, probe_video_info};
 use crate::types::{
     AnalysisFilter, AnalysisResult, ProcessableFile, SkipReason, SubtitleFile, VideoFile, VideoInfo, VideoInfoCache,
@@ -246,6 +247,28 @@ impl<'a> ClassificationRequest<'a> {
             },
         }
     }
+}
+
+/// Return whether a video file should be included for analysis.
+pub fn should_include_file(config: &Config, file: &VideoFile) -> bool {
+    // In normal mode, skip files already marked with a target codec suffix.
+    // Movie mode still analyzes them because loose subtitle sidecars may need muxing.
+    if !config.movie_mode
+        && (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name))
+        && file.extension == file.target_extension(false, false)
+    {
+        return false;
+    }
+
+    if !config.extensions.iter().any(|extension| extension == &file.extension) {
+        return false;
+    }
+
+    if config.exclude.iter().any(|pattern| file.name.contains(pattern)) {
+        return false;
+    }
+
+    config.include.is_empty() || config.include.iter().any(|pattern| file.name.contains(pattern))
 }
 
 /// Run ffprobe on a file and classify the result.
@@ -1553,5 +1576,206 @@ mod test_classify_combined_filters {
             matches!(result, AnalysisResult::NeedsConversion(..)),
             "Expected NeedsConversion with all filters passing, got: {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_classification_short_circuits {
+    use super::*;
+
+    fn default_filter() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        }
+    }
+
+    fn h264_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10_000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn missing_file_is_skipped_without_video_info() {
+        let temp_directory = tempfile::TempDir::new().expect("Failed to create temporary directory");
+        let missing_path = temp_directory.path().join("missing.mkv");
+        let file = VideoFile::new(&missing_path, 0);
+
+        let cache = probe_and_classify(file, Vec::new(), &default_filter(), false);
+
+        assert_eq!(cache.path, missing_path);
+        assert!(cache.info.is_none());
+        assert!(
+            matches!(
+                cache.result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::FileMissing,
+                    ..
+                }
+            ),
+            "Expected FileMissing skip"
+        );
+    }
+
+    #[test]
+    fn stale_codec_label_is_removed_before_conversion_filters_apply() {
+        let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
+        let info = h264_info();
+        let filter = AnalysisFilter {
+            min_bitrate: 20_000,
+            ..default_filter()
+        };
+
+        let result = classification_test_helpers::classify_video_file(file, &filter, &info);
+
+        let AnalysisResult::NeedsRename(processable) = result else {
+            panic!("Expected NeedsRename before bitrate filtering");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.mkv"));
+    }
+}
+
+#[cfg(test)]
+mod test_classification_with_subtitles {
+    use super::*;
+
+    fn default_filter() -> AnalysisFilter {
+        AnalysisFilter {
+            min_bitrate: 0,
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        }
+    }
+
+    fn video_info(codec: &str) -> VideoInfo {
+        VideoInfo {
+            codec: codec.to_string(),
+            bitrate_kbps: 10_000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn external_subtitles_are_preserved_for_movie_conversion() {
+        let file = VideoFile::new(Path::new("/videos/movie.mp4"), 0);
+        let subtitle = SubtitleFile::new(Path::new("/videos/movie.English.srt"), None);
+        let info = video_info("h264");
+
+        let result =
+            classification_test_helpers::classify_movie_file(file, &default_filter(), &info, vec![subtitle.clone()]);
+
+        let AnalysisResult::NeedsConversion(processable) = result else {
+            panic!("Expected NeedsConversion");
+        };
+        assert_eq!(processable.output_path, PathBuf::from("/videos/movie.x265.mkv"));
+        assert_eq!(processable.subtitle_files, vec![subtitle]);
+    }
+
+    #[test]
+    fn existing_movie_stream_output_is_skipped() {
+        let temp_directory = tempfile::TempDir::new().expect("Failed to create temporary directory");
+        let source = temp_directory.path().join("movie.x265.mp4");
+        let output = temp_directory.path().join("movie.x265.mkv");
+        std::fs::write(&source, []).expect("Failed to create source file");
+        std::fs::write(&output, []).expect("Failed to create output file");
+        let file = VideoFile::new(&source, 0);
+        let subtitle = SubtitleFile::new(&temp_directory.path().join("movie.srt"), None);
+        let info = video_info("hevc");
+
+        let result = classification_test_helpers::classify_movie_file(file, &default_filter(), &info, vec![subtitle]);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::OutputExists { path, source_duration: 3600.0 },
+                    ..
+                } if path == output
+            ),
+            "Expected OutputExists skip"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_file_inclusion {
+    use super::*;
+
+    fn config_with_extensions(extensions: &[&str]) -> Config {
+        Config {
+            extensions: extensions.iter().map(ToString::to_string).collect(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn includes_allowed_extensions() {
+        let config = config_with_extensions(&["mp4", "mkv"]);
+
+        assert!(should_include_file(&config, &VideoFile::new(Path::new("Movie.mp4"), 0)));
+        assert!(should_include_file(&config, &VideoFile::new(Path::new("Movie.mkv"), 0)));
+    }
+
+    #[test]
+    fn rejects_extensions_outside_the_allowlist() {
+        let config = config_with_extensions(&["mp4", "mkv"]);
+        let file = VideoFile::new(Path::new("Movie.avi"), 0);
+
+        assert!(!should_include_file(&config, &file));
+    }
+
+    #[test]
+    fn applies_include_and_exclude_patterns() {
+        let mut config = config_with_extensions(&["mp4"]);
+        config.include = vec!["Director".to_string(), "Extended".to_string()];
+        config.exclude = vec!["Sample".to_string()];
+
+        assert!(should_include_file(
+            &config,
+            &VideoFile::new(Path::new("Movie.Director.Cut.mp4"), 0)
+        ));
+        assert!(!should_include_file(
+            &config,
+            &VideoFile::new(Path::new("Movie.Theatrical.mp4"), 0)
+        ));
+        assert!(!should_include_file(
+            &config,
+            &VideoFile::new(Path::new("Movie.Director.Sample.mp4"), 0)
+        ));
+    }
+
+    #[test]
+    fn skips_labeled_target_files_only_in_normal_mode() {
+        let mut config = config_with_extensions(&["mp4", "mkv"]);
+        let converted_mp4 = VideoFile::new(Path::new("Movie.x265.mp4"), 0);
+        let remux_candidate = VideoFile::new(Path::new("Movie.av1.mkv"), 0);
+
+        assert!(!should_include_file(&config, &converted_mp4));
+        assert!(should_include_file(&config, &remux_candidate));
+
+        config.movie_mode = true;
+        assert!(should_include_file(&config, &converted_mp4));
     }
 }

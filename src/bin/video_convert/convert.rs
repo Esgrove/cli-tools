@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::VideoConvertArgs;
-use crate::classification::{ClassificationRequest, RE_AV1, RE_X265, probe_and_classify};
+use crate::classification::{ClassificationRequest, probe_and_classify, should_include_file};
 use crate::cli::{DatabaseMode, clean_scan_cache, clear_database, list_extensions, show_database_contents};
 use crate::config::{Config, VideoConvertConfig};
 use crate::database::{Database, PendingAction};
@@ -262,7 +262,7 @@ impl VideoConvert {
 
         if path.is_file() {
             let file = VideoFile::new_with_metadata(path);
-            return if self.should_include_file(&file) {
+            return if should_include_file(&self.config, &file) {
                 Ok(vec![file])
             } else {
                 Ok(vec![])
@@ -283,7 +283,7 @@ impl VideoConvert {
             .filter_map(std::result::Result::ok)
             .filter(|entry| entry.file_type().is_file())
             .map(VideoFile::from)
-            .filter(|file| self.should_include_file(file))
+            .filter(|file| should_include_file(&self.config, file))
             .collect();
 
         files.sort_unstable();
@@ -578,7 +578,7 @@ impl VideoConvert {
             } else {
                 probe_video_info(&pending_file.full_path).unwrap_or_else(|_| pending_file.to_video_info())
             };
-            let processable = self.processable_file(video_file, info, subtitles);
+            let processable = ProcessableFile::for_mode(video_file, info, subtitles, self.config.movie_mode);
             match pending_file.action {
                 PendingAction::Convert => conversion_files.push(processable),
                 PendingAction::Remux => remux_files.push(processable),
@@ -1329,17 +1329,6 @@ impl VideoConvert {
         }
     }
 
-    /// Create a processable file using the converter's output path rules.
-    fn processable_file(&self, file: VideoFile, info: VideoInfo, subtitle_files: Vec<SubtitleFile>) -> ProcessableFile {
-        let output_path = file.get_output_path_for_mode_and_bit_depth(
-            info.codec_suffix(),
-            self.config.movie_mode,
-            !subtitle_files.is_empty(),
-            info.bit_depth,
-        );
-        ProcessableFile::new(file, info, output_path, subtitle_files)
-    }
-
     /// Process all files that need renaming. Returns the number of files successfully renamed.
     fn process_renames(&self, files: &[ProcessableFile]) -> usize {
         let start = Instant::now();
@@ -1373,38 +1362,6 @@ impl VideoConvert {
 
         self.log_renames(renamed_count, total, start.elapsed());
         renamed_count
-    }
-
-    /// Check if a file should be converted based on extension and include/exclude patterns.
-    fn should_include_file(&self, file: &VideoFile) -> bool {
-        // In normal mode, skip files already marked with a target codec suffix.
-        // Movie mode still analyzes them because loose subtitle sidecars may need muxing.
-        if !self.config.movie_mode
-            && (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name))
-            && file.extension == file.target_extension(false, false)
-        {
-            return false;
-        }
-
-        // Check file extension is one of the allowed extensions
-        if !self.config.extensions.iter().any(|ext| ext == &file.extension) {
-            return false;
-        }
-
-        // Check exclude patterns (filename must not match any)
-        if self.config.exclude.iter().any(|pattern| file.name.contains(pattern)) {
-            return false;
-        }
-
-        // Check include patterns (if specified, filename must match at least one)
-        if !self.config.include.is_empty() {
-            let matches_include = self.config.include.iter().any(|pattern| file.name.contains(pattern));
-            if !matches_include {
-                return false;
-            }
-        }
-
-        true
     }
 
     #[inline]
@@ -1510,5 +1467,140 @@ impl VideoConvert {
             print_error!("Failed to delete replaced original file {}: {error}", backup.display());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_subtitle_discovery {
+    use super::*;
+
+    #[test]
+    fn gathers_supported_files_and_combines_vobsub_pairs() {
+        let temp_directory = tempfile::TempDir::new().expect("Failed to create temp directory");
+        let root = temp_directory.path().join("root");
+        std::fs::create_dir(&root).expect("Failed to create subtitle root directory");
+        let idx_path = root.join("movie.idx");
+        let paired_sub_path = root.join("movie.sub");
+        let srt_path = root.join("movie.srt");
+        let standalone_sub_path = root.join("standalone.sub");
+
+        for path in [&idx_path, &paired_sub_path, &srt_path, &standalone_sub_path] {
+            std::fs::write(path, "subtitle").expect("Failed to create subtitle fixture");
+        }
+        std::fs::write(root.join("ignored.ass"), "subtitle").expect("Failed to create unsupported fixture");
+
+        let subtitle_files = VideoConvert::gather_subtitle_files_from_root(&root, 1);
+
+        assert_eq!(subtitle_files.len(), 3);
+        assert_eq!(subtitle_files[0], SubtitleFile::new(&idx_path, Some(paired_sub_path)));
+        assert_eq!(subtitle_files[1], SubtitleFile::new(&srt_path, None));
+        assert_eq!(subtitle_files[2], SubtitleFile::new(&standalone_sub_path, None));
+    }
+
+    #[test]
+    fn respects_maximum_walk_depth() {
+        let temp_directory = tempfile::TempDir::new().expect("Failed to create temp directory");
+        let root = temp_directory.path().join("root");
+        let nested_directory = root.join("nested");
+        std::fs::create_dir_all(&nested_directory).expect("Failed to create nested directory");
+        let root_subtitle = root.join("root.srt");
+        let nested_subtitle = nested_directory.join("nested.srt");
+        std::fs::write(&root_subtitle, "subtitle").expect("Failed to create root subtitle fixture");
+        std::fs::write(&nested_subtitle, "subtitle").expect("Failed to create nested subtitle fixture");
+
+        let shallow_files = VideoConvert::gather_subtitle_files_from_root(&root, 1);
+        let recursive_files = VideoConvert::gather_subtitle_files_from_root(&root, usize::MAX);
+
+        assert_eq!(shallow_files, vec![SubtitleFile::new(&root_subtitle, None)]);
+        assert_eq!(
+            recursive_files,
+            vec![
+                SubtitleFile::new(&nested_subtitle, None),
+                SubtitleFile::new(&root_subtitle, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_each_video_directory_only_once() {
+        let temp_directory = tempfile::TempDir::new().expect("Failed to create temp directory");
+        let first_directory = temp_directory.path().join("first");
+        let second_directory = temp_directory.path().join("second");
+        std::fs::create_dir(&first_directory).expect("Failed to create first directory");
+        std::fs::create_dir(&second_directory).expect("Failed to create second directory");
+        let first_subtitle = first_directory.join("first.srt");
+        let second_subtitle = second_directory.join("second.srt");
+        std::fs::write(&first_subtitle, "subtitle").expect("Failed to create first subtitle fixture");
+        std::fs::write(&second_subtitle, "subtitle").expect("Failed to create second subtitle fixture");
+        let video_files = vec![
+            VideoFile::new(&first_directory.join("first.mp4"), 0),
+            VideoFile::new(&first_directory.join("alternate.mp4"), 0),
+            VideoFile::new(&second_directory.join("second.mkv"), 0),
+        ];
+
+        let subtitle_files = VideoConvert::gather_subtitle_files_for_video_files(&video_files);
+        let paths: HashSet<&Path> = subtitle_files.iter().map(|file| file.path.as_path()).collect();
+
+        assert_eq!(subtitle_files.len(), 2);
+        assert_eq!(
+            paths,
+            HashSet::from([first_subtitle.as_path(), second_subtitle.as_path()])
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_subtitle_matching {
+    use super::*;
+
+    #[test]
+    fn assigns_multiple_language_subtitles_to_the_same_video() {
+        let video = VideoFile::new(Path::new("movies/Movie.Title.2024.1080p.mp4"), 0);
+        let english = SubtitleFile::new(Path::new("movies/Movie.Title.2024.English.srt"), None);
+        let finnish = SubtitleFile::new(Path::new("movies/Movie.Title.2024.Finnish.srt"), None);
+
+        let matches = VideoConvert::match_subtitle_files(
+            std::slice::from_ref(&video),
+            vec![english.clone(), finnish.clone()],
+            false,
+        );
+
+        assert_eq!(matches.get(&video.path), Some(&vec![english, finnish]));
+    }
+
+    #[test]
+    fn selects_the_unique_highest_scoring_video() {
+        let exact_video = VideoFile::new(Path::new("movies/Movie.Title.2024.mp4"), 0);
+        let extended_video = VideoFile::new(Path::new("movies/Movie.Title.2024.Extended.mkv"), 0);
+        let subtitle = SubtitleFile::new(Path::new("movies/Movie.Title.2024.srt"), None);
+
+        let matches =
+            VideoConvert::match_subtitle_files(&[extended_video, exact_video.clone()], vec![subtitle.clone()], false);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches.get(&exact_video.path), Some(&vec![subtitle]));
+    }
+
+    #[test]
+    fn skips_ambiguous_best_matches() {
+        let high_resolution = VideoFile::new(Path::new("movies/Movie.Title.2024.2160p.mkv"), 0);
+        let standard_resolution = VideoFile::new(Path::new("movies/Movie.Title.2024.1080p.mp4"), 0);
+        let subtitle = SubtitleFile::new(Path::new("movies/Movie.Title.2024.English.srt"), None);
+
+        let matches =
+            VideoConvert::match_subtitle_files(&[high_resolution, standard_resolution], vec![subtitle], false);
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn requires_a_related_video_in_the_same_directory() {
+        let video = VideoFile::new(Path::new("movies/Movie.Title.2024.mp4"), 0);
+        let unrelated = SubtitleFile::new(Path::new("movies/Other.Title.2024.srt"), None);
+        let other_directory = SubtitleFile::new(Path::new("subtitles/Movie.Title.2024.srt"), None);
+
+        let matches = VideoConvert::match_subtitle_files(&[video], vec![unrelated, other_directory], false);
+
+        assert!(matches.is_empty());
     }
 }
