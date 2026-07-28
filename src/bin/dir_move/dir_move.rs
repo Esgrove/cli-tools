@@ -17,8 +17,8 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use cli_tools::{
-    count_label, get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_bold,
-    print_error, print_magenta, print_yellow,
+    MatchRange, count_label, format_text_with_highlight, get_relative_path_or_filename, path_to_filename_string,
+    path_to_string_relative, print_bold, print_error, print_magenta, print_yellow,
 };
 
 use cli_tools::dir_move::mover;
@@ -60,6 +60,25 @@ struct DestinationMatchInfo<'a> {
     stripped_normalized_name: Option<String>,
 }
 
+/// A file index and the filename range that matched a destination.
+struct FileMatch {
+    index: usize,
+    range: MatchRange,
+}
+
+/// A file listed for a move prompt and its already-computed highlight range.
+struct ListedFile {
+    path: PathBuf,
+    range: MatchRange,
+}
+
+/// A normalized filename with byte mappings back to the original filename.
+struct NormalizedFilename {
+    /// Lowercase filename with dots and spaces removed.
+    text: String,
+    original_ranges: Vec<(usize, usize)>,
+}
+
 /// Runtime state and configuration for a `dirmove` invocation.
 ///
 /// `input_roots` and `output_roots` are independent sets: files and source directories are gathered
@@ -82,16 +101,63 @@ impl DirectoryMatchOutcome {
 }
 
 impl DestinationMatchInfo<'_> {
-    fn matches_file(&self, file_name_spaced: &str, file_name_spaced_stripped: &str, file_name_concat: &str) -> bool {
-        file_name_spaced_stripped.contains(self.spaced_name)
-            || file_name_concat.contains(&self.normalized_name)
-            || self.stripped_spaced_name.as_deref().is_some_and(|stripped_name| {
-                file_name_spaced_stripped.contains(stripped_name) || file_name_spaced.contains(stripped_name)
-            })
-            || self
-                .stripped_normalized_name
-                .as_ref()
-                .is_some_and(|stripped_name| file_name_concat.contains(stripped_name))
+    /// Return the normalized directory-name variant responsible for a filename match.
+    fn matched_normalized_name<'a>(
+        &'a self,
+        file_name_spaced: &str,
+        file_name_spaced_stripped: &str,
+        file_name_concat: &str,
+    ) -> Option<&'a str> {
+        if file_name_spaced_stripped.contains(self.spaced_name) || file_name_concat.contains(&self.normalized_name) {
+            return Some(&self.normalized_name);
+        }
+
+        let stripped_name_matches = self.stripped_spaced_name.as_deref().is_some_and(|stripped_name| {
+            file_name_spaced_stripped.contains(stripped_name) || file_name_spaced.contains(stripped_name)
+        }) || self
+            .stripped_normalized_name
+            .as_ref()
+            .is_some_and(|stripped_name| file_name_concat.contains(stripped_name));
+
+        stripped_name_matches
+            .then_some(self.stripped_normalized_name.as_deref())
+            .flatten()
+    }
+}
+
+impl NormalizedFilename {
+    /// Build a normalized filename while retaining the original byte range for each character.
+    fn new(filename: &str) -> Self {
+        let mut text = String::with_capacity(filename.len());
+        let mut original_ranges = Vec::with_capacity(filename.chars().count());
+        for (start, character) in filename.char_indices() {
+            let end = start + character.len_utf8();
+            for lowercase_character in character.to_lowercase() {
+                if !matches!(lowercase_character, ' ' | '.') {
+                    text.push(lowercase_character);
+                    original_ranges.push((start, end));
+                }
+            }
+        }
+
+        Self { text, original_ranges }
+    }
+
+    /// Map a normalized substring match back to its original filename byte range.
+    fn find_match(&self, normalized_name: &str) -> Option<MatchRange> {
+        if normalized_name.is_empty() {
+            return None;
+        }
+
+        let normalized_start = self.text.find(normalized_name)?;
+        let normalized_end = normalized_start + normalized_name.len();
+        let start_index = self.text[..normalized_start].chars().count();
+        let end_index = self.text[..normalized_end].chars().count();
+
+        Some(MatchRange {
+            start: self.original_ranges.get(start_index)?.0,
+            end: self.original_ranges.get(end_index.checked_sub(1)?)?.1,
+        })
     }
 }
 
@@ -1074,16 +1140,16 @@ impl DirMove {
 
             let available_files: Vec<_> = file_indices
                 .into_iter()
-                .filter(|&file_index| {
-                    Self::file_is_available_for_matching(&remaining_files[file_index], &consumed_files)
+                .filter(|file_match| {
+                    Self::file_is_available_for_matching(&remaining_files[file_match.index], &consumed_files)
                 })
-                .map(|file_index| remaining_files[file_index].clone())
                 .collect();
             if available_files.is_empty() {
                 continue;
             }
 
-            let outcome = self.process_directory_match(&directories[directory_index], &available_files)?;
+            let outcome =
+                self.process_directory_match(&directories[directory_index], &remaining_files, &available_files)?;
             consumed_files.extend(outcome.consumed_files());
         }
 
@@ -1102,22 +1168,25 @@ impl DirMove {
             return Ok(files.to_vec());
         }
 
-        let mut custom_matches: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut custom_matches: HashMap<usize, Vec<FileMatch>> = HashMap::new();
 
         for (file_index, file_path) in files.iter().enumerate() {
             let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
 
-            // Normalize filename for matching (lowercase, no dots/spaces)
-            let file_name_normalized = file_name.to_lowercase().replace(['.', ' '], "");
+            let file_name_normalized = utils::normalize_name(file_name);
 
             // Check if file matches any custom mapping
             for mapping in &self.config.custom_mappings {
                 if file_name_normalized.contains(&mapping.pattern)
                     && let Some(directory_index) = self.find_directory_for_custom_mapping(mapping, directories)
+                    && let Some(range) = NormalizedFilename::new(file_name).find_match(&mapping.pattern)
                 {
-                    custom_matches.entry(directory_index).or_default().push(file_index);
+                    custom_matches.entry(directory_index).or_default().push(FileMatch {
+                        index: file_index,
+                        range,
+                    });
                     break;
                 }
             }
@@ -1135,20 +1204,19 @@ impl DirMove {
             }
 
             for directory_index in self.sorted_directory_indices(directories) {
-                let Some(matched_file_indices) = custom_matches.remove(&directory_index) else {
+                let Some(matched_files) = custom_matches.remove(&directory_index) else {
                     continue;
                 };
 
-                let available_files: Vec<_> = matched_file_indices
+                let available_files: Vec<_> = matched_files
                     .into_iter()
-                    .filter(|&file_index| Self::file_is_available_for_matching(&files[file_index], consumed_files))
-                    .map(|file_index| files[file_index].clone())
+                    .filter(|file_match| Self::file_is_available_for_matching(&files[file_match.index], consumed_files))
                     .collect();
                 if available_files.is_empty() {
                     continue;
                 }
 
-                let outcome = self.process_directory_match(&directories[directory_index], &available_files)?;
+                let outcome = self.process_directory_match(&directories[directory_index], files, &available_files)?;
                 consumed_files.extend(outcome.consumed_files());
             }
         }
@@ -1322,8 +1390,8 @@ impl DirMove {
         &self,
         files: &[PathBuf],
         directories: &[DirectoryInfo],
-    ) -> HashMap<usize, Vec<usize>> {
-        let mut matches: HashMap<usize, Vec<usize>> = HashMap::new();
+    ) -> HashMap<usize, Vec<FileMatch>> {
+        let mut matches: HashMap<usize, Vec<FileMatch>> = HashMap::new();
 
         let destination_match_info = self.collect_destination_match_info(directories);
 
@@ -1332,17 +1400,29 @@ impl DirMove {
                 continue;
             };
 
-            // Normalize: replace dots with spaces for matching
+            // Build the lightweight matching forms used before highlight ranges are needed.
             let file_name_spaced = file_name.replace('.', " ").to_lowercase();
-            // Also create a concatenated version (no spaces or dots) for matching "SomeName" to "Some Name"
             let file_name_concat = file_name.replace('.', "").to_lowercase();
 
             // Apply prefix ignores: strip ignored prefixes from the normalized filename
             let file_name_spaced_stripped = self.strip_ignored_prefixes(&file_name_spaced);
+            let mut normalized_filename = None;
 
             for destination_info in &destination_match_info {
-                if destination_info.matches_file(&file_name_spaced, &file_name_spaced_stripped, &file_name_concat) {
-                    matches.entry(destination_info.index).or_default().push(file_index);
+                let Some(normalized_name) = destination_info.matched_normalized_name(
+                    &file_name_spaced,
+                    &file_name_spaced_stripped,
+                    &file_name_concat,
+                ) else {
+                    continue;
+                };
+
+                let normalized_filename = normalized_filename.get_or_insert_with(|| NormalizedFilename::new(file_name));
+                if let Some(range) = normalized_filename.find_match(normalized_name) {
+                    matches.entry(destination_info.index).or_default().push(FileMatch {
+                        index: file_index,
+                        range,
+                    });
                 }
             }
         }
@@ -1436,24 +1516,34 @@ impl DirMove {
         result
     }
 
-    fn process_directory_match(&self, dir: &DirectoryInfo, files: &[PathBuf]) -> anyhow::Result<DirectoryMatchOutcome> {
+    fn process_directory_match(
+        &self,
+        dir: &DirectoryInfo,
+        source_files: &[PathBuf],
+        file_matches: &[FileMatch],
+    ) -> anyhow::Result<DirectoryMatchOutcome> {
+        let file_paths: Vec<_> = file_matches
+            .iter()
+            .map(|file_match| source_files[file_match.index].clone())
+            .collect();
         let dir_display = self.get_directory_display_path(dir);
-        let move_to_display = self.get_move_to_display_path(&dir.path, files);
+        let move_to_display = self.get_move_to_display_path(&dir.path, &file_paths);
         println!(
             "{}: {}",
             dir_display.cyan().bold(),
-            count_label(files.len(), "file", "files")
+            count_label(file_matches.len(), "file", "files")
         );
 
-        for file_path in files {
-            println!("  {}", path_to_filename_string(file_path));
+        for file_match in file_matches {
+            let filename = path_to_filename_string(&source_files[file_match.index]);
+            println!("  {}", format_text_with_highlight(&filename, Some(file_match.range)));
         }
 
         println!("{} Move to: {move_to_display}", "→".green());
 
         if self.config.dryrun {
             println!();
-            return Ok(DirectoryMatchOutcome::Consumed(files.to_vec()));
+            return Ok(DirectoryMatchOutcome::Consumed(file_paths));
         }
 
         let confirmed = if self.config.auto {
@@ -1463,7 +1553,7 @@ impl DirMove {
         };
 
         let outcome = if confirmed {
-            match self.move_files_to_target_dir(&dir.path, files) {
+            match self.move_files_to_target_dir(&dir.path, &file_paths) {
                 Ok(report) => DirectoryMatchOutcome::Consumed(report.moved_files),
                 Err(e) => {
                     print_error!("Failed to move files to {}: {e}", dir.path.display());
@@ -2078,8 +2168,12 @@ impl DirMove {
             dir_name.cyan().bold(),
             count_label(available_files.len(), "file", "files")
         );
+        let normalized_dir_name = utils::normalize_name(dir_name);
         for file_path in available_files {
-            println!("  {}", path_to_filename_string(file_path));
+            println!(
+                "  {}",
+                Self::format_filename_with_normalized_highlight(file_path, &normalized_dir_name)
+            );
         }
 
         if dir_exists {
@@ -2139,6 +2233,13 @@ impl DirMove {
         Ok(())
     }
 
+    /// Format a filename by finding and highlighting an already-normalized name.
+    fn format_filename_with_normalized_highlight(file_path: &Path, normalized_name: &str) -> String {
+        let filename = path_to_filename_string(file_path);
+        let range = NormalizedFilename::new(&filename).find_match(normalized_name);
+        format_text_with_highlight(&filename, range)
+    }
+
     /// Process custom mappings in create mode - offer to create directories for matching files.
     /// Updates `moved_files` with files that were successfully moved.
     fn process_custom_mappings_create_mode(
@@ -2151,17 +2252,21 @@ impl DirMove {
         }
 
         // Group files by custom mapping
-        let mut mapping_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut mapping_groups: HashMap<String, Vec<ListedFile>> = HashMap::new();
 
         for file_info in files_with_names {
             let file_name_normalized = file_info.original_name.to_lowercase().replace(['.', ' '], "");
 
             for mapping in &self.config.custom_mappings {
                 if file_name_normalized.contains(&mapping.pattern) {
-                    mapping_groups
-                        .entry(mapping.directory.clone())
-                        .or_default()
-                        .push(file_info.path_buf());
+                    let path = file_info.path_buf();
+                    let filename = path_to_filename_string(&path);
+                    if let Some(range) = NormalizedFilename::new(&filename).find_match(&mapping.pattern) {
+                        mapping_groups
+                            .entry(mapping.directory.clone())
+                            .or_default()
+                            .push(ListedFile { path, range });
+                    }
                     break;
                 }
             }
@@ -2197,8 +2302,9 @@ impl DirMove {
                 dir_name.cyan().bold(),
                 count_label(files.len(), "file", "files")
             );
-            for file_path in &files {
-                println!("  {}", path_to_filename_string(file_path));
+            for file in &files {
+                let filename = path_to_filename_string(&file.path);
+                println!("  {}", format_text_with_highlight(&filename, Some(file.range)));
             }
 
             if dir_exists {
@@ -2215,7 +2321,8 @@ impl DirMove {
                 };
 
                 if let PromptResult::Confirmed(target_path) = prompt_result {
-                    match self.move_files_to_target_dir(&target_path, &files) {
+                    let file_paths: Vec<_> = files.iter().map(|file| file.path.clone()).collect();
+                    match self.move_files_to_target_dir(&target_path, &file_paths) {
                         Ok(report) => {
                             moved_files.extend(report.moved_files);
                             let final_dir_name = cli_tools::path_to_filename_string(&target_path);
@@ -10798,5 +10905,62 @@ mod test_parallel_grouping_consistency {
                 group.unwrap().1.files.len()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test_filename_directory_highlight {
+    use super::*;
+
+    #[test]
+    fn finds_dot_separated_directory_name() {
+        let range = NormalizedFilename::new("Prefix.Certain.Name.Video.mp4")
+            .find_match("certainname")
+            .expect("directory name should match filename");
+
+        assert_eq!(range.extract_from("Prefix.Certain.Name.Video.mp4"), "Certain.Name");
+    }
+
+    #[test]
+    fn finds_concatenated_directory_name() {
+        let range = NormalizedFilename::new("Prefix.CertainName.Video.mp4")
+            .find_match("certainname")
+            .expect("directory name should match filename");
+
+        assert_eq!(range.extract_from("Prefix.CertainName.Video.mp4"), "CertainName");
+    }
+
+    #[test]
+    fn returns_none_when_directory_name_is_absent() {
+        assert!(
+            NormalizedFilename::new("Some.Other.Video.mp4")
+                .find_match("certainname")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn destination_matching_preserves_space_boundaries() {
+        let dirmove = test_helpers::make_test_dirmove(Vec::new());
+        let directories = test_helpers::make_test_dirs(&["ab c"]);
+        let files = test_helpers::make_file_paths(&["a bc.episode.mp4"]);
+
+        assert!(dirmove.match_files_to_directories(&files, &directories).is_empty());
+    }
+
+    #[test]
+    fn directory_matching_carries_the_highlight_range() {
+        let dirmove = test_helpers::make_test_dirmove(Vec::new());
+        let directories = test_helpers::make_test_dirs(&["certain name"]);
+        let files = test_helpers::make_file_paths(&["Prefix.Certain.Name.Video.mp4"]);
+
+        let matches = dirmove.match_files_to_directories(&files, &directories);
+        let file_match = matches
+            .get(&0)
+            .and_then(|file_matches| file_matches.first())
+            .expect("file should match directory");
+        let filename = path_to_filename_string(&files[file_match.index]);
+
+        assert_eq!(file_match.range.extract_from(&filename), "Certain.Name");
     }
 }

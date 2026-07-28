@@ -3,10 +3,9 @@ use std::hash::BuildHasher;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use colored::Colorize;
 use regex::Regex;
 
-pub use crate::RE_RESOLUTION;
+pub use crate::{MatchRange, RE_RESOLUTION};
 
 /// Regex to match codec patterns.
 static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
@@ -19,15 +18,6 @@ pub const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
 
 /// All video extensions.
 pub const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
-
-/// Range of a pattern match in a filename.
-#[derive(Debug, Clone, Copy)]
-pub struct MatchRange {
-    /// Start position of the match (inclusive).
-    pub start: usize,
-    /// End position of the match (exclusive).
-    pub end: usize,
-}
 
 /// A group of duplicate files that share a common key.
 #[derive(Debug, Clone)]
@@ -51,14 +41,6 @@ pub struct DupeFileInfo {
     pub extension: String,
     /// Pattern match range if matched by a pattern.
     pub pattern_match: Option<MatchRange>,
-}
-
-impl MatchRange {
-    /// Extract the matched substring from the given text.
-    #[must_use]
-    pub fn extract_from<'a>(&self, text: &'a str) -> &'a str {
-        &text[self.start..self.end]
-    }
 }
 
 impl DuplicateGroup {
@@ -163,13 +145,5 @@ pub fn merge_indices_into_groups<S: BuildHasher>(
 /// Otherwise the filename is returned as-is.
 #[must_use]
 pub fn format_filename_with_highlight(filename: &str, pattern_match: Option<MatchRange>) -> String {
-    pattern_match.map_or_else(
-        || filename.to_string(),
-        |range| {
-            let before = &filename[..range.start];
-            let matched = range.extract_from(filename).green().to_string();
-            let after = &filename[range.end..];
-            format!("{before}{matched}{after}")
-        },
-    )
+    crate::format_text_with_highlight(filename, pattern_match)
 }

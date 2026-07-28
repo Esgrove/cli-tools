@@ -136,6 +136,37 @@ pub fn assert_f64_eq(a: f64, b: f64) {
     );
 }
 
+/// Byte range of a highlighted match in text.
+#[derive(Debug, Clone, Copy)]
+pub struct MatchRange {
+    /// Start position of the match, inclusive.
+    pub start: usize,
+    /// End position of the match, exclusive.
+    pub end: usize,
+}
+
+impl MatchRange {
+    /// Extract the matched substring from the given text.
+    #[must_use]
+    pub fn extract_from<'a>(&self, text: &'a str) -> &'a str {
+        &text[self.start..self.end]
+    }
+}
+
+/// Format text with an optional match highlighted in green.
+#[must_use]
+pub fn format_text_with_highlight(text: &str, match_range: Option<MatchRange>) -> String {
+    match_range.map_or_else(
+        || text.to_string(),
+        |range| {
+            let before = &text[..range.start];
+            let matched = range.extract_from(text).green().to_string();
+            let after = &text[range.end..];
+            format!("{before}{matched}{after}")
+        },
+    )
+}
+
 /// Format bool value as a coloured string.
 #[must_use]
 pub fn colorize_bool(value: bool) -> ColoredString {
