@@ -100,6 +100,13 @@ mod test_strip_ignored_prefixes {
         assert_eq!(strip_ignored_prefixes("é.movie", &prefixes), "movie");
         assert_eq!(strip_ignored_prefixes("É.movie", &prefixes), "movie");
     }
+
+    #[test]
+    fn ignores_empty_configured_prefixes() {
+        let prefixes = vec![String::new(), "release".to_string()];
+
+        assert_eq!(strip_ignored_prefixes("Release.Movie.Name", &prefixes), "Movie.Name");
+    }
 }
 
 #[cfg(test)]

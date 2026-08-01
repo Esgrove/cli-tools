@@ -105,4 +105,41 @@ mod test_file_hash {
             hash_file(&second_path).expect("should hash second file")
         );
     }
+
+    #[test]
+    fn empty_file_has_expected_hash() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let path = temp_directory.path().join("empty.bin");
+        std::fs::write(&path, []).expect("should create empty file");
+
+        assert_eq!(hash_file(&path).expect("should hash empty file"), blake3::hash(b""));
+    }
+
+    #[test]
+    fn identical_contents_at_different_paths_have_same_hash() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let first_path = temp_directory.path().join("first.bin");
+        let second_path = temp_directory.path().join("second.bin");
+        std::fs::write(&first_path, b"identical").expect("should write first file");
+        std::fs::write(&second_path, b"identical").expect("should write second file");
+
+        assert_eq!(
+            hash_file(&first_path).expect("should hash first file"),
+            hash_file(&second_path).expect("should hash second file")
+        );
+    }
+
+    #[test]
+    fn missing_file_errors_include_path_context() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let path = temp_directory.path().join("missing.bin");
+
+        let fingerprint_error = fingerprint_file(&path).expect_err("missing file should not have a fingerprint");
+        let hash_error = hash_file(&path).expect_err("missing file should not have a hash");
+
+        assert!(fingerprint_error.to_string().contains("Failed to read metadata"));
+        assert!(fingerprint_error.to_string().contains("missing.bin"));
+        assert!(hash_error.to_string().contains("Failed to read"));
+        assert!(hash_error.to_string().contains("missing.bin"));
+    }
 }

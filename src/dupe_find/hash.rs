@@ -169,4 +169,75 @@ mod test_hash_candidates {
 
         assert_eq!(group_hash_matches(&reversed_hashes), vec![vec![0, 1]]);
     }
+
+    #[test]
+    fn reports_missing_files_without_discarding_valid_candidates() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let first_path = temp_directory.path().join("first.mp4");
+        let missing_path = temp_directory.path().join("missing.mp4");
+        let second_path = temp_directory.path().join("second.mp4");
+        std::fs::write(&first_path, b"same bytes").expect("should write first file");
+        std::fs::write(&second_path, b"same bytes").expect("should write second file");
+        let files = vec![
+            DupeFileInfo::new(first_path, "mp4".to_string()),
+            DupeFileInfo::new(missing_path.clone(), "mp4".to_string()),
+            DupeFileInfo::new(second_path, "mp4".to_string()),
+        ];
+
+        let collection = collect_hash_candidates(&files);
+        let indices = collection
+            .candidates
+            .iter()
+            .map(|candidate| candidate.index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(indices, vec![0, 2]);
+        assert_eq!(collection.errors.len(), 1);
+        assert_eq!(collection.errors[0].0, missing_path);
+    }
+}
+
+#[cfg(test)]
+mod test_group_hash_matches {
+    use super::*;
+
+    fn indexed_hash(index: usize, size_bytes: u64, blake3_hash: &str) -> IndexedFileHash {
+        IndexedFileHash {
+            index,
+            size_bytes,
+            blake3_hash: blake3_hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn requires_matching_size_and_hash() {
+        let values = vec![
+            indexed_hash(0, 10, "same"),
+            indexed_hash(1, 20, "same"),
+            indexed_hash(2, 10, "different"),
+        ];
+
+        assert!(group_hash_matches(&values).is_empty());
+    }
+
+    #[test]
+    fn omits_empty_and_singleton_groups() {
+        assert!(group_hash_matches(&[]).is_empty());
+        assert!(group_hash_matches(&[indexed_hash(0, 10, "only")]).is_empty());
+    }
+
+    #[test]
+    fn returns_each_duplicate_group_with_sorted_indices() {
+        let values = vec![
+            indexed_hash(4, 20, "second"),
+            indexed_hash(2, 10, "first"),
+            indexed_hash(3, 20, "second"),
+            indexed_hash(0, 10, "first"),
+        ];
+
+        let mut groups = group_hash_matches(&values);
+        groups.sort();
+
+        assert_eq!(groups, vec![vec![0, 2], vec![3, 4]]);
+    }
 }

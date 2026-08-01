@@ -387,6 +387,38 @@ mod test_copy_verification {
         assert!(!destination.exists());
         Ok(())
     }
+
+    #[test]
+    fn copy_file_with_progress_removes_incomplete_destination() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.bin");
+        let destination = temp_directory.path().join("destination.bin");
+        fs::write(&source, b"source")?;
+        let progress_bar = ProgressBar::hidden();
+
+        let result = copy_file_with_progress(&source, &destination, 10, &progress_bar);
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_copied_file_rejects_size_mismatch() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.bin");
+        let destination = temp_directory.path().join("destination.bin");
+        fs::write(&source, b"source")?;
+        fs::write(&destination, b"short")?;
+
+        let result = verify_copied_file(&source, &destination, 6, &blake3::hash(b"source"));
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!destination.exists());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +468,68 @@ mod test_move_files {
         assert!(report.failed_files.is_empty());
         assert_eq!(fs::read_to_string(input.join("one.txt"))?, "new");
         assert_eq!(fs::read_to_string(output.join("one.txt"))?, "old");
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_creates_missing_target() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.txt");
+        let output = temp_directory.path().join("nested/output");
+        fs::write(&source, "contents")?;
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+
+        assert_eq!(report.moved_files, vec![source.clone()]);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(output.join("source.txt"))?, "contents");
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_rejects_file_target() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.txt");
+        let target_file = temp_directory.path().join("target");
+        fs::write(&source, "source")?;
+        fs::write(&target_file, "target")?;
+
+        let error = move_files_to_target_dir(&target_file, &[source], false, false, true)
+            .expect_err("regular file should not be accepted as target directory");
+
+        assert!(error.to_string().contains("Target path exists but is not a directory"));
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_overwrites_existing_file() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let input = temp_directory.path().join("input");
+        let output = temp_directory.path().join("output");
+        fs::create_dir(&input)?;
+        fs::create_dir(&output)?;
+        let source = input.join("one.txt");
+        fs::write(&source, "new")?;
+        fs::write(output.join("one.txt"), "old")?;
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, false, true)?;
+
+        assert_eq!(report.moved_files, vec![source.clone()]);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(output.join("one.txt"))?, "new");
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_reports_missing_source() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let output = temp_directory.path().join("output");
+        let source = temp_directory.path().join("missing.txt");
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+
+        assert!(report.moved_files.is_empty());
+        assert_eq!(report.failed_files, vec![source]);
         Ok(())
     }
 }

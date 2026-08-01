@@ -1,3 +1,5 @@
+//! Shared video metadata parsing, resolution helpers, and aggregate statistics.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
@@ -711,6 +713,30 @@ mod test_parse_ffprobe_output {
         let output = "codec_name=h264\nwidth=1920\nheight=1080\nbit_rate=N/A\n";
         let info = VideoInfo::parse_ffprobe_output(output);
         assert!(info.bitrate_kbps.is_none());
+    }
+
+    #[test]
+    fn uses_valid_bitrate_after_malformed_primary_value() {
+        let output = "bit_rate=N/A\nBPS=8000000\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+        assert_eq!(info.bitrate_kbps, Some(8000));
+    }
+
+    #[test]
+    fn malformed_duration_remains_missing() {
+        let output = "duration=N/A\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+        assert!(info.duration.is_none());
+    }
+
+    #[test]
+    fn later_scalar_values_replace_earlier_values() {
+        let output = "codec_name=h264\ncodec_name=hevc\nduration=10\nduration=20\nwidth=1280\nwidth=1920\nheight=720\nheight=1080\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+
+        assert_eq!(info.codec.as_deref(), Some("hevc"));
+        assert_eq!(info.duration, Some(20.0));
+        assert_eq!(info.resolution, Some(Resolution::new(1920, 1080)));
     }
 
     #[test]
