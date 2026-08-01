@@ -410,7 +410,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli-tools"
-version = "9.23.0"
+version = "9.24.0"
 dependencies = [
  "anyhow",
  "blake3",
