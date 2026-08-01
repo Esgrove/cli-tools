@@ -87,6 +87,35 @@ impl DupeFileInfo {
     }
 }
 
+/// Strip configured dot-delimited prefixes from the start of a filename or stem.
+///
+/// Matching is case-insensitive and repeated, so multiple configured prefixes can be removed.
+/// Prefixes only match complete dot-delimited components.
+#[must_use]
+pub fn strip_ignored_prefixes(value: &str, prefix_ignores: &[String]) -> String {
+    let mut result = value;
+
+    loop {
+        let matching_prefix = prefix_ignores.iter().find_map(|prefix| {
+            let pattern_length = prefix.len() + 1;
+            if result.len() < pattern_length || !result.is_char_boundary(pattern_length) {
+                return None;
+            }
+
+            let candidate = &result[..pattern_length];
+            let prefix_matches = candidate[..prefix.len()].eq_ignore_ascii_case(prefix);
+            (prefix_matches && candidate.ends_with('.')).then_some(pattern_length)
+        });
+
+        let Some(pattern_length) = matching_prefix else {
+            break;
+        };
+        result = &result[pattern_length..];
+    }
+
+    result.to_string()
+}
+
 /// Normalize a file stem by removing resolution and codec patterns.
 ///
 /// Converts to lowercase and strips resolution tags (e.g. `1080p`),

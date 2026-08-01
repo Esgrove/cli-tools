@@ -139,6 +139,12 @@ replace = [
 # File extensions to include in search
 # extensions = ["mp4", "mkv", "avi", "mov", "wmv", "webm"]
 
+# Prefixes to ignore at the start of filenames during name comparisons
+# prefix_ignores = ["Something", "Other.Prefix"]
+
+# Compare exact file contents with BLAKE3 hashes
+# hash_compare = false
+
 # Identifier patterns to search for (regex) - used to find duplicate video IDs
 # patterns = ["ABC\\d{3,4}", "XYZ\\d{3,4}"]
 

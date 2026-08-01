@@ -1,6 +1,11 @@
+//! Core duplicate finder orchestration, grouping, and file operations.
+//!
+//! This module defines `DupeFind`, coordinates directory scanning and duplicate detection,
+//! and handles duplicate filtering, display, and moves.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use colored::Colorize;
 #[cfg(not(test))]
@@ -12,21 +17,15 @@ use rayon::iter::ParallelIterator;
 use walkdir::WalkDir;
 
 use cli_tools::dupe_find::{
-    DupeFileInfo, DuplicateGroup, MatchRange, format_filename_with_highlight, merge_indices_into_groups, normalize_stem,
+    DupeFileInfo, DuplicateGroup, MatchRange, format_filename_with_highlight, merge_indices_into_groups,
+    normalize_stem, strip_ignored_prefixes,
 };
-use cli_tools::scan_cache::ScanCache;
-use cli_tools::video_info::VideoInfo;
-use cli_tools::{create_semaphore_for_io_bound, print_error, print_yellow};
+use cli_tools::{print_error, print_yellow};
 
-use crate::Args;
 use crate::config::{Config, DupeConfig};
-
 #[cfg(not(test))]
-const PROGRESS_BAR_CHARS: &str = "=>-";
-#[cfg(not(test))]
-const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
-#[cfg(not(test))]
-const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg} ({pos} files found)";
+use crate::helpers::{PROGRESS_BAR_CHARS, PROGRESS_BAR_TEMPLATE, SPINNER_TEMPLATE};
+use crate::{Args, helpers};
 
 /// Duplicate file finder that scans directories for duplicate video files.
 pub struct DupeFind {
@@ -89,6 +88,10 @@ impl DupeFind {
             if !self.config.ignore_matches.is_empty() {
                 println!("Ignore matches: {:?}", self.config.ignore_matches);
             }
+            if !self.config.prefix_ignores.is_empty() {
+                println!("Prefix ignores: {:?}", self.config.prefix_ignores);
+            }
+            println!("Hash comparison: {}", self.config.hash_compare);
         }
 
         let files = self.gather_files();
@@ -102,7 +105,7 @@ impl DupeFind {
 
         // Interactive mode when not in print/dryrun mode
         if !self.config.dryrun {
-            let metadata = Self::collect_metadata_for_groups(&duplicates);
+            let metadata = helpers::collect_metadata_for_groups(&duplicates);
             return crate::tui::run_interactive(&duplicates, &metadata);
         }
 
@@ -193,83 +196,6 @@ impl DupeFind {
             .collect()
     }
 
-    /// Collect metadata for all files in duplicate groups using ffprobe.
-    ///
-    /// Checks the shared scan cache first so that files already analysed by
-    /// `vconvert` (or a previous `dupefind` run) are not re-probed.
-    /// Newly probed results are written back to the cache.
-    fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf, VideoInfo> {
-        // Collect all unique file paths from duplicate groups
-        let all_files: Vec<PathBuf> = groups
-            .iter()
-            .flat_map(|group| group.files.iter().map(|f| f.path.clone()))
-            .collect();
-
-        if all_files.is_empty() {
-            return HashMap::new();
-        }
-
-        // Try to load the scan cache; if it fails, just probe everything
-        let scan_cache = match ScanCache::open() {
-            Ok(cache) => Some(cache),
-            Err(error) => {
-                print_yellow!("Could not open scan cache: {error}");
-                None
-            }
-        };
-
-        let cached_entries = scan_cache
-            .as_ref()
-            .and_then(|cache| cache.get_all().ok())
-            .unwrap_or_default();
-
-        // Split files into cache hits and misses (check path + size match)
-        let mut metadata: HashMap<PathBuf, VideoInfo> = HashMap::new();
-        let mut cache_misses: Vec<PathBuf> = Vec::new();
-
-        for path in &all_files {
-            let path_key = path.to_string_lossy();
-            let file_size = std::fs::metadata(path).map(|m| m.len()).ok();
-
-            if let Some(cached) = cached_entries.get(path_key.as_ref())
-                && file_size == Some(cached.size_bytes)
-            {
-                metadata.insert(path.clone(), cached.to_video_info());
-            } else {
-                cache_misses.push(path.clone());
-            }
-        }
-
-        let cache_hit_count = metadata.len();
-        if cache_hit_count > 0 {
-            println!(
-                "Scan cache: {}, {}",
-                cli_tools::count_label(cache_hit_count, "hit", "hits"),
-                cli_tools::count_label(cache_misses.len(), "miss", "misses")
-            );
-        }
-
-        // Probe remaining files with ffprobe
-        if !cache_misses.is_empty() {
-            let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-            let probed = runtime.block_on(collect_metadata_async(cache_misses));
-
-            // Write newly probed results back to the cache
-            if let Some(mut cache) = scan_cache {
-                let entries: Vec<(&Path, &VideoInfo)> =
-                    probed.iter().map(|(path, info)| (path.as_path(), info)).collect();
-                if let Err(error) = cache.batch_upsert(&entries) {
-                    print_yellow!("Failed to write scan cache: {error}");
-                }
-            }
-
-            metadata.extend(probed);
-        }
-
-        metadata
-    }
-
-    /// Find all duplicates in a single pass using multiple detection methods.
     /// Filter out duplicate groups whose display name matches any of the configured ignore strings.
     /// Comparison is case-insensitive.
     fn filter_ignored_groups(&self, groups: Vec<DuplicateGroup>) -> Vec<DuplicateGroup> {
@@ -294,6 +220,7 @@ impl DupeFind {
     /// - Same filename in different directories
     /// - Match the same identifier pattern
     /// - Same normalized name (different resolution / codec / extension)
+    /// - Same exact file content when hash comparison is enabled
     fn find_all_duplicates(&self, files: &[DupeFileInfo]) -> Vec<DuplicateGroup> {
         if self.config.verbose {
             println!("Checking {} files for duplicates...", files.len());
@@ -316,7 +243,10 @@ impl DupeFind {
         let normalized_keys: Vec<String> = files
             .par_iter()
             .progress_with(progress_bar)
-            .map(|file| normalize_stem(&file.stem))
+            .map(|file| {
+                let stem = strip_ignored_prefixes(&file.stem, &self.config.prefix_ignores);
+                normalize_stem(&stem)
+            })
             .collect();
 
         // Use a union-find approach:
@@ -334,10 +264,8 @@ impl DupeFind {
         // Merge groups based on exact filename matches
         let mut filename_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
         for (idx, file) in files.iter().enumerate() {
-            filename_to_indices
-                .entry(file.filename.to_lowercase())
-                .or_default()
-                .push(idx);
+            let filename = strip_ignored_prefixes(&file.filename, &self.config.prefix_ignores).to_lowercase();
+            filename_to_indices.entry(filename).or_default().push(idx);
         }
 
         for indices in filename_to_indices.values() {
@@ -371,6 +299,11 @@ impl DupeFind {
                     merge_indices_into_groups(indices, &mut file_to_group, &mut groups);
                 }
             }
+        }
+
+        // Merge groups based on exact file content.
+        for indices in helpers::find_hash_matches(files, self.config.hash_compare, self.config.verbose) {
+            merge_indices_into_groups(&indices, &mut file_to_group, &mut groups);
         }
 
         // Convert to final output format, filtering to groups with multiple files
@@ -458,65 +391,6 @@ impl DupeFind {
     }
 }
 
-/// Collect video metadata concurrently using semaphore-limited async tasks.
-///
-/// Each ffprobe call runs in a blocking task with concurrency controlled
-/// by a semaphore sized for I/O-bound work (`num_cpus * 2`).
-async fn collect_metadata_async(files: Vec<PathBuf>) -> HashMap<PathBuf, VideoInfo> {
-    let semaphore = create_semaphore_for_io_bound();
-
-    #[cfg(not(test))]
-    let progress_bar = {
-        let pb = ProgressBar::new(files.len() as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(PROGRESS_BAR_TEMPLATE)
-                .expect("Failed to set progress bar template")
-                .progress_chars(PROGRESS_BAR_CHARS),
-        );
-        Arc::new(pb)
-    };
-    #[cfg(test)]
-    let progress_bar = Arc::new(ProgressBar::hidden());
-
-    let tasks: Vec<_> = files
-        .into_iter()
-        .map(|path| {
-            let semaphore = Arc::clone(&semaphore);
-            let progress = Arc::clone(&progress_bar);
-            tokio::spawn(async move {
-                let permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
-                let result = tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || VideoInfo::from_path(&path)
-                })
-                .await
-                .expect("spawn_blocking task failed");
-                drop(permit);
-                progress.inc(1);
-                (path, result)
-            })
-        })
-        .collect();
-
-    let metadata: HashMap<PathBuf, VideoInfo> = futures::future::join_all(tasks)
-        .await
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .filter_map(|(path, result)| match result {
-            Ok(info) => Some((path, info)),
-            Err(err) => {
-                eprintln!("Error: {err}");
-                None
-            }
-        })
-        .collect();
-
-    progress_bar.finish_and_clear();
-
-    metadata
-}
-
 #[cfg(test)]
 mod tests_dupe_find {
     use crate::config::Config;
@@ -543,9 +417,11 @@ mod tests_dupe_find {
                 debug: false,
                 dryrun: true,
                 extensions: vec!["mp4".to_string(), "mkv".to_string()],
+                hash_compare: false,
                 ignore_matches: vec![],
                 move_files: false,
                 patterns,
+                prefix_ignores: vec![],
                 recurse: false,
                 verbose: false,
             },
@@ -566,6 +442,22 @@ mod tests_dupe_find {
         // movie.1080p and movie.720p should be grouped (both normalize to "movie")
         assert_eq!(duplicates.len(), 1);
         assert_eq!(duplicates[0].key, "movie");
+        assert_eq!(duplicates[0].files.len(), 2);
+    }
+
+    #[test]
+    fn test_find_duplicates_after_stripping_ignored_prefix() {
+        let mut finder = make_dupe_finder(vec![]);
+        finder.config.prefix_ignores = vec!["prefix".to_string()];
+        let files = vec![
+            make_file("/path1/prefix.some.file.name.123.mp4", "mp4"),
+            make_file("/path2/Some.File.Name.123.mp4", "mp4"),
+        ];
+
+        let duplicates = finder.find_all_duplicates(&files);
+
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].key, "some.file.name.123");
         assert_eq!(duplicates[0].files.len(), 2);
     }
 
@@ -1071,36 +963,6 @@ mod tests_dupe_find {
 }
 
 #[cfg(test)]
-mod test_video_info_resolution_string {
-    #![allow(unused_imports)]
-    use super::*;
-    use cli_tools::video_info::Resolution;
-
-    #[test]
-    fn formats_resolution() {
-        let info = VideoInfo {
-            size_bytes: Some(1000),
-            duration: Some(60.0),
-            resolution: Some(Resolution::new(1920, 1080)),
-            codec: Some("h264".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(info.resolution_string(), Some("1920x1080".to_string()));
-    }
-
-    #[test]
-    fn returns_none_when_resolution_missing() {
-        let info = VideoInfo {
-            size_bytes: Some(1000),
-            duration: Some(60.0),
-            codec: Some("h264".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(info.resolution_string(), None);
-    }
-}
-
-#[cfg(test)]
 mod test_display_name {
     use cli_tools::dupe_find::{DupeFileInfo, DuplicateGroup, MatchRange};
     use std::path::PathBuf;
@@ -1332,9 +1194,11 @@ mod test_filter_ignored_groups {
                 debug: false,
                 dryrun: false,
                 extensions: vec![],
+                hash_compare: false,
                 ignore_matches: ignore_matches.into_iter().map(str::to_lowercase).collect(),
                 move_files: false,
                 patterns: vec![],
+                prefix_ignores: vec![],
                 recurse: false,
                 verbose: false,
             },

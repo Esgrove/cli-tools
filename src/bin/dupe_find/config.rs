@@ -23,6 +23,8 @@ pub struct DupeConfig {
     #[serde(default)]
     extensions: Vec<String>,
     #[serde(default)]
+    hash_compare: bool,
+    #[serde(default)]
     ignore_matches: Vec<String>,
     #[serde(default)]
     move_files: bool,
@@ -30,6 +32,8 @@ pub struct DupeConfig {
     pub(crate) paths: Vec<PathBuf>,
     #[serde(default)]
     patterns: Vec<String>,
+    #[serde(default)]
+    prefix_ignores: Vec<String>,
     #[serde(default)]
     recurse: bool,
     #[serde(default)]
@@ -49,11 +53,13 @@ pub struct Config {
     pub(crate) debug: bool,
     pub(crate) dryrun: bool,
     pub(crate) extensions: Vec<String>,
+    pub(crate) hash_compare: bool,
     /// Pattern match texts to ignore (case-insensitive). Groups whose display name
     /// matches any of these strings will be skipped.
     pub(crate) ignore_matches: Vec<String>,
     pub(crate) move_files: bool,
     pub(crate) patterns: Vec<Regex>,
+    pub(crate) prefix_ignores: Vec<String>,
     pub(crate) recurse: bool,
     pub(crate) verbose: bool,
 }
@@ -109,6 +115,15 @@ impl Config {
         // Combine patterns from config and CLI
         let pattern_strings: Vec<String> = user_config.patterns.into_iter().chain(args.pattern).unique().collect();
 
+        let prefix_ignores = user_config
+            .prefix_ignores
+            .into_iter()
+            .chain(args.prefix_ignore)
+            .map(|prefix| prefix.trim().to_lowercase())
+            .filter(|prefix| !prefix.is_empty())
+            .unique()
+            .collect();
+
         // Compile regex patterns
         let patterns: Vec<Regex> = pattern_strings
             .iter()
@@ -133,9 +148,11 @@ impl Config {
             debug: args.debug,
             dryrun: args.print || user_config.dryrun,
             extensions,
+            hash_compare: args.hash_compare || user_config.hash_compare,
             ignore_matches,
             move_files: args.move_files || user_config.move_files,
             patterns,
+            prefix_ignores,
             recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
         })
@@ -151,12 +168,14 @@ mod dupe_config_tests {
         let toml = "";
         let config = DupeConfig::from_toml_str(toml).expect("should parse empty config");
         assert!(!config.dryrun);
+        assert!(!config.hash_compare);
         assert!(!config.move_files);
         assert!(!config.recurse);
         assert!(!config.verbose);
         assert!(config.extensions.is_empty());
         assert!(config.ignore_matches.is_empty());
         assert!(config.patterns.is_empty());
+        assert!(config.prefix_ignores.is_empty());
         assert!(config.paths.is_empty());
         assert!(config.default_paths.is_empty());
     }
@@ -185,6 +204,18 @@ extensions = ["mp4", "mkv", "avi"]
 "#;
         let config = DupeConfig::from_toml_str(toml).expect("should parse config");
         assert_eq!(config.extensions, vec!["mp4", "mkv", "avi"]);
+    }
+
+    #[test]
+    fn from_toml_str_parses_hash_and_prefix_options() {
+        let toml = r#"
+[dupefind]
+hash_compare = true
+prefix_ignores = ["prefix", "Other"]
+"#;
+        let config = DupeConfig::from_toml_str(toml).expect("should parse config");
+        assert!(config.hash_compare);
+        assert_eq!(config.prefix_ignores, vec!["prefix", "Other"]);
     }
 
     #[test]

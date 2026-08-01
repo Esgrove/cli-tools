@@ -1,12 +1,12 @@
-//! Shared SQLite-backed cache for ffprobe scan results.
+//! Shared SQLite-backed cache for file analysis results.
 //!
 //! Both `vconvert` and `dupefind` use ffprobe to gather video metadata.
-//! This module provides a shared cache so that files already scanned by
-//! one tool do not need to be re-analysed by the other.
+//! This module caches those results so files already scanned by one tool do not need to be re-analysed by the other.
+//! It also stores BLAKE3 hashes used by `dupefind` for exact-content comparisons.
 //!
-//! The cache lives in the same database file that `vconvert` uses
-//! (`vconvert.db` in the platform-specific local data directory) and
-//! reads/writes the `scanned_files` table.
+//! The cache lives in the same database file that `vconvert` uses,
+//! `vconvert.db` in the platform-specific local data directory.
+//! It reads and writes the `scanned_files` and `file_hashes` tables.
 
 #![allow(clippy::cast_possible_wrap)]
 
@@ -37,15 +37,21 @@ impl ScanCache {
     /// # Errors
     /// Returns an error if the database cannot be opened or initialised.
     pub fn open() -> Result<Self> {
-        let path = Self::database_path();
+        Self::open_at(&Self::database_path())
+    }
 
+    /// Open (or create) the cache database at a specific path.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened or initialised.
+    pub fn open_at(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
         }
 
         let connection =
-            Connection::open(&path).with_context(|| format!("Failed to open database: {}", path.display()))?;
+            Connection::open(path).with_context(|| format!("Failed to open database: {}", path.display()))?;
 
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
@@ -103,6 +109,18 @@ impl ScanCache {
 
                 CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
 
+                CREATE TABLE IF NOT EXISTS file_hashes (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL,
+                    blake3_hash TEXT NOT NULL,
+                    hashed_time INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_file_hashes_path ON file_hashes(full_path);
+                CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(blake3_hash);
+
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = NORMAL;
                 PRAGMA cache_size = -8000;
@@ -145,6 +163,77 @@ impl ScanCache {
             .collect();
 
         Ok(entries)
+    }
+
+    /// Load every cached BLAKE3 hash into a `HashMap` keyed by full path string.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails.
+    pub fn get_all_hashes(&self) -> Result<HashMap<String, CachedFileHash>> {
+        let mut statement = self.connection.prepare(
+            r"
+            SELECT full_path, size_bytes, modified_time_ns, blake3_hash
+            FROM file_hashes
+            ",
+        )?;
+
+        let entries = statement
+            .query_map([], |row| {
+                let path: String = row.get(0)?;
+                let entry = CachedFileHash {
+                    size_bytes: row.get::<_, i64>(1)? as u64,
+                    modified_time_ns: row.get(2)?,
+                    blake3_hash: row.get(3)?,
+                };
+                Ok((path, entry))
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Insert or update multiple cached BLAKE3 hashes in a single transaction.
+    ///
+    /// Returns the number of entries written.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be started or committed.
+    pub fn batch_upsert_hashes(&mut self, entries: &[(&Path, &CachedFileHash)]) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as i64);
+
+        let transaction = self.connection.transaction()?;
+        for (path, hash) in entries {
+            transaction
+                .execute(
+                    r"
+                    INSERT INTO file_hashes (full_path, size_bytes, modified_time_ns, blake3_hash, hashed_time)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(full_path) DO UPDATE SET
+                        size_bytes = excluded.size_bytes,
+                        modified_time_ns = excluded.modified_time_ns,
+                        blake3_hash = excluded.blake3_hash,
+                        hashed_time = excluded.hashed_time
+                    ",
+                    params![
+                        path.to_string_lossy(),
+                        hash.size_bytes as i64,
+                        hash.modified_time_ns,
+                        hash.blake3_hash,
+                        now,
+                    ],
+                )
+                .context("Failed to upsert file hash")?;
+        }
+
+        transaction.commit()?;
+        Ok(entries.len())
     }
 
     /// Insert or update multiple scanned file entries in a single transaction.
@@ -210,6 +299,25 @@ impl ScanCache {
 
         transaction.commit()?;
         Ok(count)
+    }
+}
+
+/// A cached BLAKE3 hash and the file metadata used to determine whether it is still valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedFileHash {
+    /// File size when the hash was calculated.
+    pub size_bytes: u64,
+    /// File modification time as nanoseconds since the Unix epoch.
+    pub modified_time_ns: i64,
+    /// Lowercase hexadecimal BLAKE3 hash.
+    pub blake3_hash: String,
+}
+
+impl CachedFileHash {
+    /// Return whether this hash still describes a file with the given metadata.
+    #[must_use]
+    pub const fn is_current(&self, size_bytes: u64, modified_time_ns: i64) -> bool {
+        self.size_bytes == size_bytes && self.modified_time_ns == modified_time_ns
     }
 }
 
@@ -389,6 +497,43 @@ mod test_scan_cache_upsert {
         let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
         let count = cache.batch_upsert(&[]).expect("Failed to upsert");
         assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+mod test_file_hash_cache {
+    use super::*;
+
+    #[test]
+    fn upserts_and_retrieves_hashes() {
+        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
+        let path = Path::new("/videos/test.mp4");
+        let hash = CachedFileHash {
+            size_bytes: 1_024,
+            modified_time_ns: 123_456,
+            blake3_hash: "abc123".to_string(),
+        };
+
+        let count = cache
+            .batch_upsert_hashes(&[(path, &hash)])
+            .expect("Failed to upsert hash");
+        assert_eq!(count, 1);
+
+        let hashes = cache.get_all_hashes().expect("Failed to retrieve hashes");
+        assert_eq!(hashes.get("/videos/test.mp4"), Some(&hash));
+    }
+
+    #[test]
+    fn validity_requires_matching_size_and_modification_time() {
+        let hash = CachedFileHash {
+            size_bytes: 1_024,
+            modified_time_ns: 123_456,
+            blake3_hash: "abc123".to_string(),
+        };
+
+        assert!(hash.is_current(1_024, 123_456));
+        assert!(!hash.is_current(2_048, 123_456));
+        assert!(!hash.is_current(1_024, 654_321));
     }
 }
 

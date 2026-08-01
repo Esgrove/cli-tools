@@ -166,6 +166,8 @@ Options:
   -g, --pattern <PATTERN>      Identifier patterns to search for (regex)
   -e, --extension <EXTENSION>  File extensions to include
   -m, --move                   Move duplicates to a "Duplicates" directory
+  -i, --ignore <IGNORE>        Ignore prefix when matching filenames
+  -H, --hash                   Compare file contents using BLAKE3 hashes
   -p, --print                  Only print changes without moving files
   -r, --recurse                Recurse into subdirectories
   -d, --default                Use default paths from config file

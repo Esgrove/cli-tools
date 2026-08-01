@@ -1,5 +1,6 @@
 mod config;
 mod dupe_find;
+mod helpers;
 mod tui;
 
 use std::path::PathBuf;
@@ -30,6 +31,14 @@ struct Args {
     /// Move duplicates to a "Duplicates" directory
     #[arg(short = 'm', long = "move")]
     move_files: bool,
+
+    /// Ignore prefix when matching filenames
+    #[arg(short = 'i', long = "ignore", num_args = 1, action = clap::ArgAction::Append, name = "IGNORE")]
+    prefix_ignore: Vec<String>,
+
+    /// Compare file contents using BLAKE3 hashes
+    #[arg(short = 'H', long = "hash")]
+    hash_compare: bool,
 
     /// Only print changes without moving files
     #[arg(short = 'p', long)]
@@ -114,6 +123,16 @@ mod cli_args_tests {
     }
 
     #[test]
+    fn parses_prefix_ignores_and_hash_flag() {
+        let args = Args::try_parse_from(["test", "-i", "prefix", "--ignore", "other", "--hash"]).expect("should parse");
+        assert_eq!(args.prefix_ignore, vec!["prefix", "other"]);
+        assert!(args.hash_compare);
+
+        let args = Args::try_parse_from(["test", "-H"]).expect("should parse short hash flag");
+        assert!(args.hash_compare);
+    }
+
+    #[test]
     fn parses_move_flag() {
         let args = Args::try_parse_from(["test", "-m"]).expect("should parse");
         assert!(args.move_files);
@@ -146,6 +165,8 @@ mod cli_args_tests {
         assert!(args.paths.is_empty());
         assert!(args.pattern.is_empty());
         assert!(args.extension.is_empty());
+        assert!(args.prefix_ignore.is_empty());
+        assert!(!args.hash_compare);
         assert!(!args.move_files);
         assert!(!args.print);
         assert!(!args.recurse);
@@ -215,6 +236,21 @@ mod config_from_args_tests {
         let args = Args::try_parse_from(["test", "-g", "[invalid(regex"]).expect("should parse");
         let result = Config::from_args(args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_includes_hash_and_normalized_prefix_ignores() {
+        let args = Args::try_parse_from(["test", "--hash", "-i", " Prefix ", "-i", "PREFIX"]).expect("should parse");
+        let config = Config::from_args(args).expect("should create config");
+        assert!(config.hash_compare);
+        assert_eq!(
+            config
+                .prefix_ignores
+                .iter()
+                .filter(|prefix| prefix.as_str() == "prefix")
+                .count(),
+            1
+        );
     }
 
     #[test]

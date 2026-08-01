@@ -127,6 +127,7 @@ re-export from the library. Do not duplicate code in benchmark files.
 - Do not use plain unwrap. Use proper error handling or `.expect()` in constants and test cases.
 - Use `anyhow` for error handling with `Result<T>` return types
 - Use `clap` with derive macros for CLI argument parsing
+- Every CLI argument must provide both a short and a long option
 - Use `colored` crate for terminal output coloring
 - Common helper functions and macros like `print_error!` and `print_warning!` are defined in `src/lib.rs`
 - Use descriptive variable and function names. No single character variables.
