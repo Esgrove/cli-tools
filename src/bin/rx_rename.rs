@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 use cli_tools::{print_error, print_magenta_bold, resolve_input_path, should_skip_entry, trash_or_delete};
 
 /// Action to take when a conflicting unsuffixed file already exists.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum ConflictAction {
     /// Permanently delete the conflicting file.
     Delete,
@@ -17,6 +17,7 @@ enum ConflictAction {
 }
 
 /// Result of processing a single file.
+#[derive(Debug)]
 enum Outcome {
     /// File was renamed (no conflicting unsuffixed file existed).
     Renamed,
@@ -212,4 +213,147 @@ fn process_file(
     } else {
         Outcome::Renamed
     })
+}
+
+#[cfg(test)]
+mod test_args {
+    use super::*;
+
+    #[test]
+    fn parses_defaults_and_combined_flags() {
+        let defaults = Args::try_parse_from(["rxrename"]).expect("default arguments should parse");
+        assert!(defaults.command.is_none());
+        assert!(defaults.root.is_none());
+        assert!(!defaults.dryrun);
+        assert!(!defaults.trash);
+        assert!(!defaults.verbose);
+
+        let combined = Args::try_parse_from(["rxrename", "folder", "--dryrun", "--trash", "--verbose"])
+            .expect("combined arguments should parse");
+        assert_eq!(combined.root, Some(PathBuf::from("folder")));
+        assert!(combined.dryrun);
+        assert!(combined.trash);
+        assert!(combined.verbose);
+    }
+
+    #[test]
+    fn parses_completion_and_has_valid_command_definition() {
+        let args = Args::try_parse_from(["rxrename", "completion", "bash", "--install"])
+            .expect("completion command should parse");
+        assert!(matches!(
+            args.command,
+            Some(RxRenameCommand::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+        Args::command().debug_assert();
+    }
+}
+
+#[cfg(test)]
+mod test_find_files_with_rx_duplicate_suffix {
+    use super::*;
+
+    #[test]
+    fn finds_only_exact_suffix_files_recursively_and_sorts_them() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let scan_root = temp_directory.path().join("videos");
+        let nested = scan_root.join("nested");
+        let hidden = scan_root.join(".hidden");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::create_dir(&hidden)?;
+        let alpha = scan_root.join("alpha_1.mp4");
+        let beta = nested.join("beta_1");
+        std::fs::write(&alpha, b"alpha")?;
+        std::fs::write(&beta, b"beta")?;
+        std::fs::write(scan_root.join("plain.mp4"), b"plain")?;
+        std::fs::write(scan_root.join("gamma_10.mkv"), b"gamma")?;
+        std::fs::write(hidden.join("ignored_1.mp4"), b"hidden")?;
+        std::fs::create_dir(scan_root.join("directory_1"))?;
+
+        let files = find_files_with_rx_duplicate_suffix(&scan_root);
+
+        assert_eq!(files, vec![alpha, beta]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_process_file {
+    use super::*;
+
+    #[test]
+    fn dryrun_without_conflict_reports_rename_without_changes() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join("clip_1.mp4");
+        let unsuffixed = temp_directory.path().join("clip.mp4");
+        std::fs::write(&suffixed, b"new")?;
+
+        let outcome = process_file(temp_directory.path(), &suffixed, 1, 1, 1, true, ConflictAction::Delete)?;
+
+        assert!(matches!(outcome, Outcome::Renamed));
+        assert!(suffixed.exists());
+        assert!(!unsuffixed.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn dryrun_with_conflict_reports_removal_without_changes() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join("clip_1.mp4");
+        let unsuffixed = temp_directory.path().join("clip.mp4");
+        std::fs::write(&suffixed, b"new")?;
+        std::fs::write(&unsuffixed, b"old")?;
+
+        let outcome = process_file(temp_directory.path(), &suffixed, 1, 1, 1, true, ConflictAction::Trash)?;
+
+        assert!(matches!(outcome, Outcome::RenamedAndRemoved));
+        assert_eq!(std::fs::read(&suffixed)?, b"new");
+        assert_eq!(std::fs::read(&unsuffixed)?, b"old");
+        Ok(())
+    }
+
+    #[test]
+    fn existing_directory_target_is_skipped() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join("clip_1.mp4");
+        std::fs::write(&suffixed, b"new")?;
+        std::fs::create_dir(temp_directory.path().join("clip.mp4"))?;
+
+        let outcome = process_file(temp_directory.path(), &suffixed, 1, 1, 1, false, ConflictAction::Delete)?;
+
+        assert!(matches!(outcome, Outcome::Skipped));
+        assert!(suffixed.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_filename_without_duplicate_suffix() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let path = temp_directory.path().join("clip_2.mp4");
+        std::fs::write(&path, b"contents")?;
+
+        let error = process_file(temp_directory.path(), &path, 1, 1, 1, true, ConflictAction::Delete)
+            .expect_err("nonmatching suffix should fail");
+
+        assert!(error.to_string().contains("does not end with '_1'"));
+        Ok(())
+    }
+
+    #[test]
+    fn delete_mode_replaces_conflicting_file() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join("clip_1.mp4");
+        let unsuffixed = temp_directory.path().join("clip.mp4");
+        std::fs::write(&suffixed, b"new")?;
+        std::fs::write(&unsuffixed, b"old")?;
+
+        let outcome = process_file(temp_directory.path(), &suffixed, 1, 1, 1, false, ConflictAction::Delete)?;
+
+        assert!(matches!(outcome, Outcome::RenamedAndRemoved));
+        assert!(!suffixed.exists());
+        assert_eq!(std::fs::read(&unsuffixed)?, b"new");
+        Ok(())
+    }
 }

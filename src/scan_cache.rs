@@ -382,6 +382,13 @@ mod test_scan_cache_open {
         let all = cache.get_all().expect("Failed to get entries");
         assert!(all.is_empty());
     }
+
+    #[test]
+    fn empty_cache_returns_empty_hash_map() {
+        let cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
+        let hashes = cache.get_all_hashes().expect("Failed to get hashes");
+        assert!(hashes.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -498,6 +505,27 @@ mod test_scan_cache_upsert {
         let count = cache.batch_upsert(&[]).expect("Failed to upsert");
         assert_eq!(count, 0);
     }
+
+    #[test]
+    fn upsert_mixed_entries_skips_only_entry_without_size() {
+        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
+        let valid = sample_video_info();
+        let missing_size = VideoInfo {
+            size_bytes: None,
+            ..valid.clone()
+        };
+        let valid_path = Path::new("/videos/valid.mp4");
+        let skipped_path = Path::new("/videos/skipped.mp4");
+
+        let count = cache
+            .batch_upsert(&[(skipped_path, &missing_size), (valid_path, &valid)])
+            .expect("Failed to upsert mixed entries");
+        let all = cache.get_all().expect("Failed to get entries");
+
+        assert_eq!(count, 1);
+        assert!(all.contains_key("/videos/valid.mp4"));
+        assert!(!all.contains_key("/videos/skipped.mp4"));
+    }
 }
 
 #[cfg(test)]
@@ -534,6 +562,32 @@ mod test_file_hash_cache {
         assert!(hash.is_current(1_024, 123_456));
         assert!(!hash.is_current(2_048, 123_456));
         assert!(!hash.is_current(1_024, 654_321));
+    }
+
+    #[test]
+    fn upserts_multiple_hashes_in_one_batch() {
+        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
+        let first_path = Path::new("/videos/first.mp4");
+        let second_path = Path::new("/videos/second.mp4");
+        let first_hash = CachedFileHash {
+            size_bytes: 100,
+            modified_time_ns: 1,
+            blake3_hash: "first".to_string(),
+        };
+        let second_hash = CachedFileHash {
+            size_bytes: 200,
+            modified_time_ns: 2,
+            blake3_hash: "second".to_string(),
+        };
+
+        let count = cache
+            .batch_upsert_hashes(&[(first_path, &first_hash), (second_path, &second_hash)])
+            .expect("Failed to upsert hashes");
+        let hashes = cache.get_all_hashes().expect("Failed to retrieve hashes");
+
+        assert_eq!(count, 2);
+        assert_eq!(hashes.get("/videos/first.mp4"), Some(&first_hash));
+        assert_eq!(hashes.get("/videos/second.mp4"), Some(&second_hash));
     }
 }
 

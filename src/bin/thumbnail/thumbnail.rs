@@ -1,3 +1,5 @@
+//! Video thumbnail sheet discovery, metadata formatting, and ffmpeg command construction.
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -459,5 +461,237 @@ mod thumbnail_progress_prefix_tests {
     fn right_aligns_index_to_total_width() {
         assert_eq!(ThumbnailCreator::format_progress_prefix(12, 100, 3), "[ 12 / 100]");
         assert_eq!(ThumbnailCreator::format_progress_prefix(1, 100, 3), "[  1 / 100]");
+    }
+}
+
+#[cfg(test)]
+mod test_thumbnail_helpers {
+    use cli_tools::Resolution;
+
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            cols_landscape: 3,
+            cols_portrait: 4,
+            dryrun: false,
+            font_size: 20,
+            overwrite: false,
+            padding_landscape: 8,
+            padding_portrait: 16,
+            quality: 2,
+            recurse: false,
+            rows_landscape: 4,
+            rows_portrait: 3,
+            scale_width: 480,
+            verbose: false,
+        }
+    }
+
+    fn creator(root: PathBuf, config: Config) -> ThumbnailCreator {
+        ThumbnailCreator {
+            quality_str: config.quality.to_string(),
+            config,
+            root,
+            escaped_font: "font.ttf".to_string(),
+        }
+    }
+
+    #[test]
+    fn recognizes_supported_video_extensions_case_insensitively() {
+        assert!(ThumbnailCreator::is_video_file(Path::new("video.mp4")));
+        assert!(ThumbnailCreator::is_video_file(Path::new("video.MKV")));
+        assert!(!ThumbnailCreator::is_video_file(Path::new("notes.txt")));
+        assert!(!ThumbnailCreator::is_video_file(Path::new("README")));
+    }
+
+    #[test]
+    fn calculates_font_size_for_missing_vertical_square_and_landscape_resolutions() {
+        let creator = creator(PathBuf::new(), config());
+        assert_eq!(creator.calculate_font_size(&VideoInfo::default()), 20);
+        assert_eq!(
+            creator.calculate_font_size(&VideoInfo {
+                resolution: Some(Resolution::new(0, 1080)),
+                ..Default::default()
+            }),
+            20
+        );
+        assert_eq!(
+            creator.calculate_font_size(&VideoInfo {
+                resolution: Some(Resolution::new(720, 1280)),
+                ..Default::default()
+            }),
+            36
+        );
+        assert_eq!(
+            creator.calculate_font_size(&VideoInfo {
+                resolution: Some(Resolution::new(1080, 1080)),
+                ..Default::default()
+            }),
+            28
+        );
+        assert_eq!(
+            creator.calculate_font_size(&VideoInfo {
+                resolution: Some(Resolution::new(1920, 1080)),
+                ..Default::default()
+            }),
+            20
+        );
+    }
+
+    #[test]
+    fn builds_metadata_in_display_order_and_truncates_long_ascii_text() {
+        let info = VideoInfo {
+            size_bytes: None,
+            resolution: Some(Resolution::new(1920, 1080)),
+            duration: Some(90.0),
+            codec: Some("hevc".to_string()),
+            bitrate_kbps: Some(5_000),
+        };
+
+        assert_eq!(
+            ThumbnailCreator::build_metadata_text("video.mp4", &info),
+            "1m 30s | 1920x1080 | hevc | 5.0 Mbps | video.mp4"
+        );
+        assert_eq!(
+            ThumbnailCreator::build_metadata_text("video.mp4", &VideoInfo::default()),
+            "video.mp4"
+        );
+
+        let long_name = format!("{}.mp4", "a".repeat(MAX_METADATA_LENGTH));
+        let truncated = ThumbnailCreator::build_metadata_text(&long_name, &VideoInfo::default());
+        assert_eq!(truncated.len(), MAX_METADATA_LENGTH);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn escapes_all_drawtext_special_characters() {
+        assert_eq!(
+            ThumbnailCreator::escape_for_drawtext(r"C:\font:path's|name"),
+            r"C\:\\font\:path\'s\|name"
+        );
+    }
+
+    #[test]
+    fn builds_expected_ffmpeg_command_without_executing_it() {
+        let creator = creator(PathBuf::new(), config());
+        let params = ThumbnailParams {
+            interval: 10.0,
+            cols: 3,
+            rows: 4,
+            padding: 8,
+            font_size: 20,
+            metadata_text: "video: sample".to_string(),
+        };
+
+        let command = creator.build_ffmpeg_command(Path::new("input.mp4"), Path::new("output.jpg"), &params);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), "ffmpeg");
+        assert!(arguments.contains(&"-nostdin".to_string()));
+        assert!(arguments.contains(&"input.mp4".to_string()));
+        assert!(arguments.contains(&"output.jpg".to_string()));
+        assert!(arguments.contains(&"2".to_string()));
+        assert!(arguments.iter().any(|argument| argument.contains("tile=3x4")));
+        assert!(arguments.iter().any(|argument| argument.contains(r"video\: sample")));
+    }
+}
+
+#[cfg(test)]
+mod test_thumbnail_file_discovery {
+    use super::*;
+
+    fn config_with_recursion(recurse: bool) -> Config {
+        Config {
+            cols_landscape: 3,
+            cols_portrait: 4,
+            dryrun: false,
+            font_size: 20,
+            overwrite: false,
+            padding_landscape: 8,
+            padding_portrait: 16,
+            quality: 2,
+            recurse,
+            rows_landscape: 4,
+            rows_portrait: 3,
+            scale_width: 480,
+            verbose: false,
+        }
+    }
+
+    fn creator(root: PathBuf, recurse: bool) -> ThumbnailCreator {
+        ThumbnailCreator {
+            config: config_with_recursion(recurse),
+            root,
+            escaped_font: "font.ttf".to_string(),
+            quality_str: "2".to_string(),
+        }
+    }
+
+    #[test]
+    fn gathers_supported_single_file_and_rejects_unsupported_file() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let video = temp_directory.path().join("video.mp4");
+        let text = temp_directory.path().join("notes.txt");
+        std::fs::write(&video, b"video")?;
+        std::fs::write(&text, b"notes")?;
+
+        assert_eq!(creator(video.clone(), false).gather_video_files()?, vec![video]);
+        assert!(creator(text, false).gather_video_files().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recursion_controls_nested_discovery_and_hidden_directories_are_skipped() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let scan_root = temp_directory.path().join("videos");
+        let nested = scan_root.join("nested");
+        let hidden = scan_root.join(".hidden");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::create_dir(&hidden)?;
+        let top = scan_root.join("top.mp4");
+        let nested_video = nested.join("nested.mkv");
+        std::fs::write(&top, b"top")?;
+        std::fs::write(&nested_video, b"nested")?;
+        std::fs::write(hidden.join("ignored.mp4"), b"hidden")?;
+
+        assert_eq!(
+            creator(scan_root.clone(), false).gather_video_files()?,
+            vec![top.clone()]
+        );
+        let mut expected_recursive = vec![top, nested_video];
+        expected_recursive.sort();
+        assert_eq!(creator(scan_root, true).gather_video_files()?, expected_recursive);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_path_returns_error() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        assert!(
+            creator(temp_directory.path().join("missing"), false)
+                .gather_video_files()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn existing_thumbnail_returns_before_video_probe() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let video = temp_directory.path().join("video.mp4");
+        let screens = temp_directory.path().join(SCREENS_DIR_NAME);
+        std::fs::write(&video, b"not a real video")?;
+        std::fs::create_dir(&screens)?;
+        std::fs::write(screens.join("video.jpg"), b"existing")?;
+        let creator = creator(video.clone(), false);
+        let mut stats = VideoStats::new();
+
+        creator.create_thumbnail(&video, &mut stats, "[1 / 1]")?;
+
+        assert_eq!(std::fs::read(screens.join("video.jpg"))?, b"existing");
+        Ok(())
     }
 }

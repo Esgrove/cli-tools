@@ -583,6 +583,11 @@ mod test_compute_median_u64 {
     fn even_count() {
         assert_eq!(compute_median_u64(&[1, 2, 3, 4]), 2);
     }
+
+    #[test]
+    fn maximum_values_do_not_overflow() {
+        assert_eq!(compute_median_u64(&[u64::MAX - 1, u64::MAX]), u64::MAX - 1);
+    }
 }
 
 #[cfg(test)]
@@ -758,5 +763,23 @@ mod test_parse_ffprobe_output {
         let output = "width=7680\nheight=4320\n";
         let info = VideoInfo::parse_ffprobe_output(output);
         assert_eq!(info.resolution, Some(Resolution::new(7680, 4320)));
+    }
+
+    #[test]
+    fn trims_whitespace_around_lines() {
+        let output = "  codec_name=HEVC  \n  width=1920  \n  height=1080  \n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+
+        assert_eq!(info.codec.as_deref(), Some("hevc"));
+        assert_eq!(info.resolution, Some(Resolution::new(1920, 1080)));
+    }
+
+    #[test]
+    fn ignores_lines_without_key_value_separator() {
+        let output = "codec_name=h264\nmalformed line\nwidth=1280\nheight=720\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+
+        assert_eq!(info.codec.as_deref(), Some("h264"));
+        assert_eq!(info.resolution, Some(Resolution::new(1280, 720)));
     }
 }

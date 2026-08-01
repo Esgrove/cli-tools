@@ -1,3 +1,7 @@
+//! `Git` version tag creation for `CMake`, Python, and Rust projects.
+//!
+//! Detects project manifests, parses versions and names, and creates or pushes `Git` tags.
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -330,7 +334,7 @@ fn parse_version(content: &str, project_type: ProjectType) -> Option<String> {
 
 /// Parse version from Cargo.toml content.
 fn parse_cargo_toml_version(content: &str) -> Option<String> {
-    let toml_value: toml::Value = content.parse().ok()?;
+    let toml_value: toml::Value = toml::from_str(content).ok()?;
     toml_value
         .get("package")?
         .get("version")?
@@ -350,7 +354,7 @@ fn parse_cmake_version(content: &str) -> Option<String> {
 
 /// Parse version from pyproject.toml content.
 fn parse_pyproject_toml_version(content: &str) -> Option<String> {
-    let toml_value: toml::Value = content.parse().ok()?;
+    let toml_value: toml::Value = toml::from_str(content).ok()?;
     // Standard pyproject.toml uses [project].version
     toml_value
         .get("project")?
@@ -379,7 +383,7 @@ fn get_project_name(path: &Path, project_type: ProjectType) -> Option<String> {
             .and_then(|captures| captures.get(1))
             .map(|m| m.as_str().to_string()),
         ProjectType::Python => {
-            let toml_value: toml::Value = content.parse().ok()?;
+            let toml_value: toml::Value = toml::from_str(&content).ok()?;
             toml_value
                 .get("project")?
                 .get("name")?
@@ -387,12 +391,223 @@ fn get_project_name(path: &Path, project_type: ProjectType) -> Option<String> {
                 .map(ToString::to_string)
         }
         ProjectType::Rust => {
-            let toml_value: toml::Value = content.parse().ok()?;
+            let toml_value: toml::Value = toml::from_str(&content).ok()?;
             toml_value
                 .get("package")?
                 .get("name")?
                 .as_str()
                 .map(ToString::to_string)
         }
+    }
+}
+
+#[cfg(test)]
+mod test_args {
+    use super::*;
+
+    #[test]
+    fn parses_defaults_and_all_operational_flags() {
+        let defaults = Args::try_parse_from(["vtag"]).expect("default arguments should parse");
+        assert!(defaults.command.is_none());
+        assert!(defaults.path.is_none());
+        assert!(!defaults.dryrun);
+        assert!(!defaults.push);
+        assert!(!defaults.new);
+        assert!(!defaults.single);
+        assert!(!defaults.verbose);
+
+        let combined = Args::try_parse_from([
+            "vtag",
+            "project",
+            "--dryrun",
+            "--push",
+            "--new",
+            "--single",
+            "--verbose",
+        ])
+        .expect("combined arguments should parse");
+        assert_eq!(combined.path, Some(PathBuf::from("project")));
+        assert!(combined.dryrun);
+        assert!(combined.push);
+        assert!(combined.new);
+        assert!(combined.single);
+        assert!(combined.verbose);
+    }
+
+    #[test]
+    fn parses_completion_and_has_valid_command_definition() {
+        let args =
+            Args::try_parse_from(["vtag", "completion", "bash", "--install"]).expect("completion command should parse");
+        assert!(matches!(
+            args.command,
+            Some(VersionTagCommand::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+        Args::command().debug_assert();
+    }
+}
+
+#[cfg(test)]
+mod test_project_type {
+    use super::*;
+
+    #[test]
+    fn exposes_manifest_filenames_and_display_names() {
+        assert_eq!(ProjectType::Rust.manifest_filename(), "Cargo.toml");
+        assert_eq!(ProjectType::CMake.manifest_filename(), "CMakeLists.txt");
+        assert_eq!(ProjectType::Python.manifest_filename(), "pyproject.toml");
+        assert_eq!(ProjectType::Rust.to_string(), "Rust");
+        assert_eq!(ProjectType::CMake.to_string(), "CMake");
+        assert_eq!(ProjectType::Python.to_string(), "Python");
+    }
+}
+
+#[cfg(test)]
+mod test_version_parsing {
+    use super::*;
+
+    #[test]
+    fn parses_cargo_package_version() {
+        let content = "[package]\nname = \"demo\"\nversion = \"1.2.3\"";
+        let parsed: toml::Value = toml::from_str(content).expect("valid Cargo TOML should parse");
+        assert!(parsed.get("package").is_some());
+        assert_eq!(parse_cargo_toml_version(content), Some("1.2.3".to_string()));
+        assert_eq!(
+            parse_version("[package]\nversion = \"1.2.3\"", ProjectType::Rust),
+            Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn cargo_parser_rejects_invalid_or_missing_versions() {
+        assert_eq!(parse_cargo_toml_version("invalid = ["), None);
+        assert_eq!(parse_cargo_toml_version("[workspace]"), None);
+        assert_eq!(parse_cargo_toml_version("[package]\nversion = 123"), None);
+    }
+
+    #[test]
+    fn parses_python_project_version() {
+        let content = "[project]\nname = \"demo\"\nversion = \"2.0.1\"";
+        assert_eq!(parse_pyproject_toml_version(content), Some("2.0.1".to_string()));
+        assert_eq!(parse_version(content, ProjectType::Python), Some("2.0.1".to_string()));
+    }
+
+    #[test]
+    fn python_parser_rejects_invalid_or_missing_versions() {
+        assert_eq!(parse_pyproject_toml_version("invalid = ["), None);
+        assert_eq!(parse_pyproject_toml_version("[project]\nname = \"demo\""), None);
+        assert_eq!(parse_pyproject_toml_version("[project]\nversion = 123"), None);
+    }
+
+    #[test]
+    fn parses_cmake_versions_case_insensitively_across_lines() {
+        assert_eq!(
+            parse_cmake_version("project(Demo VERSION 3.4)"),
+            Some("3.4".to_string())
+        );
+        assert_eq!(
+            parse_cmake_version("PROJECT(\n  Demo\n  VERSION 3.4.5.6\n)"),
+            Some("3.4.5.6".to_string())
+        );
+        assert_eq!(
+            parse_version("project(Demo VERSION 3.4.5)", ProjectType::CMake),
+            Some("3.4.5".to_string())
+        );
+    }
+
+    #[test]
+    fn cmake_parser_requires_project_version() {
+        assert_eq!(parse_cmake_version("project(Demo)"), None);
+        assert_eq!(parse_cmake_version("set(VERSION 1.2.3)"), None);
+    }
+}
+
+#[cfg(test)]
+mod test_project_detection {
+    use super::*;
+
+    #[test]
+    fn detects_each_supported_manifest() -> anyhow::Result<()> {
+        let rust_directory = tempfile::TempDir::new()?;
+        std::fs::write(rust_directory.path().join("Cargo.toml"), "[package]")?;
+        assert_eq!(detect_project_type(rust_directory.path())?, ProjectType::Rust);
+
+        let cmake_directory = tempfile::TempDir::new()?;
+        std::fs::write(cmake_directory.path().join("CMakeLists.txt"), "project(Demo)")?;
+        assert_eq!(detect_project_type(cmake_directory.path())?, ProjectType::CMake);
+
+        let python_directory = tempfile::TempDir::new()?;
+        std::fs::write(python_directory.path().join("pyproject.toml"), "[project]")?;
+        assert_eq!(detect_project_type(python_directory.path())?, ProjectType::Python);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_precedence_is_rust_then_cmake_then_python() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        std::fs::write(temp_directory.path().join("pyproject.toml"), "[project]")?;
+        std::fs::write(temp_directory.path().join("CMakeLists.txt"), "project(Demo)")?;
+        assert_eq!(detect_project_type(temp_directory.path())?, ProjectType::CMake);
+
+        std::fs::write(temp_directory.path().join("Cargo.toml"), "[package]")?;
+        assert_eq!(detect_project_type(temp_directory.path())?, ProjectType::Rust);
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_directory_returns_contextual_error() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let error = detect_project_type(temp_directory.path()).expect_err("missing manifest should fail");
+        assert!(error.to_string().contains("No supported project manifest found"));
+    }
+}
+
+#[cfg(test)]
+mod test_project_names {
+    use super::*;
+
+    #[test]
+    fn reads_names_from_all_supported_manifests() -> anyhow::Result<()> {
+        let rust_directory = tempfile::TempDir::new()?;
+        std::fs::write(
+            rust_directory.path().join("Cargo.toml"),
+            "[package]\nname = \"rust-demo\"\nversion = \"1.0.0\"",
+        )?;
+        assert_eq!(
+            get_project_name(rust_directory.path(), ProjectType::Rust),
+            Some("rust-demo".to_string())
+        );
+
+        let python_directory = tempfile::TempDir::new()?;
+        std::fs::write(
+            python_directory.path().join("pyproject.toml"),
+            "[project]\nname = \"python-demo\"\nversion = \"1.0.0\"",
+        )?;
+        assert_eq!(
+            get_project_name(python_directory.path(), ProjectType::Python),
+            Some("python-demo".to_string())
+        );
+
+        let cmake_directory = tempfile::TempDir::new()?;
+        std::fs::write(
+            cmake_directory.path().join("CMakeLists.txt"),
+            "project(\"CMakeDemo\" VERSION 1.0)",
+        )?;
+        assert_eq!(
+            get_project_name(cmake_directory.path(), ProjectType::CMake),
+            Some("CMakeDemo".to_string())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_or_malformed_manifest_has_no_name() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        assert_eq!(get_project_name(temp_directory.path(), ProjectType::Rust), None);
+        std::fs::write(temp_directory.path().join("Cargo.toml"), "invalid = [")?;
+        assert_eq!(get_project_name(temp_directory.path(), ProjectType::Rust), None);
+        Ok(())
     }
 }

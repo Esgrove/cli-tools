@@ -1,3 +1,5 @@
+//! Video file discovery, probing, and aggregate statistics collection.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -259,4 +261,124 @@ async fn probe_files_async(files: Vec<PathBuf>, root: &Path) -> (Vec<ProbedFile>
     }
 
     (probed_files, error_count)
+}
+
+#[cfg(test)]
+mod test_video_file_discovery {
+    use super::*;
+
+    fn collector(root: PathBuf, recurse: bool) -> StatsCollector {
+        StatsCollector {
+            root,
+            recurse,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn recognizes_supported_extensions_case_insensitively() {
+        assert!(StatsCollector::is_video_file(Path::new("video.mp4")));
+        assert!(StatsCollector::is_video_file(Path::new("video.MKV")));
+        assert!(StatsCollector::is_video_file(Path::new("video.webm")));
+        assert!(!StatsCollector::is_video_file(Path::new("notes.txt")));
+        assert!(!StatsCollector::is_video_file(Path::new("README")));
+    }
+
+    #[test]
+    fn gathers_supported_single_file_and_rejects_unsupported_file() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let video = temp_directory.path().join("video.mp4");
+        let text = temp_directory.path().join("notes.txt");
+        std::fs::write(&video, b"video")?;
+        std::fs::write(&text, b"notes")?;
+
+        assert_eq!(collector(video.clone(), false).gather_video_files()?, vec![video]);
+        let error = collector(text, false)
+            .gather_video_files()
+            .expect_err("unsupported single file should fail");
+        assert!(error.to_string().contains("not a supported video file"));
+        Ok(())
+    }
+
+    #[test]
+    fn non_recursive_scan_excludes_nested_videos_and_non_video_files() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let nested = temp_directory.path().join("nested");
+        std::fs::create_dir(&nested)?;
+        let top_level = temp_directory.path().join("top.mp4");
+        std::fs::write(&top_level, b"top")?;
+        std::fs::write(temp_directory.path().join("notes.txt"), b"notes")?;
+        std::fs::write(nested.join("nested.mkv"), b"nested")?;
+
+        let files = collector(temp_directory.path().to_path_buf(), false).gather_video_files()?;
+
+        assert_eq!(files, vec![top_level]);
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_scan_includes_nested_videos_and_skips_hidden_directories() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let scan_root = temp_directory.path().join("videos");
+        let nested = scan_root.join("nested");
+        let hidden = scan_root.join(".hidden");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::create_dir(&hidden)?;
+        let top_level = scan_root.join("top.mp4");
+        let nested_video = nested.join("nested.mkv");
+        std::fs::write(&top_level, b"top")?;
+        std::fs::write(&nested_video, b"nested")?;
+        std::fs::write(hidden.join("ignored.mp4"), b"hidden")?;
+
+        let files = collector(scan_root, true).gather_video_files()?;
+
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&top_level));
+        assert!(files.contains(&nested_video));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_path_returns_contextual_error() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let missing = temp_directory.path().join("missing");
+
+        let error = collector(missing, false)
+            .gather_video_files()
+            .expect_err("missing path should fail");
+
+        assert!(error.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn empty_directory_run_completes_without_probing() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        collector(temp_directory.path().to_path_buf(), false).run()
+    }
+}
+
+#[cfg(test)]
+mod test_stats_collector_new {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn resolves_path_and_copies_flags() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let path = temp_directory
+            .path()
+            .to_str()
+            .expect("temporary path should be UTF-8")
+            .to_string();
+        let args = VideoStatsArgs::try_parse_from(["vstats", &path, "--recurse", "--verbose"])
+            .expect("arguments should parse");
+
+        let collector = StatsCollector::new(&args)?;
+
+        assert_eq!(collector.root, dunce::canonicalize(temp_directory.path())?);
+        assert!(collector.recurse);
+        assert!(collector.verbose);
+        Ok(())
+    }
 }
