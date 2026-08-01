@@ -4,12 +4,14 @@
 
 use std::collections::HashMap;
 use std::hint::black_box;
+use std::path::PathBuf;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use regex::Regex;
 
 use cli_tools::dupe_find::{
-    DupeFileInfo, DuplicateGroup, MatchRange, RE_RESOLUTION, merge_indices_into_groups, normalize_stem,
+    DupeFileInfo, DuplicateGroup, DuplicateMatchOptions, MatchRange, RE_RESOLUTION, find_duplicates,
+    merge_indices_into_groups, normalize_stem,
 };
 
 // ---------------------------------------------------------------------------
@@ -157,38 +159,13 @@ fn bench_merge_indices(c: &mut Criterion) {
 // Benchmarks for full duplicate finding pipeline
 // ---------------------------------------------------------------------------
 
-/// Simulate the full duplicate-finding pipeline on a set of filenames.
-/// This replicates the core logic of `DupeFind::find_all_duplicates` without
-/// file I/O, progress bars, or pattern matching.
-fn find_duplicates_by_normalized_name(filenames: &[&str]) -> Vec<(String, Vec<usize>)> {
-    let normalized_keys: Vec<String> = filenames.iter().map(|f| normalize_stem(f)).collect();
-
-    let mut file_to_group: HashMap<usize, String> = HashMap::new();
-    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for (idx, key) in normalized_keys.into_iter().enumerate() {
-        file_to_group.insert(idx, key.clone());
-        groups.entry(key).or_default().push(idx);
-    }
-
-    // Merge by exact filename match (lowercased)
-    let mut filename_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, filename) in filenames.iter().enumerate() {
-        filename_to_indices
-            .entry(filename.to_lowercase())
-            .or_default()
-            .push(idx);
-    }
-
-    for indices in filename_to_indices.values() {
-        if indices.len() > 1 {
-            merge_indices_into_groups(indices, &mut file_to_group, &mut groups);
-        }
-    }
-
-    let mut result: Vec<(String, Vec<usize>)> = groups.into_iter().filter(|(_, indices)| indices.len() > 1).collect();
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+/// Run the real library duplicate matcher on a set of filenames.
+fn find_duplicates_by_normalized_name(filenames: &[&str]) -> Vec<DuplicateGroup> {
+    let files: Vec<DupeFileInfo> = filenames
+        .iter()
+        .map(|filename| DupeFileInfo::new(PathBuf::from(format!("{filename}.mkv")), "mkv".to_string()))
+        .collect();
+    find_duplicates(&files, &DuplicateMatchOptions::default())
 }
 
 fn bench_find_duplicates_small(c: &mut Criterion) {

@@ -1,178 +1,41 @@
-use std::collections::HashMap;
-use std::hash::BuildHasher;
-use std::path::PathBuf;
-use std::sync::LazyLock;
+//! Duplicate file types, filename normalization, matching, hashing, and display helpers.
 
-use regex::Regex;
+pub mod hash;
+mod matcher;
+mod normalization;
+mod types;
 
 pub use crate::{MatchRange, RE_RESOLUTION};
-
-/// Regex to match codec patterns.
-static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
-    let pattern = format!(r"(?i)\b({})\b", CODEC_PATTERNS.join("|"));
-    Regex::new(&pattern).expect("Invalid codec regex")
-});
-
-/// Common codec patterns to remove when normalizing.
-pub const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
-
-/// All video extensions.
-pub const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
-
-/// A group of duplicate files that share a common key.
-#[derive(Debug, Clone)]
-pub struct DuplicateGroup {
-    /// The normalized key that identifies this group.
-    pub key: String,
-    /// Files belonging to this duplicate group.
-    pub files: Vec<DupeFileInfo>,
-}
-
-/// Information about a duplicate file candidate.
-#[derive(Debug, Clone)]
-pub struct DupeFileInfo {
-    /// Full path to the file.
-    pub path: PathBuf,
-    /// Complete filename including extension.
-    pub filename: String,
-    /// Filename stem without extension.
-    pub stem: String,
-    /// Lowercase file extension.
-    pub extension: String,
-    /// Pattern match range if matched by a pattern.
-    pub pattern_match: Option<MatchRange>,
-}
-
-impl DuplicateGroup {
-    /// Create a new duplicate group.
-    #[must_use]
-    pub const fn new(key: String, files: Vec<DupeFileInfo>) -> Self {
-        Self { key, files }
-    }
-
-    /// Get the display name for this group.
-    ///
-    /// If all files share the same pattern match text, uses that as the identifier.
-    /// Otherwise falls back to the normalized key.
-    #[must_use]
-    pub fn display_name(&self) -> String {
-        let mut pattern_texts = self
-            .files
-            .iter()
-            .filter_map(|file| file.pattern_match.map(|range| range.extract_from(&file.filename)));
-
-        if let Some(first) = pattern_texts.next()
-            && pattern_texts.all(|text| text.eq_ignore_ascii_case(first))
-        {
-            return first.to_string();
-        }
-
-        self.key.clone()
-    }
-}
-
-impl DupeFileInfo {
-    /// Create a new `DupeFileInfo` from a path and extension.
-    #[must_use]
-    pub fn new(path: PathBuf, extension: String) -> Self {
-        let filename = crate::path_to_filename_string(&path);
-        let stem = crate::path_to_file_stem_string(&path);
-        Self {
-            path,
-            filename,
-            stem,
-            extension,
-            pattern_match: None,
-        }
-    }
-}
-
-/// Strip configured dot-delimited prefixes from the start of a filename or stem.
-///
-/// Matching is case-insensitive and repeated, so multiple configured prefixes can be removed.
-/// Prefixes only match complete dot-delimited components.
-#[must_use]
-pub fn strip_ignored_prefixes(value: &str, prefix_ignores: &[String]) -> String {
-    let mut result = value;
-
-    loop {
-        let matching_prefix = prefix_ignores.iter().find_map(|prefix| {
-            let pattern_length = prefix.len() + 1;
-            if result.len() < pattern_length || !result.is_char_boundary(pattern_length) {
-                return None;
-            }
-
-            let candidate = &result[..pattern_length];
-            let prefix_matches = candidate[..prefix.len()].eq_ignore_ascii_case(prefix);
-            (prefix_matches && candidate.ends_with('.')).then_some(pattern_length)
-        });
-
-        let Some(pattern_length) = matching_prefix else {
-            break;
-        };
-        result = &result[pattern_length..];
-    }
-
-    result.to_string()
-}
-
-/// Normalize a file stem by removing resolution and codec patterns.
-///
-/// Converts to lowercase and strips resolution tags (e.g. `1080p`),
-/// codec tags (e.g. `x265`),
-/// then cleans up leftover consecutive dots, spaces, and trailing separators.
-/// Falls back to the lowercased original stem if normalization would produce an empty string.
-pub fn normalize_stem(stem: &str) -> String {
-    let mut normalized = stem.to_lowercase();
-
-    // Remove resolutions
-    normalized = RE_RESOLUTION.replace_all(&normalized, "").to_string();
-
-    // Remove codec patterns
-    normalized = RE_CODEC.replace_all(&normalized, "").to_string();
-
-    let result = crate::collapse_repeated_separators(&normalized);
-
-    // Fallback to lowercase stem if normalization removed everything
-    if result.is_empty() { stem.to_lowercase() } else { result }
-}
-
-/// Merge file indices into existing groups, unifying any separate groups that
-/// contain files from the same set of indices.
-///
-/// Uses the group of the first index as the canonical group and moves all other
-/// indices into it.
-pub fn merge_indices_into_groups<S: BuildHasher>(
-    indices: &[usize],
-    file_to_group: &mut HashMap<usize, String, S>,
-    groups: &mut HashMap<String, Vec<usize>, S>,
-) {
-    if indices.len() < 2 {
-        return;
-    }
-
-    // Find the canonical group (use the first one as canonical)
-    let canonical_group = file_to_group[&indices[0]].clone();
-
-    for &index in &indices[1..] {
-        let current_group = file_to_group[&index].clone();
-        if current_group != canonical_group {
-            // Move all files from current_group to canonical_group
-            if let Some(to_move) = groups.remove(&current_group) {
-                for moved_index in &to_move {
-                    file_to_group.insert(*moved_index, canonical_group.clone());
-                }
-                groups.entry(canonical_group.clone()).or_default().extend(to_move);
-            }
-        }
-    }
-}
+pub use matcher::{
+    DuplicateMatchOptions, filter_ignored_groups, find_duplicates, group_matches_ignore, merge_indices_into_groups,
+};
+pub use normalization::{CODEC_PATTERNS, normalize_stem, strip_ignored_prefixes};
+pub use types::{DupeFileInfo, DuplicateGroup, FILE_EXTENSIONS};
 
 /// Format a filename with optional pattern match highlighting.
 ///
 /// When a `MatchRange` is provided the matched portion is rendered in green.
-/// Otherwise the filename is returned as-is.
+/// Otherwise the filename is returned unchanged.
 #[must_use]
 pub fn format_filename_with_highlight(filename: &str, pattern_match: Option<MatchRange>) -> String {
     crate::format_text_with_highlight(filename, pattern_match)
+}
+
+#[cfg(test)]
+mod test_format_filename_with_highlight {
+    use super::*;
+
+    #[test]
+    fn leaves_filename_unchanged_without_match() {
+        assert_eq!(format_filename_with_highlight("example.mp4", None), "example.mp4");
+    }
+
+    #[test]
+    fn preserves_all_text_when_highlighting_match() {
+        let formatted = format_filename_with_highlight("example.ABC123.mp4", Some(MatchRange { start: 8, end: 14 }));
+
+        assert!(formatted.contains("example."));
+        assert!(formatted.contains("ABC123"));
+        assert!(formatted.contains(".mp4"));
+    }
 }

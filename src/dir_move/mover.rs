@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::file_hash::hash_file;
 use crate::{path_to_filename_string, print_error, print_yellow};
 
 /// Size of chunks used when copying files across devices.
@@ -319,13 +320,6 @@ fn remove_failed_destination(destination: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Calculate the BLAKE3 hash for a file.
-fn hash_file(path: &Path) -> anyhow::Result<blake3::Hash> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_mmap_rayon(path)?;
-    Ok(hasher.finalize())
-}
-
 /// Check if an I/O error indicates a cross-device move attempt.
 fn is_cross_device_error(error: &io::Error) -> bool {
     error.raw_os_error() == Some(17) || error.raw_os_error() == Some(18)
@@ -359,7 +353,7 @@ fn create_move_progress_bar(length: u64, hide_progress: bool) -> ProgressBar {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_copy_verification {
     use super::*;
 
     #[test]
@@ -393,6 +387,11 @@ mod tests {
         assert!(!destination.exists());
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod test_move_files {
+    use super::*;
 
     #[test]
     fn move_files_to_target_dir_moves_files() -> anyhow::Result<()> {

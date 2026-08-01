@@ -1,3 +1,5 @@
+//! Interactive terminal interface for reviewing and resolving duplicate groups.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -614,4 +616,65 @@ fn score_file(file: &DupeFileInfo) -> (u8, bool) {
     let has_x265 = filename_lower.contains(".x265");
 
     (resolution_score, has_x265)
+}
+
+#[cfg(test)]
+mod test_tui_state {
+    use super::*;
+
+    #[test]
+    fn selection_stays_within_bounds() {
+        let mut state = TuiState::new();
+
+        state.select_next(2);
+        state.select_next(2);
+        assert_eq!(state.selected, 1);
+
+        state.select_prev();
+        state.select_prev();
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn editing_updates_buffer_and_cursor() {
+        let mut state = TuiState::new();
+        state.start_editing("name");
+        state.insert_char('X');
+        state.move_cursor_right();
+        state.delete_char_forward();
+
+        assert_eq!(state.edit_buffer, "Xnme");
+        assert_eq!(state.cursor_pos, 2);
+
+        state.stop_editing();
+        assert!(!state.editing);
+        assert!(state.edit_buffer.is_empty());
+        assert_eq!(state.cursor_pos, 0);
+    }
+}
+
+#[cfg(test)]
+mod test_file_scoring {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn make_file(filename: &str) -> DupeFileInfo {
+        DupeFileInfo::new(PathBuf::from(filename), "mp4".to_string())
+    }
+
+    #[test]
+    fn prefers_higher_resolution_then_x265() {
+        let lower_resolution = make_file("movie.720p.x265.mp4");
+        let high_resolution_x264 = make_file("movie.1080p.x264.mp4");
+        let high_resolution_x265 = make_file("movie.1080p.x265.mp4");
+        let files = vec![&lower_resolution, &high_resolution_x264, &high_resolution_x265];
+
+        assert_eq!(find_best_file_index(&files), 2);
+    }
+
+    #[test]
+    fn empty_file_list_defaults_to_first_index() {
+        assert_eq!(find_best_file_index(&[]), 0);
+    }
 }

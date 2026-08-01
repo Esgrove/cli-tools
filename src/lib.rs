@@ -1,7 +1,13 @@
+//! Shared library modules and utilities for the `cli-tools` binaries.
+//!
+//! This crate provides reusable path handling, formatting, video analysis, duplicate detection,
+//! file hashing, and directory movement functionality.
+
 pub mod date;
 pub mod dir_move;
 pub mod dot_rename;
 pub mod dupe_find;
+pub mod file_hash;
 pub mod resolution;
 pub mod scan_cache;
 pub mod video_info;
