@@ -109,8 +109,9 @@ impl FFProbeResult {
             || format!("{name}.{label}"),
             |codec_match| {
                 // Found a codec - insert label before it
-                let before_codec = &name[..codec_match.start()];
-                let codec_and_after = &name[codec_match.start()..];
+                let Some((before_codec, codec_and_after)) = name.split_at_checked(codec_match.start()) else {
+                    return format!("{name}.{label}");
+                };
                 format!("{before_codec}.{label}.{codec_and_after}")
             },
         )

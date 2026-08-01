@@ -25,6 +25,10 @@ pub struct DuplicateMatchOptions<'a> {
 
 /// Find duplicate groups using filename, pattern, normalization, and matches supplied by the caller.
 #[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "group indices are created from this file slice and caller indices are bounds-checked"
+)]
 pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'_>) -> Vec<DuplicateGroup> {
     let normalized_keys: Vec<String> = files
         .par_iter()
@@ -126,10 +130,13 @@ pub fn merge_indices_into_groups<S: BuildHasher>(
         return;
     }
 
-    let Some(canonical_group) = file_to_group.get(&indices[0]).cloned() else {
+    let Some((&canonical_index, remaining_indices)) = indices.split_first() else {
         return;
     };
-    for &index in &indices[1..] {
+    let Some(canonical_group) = file_to_group.get(&canonical_index).cloned() else {
+        return;
+    };
+    for &index in remaining_indices {
         let Some(current_group) = file_to_group.get(&index).cloned() else {
             continue;
         };

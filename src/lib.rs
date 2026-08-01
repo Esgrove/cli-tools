@@ -3,6 +3,8 @@
 //! This crate provides reusable path handling, formatting, video analysis, duplicate detection,
 //! file hashing, and directory movement functionality.
 
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 pub mod date;
 pub mod dir_move;
 pub mod dot_rename;
@@ -154,8 +156,8 @@ pub struct MatchRange {
 impl MatchRange {
     /// Extract the matched substring from the given text.
     #[must_use]
-    pub fn extract_from<'a>(&self, text: &'a str) -> &'a str {
-        &text[self.start..self.end]
+    pub fn extract_from<'a>(&self, text: &'a str) -> Option<&'a str> {
+        text.get(self.start..self.end)
     }
 }
 
@@ -165,10 +167,16 @@ pub fn format_text_with_highlight(text: &str, match_range: Option<MatchRange>) -
     match_range.map_or_else(
         || text.to_string(),
         |range| {
-            let before = &text[..range.start];
-            let matched = range.extract_from(text).green().to_string();
-            let after = &text[range.end..];
-            format!("{before}{matched}{after}")
+            let Some(before) = text.get(..range.start) else {
+                return text.to_string();
+            };
+            let Some(matched) = text.get(range.start..range.end) else {
+                return text.to_string();
+            };
+            let Some(after) = text.get(range.end..) else {
+                return text.to_string();
+            };
+            format!("{before}{}{after}", matched.green())
         },
     )
 }
@@ -473,7 +481,7 @@ pub fn get_normalized_dir_name(path: &Path) -> Result<String> {
 #[must_use]
 pub fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     let name_bytes = entry.file_name().as_encoded_bytes();
-    !name_bytes.is_empty() && name_bytes[0] == b'.'
+    name_bytes.first() == Some(&b'.')
 }
 
 /// Check if entry is a hidden file or directory (starts with '.')
@@ -481,7 +489,7 @@ pub fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
     let name = entry.file_name();
     let name_bytes = name.as_encoded_bytes();
-    !name_bytes.is_empty() && name_bytes[0] == b'.'
+    name_bytes.first() == Some(&b'.')
 }
 
 /// Check if entry is a system directory that should be skipped.
@@ -533,7 +541,7 @@ pub fn is_network_path(path: &Path) -> bool {
         let prefix_str = prefix.as_os_str();
         // Create a root path like "X:\"
         let mut root: Vec<u16> = prefix_str.encode_wide().collect();
-        if root.len() >= 2 && root[1] == u16::from(b':') {
+        if root.get(1).is_some_and(|value| *value == u16::from(b':')) {
             root.push(u16::from(b'\\'));
             root.push(0); // null terminator
 
@@ -2336,7 +2344,7 @@ mod text_highlight_tests {
     #[test]
     fn match_range_extracts_selected_substring() {
         let range = MatchRange { start: 6, end: 11 };
-        assert_eq!(range.extract_from("hello world"), "world");
+        assert_eq!(range.extract_from("hello world"), Some("world"));
     }
 
     #[test]

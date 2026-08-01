@@ -230,11 +230,12 @@ impl VideoStats {
         });
 
         let total_labels = sorted_labels.len();
-        let display_labels = if verbose {
-            &sorted_labels[..]
+        let display_count = if verbose {
+            total_labels
         } else {
-            &sorted_labels[..total_labels.min(Self::MAX_RESOLUTION_ROWS)]
+            total_labels.min(Self::MAX_RESOLUTION_ROWS)
         };
+        let display_labels = sorted_labels.get(..display_count).unwrap_or_default();
 
         // Calculate max widths for right-alignment
         let max_label_width = display_labels.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
@@ -250,7 +251,9 @@ impl VideoStats {
 
         if !verbose && total_labels > Self::MAX_RESOLUTION_ROWS {
             let remaining_labels = total_labels - Self::MAX_RESOLUTION_ROWS;
-            let remaining_files: usize = sorted_labels[Self::MAX_RESOLUTION_ROWS..]
+            let remaining_files: usize = sorted_labels
+                .get(Self::MAX_RESOLUTION_ROWS..)
+                .unwrap_or_default()
                 .iter()
                 .map(|(_, (count, _))| count)
                 .sum();
@@ -366,10 +369,19 @@ fn compute_median_f64(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let length = sorted.len();
+    let middle = length / 2;
+    let Some(&upper) = sorted.get(middle) else {
+        return 0.0;
+    };
     if length.is_multiple_of(2) {
-        f64::midpoint(sorted[length / 2 - 1], sorted[length / 2])
+        let lower = sorted
+            .get(..middle)
+            .and_then(|values| values.last())
+            .copied()
+            .unwrap_or(upper);
+        f64::midpoint(lower, upper)
     } else {
-        sorted[length / 2]
+        upper
     }
 }
 
@@ -381,10 +393,19 @@ fn compute_median_u64(values: &[u64]) -> u64 {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     let length = sorted.len();
+    let middle = length / 2;
+    let Some(&upper) = sorted.get(middle) else {
+        return 0;
+    };
     if length.is_multiple_of(2) {
-        u64::midpoint(sorted[length / 2 - 1], sorted[length / 2])
+        let lower = sorted
+            .get(..middle)
+            .and_then(|values| values.last())
+            .copied()
+            .unwrap_or(upper);
+        u64::midpoint(lower, upper)
     } else {
-        sorted[length / 2]
+        upper
     }
 }
 

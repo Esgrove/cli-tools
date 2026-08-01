@@ -1,5 +1,7 @@
 //! Integration tests for duplicate discovery through public hashing APIs.
 
+#![allow(clippy::panic_in_result_fn)]
+
 use cli_tools::dupe_find::DupeFileInfo;
 use cli_tools::dupe_find::hash::{calculate_file_hash, collect_hash_candidates, group_hash_matches};
 

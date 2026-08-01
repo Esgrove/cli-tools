@@ -2,6 +2,8 @@
 //!
 //! Parses grid and rendering options, then delegates work to `ThumbnailCreator`.
 
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 mod config;
 mod thumbnail;
 

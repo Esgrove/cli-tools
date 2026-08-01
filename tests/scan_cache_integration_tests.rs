@@ -1,5 +1,7 @@
 //! Integration tests for persistent scan and file hash caching.
 
+#![allow(clippy::panic_in_result_fn)]
+
 use cli_tools::Resolution;
 use cli_tools::file_hash::{fingerprint_file, hash_file};
 use cli_tools::scan_cache::{CachedFileHash, ScanCache};

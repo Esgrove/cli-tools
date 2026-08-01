@@ -151,8 +151,8 @@ impl NormalizedFilename {
 
         let normalized_start = self.text.find(normalized_name)?;
         let normalized_end = normalized_start + normalized_name.len();
-        let start_index = self.text[..normalized_start].chars().count();
-        let end_index = self.text[..normalized_end].chars().count();
+        let start_index = self.text.get(..normalized_start)?.chars().count();
+        let end_index = self.text.get(..normalized_end)?.chars().count();
 
         Some(MatchRange {
             start: self.original_ranges.get(start_index)?.0,
@@ -987,7 +987,9 @@ impl DirMove {
         for source_directory in source_directories {
             let source_name = DirectoryInfo::new(source_directory.clone()).name;
             for &dir_idx in &dir_indices {
-                let target_directory = &directories[dir_idx];
+                let target_directory = directories
+                    .get(dir_idx)
+                    .ok_or_else(|| anyhow::anyhow!("Directory match index {dir_idx} is out of bounds"))?;
                 if source_name == target_directory.name
                     && !cli_tools::paths_refer_to_same_file(&source_directory, &target_directory.path)
                 {
@@ -1003,7 +1005,14 @@ impl DirMove {
 
         let groups_to_process: Vec<_> = matches
             .into_iter()
-            .map(|(idx, source_directories)| (&directories[idx], source_directories))
+            .map(|(index, source_directories)| {
+                let target_directory = directories
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("Directory match index {index} is out of bounds"))?;
+                Ok((target_directory, source_directories))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
             .sorted_by(|left, right| left.0.name.cmp(&right.0.name))
             .collect();
 
@@ -1138,18 +1147,23 @@ impl DirMove {
                 continue;
             };
 
-            let available_files: Vec<_> = file_indices
-                .into_iter()
-                .filter(|file_match| {
-                    Self::file_is_available_for_matching(&remaining_files[file_match.index], &consumed_files)
-                })
-                .collect();
+            let mut available_files = Vec::with_capacity(file_indices.len());
+            for file_match in file_indices {
+                let file_path = remaining_files
+                    .get(file_match.index)
+                    .ok_or_else(|| anyhow::anyhow!("File match index {} is out of bounds", file_match.index))?;
+                if Self::file_is_available_for_matching(file_path, &consumed_files) {
+                    available_files.push(file_match);
+                }
+            }
             if available_files.is_empty() {
                 continue;
             }
 
-            let outcome =
-                self.process_directory_match(&directories[directory_index], &remaining_files, &available_files)?;
+            let directory = directories
+                .get(directory_index)
+                .ok_or_else(|| anyhow::anyhow!("Directory match index {directory_index} is out of bounds"))?;
+            let outcome = self.process_directory_match(directory, &remaining_files, &available_files)?;
             consumed_files.extend(outcome.consumed_files());
         }
 
@@ -1208,15 +1222,23 @@ impl DirMove {
                     continue;
                 };
 
-                let available_files: Vec<_> = matched_files
-                    .into_iter()
-                    .filter(|file_match| Self::file_is_available_for_matching(&files[file_match.index], consumed_files))
-                    .collect();
+                let mut available_files = Vec::with_capacity(matched_files.len());
+                for file_match in matched_files {
+                    let file_path = files
+                        .get(file_match.index)
+                        .ok_or_else(|| anyhow::anyhow!("File match index {} is out of bounds", file_match.index))?;
+                    if Self::file_is_available_for_matching(file_path, consumed_files) {
+                        available_files.push(file_match);
+                    }
+                }
                 if available_files.is_empty() {
                     continue;
                 }
 
-                let outcome = self.process_directory_match(&directories[directory_index], files, &available_files)?;
+                let directory = directories
+                    .get(directory_index)
+                    .ok_or_else(|| anyhow::anyhow!("Directory match index {directory_index} is out of bounds"))?;
+                let outcome = self.process_directory_match(directory, files, &available_files)?;
                 consumed_files.extend(outcome.consumed_files());
             }
         }
@@ -1247,7 +1269,11 @@ impl DirMove {
 
         self.sorted_directory_indices(directories)
             .into_iter()
-            .find(|&directory_index| utils::normalize_name(&directories[directory_index].name) == target_normalized)
+            .find(|&directory_index| {
+                directories
+                    .get(directory_index)
+                    .is_some_and(|directory| utils::normalize_name(&directory.name) == target_normalized)
+            })
     }
 
     /// Collect candidate destination directories from every output root.
@@ -1355,7 +1381,7 @@ impl DirMove {
         self.sorted_directory_indices(directories)
             .into_iter()
             .filter_map(|directory_index| {
-                let directory_name = directories[directory_index].name.as_str();
+                let directory_name = directories.get(directory_index)?.name.as_str();
                 if self.is_ignored_prefix(directory_name) {
                     return None;
                 }
@@ -1433,9 +1459,12 @@ impl DirMove {
             let mut sorted_matches: Vec<_> = matches.iter().collect();
             sorted_matches.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
             for (&directory_index, matched_files) in sorted_matches {
+                let Some(directory) = directories.get(directory_index) else {
+                    continue;
+                };
                 eprintln!(
                     "  {} -> {}",
-                    directories[directory_index].name,
+                    directory.name,
                     count_label(matched_files.len(), "file", "files")
                 );
             }
@@ -1454,20 +1483,14 @@ impl DirMove {
     /// matching destination. Directory name length breaks same-depth ties, favoring more specific
     /// names before shorter broad matches.
     fn sorted_directory_indices(&self, directories: &[DirectoryInfo]) -> Vec<usize> {
-        let mut directory_indices: Vec<usize> = (0..directories.len()).collect();
-        directory_indices.sort_by(|&left, &right| {
-            self.directory_match_depth(&directories[right])
-                .cmp(&self.directory_match_depth(&directories[left]))
-                .then_with(|| {
-                    directories[right]
-                        .name
-                        .chars()
-                        .count()
-                        .cmp(&directories[left].name.chars().count())
-                })
-                .then_with(|| directories[left].name.cmp(&directories[right].name))
+        let mut indexed_directories: Vec<_> = directories.iter().enumerate().collect();
+        indexed_directories.sort_by(|(_, left), (_, right)| {
+            self.directory_match_depth(right)
+                .cmp(&self.directory_match_depth(left))
+                .then_with(|| right.name.chars().count().cmp(&left.name.chars().count()))
+                .then_with(|| left.name.cmp(&right.name))
         });
-        directory_indices
+        indexed_directories.into_iter().map(|(index, _)| index).collect()
     }
 
     /// Compute a directory's depth relative to the output root that contains it.
@@ -1505,8 +1528,11 @@ impl DirMove {
             changed = false;
             let result_lower = result.to_lowercase();
             for prefix_with_dot in &patterns_with_dot {
-                if result_lower.starts_with(prefix_with_dot) {
-                    result = result[prefix_with_dot.len()..].to_string();
+                if result_lower.starts_with(prefix_with_dot)
+                    && let Some(prefix_end) = original_end_for_lowercase_prefix(&result, prefix_with_dot)
+                    && let Some(stripped) = result.get(prefix_end..)
+                {
+                    result = stripped.to_string();
                     changed = true;
                     break;
                 }
@@ -1524,8 +1550,13 @@ impl DirMove {
     ) -> anyhow::Result<DirectoryMatchOutcome> {
         let file_paths: Vec<_> = file_matches
             .iter()
-            .map(|file_match| source_files[file_match.index].clone())
-            .collect();
+            .map(|file_match| {
+                source_files
+                    .get(file_match.index)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("File match index {} is out of bounds", file_match.index))
+            })
+            .collect::<anyhow::Result<_>>()?;
         let dir_display = self.get_directory_display_path(dir);
         let move_to_display = self.get_move_to_display_path(&dir.path, &file_paths);
         println!(
@@ -1534,8 +1565,8 @@ impl DirMove {
             count_label(file_matches.len(), "file", "files")
         );
 
-        for file_match in file_matches {
-            let filename = path_to_filename_string(&source_files[file_match.index]);
+        for (file_match, file_path) in file_matches.iter().zip(&file_paths) {
+            let filename = path_to_filename_string(file_path);
             println!("  {}", format_text_with_highlight(&filename, Some(file_match.range)));
         }
 
@@ -2475,8 +2506,11 @@ impl DirMove {
             changed = false;
             let result_lower = result.to_lowercase();
             for prefix_with_space in &patterns_with_space {
-                if result_lower.starts_with(prefix_with_space) {
-                    result = &result[prefix_with_space.len()..];
+                if result_lower.starts_with(prefix_with_space)
+                    && let Some(prefix_end) = original_end_for_lowercase_prefix(result, prefix_with_space)
+                    && let Some(stripped) = result.get(prefix_end..)
+                {
+                    result = stripped;
                     changed = true;
                     break;
                 }
@@ -2689,6 +2723,22 @@ impl DirMove {
             database,
         }
     }
+}
+
+/// Map a lowercase prefix length to its ending byte boundary in the original string.
+fn original_end_for_lowercase_prefix(text: &str, lowercase_prefix: &str) -> Option<usize> {
+    let mut lowercase_length = 0;
+
+    for (start, character) in text.char_indices() {
+        lowercase_length += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+        match lowercase_length.cmp(&lowercase_prefix.len()) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => return Some(start + character.len_utf8()),
+            std::cmp::Ordering::Greater => return None,
+        }
+    }
+
+    lowercase_prefix.is_empty().then_some(0)
 }
 
 #[cfg(test)]
@@ -10918,7 +10968,10 @@ mod test_filename_directory_highlight {
             .find_match("certainname")
             .expect("directory name should match filename");
 
-        assert_eq!(range.extract_from("Prefix.Certain.Name.Video.mp4"), "Certain.Name");
+        assert_eq!(
+            range.extract_from("Prefix.Certain.Name.Video.mp4"),
+            Some("Certain.Name")
+        );
     }
 
     #[test]
@@ -10927,7 +10980,7 @@ mod test_filename_directory_highlight {
             .find_match("certainname")
             .expect("directory name should match filename");
 
-        assert_eq!(range.extract_from("Prefix.CertainName.Video.mp4"), "CertainName");
+        assert_eq!(range.extract_from("Prefix.CertainName.Video.mp4"), Some("CertainName"));
     }
 
     #[test]
@@ -10961,6 +11014,6 @@ mod test_filename_directory_highlight {
             .expect("file should match directory");
         let filename = path_to_filename_string(&files[file_match.index]);
 
-        assert_eq!(file_match.range.extract_from(&filename), "Certain.Name");
+        assert_eq!(file_match.range.extract_from(&filename), Some("Certain.Name"));
     }
 }

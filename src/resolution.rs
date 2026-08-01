@@ -350,21 +350,25 @@ pub fn print_fuzzy_resolution_ranges() {
 }
 
 /// Precalculate fuzzy resolution match ranges for all known resolutions at compile time.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "both arrays have the same compile-time length and the loop bounds-checks the index"
+)]
 const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
     let mut out = [ResolutionMatch {
         label_height: 0,
         width_range: (0, 0),
         height_range: (0, 0),
     }; KNOWN_RESOLUTIONS.len()];
-    let mut i = 0;
-    while i < KNOWN_RESOLUTIONS.len() {
-        let (w, h) = KNOWN_RESOLUTIONS[i];
-        out[i] = ResolutionMatch {
-            label_height: h,
-            width_range: compute_bounds(w),
-            height_range: compute_bounds(h),
+    let mut index = 0;
+    while index < KNOWN_RESOLUTIONS.len() {
+        let (width, height) = KNOWN_RESOLUTIONS[index];
+        out[index] = ResolutionMatch {
+            label_height: height,
+            width_range: compute_bounds(width),
+            height_range: compute_bounds(height),
         };
-        i += 1;
+        index += 1;
     }
     out
 }

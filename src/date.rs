@@ -125,12 +125,12 @@ impl Date {
                 let date_str = date_match.as_str();
 
                 let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
-                if numbers.len() != 3 {
+                let [month, day, year] = numbers.as_slice() else {
                     continue;
-                }
+                };
 
-                // MM.DD.YYYY format: numbers[0]=month, numbers[1]=day, numbers[2]=year
-                if let Some(date) = Self::parse_date_from_mm_dd_yyyy(numbers[0], numbers[1], numbers[2]) {
+                // MM.DD.YYYY format
+                if let Some(date) = Self::parse_date_from_mm_dd_yyyy(month, day, year) {
                     best_match = Some((date_str.to_string(), date.to_string()));
                 }
             }
@@ -148,11 +148,11 @@ impl Date {
                 let date_str = date_match.as_str();
 
                 let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
-                if numbers.len() != 3 {
+                let [day, month, year] = numbers.as_slice() else {
                     continue;
-                }
+                };
 
-                if let Some(date) = Self::parse_date_from_dd_mm_yyyy(numbers[0], numbers[1], numbers[2]) {
+                if let Some(date) = Self::parse_date_from_dd_mm_yyyy(day, month, year) {
                     best_match = Some((date_str.to_string(), date.to_string()));
                 }
             }
@@ -170,14 +170,14 @@ impl Date {
                 let date_str = date_match.as_str();
 
                 let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
-                if numbers.len() != 3 {
+                let [first, month, third] = numbers.as_slice() else {
                     continue;
-                }
+                };
 
-                if let Some(date) = (year_first && numbers[0].len() == 2)
-                    .then(|| Self::parse_from_short(numbers[0], numbers[1], numbers[2]))
+                if let Some(date) = (year_first && first.len() == 2)
+                    .then(|| Self::parse_from_short(first, month, third))
                     .flatten()
-                    .or_else(|| Self::parse_from_short(numbers[2], numbers[1], numbers[0]))
+                    .or_else(|| Self::parse_from_short(third, month, first))
                 {
                     best_match = Some((date_str.to_string(), date.to_string()));
                 }
@@ -196,11 +196,11 @@ impl Date {
                 let date_str = date_match.as_str();
 
                 let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
-                if numbers.len() != 3 {
+                let [year, month, day] = numbers.as_slice() else {
                     continue;
-                }
+                };
 
-                if let Some(date) = Self::parse_from_short(numbers[0], numbers[1], numbers[2]) {
+                if let Some(date) = Self::parse_from_short(year, month, day) {
                     best_match = Some((date_str.to_string(), date.to_string()));
                 }
             }
@@ -322,9 +322,12 @@ impl Date {
         let separators = "_-.";
         if input.starts_with(|c: char| separators.contains(c)) {
             input.trim().to_string()
-        } else if input.ends_with(|c: char| separators.contains(c)) {
-            let separator = input.chars().last().expect("Failed to get last element");
-            let rest = &input[..input.len() - 1];
+        } else if let Some((separator, rest)) = input
+            .chars()
+            .next_back()
+            .filter(|separator| separators.contains(*separator))
+            .and_then(|separator| input.strip_suffix(separator).map(|rest| (separator, rest)))
+        {
             format!("{separator}{rest}")
         } else {
             format!(" {}", input.trim())

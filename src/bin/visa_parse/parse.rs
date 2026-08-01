@@ -382,7 +382,7 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
     let mut buf_reader = BufReader::new(&xml_file);
     let mut buf = [0; 256];
     let n = buf_reader.read(&mut buf).unwrap_or(0);
-    let header = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+    let header = String::from_utf8_lossy(buf.get(..n).unwrap_or_default()).to_lowercase();
     let encoding_name = header
         .split("encoding=")
         .nth(1)
@@ -547,7 +547,8 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
     println!("Unique names: {}", totals.len());
 
     if verbose {
-        let max_name_length = totals[..num_totals]
+        let top_totals = totals.get(..num_totals).unwrap_or(totals);
+        let max_name_length = top_totals
             .iter()
             .map(|(name, _)| name.chars().count())
             .max()
@@ -555,7 +556,7 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
             + 1;
 
         println!("\n{}", format!("Top {num_totals} totals:").bold());
-        for (name, sum) in &totals[..num_totals] {
+        for (name, sum) in top_totals {
             println!("{:width$}    {:>7.2}€", format!("{name}"), sum, width = max_name_length);
         }
     }
@@ -629,6 +630,7 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
         "{}",
         format!("Writing data to Excel: {}", output_file.display()).green()
     );
+    let first_item = items.first().context("Cannot write Excel workbook without items")?;
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet().set_name("VISA")?;
     let header_format = Format::new()
@@ -636,13 +638,13 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
         .set_border(FormatBorder::Thin)
         .set_background_color("C6E0B4");
 
-    sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
     sheet.serialize(&items)?;
     sheet.autofit();
 
     let dj_sheet = workbook.add_worksheet().set_name("DJ")?;
     let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
-    dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
     let mut row: RowNum = 1;
     for item in items {
         // Filter out common non-DJ items

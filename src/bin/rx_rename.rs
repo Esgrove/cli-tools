@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;

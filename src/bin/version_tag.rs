@@ -2,6 +2,8 @@
 //!
 //! Detects project manifests, parses versions and names, and creates or pushes `Git` tags.
 
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;

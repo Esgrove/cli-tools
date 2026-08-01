@@ -396,8 +396,8 @@ pub fn parse_torrent(path: &Path, config: &Config) -> Result<TorrentInfo> {
             let effective_multi = filtered.included.len() > 1;
             // If only one file remains, store its name for extension extraction
             // and use its path as the original name for renaming (since NoSubfolder is used)
-            let (single_file, eff_name) = if filtered.included.len() == 1 {
-                let file_path = filtered.included[0].path.to_string();
+            let (single_file, eff_name) = if let [file] = filtered.included.as_slice() {
+                let file_path = file.path.to_string();
                 (Some(file_path.clone()), Some(file_path))
             } else {
                 (None, original_name)
@@ -487,8 +487,8 @@ where
 pub fn to_hex(bytes: &[u8]) -> String {
     let mut hex = Vec::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        hex.push(HEX_CHARS[(byte >> 4) as usize]);
-        hex.push(HEX_CHARS[(byte & 0x0f) as usize]);
+        hex.push(HEX_CHARS.get(usize::from(byte >> 4)).copied().unwrap_or(b'0'));
+        hex.push(HEX_CHARS.get(usize::from(byte & 0x0f)).copied().unwrap_or(b'0'));
     }
     String::from_utf8(hex).expect("hex chars are valid UTF-8")
 }
@@ -517,14 +517,21 @@ fn extract_info_dict_bytes(buffer: &[u8]) -> Result<&[u8]> {
     }
 
     // Parse the bencode value to find its end
-    let info_len = bencode_value_length(&buffer[info_start..])?;
-    let info_end = info_start + info_len;
+    let info_data = buffer
+        .get(info_start..)
+        .context("Torrent file truncated after 'info' key")?;
+    let info_len = bencode_value_length(info_data)?;
+    let info_end = info_start
+        .checked_add(info_len)
+        .context("Info dictionary length overflow")?;
 
     if info_end > buffer.len() {
         bail!("Info dictionary extends beyond end of file");
     }
 
-    Ok(&buffer[info_start..info_end])
+    buffer
+        .get(info_start..info_end)
+        .context("Info dictionary extends beyond end of file")
 }
 
 /// Find the position of a subsequence in a byte slice.
@@ -537,11 +544,11 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// # Errors
 /// Returns an error if the bencode is malformed.
 fn bencode_value_length(data: &[u8]) -> Result<usize> {
-    if data.is_empty() {
+    let Some(&value_type) = data.first() else {
         bail!("Empty bencode value");
-    }
+    };
 
-    match data[0] {
+    match value_type {
         // Integer: i<number>e
         b'i' => {
             let end = find_subsequence(data, b"e").context("Malformed bencode integer")?;
@@ -550,11 +557,12 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
         // List: l<items>e
         b'l' => {
             let mut pos = 1;
-            while pos < data.len() && data[pos] != b'e' {
-                let item_len = bencode_value_length(&data[pos..])?;
-                pos += item_len;
+            while data.get(pos).is_some_and(|byte| *byte != b'e') {
+                let remaining = data.get(pos..).context("Malformed bencode list")?;
+                let item_len = bencode_value_length(remaining)?;
+                pos = pos.checked_add(item_len).context("Bencode list length overflow")?;
             }
-            if pos >= data.len() {
+            if data.get(pos).is_none() {
                 bail!("Malformed bencode list");
             }
             Ok(pos + 1) // +1 for the 'e'
@@ -562,15 +570,19 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
         // Dictionary: d<key><value>...e
         b'd' => {
             let mut pos = 1;
-            while pos < data.len() && data[pos] != b'e' {
+            while data.get(pos).is_some_and(|byte| *byte != b'e') {
                 // Key (must be a string)
-                let key_len = bencode_value_length(&data[pos..])?;
-                pos += key_len;
+                let remaining = data.get(pos..).context("Malformed bencode dictionary")?;
+                let key_len = bencode_value_length(remaining)?;
+                pos = pos.checked_add(key_len).context("Bencode dictionary length overflow")?;
                 // Value
-                let value_len = bencode_value_length(&data[pos..])?;
-                pos += value_len;
+                let remaining = data.get(pos..).context("Malformed bencode dictionary")?;
+                let value_len = bencode_value_length(remaining)?;
+                pos = pos
+                    .checked_add(value_len)
+                    .context("Bencode dictionary length overflow")?;
             }
-            if pos >= data.len() {
+            if data.get(pos).is_none() {
                 bail!("Malformed bencode dictionary");
             }
             Ok(pos + 1) // +1 for the 'e'
@@ -578,9 +590,13 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
         // String: <length>:<content>
         b'0'..=b'9' => {
             let colon_pos = find_subsequence(data, b":").context("Malformed bencode string")?;
-            let len_str = std::str::from_utf8(&data[..colon_pos]).context("Invalid length in bencode string")?;
+            let length_bytes = data.get(..colon_pos).context("Malformed bencode string")?;
+            let len_str = std::str::from_utf8(length_bytes).context("Invalid length in bencode string")?;
             let str_len: usize = len_str.parse().context("Invalid length number in bencode string")?;
-            Ok(colon_pos + 1 + str_len)
+            colon_pos
+                .checked_add(1)
+                .and_then(|content_start| content_start.checked_add(str_len))
+                .context("Bencode string length overflow")
         }
         other => bail!("Unknown bencode type: {}", other as char),
     }

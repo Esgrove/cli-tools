@@ -48,7 +48,7 @@ impl DuplicateGroup {
         let mut pattern_texts = self
             .files
             .iter()
-            .filter_map(|file| file.pattern_match.map(|range| range.extract_from(&file.filename)));
+            .filter_map(|file| file.pattern_match.and_then(|range| range.extract_from(&file.filename)));
 
         if let Some(first) = pattern_texts.next() {
             let normalized_first = first.to_lowercase();

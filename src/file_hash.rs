@@ -72,7 +72,10 @@ pub fn hash_file_with_progress(path: &Path, mut report_progress: impl FnMut(u64)
         if bytes_read == 0 {
             break;
         }
-        hasher.update(&buffer[..bytes_read]);
+        let Some(chunk) = buffer.get(..bytes_read) else {
+            anyhow::bail!("Read more bytes than the buffer capacity from {}", path.display());
+        };
+        hasher.update(chunk);
         report_progress(bytes_read as u64);
     }
 

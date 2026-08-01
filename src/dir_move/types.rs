@@ -198,23 +198,29 @@ impl FilteredParts {
         let parts_lower: Vec<String> = parts_original.iter().map(|p| p.to_lowercase()).collect();
 
         let two_parts_lower: Vec<String> = parts_lower
-            .windows(2)
-            .map(|window| format!("{}{}", window[0], window[1]))
+            .iter()
+            .zip(parts_lower.iter().skip(1))
+            .map(|(first, second)| format!("{first}{second}"))
             .collect();
 
         let three_parts_lower: Vec<String> = parts_lower
-            .windows(3)
-            .map(|window| format!("{}{}{}", window[0], window[1], window[2]))
+            .iter()
+            .zip(parts_lower.iter().skip(1))
+            .zip(parts_lower.iter().skip(2))
+            .map(|((first, second), third)| format!("{first}{second}{third}"))
             .collect();
 
         let two_parts_original: Vec<String> = parts_original
-            .windows(2)
-            .map(|window| format!("{}{}", window[0], window[1]))
+            .iter()
+            .zip(parts_original.iter().skip(1))
+            .map(|(first, second)| format!("{first}{second}"))
             .collect();
 
         let three_parts_original: Vec<String> = parts_original
-            .windows(3)
-            .map(|window| format!("{}{}{}", window[0], window[1], window[2]))
+            .iter()
+            .zip(parts_original.iter().skip(1))
+            .zip(parts_original.iter().skip(2))
+            .map(|((first, second), third)| format!("{first}{second}{third}"))
             .collect();
 
         Self {
@@ -281,11 +287,6 @@ impl FilteredParts {
     /// Handles Unicode letters (including Scandic characters such as Ä, Ö, Ü, Å)
     /// by inspecting the `char` values on either side of the boundary.
     ///
-    /// # Panics
-    ///
-    /// Panics if `prefix_len` is within `(0, original_text.len())` but falls on a
-    /// char boundary where the preceding or following slice is unexpectedly empty.
-    /// This cannot happen when the caller respects the boundary and length guards.
     #[must_use]
     pub fn has_word_boundary_at(original_text: &str, prefix_len: usize) -> bool {
         if prefix_len == 0 || prefix_len >= original_text.len() {
@@ -298,9 +299,12 @@ impl FilteredParts {
             return false;
         }
 
-        // Safe to split: both slices are valid UTF-8.
-        let prev = original_text[..prefix_len].chars().next_back().expect("prefix_len > 0");
-        let next = original_text[prefix_len..].chars().next().expect("prefix_len < len");
+        let Some((before, after)) = original_text.split_at_checked(prefix_len) else {
+            return false;
+        };
+        let (Some(prev), Some(next)) = (before.chars().next_back(), after.chars().next()) else {
+            return false;
+        };
 
         if next.is_uppercase() {
             true

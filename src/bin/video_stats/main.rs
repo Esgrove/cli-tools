@@ -2,6 +2,8 @@
 //!
 //! Parses input paths and display options, then delegates collection to `StatsCollector`.
 
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 mod collector;
 
 use std::path::PathBuf;

@@ -396,14 +396,16 @@ impl ThumbnailCreator {
         }
         parts.push(filename.to_string());
 
-        let metadata = parts.join(" | ");
+        let mut metadata = parts.join(" | ");
 
         // Crop if too long
         if metadata.len() > MAX_METADATA_LENGTH {
-            format!("{}...", &metadata[..MAX_METADATA_LENGTH - 3])
-        } else {
-            metadata
+            let truncate_at = metadata.floor_char_boundary(MAX_METADATA_LENGTH - 3);
+            metadata.truncate(truncate_at);
+            metadata.push_str("...");
         }
+
+        metadata
     }
 
     /// Build the ffmpeg command for creating a thumbnail.

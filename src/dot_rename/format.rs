@@ -309,8 +309,12 @@ impl DotFormat<'_> {
         let lower_name = new_name.to_lowercase();
         let lower_suffix = suffix.to_lowercase();
 
-        if lower_name.ends_with(&lower_suffix) {
-            format!("{}{}", &new_name[..new_name.len() - lower_suffix.len()], suffix)
+        if lower_name.ends_with(&lower_suffix)
+            && let Some(lowercase_stem_length) = lower_name.len().checked_sub(lower_suffix.len())
+            && let Some(stem_end) = original_end_for_lowercase_prefix(&new_name, lowercase_stem_length)
+            && let Some(stem) = new_name.get(..stem_end)
+        {
+            format!("{stem}{suffix}")
         } else {
             format!("{new_name}.{suffix}")
         }
@@ -380,11 +384,9 @@ impl DotFormat<'_> {
     fn remove_from_start(&self, name: &mut String) {
         for pattern in &self.config.remove_from_start {
             let re = Regex::new(&format!(r"\b{}\b", regex::escape(pattern))).expect("Failed to create regex pattern");
-            if let Some(last_match) = re.find_iter(name).last() {
-                // Split the text into parts before the last regex match
-                let before_last = &name[..last_match.start()];
-                let after_last = &name[last_match.start()..];
-
+            if let Some(last_match) = re.find_iter(name).last()
+                && let Some((before_last, after_last)) = name.split_at_checked(last_match.start())
+            {
                 // Remove all occurrences from the first part using regex
                 *name = format!("{}.{after_last}", re.replace_all(before_last, ""));
             }
@@ -402,20 +404,26 @@ impl DotFormat<'_> {
         let lower_name = new_name.to_lowercase();
         let lower_prefix = prefix.to_lowercase();
 
-        if lower_name.starts_with(&lower_prefix) {
-            // Full prefix match - update capitalization
-            return format!("{}{}", prefix, &new_name[prefix.len()..]);
+        if lower_name.starts_with(&lower_prefix)
+            && let Some(prefix_end) = original_end_for_lowercase_prefix(&new_name, lower_prefix.len())
+            && let Some(remainder) = new_name.get(prefix_end..)
+        {
+            // Full prefix match, update capitalization
+            return format!("{prefix}{remainder}");
         }
 
         // Check if new_name starts with any suffix of the prefix
-        let prefix_parts: Vec<&str> = prefix.split('.').collect();
-        for i in 1..prefix_parts.len() {
-            let suffix = prefix_parts[i..].join(".");
+        let mut suffix = prefix;
+        while let Some((_, remaining)) = suffix.split_once('.') {
+            suffix = remaining;
             let lower_suffix = suffix.to_lowercase();
 
-            if lower_name.starts_with(&lower_suffix) {
+            if lower_name.starts_with(&lower_suffix)
+                && let Some(suffix_end) = original_end_for_lowercase_prefix(&new_name, lower_suffix.len())
+                && let Some(remainder) = new_name.get(suffix_end..)
+            {
                 // Found a matching suffix, replace with full prefix
-                return format!("{}{}", prefix, &new_name[suffix.len()..]);
+                return format!("{prefix}{remainder}");
             }
         }
 
@@ -531,6 +539,25 @@ impl DotFormat<'_> {
             })
             .into_owned();
     }
+}
+
+/// Map a lowercase prefix length to its ending byte boundary in the original string.
+fn original_end_for_lowercase_prefix(text: &str, lowercase_prefix_length: usize) -> Option<usize> {
+    if lowercase_prefix_length == 0 {
+        return Some(0);
+    }
+
+    let mut lowercase_length = 0;
+    for (start, character) in text.char_indices() {
+        lowercase_length += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+        match lowercase_length.cmp(&lowercase_prefix_length) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => return Some(start + character.len_utf8()),
+            std::cmp::Ordering::Greater => return None,
+        }
+    }
+
+    None
 }
 
 /// Replace two or more consecutive dots with a single dot in place.
@@ -943,6 +970,19 @@ mod tests {
         assert_eq!(
             formatter.format_name("Testing date 16.10.20 in the middle"),
             "Testing.Date.2016.10.20.in.the.Middle"
+        );
+    }
+
+    #[test]
+    fn case_insensitive_prefix_and_suffix_handle_unicode_lowercase_length_changes() {
+        let lowercase_i_with_dot = format!("i{}", '\u{307}');
+        assert_eq!(
+            DotFormat::apply_prefix("İ.name", &lowercase_i_with_dot),
+            format!("{lowercase_i_with_dot}.name")
+        );
+        assert_eq!(
+            FORMATTER.apply_suffix("name.İ", &lowercase_i_with_dot),
+            format!("name.{lowercase_i_with_dot}")
         );
     }
 

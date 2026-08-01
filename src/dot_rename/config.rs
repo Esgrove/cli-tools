@@ -135,17 +135,16 @@ impl DotsConfig {
         substitutes
             .chunks(2)
             .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    let pattern = chunk[0].trim().to_string();
-                    let replace = chunk[1].trim().to_string();
-                    if pattern.is_empty() {
-                        eprintln!("Empty replace pattern: '{pattern}' -> '{replace}'");
-                        None
-                    } else {
-                        Some((pattern, replace))
-                    }
-                } else {
+                let [pattern, replace] = chunk else {
+                    return None;
+                };
+                let pattern = pattern.trim().to_string();
+                let replace = replace.trim().to_string();
+                if pattern.is_empty() {
+                    eprintln!("Empty replace pattern: '{pattern}' -> '{replace}'");
                     None
+                } else {
+                    Some((pattern, replace))
                 }
             })
             .collect()
@@ -177,14 +176,14 @@ impl DotsConfig {
         regex_pairs
             .chunks(2)
             .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    match Regex::new(&chunk[0]).with_context(|| format!("Invalid regex: '{}'", chunk[0])) {
-                        Ok(regex) => Some(Ok((regex, chunk[1].clone()))),
-                        Err(e) => Some(Err(e)),
-                    }
-                } else {
-                    None
-                }
+                let [pattern, replacement] = chunk else {
+                    return None;
+                };
+                Some(
+                    Regex::new(pattern)
+                        .with_context(|| format!("Invalid regex: '{pattern}'"))
+                        .map(|regex| (regex, replacement.clone())),
+                )
             })
             .collect()
     }

@@ -227,8 +227,14 @@ fn copy_file_inner(
         if bytes_read == 0 {
             break;
         }
-        source_hasher.update(&buffer[..bytes_read]);
-        destination_file.write_all(&buffer[..bytes_read])?;
+        let Some(chunk) = buffer.get(..bytes_read) else {
+            anyhow::bail!(
+                "Read returned {bytes_read} bytes for a {}-byte copy buffer",
+                buffer.len()
+            );
+        };
+        source_hasher.update(chunk);
+        destination_file.write_all(chunk)?;
         bytes_copied += bytes_read as u64;
         progress_bar.inc(bytes_read as u64);
     }
@@ -535,7 +541,9 @@ mod test_move_helpers {
     #[test]
     fn short_hash_uses_first_twelve_hex_characters() {
         let hash = blake3::hash(b"contents");
-        assert_eq!(short_hash(&hash), hash.to_string()[..12]);
+        let hash_string = hash.to_string();
+        let expected = hash_string.get(..12).expect("BLAKE3 hash should contain 12 characters");
+        assert_eq!(short_hash(&hash), expected);
     }
 }
 
