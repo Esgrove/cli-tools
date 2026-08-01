@@ -24,11 +24,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, Utc};
 use clap::Command;
 use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
+use jiff::{Timestamp, tz::TimeZone};
 use regex::Regex;
 use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
@@ -1057,11 +1057,13 @@ pub fn path_to_string_relative(path: &Path) -> String {
 /// Format a Unix timestamp as a local datetime string.
 #[must_use]
 pub fn format_timestamp(timestamp: i64) -> String {
-    DateTime::<Utc>::from_timestamp(timestamp, 0).map_or_else(
-        || "unknown".to_string(),
-        |utc| {
-            let local: DateTime<Local> = utc.into();
-            local.format("%Y-%m-%d %H:%M").to_string()
+    Timestamp::from_second(timestamp).map_or_else(
+        |_| "unknown".to_string(),
+        |timestamp| {
+            timestamp
+                .to_zoned(TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string()
         },
     )
 }
