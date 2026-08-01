@@ -7,13 +7,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use indicatif::ProgressBar;
 #[cfg(not(test))]
 use indicatif::ProgressStyle;
-use indicatif::{ParallelProgressIterator, ProgressBar};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use cli_tools::dupe_find::hash::{
-    CalculatedFileHash, IndexedFileHash, calculate_file_hash, collect_hash_candidates, group_hash_matches,
+    CalculatedFileHash, IndexedFileHash, calculate_file_hash_with_progress, collect_hash_candidates, group_hash_matches,
 };
 use cli_tools::dupe_find::{DupeFileInfo, DuplicateGroup};
 use cli_tools::scan_cache::{CachedFileHash, ScanCache};
@@ -24,6 +23,9 @@ use cli_tools::{create_semaphore_for_io_bound, print_yellow};
 pub const PROGRESS_BAR_CHARS: &str = "=>-";
 #[cfg(not(test))]
 pub const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
+#[cfg(not(test))]
+pub const HASH_PROGRESS_BAR_TEMPLATE: &str =
+    "[{elapsed_precise}] {bar:60.magenta/blue} {bytes}/{total_bytes} {percent}% {msg}";
 #[cfg(not(test))]
 pub const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg} ({pos} files found)";
 
@@ -162,26 +164,40 @@ fn find_hash_matches_with_cache(
         );
     }
 
+    #[cfg(not(test))]
+    let total_hash_bytes: u64 = cache_misses
+        .iter()
+        .map(|candidate| candidate.fingerprint.size_bytes)
+        .sum();
     #[cfg(test)]
     let progress_bar = ProgressBar::hidden();
     #[cfg(not(test))]
     let progress_bar = {
-        let progress_bar = ProgressBar::new(cache_misses.len() as u64);
+        let progress_bar = ProgressBar::new(total_hash_bytes);
         progress_bar.set_style(
             ProgressStyle::default_bar()
-                .template(PROGRESS_BAR_TEMPLATE)
-                .expect("Failed to set progress bar template")
+                .template(HASH_PROGRESS_BAR_TEMPLATE)
+                .expect("Failed to set hash progress bar template")
                 .progress_chars(PROGRESS_BAR_CHARS),
         );
-        progress_bar.set_message("Hashing files");
         progress_bar
     };
 
+    let total_hash_files = cache_misses.len();
     let calculated_results: Vec<anyhow::Result<CalculatedFileHash>> = cache_misses
-        .par_iter()
-        .progress_with(progress_bar)
-        .map(calculate_file_hash)
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            progress_bar.set_message(format!(
+                "[{}/{}] {}",
+                index + 1,
+                total_hash_files,
+                candidate.path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            calculate_file_hash_with_progress(candidate, |bytes_read| progress_bar.inc(bytes_read))
+        })
         .collect();
+    progress_bar.finish_and_clear();
     let mut calculated_hashes = Vec::new();
     for result in calculated_results {
         match result {

@@ -3,10 +3,14 @@
 //! Fingerprints use file size and modification time to identify unchanged files.
 //! Hash helpers verify that a file's fingerprint remains stable while its contents are read.
 
+use std::io::Read;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
+
+/// Size of chunks used when hashing files with progress reporting.
+const HASH_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 /// File metadata used to determine whether cached analysis is still valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,17 +53,63 @@ pub fn hash_file(path: &Path) -> anyhow::Result<blake3::Hash> {
     Ok(hasher.finalize())
 }
 
+/// Calculate the BLAKE3 hash for a file using sequential buffered reads.
+///
+/// The callback receives the number of bytes read after each chunk.
+/// Sequential reads avoid issuing many simultaneous random reads against network drives.
+///
+/// # Errors
+/// Returns an error when the file cannot be opened or read.
+pub fn hash_file_with_progress(path: &Path, mut report_progress: impl FnMut(u64)) -> anyhow::Result<blake3::Hash> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0; HASH_BUFFER_SIZE];
+
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+        report_progress(bytes_read as u64);
+    }
+
+    Ok(hasher.finalize())
+}
+
 /// Calculate a BLAKE3 hash and reject it if the file changed while being read.
 ///
 /// # Errors
 /// Returns an error when the file cannot be read or its fingerprint changes during hashing.
 pub fn hash_file_if_unchanged(path: &Path, expected: FileFingerprint) -> anyhow::Result<blake3::Hash> {
     let hash = hash_file(path)?;
+    verify_file_unchanged(path, expected)?;
+    Ok(hash)
+}
+
+/// Calculate a buffered BLAKE3 hash with progress reporting and reject changed files.
+///
+/// # Errors
+/// Returns an error when the file cannot be read or its fingerprint changes during hashing.
+pub fn hash_file_if_unchanged_with_progress(
+    path: &Path,
+    expected: FileFingerprint,
+    report_progress: impl FnMut(u64),
+) -> anyhow::Result<blake3::Hash> {
+    let hash = hash_file_with_progress(path, report_progress)?;
+    verify_file_unchanged(path, expected)?;
+    Ok(hash)
+}
+
+/// Verify that a file still has the expected fingerprint.
+fn verify_file_unchanged(path: &Path, expected: FileFingerprint) -> anyhow::Result<()> {
     let current = fingerprint_file(path)?;
     if current != expected {
         anyhow::bail!("{} changed while it was being hashed", path.display());
     }
-    Ok(hash)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -141,5 +191,33 @@ mod test_file_hash {
         assert!(fingerprint_error.to_string().contains("missing.bin"));
         assert!(hash_error.to_string().contains("Failed to read"));
         assert!(hash_error.to_string().contains("missing.bin"));
+    }
+
+    #[test]
+    fn buffered_hash_reports_every_read_byte() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let path = temp_directory.path().join("sample.bin");
+        let contents = vec![42; HASH_BUFFER_SIZE + 17];
+        std::fs::write(&path, &contents).expect("should write sample file");
+        let mut reported_bytes = 0;
+
+        let hash = hash_file_with_progress(&path, |bytes_read| reported_bytes += bytes_read)
+            .expect("should hash file with progress");
+
+        assert_eq!(reported_bytes, contents.len() as u64);
+        assert_eq!(hash, blake3::hash(&contents));
+    }
+
+    #[test]
+    fn buffered_hash_rejects_stale_expected_fingerprint() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let path = temp_directory.path().join("sample.bin");
+        std::fs::write(&path, b"sample contents").expect("should write sample file");
+        let mut stale_fingerprint = fingerprint_file(&path).expect("should fingerprint file");
+        stale_fingerprint.size_bytes += 1;
+
+        let result = hash_file_if_unchanged_with_progress(&path, stale_fingerprint, |_| {});
+
+        assert!(result.is_err());
     }
 }

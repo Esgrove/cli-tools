@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use itertools::Itertools;
 
-use crate::file_hash::{FileFingerprint, fingerprint_file, hash_file_if_unchanged};
+use crate::file_hash::{
+    FileFingerprint, fingerprint_file, hash_file_if_unchanged, hash_file_if_unchanged_with_progress,
+};
 
 use super::DupeFileInfo;
 
@@ -63,6 +65,16 @@ impl CalculatedFileHash {
             blake3_hash: self.hash.to_string(),
         }
     }
+
+    /// Create a calculated hash result for a candidate.
+    fn from_candidate(candidate: &HashCandidate, hash: blake3::Hash) -> Self {
+        Self {
+            index: candidate.index,
+            path: candidate.path.clone(),
+            fingerprint: candidate.fingerprint,
+            hash,
+        }
+    }
 }
 
 /// Find files that need hashing, skipping sizes represented by only one file.
@@ -100,12 +112,21 @@ pub fn collect_hash_candidates(files: &[DupeFileInfo]) -> HashCandidateCollectio
 /// Returns an error when the file cannot be read or changes while being hashed.
 pub fn calculate_file_hash(candidate: &HashCandidate) -> anyhow::Result<CalculatedFileHash> {
     let hash = hash_file_if_unchanged(&candidate.path, candidate.fingerprint)?;
-    Ok(CalculatedFileHash {
-        index: candidate.index,
-        path: candidate.path.clone(),
-        fingerprint: candidate.fingerprint,
-        hash,
-    })
+    Ok(CalculatedFileHash::from_candidate(candidate, hash))
+}
+
+/// Calculate a candidate's hash with progress reporting and reject files changed during the read.
+///
+/// The callback receives the number of bytes read after each buffered chunk.
+///
+/// # Errors
+/// Returns an error when the file cannot be read or changes while being hashed.
+pub fn calculate_file_hash_with_progress(
+    candidate: &HashCandidate,
+    report_progress: impl FnMut(u64),
+) -> anyhow::Result<CalculatedFileHash> {
+    let hash = hash_file_if_unchanged_with_progress(&candidate.path, candidate.fingerprint, report_progress)?;
+    Ok(CalculatedFileHash::from_candidate(candidate, hash))
 }
 
 /// Group file indices by equal size and BLAKE3 hash.
@@ -194,6 +215,31 @@ mod test_hash_candidates {
         assert_eq!(indices, vec![0, 2]);
         assert_eq!(collection.errors.len(), 1);
         assert_eq!(collection.errors[0].0, missing_path);
+    }
+
+    #[test]
+    fn calculates_hash_with_byte_progress() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let first_path = temp_directory.path().join("first.mp4");
+        let second_path = temp_directory.path().join("second.mp4");
+        std::fs::write(&first_path, b"same bytes").expect("should write first file");
+        std::fs::write(&second_path, b"same bytes").expect("should write second file");
+        let files = vec![
+            DupeFileInfo::new(first_path, "mp4".to_string()),
+            DupeFileInfo::new(second_path, "mp4".to_string()),
+        ];
+        let candidate = collect_hash_candidates(&files)
+            .candidates
+            .into_iter()
+            .next()
+            .expect("should have a hash candidate");
+        let mut reported_bytes = 0;
+
+        let calculated = calculate_file_hash_with_progress(&candidate, |bytes_read| reported_bytes += bytes_read)
+            .expect("should hash candidate");
+
+        assert_eq!(reported_bytes, candidate.fingerprint.size_bytes);
+        assert_eq!(calculated.hash, blake3::hash(b"same bytes"));
     }
 }
 
