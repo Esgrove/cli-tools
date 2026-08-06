@@ -1,3 +1,9 @@
+//! Thumbnail sheet command-line entrypoint.
+//!
+//! Parses grid and rendering options, then delegates work to `ThumbnailCreator`.
+
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 mod config;
 mod thumbnail;
 
@@ -88,5 +94,79 @@ fn main() -> Result<()> {
         )
     } else {
         ThumbnailCreator::new(&args)?.run()
+    }
+}
+
+#[cfg(test)]
+mod test_thumbnail_args {
+    use super::*;
+
+    #[test]
+    fn parses_defaults_and_rendering_options() {
+        let defaults = ThumbnailArgs::try_parse_from(["thumbs"]).expect("default arguments should parse");
+        assert!(defaults.command.is_none());
+        assert!(defaults.path.is_none());
+        assert!(!defaults.force);
+        assert!(!defaults.print);
+        assert!(!defaults.recurse);
+        assert!(!defaults.verbose);
+        assert!(defaults.cols.is_none());
+        assert!(defaults.rows.is_none());
+        assert!(defaults.scale.is_none());
+        assert!(defaults.padding.is_none());
+        assert!(defaults.fontsize.is_none());
+        assert!(defaults.quality.is_none());
+
+        let configured = ThumbnailArgs::try_parse_from([
+            "thumbs",
+            "video.mp4",
+            "-f",
+            "-p",
+            "-r",
+            "-v",
+            "-c",
+            "5",
+            "-w",
+            "6",
+            "-s",
+            "640",
+            "-a",
+            "12",
+            "-t",
+            "24",
+            "-q",
+            "3",
+        ])
+        .expect("rendering options should parse");
+        assert_eq!(configured.path, Some(PathBuf::from("video.mp4")));
+        assert!(configured.force);
+        assert!(configured.print);
+        assert!(configured.recurse);
+        assert!(configured.verbose);
+        assert_eq!(configured.cols, Some(5));
+        assert_eq!(configured.rows, Some(6));
+        assert_eq!(configured.scale, Some(640));
+        assert_eq!(configured.padding, Some(12));
+        assert_eq!(configured.fontsize, Some(24));
+        assert_eq!(configured.quality, Some(3));
+    }
+
+    #[test]
+    fn rejects_invalid_numeric_values() {
+        assert!(ThumbnailArgs::try_parse_from(["thumbs", "--cols", "not-a-number"]).is_err());
+    }
+
+    #[test]
+    fn parses_completion_and_has_valid_command_definition() {
+        let args = ThumbnailArgs::try_parse_from(["thumbs", "completion", "bash", "--install"])
+            .expect("completion command should parse");
+        assert!(matches!(
+            args.command,
+            Some(ThumbnailCommand::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+        ThumbnailArgs::command().debug_assert();
     }
 }

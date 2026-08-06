@@ -229,3 +229,151 @@ fn main() -> Result<()> {
         cli.run()
     }
 }
+
+#[cfg(test)]
+mod test_dots_cli_parsing {
+    use super::*;
+
+    #[test]
+    fn parses_defaults() {
+        let cli = DotsCli::try_parse_from(["dots"]).expect("default arguments should parse");
+
+        assert!(cli.command.is_none());
+        assert!(cli.path.is_none());
+        assert!(!cli.case);
+        assert!(!cli.debug);
+        assert!(!cli.directory);
+        assert!(!cli.force);
+        assert!(!cli.increment);
+        assert!(!cli.print);
+        assert!(!cli.recurse);
+        assert!(!cli.random);
+        assert!(!cli.year);
+        assert!(!cli.verbose);
+        assert!(cli.include.is_empty());
+        assert!(cli.exclude.is_empty());
+        assert!(cli.substitute.is_empty());
+        assert!(cli.remove.is_empty());
+        assert!(cli.regex.is_empty());
+    }
+
+    #[test]
+    fn parses_repeated_transform_arguments() {
+        let cli = DotsCli::try_parse_from([
+            "dots",
+            "-n",
+            "first",
+            "-n",
+            "second",
+            "-e",
+            "skip",
+            "-s",
+            "old",
+            "new",
+            "-s",
+            "x",
+            "y",
+            "-z",
+            "remove-one",
+            "-z",
+            "remove-two",
+            "-g",
+            "a+",
+            "replacement",
+        ])
+        .expect("repeated transform arguments should parse");
+
+        assert_eq!(cli.include, vec!["first", "second"]);
+        assert_eq!(cli.exclude, vec!["skip"]);
+        assert_eq!(cli.substitute, vec!["old", "new", "x", "y"]);
+        assert_eq!(cli.remove, vec!["remove-one", "remove-two"]);
+        assert_eq!(cli.regex, vec!["a+", "replacement"]);
+    }
+
+    #[test]
+    fn rejects_incomplete_pair_arguments() {
+        assert!(DotsCli::try_parse_from(["dots", "--substitute", "old"]).is_err());
+        assert!(DotsCli::try_parse_from(["dots", "--regex", "pattern"]).is_err());
+    }
+
+    #[test]
+    fn rejects_conflicting_prefix_and_suffix_modes() {
+        assert!(DotsCli::try_parse_from(["dots", "--prefix", "name", "--prefix-dir"]).is_err());
+        assert!(DotsCli::try_parse_from(["dots", "--suffix", "name", "--suffix-dir"]).is_err());
+    }
+
+    #[test]
+    fn parses_completion_command() {
+        let cli = DotsCli::try_parse_from(["dots", "completion", "bash", "--install"])
+            .expect("completion command should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+    }
+
+    #[test]
+    fn clap_command_is_valid() {
+        DotsCli::command().debug_assert();
+    }
+}
+
+#[cfg(test)]
+mod test_apply_subcommand {
+    use super::*;
+
+    #[test]
+    fn applies_named_prefix_and_start_mode() {
+        let mut cli = DotsCli::try_parse_from(["dots", "prefix", "folder", "--name", "Series", "--start"])
+            .expect("prefix command should parse");
+
+        cli.apply_subcommand();
+
+        assert_eq!(cli.path, Some(PathBuf::from("folder")));
+        assert_eq!(cli.prefix.as_deref(), Some("Series"));
+        assert!(cli.prefix_dir_start);
+        assert!(!cli.prefix_dir);
+    }
+
+    #[test]
+    fn applies_directory_and_recursive_prefix_modes() {
+        let mut directory =
+            DotsCli::try_parse_from(["dots", "prefix", "folder"]).expect("directory prefix should parse");
+        directory.apply_subcommand();
+        assert!(directory.prefix_dir);
+
+        let mut recursive = DotsCli::try_parse_from(["dots", "prefix", "folder", "--recursive"])
+            .expect("recursive prefix should parse");
+        recursive.apply_subcommand();
+        assert!(recursive.prefix_dir_recursive);
+        assert!(!recursive.prefix_dir);
+    }
+
+    #[test]
+    fn applies_named_and_recursive_suffix_modes() {
+        let mut named = DotsCli::try_parse_from(["dots", "suffix", "folder", "--name", "Extra"])
+            .expect("named suffix should parse");
+        named.apply_subcommand();
+        assert_eq!(named.suffix.as_deref(), Some("Extra"));
+
+        let mut recursive = DotsCli::try_parse_from(["dots", "suffix", "folder", "--recursive"])
+            .expect("recursive suffix should parse");
+        recursive.apply_subcommand();
+        assert!(recursive.suffix_dir_recursive);
+        assert!(!recursive.suffix_dir);
+    }
+
+    #[test]
+    fn no_subcommand_leaves_operational_fields_unchanged() {
+        let mut cli =
+            DotsCli::try_parse_from(["dots", "--prefix", "existing"]).expect("ordinary arguments should parse");
+        cli.apply_subcommand();
+
+        assert_eq!(cli.prefix.as_deref(), Some("existing"));
+        assert!(cli.path.is_none());
+    }
+}

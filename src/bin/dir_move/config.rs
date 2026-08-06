@@ -170,14 +170,12 @@ impl Config {
         let cli_mappings: Vec<[String; 2]> = args
             .custom_mapping
             .into_iter()
-            .filter_map(|s| {
-                let parts: Vec<&str> = s.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    Some([parts[0].to_string(), parts[1].to_string()])
-                } else {
-                    eprintln!("Warning: Invalid custom mapping format '{s}', expected 'pattern:dirname'");
-                    None
-                }
+            .filter_map(|mapping| {
+                let Some((pattern, directory)) = mapping.split_once(':') else {
+                    eprintln!("Warning: Invalid custom mapping format '{mapping}', expected 'pattern:dirname'");
+                    return None;
+                };
+                Some([pattern.to_string(), directory.to_string()])
             })
             .collect();
 
@@ -387,10 +385,9 @@ fn add_ignored_name_to_toml(content: &str, name: &str) -> Result<(String, bool)>
         .map_err(|error| anyhow::anyhow!("Failed to parse config file as TOML: {error}"))?;
 
     // Find or create the [dirmove] section
-    if !document.contains_table("dirmove") {
-        document["dirmove"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let dirmove_table = document["dirmove"]
+    let dirmove_table = document
+        .entry("dirmove")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("'dirmove' is not a table in config"))?;
 

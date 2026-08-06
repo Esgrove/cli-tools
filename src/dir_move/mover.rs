@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::file_hash::hash_file;
 use crate::{path_to_filename_string, print_error, print_yellow};
 
 /// Size of chunks used when copying files across devices.
@@ -226,8 +227,14 @@ fn copy_file_inner(
         if bytes_read == 0 {
             break;
         }
-        source_hasher.update(&buffer[..bytes_read]);
-        destination_file.write_all(&buffer[..bytes_read])?;
+        let Some(chunk) = buffer.get(..bytes_read) else {
+            anyhow::bail!(
+                "Read returned {bytes_read} bytes for a {}-byte copy buffer",
+                buffer.len()
+            );
+        };
+        source_hasher.update(chunk);
+        destination_file.write_all(chunk)?;
         bytes_copied += bytes_read as u64;
         progress_bar.inc(bytes_read as u64);
     }
@@ -319,13 +326,6 @@ fn remove_failed_destination(destination: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Calculate the BLAKE3 hash for a file.
-fn hash_file(path: &Path) -> anyhow::Result<blake3::Hash> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_mmap_rayon(path)?;
-    Ok(hasher.finalize())
-}
-
 /// Check if an I/O error indicates a cross-device move attempt.
 fn is_cross_device_error(error: &io::Error) -> bool {
     error.raw_os_error() == Some(17) || error.raw_os_error() == Some(18)
@@ -359,7 +359,7 @@ fn create_move_progress_bar(length: u64, hide_progress: bool) -> ProgressBar {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_copy_verification {
     use super::*;
 
     #[test]
@@ -393,6 +393,163 @@ mod tests {
         assert!(!destination.exists());
         Ok(())
     }
+
+    #[test]
+    fn copy_file_with_progress_removes_incomplete_destination() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.bin");
+        let destination = temp_directory.path().join("destination.bin");
+        fs::write(&source, b"source")?;
+        let progress_bar = ProgressBar::hidden();
+
+        let result = copy_file_with_progress(&source, &destination, 10, &progress_bar);
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_copied_file_rejects_size_mismatch() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.bin");
+        let destination = temp_directory.path().join("destination.bin");
+        fs::write(&source, b"source")?;
+        fs::write(&destination, b"short")?;
+
+        let result = verify_copied_file(&source, &destination, 6, &blake3::hash(b"source"));
+
+        assert!(result.is_err());
+        assert!(source.exists());
+        assert!(!destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_copied_file_accepts_matching_contents() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.bin");
+        let destination = temp_directory.path().join("destination.bin");
+        fs::write(&source, b"matching")?;
+        fs::write(&destination, b"matching")?;
+
+        verify_copied_file(&source, &destination, 8, &blake3::hash(b"matching"))?;
+
+        assert!(source.exists());
+        assert!(destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn copy_failure_reports_destination_cleanup_failure() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.bin");
+        let destination = temp_directory.path().join("destination");
+        fs::write(&source, b"source")?;
+        fs::create_dir(&destination)?;
+        let progress_bar = ProgressBar::hidden();
+
+        let error = copy_file_with_progress(&source, &destination, 6, &progress_bar)
+            .expect_err("directory destination should fail creation and cleanup");
+
+        assert!(error.to_string().contains("Also failed to remove partial destination"));
+        assert!(source.exists());
+        assert!(destination.is_dir());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_move_helpers {
+    use super::*;
+
+    #[test]
+    fn move_single_file_accepts_matching_destination_when_source_is_gone() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("missing.bin");
+        let destination = temp_directory.path().join("destination.bin");
+        fs::write(&destination, b"existing")?;
+        let progress_bar = ProgressBar::with_draw_target(Some(8), indicatif::ProgressDrawTarget::hidden());
+
+        move_single_file(&source, &destination, 8, &progress_bar, false)?;
+
+        assert_eq!(progress_bar.position(), 8);
+        assert_eq!(fs::read(&destination)?, b"existing");
+        Ok(())
+    }
+
+    #[test]
+    fn move_single_file_rejects_mismatched_destination_when_source_is_gone() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("missing.bin");
+        let destination = temp_directory.path().join("destination.bin");
+        fs::write(&destination, b"short")?;
+        let progress_bar = ProgressBar::hidden();
+
+        let error = move_single_file(&source, &destination, 8, &progress_bar, false)
+            .expect_err("mismatched destination should not be treated as completed move");
+
+        assert!(error.to_string().contains("source is gone"));
+        assert!(destination.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn remove_failed_destination_accepts_missing_path() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        remove_failed_destination(&temp_directory.path().join("missing.bin"))
+    }
+
+    #[test]
+    fn recognizes_cross_device_error_codes() {
+        assert!(is_cross_device_error(&io::Error::from_raw_os_error(17)));
+        assert!(is_cross_device_error(&io::Error::from_raw_os_error(18)));
+        assert!(!is_cross_device_error(&io::Error::from_raw_os_error(5)));
+    }
+
+    #[test]
+    fn collect_file_sizes_ignores_missing_files() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let first = temp_directory.path().join("first.bin");
+        let second = temp_directory.path().join("second.bin");
+        let missing = temp_directory.path().join("missing.bin");
+        fs::write(&first, b"one")?;
+        fs::write(&second, b"second")?;
+
+        let sizes = collect_file_sizes(&[first.clone(), missing.clone(), second.clone()]);
+
+        assert_eq!(sizes.get(&first), Some(&3));
+        assert_eq!(sizes.get(&second), Some(&6));
+        assert!(!sizes.contains_key(&missing));
+        Ok(())
+    }
+
+    #[test]
+    fn finish_progress_only_marks_complete_bar_finished() {
+        let incomplete = ProgressBar::with_draw_target(Some(10), indicatif::ProgressDrawTarget::hidden());
+        incomplete.set_position(9);
+        finish_progress_if_complete(&incomplete);
+        assert!(!incomplete.is_finished());
+
+        let complete = ProgressBar::with_draw_target(Some(10), indicatif::ProgressDrawTarget::hidden());
+        complete.set_position(10);
+        finish_progress_if_complete(&complete);
+        assert!(complete.is_finished());
+    }
+
+    #[test]
+    fn short_hash_uses_first_twelve_hex_characters() {
+        let hash = blake3::hash(b"contents");
+        let hash_string = hash.to_string();
+        let expected = hash_string.get(..12).expect("BLAKE3 hash should contain 12 characters");
+        assert_eq!(short_hash(&hash), expected);
+    }
+}
+
+#[cfg(test)]
+mod test_move_files {
+    use super::*;
 
     #[test]
     fn move_files_to_target_dir_moves_files() -> anyhow::Result<()> {
@@ -437,6 +594,99 @@ mod tests {
         assert!(report.failed_files.is_empty());
         assert_eq!(fs::read_to_string(input.join("one.txt"))?, "new");
         assert_eq!(fs::read_to_string(output.join("one.txt"))?, "old");
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_creates_missing_target() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.txt");
+        let output = temp_directory.path().join("nested/output");
+        fs::write(&source, "contents")?;
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+
+        assert_eq!(report.moved_files, vec![source.clone()]);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(output.join("source.txt"))?, "contents");
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_rejects_file_target() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.txt");
+        let target_file = temp_directory.path().join("target");
+        fs::write(&source, "source")?;
+        fs::write(&target_file, "target")?;
+
+        let error = move_files_to_target_dir(&target_file, &[source], false, false, true)
+            .expect_err("regular file should not be accepted as target directory");
+
+        assert!(error.to_string().contains("Target path exists but is not a directory"));
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_overwrites_existing_file() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let input = temp_directory.path().join("input");
+        let output = temp_directory.path().join("output");
+        fs::create_dir(&input)?;
+        fs::create_dir(&output)?;
+        let source = input.join("one.txt");
+        fs::write(&source, "new")?;
+        fs::write(output.join("one.txt"), "old")?;
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, false, true)?;
+
+        assert_eq!(report.moved_files, vec![source.clone()]);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(output.join("one.txt"))?, "new");
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_reports_missing_source() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let output = temp_directory.path().join("output");
+        let source = temp_directory.path().join("missing.txt");
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+
+        assert!(report.moved_files.is_empty());
+        assert_eq!(report.failed_files, vec![source]);
+        Ok(())
+    }
+
+    #[test]
+    fn move_files_to_target_dir_reports_empty_source_path() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let output = temp_directory.path().join("output");
+        let source = PathBuf::new();
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+
+        assert_eq!(report.failed_files, vec![source]);
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_reports_destination_removal_failure() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let input = temp_directory.path().join("input");
+        let output = temp_directory.path().join("output");
+        fs::create_dir(&input)?;
+        fs::create_dir(&output)?;
+        let source = input.join("one.txt");
+        fs::write(&source, "source")?;
+        fs::create_dir(output.join("one.txt"))?;
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, false, true)?;
+
+        assert_eq!(report.failed_files, vec![source.clone()]);
+        assert!(source.exists());
+        assert!(output.join("one.txt").is_dir());
         Ok(())
     }
 }

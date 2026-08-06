@@ -114,3 +114,83 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         verbose: cli.verbose || user_config.verbose,
     })
 }
+
+#[cfg(test)]
+mod test_build_config {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn merges_cli_arguments_with_fixture_config() {
+        let cli = DotsCli::try_parse_from([
+            "dots", "-c", "-D", "-d", "-f", "-i", "-p", "-r", "-m", "-v", "-n", "*.avi", "-e", "skip", "-s", "OLD",
+            "new", "-z", "REMOVE", "-g", "x+", "y", "--prefix", "PRE", "--suffix", "SUF",
+        ])
+        .expect("combined CLI arguments should parse");
+
+        let config = build_config(&cli).expect("config should build");
+
+        assert!(config.convert_case);
+        assert!(config.debug);
+        assert!(config.rename_directories);
+        assert!(config.overwrite);
+        assert!(config.increment_name);
+        assert!(config.dryrun);
+        assert!(config.recurse);
+        assert!(config.remove_random);
+        assert!(config.verbose);
+        assert_eq!(config.prefix.as_deref(), Some("PRE"));
+        assert_eq!(config.suffix.as_deref(), Some("SUF"));
+        assert_eq!(config.exclude, vec!["skip"]);
+        assert_eq!(config.include, vec!["*.mkv", "*.mp4", "*.avi"]);
+        assert_eq!(config.include_any, vec!["OLD", "REMOVE"]);
+        assert_eq!(config.replace[0], ("OLD".to_string(), "new".to_string()));
+        assert_eq!(config.replace[1], ("REMOVE".to_string(), String::new()));
+        assert_eq!(config.regex_replace[0].0.as_str(), "x+");
+        assert_eq!(config.regex_replace[0].1, "y");
+    }
+
+    #[test]
+    fn builds_unique_deduplication_patterns_for_non_empty_replacements() {
+        let cli = DotsCli::try_parse_from([
+            "dots", "-s", "first", "same", "-s", "second", "same", "-s", "dot", ".", "-s", "removed", "",
+        ])
+        .expect("substitutions should parse");
+
+        let config = build_config(&cli).expect("config should build");
+
+        assert_eq!(config.deduplicate_patterns.len(), 2);
+        assert!(config.deduplicate_patterns[0].0.is_match("samesamesame"));
+        assert_eq!(config.deduplicate_patterns[0].1, "same");
+        assert!(config.deduplicate_patterns[1].0.is_match("..."));
+        assert!(!config.deduplicate_patterns[1].0.is_match("abc"));
+    }
+
+    #[test]
+    fn recursive_directory_modes_imply_enabled_mode_and_recursion() {
+        let prefix_cli = DotsCli::try_parse_from(["dots", "--prefix-dir-recursive"])
+            .expect("recursive prefix argument should parse");
+        let prefix_config = build_config(&prefix_cli).expect("prefix config should build");
+        assert!(prefix_config.prefix_dir);
+        assert!(prefix_config.prefix_dir_recursive);
+        assert!(prefix_config.recurse);
+
+        let suffix_cli = DotsCli::try_parse_from(["dots", "--suffix-dir-recursive"])
+            .expect("recursive suffix argument should parse");
+        let suffix_config = build_config(&suffix_cli).expect("suffix config should build");
+        assert!(suffix_config.suffix_dir);
+        assert!(suffix_config.suffix_dir_recursive);
+        assert!(suffix_config.recurse);
+    }
+
+    #[test]
+    fn invalid_cli_regex_returns_contextual_error() {
+        let cli = DotsCli::try_parse_from(["dots", "--regex", "[invalid", "replacement"])
+            .expect("clap should preserve regex text");
+
+        let error = build_config(&cli).expect_err("invalid regex should fail config construction");
+
+        assert!(error.to_string().contains("Invalid regex"));
+    }
+}

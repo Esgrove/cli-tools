@@ -3,6 +3,8 @@
 //! Uses the algorithmic types and functions extracted to the `cli_tools::dir_move`
 //! library module.
 
+#![allow(clippy::indexing_slicing, clippy::string_slice)]
+
 use std::hint::black_box;
 use std::path::PathBuf;
 

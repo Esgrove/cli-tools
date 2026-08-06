@@ -1,6 +1,9 @@
+//! Interactive terminal interface for reviewing and resolving duplicate groups.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
@@ -90,33 +93,39 @@ impl TuiState {
         self.cursor_pos = 0;
     }
 
-    const fn move_cursor_left(&mut self) {
+    fn move_cursor_left(&mut self) {
         if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
+            self.cursor_pos = self.edit_buffer.floor_char_boundary(self.cursor_pos - 1);
         }
     }
 
-    const fn move_cursor_right(&mut self) {
+    fn move_cursor_right(&mut self) {
         if self.cursor_pos < self.edit_buffer.len() {
-            self.cursor_pos += 1;
+            self.cursor_pos = self.edit_buffer.ceil_char_boundary(self.cursor_pos + 1);
         }
     }
 
-    fn insert_char(&mut self, c: char) {
-        self.edit_buffer.insert(self.cursor_pos, c);
-        self.cursor_pos += 1;
+    fn insert_char(&mut self, character: char) {
+        self.edit_buffer.insert(self.cursor_pos, character);
+        self.cursor_pos += character.len_utf8();
     }
 
     fn delete_char(&mut self) {
         if self.cursor_pos > 0 {
-            self.edit_buffer.remove(self.cursor_pos - 1);
-            self.cursor_pos -= 1;
+            let previous_position = self.edit_buffer.floor_char_boundary(self.cursor_pos - 1);
+            self.edit_buffer.replace_range(previous_position..self.cursor_pos, "");
+            self.cursor_pos = previous_position;
         }
     }
 
     fn delete_char_forward(&mut self) {
-        if self.cursor_pos < self.edit_buffer.len() {
-            self.edit_buffer.remove(self.cursor_pos);
+        if let Some(character) = self
+            .edit_buffer
+            .get(self.cursor_pos..)
+            .and_then(|remaining| remaining.chars().next())
+        {
+            self.edit_buffer
+                .replace_range(self.cursor_pos..self.cursor_pos + character.len_utf8(), "");
         }
     }
 }
@@ -154,7 +163,9 @@ fn interactive_loop(
     let mut actions: Vec<GroupAction> = Vec::new();
 
     while group_index < duplicates.len() {
-        let group = &duplicates[group_index];
+        let group = duplicates
+            .get(group_index)
+            .with_context(|| format!("Duplicate group index {group_index} is out of bounds"))?;
         let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
         let action = handle_duplicate_group(
@@ -288,11 +299,11 @@ fn handle_duplicate_group(
                         state.confirming = true;
                     }
                     KeyCode::Char('r') => {
-                        let selected_file = files[state.selected];
+                        let selected_file = files.get(state.selected).context("Selected file is unavailable")?;
                         state.start_editing(&selected_file.stem);
                     }
                     KeyCode::Char('n') => {
-                        let selected_file = files[state.selected];
+                        let selected_file = files.get(state.selected).context("Selected file is unavailable")?;
                         state.start_editing(&selected_file.stem);
                         state.rename_only = true;
                     }
@@ -400,7 +411,14 @@ fn render_ui(
         .min(area.height / 2);
 
     // Create layout
-    let chunks = Layout::default()
+    let [
+        header_area,
+        file_list_area,
+        details_area,
+        status_area,
+        help_area,
+        _spacer_area,
+    ] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),                // Header
@@ -410,14 +428,18 @@ fn render_ui(
             Constraint::Length(3),                // Help
             Constraint::Min(0),                   // Spacer (unused space below)
         ])
-        .split(area);
+        .areas(area);
+
+    let Some(selected_file) = files.get(state.selected) else {
+        return;
+    };
 
     // Header
     let header_text = format!("Duplicate Group {}/{}: {}", current_group + 1, total_groups, key);
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .block(Block::default().borders(Borders::ALL).title("Duplicate Finder"));
-    frame.render_widget(header, chunks[0]);
+    frame.render_widget(header, header_area);
 
     // File list
     let items: Vec<ListItem> = files
@@ -437,7 +459,7 @@ fn render_ui(
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("Files (↑/↓ to select)"))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(list, chunks[1], list_state);
+    frame.render_stateful_widget(list, file_list_area, list_state);
 
     // File details panel
     let mut detail_lines: Vec<Line> = Vec::new();
@@ -447,22 +469,23 @@ fn render_ui(
     }
 
     let details = Paragraph::new(detail_lines).block(Block::default().borders(Borders::ALL).title("File Details"));
-    frame.render_widget(details, chunks[2]);
+    frame.render_widget(details, details_area);
 
     // Status/Edit area
     let status_content = if state.editing {
-        let before_cursor = &state.edit_buffer[..state.cursor_pos];
-        let after_cursor = &state.edit_buffer[state.cursor_pos..];
-        let extension = &files[state.selected].extension;
-        format!("New name: {before_cursor}│{after_cursor}.{extension}")
+        let (before_cursor, after_cursor) = state
+            .edit_buffer
+            .split_at_checked(state.cursor_pos)
+            .unwrap_or((&state.edit_buffer, ""));
+        format!("New name: {before_cursor}│{after_cursor}.{}", selected_file.extension)
     } else if state.confirming {
         format!(
             "Keep '{}' and delete {}? [y/N]",
-            files[state.selected].filename,
+            selected_file.filename,
             cli_tools::count_label(files.len() - 1, "other file", "other files")
         )
     } else {
-        format!("Selected: {}", files[state.selected].filename)
+        format!("Selected: {}", selected_file.filename)
     };
 
     let status_style = if state.editing {
@@ -484,7 +507,7 @@ fn render_ui(
             .borders(Borders::ALL)
             .title(if state.editing { edit_title } else { "Status" }),
     );
-    frame.render_widget(status, chunks[3]);
+    frame.render_widget(status, status_area);
 
     // Help
     let help_text = if state.editing {
@@ -498,7 +521,7 @@ fn render_ui(
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL).title("Help"));
 
-    frame.render_widget(help, chunks[4]);
+    frame.render_widget(help, help_area);
 }
 
 /// Apply all collected actions
@@ -510,7 +533,9 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
     let total = actionable.len();
 
     for (number, group_action) in actionable.into_iter().enumerate() {
-        let group = &duplicates[group_action.group_index];
+        let group = duplicates
+            .get(group_action.group_index)
+            .with_context(|| format!("Duplicate group index {} is out of bounds", group_action.group_index))?;
         let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
         println!(
@@ -522,7 +547,10 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
 
         match &group_action.action {
             DuplicateAction::Keep { keep_index, new_name } => {
-                let keep_file = sorted_files[*keep_index];
+                let keep_file = sorted_files
+                    .get(*keep_index)
+                    .copied()
+                    .context("Selected file to keep is unavailable")?;
 
                 // Handle rename if specified
                 if let Some(new_stem) = new_name {
@@ -557,7 +585,10 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
                 }
             }
             DuplicateAction::RenameOnly { rename_index, new_name } => {
-                let rename_file = sorted_files[*rename_index];
+                let rename_file = sorted_files
+                    .get(*rename_index)
+                    .copied()
+                    .context("Selected file to rename is unavailable")?;
                 let new_filename = format!("{new_name}.{}", rename_file.extension);
                 let new_path = rename_file.path.with_file_name(&new_filename);
 
@@ -614,4 +645,65 @@ fn score_file(file: &DupeFileInfo) -> (u8, bool) {
     let has_x265 = filename_lower.contains(".x265");
 
     (resolution_score, has_x265)
+}
+
+#[cfg(test)]
+mod test_tui_state {
+    use super::*;
+
+    #[test]
+    fn selection_stays_within_bounds() {
+        let mut state = TuiState::new();
+
+        state.select_next(2);
+        state.select_next(2);
+        assert_eq!(state.selected, 1);
+
+        state.select_prev();
+        state.select_prev();
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn editing_updates_buffer_and_cursor() {
+        let mut state = TuiState::new();
+        state.start_editing("name");
+        state.insert_char('X');
+        state.move_cursor_right();
+        state.delete_char_forward();
+
+        assert_eq!(state.edit_buffer, "Xnme");
+        assert_eq!(state.cursor_pos, 2);
+
+        state.stop_editing();
+        assert!(!state.editing);
+        assert!(state.edit_buffer.is_empty());
+        assert_eq!(state.cursor_pos, 0);
+    }
+}
+
+#[cfg(test)]
+mod test_file_scoring {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn make_file(filename: &str) -> DupeFileInfo {
+        DupeFileInfo::new(PathBuf::from(filename), "mp4".to_string())
+    }
+
+    #[test]
+    fn prefers_higher_resolution_then_x265() {
+        let lower_resolution = make_file("movie.720p.x265.mp4");
+        let high_resolution_x264 = make_file("movie.1080p.x264.mp4");
+        let high_resolution_x265 = make_file("movie.1080p.x265.mp4");
+        let files = vec![&lower_resolution, &high_resolution_x264, &high_resolution_x265];
+
+        assert_eq!(find_best_file_index(&files), 2);
+    }
+
+    #[test]
+    fn empty_file_list_defaults_to_first_index() {
+        assert_eq!(find_best_file_index(&[]), 0);
+    }
 }

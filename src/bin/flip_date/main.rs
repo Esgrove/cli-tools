@@ -1,3 +1,7 @@
+//! Date-flipping command-line entrypoint.
+//!
+//! Parses file or directory mode options and delegates date transformations.
+
 mod config;
 mod flip_date;
 
@@ -87,5 +91,68 @@ fn main() -> anyhow::Result<()> {
         flip_date::date_flip_directories(path, &config)
     } else {
         flip_date::date_flip_files(&path, &config)
+    }
+}
+
+#[cfg(test)]
+mod test_args {
+    use super::*;
+
+    #[test]
+    fn parses_defaults_and_all_operational_flags() {
+        let defaults = Args::try_parse_from(["flipdate"]).expect("default arguments should parse");
+        assert!(defaults.command.is_none());
+        assert!(defaults.path.is_none());
+        assert!(defaults.extensions.is_none());
+        assert!(!defaults.dir);
+        assert!(!defaults.force);
+        assert!(!defaults.year);
+        assert!(!defaults.print);
+        assert!(!defaults.recurse);
+        assert!(!defaults.swap);
+        assert!(!defaults.verbose);
+
+        let configured = Args::try_parse_from([
+            "flipdate",
+            "files",
+            "--force",
+            "--year",
+            "--print",
+            "--recurse",
+            "--swap",
+            "--verbose",
+            "--extensions",
+            "mp4",
+            "--extensions",
+            "mkv",
+        ])
+        .expect("operational flags should parse");
+        assert_eq!(configured.path, Some(PathBuf::from("files")));
+        assert_eq!(configured.extensions, Some(vec!["mp4".to_string(), "mkv".to_string()]));
+        assert!(configured.force);
+        assert!(configured.year);
+        assert!(configured.print);
+        assert!(configured.recurse);
+        assert!(configured.swap);
+        assert!(configured.verbose);
+    }
+
+    #[test]
+    fn directory_mode_conflicts_with_extensions() {
+        assert!(Args::try_parse_from(["flipdate", "--dir", "--extensions", "mp4"]).is_err());
+    }
+
+    #[test]
+    fn parses_completion_and_has_valid_command_definition() {
+        let args = Args::try_parse_from(["flipdate", "completion", "bash", "--install"])
+            .expect("completion command should parse");
+        assert!(matches!(
+            args.command,
+            Some(FlipDateCommand::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+        Args::command().debug_assert();
     }
 }

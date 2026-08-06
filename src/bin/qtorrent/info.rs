@@ -330,3 +330,93 @@ fn print_torrent_detail(torrent: &TorrentListItem) {
         println!("    {:<14} {}", "Tags:", torrent.tags.cyan());
     }
 }
+
+#[cfg(test)]
+mod test_torrent_classification {
+    use super::*;
+
+    fn torrent(name: &str, progress: f64, completion_on: Option<i64>, size: i64, save_path: &str) -> TorrentListItem {
+        TorrentListItem {
+            hash: name.to_string(),
+            name: name.to_string(),
+            added_on: 1,
+            completion_on,
+            progress,
+            ratio: 0.0,
+            save_path: save_path.to_string(),
+            size,
+            tags: String::new(),
+        }
+    }
+
+    #[test]
+    fn classifies_completed_downloading_and_not_started_torrents() {
+        assert!(matches!(
+            classify_torrent(&torrent("complete", 1.0, None, 1, "/a")),
+            TorrentStatus::Completed
+        ));
+        assert!(matches!(
+            classify_torrent(&torrent("timestamp", 0.5, Some(10), 1, "/a")),
+            TorrentStatus::Completed
+        ));
+        assert!(matches!(
+            classify_torrent(&torrent("downloading", 0.5, None, 1, "/a")),
+            TorrentStatus::Downloading
+        ));
+        assert!(matches!(
+            classify_torrent(&torrent("waiting", 0.0, None, 1, "/a")),
+            TorrentStatus::NotStarted
+        ));
+    }
+
+    #[test]
+    fn sorts_names_case_insensitively() {
+        let alpha = torrent("alpha", 0.0, None, 1, "/b");
+        let beta = torrent("Beta", 0.0, None, 2, "/a");
+        let mut torrents = vec![&beta, &alpha];
+
+        sort_torrents(&mut torrents, SortOrder::Name);
+
+        assert_eq!(
+            torrents.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "Beta"]
+        );
+    }
+
+    #[test]
+    fn sorts_size_descending_with_name_tiebreaker() {
+        let alpha = torrent("alpha", 0.0, None, 10, "/b");
+        let beta = torrent("Beta", 0.0, None, 20, "/a");
+        let gamma = torrent("gamma", 0.0, None, 20, "/c");
+        let mut torrents = vec![&gamma, &alpha, &beta];
+
+        sort_torrents(&mut torrents, SortOrder::Size);
+
+        assert_eq!(
+            torrents.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            vec!["Beta", "gamma", "alpha"]
+        );
+    }
+
+    #[test]
+    fn sorts_paths_case_insensitively_with_name_tiebreaker() {
+        let alpha = torrent("alpha", 0.0, None, 10, "/same");
+        let beta = torrent("Beta", 0.0, None, 20, "/A");
+        let gamma = torrent("gamma", 0.0, None, 20, "/SAME");
+        let mut torrents = vec![&gamma, &alpha, &beta];
+
+        sort_torrents(&mut torrents, SortOrder::Path);
+
+        assert_eq!(
+            torrents.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
+            vec!["Beta", "alpha", "gamma"]
+        );
+    }
+
+    #[test]
+    fn formats_progress_for_each_status() {
+        assert!(format_progress(&torrent("complete", 1.0, None, 1, "/a")).contains("100%"));
+        assert!(format_progress(&torrent("downloading", 0.5, None, 1, "/a")).contains("50%"));
+        assert!(format_progress(&torrent("waiting", 0.0, None, 1, "/a")).contains("0%"));
+    }
+}

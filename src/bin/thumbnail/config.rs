@@ -1,3 +1,5 @@
+//! Thumbnail configuration parsing and CLI option merging.
+
 use std::fs;
 
 use anyhow::Result;
@@ -267,5 +269,71 @@ verbose = true
         let config = ThumbnailConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.verbose);
         assert!(!config.dryrun);
+    }
+}
+
+#[cfg(test)]
+mod test_config_from_args {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn uses_fixture_defaults_when_cli_values_are_missing() {
+        let args = ThumbnailArgs::try_parse_from(["thumbs"]).expect("default arguments should parse");
+        let config = Config::from_args(&args).expect("config should build");
+
+        assert_eq!(config.cols_landscape, 3);
+        assert_eq!(config.rows_landscape, 4);
+        assert_eq!(config.cols_portrait, 4);
+        assert_eq!(config.rows_portrait, 3);
+        assert_eq!(config.padding_landscape, 8);
+        assert_eq!(config.padding_portrait, 16);
+        assert_eq!(config.scale_width, 480);
+        assert_eq!(config.font_size, 20);
+        assert_eq!(config.quality, 2);
+        assert!(!config.dryrun);
+        assert!(!config.overwrite);
+        assert!(!config.recurse);
+        assert!(!config.verbose);
+    }
+
+    #[test]
+    fn cli_values_override_both_orientation_specific_settings() {
+        let args = ThumbnailArgs::try_parse_from([
+            "thumbs",
+            "--cols",
+            "7",
+            "--rows",
+            "8",
+            "--padding",
+            "9",
+            "--scale",
+            "720",
+            "--fontsize",
+            "26",
+            "--quality",
+            "4",
+            "--print",
+            "--force",
+            "--recurse",
+            "--verbose",
+        ])
+        .expect("override arguments should parse");
+        let config = Config::from_args(&args).expect("config should build");
+
+        assert_eq!(config.cols_landscape, 7);
+        assert_eq!(config.cols_portrait, 7);
+        assert_eq!(config.rows_landscape, 8);
+        assert_eq!(config.rows_portrait, 8);
+        assert_eq!(config.padding_landscape, 9);
+        assert_eq!(config.padding_portrait, 9);
+        assert_eq!(config.scale_width, 720);
+        assert_eq!(config.font_size, 26);
+        assert_eq!(config.quality, 4);
+        assert!(config.dryrun);
+        assert!(config.overwrite);
+        assert!(config.recurse);
+        assert!(config.verbose);
     }
 }

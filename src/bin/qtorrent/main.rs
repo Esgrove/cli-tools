@@ -5,6 +5,8 @@
 //! The `info` subcommand connects to qBittorrent and displays statistics
 //! about existing torrents, including counts, sizes, and completion status.
 
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 mod add;
 mod config;
 mod info;

@@ -1,3 +1,5 @@
+//! Shared video metadata parsing, resolution helpers, and aggregate statistics.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
@@ -228,11 +230,12 @@ impl VideoStats {
         });
 
         let total_labels = sorted_labels.len();
-        let display_labels = if verbose {
-            &sorted_labels[..]
+        let display_count = if verbose {
+            total_labels
         } else {
-            &sorted_labels[..total_labels.min(Self::MAX_RESOLUTION_ROWS)]
+            total_labels.min(Self::MAX_RESOLUTION_ROWS)
         };
+        let display_labels = sorted_labels.get(..display_count).unwrap_or_default();
 
         // Calculate max widths for right-alignment
         let max_label_width = display_labels.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
@@ -248,7 +251,9 @@ impl VideoStats {
 
         if !verbose && total_labels > Self::MAX_RESOLUTION_ROWS {
             let remaining_labels = total_labels - Self::MAX_RESOLUTION_ROWS;
-            let remaining_files: usize = sorted_labels[Self::MAX_RESOLUTION_ROWS..]
+            let remaining_files: usize = sorted_labels
+                .get(Self::MAX_RESOLUTION_ROWS..)
+                .unwrap_or_default()
                 .iter()
                 .map(|(_, (count, _))| count)
                 .sum();
@@ -364,10 +369,19 @@ fn compute_median_f64(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let length = sorted.len();
+    let middle = length / 2;
+    let Some(&upper) = sorted.get(middle) else {
+        return 0.0;
+    };
     if length.is_multiple_of(2) {
-        f64::midpoint(sorted[length / 2 - 1], sorted[length / 2])
+        let lower = sorted
+            .get(..middle)
+            .and_then(|values| values.last())
+            .copied()
+            .unwrap_or(upper);
+        f64::midpoint(lower, upper)
     } else {
-        sorted[length / 2]
+        upper
     }
 }
 
@@ -379,10 +393,19 @@ fn compute_median_u64(values: &[u64]) -> u64 {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     let length = sorted.len();
+    let middle = length / 2;
+    let Some(&upper) = sorted.get(middle) else {
+        return 0;
+    };
     if length.is_multiple_of(2) {
-        u64::midpoint(sorted[length / 2 - 1], sorted[length / 2])
+        let lower = sorted
+            .get(..middle)
+            .and_then(|values| values.last())
+            .copied()
+            .unwrap_or(upper);
+        u64::midpoint(lower, upper)
     } else {
-        sorted[length / 2]
+        upper
     }
 }
 
@@ -581,6 +604,11 @@ mod test_compute_median_u64 {
     fn even_count() {
         assert_eq!(compute_median_u64(&[1, 2, 3, 4]), 2);
     }
+
+    #[test]
+    fn maximum_values_do_not_overflow() {
+        assert_eq!(compute_median_u64(&[u64::MAX - 1, u64::MAX]), u64::MAX - 1);
+    }
 }
 
 #[cfg(test)]
@@ -714,6 +742,30 @@ mod test_parse_ffprobe_output {
     }
 
     #[test]
+    fn uses_valid_bitrate_after_malformed_primary_value() {
+        let output = "bit_rate=N/A\nBPS=8000000\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+        assert_eq!(info.bitrate_kbps, Some(8000));
+    }
+
+    #[test]
+    fn malformed_duration_remains_missing() {
+        let output = "duration=N/A\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+        assert!(info.duration.is_none());
+    }
+
+    #[test]
+    fn later_scalar_values_replace_earlier_values() {
+        let output = "codec_name=h264\ncodec_name=hevc\nduration=10\nduration=20\nwidth=1280\nwidth=1920\nheight=720\nheight=1080\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+
+        assert_eq!(info.codec.as_deref(), Some("hevc"));
+        assert_eq!(info.duration, Some(20.0));
+        assert_eq!(info.resolution, Some(Resolution::new(1920, 1080)));
+    }
+
+    #[test]
     fn handles_malformed_width() {
         let output = "codec_name=h264\nwidth=abc\nheight=1080\n";
         let info = VideoInfo::parse_ffprobe_output(output);
@@ -732,5 +784,23 @@ mod test_parse_ffprobe_output {
         let output = "width=7680\nheight=4320\n";
         let info = VideoInfo::parse_ffprobe_output(output);
         assert_eq!(info.resolution, Some(Resolution::new(7680, 4320)));
+    }
+
+    #[test]
+    fn trims_whitespace_around_lines() {
+        let output = "  codec_name=HEVC  \n  width=1920  \n  height=1080  \n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+
+        assert_eq!(info.codec.as_deref(), Some("hevc"));
+        assert_eq!(info.resolution, Some(Resolution::new(1920, 1080)));
+    }
+
+    #[test]
+    fn ignores_lines_without_key_value_separator() {
+        let output = "codec_name=h264\nmalformed line\nwidth=1280\nheight=720\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+
+        assert_eq!(info.codec.as_deref(), Some("h264"));
+        assert_eq!(info.resolution, Some(Resolution::new(1280, 720)));
     }
 }

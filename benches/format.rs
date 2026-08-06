@@ -4,6 +4,8 @@
 //! including replacements, date reordering, special character removal, and
 //! prefix/suffix application.
 
+#![allow(clippy::string_slice)]
+
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

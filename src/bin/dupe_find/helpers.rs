@@ -1,19 +1,19 @@
-//! Metadata collection and exact-content hash helpers for `dupefind`.
+//! Metadata collection and exact content hash helpers for `dupefind`.
 //!
 //! This module owns ffprobe cache integration, BLAKE3 hash calculation, file fingerprinting,
-//! and cache-aware grouping of files with identical contents.
+//! and cache aware grouping of files with identical contents.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
-use anyhow::Context;
+use indicatif::ProgressBar;
 #[cfg(not(test))]
 use indicatif::ProgressStyle;
-use indicatif::{ParallelProgressIterator, ProgressBar};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
+use cli_tools::dupe_find::hash::{
+    CalculatedFileHash, IndexedFileHash, calculate_file_hash_with_progress, collect_hash_candidates, group_hash_matches,
+};
 use cli_tools::dupe_find::{DupeFileInfo, DuplicateGroup};
 use cli_tools::scan_cache::{CachedFileHash, ScanCache};
 use cli_tools::video_info::VideoInfo;
@@ -24,35 +24,15 @@ pub const PROGRESS_BAR_CHARS: &str = "=>-";
 #[cfg(not(test))]
 pub const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
 #[cfg(not(test))]
+pub const HASH_PROGRESS_BAR_TEMPLATE: &str =
+    "[{elapsed_precise}] {bar:60.magenta/blue} {bytes}/{total_bytes} {percent}% {msg}";
+#[cfg(not(test))]
 pub const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg} ({pos} files found)";
-
-/// File metadata used to detect whether a cached hash is still valid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileFingerprint {
-    size_bytes: u64,
-    modified_time_ns: i64,
-}
-
-/// A file that needs a BLAKE3 hash for content comparison.
-#[derive(Debug, Clone)]
-struct HashCandidate {
-    index: usize,
-    path: PathBuf,
-    fingerprint: FileFingerprint,
-}
-
-/// A newly calculated BLAKE3 hash and its source file index.
-#[derive(Debug)]
-struct CalculatedFileHash {
-    index: usize,
-    path: PathBuf,
-    cache_entry: CachedFileHash,
-}
 
 /// Collect metadata for all files in duplicate groups using ffprobe.
 ///
 /// Checks the shared scan cache first so that files already analysed by
-/// `vconvert` or a previous `dupefind` run are not re-probed.
+/// `vconvert` or a previous `dupefind` run are not probed again.
 /// Newly probed results are written back to the cache.
 pub fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf, VideoInfo> {
     let all_files: Vec<PathBuf> = groups
@@ -142,27 +122,11 @@ fn find_hash_matches_with_cache(
     verbose: bool,
     hash_cache: Option<&mut ScanCache>,
 ) -> Vec<Vec<usize>> {
-    let mut candidates_by_size: HashMap<u64, Vec<HashCandidate>> = HashMap::new();
-    for (index, file) in files.iter().enumerate() {
-        match file_fingerprint(&file.path) {
-            Ok(fingerprint) => candidates_by_size
-                .entry(fingerprint.size_bytes)
-                .or_default()
-                .push(HashCandidate {
-                    index,
-                    path: file.path.clone(),
-                    fingerprint,
-                }),
-            Err(error) => print_yellow!("Could not inspect {} for hashing: {error}", file.path.display()),
-        }
+    let collection = collect_hash_candidates(files);
+    for (path, error) in collection.errors {
+        print_yellow!("Could not inspect {} for hashing: {error}", path.display());
     }
-
-    let candidates: Vec<HashCandidate> = candidates_by_size
-        .into_values()
-        .filter(|same_size| same_size.len() > 1)
-        .flatten()
-        .collect();
-    if candidates.is_empty() {
+    if collection.candidates.is_empty() {
         return Vec::new();
     }
 
@@ -174,14 +138,18 @@ fn find_hash_matches_with_cache(
             HashMap::new()
         });
 
-    let mut hash_values = Vec::with_capacity(candidates.len());
+    let mut hash_values = Vec::with_capacity(collection.candidates.len());
     let mut cache_misses = Vec::new();
-    for candidate in candidates {
+    for candidate in collection.candidates {
         let path_key = candidate.path.to_string_lossy();
         if let Some(cached) = cached_entries.get(path_key.as_ref())
             && cached.is_current(candidate.fingerprint.size_bytes, candidate.fingerprint.modified_time_ns)
         {
-            hash_values.push((candidate.index, cached.size_bytes, cached.blake3_hash.clone()));
+            hash_values.push(IndexedFileHash {
+                index: candidate.index,
+                size_bytes: cached.size_bytes,
+                blake3_hash: cached.blake3_hash.clone(),
+            });
         } else {
             cache_misses.push(candidate);
         }
@@ -196,26 +164,40 @@ fn find_hash_matches_with_cache(
         );
     }
 
+    #[cfg(not(test))]
+    let total_hash_bytes: u64 = cache_misses
+        .iter()
+        .map(|candidate| candidate.fingerprint.size_bytes)
+        .sum();
     #[cfg(test)]
     let progress_bar = ProgressBar::hidden();
     #[cfg(not(test))]
     let progress_bar = {
-        let progress_bar = ProgressBar::new(cache_misses.len() as u64);
+        let progress_bar = ProgressBar::new(total_hash_bytes);
         progress_bar.set_style(
             ProgressStyle::default_bar()
-                .template(PROGRESS_BAR_TEMPLATE)
-                .expect("Failed to set progress bar template")
+                .template(HASH_PROGRESS_BAR_TEMPLATE)
+                .expect("Failed to set hash progress bar template")
                 .progress_chars(PROGRESS_BAR_CHARS),
         );
-        progress_bar.set_message("Hashing files");
         progress_bar
     };
 
+    let total_hash_files = cache_misses.len();
     let calculated_results: Vec<anyhow::Result<CalculatedFileHash>> = cache_misses
-        .par_iter()
-        .progress_with(progress_bar)
-        .map(calculate_file_hash)
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            progress_bar.set_message(format!(
+                "[{}/{}] {}",
+                index + 1,
+                total_hash_files,
+                candidate.path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            calculate_file_hash_with_progress(candidate, |bytes_read| progress_bar.inc(bytes_read))
+        })
         .collect();
+    progress_bar.finish_and_clear();
     let mut calculated_hashes = Vec::new();
     for result in calculated_results {
         match result {
@@ -225,78 +207,32 @@ fn find_hash_matches_with_cache(
     }
 
     if let Some(cache) = hash_cache {
+        let cache_values: Vec<CachedFileHash> = calculated_hashes
+            .iter()
+            .map(|calculated| CachedFileHash {
+                size_bytes: calculated.fingerprint.size_bytes,
+                modified_time_ns: calculated.fingerprint.modified_time_ns,
+                blake3_hash: calculated.hash.to_string(),
+            })
+            .collect();
         let entries: Vec<(&Path, &CachedFileHash)> = calculated_hashes
             .iter()
-            .map(|calculated| (calculated.path.as_path(), &calculated.cache_entry))
+            .zip(&cache_values)
+            .map(|(calculated, cached)| (calculated.path.as_path(), cached))
             .collect();
         if let Err(error) = cache.batch_upsert_hashes(&entries) {
             print_yellow!("Failed to write hash cache: {error}");
         }
     }
 
-    hash_values.extend(calculated_hashes.iter().map(|calculated| {
-        (
-            calculated.index,
-            calculated.cache_entry.size_bytes,
-            calculated.cache_entry.blake3_hash.clone(),
-        )
-    }));
-
-    let mut hash_to_indices: HashMap<(u64, String), Vec<usize>> = HashMap::new();
-    for (index, size_bytes, hash) in hash_values {
-        hash_to_indices.entry((size_bytes, hash)).or_default().push(index);
-    }
-
-    hash_to_indices
-        .into_values()
-        .filter(|indices| indices.len() > 1)
-        .collect()
+    hash_values.extend(calculated_hashes.iter().map(CalculatedFileHash::indexed_hash));
+    group_hash_matches(&hash_values)
 }
 
-/// Read the file metadata used to validate a cached hash.
-fn file_fingerprint(path: &Path) -> anyhow::Result<FileFingerprint> {
-    let metadata =
-        std::fs::metadata(path).with_context(|| format!("Failed to read metadata for {}", path.display()))?;
-    let modified = metadata
-        .modified()
-        .with_context(|| format!("Failed to read modification time for {}", path.display()))?;
-    let modified_time_ns = modified
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX));
-
-    Ok(FileFingerprint {
-        size_bytes: metadata.len(),
-        modified_time_ns,
-    })
-}
-
-/// Calculate a BLAKE3 hash and reject the result if the file changed while it was being read.
-fn calculate_file_hash(candidate: &HashCandidate) -> anyhow::Result<CalculatedFileHash> {
-    let mut hasher = blake3::Hasher::new();
-    hasher
-        .update_mmap_rayon(&candidate.path)
-        .with_context(|| format!("Failed to read {}", candidate.path.display()))?;
-
-    let current_fingerprint = file_fingerprint(&candidate.path)?;
-    if current_fingerprint != candidate.fingerprint {
-        anyhow::bail!("{} changed while it was being hashed", candidate.path.display());
-    }
-
-    Ok(CalculatedFileHash {
-        index: candidate.index,
-        path: candidate.path.clone(),
-        cache_entry: CachedFileHash {
-            size_bytes: candidate.fingerprint.size_bytes,
-            modified_time_ns: candidate.fingerprint.modified_time_ns,
-            blake3_hash: hasher.finalize().to_string(),
-        },
-    })
-}
-
-/// Collect video metadata concurrently using semaphore-limited async tasks.
+/// Collect video metadata concurrently using async tasks limited by a semaphore.
 ///
 /// Each ffprobe call runs in a blocking task with concurrency controlled
-/// by a semaphore sized for I/O-bound work.
+/// by a semaphore sized for input and output work.
 async fn collect_metadata_async(files: Vec<PathBuf>) -> HashMap<PathBuf, VideoInfo> {
     let semaphore = create_semaphore_for_io_bound();
 
@@ -413,5 +349,74 @@ mod test_hash_matches {
 
         let cached_matches = find_hash_matches_with_cache(&files, false, Some(&mut cache));
         assert_eq!(cached_matches, matches);
+    }
+
+    #[test]
+    fn replaces_stale_cached_hash_after_file_changes() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let first_path = temp_directory.path().join("first.mp4");
+        let second_path = temp_directory.path().join("second.mp4");
+        fs::write(&first_path, b"same bytes").expect("should write first file");
+        fs::write(&second_path, b"same bytes").expect("should write second file");
+        let files = vec![
+            DupeFileInfo::new(first_path, "mp4".to_string()),
+            DupeFileInfo::new(second_path.clone(), "mp4".to_string()),
+        ];
+        let database_path = temp_directory.path().join("hash-cache.db");
+        let mut cache = ScanCache::open_at(&database_path).expect("should open hash cache");
+        assert_eq!(
+            find_hash_matches_with_cache(&files, false, Some(&mut cache)),
+            vec![vec![0, 1]]
+        );
+
+        fs::write(&second_path, b"different!").expect("should change second file");
+        let current_fingerprint =
+            cli_tools::file_hash::fingerprint_file(&second_path).expect("should fingerprint changed file");
+        let stale_hash = CachedFileHash {
+            size_bytes: current_fingerprint.size_bytes,
+            modified_time_ns: current_fingerprint.modified_time_ns.saturating_sub(1),
+            blake3_hash: blake3::hash(b"same bytes").to_string(),
+        };
+        cache
+            .batch_upsert_hashes(&[(&second_path, &stale_hash)])
+            .expect("should write stale hash entry");
+
+        let matches = find_hash_matches_with_cache(&files, false, Some(&mut cache));
+        let cached_entries = cache.get_all_hashes().expect("should read refreshed hashes");
+        let refreshed = cached_entries
+            .get(second_path.to_string_lossy().as_ref())
+            .expect("expected refreshed second file hash");
+
+        assert!(matches.is_empty());
+        assert_eq!(refreshed.blake3_hash, blake3::hash(b"different!").to_string());
+        assert_eq!(refreshed.modified_time_ns, current_fingerprint.modified_time_ns);
+    }
+
+    #[test]
+    fn preserves_file_order_with_mixed_cache_hits_and_misses() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let first_path = temp_directory.path().join("first.mp4");
+        let second_path = temp_directory.path().join("second.mp4");
+        fs::write(&first_path, b"same bytes").expect("should write first file");
+        fs::write(&second_path, b"same bytes").expect("should write second file");
+        let files = vec![
+            DupeFileInfo::new(first_path, "mp4".to_string()),
+            DupeFileInfo::new(second_path.clone(), "mp4".to_string()),
+        ];
+        let database_path = temp_directory.path().join("hash-cache.db");
+        let mut cache = ScanCache::open_at(&database_path).expect("should open hash cache");
+        let fingerprint = cli_tools::file_hash::fingerprint_file(&second_path).expect("should fingerprint second file");
+        let cached_hash = CachedFileHash {
+            size_bytes: fingerprint.size_bytes,
+            modified_time_ns: fingerprint.modified_time_ns,
+            blake3_hash: blake3::hash(b"same bytes").to_string(),
+        };
+        cache
+            .batch_upsert_hashes(&[(&second_path, &cached_hash)])
+            .expect("should cache second file hash");
+
+        let matches = find_hash_matches_with_cache(&files, false, Some(&mut cache));
+
+        assert_eq!(matches, vec![vec![0, 1]]);
     }
 }

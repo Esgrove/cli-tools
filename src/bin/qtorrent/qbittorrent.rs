@@ -612,3 +612,102 @@ where
     let value = i64::deserialize(deserializer)?;
     if value < 0 { Ok(None) } else { Ok(Some(value)) }
 }
+
+#[cfg(test)]
+mod test_torrent_list_item {
+    use super::*;
+
+    fn torrent(progress: f64, completion_on: Option<i64>) -> TorrentListItem {
+        TorrentListItem {
+            hash: "hash".to_string(),
+            name: "name".to_string(),
+            added_on: 1,
+            completion_on,
+            progress,
+            ratio: 0.0,
+            save_path: "/downloads".to_string(),
+            size: 100,
+            tags: String::new(),
+        }
+    }
+
+    #[test]
+    fn completion_uses_progress_or_timestamp() {
+        assert!(torrent(1.0, None).is_completed());
+        assert!(torrent(0.5, Some(10)).is_completed());
+        assert!(!torrent(0.5, None).is_completed());
+    }
+
+    #[test]
+    fn deserializes_completion_timestamp_sentinel() {
+        let incomplete: TorrentListItem = serde_json::from_str(
+            r#"{"hash":"a","name":"A","added_on":1,"completion_on":-1,"progress":0.0,"ratio":0.0,"save_path":"/a","size":10,"tags":""}"#,
+        )
+        .expect("incomplete torrent JSON should parse");
+        let complete: TorrentListItem = serde_json::from_str(
+            r#"{"hash":"b","name":"B","added_on":1,"completion_on":123,"progress":1.0,"ratio":1.0,"save_path":"/b","size":20,"tags":"tag"}"#,
+        )
+        .expect("completed torrent JSON should parse");
+
+        assert_eq!(incomplete.completion_on, None);
+        assert_eq!(complete.completion_on, Some(123));
+    }
+
+    #[test]
+    fn rejects_invalid_field_types() {
+        let result = serde_json::from_str::<TorrentListItem>(
+            r#"{"hash":"a","name":"A","added_on":1,"completion_on":"never","progress":0.0,"ratio":0.0,"save_path":"/a","size":10,"tags":""}"#,
+        );
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_client_without_network {
+    use super::*;
+
+    #[test]
+    fn constructs_expected_base_url_and_api_urls() {
+        let client = QBittorrentClient::new("localhost", 8080);
+        assert!(!client.is_authenticated());
+        assert_eq!(client.base_url, "http://localhost:8080");
+        assert_eq!(
+            client.build_url("auth/login"),
+            "http://localhost:8080/api/v2/auth/login"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_is_noop_when_unauthenticated() -> anyhow::Result<()> {
+        let mut client = QBittorrentClient::new("localhost", 8080);
+        client.logout().await?;
+        assert!(!client.is_authenticated());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_operations_fail_before_network_when_unauthenticated() {
+        let client = QBittorrentClient::new("localhost", 8080);
+        let add_error = client
+            .add_torrent(AddTorrentParams::default())
+            .await
+            .expect_err("adding without login should fail");
+        let path_error = client
+            .get_default_save_path()
+            .await
+            .expect_err("reading path without login should fail");
+        let priority_error = client
+            .set_file_priorities("hash", &[0], 1)
+            .await
+            .expect_err("setting priorities without login should fail");
+        let list_error = client
+            .get_torrent_list()
+            .await
+            .expect_err("listing without login should fail");
+
+        assert!(add_error.to_string().contains("Not authenticated"));
+        assert!(path_error.to_string().contains("Not authenticated"));
+        assert!(priority_error.to_string().contains("Not authenticated"));
+        assert!(list_error.to_string().contains("Not authenticated"));
+    }
+}

@@ -924,23 +924,27 @@ impl QTorrent {
         skipped_dirs_sorted.sort_by_key(|entry| std::cmp::Reverse(entry.1.total_size));
 
         // Find the widest formatted size string for right-alignment
-        let all_sizes: Vec<String> = included_files
+        let max_size_width = included_files
             .iter()
-            .map(|file| cli_tools::format_size(file.size))
-            .chain(other_excluded.iter().map(|file| cli_tools::format_size(file.size)))
+            .map(|file| cli_tools::format_size(file.size).len())
+            .chain(
+                other_excluded
+                    .iter()
+                    .map(|file| cli_tools::format_size(file.size).len()),
+            )
             .chain(
                 skipped_dirs_sorted
                     .iter()
-                    .map(|(_, summary)| cli_tools::format_size(summary.total_size)),
+                    .map(|(_, summary)| cli_tools::format_size(summary.total_size).len()),
             )
-            .collect();
-        let max_size_width = all_sizes.iter().map(String::len).max().unwrap_or(0);
+            .max()
+            .unwrap_or(0);
 
         println!("  {}", "Files:".bold());
 
         // Print included files
-        let mut size_index = 0;
         for file in included_files {
+            let size_str = cli_tools::format_size(file.size);
             // Show the final file name after dot formatting (if configured)
             let display_path = dot_formatter
                 .as_ref()
@@ -960,17 +964,14 @@ impl QTorrent {
                 })
                 .unwrap_or_else(|| file.path.to_string());
 
-            let size_str = &all_sizes[size_index];
-            size_index += 1;
             let check = "✓".green();
             println!("    {size_str:>max_size_width$}  {check} {display_path}");
         }
 
         // Print other excluded files (not from directory matching)
         for file in other_excluded {
+            let size_str = cli_tools::format_size(file.size);
             let reason = file.exclusion_reason.as_deref().unwrap_or("excluded");
-            let size_str = &all_sizes[size_index];
-            size_index += 1;
             let path = &file.path;
             let reason = reason.dimmed();
             let cross = "✗".red();
@@ -979,8 +980,7 @@ impl QTorrent {
 
         // Print skipped directory summaries
         for (dir_name, summary) in skipped_dirs_sorted {
-            let size_str = &all_sizes[size_index];
-            size_index += 1;
+            let size_str = cli_tools::format_size(summary.total_size);
             let ellipsis = "...".dimmed();
             let file_count = summary.file_count;
             let files_word = summary.files_word();

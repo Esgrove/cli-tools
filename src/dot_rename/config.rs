@@ -135,17 +135,16 @@ impl DotsConfig {
         substitutes
             .chunks(2)
             .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    let pattern = chunk[0].trim().to_string();
-                    let replace = chunk[1].trim().to_string();
-                    if pattern.is_empty() {
-                        eprintln!("Empty replace pattern: '{pattern}' -> '{replace}'");
-                        None
-                    } else {
-                        Some((pattern, replace))
-                    }
-                } else {
+                let [pattern, replace] = chunk else {
+                    return None;
+                };
+                let pattern = pattern.trim().to_string();
+                let replace = replace.trim().to_string();
+                if pattern.is_empty() {
+                    eprintln!("Empty replace pattern: '{pattern}' -> '{replace}'");
                     None
+                } else {
+                    Some((pattern, replace))
                 }
             })
             .collect()
@@ -177,14 +176,14 @@ impl DotsConfig {
         regex_pairs
             .chunks(2)
             .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    match Regex::new(&chunk[0]).with_context(|| format!("Invalid regex: '{}'", chunk[0])) {
-                        Ok(regex) => Some(Ok((regex, chunk[1].clone()))),
-                        Err(e) => Some(Err(e)),
-                    }
-                } else {
-                    None
-                }
+                let [pattern, replacement] = chunk else {
+                    return None;
+                };
+                Some(
+                    Regex::new(pattern)
+                        .with_context(|| format!("Invalid regex: '{pattern}'"))
+                        .map(|regex| (regex, replacement.clone())),
+                )
             })
             .collect()
     }
@@ -596,6 +595,44 @@ mod compile_regex_patterns_tests {
 }
 
 #[cfg(test)]
+mod compile_word_boundary_patterns_tests {
+    use super::*;
+
+    #[test]
+    fn compiles_case_insensitive_literal_patterns() {
+        let patterns = DotsConfig::compile_word_boundary_patterns(vec!["A.B".to_string()])
+            .expect("should compile escaped literal pattern");
+
+        assert!(patterns[0].is_match("prefix a.b suffix"));
+        assert!(!patterns[0].is_match("prefix axb suffix"));
+        assert!(!patterns[0].is_match("XA.BY"));
+    }
+
+    #[test]
+    fn handles_empty_input() {
+        let patterns =
+            DotsConfig::compile_word_boundary_patterns(Vec::new()).expect("empty pattern list should compile");
+        assert!(patterns.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod from_user_config_tests {
+    use super::*;
+
+    #[test]
+    fn loads_and_compiles_fixture_configuration() {
+        let config = DotRenameConfig::from_user_config().expect("should load fixture config");
+
+        assert!(config.date_starts_with_year);
+        assert_eq!(config.include, vec!["*.mkv", "*.mp4"]);
+        assert_eq!(config.replace[0], ("SAMPLE.TEXT".to_string(), "REPLACED".to_string()));
+        assert!(config.move_to_start.iter().any(|pattern| pattern.is_match("repack")));
+        assert!(config.regex_replace[0].0.is_match("2024.01.31"));
+    }
+}
+
+#[cfg(test)]
 mod dot_rename_config_display_tests {
     use super::*;
 
@@ -636,5 +673,24 @@ mod dot_rename_config_display_tests {
         assert!(display.contains("include: []"));
         assert!(display.contains("exclude: []"));
         assert!(display.contains("replace:   []"));
+    }
+
+    #[test]
+    fn display_shows_all_non_empty_collection_fields_and_suffix() {
+        let config = DotRenameConfig {
+            include_any: vec!["partial".to_string()],
+            replace: vec![("old".to_string(), "new".to_string())],
+            regex_replace: vec![(Regex::new("old\\d+").expect("valid regex"), "new".to_string())],
+            suffix: Some("SUFFIX".to_string()),
+            ..Default::default()
+        };
+
+        let display = format!("{config}");
+
+        assert!(display.contains("partial"));
+        assert!(display.contains("old"));
+        assert!(display.contains("regex_replace:"));
+        assert!(display.contains("new"));
+        assert!(display.contains("SUFFIX"));
     }
 }

@@ -1,7 +1,15 @@
+//! Shared library modules and utilities for the `cli-tools` binaries.
+//!
+//! This crate provides reusable path handling, formatting, video analysis, duplicate detection,
+//! file hashing, and directory movement functionality.
+
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 pub mod date;
 pub mod dir_move;
 pub mod dot_rename;
 pub mod dupe_find;
+pub mod file_hash;
 pub mod resolution;
 pub mod scan_cache;
 pub mod video_info;
@@ -16,11 +24,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, Utc};
 use clap::Command;
 use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
 use difference::{Changeset, Difference};
+use jiff::{Timestamp, tz::TimeZone};
 use regex::Regex;
 use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
@@ -148,8 +156,8 @@ pub struct MatchRange {
 impl MatchRange {
     /// Extract the matched substring from the given text.
     #[must_use]
-    pub fn extract_from<'a>(&self, text: &'a str) -> &'a str {
-        &text[self.start..self.end]
+    pub fn extract_from<'a>(&self, text: &'a str) -> Option<&'a str> {
+        text.get(self.start..self.end)
     }
 }
 
@@ -159,10 +167,16 @@ pub fn format_text_with_highlight(text: &str, match_range: Option<MatchRange>) -
     match_range.map_or_else(
         || text.to_string(),
         |range| {
-            let before = &text[..range.start];
-            let matched = range.extract_from(text).green().to_string();
-            let after = &text[range.end..];
-            format!("{before}{matched}{after}")
+            let Some(before) = text.get(..range.start) else {
+                return text.to_string();
+            };
+            let Some(matched) = text.get(range.start..range.end) else {
+                return text.to_string();
+            };
+            let Some(after) = text.get(range.end..) else {
+                return text.to_string();
+            };
+            format!("{before}{}{after}", matched.green())
         },
     )
 }
@@ -467,7 +481,7 @@ pub fn get_normalized_dir_name(path: &Path) -> Result<String> {
 #[must_use]
 pub fn is_hidden(entry: &walkdir::DirEntry) -> bool {
     let name_bytes = entry.file_name().as_encoded_bytes();
-    !name_bytes.is_empty() && name_bytes[0] == b'.'
+    name_bytes.first() == Some(&b'.')
 }
 
 /// Check if entry is a hidden file or directory (starts with '.')
@@ -475,7 +489,7 @@ pub fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
     let name = entry.file_name();
     let name_bytes = name.as_encoded_bytes();
-    !name_bytes.is_empty() && name_bytes[0] == b'.'
+    name_bytes.first() == Some(&b'.')
 }
 
 /// Check if entry is a system directory that should be skipped.
@@ -527,7 +541,7 @@ pub fn is_network_path(path: &Path) -> bool {
         let prefix_str = prefix.as_os_str();
         // Create a root path like "X:\"
         let mut root: Vec<u16> = prefix_str.encode_wide().collect();
-        if root.len() >= 2 && root[1] == u16::from(b':') {
+        if root.get(1).is_some_and(|value| *value == u16::from(b':')) {
             root.push(u16::from(b'\\'));
             root.push(0); // null terminator
 
@@ -1043,11 +1057,13 @@ pub fn path_to_string_relative(path: &Path) -> String {
 /// Format a Unix timestamp as a local datetime string.
 #[must_use]
 pub fn format_timestamp(timestamp: i64) -> String {
-    DateTime::<Utc>::from_timestamp(timestamp, 0).map_or_else(
-        || "unknown".to_string(),
-        |utc| {
-            let local: DateTime<Local> = utc.into();
-            local.format("%Y-%m-%d %H:%M").to_string()
+    Timestamp::from_second(timestamp).map_or_else(
+        |_| "unknown".to_string(),
+        |timestamp| {
+            timestamp
+                .to_zoned(TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string()
         },
     )
 }
@@ -2320,5 +2336,126 @@ mod print_function_tests {
     #[test]
     fn print_dimmed_does_not_panic() {
         print_dimmed("test dimmed message");
+    }
+}
+
+#[cfg(test)]
+mod text_highlight_tests {
+    use super::*;
+
+    #[test]
+    fn match_range_extracts_selected_substring() {
+        let range = MatchRange { start: 6, end: 11 };
+        assert_eq!(range.extract_from("hello world"), Some("world"));
+    }
+
+    #[test]
+    fn format_text_without_range_returns_original_text() {
+        assert_eq!(format_text_with_highlight("hello world", None), "hello world");
+    }
+
+    #[test]
+    fn format_text_with_range_preserves_prefix_match_and_suffix() {
+        let formatted = format_text_with_highlight("before MATCH after", Some(MatchRange { start: 7, end: 12 }));
+
+        assert!(formatted.starts_with("before "));
+        assert!(formatted.contains("MATCH"));
+        assert!(formatted.ends_with(" after"));
+    }
+}
+
+#[cfg(test)]
+mod additional_shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn pluralization_handles_zero_one_and_many() {
+        assert_eq!(pluralize(0, "file", "files"), "file");
+        assert_eq!(pluralize(1, "file", "files"), "file");
+        assert_eq!(pluralize(2, "file", "files"), "files");
+        assert_eq!(count_label(0, "file", "files"), "0 file");
+        assert_eq!(count_label(2, "file", "files"), "2 files");
+    }
+
+    #[test]
+    fn resolve_output_path_defaults_to_input_file_parent() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let input_file = temp_directory.path().join("input.txt");
+        std::fs::write(&input_file, b"input")?;
+
+        let output = resolve_output_path(None, &input_file)?;
+        let whitespace_output = resolve_output_path(Some("  \n"), &input_file)?;
+
+        assert_eq!(output, dunce::simplified(temp_directory.path()));
+        assert_eq!(whitespace_output, output);
+        Ok(())
+    }
+
+    #[test]
+    fn relative_path_strips_current_working_directory() -> anyhow::Result<()> {
+        let current_directory = env::current_dir()?;
+        let absolute_path = current_directory.join("nested").join("file.txt");
+
+        assert_eq!(
+            get_relative_path_from_current_working_directory(&absolute_path),
+            PathBuf::from("nested").join("file.txt")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_paths_do_not_refer_to_same_file() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let missing_left = temp_directory.path().join("missing-left");
+        let missing_right = temp_directory.path().join("missing-right");
+
+        assert!(!paths_refer_to_same_file(&missing_left, &missing_right));
+    }
+
+    #[test]
+    fn formats_valid_and_out_of_range_timestamps() {
+        assert_ne!(format_timestamp(0), "unknown");
+        assert_eq!(format_timestamp(i64::MAX), "unknown");
+    }
+
+    #[test]
+    fn io_semaphore_uses_twice_the_physical_cpu_count() {
+        let semaphore = create_semaphore_for_io_bound();
+        assert_eq!(semaphore.available_permits(), num_cpus::get_physical() * 2);
+    }
+}
+
+#[cfg(test)]
+mod tokio_directory_entry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn identifies_hidden_visible_system_and_normal_entries() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        tokio::fs::write(temp_directory.path().join(".hidden"), b"hidden").await?;
+        tokio::fs::write(temp_directory.path().join("visible.txt"), b"visible").await?;
+        tokio::fs::create_dir(temp_directory.path().join("lost+found")).await?;
+        tokio::fs::create_dir(temp_directory.path().join("ordinary")).await?;
+        let mut entries = tokio::fs::read_dir(temp_directory.path()).await?;
+        let mut hidden_found = false;
+        let mut visible_found = false;
+        let mut system_found = false;
+        let mut ordinary_found = false;
+
+        while let Some(entry) = entries.next_entry().await? {
+            match entry.file_name().to_string_lossy().as_ref() {
+                ".hidden" => hidden_found = is_hidden_tokio(&entry),
+                "visible.txt" => visible_found = !is_hidden_tokio(&entry),
+                "lost+found" => system_found = is_system_directory_tokio(&entry),
+                "ordinary" => ordinary_found = !is_system_directory_tokio(&entry),
+                _ => {}
+            }
+        }
+
+        assert!(hidden_found);
+        assert!(visible_found);
+        assert!(system_found);
+        assert!(ordinary_found);
+        Ok(())
     }
 }

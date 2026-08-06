@@ -224,18 +224,12 @@ pub fn parts_are_contiguous_with_combined(
     }
 
     // Check if the prefix parts match contiguous original parts exactly
-    'outer: for start_idx in 0..original_parts.len() {
-        if start_idx + prefix_parts.len() > original_parts.len() {
-            break;
-        }
-
-        for (offset, prefix_part) in prefix_parts.iter().enumerate() {
-            if !original_parts[start_idx + offset].eq_ignore_ascii_case(prefix_part) {
-                continue 'outer;
-            }
-        }
-
-        // Found a contiguous match with exact parts
+    if original_parts.windows(prefix_parts.len()).any(|window| {
+        window
+            .iter()
+            .zip(prefix_parts)
+            .all(|(original_part, prefix_part)| original_part.eq_ignore_ascii_case(prefix_part))
+    }) {
         return true;
     }
 
@@ -305,16 +299,18 @@ pub fn get_all_n_part_sequences(file_name: &str, n: usize) -> Vec<&str> {
 
     let mut sequences = Vec::new();
     for start in 0..=(num_parts - n) {
-        let start_pos = part_starts[start];
-        let end_pos = if start + n < num_parts {
-            // End just before the next part's dot
-            part_starts[start + n] - 1
-        } else {
-            file_name.len()
+        let Some(&start_pos) = part_starts.get(start) else {
+            continue;
         };
+        let end_pos = part_starts.get(start + n).map_or(file_name.len(), |next_start| {
+            // End just before the next part's dot
+            next_start.saturating_sub(1)
+        });
 
-        if start_pos < end_pos {
-            sequences.push(&file_name[start_pos..end_pos]);
+        if start_pos < end_pos
+            && let Some(sequence) = file_name.get(start_pos..end_pos)
+        {
+            sequences.push(sequence);
         }
     }
 

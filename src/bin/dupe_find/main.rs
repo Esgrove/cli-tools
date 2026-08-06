@@ -1,3 +1,5 @@
+//! Entry point and command line arguments for `dupefind`.
+
 mod config;
 mod dupe_find;
 mod helpers;

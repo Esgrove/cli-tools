@@ -1,5 +1,7 @@
 //! Entry point and CLI argument definitions for `dirmove`.
 
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 mod config;
 mod database;
 mod dir_move;

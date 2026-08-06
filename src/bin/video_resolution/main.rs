@@ -1,3 +1,7 @@
+//! Video resolution command-line entrypoint.
+//!
+//! Parses rename and deletion options, builds configuration, and runs asynchronous processing.
+
 mod cli;
 mod config;
 mod resolution;
@@ -75,4 +79,55 @@ async fn main() -> anyhow::Result<()> {
     }
     let config = Config::try_from_args(&args)?;
     cli::run(config).await
+}
+
+#[cfg(test)]
+mod test_args {
+    use super::*;
+
+    #[test]
+    fn parses_defaults_and_operational_flags() {
+        let defaults = Args::try_parse_from(["vres"]).expect("default arguments should parse");
+        assert!(defaults.command.is_none());
+        assert!(defaults.path.is_none());
+        assert!(defaults.delete.is_none());
+        assert!(!defaults.debug);
+        assert!(!defaults.force);
+        assert!(!defaults.print);
+        assert!(!defaults.recurse);
+        assert!(!defaults.verbose);
+
+        let configured = Args::try_parse_from(["vres", "videos", "-D", "-f", "-p", "-r", "-v"])
+            .expect("operational flags should parse");
+        assert_eq!(configured.path, Some(PathBuf::from("videos")));
+        assert!(configured.debug);
+        assert!(configured.force);
+        assert!(configured.print);
+        assert!(configured.recurse);
+        assert!(configured.verbose);
+    }
+
+    #[test]
+    fn distinguishes_delete_without_and_with_limit() {
+        let default_limit = Args::try_parse_from(["vres", "--delete"]).expect("bare delete should parse");
+        assert_eq!(default_limit.delete, Some(None));
+
+        let explicit_limit = Args::try_parse_from(["vres", "--delete", "720"]).expect("delete limit should parse");
+        assert_eq!(explicit_limit.delete, Some(Some(720)));
+        assert!(Args::try_parse_from(["vres", "--delete", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn parses_completion_and_has_valid_command_definition() {
+        let args =
+            Args::try_parse_from(["vres", "completion", "bash", "--install"]).expect("completion command should parse");
+        assert!(matches!(
+            args.command,
+            Some(VideoResolutionCommand::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+        Args::command().debug_assert();
+    }
 }

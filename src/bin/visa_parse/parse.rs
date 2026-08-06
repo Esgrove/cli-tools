@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{Datelike, Local, NaiveDate};
 use colored::Colorize;
 use encoding_rs::Encoding;
+use jiff::{Zoned, civil::Date};
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, RowNum, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -188,7 +188,7 @@ impl RawParsedItem {
     /// Convert this raw parsed item into a `VisaItem` with the given year.
     fn into_visa_item(self, year: i32) -> Result<VisaItem> {
         let date_str = format!("{:02}.{:02}.{year}", self.day, self.month);
-        let date = NaiveDate::parse_from_str(&date_str, "%d.%m.%Y")
+        let date = Date::strptime("%d.%m.%Y", &date_str)
             .with_context(|| format!("Invalid date '{date_str}' for item: {} ({:.2}€)", self.name, self.sum))?;
         Ok(VisaItem {
             date,
@@ -201,7 +201,7 @@ impl RawParsedItem {
 /// Represents one credit card purchase.
 #[derive(Debug, Clone, PartialEq)]
 struct VisaItem {
-    date: NaiveDate,
+    date: Date,
     name: String,
     sum: f64,
 }
@@ -214,7 +214,7 @@ impl VisaItem {
 
     /// Date in format "yyyy.mm.dd"
     pub fn finnish_date(&self) -> String {
-        self.date.format("%Y.%m.%d").to_string()
+        self.date.strftime("%Y.%m.%d").to_string()
     }
 }
 
@@ -369,7 +369,7 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
 /// Read transaction lines from an XML file.
 fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
     let mut lines: Vec<String> = Vec::new();
-    let mut year = Local::now().year();
+    let mut year = i32::from(Zoned::now().year());
     let xml_file = match File::open(file) {
         Ok(f) => f,
         Err(e) => {
@@ -382,7 +382,7 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
     let mut buf_reader = BufReader::new(&xml_file);
     let mut buf = [0; 256];
     let n = buf_reader.read(&mut buf).unwrap_or(0);
-    let header = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+    let header = String::from_utf8_lossy(buf.get(..n).unwrap_or_default()).to_lowercase();
     let encoding_name = header
         .split("encoding=")
         .nth(1)
@@ -547,7 +547,8 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
     println!("Unique names: {}", totals.len());
 
     if verbose {
-        let max_name_length = totals[..num_totals]
+        let top_totals = totals.get(..num_totals).unwrap_or(totals);
+        let max_name_length = top_totals
             .iter()
             .map(|(name, _)| name.chars().count())
             .max()
@@ -555,7 +556,7 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
             + 1;
 
         println!("\n{}", format!("Top {num_totals} totals:").bold());
-        for (name, sum) in &totals[..num_totals] {
+        for (name, sum) in top_totals {
             println!("{:width$}    {:>7.2}€", format!("{name}"), sum, width = max_name_length);
         }
     }
@@ -629,6 +630,7 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
         "{}",
         format!("Writing data to Excel: {}", output_file.display()).green()
     );
+    let first_item = items.first().context("Cannot write Excel workbook without items")?;
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet().set_name("VISA")?;
     let header_format = Format::new()
@@ -636,13 +638,13 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
         .set_border(FormatBorder::Thin)
         .set_background_color("C6E0B4");
 
-    sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
     sheet.serialize(&items)?;
     sheet.autofit();
 
     let dj_sheet = workbook.add_worksheet().set_name("DJ")?;
     let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
-    dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, &items[0], &header_format)?;
+    dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
     let mut row: RowNum = 1;
     for item in items {
         // Filter out common non-DJ items
@@ -922,7 +924,7 @@ mod test_visa_item {
     #[test]
     fn finnish_sum_formats_correctly() {
         let item = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            date: Date::new(2024, 6, 15).expect("valid date"),
             name: "TEST".to_string(),
             sum: 123.45,
         };
@@ -932,7 +934,7 @@ mod test_visa_item {
     #[test]
     fn finnish_sum_handles_whole_numbers() {
         let item = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            date: Date::new(2024, 6, 15).expect("valid date"),
             name: "TEST".to_string(),
             sum: 100.0,
         };
@@ -942,7 +944,7 @@ mod test_visa_item {
     #[test]
     fn finnish_date_formats_correctly() {
         let item = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            date: Date::new(2024, 6, 15).expect("valid date"),
             name: "TEST".to_string(),
             sum: 10.0,
         };
@@ -952,7 +954,7 @@ mod test_visa_item {
     #[test]
     fn display_formats_correctly() {
         let item = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 5).expect("valid date"),
+            date: Date::new(2024, 1, 5).expect("valid date"),
             name: "STORE NAME".to_string(),
             sum: 99.99,
         };
@@ -965,17 +967,17 @@ mod test_visa_item {
     #[test]
     fn ordering_by_date_then_name() {
         let item1 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "AAA".to_string(),
             sum: 10.0,
         };
         let item2 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "BBB".to_string(),
             sum: 20.0,
         };
         let item3 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+            date: Date::new(2024, 1, 2).expect("valid date"),
             name: "AAA".to_string(),
             sum: 30.0,
         };
@@ -990,12 +992,12 @@ mod test_visa_item {
     #[test]
     fn partial_ord_matches_ord() {
         let item1 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "AAA".to_string(),
             sum: 10.0,
         };
         let item2 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+            date: Date::new(2024, 1, 2).expect("valid date"),
             name: "BBB".to_string(),
             sum: 20.0,
         };
@@ -1061,11 +1063,11 @@ mod test_extract_items {
         let items = extract_items(&lines, year).expect("should parse items");
 
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].date, NaiveDate::from_ymd_opt(2024, 2, 5).unwrap());
+        assert_eq!(items[0].date, Date::new(2024, 2, 5).expect("valid date"));
         assert_eq!(items[0].name, "K-MARKET");
         assert!((items[0].sum - 25.50).abs() < 0.01);
 
-        assert_eq!(items[1].date, NaiveDate::from_ymd_opt(2024, 2, 8).unwrap());
+        assert_eq!(items[1].date, Date::new(2024, 2, 8).expect("valid date"));
         assert_eq!(items[1].name, "ALEPA");
         assert!((items[1].sum - 12.95).abs() < 0.01);
     }
@@ -1086,12 +1088,12 @@ mod test_extract_items {
         assert_eq!(items.len(), 4);
 
         // December items should be assigned to previous year (2024)
-        assert_eq!(items[0].date, NaiveDate::from_ymd_opt(2024, 12, 15).unwrap());
-        assert_eq!(items[1].date, NaiveDate::from_ymd_opt(2024, 12, 28).unwrap());
+        assert_eq!(items[0].date, Date::new(2024, 12, 15).expect("valid date"));
+        assert_eq!(items[1].date, Date::new(2024, 12, 28).expect("valid date"));
 
         // January items should be assigned to the current year (2025)
-        assert_eq!(items[2].date, NaiveDate::from_ymd_opt(2025, 1, 2).unwrap());
-        assert_eq!(items[3].date, NaiveDate::from_ymd_opt(2025, 1, 15).unwrap());
+        assert_eq!(items[2].date, Date::new(2025, 1, 2).expect("valid date"));
+        assert_eq!(items[3].date, Date::new(2025, 1, 15).expect("valid date"));
     }
 
     #[test]
@@ -1131,17 +1133,17 @@ mod test_calculate_totals {
     fn groups_by_name_and_sums() {
         let items = vec![
             VisaItem {
-                date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+                date: Date::new(2024, 1, 1).expect("valid date"),
                 name: "STORE A".to_string(),
                 sum: 10.0,
             },
             VisaItem {
-                date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+                date: Date::new(2024, 1, 2).expect("valid date"),
                 name: "STORE A".to_string(),
                 sum: 20.0,
             },
             VisaItem {
-                date: NaiveDate::from_ymd_opt(2024, 1, 3).expect("valid date"),
+                date: Date::new(2024, 1, 3).expect("valid date"),
                 name: "STORE B".to_string(),
                 sum: 15.0,
             },
@@ -1161,17 +1163,17 @@ mod test_calculate_totals {
     fn sorts_by_sum_descending() {
         let items = vec![
             VisaItem {
-                date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+                date: Date::new(2024, 1, 1).expect("valid date"),
                 name: "SMALL".to_string(),
                 sum: 10.0,
             },
             VisaItem {
-                date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+                date: Date::new(2024, 1, 2).expect("valid date"),
                 name: "LARGE".to_string(),
                 sum: 100.0,
             },
             VisaItem {
-                date: NaiveDate::from_ymd_opt(2024, 1, 3).expect("valid date"),
+                date: Date::new(2024, 1, 3).expect("valid date"),
                 name: "MEDIUM".to_string(),
                 sum: 50.0,
             },
@@ -1194,7 +1196,7 @@ mod test_calculate_totals {
     #[test]
     fn handles_single_item() {
         let items = vec![VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "ONLY".to_string(),
             sum: 42.0,
         }];
@@ -1604,7 +1606,7 @@ mod test_visa_item_serialize {
     #[test]
     fn serializes_to_correct_json() {
         let item = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 6, 15).expect("valid date"),
+            date: Date::new(2024, 6, 15).expect("valid date"),
             name: "TEST STORE".to_string(),
             sum: 123.45,
         };
@@ -1626,12 +1628,12 @@ mod test_visa_item_ordering_comprehensive {
     #[test]
     fn orders_by_date_first() {
         let item1 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "ZZZ".to_string(),
             sum: 999.99,
         };
         let item2 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+            date: Date::new(2024, 1, 2).expect("valid date"),
             name: "AAA".to_string(),
             sum: 1.00,
         };
@@ -1642,12 +1644,12 @@ mod test_visa_item_ordering_comprehensive {
     #[test]
     fn orders_by_name_when_date_equal() {
         let item1 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "AAA".to_string(),
             sum: 999.99,
         };
         let item2 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "ZZZ".to_string(),
             sum: 1.00,
         };
@@ -1658,12 +1660,12 @@ mod test_visa_item_ordering_comprehensive {
     #[test]
     fn orders_by_sum_when_date_and_name_equal() {
         let item1 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "SAME".to_string(),
             sum: 10.00,
         };
         let item2 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "SAME".to_string(),
             sum: 20.00,
         };
@@ -1674,12 +1676,12 @@ mod test_visa_item_ordering_comprehensive {
     #[test]
     fn equal_items_are_equal() {
         let item1 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "SAME".to_string(),
             sum: 10.00,
         };
         let item2 = VisaItem {
-            date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            date: Date::new(2024, 1, 1).expect("valid date"),
             name: "SAME".to_string(),
             sum: 10.00,
         };

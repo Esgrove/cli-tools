@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Local;
+use jiff::Zoned;
 
 use crate::config::Config;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
@@ -35,7 +35,7 @@ impl FileLogger {
 
         let log_path = log_dir.join(format!(
             "video_convert_{}.log",
-            Local::now().format("%Y-%m-%d_%H-%M-%S")
+            Zoned::now().strftime("%Y-%m-%d_%H-%M-%S")
         ));
 
         let file = OpenOptions::new()
@@ -50,7 +50,7 @@ impl FileLogger {
     }
 
     fn timestamp() -> String {
-        Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+        Zoned::now().strftime("%Y-%m-%d %H:%M:%S").to_string()
     }
 
     /// Log when starting the program

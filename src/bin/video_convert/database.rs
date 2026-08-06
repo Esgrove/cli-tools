@@ -1022,17 +1022,16 @@ fn drive_key(path: &Path) -> String {
     // UNC paths: \\server\share\...
     if let Some(without_prefix) = path_str.strip_prefix(r"\\") {
         // Take server\share as the key
-        let parts: Vec<&str> = without_prefix.splitn(3, '\\').collect();
-        return if parts.len() >= 2 {
-            format!(r"\\{}\{}", parts[0], parts[1])
-        } else {
-            r"\\".to_string()
+        let mut parts = without_prefix.splitn(3, '\\');
+        return match (parts.next(), parts.next()) {
+            (Some(server), Some(share)) => format!(r"\\{server}\{share}"),
+            _ => r"\\".to_string(),
         };
     }
 
     // Drive letter paths: C:\...
-    if path_str.len() >= 2 && path_str.as_bytes()[1] == b':' {
-        return path_str[..2].to_uppercase();
+    if let Some(drive) = path_str.get(..2).filter(|drive| drive.ends_with(':')) {
+        return drive.to_uppercase();
     }
 
     // Unix / fallback — everything is on one root
