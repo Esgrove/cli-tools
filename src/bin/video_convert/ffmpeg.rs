@@ -117,7 +117,7 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
         .args(["-preset", NVENC_PRESET])
         .args(["-b:v", "0"])
         .args(["-rc-lookahead", NVENC_LOOKAHEAD_FRAMES])
-        .args(["-spatial_aq", "1", "-temporal_aq", "1"]);
+        .args(["-spatial-aq", "1", "-temporal-aq", "1"]);
 
     if options.bit_depth > 8 {
         command.args(["-profile:v", "main10", "-pix_fmt", "p010le"]);
@@ -592,9 +592,9 @@ mod test_conversion_command {
                 "0",
                 "-rc-lookahead",
                 "48",
-                "-spatial_aq",
+                "-spatial-aq",
                 "1",
-                "-temporal_aq",
+                "-temporal-aq",
                 "1",
                 "-tag:v",
                 "hvc1",
