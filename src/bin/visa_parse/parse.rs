@@ -557,7 +557,7 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
 
         println!("\n{}", format!("Top {num_totals} totals:").bold());
         for (name, sum) in top_totals {
-            println!("{:width$}    {:>7.2}€", format!("{name}"), sum, width = max_name_length);
+            println!("{name:max_name_length$}    {sum:>7.2}€");
         }
     }
     println!();
