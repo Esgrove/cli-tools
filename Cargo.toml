@@ -13,7 +13,7 @@ rust-version = "1.97"
 
 [dependencies]
 anyhow = "1.0.104"
-blake3 = { version = "1.8.6", features = ["mmap", "rayon"] }
+blake3 = { version = "1.8.7", features = ["mmap", "rayon"] }
 jiff = "0.2.35"
 clap = { version = "4.6.6", features = ["derive"] }
 clap_complete = "4.6.9"
@@ -34,7 +34,7 @@ rayon = "1.12.0"
 regex = "1.13.1"
 reqwest = { version = "0.13.4", features = ["cookies", "form", "multipart"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-rust_xlsxwriter = { version = "0.98.0", features = ["jiff", "serde"] }
+rust_xlsxwriter = { version = "0.99.0", features = ["jiff", "serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_bencode = "0.2.4"
 serde_bytes = "0.11.19"
