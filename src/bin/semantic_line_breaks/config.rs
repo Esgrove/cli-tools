@@ -18,7 +18,17 @@ use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, RuleSet, Violatio
 use crate::Args;
 
 /// Directory names skipped by default when walking directories.
-pub const DEFAULT_EXCLUDES: &[&str] = &["target", "node_modules", "build", "dist", ".venv", "venv", "vendor"];
+pub const DEFAULT_EXCLUDES: &[&str] = &[
+    "target",
+    "node_modules",
+    "build",
+    "dist",
+    "cdk.out",
+    "coverage",
+    ".venv",
+    "venv",
+    "vendor",
+];
 
 /// User configuration from the `[slb]` section of the config file.
 #[derive(Debug, Default, Deserialize)]

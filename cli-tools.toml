@@ -379,7 +379,7 @@ replace = [
 # extensions = []
 
 # Skip paths with a directory or file name equal to any of these
-# exclude = ["target", "node_modules", "build", "dist", ".venv", "venv", "vendor"]
+# exclude = ["target", "node_modules", "build", "dist", "cdk.out", "coverage", ".venv", "venv", "vendor"]
 
 # Abbreviations that do not end a sentence (added to the built-in list)
 # abbreviations = []
