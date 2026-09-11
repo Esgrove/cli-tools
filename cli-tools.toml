@@ -357,6 +357,45 @@ replace = [
 # Use TOML literal strings for Windows paths so backslashes do not need escaping.
 # tag_overwrite_paths = [["Media/Movies", "movies"], ['D:\Torrents\Series', "series"]]
 
+[slb]
+# Maximum line length including indentation and comment marker.
+# When unset, the limit comes from project config files such as .editorconfig, rustfmt.toml, or pyproject.toml,
+# or defaults to 120.
+# width = 120
+
+# Read the line length from project config files such as .editorconfig, rustfmt.toml, and pyproject.toml
+# use_project_config = true
+
+# Rules to enable
+# rules = ["too-long", "mid-clause", "semicolon", "em-dash", "trailing"]
+
+# Also pack consecutive short sentences up to the line limit
+# join_sentences = false
+
+# Allow breaking at a plain word boundary when no clause boundary fits
+# allow_word_break = false
+
+# Only process files with these extensions (empty means all supported file types)
+# extensions = []
+
+# Skip paths with a directory or file name equal to any of these
+# exclude = ["target", "node_modules", "build", "dist", ".venv", "venv", "vendor"]
+
+# Abbreviations that do not end a sentence (added to the built-in list)
+# abbreviations = []
+
+# Words that start a clause and can begin a new line (added to the built-in list, lowest preference tier)
+# clause_starters = []
+
+# Trailing comments starting with these prefixes are left alone (added to the built-in list)
+# directive_prefixes = []
+
+# Words never capitalized after a semicolon split (added to the built-in list)
+# preserve_lowercase = []
+
+# Print processed files and the resolved line width
+# verbose = false
+
 [resolution]
 # Enable debug prints
 # debug = false

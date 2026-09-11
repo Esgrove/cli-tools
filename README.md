@@ -481,6 +481,42 @@ Options:
   -h, --help             Print help (see more with '--help')
 ```
 
+## Slb
+
+Check and format prose in code comments, docstrings, and Markdown with semantic line breaks.
+Lines are broken at sentence and clause boundaries within a soft 120 character limit,
+semicolons and em dashes are rewritten, and trailing comments are moved above the code.
+The line limit is read from project config files such as `.editorconfig`, `rustfmt.toml`, and `pyproject.toml`.
+The default mode reports violations and exits with code 1.
+Use `--fix` to rewrite files, `--print` to show a diff,
+or `--stdin` to format text from stdin for editor and git hook integration.
+
+```console
+Check and format prose in comments, docstrings, and Markdown with semantic line breaks
+
+Usage: slb [OPTIONS] [PATHS]... [COMMAND]
+
+Arguments:
+  [PATHS]...  Files or directories to check. Defaults to the current directory
+
+Options:
+  -f, --fix                     Rewrite files in place
+  -p, --print                   Show the changes fix mode would make without writing
+  -j, --join-sentences          Also pack consecutive short sentences up to the line limit
+  -w, --width <N>               Maximum line length including indentation and comment marker (default: from project config or 120)
+  -i, --ignore-project-config   Do not read the line length from project config files such as .editorconfig, rustfmt.toml, and pyproject.toml
+  -R, --rules <RULES>           Rules to enable (default: all) [possible values: too-long, mid-clause, semicolon, em-dash, trailing]
+  -e, --extensions <EXTENSION>  Only process files with these extensions
+  -x, --exclude <PATTERN>       Skip paths with a directory or file name equal to this text
+  -t, --type <KIND>             Force the file kind, required with --stdin [possible values: rust, c, javascript, go, python, shell, toml, yaml, dockerfile, makefile, ruby, sql, lua, markdown]
+  -s, --stdin                   Read text from stdin and write the formatted result to stdout
+  -b, --word-break              Allow breaking at a plain word boundary when no clause boundary fits
+  -q, --quiet                   Only print the summary
+  -v, --verbose                 Print processed files and the resolved line width
+  -h, --help                    Print help (see more with '--help')
+  -V, --version                 Print version
+```
+
 ## Vtag
 
 ```console

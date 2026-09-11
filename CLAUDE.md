@@ -51,6 +51,7 @@ cargo bench --bench dupe_find
 cargo bench --bench format
 cargo bench --bench lib
 cargo bench --bench resolution
+cargo bench --bench semantic_line_breaks
 
 # Run benchmarks matching a filter pattern
 cargo bench -- "normalize_stem"
@@ -85,6 +86,7 @@ benchmarks can import them directly without duplicating code.
 - `benches/format.rs` - Dot-rename formatting pipeline
 - `benches/lib.rs` - Shared utility functions
 - `benches/resolution.rs` - Resolution labeling and regex matching
+- `benches/semantic_line_breaks.rs` - Prose tokenizing, boundary detection, paragraph reflow, and file formatting
 
 ### Adding new benchmarks
 
@@ -99,6 +101,7 @@ re-export from the library. Do not duplicate code in benchmark files.
 - `src/date.rs` - Date parsing and formatting utilities
 - `src/dir_move/` - Algorithmic types and functions for dir_move (prefix grouping, matching)
 - `src/dupe_find/` - Algorithmic types and functions for dupe_find (normalization, grouping)
+- `src/semantic_line_breaks/` - Algorithmic types and functions for slb (prose tokenizing, reflow, Markdown splitting, comment scanning, project config width discovery)
 - `src/bin/` - Individual CLI tool binaries:
     - `dir_move.rs` → `dirmove` - Move files to matching directories
     - `divider.rs` → `div` - Print divider comments
@@ -106,6 +109,7 @@ re-export from the library. Do not duplicate code in benchmark files.
     - `flip_date.rs` → `flipdate` - Flip dates in filenames
     - `qtorrent` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming, show torrent stats
     - `resolution.rs` → `vres` - Add video resolution to file names
+    - `semantic_line_breaks` → `slb` - Check and format prose with semantic line breaks
     - `version_tag.rs` → `vtag` - Create git version tags for a project (Rust, C++, Python)
     - `video_convert` → `vconvert` - Video conversion to HEVC/MP4
     - `video_stats` → `vstats` - Collect and print video file statistics
