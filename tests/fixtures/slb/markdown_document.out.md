@@ -6,8 +6,7 @@ title: Sample
 
 [![Badge](https://img.shields.io/x.svg)](https://example.com)
 
-Some intro text that was wrapped by hand at a fairly narrow column.
-It also uses a semicolon, and a dash.
+Some intro text that was wrapped by hand at a fairly narrow column. It also uses a semicolon, and a dash.
 
 - A list item that continues onto a lazy line.
 - Short item.

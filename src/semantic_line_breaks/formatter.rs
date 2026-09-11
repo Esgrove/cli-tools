@@ -4,6 +4,8 @@
 //! runs the trailing comment pass and the prose pass,
 //! and reassembles the result byte for byte where nothing changed.
 
+use std::borrow::Cow;
+
 use super::comments;
 use super::markdown;
 use super::prose;
@@ -21,12 +23,22 @@ struct SourceLine<'a> {
 /// Check a text buffer and return the violations without producing fixed text.
 #[must_use]
 pub fn check(text: &str, kind: FileKind, options: &FormatOptions) -> Vec<Violation> {
-    format(text, kind, options).violations
+    run(text, kind, options, false).violations
 }
 
 /// Check and fix a text buffer.
 #[must_use]
 pub fn format(text: &str, kind: FileKind, options: &FormatOptions) -> FormatResult {
+    run(text, kind, options, true)
+}
+
+/// Run the pipeline over a text buffer, building the fixed text only when `produce_fix` is set.
+///
+/// Violations always describe the original text.
+/// Moving a trailing comment to its own line shifts every line number after it,
+/// so the fixed text needs a second prose pass over the rewritten lines,
+/// which is skipped when the caller only asked for the violations.
+fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -> FormatResult {
     let source = split_lines(text);
     let texts: Vec<&str> = source.iter().map(|line| line.text).collect();
     if markdown::has_ignore_file_marker(&texts) {
@@ -34,7 +46,7 @@ pub fn format(text: &str, kind: FileKind, options: &FormatOptions) -> FormatResu
     }
 
     let mut violations = Vec::new();
-    let mut working: Vec<(String, &str)> = Vec::with_capacity(source.len());
+    let mut working: Vec<(Cow<'_, str>, &str)> = Vec::with_capacity(source.len());
     let mut trailing_changed = false;
     if kind.supports_trailing_comment_check() && options.rules.trailing_comment {
         let (replacements, trailing_violations) = comments::fix_trailing_comments(&texts, kind, options);
@@ -42,30 +54,33 @@ pub fn format(text: &str, kind: FileKind, options: &FormatOptions) -> FormatResu
         for (line, replacement) in source.iter().zip(replacements) {
             match replacement {
                 Some((comment, code)) => {
-                    working.push((comment, line.eol));
-                    working.push((code, line.eol));
+                    working.push((Cow::Owned(comment), line.eol));
+                    working.push((Cow::Owned(code), line.eol));
                     trailing_changed = true;
                 }
-                None => working.push((line.text.to_string(), line.eol)),
+                None => working.push((Cow::Borrowed(line.text), line.eol)),
             }
         }
     } else {
-        working.extend(source.iter().map(|line| (line.text.to_string(), line.eol)));
+        working.extend(source.iter().map(|line| (Cow::Borrowed(line.text), line.eol)));
     }
 
+    let working_texts: Vec<&str> = working.iter().map(|(text, _)| text.as_ref()).collect();
     let (output, prose_violations) = if trailing_changed {
         let original_violations = prose_pass(&texts, kind, options).1;
-        let working_texts: Vec<&str> = working.iter().map(|(text, _)| text.as_str()).collect();
-        let (output, _) = prose_pass(&working_texts, kind, options);
+        let output = produce_fix.then(|| prose_pass(&working_texts, kind, options).0);
         (output, original_violations)
     } else {
-        prose_pass(&texts, kind, options)
+        let (output, prose_violations) = prose_pass(&working_texts, kind, options);
+        (produce_fix.then_some(output), prose_violations)
     };
     violations.extend(prose_violations);
     violations.sort_by_key(|violation| (violation.line, violation.kind));
 
-    let fixed = assemble(&output, &working, text);
-    let fixed_text = (fixed != text).then_some(fixed);
+    let fixed_text = output.and_then(|output| {
+        let fixed = assemble(&output, &working, text);
+        (fixed != text).then_some(fixed)
+    });
     FormatResult { violations, fixed_text }
 }
 
@@ -95,13 +110,13 @@ fn split_lines(text: &str) -> Vec<SourceLine<'_>> {
 }
 
 /// Reflow every prose paragraph in the lines and return the new lines and the violations found.
-fn prose_pass(lines: &[&str], kind: FileKind, options: &FormatOptions) -> (Vec<String>, Vec<Violation>) {
+fn prose_pass<'a>(lines: &[&'a str], kind: FileKind, options: &FormatOptions) -> (Vec<Cow<'a, str>>, Vec<Violation>) {
     let regions = if kind == FileKind::Markdown {
         markdown::split_paragraphs(lines, "", 0, true)
     } else {
         comments::split_source_regions(lines, kind)
     };
-    let mut output: Vec<String> = Vec::with_capacity(lines.len());
+    let mut output: Vec<Cow<'a, str>> = Vec::with_capacity(lines.len());
     let mut violations = Vec::new();
     let mut cursor = 0;
     for region in regions {
@@ -123,7 +138,7 @@ fn prose_pass(lines: &[&str], kind: FileKind, options: &FormatOptions) -> (Vec<S
                             } else {
                                 ""
                             };
-                            output.push(format!("{}{content}{suffix}", paragraph.prefix_for(index)));
+                            output.push(Cow::Owned(format!("{}{content}{suffix}", paragraph.prefix_for(index))));
                         }
                     }
                     None => copy_lines(lines, paragraph.start_line, paragraph.end_line, &mut output),
@@ -137,7 +152,7 @@ fn prose_pass(lines: &[&str], kind: FileKind, options: &FormatOptions) -> (Vec<S
 }
 
 /// Copy the lines in `from..to` into the output.
-fn copy_lines(lines: &[&str], from: usize, to: usize, output: &mut Vec<String>) {
+fn copy_lines<'a>(lines: &[&'a str], from: usize, to: usize, output: &mut Vec<Cow<'a, str>>) {
     if from >= to {
         return;
     }
@@ -146,20 +161,21 @@ fn copy_lines(lines: &[&str], from: usize, to: usize, output: &mut Vec<String>) 
             .get(from..to)
             .unwrap_or_default()
             .iter()
-            .map(|line| (*line).to_string()),
+            .copied()
+            .map(Cow::Borrowed),
     );
 }
 
 /// Join output lines with line endings taken from the working lines.
 ///
 /// When the line counts differ, the dominant line ending of the original text is used.
-fn assemble(output: &[String], working: &[(String, &str)], original: &str) -> String {
+fn assemble(output: &[Cow<'_, str>], working: &[(Cow<'_, str>, &str)], original: &str) -> String {
     let default_eol = if original.contains("\r\n") { "\r\n" } else { "\n" };
     let trailing_newline = original.ends_with('\n') || original.is_empty();
     let mut result = String::with_capacity(original.len() + 64);
     let last_index = output.len().saturating_sub(1);
     for (index, line) in output.iter().enumerate() {
-        result.push_str(line);
+        result.push_str(line.as_ref());
         if index == last_index {
             if trailing_newline && !output.is_empty() {
                 let eol = working.get(index).map_or(default_eol, |(_, eol)| eol);
@@ -222,7 +238,7 @@ mod test_format {
         let result = format(text, FileKind::Rust, &FormatOptions::default());
         assert_eq!(
             result.fixed_text.as_deref(),
-            Some("/// the quick brown fox jumps over.\n/// It is fast, really.\nfn f() {}\n")
+            Some("/// the quick brown fox jumps over. It is fast, really.\nfn f() {}\n")
         );
         let kinds: Vec<ViolationKind> = result.violations.iter().map(|violation| violation.kind).collect();
         assert_eq!(

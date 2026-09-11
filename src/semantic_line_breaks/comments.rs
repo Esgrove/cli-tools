@@ -212,11 +212,12 @@ pub fn fix_trailing_comments(
         return (replacements, violations);
     };
     let mut state = ScanState::Normal;
+    let mut characters = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if index == 0 && line.starts_with("#!") {
             continue;
         }
-        let result = scan_line(line, state, &syntax);
+        let result = scan_line_buffered(line, state, &syntax, &mut characters);
         state = result.state;
         let Some(comment_start) = result.comment_start else {
             continue;
@@ -268,15 +269,31 @@ enum NormalStep {
 /// Scan one line of code for a comment marker that follows code.
 #[must_use]
 pub fn scan_line(line: &str, state: ScanState, syntax: &StringSyntax) -> ScanResult {
+    let mut characters = Vec::new();
+    scan_line_buffered(line, state, syntax, &mut characters)
+}
+
+/// Scan one line, reusing the given character buffer.
+///
+/// The buffer holds the character indices of the line.
+/// Reusing it across the lines of a file avoids one allocation per line.
+fn scan_line_buffered(
+    line: &str,
+    state: ScanState,
+    syntax: &StringSyntax,
+    characters: &mut Vec<(usize, char)>,
+) -> ScanResult {
     let mut state = state;
     if let Some(result) = line_level_state(line, &mut state) {
         return result;
     }
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    characters.clear();
+    characters.extend(line.char_indices());
+    let chars = characters.as_slice();
     let mut cursor = Cursor::default();
     while cursor.index < chars.len() {
         match state {
-            ScanState::Normal => match scan_normal(line, &chars, &mut cursor, syntax) {
+            ScanState::Normal => match scan_normal(line, chars, &mut cursor, syntax) {
                 NormalStep::Continue(next_state) => state = next_state,
                 NormalStep::Comment(byte) => {
                     return ScanResult {
@@ -288,7 +305,7 @@ pub fn scan_line(line: &str, state: ScanState, syntax: &StringSyntax) -> ScanRes
                 NormalStep::Uncertain => return uncertain_result(),
             },
             ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) => break,
-            other => state = continue_state(other, &chars, &mut cursor.index, syntax),
+            other => state = continue_state(other, chars, &mut cursor.index, syntax),
         }
     }
     if state == ScanState::Normal {
@@ -307,9 +324,9 @@ pub fn scan_line(line: &str, state: ScanState, syntax: &StringSyntax) -> ScanRes
 
 /// Handle states that apply to whole lines, returning the result when the line needs no scanning.
 fn line_level_state(line: &str, state: &mut ScanState) -> Option<ScanResult> {
-    match state.clone() {
+    match state {
         ScanState::InHeredoc(terminator) => {
-            if line.trim() == terminator {
+            if line.trim() == terminator.as_str() {
                 *state = ScanState::Normal;
             }
             Some(ScanResult {
@@ -319,7 +336,7 @@ fn line_level_state(line: &str, state: &mut ScanState) -> Option<ScanResult> {
             })
         }
         ScanState::InBlockScalar(indent) => {
-            if line.trim().is_empty() || leading_whitespace(line).chars().count() > indent {
+            if line.trim().is_empty() || leading_whitespace(line).chars().count() > *indent {
                 return Some(ScanResult {
                     state: state.clone(),
                     comment_start: None,
@@ -531,6 +548,7 @@ fn lines_inside_strings(lines: &[&str], kind: FileKind) -> Vec<bool> {
         return vec![false; lines.len()];
     };
     let mut state = ScanState::Normal;
+    let mut characters = Vec::new();
     lines
         .iter()
         .map(|line| {
@@ -543,7 +561,7 @@ fn lines_inside_strings(lines: &[&str], kind: FileKind) -> Vec<bool> {
                     | ScanState::InBacktickRaw
                     | ScanState::InHeredoc(_)
             );
-            state = scan_line(line, state.clone(), &syntax).state;
+            state = scan_line_buffered(line, std::mem::take(&mut state), &syntax, &mut characters).state;
             inside
         })
         .collect()
@@ -569,11 +587,18 @@ fn trailing_comment(line: &str, comment_start: usize, syntax: &StringSyntax) -> 
 
 /// Whether the comment text is a directive for another tool.
 fn is_directive(text: &str, options: &FormatOptions) -> bool {
-    let normalized = text.trim_start_matches(['!', '/', '#', '-', ' ']).to_lowercase();
+    let normalized = text.trim_start_matches(['!', '/', '#', '-', ' ']);
     options
         .directive_prefixes
         .iter()
-        .any(|prefix| normalized.starts_with(&prefix.to_lowercase()))
+        .any(|prefix| starts_with_ignore_case(normalized, prefix))
+}
+
+/// Whether the text starts with the prefix, ignoring ASCII case.
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 /// Scanner result for a line the scanner cannot interpret.

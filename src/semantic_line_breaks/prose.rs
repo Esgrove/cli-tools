@@ -5,6 +5,7 @@
 //! rewording of semicolons and em dashes, and the reflow algorithm
 //! that joins hard-wrapped lines and re-breaks them at semantic boundaries.
 
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -92,7 +93,8 @@ static RE_VERSION: LazyLock<Regex> =
 static RE_NUMBER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[+-]?\d[\d_,]*(?:\.\d+)?%?$").expect("Invalid number regex"));
 
-/// Matches identifiers: `snake_case`, `path::segments`, `camelCase`, `SCREAMING_CASE`, and calls like `foo()`.
+/// Matches identifiers: `snake_case`, `path::segments`, `camelCase`, `SCREAMING_CASE`,
+/// and calls like `foo()`.
 static RE_IDENTIFIER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?:\w*_\w*|\w+(?:::\w+)+|[a-z]+[A-Z]\w*|[\w:.]+\(.*\))$").expect("Invalid identifier regex")
 });
@@ -127,6 +129,8 @@ pub struct Segment {
     pub hard_break: HardBreak,
     /// Whether joining or rewording changed the segment, forcing a re-split.
     pub modified: bool,
+    /// Index of the single paragraph line the segment came from, when it covers exactly one line.
+    pub source_line: Option<usize>,
 }
 
 /// Result of reflowing a paragraph.
@@ -144,10 +148,10 @@ pub struct ReflowOutcome {
 /// so the em dash rewrite can handle them uniformly.
 #[must_use]
 pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) -> Vec<Token> {
-    let normalized = if normalize_dashes && content.contains('—') {
-        content.replace('—', " — ")
+    let normalized: Cow<'_, str> = if normalize_dashes && content.contains('—') {
+        Cow::Owned(content.replace('—', " — "))
     } else {
-        content.to_string()
+        Cow::Borrowed(content)
     };
     let chars: Vec<char> = normalized.chars().collect();
     let mut tokens = Vec::new();
@@ -176,6 +180,18 @@ pub fn is_sentence_end(tokens: &[Token], index: usize, options: &FormatOptions) 
     let Some(next) = tokens.get(index + 1) else {
         return false;
     };
+    is_sentence_boundary(token, next, options)
+}
+
+/// Whether `token` ends a sentence that `next` continues after.
+#[must_use]
+pub fn is_sentence_boundary(token: &Token, next: &Token, options: &FormatOptions) -> bool {
+    ends_sentence(token, options) && starts_sentence(next)
+}
+
+/// Whether the token ends a sentence, ignoring what follows it.
+#[must_use]
+pub fn ends_sentence(token: &Token, options: &FormatOptions) -> bool {
     if !token.ends_sentence_punctuation() {
         return false;
     }
@@ -183,8 +199,7 @@ pub fn is_sentence_end(tokens: &[Token], index: usize, options: &FormatOptions) 
         return false;
     }
     if matches!(token.kind, TokenKind::Word | TokenKind::Path | TokenKind::Identifier) {
-        let lowercase = format!("{}.", token.core.to_lowercase());
-        if options.abbreviations.contains(&lowercase) {
+        if is_abbreviation(&token.core, options) {
             return false;
         }
         let mut core_chars = token.core.chars();
@@ -194,13 +209,18 @@ pub fn is_sentence_end(tokens: &[Token], index: usize, options: &FormatOptions) 
             return false;
         }
     }
+    true
+}
+
+/// Whether the token can start a new sentence.
+fn starts_sentence(token: &Token) -> bool {
     if matches!(
-        next.kind,
+        token.kind,
         TokenKind::Code | TokenKind::Link | TokenKind::Url | TokenKind::Html
     ) {
         return true;
     }
-    next.first_char().is_some_and(|first| {
+    token.first_char().is_some_and(|first| {
         first.is_uppercase()
             || first.is_ascii_digit()
             || matches!(first, '"' | '“' | '\'' | '‘' | '(' | '[' | '*' | '_')
@@ -214,21 +234,24 @@ pub fn clause_rank(tokens: &[Token], index: usize, options: &FormatOptions) -> O
     if token.kind != TokenKind::Word {
         return None;
     }
-    let word = token.core.to_lowercase();
-    if let Some(next) = tokens.get(index + 1) {
-        let pair = format!("{word} {}", next.core.to_lowercase());
-        if CLAUSE_PAIRS.contains(&pair.as_str()) {
-            return Some(Rank::ClauseTier3);
-        }
+    let word = token.core.as_str();
+    if let Some(next) = tokens.get(index + 1)
+        && CLAUSE_PAIRS.iter().any(|pair| is_word_pair(pair, word, &next.core))
+    {
+        return Some(Rank::ClauseTier3);
     }
-    let word = word.as_str();
-    if CLAUSE_TIER_1.contains(&word) {
+    if contains_word(CLAUSE_TIER_1, word) {
         Some(Rank::ClauseTier1)
-    } else if CLAUSE_TIER_2.contains(&word) {
+    } else if contains_word(CLAUSE_TIER_2, word) {
         Some(Rank::ClauseTier2)
-    } else if CLAUSE_TIER_3.contains(&word) {
+    } else if contains_word(CLAUSE_TIER_3, word) {
         Some(Rank::ClauseTier3)
-    } else if CLAUSE_TIER_4.contains(&word) || options.clause_starters.iter().any(|starter| starter == word) {
+    } else if contains_word(CLAUSE_TIER_4, word)
+        || options
+            .clause_starters
+            .iter()
+            .any(|starter| starter.eq_ignore_ascii_case(word))
+    {
         Some(Rank::ClauseTier4)
     } else {
         None
@@ -283,16 +306,17 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
 
 /// Bracket nesting depth after the token, given the depth before it.
 fn bracket_depth_after(token: &Token, depth: usize) -> usize {
-    let text = if token.is_atom() {
-        format!("{}{}", token.leading, token.trailing)
-    } else {
-        token.text()
-    };
-    text.chars().fold(depth, |depth, character| match character {
+    bracket_characters(token).fold(depth, |depth, character| match character {
         '(' | '[' => depth + 1,
         ')' | ']' => depth.saturating_sub(1),
         _ => depth,
     })
+}
+
+/// Characters of the token that affect bracket nesting, skipping the inner text of an atom.
+fn bracket_characters(token: &Token) -> impl Iterator<Item = char> + '_ {
+    let core = if token.is_atom() { "" } else { token.core.as_str() };
+    token.leading.chars().chain(core.chars()).chain(token.trailing.chars())
 }
 
 /// Whether the break between two consecutive lines falls in the middle of a clause.
@@ -316,8 +340,7 @@ pub fn is_mid_clause_break(line_a: &[Token], line_b: &[Token], hard_break: HardB
     if first.text().ends_with(':') || starts_markdown_structure(first) {
         return false;
     }
-    let last_word = last.core.to_lowercase();
-    let last_is_dangling = last.kind == TokenKind::Word && DANGLING_WORDS.contains(&last_word.as_str());
+    let last_is_dangling = last.kind == TokenKind::Word && contains_word(DANGLING_WORDS, &last.core);
     let first_is_uppercase = first.core.chars().next().is_some_and(char::is_uppercase);
     if first_is_uppercase && !last_is_dangling && clause_rank(line_a, line_a.len() - 1, options).is_none() {
         return false;
@@ -357,44 +380,46 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
         .collect();
     let (mut segments, mut violations) = build_segments(paragraph, line_tokens, options);
     reword_segments(&mut segments, options, line_offset, &mut violations);
+    merge_changed_sentences(&mut segments, options);
 
     let mut output: Vec<(String, HardBreak)> = Vec::new();
     let mut is_first_line = true;
     for segment in segments {
         let should_split = segment.modified || options.rules.line_too_long;
+        let source_line = if segment.modified { None } else { segment.source_line };
         let mut emitted_any = false;
-        for sub_segment in split_at_forced(segment.tokens) {
-            let pieces = if should_split {
-                split_tokens(
-                    sub_segment,
-                    first_budget,
-                    rest_budget,
-                    &mut is_first_line,
-                    options,
-                    line_offset,
-                    &mut violations,
-                )
-            } else {
-                is_first_line = false;
-                vec![sub_segment]
-            };
-            for piece in pieces {
-                output.push((join_tokens(&piece), HardBreak::None));
-                emitted_any = true;
-            }
+        let pieces = if should_split {
+            split_tokens(
+                segment.tokens,
+                first_budget,
+                rest_budget,
+                &mut is_first_line,
+                options,
+                line_offset,
+                &mut violations,
+            )
+        } else {
+            is_first_line = false;
+            vec![segment.tokens]
+        };
+        let unchanged_line = if pieces.len() == 1 { source_line } else { None };
+        for piece in pieces {
+            let content = unchanged_line
+                .and_then(|line| paragraph.lines.get(line).cloned())
+                .unwrap_or_else(|| join_tokens(&piece));
+            output.push((content, HardBreak::None));
+            emitted_any = true;
         }
         if emitted_any && let Some(last) = output.last_mut() {
             last.1 = segment.hard_break;
         }
     }
 
-    let original: Vec<(String, HardBreak)> = paragraph
-        .lines
-        .iter()
-        .cloned()
-        .zip(paragraph.hard_breaks.iter().copied())
-        .collect();
-    let changed = output != original;
+    let changed = output.len() != paragraph.lines.len()
+        || output
+            .iter()
+            .zip(paragraph.lines.iter().zip(&paragraph.hard_breaks))
+            .any(|((content, hard_break), (line, original_break))| content != line || hard_break != original_break);
 
     if options.rules.line_too_long {
         violations.extend(over_long_line_violations(paragraph, options, hard_limit, changed));
@@ -436,7 +461,16 @@ pub fn tokens_width(tokens: &[Token]) -> usize {
 /// Join the tokens with single spaces.
 #[must_use]
 pub fn join_tokens(tokens: &[Token]) -> String {
-    tokens.iter().map(Token::text).collect::<Vec<_>>().join(" ")
+    let mut result = String::with_capacity(tokens_width(tokens));
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 {
+            result.push(' ');
+        }
+        result.push_str(&token.leading);
+        result.push_str(&token.core);
+        result.push_str(&token.trailing);
+    }
+    result
 }
 
 /// Uppercase the first character of a word.
@@ -488,7 +522,7 @@ fn read_token(chars: &[char], start: usize, word_end: usize, origin_line: usize)
 
     if let (Some(atom_end), Some(kind)) = (atom_end, atom_kind) {
         let tail_end = chunk_end(chars, atom_end);
-        let tail: Vec<char> = chars.get(atom_end..tail_end).unwrap_or_default().to_vec();
+        let tail: &[char] = chars.get(atom_end..tail_end).unwrap_or_default();
         let mut trailing_start = tail.len();
         while trailing_start > 0
             && tail
@@ -511,7 +545,7 @@ fn read_token(chars: &[char], start: usize, word_end: usize, origin_line: usize)
         return (token, tail_end);
     }
 
-    let chunk: Vec<char> = chars.get(leading_end..word_end).unwrap_or_default().to_vec();
+    let chunk: &[char] = chars.get(leading_end..word_end).unwrap_or_default();
     let mut core_end = chunk.len();
     while core_end > 1
         && chunk
@@ -635,31 +669,64 @@ fn classify_core(core: &str, bare: bool) -> TokenKind {
     if bare && matches!(core, "—" | "–" | "--") {
         return TokenKind::Dash;
     }
-    if RE_LETTER_ABBREVIATION.is_match(core) {
+    let has_dot = core.contains('.');
+    let has_colon = core.contains(':');
+    let starts_with_number =
+        core.starts_with(|character: char| character.is_ascii_digit() || character == '+' || character == '-');
+    if has_dot && RE_LETTER_ABBREVIATION.is_match(core) {
         return TokenKind::Word;
     }
-    if RE_URL.is_match(core) {
+    if (has_colon || has_dot) && RE_URL.is_match(core) {
         return TokenKind::Url;
     }
-    if RE_NUMBER.is_match(core) {
+    if starts_with_number && RE_NUMBER.is_match(core) {
         return TokenKind::Number;
     }
-    if RE_VERSION.is_match(core) {
+    if has_dot && (starts_with_number || core.starts_with('v')) && RE_VERSION.is_match(core) {
         return TokenKind::Version;
     }
-    if core.contains('/') && !core.contains("//") || RE_FILE_NAME.is_match(core) && core.chars().any(|c| c == '.') {
+    if core.contains('/') && !core.contains("//") || has_dot && RE_FILE_NAME.is_match(core) {
         return TokenKind::Path;
     }
-    if RE_IDENTIFIER.is_match(core) {
+    if (core.contains('_') || has_colon || core.contains('(') || core.as_bytes().iter().any(u8::is_ascii_uppercase))
+        && RE_IDENTIFIER.is_match(core)
+    {
         return TokenKind::Identifier;
     }
     TokenKind::Word
 }
 
+/// Whether the word list contains the word, ignoring ASCII case.
+fn contains_word(words: &[&str], word: &str) -> bool {
+    words.iter().any(|candidate| candidate.eq_ignore_ascii_case(word))
+}
+
+/// Whether the two words form the given two word phrase, ignoring ASCII case.
+fn is_word_pair(pair: &str, first: &str, second: &str) -> bool {
+    pair.split_once(' ')
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(first) && right.eq_ignore_ascii_case(second))
+}
+
+/// Whether the word is a configured abbreviation that never ends a sentence.
+fn is_abbreviation(core: &str, options: &FormatOptions) -> bool {
+    if core.is_ascii() {
+        return options.abbreviations.iter().any(|abbreviation| {
+            abbreviation
+                .strip_suffix('.')
+                .is_some_and(|word| word.eq_ignore_ascii_case(core))
+        });
+    }
+    let lowercase = format!("{}.", core.to_lowercase());
+    options.abbreviations.contains(&lowercase)
+}
+
 /// Whether placing the token at a line start would change Markdown structure.
 fn starts_markdown_structure(token: &Token) -> bool {
-    let text = token.text();
-    RE_MARKDOWN_STRUCTURE.is_match(&text) || text.starts_with('#') || text.chars().all(is_trailing_closer)
+    let text = token.text_cow();
+    let can_be_structure = text
+        .starts_with(|character: char| matches!(character, '-' | '+' | '*' | '>' | '|' | '#' | '`' | '~' | '0'..='9'));
+    can_be_structure && (RE_MARKDOWN_STRUCTURE.is_match(&text) || text.starts_with('#'))
+        || text.chars().all(is_trailing_closer)
 }
 
 /// Group paragraph lines into segments, joining lines that end mid-clause.
@@ -678,6 +745,7 @@ fn build_segments(
                 tokens,
                 hard_break,
                 modified: false,
+                source_line: Some(index),
             });
             continue;
         };
@@ -698,6 +766,7 @@ fn build_segments(
             segment.tokens.extend(tokens);
             segment.hard_break = hard_break;
             segment.modified = true;
+            segment.source_line = None;
             current = Some(segment);
         } else {
             segments.push(segment);
@@ -705,6 +774,7 @@ fn build_segments(
                 tokens,
                 hard_break,
                 modified: false,
+                source_line: Some(index),
             });
         }
     }
@@ -857,12 +927,7 @@ fn semicolon_refusal(
         return Some("nothing follows it");
     };
     let depth = tokens.iter().take(index + 1).fold(0i64, |depth, token| {
-        let text = if token.is_atom() {
-            format!("{}{}", token.leading, token.trailing)
-        } else {
-            token.text()
-        };
-        text.chars().fold(depth, |depth, character| match character {
+        bracket_characters(token).fold(depth, |depth, character| match character {
             '(' | '[' => depth + 1,
             ')' | ']' => depth - 1,
             _ => depth,
@@ -922,21 +987,32 @@ fn capitalize_token(token: &Token, options: &FormatOptions) -> Option<String> {
     Some(capitalize(&token.core))
 }
 
-/// Split tokens after every forced break.
-fn split_at_forced(tokens: Vec<Token>) -> Vec<Vec<Token>> {
-    let mut result = Vec::new();
-    let mut current = Vec::new();
-    for token in tokens {
-        let forced = token.force_break_after;
-        current.push(token);
-        if forced {
-            result.push(std::mem::take(&mut current));
+/// Join the segments around a change when the line break between them falls inside a sentence.
+///
+/// Reflowing a sentence means the old break in the middle of it is no longer meaningful,
+/// so the whole sentence is re-broken at its best boundary instead.
+/// Breaks at sentence ends and hard breaks are always kept,
+/// so sentences that already have their own line stay on it.
+fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &FormatOptions) {
+    let mut index = 0;
+    while index + 1 < segments.len() {
+        let Some(first) = segments.get(index) else { break };
+        let Some(second) = segments.get(index + 1) else { break };
+        let inside_sentence = first.hard_break == HardBreak::None
+            && !second.tokens.is_empty()
+            && first.tokens.last().is_some_and(|last| !ends_sentence(last, options));
+        if inside_sentence && (first.modified || second.modified) {
+            let second = segments.remove(index + 1);
+            if let Some(first) = segments.get_mut(index) {
+                first.tokens.extend(second.tokens);
+                first.hard_break = second.hard_break;
+                first.modified = true;
+                first.source_line = None;
+            }
+        } else {
+            index += 1;
         }
     }
-    if !current.is_empty() {
-        result.push(current);
-    }
-    result
 }
 
 /// Break a run of tokens into lines that fit the budgets, preferring semantic boundaries.
@@ -969,20 +1045,22 @@ fn split_tokens(
             .filter(|boundary| boundary.rank == Rank::Sentence && left_width(boundary) <= budget)
             .max_by_key(|boundary| boundary.before)
             .copied();
-        if width <= hard_limit && fitting_sentence.is_none() {
+        let preferred = fitting_sentence.or_else(|| choose_in_band(&boundaries, budget, hard_limit, &left_width));
+        // A line may run a little over the budget unless it can break at a sentence end
+        // or before a coordinating conjunction, which is always worth the extra line.
+        let strong_boundary = preferred.is_some_and(|boundary| boundary.rank >= Rank::ClauseTier2);
+        if !strong_boundary && width <= hard_limit {
             pieces.push(rest);
             break;
         }
 
-        let chosen = fitting_sentence
-            .or_else(|| choose_in_band(&boundaries, budget, hard_limit, &left_width))
-            .or_else(|| {
-                boundaries
-                    .iter()
-                    .filter(|boundary| boundary.rank > Rank::Word && left_width(boundary) <= budget)
-                    .max_by_key(|boundary| (boundary.rank, boundary.before))
-                    .copied()
-            });
+        let chosen = preferred.or_else(|| {
+            boundaries
+                .iter()
+                .filter(|boundary| boundary.rank > Rank::Word && left_width(boundary) <= budget)
+                .max_by_key(|boundary| (boundary.rank, boundary.before))
+                .copied()
+        });
         let chosen = chosen.or_else(|| {
             let leftmost = boundaries
                 .iter()
@@ -1046,7 +1124,8 @@ fn choose_in_band(
             let width = left_width(boundary);
             let fits = width <= budget;
             let closeness = if fits { width } else { usize::MAX - width };
-            (boundary.rank, fits, closeness)
+            let rank = if fits { boundary.rank } else { boundary.rank.lowered() };
+            (rank, fits, closeness)
         })
         .copied()
 }
@@ -1158,6 +1237,144 @@ mod test_helpers {
             .into_iter()
             .find(|boundary| boundary.before == index)
             .map(|boundary| boundary.rank)
+    }
+}
+
+#[cfg(test)]
+mod test_sentence_merge {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_joined_sentence_is_re_broken_at_its_best_boundary() {
+        let lines = [
+            "Parse reads the header from the input and returns the parsed struct, and it reports an error",
+            "when the input is",
+            "truncated.",
+        ];
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "Parse reads the header from the input and returns the parsed struct,".to_string(),
+                "and it reports an error when the input is truncated.".to_string(),
+            ]),
+            "the whole sentence should be re-broken before the conjunction"
+        );
+    }
+
+    #[test]
+    fn a_sentence_that_has_its_own_line_is_kept_on_it() {
+        let lines = ["Use the default width for now.", "default width"];
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines, None,
+            "a line ending a sentence must not absorb the next line"
+        );
+    }
+
+    #[test]
+    fn a_hard_break_stops_the_merge() {
+        let mut paragraph = paragraph(&["text that continues", "onto the next line"], "");
+        paragraph.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120));
+        assert_eq!(outcome.lines, None);
+    }
+
+    #[test]
+    fn short_sentences_on_their_own_lines_survive_a_join_elsewhere() {
+        let lines = [
+            "First sentence.",
+            "Second sentence.",
+            "A third sentence that was wrapped in the",
+            "middle of a clause.",
+        ];
+        let outcome = reflow(&lines, 120);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "First sentence.".to_string(),
+                "Second sentence.".to_string(),
+                "A third sentence that was wrapped in the middle of a clause.".to_string(),
+            ]),
+            "only the wrapped sentence should be joined"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_break_choice {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_fitting_conjunction_wins_over_an_overflowing_sentence_end() {
+        let lines = [concat!(
+            "The current directory placeholder is used as both the first input and first output root, ",
+            "and no database is attached. Tests that need a database can use struct update syntax."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120));
+        let reflowed = outcome.lines.expect("the paragraph should be reflowed");
+        assert_eq!(
+            reflowed.first().map(String::as_str),
+            Some("The current directory placeholder is used as both the first input and first output root,")
+        );
+        assert!(
+            reflowed.iter().all(|line| line.chars().count() + 8 <= 120),
+            "every line should fit the budget: {reflowed:?}"
+        );
+    }
+
+    #[test]
+    fn an_overflowing_conjunction_still_wins_over_a_fitting_comma() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta, iota kappa lambda mu nu and xi omicron pi rho sigma tau upsilon phi chi psi omega";
+        let outcome = reflow(&[text], 60);
+        let lines = outcome.lines.expect("should reflow");
+        assert_eq!(lines[0].chars().count(), 70, "a small overshoot is allowed: {lines:?}");
+    }
+}
+
+#[cfg(test)]
+mod test_unchanged_lines {
+    use super::test_helpers::*;
+    use super::*;
+    use crate::semantic_line_breaks::RuleSet;
+
+    #[test]
+    fn a_line_that_needs_no_change_keeps_its_internal_spacing() {
+        let lines = ["Root/studio dirname/file1.txt       <- prefixed at root"];
+        let outcome = reflow(&lines, 120);
+        assert_eq!(outcome.lines, None);
+    }
+
+    #[test]
+    fn an_aligned_line_is_kept_when_another_line_of_the_paragraph_is_reflowed() {
+        let lines = [
+            "Root/a.txt       <- first",
+            "One sentence here. Another sentence there.",
+        ];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(30));
+        let reflowed = outcome.lines.expect("the paragraph should be reflowed");
+        assert_eq!(
+            reflowed.first().map(String::as_str),
+            Some("Root/a.txt       <- first"),
+            "the untouched line must keep its spacing"
+        );
+    }
+
+    #[test]
+    fn no_enabled_rule_leaves_the_paragraph_alone() {
+        let options = FormatOptions {
+            rules: RuleSet::NONE,
+            ..FormatOptions::with_width(30)
+        };
+        let lines = [
+            "A very long line with several   spaces that would otherwise be reflowed here.",
+            "Another line; with a semicolon \u{2014} and a dash.",
+        ];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &options);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
     }
 }
 
@@ -1593,11 +1810,23 @@ mod test_rewording {
     #[test]
     fn semicolon_becomes_period_and_capitalized_sentence() {
         let outcome = reflow(&["run it; then check the result"], 120);
+        assert_eq!(outcome.lines, Some(vec!["run it. Then check the result".to_string()]));
+        assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, true)]);
+    }
+
+    #[test]
+    fn a_rewritten_semicolon_breaks_the_line_when_the_sentences_do_not_fit() {
+        let outcome = reflow(
+            &["run the whole pipeline once; then check the result of every single step"],
+            40,
+        );
         assert_eq!(
             outcome.lines,
-            Some(vec!["run it.".to_string(), "Then check the result".to_string()])
+            Some(vec![
+                "run the whole pipeline once.".to_string(),
+                "Then check the result of every single step".to_string()
+            ])
         );
-        assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, true)]);
     }
 
     #[test]
@@ -1627,9 +1856,9 @@ mod test_rewording {
     #[test]
     fn semicolon_before_atoms_and_capitals_needs_no_capitalization() {
         let outcome = reflow(&["x y; `y` wins"], 120);
-        assert_eq!(outcome.lines, Some(vec!["x y.".to_string(), "`y` wins".to_string()]));
+        assert_eq!(outcome.lines, Some(vec!["x y. `y` wins".to_string()]));
         let outcome = reflow(&["x y; Foo wins"], 120);
-        assert_eq!(outcome.lines, Some(vec!["x y.".to_string(), "Foo wins".to_string()]));
+        assert_eq!(outcome.lines, Some(vec!["x y. Foo wins".to_string()]));
     }
 
     #[test]

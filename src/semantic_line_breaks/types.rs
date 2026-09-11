@@ -4,6 +4,7 @@
 //! paragraph and region representations, and the formatting options used by the prose engine, the block splitters,
 //! and the `slb` binary.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
 
@@ -404,6 +405,25 @@ impl FileKind {
     }
 }
 
+impl Rank {
+    /// The next lower ranking.
+    ///
+    /// Used to penalize a break candidate whose line does not fit the budget,
+    /// so an overflowing break has to be clearly better than one that fits.
+    #[must_use]
+    pub const fn lowered(self) -> Self {
+        match self {
+            Self::Word | Self::ClauseTier4 => Self::Word,
+            Self::ClauseTier3 => Self::ClauseTier4,
+            Self::Punctuation => Self::ClauseTier3,
+            Self::ClauseTier2 => Self::Punctuation,
+            Self::ClauseTier1 => Self::ClauseTier2,
+            Self::Sentence => Self::ClauseTier1,
+            Self::Forced => Self::Sentence,
+        }
+    }
+}
+
 impl ViolationKind {
     /// Short name used in reports and in the rules option.
     #[must_use]
@@ -450,6 +470,24 @@ impl Token {
         format!("{}{}{}", self.leading, self.core, self.trailing)
     }
 
+    /// Full text of the token, borrowing the core when there is no surrounding punctuation.
+    #[must_use]
+    pub fn text_cow(&self) -> Cow<'_, str> {
+        if self.leading.is_empty() && self.trailing.is_empty() {
+            Cow::Borrowed(&self.core)
+        } else {
+            Cow::Owned(self.text())
+        }
+    }
+
+    /// Characters of the token in order, including surrounding punctuation.
+    pub fn characters(&self) -> impl Iterator<Item = char> + '_ {
+        self.leading
+            .chars()
+            .chain(self.core.chars())
+            .chain(self.trailing.chars())
+    }
+
     /// Width of the token in characters.
     #[must_use]
     pub fn width(&self) -> usize {
@@ -482,7 +520,12 @@ impl Token {
     /// Whether the token ends with an opening bracket or quote.
     #[must_use]
     pub fn ends_with_opener(&self) -> bool {
-        self.text().ends_with(is_opener)
+        self.trailing
+            .chars()
+            .next_back()
+            .or_else(|| self.core.chars().next_back())
+            .or_else(|| self.leading.chars().next_back())
+            .is_some_and(is_opener)
     }
 
     /// First visible character of the token.
@@ -686,6 +729,34 @@ mod test_token {
 }
 
 #[cfg(test)]
+mod test_rank {
+    use super::*;
+
+    #[test]
+    fn lowering_moves_one_step_down_and_stops_at_word() {
+        assert_eq!(Rank::Forced.lowered(), Rank::Sentence);
+        assert_eq!(Rank::Sentence.lowered(), Rank::ClauseTier1);
+        assert_eq!(Rank::ClauseTier1.lowered(), Rank::ClauseTier2);
+        assert_eq!(Rank::ClauseTier2.lowered(), Rank::Punctuation);
+        assert_eq!(Rank::Punctuation.lowered(), Rank::ClauseTier3);
+        assert_eq!(Rank::ClauseTier3.lowered(), Rank::ClauseTier4);
+        assert_eq!(Rank::ClauseTier4.lowered(), Rank::Word);
+        assert_eq!(Rank::Word.lowered(), Rank::Word);
+    }
+
+    #[test]
+    fn the_ranking_order_is_word_to_forced() {
+        assert!(Rank::Word < Rank::ClauseTier4);
+        assert!(Rank::ClauseTier4 < Rank::ClauseTier3);
+        assert!(Rank::ClauseTier3 < Rank::Punctuation);
+        assert!(Rank::Punctuation < Rank::ClauseTier2);
+        assert!(Rank::ClauseTier2 < Rank::ClauseTier1);
+        assert!(Rank::ClauseTier1 < Rank::Sentence);
+        assert!(Rank::Sentence < Rank::Forced);
+    }
+}
+
+#[cfg(test)]
 mod test_rule_set {
     use super::*;
 
@@ -699,5 +770,303 @@ mod test_rule_set {
         assert!(!rules.em_dash);
         assert!(rules.is_enabled(ViolationKind::Semicolon));
         assert!(!rules.is_enabled(ViolationKind::EmDash));
+    }
+}
+
+#[cfg(test)]
+mod test_file_kind_extensions {
+    use super::*;
+
+    #[test]
+    fn every_supported_extension_maps_to_a_kind() {
+        let expected = [
+            ("rs", FileKind::Rust),
+            ("cpp", FileKind::CLike),
+            ("java", FileKind::CLike),
+            ("kt", FileKind::CLike),
+            ("swift", FileKind::CLike),
+            ("cs", FileKind::CLike),
+            ("scala", FileKind::CLike),
+            ("dart", FileKind::CLike),
+            ("mm", FileKind::CLike),
+            ("ts", FileKind::JavaScript),
+            ("mjs", FileKind::JavaScript),
+            ("go", FileKind::Go),
+            ("py", FileKind::Python),
+            ("pyi", FileKind::Python),
+            ("sh", FileKind::Shell),
+            ("zsh", FileKind::Shell),
+            ("fish", FileKind::Shell),
+            ("toml", FileKind::Toml),
+            ("yaml", FileKind::Yaml),
+            ("yml", FileKind::Yaml),
+            ("dockerfile", FileKind::Dockerfile),
+            ("mk", FileKind::Makefile),
+            ("rb", FileKind::Ruby),
+            ("sql", FileKind::Sql),
+            ("lua", FileKind::Lua),
+            ("markdown", FileKind::Markdown),
+        ];
+        for (extension, kind) in expected {
+            assert_eq!(FileKind::from_extension(extension), Some(kind), "extension {extension}");
+            assert_eq!(
+                FileKind::from_extension(&extension.to_ascii_uppercase()),
+                Some(kind),
+                "uppercase extension {extension}"
+            );
+        }
+        assert_eq!(FileKind::from_extension("zip"), None);
+        assert_eq!(FileKind::from_extension(""), None);
+    }
+
+    #[test]
+    fn well_known_file_names_map_to_a_kind() {
+        let expected = [
+            ("Dockerfile", FileKind::Dockerfile),
+            ("Containerfile", FileKind::Dockerfile),
+            ("Makefile", FileKind::Makefile),
+            ("makefile", FileKind::Makefile),
+            ("GNUmakefile", FileKind::Makefile),
+            ("Gemfile", FileKind::Ruby),
+            ("Rakefile", FileKind::Ruby),
+            (".bashrc", FileKind::Shell),
+            (".zshrc", FileKind::Shell),
+            (".zshenv", FileKind::Shell),
+            (".zprofile", FileKind::Shell),
+            (".profile", FileKind::Shell),
+            (".bash_profile", FileKind::Shell),
+        ];
+        for (name, kind) in expected {
+            assert_eq!(FileKind::from_path(Path::new(name)), Some(kind), "file name {name}");
+            assert_eq!(
+                FileKind::from_path(Path::new("some/directory").join(name).as_path()),
+                Some(kind),
+                "nested file name {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn comment_styles_cover_every_kind() {
+        let kinds = [
+            FileKind::Rust,
+            FileKind::CLike,
+            FileKind::JavaScript,
+            FileKind::Go,
+            FileKind::Python,
+            FileKind::Shell,
+            FileKind::Toml,
+            FileKind::Yaml,
+            FileKind::Dockerfile,
+            FileKind::Makefile,
+            FileKind::Ruby,
+            FileKind::Sql,
+            FileKind::Lua,
+            FileKind::Markdown,
+        ];
+        for kind in kinds {
+            let style = kind.comment_style();
+            let has_syntax = !style.line_markers.is_empty() || style.block.is_some() || style.docstrings;
+            assert_eq!(
+                has_syntax,
+                kind != FileKind::Markdown,
+                "{kind:?} should only lack comment syntax for Markdown"
+            );
+        }
+        assert_eq!(FileKind::Sql.comment_style().line_markers, &["--"]);
+        assert_eq!(FileKind::Lua.comment_style().line_markers, &["--"]);
+        assert_eq!(FileKind::Go.comment_style().line_markers, &["///", "//"]);
+        assert!(FileKind::CLike.comment_style().block.is_some());
+        assert!(FileKind::Yaml.comment_style().block.is_none());
+    }
+}
+
+#[cfg(test)]
+mod test_violation_kind {
+    use super::*;
+
+    #[test]
+    fn names_and_display_match_the_rules_option() {
+        let expected = [
+            (ViolationKind::LineTooLong, "too-long"),
+            (ViolationKind::MidClauseBreak, "mid-clause"),
+            (ViolationKind::Semicolon, "semicolon"),
+            (ViolationKind::EmDash, "em-dash"),
+            (ViolationKind::TrailingComment, "trailing"),
+        ];
+        for (kind, name) in expected {
+            assert_eq!(kind.name(), name);
+            assert_eq!(kind.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn violations_display_with_and_without_a_column() {
+        let violation = Violation {
+            line: 12,
+            column: None,
+            kind: ViolationKind::Semicolon,
+            message: "semicolon joins clauses".to_string(),
+            fixable: false,
+        };
+        assert_eq!(violation.to_string(), "12: semicolon: semicolon joins clauses");
+
+        let with_column = Violation {
+            column: Some(5),
+            ..violation
+        };
+        assert_eq!(with_column.to_string(), "12:5: semicolon: semicolon joins clauses");
+    }
+}
+
+#[cfg(test)]
+mod test_token_helpers {
+    use super::*;
+
+    #[test]
+    fn text_cow_borrows_a_bare_core() {
+        let bare = Token::word("value", 0);
+        assert!(matches!(bare.text_cow(), Cow::Borrowed("value")));
+        assert_eq!(bare.text(), "value");
+
+        let mut wrapped = Token::word("value", 0);
+        wrapped.leading = "(".to_string();
+        wrapped.trailing = ").".to_string();
+        assert!(matches!(wrapped.text_cow(), Cow::Owned(_)));
+        assert_eq!(wrapped.text_cow(), "(value).");
+    }
+
+    #[test]
+    fn characters_yield_the_whole_token_in_order() {
+        let mut token = Token::word("value", 0);
+        token.leading = "[".to_string();
+        token.trailing = "],".to_string();
+        assert_eq!(token.characters().collect::<String>(), "[value],");
+        assert_eq!(token.width(), 8);
+    }
+
+    #[test]
+    fn first_char_falls_back_to_the_core() {
+        let bare = Token::word("word", 3);
+        assert_eq!(bare.first_char(), Some('w'));
+        assert_eq!(bare.origin_line, 3);
+
+        let mut wrapped = Token::word("word", 0);
+        wrapped.leading = "\"".to_string();
+        assert_eq!(wrapped.first_char(), Some('"'));
+
+        let empty = Token::word("", 0);
+        assert_eq!(empty.first_char(), None);
+    }
+
+    #[test]
+    fn ends_with_opener_checks_the_last_character_of_the_token() {
+        let mut token = Token::word("call", 0);
+        assert!(!token.ends_with_opener());
+        token.trailing = "(".to_string();
+        assert!(token.ends_with_opener());
+
+        let mut core_only = Token::word("(", 0);
+        assert!(core_only.ends_with_opener());
+        core_only.core = String::new();
+        core_only.leading = "[".to_string();
+        assert!(core_only.ends_with_opener());
+    }
+
+    #[test]
+    fn atoms_are_every_kind_except_words_and_dashes() {
+        let kinds = [
+            (TokenKind::Word, false),
+            (TokenKind::Dash, false),
+            (TokenKind::Code, true),
+            (TokenKind::Url, true),
+            (TokenKind::Path, true),
+            (TokenKind::Version, true),
+            (TokenKind::Number, true),
+            (TokenKind::Identifier, true),
+            (TokenKind::Link, true),
+            (TokenKind::Html, true),
+        ];
+        for (kind, is_atom) in kinds {
+            let token = Token {
+                kind,
+                ..Token::word("x", 0)
+            };
+            assert_eq!(token.is_atom(), is_atom, "{kind:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_options_and_prefixes {
+    use super::*;
+
+    #[test]
+    fn hard_break_markers_round_trip() {
+        assert_eq!(HardBreak::None.marker(), "");
+        assert_eq!(HardBreak::Spaces.marker(), "  ");
+        assert_eq!(HardBreak::Backslash.marker(), "\\");
+        assert_eq!(HardBreak::default(), HardBreak::None);
+    }
+
+    #[test]
+    fn the_first_line_uses_the_first_prefix() {
+        let paragraph = Paragraph {
+            start_line: 0,
+            end_line: 2,
+            first_prefix: "/// - ".to_string(),
+            rest_prefix: "///   ".to_string(),
+            last_suffix: String::new(),
+            lines: vec!["one".to_string(), "two".to_string()],
+            hard_breaks: vec![HardBreak::None; 2],
+        };
+        assert_eq!(paragraph.prefix_for(0), "/// - ");
+        assert_eq!(paragraph.prefix_for(1), "///   ");
+        assert_eq!(paragraph.prefix_for(9), "///   ");
+    }
+
+    #[test]
+    fn options_with_width_keep_the_other_defaults() {
+        let options = FormatOptions::with_width(72);
+        let defaults = FormatOptions::default();
+        assert_eq!(options.max_width, 72);
+        assert_eq!(options.tab_width, DEFAULT_TAB_WIDTH);
+        assert_eq!(options.rules, RuleSet::ALL);
+        assert_eq!(options.abbreviations, defaults.abbreviations);
+        assert_eq!(options.directive_prefixes, defaults.directive_prefixes);
+        assert_eq!(options.preserve_lowercase, defaults.preserve_lowercase);
+        assert!(options.clause_starters.is_empty());
+        assert!(!options.join_sentences);
+        assert!(!options.allow_word_break);
+        assert_eq!(defaults.max_width, DEFAULT_MAX_WIDTH);
+    }
+
+    #[test]
+    fn the_rule_set_defaults_to_all_rules() {
+        assert_eq!(RuleSet::default(), RuleSet::ALL);
+        assert_eq!(RuleSet::from_kinds(&[]), RuleSet::NONE);
+        for kind in [
+            ViolationKind::LineTooLong,
+            ViolationKind::MidClauseBreak,
+            ViolationKind::Semicolon,
+            ViolationKind::EmDash,
+            ViolationKind::TrailingComment,
+        ] {
+            assert!(RuleSet::ALL.is_enabled(kind), "{kind} should be enabled in ALL");
+            assert!(!RuleSet::NONE.is_enabled(kind), "{kind} should be disabled in NONE");
+            assert!(RuleSet::from_kinds(&[kind]).is_enabled(kind));
+        }
+    }
+
+    #[test]
+    fn openers_and_closers_are_recognized() {
+        for character in ['(', '[', '{', '"', '\'', '“', '‘', '«'] {
+            assert!(is_opener(character), "{character} should open");
+        }
+        for character in [')', ']', '}', '"', '\'', '”', '’', '»', '`', '*', '_'] {
+            assert!(is_closer(character), "{character} should close");
+        }
+        assert!(!is_opener('a'));
+        assert!(!is_closer('a'));
     }
 }

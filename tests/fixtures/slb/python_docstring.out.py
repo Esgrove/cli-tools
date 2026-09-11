@@ -5,8 +5,7 @@ import os
 
 
 def parse(path: str) -> dict:
-    """Parse the file at the given path and return the parsed mapping.
-    Missing files raise.
+    """Parse the file at the given path and return the parsed mapping. Missing files raise.
 
     Args:
         path: the file path that is

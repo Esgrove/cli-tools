@@ -120,8 +120,14 @@ impl Config {
     /// # Errors
     /// Returns an error if the config file cannot be read or parsed or names an unknown rule.
     pub fn from_args(args: &Args) -> Result<Self> {
-        let user_config = SlbConfig::get_user_config()?;
+        Self::from_args_and_user_config(args, SlbConfig::get_user_config()?)
+    }
 
+    /// Create the final config from command line arguments and the given user config.
+    ///
+    /// # Errors
+    /// Returns an error if the user config names an unknown rule.
+    pub fn from_args_and_user_config(args: &Args, user_config: SlbConfig) -> Result<Self> {
         let rules = if args.rules.is_empty() {
             if user_config.rules.is_empty() {
                 RuleSet::ALL
@@ -326,5 +332,112 @@ mod test_config_from_args {
         assert!(!config.project_width);
         let options = config.format_options(90);
         assert_eq!(options.max_width, 90);
+    }
+}
+
+#[cfg(test)]
+mod test_config_merge {
+    use clap::Parser;
+
+    use super::*;
+
+    /// Build a config from arguments and an explicit user config, without reading the config file.
+    fn config(arguments: &[&str], toml: &str) -> Result<Config> {
+        let args = Args::try_parse_from(arguments).expect("arguments should parse");
+        let user_config = SlbConfig::from_toml_str(toml).expect("user config should parse");
+        Config::from_args_and_user_config(&args, user_config)
+    }
+
+    #[test]
+    fn an_empty_user_config_gives_the_built_in_defaults() {
+        let config = config(&["slb"], "").expect("config should build");
+        assert_eq!(config.rules, RuleSet::ALL);
+        assert_eq!(config.exclude, to_strings(DEFAULT_EXCLUDES));
+        assert!(config.extensions.is_empty());
+        assert!(config.width.is_none());
+        assert!(config.project_width);
+        assert!(!config.join_sentences);
+        assert!(!config.allow_word_break);
+        assert!(config.clause_starters.is_empty());
+        assert_eq!(config.abbreviations, to_strings(DEFAULT_ABBREVIATIONS));
+    }
+
+    #[test]
+    fn the_user_config_rules_are_used_when_no_rules_option_is_given() {
+        let config = config(&["slb"], "[slb]\nrules = [\"semicolon\", \"em-dash\"]\n").expect("config should build");
+        assert!(config.rules.semicolon);
+        assert!(config.rules.em_dash);
+        assert!(!config.rules.line_too_long);
+        assert!(!config.rules.trailing_comment);
+    }
+
+    #[test]
+    fn the_rules_option_wins_over_the_user_config() {
+        let config =
+            config(&["slb", "--rules", "trailing"], "[slb]\nrules = [\"semicolon\"]\n").expect("config should build");
+        assert!(config.rules.trailing_comment);
+        assert!(!config.rules.semicolon);
+    }
+
+    #[test]
+    fn an_unknown_rule_in_the_user_config_is_an_error() {
+        let error = config(&["slb"], "[slb]\nrules = [\"bogus\"]\n").expect_err("an unknown rule should fail");
+        assert!(format!("{error:#}").contains("Unknown rule in config file: 'bogus'"));
+    }
+
+    #[test]
+    fn the_user_config_excludes_replace_the_defaults() {
+        let config = config(&["slb"], "[slb]\nexclude = [\"generated\"]\n").expect("config should build");
+        assert_eq!(config.exclude, vec!["generated"]);
+
+        let overridden = config_with_exclude_option();
+        assert_eq!(overridden.exclude, vec!["docs"]);
+    }
+
+    /// Config with an exclude given on the command line and another one in the user config.
+    fn config_with_exclude_option() -> Config {
+        config(&["slb", "--exclude", "docs"], "[slb]\nexclude = [\"generated\"]\n").expect("config should build")
+    }
+
+    #[test]
+    fn the_user_config_width_and_flags_are_merged() {
+        let config = config(
+            &["slb"],
+            "[slb]\nwidth = 100\njoin_sentences = true\nallow_word_break = true\nuse_project_config = false\nverbose = true\n",
+        )
+        .expect("config should build");
+        assert_eq!(config.width, Some(100));
+        assert!(config.join_sentences);
+        assert!(config.allow_word_break);
+        assert!(!config.project_width);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn the_width_option_wins_over_the_user_config() {
+        let config = config(&["slb", "--width", "80"], "[slb]\nwidth = 100\n").expect("config should build");
+        assert_eq!(config.width, Some(80));
+    }
+
+    #[test]
+    fn extensions_from_the_user_config_are_normalized() {
+        let config = config(&["slb"], "[slb]\nextensions = [\".RS\", \"MD\"]\n").expect("config should build");
+        assert_eq!(config.extensions, vec!["rs", "md"]);
+    }
+
+    #[test]
+    fn the_format_options_carry_the_merged_values() {
+        let config = config(
+            &["slb"],
+            "[slb]\nclause_starters = [\"meanwhile\"]\nabbreviations = [\"approx.\"]\npreserve_lowercase = [\"ffmpeg\"]\n",
+        )
+        .expect("config should build");
+        let options = config.format_options(95);
+        assert_eq!(options.max_width, 95);
+        assert_eq!(options.tab_width, DEFAULT_TAB_WIDTH);
+        assert_eq!(options.clause_starters, vec!["meanwhile"]);
+        assert!(options.abbreviations.contains(&"approx.".to_string()));
+        assert!(options.preserve_lowercase.contains(&"ffmpeg".to_string()));
+        assert_eq!(options.rules, RuleSet::ALL);
     }
 }
