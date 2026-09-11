@@ -1,0 +1,8 @@
+# Configuration for the formatter. Every section is optional.
+# The width applies to comments and Markdown, it counts the comment marker and the indentation.
+
+[slb]
+# Maximum line length including the indentation and the comment marker, which defaults to 120.
+width = 120
+# A string value with a hash inside "# not a comment" must not be split.
+exclude = ["target", "node_modules"]

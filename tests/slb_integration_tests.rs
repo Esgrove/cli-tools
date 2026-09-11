@@ -1,6 +1,7 @@
 //! Integration tests for the `slb` formatter using fixture file pairs.
 //!
-//! Each `*.in.*` fixture under `tests/fixtures/slb/` is formatted and compared to the matching `*.out.*` file.
+//! Each `*.in.*` fixture under `tests/fixtures/slb/` is formatted
+//! and compared to the matching `*.out.*` file.
 //! The expected output is formatted again to verify that formatting is idempotent.
 
 use std::fs;
@@ -68,6 +69,36 @@ fn c_block_comment_fixture() {
 #[test]
 fn yaml_comments_fixture() {
     assert_fixture("yaml_comments.in.yml", "yaml_comments.out.yml");
+}
+
+#[test]
+fn typescript_comments_fixture() {
+    assert_fixture("typescript_comments.in.ts", "typescript_comments.out.ts");
+}
+
+#[test]
+fn go_comments_fixture() {
+    assert_fixture("go_comments.in.go", "go_comments.out.go");
+}
+
+#[test]
+fn shell_script_fixture() {
+    assert_fixture("shell_script.in.sh", "shell_script.out.sh");
+}
+
+#[test]
+fn sql_queries_fixture() {
+    assert_fixture("sql_queries.in.sql", "sql_queries.out.sql");
+}
+
+#[test]
+fn toml_config_fixture() {
+    assert_fixture("toml_config.in.toml", "toml_config.out.toml");
+}
+
+#[test]
+fn markdown_readme_fixture() {
+    assert_fixture("markdown_readme.in.md", "markdown_readme.out.md");
 }
 
 #[test]

@@ -52,7 +52,7 @@ pub struct Args {
     #[arg(short, long, value_name = "N")]
     width: Option<usize>,
 
-    /// Do not read the line length from project config files such as .editorconfig, rustfmt.toml, and pyproject.toml
+    /// Do not read the line length from project config files such as .editorconfig, rustfmt.toml, or pyproject.toml
     #[arg(short, long)]
     ignore_project_config: bool,
 
