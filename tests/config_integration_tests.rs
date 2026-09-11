@@ -42,6 +42,7 @@ fn sample_config_has_all_sections() {
         "video_stats",
         "resolution",
         "thumbnail",
+        "slb",
     ];
 
     for section in expected_sections {
@@ -183,6 +184,20 @@ fn video_stats_section_has_expected_structure() {
 }
 
 #[test]
+fn slb_section_has_expected_structure() {
+    let config_content = read_sample_config();
+    let value: toml::Value = toml::from_str(&config_content).expect("should parse");
+
+    let slb = value.get("slb").expect("should have slb section");
+
+    assert!(slb.get("width").is_some());
+    assert!(slb.get("rules").is_some());
+    assert!(slb.get("exclude").is_some());
+    assert!(slb.get("extensions").is_some());
+    assert!(slb.get("use_project_config").is_some());
+}
+
+#[test]
 fn config_values_have_correct_types() {
     let config_content = read_sample_config();
     let value: toml::Value = toml::from_str(&config_content).expect("should parse");
@@ -196,6 +211,8 @@ fn config_values_have_correct_types() {
     let thumbnail = value.get("thumbnail").expect("should have thumbnail section");
     assert!(thumbnail.get("cols_landscape").unwrap().is_integer());
     assert!(thumbnail.get("quality").unwrap().is_integer());
+    let slb = value.get("slb").expect("should have slb section");
+    assert!(slb.get("width").unwrap().is_integer());
 
     // Check float types
     let qtorrent = value.get("qtorrent").expect("should have qtorrent section");
@@ -210,4 +227,5 @@ fn config_values_have_correct_types() {
     let dupefind = value.get("dupefind").expect("should have dupefind section");
     assert!(dupefind.get("extensions").unwrap().is_array());
     assert!(dupefind.get("patterns").unwrap().is_array());
+    assert!(slb.get("rules").unwrap().is_array());
 }

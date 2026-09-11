@@ -109,6 +109,10 @@ path = "src/bin/qtorrent/main.rs"
 name = "rxrename"
 path = "src/bin/rx_rename.rs"
 
+[[bin]]
+name = "slb"
+path = "src/bin/semantic_line_breaks/main.rs"
+
 [[bench]]
 name = "date"
 harness = false
@@ -131,6 +135,10 @@ harness = false
 
 [[bench]]
 name = "dupe_find"
+harness = false
+
+[[bench]]
+name = "semantic_line_breaks"
 harness = false
 
 [profile.dev]

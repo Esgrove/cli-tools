@@ -96,6 +96,20 @@ overwrite = false
 recurse = false
 verbose = false
 
+[slb]
+width = 110
+use_project_config = true
+rules = ["too-long", "mid-clause", "semicolon", "em-dash", "trailing"]
+join_sentences = false
+allow_word_break = false
+extensions = ["rs", "md"]
+exclude = ["target"]
+abbreviations = ["approx."]
+clause_starters = ["meanwhile"]
+directive_prefixes = ["todo"]
+preserve_lowercase = ["ffmpeg"]
+verbose = false
+
 [thumbnail]
 cols_landscape = 3
 rows_landscape = 4
