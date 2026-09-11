@@ -508,7 +508,7 @@ Options:
   -p, --print                   Show the changes fix mode would make without writing
   -j, --join-sentences          Also pack consecutive short sentences up to the line limit
   -w, --width <N>               Maximum line length including indentation and comment marker (default: from project config or 120)
-  -i, --ignore-project-config   Do not read the line length from project config files such as .editorconfig, rustfmt.toml, and pyproject.toml
+  -i, --ignore-project-config   Do not read the line length from project config files such as .editorconfig, rustfmt.toml, or pyproject.toml
   -R, --rules <RULES>           Rules to enable (default: all) [possible values: too-long, mid-clause, semicolon, em-dash, trailing]
   -e, --extensions <EXTENSION>  Only process files with these extensions
   -x, --exclude <PATTERN>       Skip paths with a directory or file name equal to this text
