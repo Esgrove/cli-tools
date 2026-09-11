@@ -97,6 +97,11 @@ fn toml_config_fixture() {
 }
 
 #[test]
+fn bracket_prose_fixture() {
+    assert_fixture("bracket_prose.in.ts", "bracket_prose.out.ts");
+}
+
+#[test]
 fn markdown_readme_fixture() {
     assert_fixture("markdown_readme.in.md", "markdown_readme.out.md");
 }

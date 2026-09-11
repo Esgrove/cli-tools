@@ -168,7 +168,28 @@ pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) 
         tokens.push(token);
         position = end.max(position + 1);
     }
+    demote_command_separators(&mut tokens);
     tokens
+}
+
+/// Turn a double hyphen that precedes a command line flag into a plain word.
+///
+/// A line such as `pnpm run migrate -- --env dev` uses the double hyphen to separate arguments,
+/// so rewriting it as a dash would corrupt the command.
+fn demote_command_separators(tokens: &mut [Token]) {
+    for index in 0..tokens.len() {
+        let next_is_flag = tokens
+            .get(index + 1)
+            .is_some_and(|next| next.core.starts_with('-') || next.leading.starts_with('-'));
+        if !next_is_flag {
+            continue;
+        }
+        if let Some(token) = tokens.get_mut(index)
+            && token.kind == TokenKind::Dash
+        {
+            token.kind = TokenKind::Word;
+        }
+    }
 }
 
 /// Whether the token at `index` ends a sentence and the following token starts a new one.
@@ -262,12 +283,12 @@ pub fn clause_rank(tokens: &[Token], index: usize, options: &FormatOptions) -> O
 #[must_use]
 pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundary> {
     let mut boundaries = Vec::new();
-    let mut depth = 0usize;
+    let depths = bracket_depths(tokens);
     for index in 1..tokens.len() {
         let (Some(previous), Some(current)) = (tokens.get(index - 1), tokens.get(index)) else {
             continue;
         };
-        depth = bracket_depth_after(previous, depth);
+        let depth = depths.get(index).copied().unwrap_or_default();
         if starts_markdown_structure(current) {
             continue;
         }
@@ -285,14 +306,10 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
         } else {
             clause.unwrap_or(Rank::Word)
         };
-        if depth > 0
-            && matches!(
-                rank,
-                Rank::Punctuation | Rank::ClauseTier1 | Rank::ClauseTier2 | Rank::ClauseTier3 | Rank::ClauseTier4
-            )
-        {
+        if depth > 0 {
+            // Text inside brackets belongs together, so a break there is a last resort.
             rank = Rank::Word;
-        } else if depth == 0 && rank == Rank::Word {
+        } else if rank == Rank::Word {
             let closes_group = previous.trailing.contains([')', ']']);
             let opens_group = current.leading.contains(['(', '[']);
             if closes_group || opens_group {
@@ -304,13 +321,108 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
     boundaries
 }
 
-/// Bracket nesting depth after the token, given the depth before it.
-fn bracket_depth_after(token: &Token, depth: usize) -> usize {
-    bracket_characters(token).fold(depth, |depth, character| match character {
-        '(' | '[' => depth + 1,
-        ')' | ']' => depth.saturating_sub(1),
-        _ => depth,
-    })
+/// Bracket nesting depth before each token, counting only brackets that are closed later.
+///
+/// A bracket that is never closed is ignored,
+/// so a stray parenthesis in prose does not make the rest of the text unbreakable.
+///
+/// Returns an empty vector when the tokens hold no brackets, since every depth is then zero.
+fn bracket_depths(tokens: &[Token]) -> Vec<usize> {
+    let mut events = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        collect_bracket_events(token, index, &mut events);
+    }
+    if events.is_empty() {
+        return Vec::new();
+    }
+    retain_matched_brackets(&mut events);
+
+    let mut depths = Vec::with_capacity(tokens.len());
+    let mut depth = 0usize;
+    let mut next = 0;
+    for index in 0..tokens.len() {
+        depths.push(depth);
+        while let Some(&(position, opens)) = events.get(next) {
+            if position != index {
+                break;
+            }
+            depth = if opens { depth + 1 } else { depth.saturating_sub(1) };
+            next += 1;
+        }
+    }
+    depths
+}
+
+/// Whether each paragraph line ends inside a bracket that closes on a later line.
+///
+/// Returns an empty vector when the lines hold no brackets.
+fn lines_ending_inside_brackets(line_tokens: &[Vec<Token>]) -> Vec<bool> {
+    let mut events = Vec::new();
+    for (index, tokens) in line_tokens.iter().enumerate() {
+        for token in tokens {
+            collect_bracket_events(token, index, &mut events);
+        }
+    }
+    if events.is_empty() {
+        return Vec::new();
+    }
+    retain_matched_brackets(&mut events);
+
+    let mut inside = Vec::with_capacity(line_tokens.len());
+    let mut depth = 0usize;
+    let mut next = 0;
+    for index in 0..line_tokens.len() {
+        while let Some(&(position, opens)) = events.get(next) {
+            if position != index {
+                break;
+            }
+            depth = if opens { depth + 1 } else { depth.saturating_sub(1) };
+            next += 1;
+        }
+        inside.push(depth > 0);
+    }
+    inside
+}
+
+/// Append the bracket characters of the token as `(position, opens)` events.
+///
+/// Brackets are ASCII, so the parts are scanned as bytes to avoid decoding every character.
+/// The inner text of an atom is skipped, so a bracket in a code span or a link does not count.
+fn collect_bracket_events(token: &Token, position: usize, events: &mut Vec<(usize, bool)>) {
+    let core = if token.is_atom() { "" } else { token.core.as_str() };
+    for part in [token.leading.as_str(), core, token.trailing.as_str()] {
+        for byte in part.bytes() {
+            match byte {
+                b'(' | b'[' => events.push((position, true)),
+                b')' | b']' => events.push((position, false)),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Drop the events of brackets that are never opened or never closed.
+fn retain_matched_brackets(events: &mut Vec<(usize, bool)>) {
+    let mut matched = vec![false; events.len()];
+    let mut open_events: Vec<usize> = Vec::new();
+    for (index, (_, opens)) in events.iter().enumerate() {
+        if *opens {
+            open_events.push(index);
+        } else if let Some(open) = open_events.pop() {
+            if let Some(slot) = matched.get_mut(open) {
+                *slot = true;
+            }
+            if let Some(slot) = matched.get_mut(index) {
+                *slot = true;
+            }
+        }
+    }
+    let mut index = 0;
+    events.retain(|_| {
+        let keep = matched.get(index).copied().unwrap_or_default();
+        index += 1;
+        keep
+    });
 }
 
 /// Characters of the token that affect bracket nesting, skipping the inner text of an atom.
@@ -415,11 +527,22 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
         }
     }
 
-    let changed = output.len() != paragraph.lines.len()
+    let mut changed = output.len() != paragraph.lines.len()
         || output
             .iter()
             .zip(paragraph.lines.iter().zip(&paragraph.hard_breaks))
             .any(|((content, hard_break), (line, original_break))| content != line || hard_break != original_break);
+
+    if changed && !fits_as_well_as_before(&output, paragraph, options, hard_limit) {
+        // Joining lines that cannot be broken again would replace readable lines with a longer one.
+        // The over-long lines the split attempt reported are never written, so those reports go too,
+        // and the original lines are measured further down like any other unchanged paragraph.
+        changed = false;
+        violations.retain(|violation| violation.kind != ViolationKind::LineTooLong);
+        for violation in &mut violations {
+            violation.fixable = false;
+        }
+    }
 
     if options.rules.line_too_long {
         violations.extend(over_long_line_violations(paragraph, options, hard_limit, changed));
@@ -438,6 +561,43 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
             .collect()
     });
     ReflowOutcome { lines, violations }
+}
+
+/// Whether the reflowed lines are no longer than the lines the paragraph started with.
+///
+/// A line may use the soft overflow, but reflowing must never push a line past the hard limit
+/// when the paragraph did not start out that long.
+fn fits_as_well_as_before(
+    output: &[(String, HardBreak)],
+    paragraph: &Paragraph,
+    options: &FormatOptions,
+    hard_limit: usize,
+) -> bool {
+    let line_width = |index: usize, content: &str, hard_break: HardBreak| {
+        prefix_width(paragraph.prefix_for(index), options.tab_width)
+            + content.chars().count()
+            + hard_break.marker().len()
+    };
+    let output_width = output
+        .iter()
+        .enumerate()
+        .map(|(index, (content, hard_break))| line_width(index, content, *hard_break))
+        .max()
+        .unwrap_or_default();
+    if output_width <= hard_limit {
+        return true;
+    }
+    let original_width = paragraph
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
+            line_width(index, line, hard_break)
+        })
+        .max()
+        .unwrap_or_default();
+    output_width <= original_width
 }
 
 /// Width of a prefix in characters, counting tabs as `tab_width`.
@@ -738,6 +898,7 @@ fn build_segments(
     let mut segments = Vec::new();
     let mut violations = Vec::new();
     let mut current: Option<Segment> = None;
+    let inside_brackets = lines_ending_inside_brackets(&line_tokens);
     for (index, tokens) in line_tokens.into_iter().enumerate() {
         let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
         let Some(mut segment) = current.take() else {
@@ -750,14 +911,21 @@ fn build_segments(
             continue;
         };
         let previous_break = paragraph.hard_breaks.get(index - 1).copied().unwrap_or_default();
-        let mid_clause =
-            options.rules.mid_clause_break && is_mid_clause_break(&segment.tokens, &tokens, previous_break, options);
+        let inside_bracket =
+            previous_break == HardBreak::None && inside_brackets.get(index - 1).copied().unwrap_or_default();
+        let mid_clause = options.rules.mid_clause_break
+            && (inside_bracket || is_mid_clause_break(&segment.tokens, &tokens, previous_break, options));
         if mid_clause {
+            let message = if inside_bracket {
+                "line breaks inside brackets"
+            } else {
+                "line breaks in the middle of a clause"
+            };
             violations.push(Violation {
                 line: paragraph.start_line + index,
                 column: None,
                 kind: ViolationKind::MidClauseBreak,
-                message: "line breaks in the middle of a clause".to_string(),
+                message: message.to_string(),
                 fixable: true,
             });
         }
@@ -1040,9 +1208,12 @@ fn split_tokens(
         let left_width = |boundary: &Boundary| widths.get(boundary.before).copied().unwrap_or(usize::MAX);
         let hard_limit = budget + SOFT_OVERFLOW;
 
+        // A sentence end is the best place to break, whatever the line is filled to.
+        // A forced break marks a sentence the formatter created itself, such as a rewritten
+        // semicolon, and counts the same.
         let fitting_sentence = boundaries
             .iter()
-            .filter(|boundary| boundary.rank == Rank::Sentence && left_width(boundary) <= budget)
+            .filter(|boundary| boundary.rank >= Rank::Sentence && left_width(boundary) <= budget)
             .max_by_key(|boundary| boundary.before)
             .copied();
         let preferred = fitting_sentence.or_else(|| choose_in_band(&boundaries, budget, hard_limit, &left_width));
@@ -1237,6 +1408,187 @@ mod test_helpers {
             .into_iter()
             .find(|boundary| boundary.before == index)
             .map(|boundary| boundary.rank)
+    }
+}
+
+#[cfg(test)]
+mod test_command_text {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_double_hyphen_before_a_flag_is_not_a_dash() {
+        let tokens = tokens("pnpm run migrate -- --env dev");
+        let separator = tokens
+            .iter()
+            .find(|token| token.core == "--")
+            .expect("the separator should be a token");
+        assert_eq!(separator.kind, TokenKind::Word);
+
+        let outcome = reflow(&["Run the migrations first: pnpm run migrate -- --env dev"], 120);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
+
+    #[test]
+    fn a_double_hyphen_between_words_is_still_a_dash() {
+        let outcome = reflow(&["the value is set -- always"], 120);
+        assert_eq!(summary(&outcome), vec![(ViolationKind::EmDash, true)]);
+    }
+}
+
+#[cfg(test)]
+mod test_reflow_safety {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_join_that_cannot_be_broken_again_is_not_applied() {
+        let lines = [
+            "and `shopifyEventHandler` in `packages/api` consumes them to link the product back to its Iron Bank",
+            "item through an `ironbank_id` metafield.",
+        ];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120));
+
+        assert_eq!(outcome.lines, None, "the paragraph should be left as it is");
+        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, false)]);
+    }
+
+    #[test]
+    fn a_join_that_stays_within_the_limit_is_applied() {
+        let lines = ["a short line that ends with the", "word that continues the clause."];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120));
+
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "a short line that ends with the word that continues the clause.".to_string()
+            ])
+        );
+        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, true)]);
+    }
+
+    #[test]
+    fn a_paragraph_that_is_already_too_long_can_still_be_improved() {
+        let long_line = format!("Alpha beta gamma delta epsilon, {}", "zeta ".repeat(40));
+        let outcome = reflow(&[long_line.trim()], 60);
+        let reflowed = outcome.lines.expect("the long line should be reflowed");
+        assert!(reflowed.len() > 1);
+        let widest = reflowed
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_default();
+        assert!(widest <= long_line.chars().count(), "the result must not be wider");
+    }
+}
+
+#[cfg(test)]
+mod test_brackets {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_break_inside_brackets_is_joined() {
+        let lines = [
+            "The query compiler only handles primitives (string, number,",
+            "boolean, null, Date, Buffer). Arrays are passed through unchanged.",
+        ];
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "The query compiler only handles primitives (string, number, boolean, null, Date, Buffer).".to_string(),
+                "Arrays are passed through unchanged.".to_string(),
+            ])
+        );
+        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, true)]);
+        assert!(
+            outcome
+                .violations
+                .iter()
+                .any(|violation| violation.message == "line breaks inside brackets")
+        );
+    }
+
+    #[test]
+    fn a_parenthetical_that_does_not_fit_gets_its_own_line() {
+        let lines = [concat!(
+            "The resolver walks up the directory tree (it reads .editorconfig, rustfmt.toml, ",
+            "pyproject.toml, setup.cfg and .clang-format in that order) and caches the result."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "The resolver walks up the directory tree".to_string(),
+                "(it reads .editorconfig, rustfmt.toml, pyproject.toml, setup.cfg and .clang-format in that order)"
+                    .to_string(),
+                "and caches the result.".to_string(),
+            ]),
+            "the parenthetical should stay on one line"
+        );
+    }
+
+    #[test]
+    fn no_break_is_made_inside_brackets() {
+        let lines = ["one two three four (alpha, beta or gamma) five six seven eight nine ten"];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(40));
+        let reflowed = outcome.lines.expect("the line should be reflowed");
+        for line in &reflowed {
+            assert_eq!(
+                line.matches('(').count(),
+                line.matches(')').count(),
+                "a bracket was left open in {line:?} of {reflowed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sentence_end_inside_brackets_is_not_a_break_point() {
+        assert_eq!(rank_before("x y (a. B c) z", 3), Some(Rank::Word));
+    }
+
+    #[test]
+    fn an_unclosed_bracket_does_not_block_breaks_after_it() {
+        let text = "the smiley :-) and a stray ( opening bracket that keeps going on and on and on until the end";
+        let outcome = reflow(&[text], 40);
+        let reflowed = outcome.lines.expect("the line should still be reflowed");
+        assert!(
+            reflowed.len() > 1,
+            "a stray bracket must not block breaking: {reflowed:?}"
+        );
+    }
+
+    #[test]
+    fn brackets_inside_a_code_span_are_ignored() {
+        let lines = [
+            "Call `foo(bar` with the flag and then read the result",
+            "from the buffer that the call returns.",
+        ];
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "Call `foo(bar` with the flag and then read the result from the buffer that the call returns."
+                    .to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_hard_break_inside_brackets_is_kept() {
+        let mut paragraph = paragraph(&["text with (an open bracket", "and the rest) after it"], "");
+        paragraph.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120));
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
+
+    #[test]
+    fn nested_brackets_are_tracked() {
+        assert_eq!(rank_before("x y (a [b, c] d) z", 4), Some(Rank::Word));
+        assert_eq!(rank_before("x y (a [b, c] d) z", 2), Some(Rank::ClauseTier4));
     }
 }
 

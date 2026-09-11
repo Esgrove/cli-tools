@@ -86,6 +86,10 @@ static RE_CODE_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
     .expect("Invalid keyword regex")
 });
 
+/// Matches a long command line flag such as `--env`, which marks the line as a command.
+static RE_COMMAND_FLAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)--[A-Za-z][\w-]*").expect("Invalid command flag regex"));
+
 /// Matches two or more runs of aligned column spacing.
 static RE_ALIGNED_COLUMNS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\S\s{3,}\S.*\S\s{3,}\S").expect("Invalid aligned columns regex"));
@@ -243,6 +247,9 @@ pub fn looks_like_code(line: &str) -> bool {
     if RE_CODE_KEYWORD.is_match(text)
         && (has_code_characters || text.ends_with(';') || text.starts_with(['#', '/', '$']))
     {
+        return true;
+    }
+    if RE_COMMAND_FLAG.is_match(text) {
         return true;
     }
     if text.contains("::")
@@ -981,6 +988,16 @@ mod test_markdown_paragraphs {
 #[cfg(test)]
 mod test_looks_like_code {
     use super::*;
+
+    #[test]
+    fn a_command_line_flag_marks_the_line_as_code() {
+        assert!(looks_like_code(
+            "pnpm exec tsx scripts/import.ts --env dev --file data.csv"
+        ));
+        assert!(looks_like_code("cargo build --release"));
+        assert!(!looks_like_code("Use the `--fix` option to rewrite the files"));
+        assert!(!looks_like_code("the value is set -- always"));
+    }
 
     #[test]
     fn detects_code_lines() {
