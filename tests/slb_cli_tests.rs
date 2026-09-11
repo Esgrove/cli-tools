@@ -82,6 +82,24 @@ fn argument(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Text without the terminal color codes, so a comparison does not depend on the terminal.
+fn plain(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            result.push(character);
+            continue;
+        }
+        for escape in characters.by_ref() {
+            if escape == 'm' {
+                break;
+            }
+        }
+    }
+    result
+}
+
 #[test]
 fn check_mode_reports_violations_and_exits_with_one() {
     let directory = temporary_directory();
@@ -419,7 +437,7 @@ fn the_help_output_matches_the_readme() {
         .expect("README should document the slb usage");
 
     assert_eq!(
-        stdout(&output).trim_end(),
+        plain(&stdout(&output)).trim_end(),
         documented.trim_end(),
         "the slb usage in README.md is out of date, update it with: cargo run --bin slb -- -h"
     );

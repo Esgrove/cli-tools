@@ -116,18 +116,57 @@ mod test_violation_messages {
         }
     }
 
+    /// Message without the terminal color codes.
+    ///
+    /// Colors are on when the terminal supports them,
+    /// which otherwise splits the text with escape sequences.
+    fn plain(message: &str) -> String {
+        let mut result = String::with_capacity(message.len());
+        let mut characters = message.chars();
+        while let Some(character) = characters.next() {
+            if character != '\u{1b}' {
+                result.push(character);
+                continue;
+            }
+            for escape in characters.by_ref() {
+                if escape == 'm' {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
     #[test]
     fn includes_the_column_only_when_known() {
         let without_column = format_violation("src/lib.rs", &violation(ViolationKind::LineTooLong, None, true), false);
-        assert!(without_column.contains("src/lib.rs:7:"));
-        assert!(!without_column.contains("src/lib.rs:7:4"));
+        assert_eq!(
+            plain(&without_column),
+            "src/lib.rs:7: too-long: line is 130 characters, limit is 120"
+        );
 
         let with_column = format_violation(
             "src/lib.rs",
             &violation(ViolationKind::TrailingComment, Some(42), true),
             false,
         );
-        assert!(with_column.contains("src/lib.rs:7:42"));
+        assert_eq!(
+            plain(&with_column),
+            "src/lib.rs:7:42: trailing: line is 130 characters, limit is 120"
+        );
+    }
+
+    #[test]
+    fn the_color_codes_wrap_the_location_and_the_rule_name() {
+        let message = format_violation("a.rs", &violation(ViolationKind::LineTooLong, None, true), false);
+        assert_eq!(
+            plain(&message),
+            "a.rs:7: too-long: line is 130 characters, limit is 120"
+        );
+        assert!(
+            message.contains("a.rs:7"),
+            "the location should not be split by escape codes: {message:?}"
+        );
     }
 
     #[test]
