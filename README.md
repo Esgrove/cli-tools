@@ -485,7 +485,8 @@ Options:
 
 Check and format prose in code comments, docstrings, and Markdown with semantic line breaks.
 Lines are broken at sentence and clause boundaries within a soft 120 character limit,
-semicolons and em dashes are rewritten, and trailing comments are moved above the code.
+and a sentence that does not fit on one line is spread evenly over the lines it needs.
+Semicolons and em dashes are rewritten, and trailing comments are moved above the code.
 The line limit is read from project config files such as `.editorconfig`, `rustfmt.toml`, and `pyproject.toml`.
 The default mode reports violations and exits with code 1.
 Use `--fix` to rewrite files, `--print` to show a diff,

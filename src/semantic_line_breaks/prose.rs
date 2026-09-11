@@ -4,6 +4,9 @@
 //! sentence and clause boundary detection, mid-clause break detection between consecutive lines,
 //! rewording of semicolons and em dashes, and the reflow algorithm
 //! that joins hard-wrapped lines and re-breaks them at semantic boundaries.
+//!
+//! The lines of a run are planned together and scored,
+//! so the break points that read best and spread the text most evenly over the lines win.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -21,8 +24,31 @@ use super::types::{
 /// when that reads better than a strict break at a comma.
 pub const SOFT_OVERFLOW: usize = 10;
 
-/// Minimum fill of the budget, in percent, for a preferred clause word break to be considered.
+/// Minimum fill of the budget, in percent, for a boundary to count as a reachable strong break.
 const MIN_FILL_PERCENT: usize = 50;
+
+/// Weight of the width a line runs over the budget, relative to the width it leaves unused.
+///
+/// Going over the soft limit reads worse than stopping short by the same amount,
+/// so the overflow counts several times heavier.
+const OVERFLOW_WEIGHT: usize = 4;
+
+/// Cost of using the soft overflow where a sentence end or a coordinating conjunction could end the line instead.
+const WEAK_OVERFLOW_COST: usize = 5_000_000;
+
+/// Cost of every character a line runs past the hard limit, when nothing can be broken within it.
+///
+/// Counting the characters keeps the text that does not fit on as few lines as possible,
+/// so an unbreakable atom such as a long URL is left alone instead of dragging prose over the limit with it.
+const TOO_LONG_COST: usize = 10_000_000;
+
+/// Cost of a break before a phrase joining conjunction that no comma or colon leads into.
+///
+/// Such a break may cut a phrase in two instead of separating two clauses.
+const BARE_CONJUNCTION_COST: usize = 250_000;
+
+/// Cost of breaking in the middle of a clause, only reachable when word breaks are allowed.
+const WORD_BREAK_COST: usize = 1_000_000_000_000;
 
 /// Smallest usable budget. Paragraphs with a narrower budget are left alone.
 const MIN_BUDGET: usize = 10;
@@ -66,6 +92,10 @@ const CLAUSE_TIER_3: &[&str] = &[
 
 /// Two word connectors, treated like tier 3.
 const CLAUSE_PAIRS: &[&str] = &["for example", "such as", "as well as", "in order to"];
+
+/// Conjunctions that join two phrases as often as two clauses,
+/// such as "the first input and the first output root".
+const PHRASE_CONJUNCTIONS: &[&str] = &["and", "or", "but", "nor"];
 
 /// Relative pronouns and weak connectors, the least preferred clause words.
 const CLAUSE_TIER_4: &[&str] = &["which", "that", "as"];
@@ -118,6 +148,15 @@ pub struct Boundary {
     pub before: usize,
     /// Quality of the break.
     pub rank: Rank,
+}
+
+/// Cheapest plan for the lines of a run, counted from one token to the end of the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinePlan {
+    /// Total cost of the lines the plan covers.
+    cost: usize,
+    /// Token index where the first line of the plan ends.
+    line_end: usize,
 }
 
 /// A run of tokens that is reflowed as one unit.
@@ -1193,112 +1232,252 @@ fn split_tokens(
     line_offset: usize,
     violations: &mut Vec<Violation>,
 ) -> Vec<Vec<Token>> {
-    let mut pieces = Vec::new();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let budget = if *is_first_line { first_budget } else { rest_budget };
+    *is_first_line = false;
+    if tokens_width(&tokens) <= budget {
+        return vec![tokens];
+    }
+
+    let breaks = plan_line_breaks(&tokens, budget, rest_budget, options);
+    let mut pieces: Vec<Vec<Token>> = Vec::with_capacity(breaks.len() + 1);
     let mut rest = tokens;
-    while !rest.is_empty() {
-        let budget = if *is_first_line { first_budget } else { rest_budget };
-        *is_first_line = false;
-        let width = tokens_width(&rest);
-        if width <= budget {
-            pieces.push(rest);
-            break;
-        }
-        let boundaries = find_boundaries(&rest, options);
-        let widths = cumulative_widths(&rest);
-        let left_width = |boundary: &Boundary| widths.get(boundary.before).copied().unwrap_or(usize::MAX);
-        let hard_limit = budget + SOFT_OVERFLOW;
+    let mut line_start = 0;
+    for position in breaks {
+        let tail = rest.split_off(position - line_start);
+        pieces.push(std::mem::replace(&mut rest, tail));
+        line_start = position;
+    }
+    pieces.push(rest);
 
-        // A sentence end is the best place to break, whatever the line is filled to.
-        // A forced break marks a sentence the formatter created itself, such as a rewritten
-        // semicolon, and counts the same.
-        let fitting_sentence = boundaries
-            .iter()
-            .filter(|boundary| boundary.rank >= Rank::Sentence && left_width(boundary) <= budget)
-            .max_by_key(|boundary| boundary.before)
-            .copied();
-        let preferred = fitting_sentence.or_else(|| choose_in_band(&boundaries, budget, hard_limit, &left_width));
-        // A line may run a little over the budget unless it can break at a sentence end
-        // or before a coordinating conjunction, which is always worth the extra line.
-        let strong_boundary = preferred.is_some_and(|boundary| boundary.rank >= Rank::ClauseTier2);
-        if !strong_boundary && width <= hard_limit {
-            pieces.push(rest);
-            break;
-        }
-
-        let chosen = preferred.or_else(|| {
-            boundaries
-                .iter()
-                .filter(|boundary| boundary.rank > Rank::Word && left_width(boundary) <= budget)
-                .max_by_key(|boundary| (boundary.rank, boundary.before))
-                .copied()
-        });
-        let chosen = chosen.or_else(|| {
-            let leftmost = boundaries
-                .iter()
-                .filter(|boundary| boundary.rank > Rank::Word)
-                .min_by_key(|boundary| boundary.before)
-                .copied();
-            if leftmost.is_some() {
-                report_too_long(
-                    &rest,
-                    line_offset,
-                    "no clause boundary fits within the line limit",
-                    violations,
-                );
-            }
-            leftmost
-        });
-        let chosen = chosen.or_else(|| {
-            if options.allow_word_break {
-                boundaries
-                    .iter()
-                    .filter(|boundary| left_width(boundary) <= budget)
-                    .max_by_key(|boundary| boundary.before)
-                    .copied()
+    for (index, piece) in pieces.iter().enumerate() {
+        let budget = if index == 0 { budget } else { rest_budget };
+        if tokens_width(piece) > budget + SOFT_OVERFLOW {
+            let reason = if piece.len() > 1 {
+                "no clause boundary fits within the line limit"
             } else {
-                None
-            }
-        });
-
-        match chosen {
-            Some(boundary) if boundary.before > 0 && boundary.before < rest.len() => {
-                let right = rest.split_off(boundary.before);
-                pieces.push(rest);
-                rest = right;
-            }
-            _ => {
-                report_too_long(&rest, line_offset, "no break point available", violations);
-                pieces.push(rest);
-                break;
-            }
+                "no break point available"
+            };
+            report_too_long(piece, line_offset, reason, violations);
         }
     }
     pieces
 }
 
-/// Choose the best boundary whose left part lands inside the preference band.
-fn choose_in_band(
-    boundaries: &[Boundary],
+/// Plan where a run of tokens breaks into lines, and return the token indices that start a new line.
+///
+/// The whole run is planned at once so that the lines come out balanced.
+/// Of the break sets that use equally good boundaries the most even one wins,
+/// so a long sentence becomes two medium length lines instead of one full line and a short remainder.
+fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, options: &FormatOptions) -> Vec<usize> {
+    let count = tokens.len();
+    let widths = cumulative_widths(tokens);
+    let mut ranks = vec![None; count + 1];
+    for boundary in find_boundaries(tokens, options) {
+        if (boundary.rank > Rank::Word || options.allow_word_break)
+            && let Some(slot) = ranks.get_mut(boundary.before)
+        {
+            *slot = Some(boundary.rank);
+        }
+    }
+    // The width of a line, which loses the space that joined it to the previous line.
+    let span_width = |from: usize, to: usize| {
+        let head = widths.get(from).copied().unwrap_or_default();
+        let tail = widths.get(to).copied().unwrap_or_default();
+        tail.saturating_sub(head).saturating_sub(usize::from(from > 0))
+    };
+
+    // The run is walked backwards so the plan for every tail is known when a line is measured against it.
+    let empty_tail = LinePlan {
+        cost: 0,
+        line_end: count,
+    };
+    let mut plans = vec![empty_tail; count + 1];
+    let mut candidates = Vec::new();
+    for start in (0..count).rev() {
+        let budget = if start == 0 { first_budget } else { rest_budget };
+        let mut best = LinePlan {
+            cost: usize::MAX,
+            line_end: count,
+        };
+        collect_line_candidates(start, count, budget, &ranks, &span_width, &mut candidates);
+        for end in candidates.iter().copied() {
+            let tail = plans.get(end).map_or(usize::MAX, |plan| plan.cost);
+            let cost = line_cost(tokens, start, end, budget, &ranks, &span_width).saturating_add(tail);
+            // Candidates come in reading order, so the last one of an equal cost fills the line the most.
+            if cost <= best.cost {
+                best = LinePlan { cost, line_end: end };
+            }
+        }
+        if let Some(plan) = plans.get_mut(start) {
+            *plan = best;
+        }
+    }
+
+    let mut breaks = Vec::new();
+    let mut position = plans.first().map_or(count, |plan| plan.line_end);
+    while position < count {
+        breaks.push(position);
+        position = plans.get(position).map_or(count, |plan| plan.line_end);
+    }
+    breaks
+}
+
+/// Collect the token indices where the line that starts at `start` may end, in reading order.
+fn collect_line_candidates(
+    start: usize,
+    count: usize,
     budget: usize,
-    hard_limit: usize,
-    left_width: &dyn Fn(&Boundary) -> usize,
-) -> Option<Boundary> {
+    ranks: &[Option<Rank>],
+    span_width: &dyn Fn(usize, usize) -> usize,
+    candidates: &mut Vec<usize>,
+) {
+    candidates.clear();
+    if span_width(start, count) <= budget {
+        candidates.push(count);
+        return;
+    }
+
+    // A sentence end is the best place to break, whatever the line is filled to.
+    // A forced break marks a sentence the formatter created itself, such as a rewritten semicolon,
+    // and counts the same.
+    let sentence_end = (start + 1..count)
+        .filter(|end| rank_at(ranks, *end).is_some_and(|rank| rank >= Rank::Sentence))
+        .take_while(|end| span_width(start, *end) <= budget)
+        .last();
+    if let Some(end) = sentence_end {
+        candidates.push(end);
+        return;
+    }
+
+    for end in start + 1..count {
+        if rank_at(ranks, end).is_none() {
+            continue;
+        }
+        candidates.push(end);
+        if span_width(start, end) > budget + SOFT_OVERFLOW {
+            // One boundary past the limit is kept for text that cannot be broken within it,
+            // such as a long URL at the start of the line.
+            break;
+        }
+    }
+    candidates.push(count);
+}
+
+/// Rank of the boundary before the token at `index`, or `None` when no line may end there.
+fn rank_at(ranks: &[Option<Rank>], index: usize) -> Option<Rank> {
+    ranks.get(index).copied().flatten()
+}
+
+/// Cost of a line that covers the tokens `start..end` of the run.
+fn line_cost(
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    budget: usize,
+    ranks: &[Option<Rank>],
+    span_width: &dyn Fn(usize, usize) -> usize,
+) -> usize {
+    let count = tokens.len();
+    let width = span_width(start, end);
+    let rank = if end < count { rank_at(ranks, end) } else { None };
+    let mut cost = width_cost(budget, width);
+    if let Some(rank) = rank {
+        cost = cost.saturating_add(boundary_cost(tokens, end, rank));
+    }
+    if width > budget {
+        if !overflow_is_earned(start, count, budget, rank, ranks, span_width) {
+            cost = cost.saturating_add(WEAK_OVERFLOW_COST);
+        }
+        let excess = width.saturating_sub(budget + SOFT_OVERFLOW);
+        cost = cost.saturating_add(excess.saturating_mul(TOO_LONG_COST));
+    }
+    cost
+}
+
+/// Cost of ending a line at the boundary before the token at `index`.
+///
+/// A comma or a colon before a conjunction marks the end of a clause, so the break reads as intended there.
+/// The same conjunction without one may only join two parts of a phrase,
+/// which is a worse place to break than the width of the lines alone suggests.
+fn boundary_cost(tokens: &[Token], index: usize, rank: Rank) -> usize {
+    let cost = break_cost(rank);
+    if !tokens
+        .get(index)
+        .is_some_and(|token| contains_word(PHRASE_CONJUNCTIONS, &token.core))
+    {
+        return cost;
+    }
+    let follows_punctuation = index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+        .is_some_and(Token::ends_clause_punctuation);
+    if follows_punctuation {
+        cost
+    } else {
+        cost.saturating_add(BARE_CONJUNCTION_COST)
+    }
+}
+
+/// Cost of the width a line leaves unused, or runs over the budget by, as a squared per mille of the budget.
+///
+/// Squaring the share of the budget balances the lines of a run:
+/// two lines that stop short by a little cost less than one full line and a short remainder.
+fn width_cost(budget: usize, width: usize) -> usize {
+    let share = |amount: usize| amount * 1000 / budget.max(1);
+    if width <= budget {
+        let unused = share(budget - width);
+        unused * unused
+    } else {
+        let over = share(width - budget);
+        OVERFLOW_WEIGHT * over * over
+    }
+}
+
+/// Cost of ending a line at a boundary, in the squared share units of `width_cost`.
+///
+/// A sentence end is free.
+/// A weaker boundary has to earn its place:
+/// it costs as much as leaving the share of the budget given in the match unused,
+/// so a clearly better boundary wins over a small gain in balance.
+const fn break_cost(rank: Rank) -> usize {
+    match rank {
+        Rank::Forced | Rank::Sentence => 0,
+        Rank::ClauseTier1 => 10_000,
+        Rank::ClauseTier2 => 25_000,
+        Rank::Punctuation => 50_000,
+        Rank::ClauseTier3 => 80_000,
+        Rank::ClauseTier4 => 250_000,
+        Rank::Word => WORD_BREAK_COST,
+    }
+}
+
+/// Whether a line that runs over the budget has earned the overflow.
+///
+/// The width limit is soft,
+/// but the extra width has to buy a better break than the line could get by staying inside the budget,
+/// so a boundary that is at least as good and fills enough of the line blocks it.
+fn overflow_is_earned(
+    start: usize,
+    count: usize,
+    budget: usize,
+    rank: Option<Rank>,
+    ranks: &[Option<Rank>],
+    span_width: &dyn Fn(usize, usize) -> usize,
+) -> bool {
+    // The end of the run and a sentence end are the best breaks there are,
+    // so only a coordinating conjunction or better is worth staying inside the budget for.
+    let blocking = match rank {
+        Some(rank) if rank < Rank::Sentence => rank,
+        _ => Rank::ClauseTier2,
+    };
     let min_fill = budget * MIN_FILL_PERCENT / 100;
-    boundaries
-        .iter()
-        .filter(|boundary| boundary.rank > Rank::Word)
-        .filter(|boundary| {
-            let width = left_width(boundary);
-            width >= min_fill && width <= hard_limit
-        })
-        .max_by_key(|boundary| {
-            let width = left_width(boundary);
-            let fits = width <= budget;
-            let closeness = if fits { width } else { usize::MAX - width };
-            let rank = if fits { boundary.rank } else { boundary.rank.lowered() };
-            (rank, fits, closeness)
-        })
-        .copied()
+    !(start + 1..count).any(|end| {
+        let width = span_width(start, end);
+        rank_at(ranks, end).is_some_and(|candidate| candidate >= blocking) && width >= min_fill && width <= budget
+    })
 }
 
 /// Record an unfixable too long line violation at the first token of the run.
@@ -1674,6 +1853,56 @@ mod test_break_choice {
         assert!(
             reflowed.iter().all(|line| line.chars().count() + 8 <= 120),
             "every line should fit the budget: {reflowed:?}"
+        );
+    }
+
+    #[test]
+    fn a_sentence_is_split_into_two_balanced_lines() {
+        let lines = [concat!(
+            "A forced break marks a sentence the formatter created itself, ",
+            "such as a rewritten semicolon, and counts the same."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, "        // "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "A forced break marks a sentence the formatter created itself,".to_string(),
+                "such as a rewritten semicolon, and counts the same.".to_string(),
+            ]),
+            "the lines should come out even instead of one full line and a short remainder"
+        );
+    }
+
+    #[test]
+    fn a_comma_in_the_middle_wins_over_a_fuller_first_line() {
+        let lines = [concat!(
+            "Skips empty names, ignored group names, ignored prefixes, ",
+            "names matching the parent directory, and runtime-ignored names."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "Skips empty names, ignored group names, ignored prefixes,".to_string(),
+                "names matching the parent directory, and runtime-ignored names.".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_conjunction_after_a_comma_wins_over_a_bare_one() {
+        let lines = [concat!(
+            "The current directory placeholder is used as both the first input and first output root, ",
+            "and no database is attached."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "The current directory placeholder is used as both the first input and first output root,".to_string(),
+                "and no database is attached.".to_string(),
+            ]),
+            "a break before a bare conjunction would cut the phrase in two"
         );
     }
 
