@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "9.24.1"
+version = "10.0.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities"
@@ -9,7 +9,7 @@ readme = "README.md"
 repository = "https://github.com/Esgrove/cli-tools"
 keywords = ["cli", "rename"]
 categories = ["command-line-utilities"]
-rust-version = "1.97"
+rust-version = "1.98"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -23,7 +23,7 @@ ctrlc = "3.5.2"
 difference = "2.0.0"
 dirs = "7.0.0"
 dunce = "1.0.5"
-encoding_rs = "0.8.35"
+encoding_rs = "0.8.41"
 futures = "0.3.34"
 git2 = { version = "0.21.0", features = ["ssh", "https"] }
 indicatif = { version = "0.18.6", features = ["tokio", "futures", "rayon"] }
@@ -32,7 +32,7 @@ num_cpus = "1.17.0"
 ratatui = "0.30.2"
 rayon = "1.12.0"
 regex = "1.13.1"
-reqwest = { version = "0.13.4", features = ["cookies", "form", "multipart"] }
+reqwest = { version = "0.13.5", features = ["cookies", "form", "multipart"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rust_xlsxwriter = { version = "0.99.0", features = ["jiff", "serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -44,9 +44,9 @@ sha1 = "0.11.0"
 tempfile = "3.27.0"
 titlecase = "3.6.0"
 tokio = { version = "1.53.1", features = ["full"] }
-toml = "1.1.5"
-toml_edit = "0.25.13"
-trash = "5.2.7"
+toml = "1.1.6"
+toml_edit = "0.25.15"
+trash = "5.2.8"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
 walkdir = "2.5.0"
