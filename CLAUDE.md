@@ -86,7 +86,8 @@ benchmarks can import them directly without duplicating code.
 - `benches/format.rs` - Dot-rename formatting pipeline
 - `benches/lib.rs` - Shared utility functions
 - `benches/resolution.rs` - Resolution labeling and regex matching
-- `benches/semantic_line_breaks.rs` - Prose tokenizing, boundary detection, paragraph reflow, and file formatting
+- `benches/semantic_line_breaks.rs` - Prose tokenizing, boundary detection, paragraph reflow,
+  comment scanning, and whole file checking and formatting
 
 ### Adding new benchmarks
 

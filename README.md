@@ -496,6 +496,10 @@ Check and format prose in comments, docstrings, and Markdown with semantic line 
 
 Usage: slb [OPTIONS] [PATHS]... [COMMAND]
 
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
+
 Arguments:
   [PATHS]...  Files or directories to check. Defaults to the current directory
 
@@ -594,6 +598,7 @@ cargo bench --bench dupe_find
 cargo bench --bench format
 cargo bench --bench lib
 cargo bench --bench resolution
+cargo bench --bench semantic_line_breaks
 
 # Run benchmarks matching a filter pattern
 cargo bench -- normalize_stem
