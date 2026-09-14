@@ -509,12 +509,15 @@ fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: 
     }
     let rest = line.get(byte..).unwrap_or_default();
     if let Some(end) = find_regex_end(chars, cursor.index + 1) {
+        let end_byte = chars.get(end).map_or(line.len(), |&(offset, _)| offset);
+        let candidate = line.get(byte..end_byte).unwrap_or_default();
+        if syntax.heredoc && candidate.contains("<<") {
+            return uncertain_regex(rest, chars.len(), cursor, syntax);
+        }
         if regex_can_start(prefix) {
             cursor.index = end;
             return NormalStep::Continue(ScanState::Normal);
         }
-        let end_byte = chars.get(end).map_or(line.len(), |&(offset, _)| offset);
-        let candidate = line.get(byte..end_byte).unwrap_or_default();
         if candidate.contains(syntax.line_marker)
             || candidate.contains(['\\', '\'', '"', '`'])
             || syntax.block_comment.is_some_and(|(open, _)| candidate.contains(open))
@@ -537,6 +540,8 @@ fn uncertain_regex(rest: &str, line_length: usize, cursor: &mut Cursor, syntax: 
         || rest.ends_with('\\')
         || syntax.multiline_strings && rest.contains('"')
         || syntax.triple_quotes && (rest.contains("\"\"\"") || rest.contains("'''"))
+        || syntax.heredoc && (rest.contains("<<") || cursor.pending_heredoc.is_some())
+        || syntax.block_scalars && RE_BLOCK_SCALAR.is_match(rest)
     {
         cursor.index = line_length;
         cursor.uncertain = true;
@@ -1763,6 +1768,53 @@ mod test_trailing_other_languages {
 mod test_regex_literals {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn uncertain_slashes_protect_heredocs_and_block_scalars() {
+        for (kind, opening, interior, closing) in [
+            (
+                FileKind::Shell,
+                "DIR=/root cat <<EOF /dev/stdin",
+                "literal # not a comment",
+                "EOF",
+            ),
+            (
+                FileKind::Shell,
+                "DIR=/\"root\" cat <<'EOF'",
+                "literal # not a comment",
+                "EOF",
+            ),
+            (
+                FileKind::Shell,
+                "cat <<'EOF' DIR=/\"root\"",
+                "literal # not a comment",
+                "EOF",
+            ),
+            (
+                FileKind::Yaml,
+                "/path\"key\": |",
+                "  literal # not a comment",
+                "next: value",
+            ),
+        ] {
+            let syntax = string_syntax(kind).expect("source syntax");
+            let lines = [opening, interior, closing];
+            assert_eq!(
+                scan_line(opening, ScanState::Normal, &syntax).state,
+                ScanState::Uncertain,
+                "{opening}"
+            );
+            assert_eq!(lines_inside_strings(&lines, kind), vec![false, true, true], "{opening}");
+            assert!(replaced_indices(&lines, kind).is_empty(), "{opening}");
+        }
+        let syntax = string_syntax(FileKind::Yaml).expect("YAML syntax");
+        let lines = ["foo/\"bar\": |", "  literal # not a comment"];
+        assert_eq!(
+            scan_line(lines[0], ScanState::Normal, &syntax).state,
+            ScanState::InBlockScalar(0)
+        );
+        assert!(replaced_indices(&lines, FileKind::Yaml).is_empty());
+    }
 
     #[test]
     fn quoted_slashes_after_division_and_in_paths_are_not_regex_boundaries() {

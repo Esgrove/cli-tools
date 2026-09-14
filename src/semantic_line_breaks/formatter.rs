@@ -388,6 +388,33 @@ mod test_format {
     }
 
     #[test]
+    fn uncertain_slashes_preserve_heredocs_and_block_scalars() {
+        let options = FormatOptions::default();
+        for (kind, text) in [
+            (
+                FileKind::Shell,
+                "DIR=/root cat <<EOF /dev/stdin\nliteral # not a comment\nEOF\n",
+            ),
+            (FileKind::Yaml, "foo/\"bar\": |\n  literal # not a comment\n"),
+            (
+                FileKind::Shell,
+                "DIR=/\"root\" cat <<'EOF'\nliteral # not a comment\nEOF\n",
+            ),
+            (
+                FileKind::Shell,
+                "cat <<'EOF' DIR=/\"root\"\nliteral # not a comment\nEOF\n",
+            ),
+            (
+                FileKind::Yaml,
+                "/path\"key\": |\n  literal # not a comment\nnext: value\n",
+            ),
+        ] {
+            assert_eq!(format(text, kind, &options), FormatResult::default(), "{text}");
+            assert!(check(text, kind, &options).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",
