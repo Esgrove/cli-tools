@@ -1,0 +1,8 @@
+# Top level comment that wraps
+# in the middle.
+key: value # trailing note
+url: http://example.com/#anchor
+script: |
+  echo "# not a comment"
+  # also not a comment
+other: 1

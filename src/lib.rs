@@ -12,6 +12,7 @@ pub mod dupe_find;
 pub mod file_hash;
 pub mod resolution;
 pub mod scan_cache;
+pub mod semantic_line_breaks;
 pub mod video_info;
 
 pub use resolution::Resolution;
