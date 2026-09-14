@@ -626,6 +626,7 @@ fn regex_can_start(prefix: &str) -> bool {
 /// Find the end of a same-line slash-delimited regex, including its flags.
 ///
 /// Escapes and character classes hide slash and quote characters.
+/// Unescaped quotes outside classes could instead start strings after division or within paths.
 /// Nested classes may use Unicode set syntax, so leave them unchanged rather than guess at their boundaries.
 fn find_regex_end(chars: &[(usize, char)], mut index: usize) -> Option<usize> {
     let mut in_class = false;
@@ -643,6 +644,7 @@ fn find_regex_end(chars: &[(usize, char)], mut index: usize) -> Option<usize> {
             '[' if in_class => return None,
             '[' => in_class = true,
             ']' => in_class = false,
+            '\'' | '"' | '`' if !in_class => return None,
             '/' if !in_class => {
                 index += 1;
                 while chars.get(index).is_some_and(|(_, flag)| flag.is_ascii_alphabetic()) {
@@ -1764,6 +1766,59 @@ mod test_regex_literals {
     use super::*;
 
     #[test]
+    fn quoted_slashes_after_division_and_in_paths_are_not_regex_boundaries() {
+        for (kind, code) in [
+            (FileKind::Python, r#"value = default / len("/# not a comment")"#),
+            (FileKind::Shell, r#"path=/"foo/bar # literal""#),
+        ] {
+            assert_eq!(replacement(code, kind), None, "{code}");
+            assert_eq!(replaced_indices(&[code, "next = 1 # c"], kind), vec![1], "{code}");
+        }
+        for kind in [
+            FileKind::Python,
+            FileKind::Rust,
+            FileKind::CLike,
+            FileKind::Go,
+            FileKind::Shell,
+        ] {
+            let marker = string_syntax(kind).expect("source syntax").line_marker;
+            for identifier in ["default", "typeof", "void", "delete", "do", "new", "extends", "case"] {
+                let code = format!("value = {identifier} / len(\"/{marker} not a comment\")");
+                assert_eq!(replacement(&code, kind), None, "{kind:?}: {code}");
+            }
+        }
+    }
+
+    #[test]
+    fn regexes_with_unescaped_quotes_outside_classes_are_left_unchanged() {
+        for kind in [
+            FileKind::JavaScript,
+            FileKind::CLike,
+            FileKind::Rust,
+            FileKind::Go,
+            FileKind::Python,
+            FileKind::Shell,
+            FileKind::Toml,
+            FileKind::Yaml,
+        ] {
+            let marker = string_syntax(kind).expect("source syntax").line_marker;
+            for code in [
+                r#"pattern = /foo"bar/;"#,
+                r"pattern = /foo'bar/;",
+                r"pattern = /foo`bar/;",
+                r#"pattern = /"'`\/\/*/dgimsuy;"#,
+            ] {
+                assert_eq!(replacement(code, kind), None, "{kind:?}: {code}");
+                assert_eq!(
+                    replacement(&format!("{code} {marker} c"), kind),
+                    None,
+                    "{kind:?}: {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn swift_bare_regex_and_hash_comment_syntax_are_protected() {
         let swift = FileKind::from_extension("swift").expect("Swift is supported");
         assert_eq!(swift, FileKind::CLike);
@@ -1913,7 +1968,6 @@ mod test_regex_literals {
             r"const expression = /[//]/;",
             r"const expression = /[\]\/]/;",
             r#"const expression = /["'`/]/;"#,
-            r#"const expression = /"'`\/\/*/dgimsuy;"#,
             r"const expression = /=/;",
             r"const expressions = [/a\//, /b\//];",
             r"const expression = /😀\//u;",

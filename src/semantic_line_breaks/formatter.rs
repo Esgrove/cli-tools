@@ -367,6 +367,25 @@ mod test_format {
     }
 
     #[test]
+    fn quoted_slashes_in_division_and_paths_preserve_code() {
+        let options = FormatOptions::default();
+        for (kind, code) in [
+            (FileKind::Python, r#"value = default / len("/# not a comment")"#),
+            (FileKind::Shell, r#"path=/"foo/bar # literal""#),
+        ] {
+            assert_eq!(format(code, kind, &options), FormatResult::default(), "{kind:?}");
+            let text = format!("{code}\nnext = 1 # Keep this comment.\n");
+            let expected = format!("{code}\n# Keep this comment.\nnext = 1\n");
+            assert_eq!(
+                format(&text, kind, &options).fixed_text.as_deref(),
+                Some(expected.as_str()),
+                "{kind:?}"
+            );
+            assert_eq!(format(&expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",
