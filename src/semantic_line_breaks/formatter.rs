@@ -352,6 +352,77 @@ mod test_format {
     }
 
     #[test]
+    fn contextual_identifiers_format_real_comments_without_changing_block_contents() {
+        let text = concat!(
+            "let value = new / divisor; // note\n",
+            "let value = new / divisor; /// doc note\n",
+            "let value = new / divisor; //// longer note\n",
+            "let value = new / divisor; /* block\n",
+            "code // literal; not prose\n",
+            "code /// literal; not prose\n",
+            "code //// literal; not prose\n",
+            "// wrapped block\n",
+            "// content.\n",
+            "*/ let next = 1; // next note\n",
+        );
+        let expected = concat!(
+            "// note\n",
+            "let value = new / divisor;\n",
+            "let value = new / divisor; /// doc note\n",
+            "let value = new / divisor; //// longer note\n",
+            "let value = new / divisor; /* block\n",
+            "code // literal; not prose\n",
+            "code /// literal; not prose\n",
+            "code //// literal; not prose\n",
+            "// wrapped block\n",
+            "// content.\n",
+            "// next note\n",
+            "*/ let next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
+            let first = format(text, kind, &options);
+            assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
+            assert_eq!(check(text, kind, &options), first.violations, "{kind:?}");
+            assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn contextual_regexes_keep_attached_comments_and_format_idempotently() {
+        let text = concat!(
+            "return /foo/;\n",
+            "return /foo/// attached note\n",
+            "return /foo;/// comment\n",
+            "return /foo;//// comment\n",
+            "return /path\\//// note\n",
+            "new /[/*]//* block\n",
+            "code // literal; not prose\n",
+            "*/ let next = 1; // next note\n",
+        );
+        let expected = concat!(
+            "return /foo/;\n",
+            "// attached note\n",
+            "return /foo/\n",
+            "return /foo;/// comment\n",
+            "return /foo;//// comment\n",
+            "// note\n",
+            "return /path\\//\n",
+            "new /[/*]//* block\n",
+            "code // literal; not prose\n",
+            "// next note\n",
+            "*/ let next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
+            let first = format(text, kind, &options);
+            assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
+            assert_eq!(check(text, kind, &options), first.violations, "{kind:?}");
+            assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn regex_hashes_are_preserved_while_real_hash_comments_are_formatted() {
         let text = "pattern = /[ #/]/ # Match a delimiter.\nnext = 1 # Keep this comment.\n";
         let expected = "# Match a delimiter.\npattern = /[ #/]/\n# Keep this comment.\nnext = 1\n";

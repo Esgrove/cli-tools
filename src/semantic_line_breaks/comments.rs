@@ -515,6 +515,15 @@ fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: 
             return uncertain_regex(rest, chars.len(), cursor, syntax);
         }
         if regex_can_start(prefix) {
+            if prefix.trim_end().ends_with(char::is_alphanumeric)
+                && regex_end_overlaps_comment(chars, end, candidate, syntax)
+            {
+                if comment_starts_at(chars, end, syntax) {
+                    return uncertain_regex(rest, chars.len(), cursor, syntax);
+                }
+                cursor.index += 1;
+                return NormalStep::Continue(ScanState::Normal);
+            }
             cursor.index = end;
             return NormalStep::Continue(ScanState::Normal);
         }
@@ -531,6 +540,23 @@ fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: 
     }
     cursor.index += 1;
     NormalStep::Continue(ScanState::Normal)
+}
+
+/// Contextual words may be ordinary identifiers before division.
+/// Do not consume a comment opener as a regex delimiter, but allow comments attached after a complete regex.
+/// A statement separator makes an attached comment ambiguous, so the caller must leave that source unchanged.
+fn regex_end_overlaps_comment(chars: &[(usize, char)], end: usize, candidate: &str, syntax: &StringSyntax) -> bool {
+    end.checked_sub(1)
+        .is_some_and(|index| comment_starts_at(chars, index, syntax))
+        && (candidate.contains(';') || !comment_starts_at(chars, end, syntax))
+}
+
+/// Whether a line or block comment opener begins at a character index.
+fn comment_starts_at(chars: &[(usize, char)], index: usize, syntax: &StringSyntax) -> bool {
+    rest_starts_with(chars, index, syntax.line_marker)
+        || syntax
+            .block_comment
+            .is_some_and(|(open, _)| rest_starts_with(chars, index, open))
 }
 
 /// Preserve subsequent source when an unsupported regex may hide a multiline construct.
@@ -1768,6 +1794,130 @@ mod test_trailing_other_languages {
 mod test_regex_literals {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn contextual_identifiers_preserve_real_trailing_comments() {
+        for kind in [
+            FileKind::Rust,
+            FileKind::Go,
+            FileKind::CLike,
+            FileKind::JavaScript,
+            FileKind::Python,
+            FileKind::Shell,
+            FileKind::Toml,
+            FileKind::Yaml,
+        ] {
+            let syntax = string_syntax(kind).expect("source syntax");
+            let marker = syntax.line_marker;
+            let suffixes: &[&str] = if marker == "//" { &["", "/", "//"] } else { &[""] };
+            for identifier in ["new", "default", "typeof", "void", "delete", "do", "extends", "case"] {
+                let code = format!("let value = {identifier} / divisor;");
+                for suffix in suffixes {
+                    let comment = format!("{marker}{suffix} note");
+                    let line = format!("{code} {comment}");
+                    let result = scan_line(&line, ScanState::Normal, &syntax);
+                    if suffix.is_empty() {
+                        assert_eq!(
+                            replacement(&line, kind),
+                            Some(pair(&comment, &code)),
+                            "{kind:?}: {line}"
+                        );
+                        assert_eq!(result.comment_start, Some(code.len() + 1), "{kind:?}: {line}");
+                        assert!(!result.uncertain, "{kind:?}: {line}");
+                    } else {
+                        assert_eq!(replacement(&line, kind), None, "{kind:?}: {line}");
+                        assert_eq!(result.comment_start, None, "{kind:?}: {line}");
+                        assert!(result.uncertain, "{kind:?}: {line}");
+                    }
+                    assert_eq!(result.state, ScanState::Normal, "{kind:?}: {line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_semicolon_regexes_leave_ambiguous_attached_comments_unchanged() {
+        for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
+            let syntax = string_syntax(kind).expect("source syntax");
+            for prefix in ["return", "new", "throw", "export default"] {
+                for comment in ["// comment", "/// comment"] {
+                    let line = format!("{prefix} /foo;/{comment}");
+                    assert_eq!(replacement(&line, kind), None, "{kind:?}: {line}");
+                    let result = scan_line(&line, ScanState::Normal, &syntax);
+                    assert!(result.uncertain, "{kind:?}: {line}");
+                    assert_eq!(result.comment_start, None, "{kind:?}: {line}");
+                    assert_eq!(result.state, ScanState::Normal, "{kind:?}: {line}");
+                    assert_eq!(
+                        replaced_indices(&[&line, "let next = 1; // note"], kind),
+                        vec![1],
+                        "{kind:?}: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_identifiers_preserve_real_block_comment_state() {
+        for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
+            let syntax = string_syntax(kind).expect("source syntax");
+            for identifier in ["new", "default", "typeof", "void", "delete", "do", "extends", "case"] {
+                let opening = format!("let value = {identifier} / divisor; /* block");
+                let result = scan_line(&opening, ScanState::Normal, &syntax);
+                assert_eq!(result.state, ScanState::InBlockComment(1), "{kind:?}: {opening}");
+                assert!(!result.uncertain, "{kind:?}: {opening}");
+                let lines = [
+                    opening.as_str(),
+                    "code // literal; not prose",
+                    "code /// literal; not prose",
+                    "code //// literal; not prose",
+                    "*/ let next = 1; // note",
+                ];
+                assert_eq!(replaced_indices(&lines, kind), vec![4], "{kind:?}: {opening}");
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_regexes_preserve_attached_comments_across_syntaxes() {
+        for kind in [
+            FileKind::Rust,
+            FileKind::Go,
+            FileKind::CLike,
+            FileKind::JavaScript,
+            FileKind::Python,
+            FileKind::Shell,
+            FileKind::Toml,
+            FileKind::Yaml,
+        ] {
+            let syntax = string_syntax(kind).expect("source syntax");
+            for prefix in ["return", "new", "throw", "export default"] {
+                for pattern in [r"/foo/", r"/path\//", r"/[/*]/", r"/path\//g"] {
+                    let code = format!("{prefix} {pattern}");
+                    let comment = format!("{} note", syntax.line_marker);
+                    assert_eq!(replacement(&code, kind), None, "{kind:?}: {code}");
+                    assert_eq!(
+                        replacement(&format!("{code} {comment}"), kind),
+                        Some(pair(&comment, &code)),
+                        "{kind:?}: {code}"
+                    );
+                    if syntax.line_marker == "//" {
+                        assert_eq!(
+                            replacement(&format!("{code}{comment}"), kind),
+                            Some(pair(&comment, &code)),
+                            "{kind:?}: {code}"
+                        );
+                        let opening = format!("{code}/* block");
+                        assert_eq!(
+                            scan_line(&opening, ScanState::Normal, &syntax).state,
+                            ScanState::InBlockComment(1),
+                            "{kind:?}: {opening}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn uncertain_slashes_protect_heredocs_and_block_scalars() {

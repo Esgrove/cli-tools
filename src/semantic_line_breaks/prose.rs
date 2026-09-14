@@ -9,6 +9,7 @@
 //! so the break points that read best and spread the text most evenly over the lines win.
 
 use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -1289,6 +1290,7 @@ fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, o
             *slot = Some(boundary.rank);
         }
     }
+    let colon_counts = cumulative_colon_counts(&ranks);
     // The width of a line, which loses the space that joined it to the previous line.
     let span_width = |from: usize, to: usize| {
         let head = widths.get(from).copied().unwrap_or_default();
@@ -1309,10 +1311,17 @@ fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, o
             cost: usize::MAX,
             line_end: count,
         };
+        let colon_range = if span_width(start, count) > budget {
+            reachable_boundary_range(&widths, start, budget)
+        } else {
+            0..0
+        };
         collect_line_candidates(start, count, budget, &ranks, &span_width, &mut candidates);
         for end in candidates.iter().copied() {
             let tail = plans.get(end).map_or(usize::MAX, |plan| plan.cost);
-            let cost = line_cost(tokens, start, end, budget, &ranks, &span_width).saturating_add(tail);
+            let cost = line_cost(tokens, start, end, budget, &ranks, &span_width)
+                .saturating_add(skipped_colon_cost(&colon_counts, &colon_range, end))
+                .saturating_add(tail);
             // Candidates come in reading order, so the last one of an equal cost fills the line the most.
             if cost <= best.cost {
                 best = LinePlan { cost, line_end: end };
@@ -1378,6 +1387,37 @@ fn rank_at(ranks: &[Option<Rank>], index: usize) -> Option<Rank> {
     ranks.get(index).copied().flatten()
 }
 
+/// Count colon boundaries before each token index for constant-time range queries.
+fn cumulative_colon_counts(ranks: &[Option<Rank>]) -> Vec<usize> {
+    let mut counts = Vec::with_capacity(ranks.len() + 1);
+    let mut total = 0;
+    counts.push(total);
+    for rank in ranks {
+        total += usize::from(*rank == Some(Rank::Colon));
+        counts.push(total);
+    }
+    counts
+}
+
+/// Find the boundary range that fills at least half the line without exceeding its budget.
+///
+/// Cumulative widths are sorted, so two binary searches suffice for each line start.
+fn reachable_boundary_range(widths: &[usize], start: usize, budget: usize) -> Range<usize> {
+    let remaining = widths.get(start + 1..).unwrap_or_default();
+    let offset = widths.get(start).copied().unwrap_or_default() + usize::from(start > 0);
+    let min_fill = budget * MIN_FILL_PERCENT / 100;
+    let first = remaining.partition_point(|width| width.saturating_sub(offset) < min_fill);
+    let last = remaining.partition_point(|width| width.saturating_sub(offset) <= budget);
+    start + 1 + first..start + 1 + last
+}
+
+/// Query the penalty for reachable colons strictly before the candidate line end.
+fn skipped_colon_cost(counts: &[usize], reachable: &Range<usize>, end: usize) -> usize {
+    let first = counts.get(reachable.start.min(end)).copied().unwrap_or_default();
+    let last = counts.get(reachable.end.min(end)).copied().unwrap_or_default();
+    last.saturating_sub(first).saturating_mul(SKIPPED_COLON_COST)
+}
+
 /// Cost of a line that covers the tokens `start..end` of the run.
 fn line_cost(
     tokens: &[Token],
@@ -1393,15 +1433,6 @@ fn line_cost(
     let mut cost = width_cost(budget, width);
     if let Some(rank) = rank {
         cost = cost.saturating_add(boundary_cost(tokens, end, rank));
-    }
-    if span_width(start, count) > budget {
-        let min_fill = budget * MIN_FILL_PERCENT / 100;
-        for boundary in start + 1..end {
-            let width = span_width(start, boundary);
-            if rank_at(ranks, boundary) == Some(Rank::Colon) && width >= min_fill && width <= budget {
-                cost = cost.saturating_add(SKIPPED_COLON_COST);
-            }
-        }
     }
     if width > budget {
         if !overflow_is_earned(start, count, budget, rank, ranks, span_width) {
@@ -1847,6 +1878,65 @@ mod test_sentence_merge {
             ]),
             "only the wrapped sentence should be joined"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_colon_penalties {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn precomputed_penalties_match_boundary_scanning() {
+        for text in [
+            "",
+            "A sentence with no colons.",
+            "Introduction: first clause: second clause: final clause.",
+            "説明: a longer clause with `code: inside` and (a label: value), then more: text.",
+        ] {
+            let tokens = tokens(text);
+            let count = tokens.len();
+            let widths = cumulative_widths(&tokens);
+            let mut ranks = vec![None; count + 1];
+            for boundary in find_boundaries(&tokens, &FormatOptions::default()) {
+                ranks[boundary.before] = Some(boundary.rank);
+            }
+            let colon_counts = cumulative_colon_counts(&ranks);
+            let span_width = |start: usize, end: usize| {
+                widths[end]
+                    .saturating_sub(widths[start])
+                    .saturating_sub(usize::from(start > 0))
+            };
+            for budget in 0..=widths.last().copied().unwrap_or_default() + 1 {
+                for start in 0..count {
+                    let reachable = if span_width(start, count) > budget {
+                        reachable_boundary_range(&widths, start, budget)
+                    } else {
+                        0..0
+                    };
+                    for end in start + 1..=count {
+                        let expected = if span_width(start, count) > budget {
+                            (start + 1..end)
+                                .filter(|boundary| {
+                                    let width = span_width(start, *boundary);
+                                    ranks[*boundary] == Some(Rank::Colon)
+                                        && width >= budget * MIN_FILL_PERCENT / 100
+                                        && width <= budget
+                                })
+                                .count()
+                                * SKIPPED_COLON_COST
+                        } else {
+                            0
+                        };
+                        assert_eq!(
+                            skipped_colon_cost(&colon_counts, &reachable, end),
+                            expected,
+                            "{text:?}, start={start}, end={end}, budget={budget}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
