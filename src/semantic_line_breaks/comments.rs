@@ -66,6 +66,8 @@ pub enum ScanState {
     InHeredoc(String),
     /// Inside a YAML block scalar with lines indented more than the given width.
     InBlockScalar(usize),
+    /// An ambiguous JavaScript slash may hide a multiline construct, so the remaining source is protected.
+    Uncertain,
 }
 
 /// String and comment syntax of a language for the trailing comment scanner.
@@ -101,7 +103,7 @@ pub struct StringSyntax {
     heredoc: bool,
     /// Whether YAML block scalars exist.
     block_scalars: bool,
-    /// Whether an odd number of slashes before a marker makes the line uncertain.
+    /// Whether JavaScript regex literals must be distinguished from division.
     regex_guard: bool,
 }
 
@@ -249,8 +251,8 @@ pub fn fix_trailing_comments(
 struct Cursor {
     /// Index into the character vector.
     index: usize,
-    /// Number of unquoted slashes seen, for the JavaScript regex guard.
-    slashes: usize,
+    /// Whether division makes comment relocation unsafe without preventing string state tracking.
+    uncertain: bool,
     /// Heredoc terminator to enter after this line.
     pending_heredoc: Option<String>,
 }
@@ -298,13 +300,13 @@ fn scan_line_buffered(
                 NormalStep::Comment(byte) => {
                     return ScanResult {
                         state: ScanState::Normal,
-                        comment_start: Some(byte),
-                        uncertain: false,
+                        comment_start: (!cursor.uncertain).then_some(byte),
+                        uncertain: cursor.uncertain,
                     };
                 }
                 NormalStep::Uncertain => return uncertain_result(),
             },
-            ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) => break,
+            ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) | ScanState::Uncertain => break,
             other => state = continue_state(other, chars, &mut cursor.index, syntax),
         }
     }
@@ -318,13 +320,18 @@ fn scan_line_buffered(
     ScanResult {
         state,
         comment_start: None,
-        uncertain: false,
+        uncertain: cursor.uncertain,
     }
 }
 
 /// Handle states that apply to whole lines, returning the result when the line needs no scanning.
 fn line_level_state(line: &str, state: &mut ScanState) -> Option<ScanResult> {
     match state {
+        ScanState::Uncertain => Some(ScanResult {
+            state: ScanState::Uncertain,
+            comment_start: None,
+            uncertain: true,
+        }),
         ScanState::InHeredoc(terminator) => {
             if line.trim() == terminator.as_str() {
                 *state = ScanState::Normal;
@@ -416,7 +423,7 @@ fn continue_state(state: ScanState, chars: &[(usize, char)], index: &mut usize, 
             *index += 1;
             if character == '`' { ScanState::Normal } else { state }
         }
-        ScanState::Normal | ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) => state,
+        ScanState::Normal | ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) | ScanState::Uncertain => state,
     }
 }
 
@@ -434,9 +441,6 @@ fn scan_normal(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax:
         let needs_space = syntax.marker_needs_leading_space
             && previous.is_some_and(|previous| !previous.is_whitespace() && previous != ';');
         if !is_url && !needs_space {
-            if syntax.regex_guard && cursor.slashes % 2 == 1 {
-                return NormalStep::Uncertain;
-            }
             return NormalStep::Comment(byte);
         }
         cursor.index += syntax.line_marker.chars().count();
@@ -483,10 +487,145 @@ fn scan_normal(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax:
         return NormalStep::Continue(ScanState::Normal);
     }
     if syntax.regex_guard && character == '/' {
-        cursor.slashes += 1;
+        let prefix = line.get(..byte).unwrap_or_default();
+        if division_can_start(prefix) {
+            cursor.uncertain = true;
+            cursor.index += 1;
+            return NormalStep::Continue(ScanState::Normal);
+        }
+        if !regex_can_start(prefix) {
+            return uncertain_regex(line.get(byte..).unwrap_or_default(), chars.len(), cursor);
+        }
+        let Some(end) = find_regex_end(chars, index + 1) else {
+            return uncertain_regex(line.get(byte..).unwrap_or_default(), chars.len(), cursor);
+        };
+        cursor.index = end;
+        return NormalStep::Continue(ScanState::Normal);
     }
     cursor.index += 1;
     NormalStep::Continue(ScanState::Normal)
+}
+
+/// Preserve subsequent source when an unsupported regex may hide a multiline construct.
+fn uncertain_regex(rest: &str, line_length: usize, cursor: &mut Cursor) -> NormalStep {
+    if rest.contains('`') || rest.contains("/*") || rest.ends_with('\\') {
+        cursor.index = line_length;
+        cursor.uncertain = true;
+        NormalStep::Continue(ScanState::Uncertain)
+    } else {
+        NormalStep::Uncertain
+    }
+}
+
+/// Recognize definite operands before division so later strings and block comments are still tracked.
+///
+/// Contextual keywords can introduce regex expressions and must not be treated as operands here.
+fn division_can_start(prefix: &str) -> bool {
+    let prefix = prefix.trim_end();
+    let Some(previous) = prefix.chars().next_back() else {
+        return false;
+    };
+    if matches!(previous, '\'' | '"' | '`' | ']') || prefix.ends_with("++") || prefix.ends_with("--") {
+        return true;
+    }
+    if !previous.is_alphanumeric() && previous != '_' && previous != '$' {
+        return false;
+    }
+    let word = prefix
+        .rsplit(|character: char| !character.is_alphanumeric() && character != '_' && character != '$')
+        .next()
+        .unwrap_or_default();
+    !matches!(
+        word,
+        "return"
+            | "throw"
+            | "case"
+            | "delete"
+            | "void"
+            | "typeof"
+            | "else"
+            | "do"
+            | "in"
+            | "instanceof"
+            | "yield"
+            | "await"
+            | "of"
+            | "new"
+            | "extends"
+            | "default"
+    )
+}
+
+/// Recognize contexts that require an expression rather than a division operator.
+///
+/// Closing parentheses and braces, line starts, and TypeScript postfix operators are ambiguous.
+/// Leaving those lines alone is safer than interpreting regex contents as comments or strings.
+fn regex_can_start(prefix: &str) -> bool {
+    let prefix = prefix.trim_end();
+    let Some(previous) = prefix.chars().next_back() else {
+        return false;
+    };
+    match previous {
+        '=' | '(' | '[' | '{' | ',' | ':' | ';' | '?' | '&' | '|' | '~' | '%' | '*' => true,
+        '+' | '-' => !prefix
+            .strip_suffix(previous)
+            .is_some_and(|rest| rest.ends_with(previous)),
+        '>' => prefix.ends_with("=>"),
+        _ => {
+            let word_start = prefix
+                .rfind(|character: char| !character.is_alphanumeric() && character != '_' && character != '$')
+                .map_or(0, |index| index + 1);
+            let word = prefix.get(word_start..).unwrap_or_default();
+            matches!(
+                word,
+                "return"
+                    | "throw"
+                    | "case"
+                    | "delete"
+                    | "void"
+                    | "typeof"
+                    | "else"
+                    | "do"
+                    | "new"
+                    | "extends"
+                    | "default"
+            ) && !prefix.get(..word_start).unwrap_or_default().trim_end().ends_with('.')
+        }
+    }
+}
+
+/// Find the end of a same-line JavaScript regex, including its flags.
+///
+/// Escapes and character classes hide slash and quote characters.
+/// Nested classes may use Unicode set syntax, so leave them unchanged rather than guess at their boundaries.
+fn find_regex_end(chars: &[(usize, char)], mut index: usize) -> Option<usize> {
+    let mut in_class = false;
+    while let Some(&(_, character)) = chars.get(index) {
+        match character {
+            '\n' | '\r' | '\u{2028}' | '\u{2029}' => return None,
+            '\\' => {
+                let &(_, escaped) = chars.get(index + 1)?;
+                if matches!(escaped, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                    return None;
+                }
+                index += 2;
+                continue;
+            }
+            '[' if in_class => return None,
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '/' if !in_class => {
+                index += 1;
+                while chars.get(index).is_some_and(|(_, flag)| flag.is_ascii_alphabetic()) {
+                    index += 1;
+                }
+                return Some(index);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Scan a string or character literal starting at the cursor.
@@ -542,7 +681,10 @@ fn is_triple(chars: &[(usize, char)], index: usize, quote: char) -> bool {
     })
 }
 
-/// Whether each line starts inside a multi-line string literal, so comment-like text in it is left alone.
+/// Whether a line starts in a multiline string or follows an unresolved multiline construct.
+///
+/// Ambiguous JavaScript slashes can hide template or block comment boundaries.
+/// Protect the remaining source when those boundaries cannot be recovered safely.
 fn lines_inside_strings(lines: &[&str], kind: FileKind) -> Vec<bool> {
     let Some(syntax) = string_syntax(kind) else {
         return vec![false; lines.len()];
@@ -560,6 +702,7 @@ fn lines_inside_strings(lines: &[&str], kind: FileKind) -> Vec<bool> {
                     | ScanState::InTemplate
                     | ScanState::InBacktickRaw
                     | ScanState::InHeredoc(_)
+                    | ScanState::Uncertain
             );
             state = scan_line_buffered(line, std::mem::take(&mut state), &syntax, &mut characters).state;
             inside
@@ -1538,8 +1681,11 @@ mod test_trailing_other_languages {
     }
 
     #[test]
-    fn javascript_regex_guard_gives_up_on_odd_slash_count() {
-        assert_eq!(replacement("const r = /a\\/b/; // c", FileKind::JavaScript), None);
+    fn javascript_regex_escapes_do_not_hide_real_comments() {
+        assert_eq!(
+            replacement("const r = /a\\/b/; // c", FileKind::JavaScript),
+            Some(pair("// c", "const r = /a\\/b/;"))
+        );
         assert_eq!(replacement("const d = a / b; // c", FileKind::JavaScript), None);
         assert_eq!(
             replacement("const r = /a\\/\\/b/; // c", FileKind::JavaScript),
@@ -1578,6 +1724,180 @@ mod test_trailing_other_languages {
             let (replacements, violations) = fix(&["RUN echo hi # c", "x = 1 # c"], kind);
             assert_eq!(replacements, vec![None, None], "{kind:?}");
             assert!(violations.is_empty(), "{kind:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_javascript_regex {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn regex_literals_hide_comment_markers_quotes_and_escaped_delimiters() {
+        for code in [
+            r"test: /node_modules\/(react|react-dom)\//,",
+            r"const expression = /a\/b/;",
+            r"const expression = /a\/\/b/;",
+            r"const expression = /a\\\//g;",
+            r"const expression = /a\\/g;",
+            r"const expression = /[/]/;",
+            r"const expression = /[/*]/;",
+            r"const expression = /[//]/;",
+            r"const expression = /[\]\/]/;",
+            r#"const expression = /["'`/]/;"#,
+            r#"const expression = /"'`\/\/*/dgimsuy;"#,
+            r"const expression = /=/;",
+            r"const expressions = [/a\//, /b\//];",
+            r"const expression = /😀\//u;",
+        ] {
+            assert_eq!(replacement(code, FileKind::JavaScript), None, "{code}");
+            assert_eq!(
+                replacement(&format!("{code} // real comment"), FileKind::JavaScript),
+                Some(pair("// real comment", code)),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn expression_contexts_allow_regex_literals() {
+        for prefix in [
+            "return ",
+            "throw ",
+            "case ",
+            "typeof ",
+            "void ",
+            "delete ",
+            "new ",
+            "export default ",
+            "class Example extends ",
+            "else ",
+            "do ",
+            "const expression = ",
+            "test(",
+            "const expressions = [",
+            "test: ",
+            "condition ? ",
+            "condition && ",
+            "condition || ",
+            "const create = () => ",
+            "value + ",
+            "value - ",
+            "value * ",
+            "value % ",
+        ] {
+            let code = format!("{prefix}/path\\//g;");
+            assert_eq!(
+                replacement(&format!("{code} // c"), FileKind::JavaScript),
+                Some(pair("// c", &code)),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_or_unclosed_regexes_leave_no_persistent_state() {
+        let syntax = string_syntax(FileKind::JavaScript).expect("JavaScript syntax");
+        for line in [
+            r"const value = numerator / denominator; // c",
+            r"const value = numerator / denominator / divisor; // c",
+            r"const value = numerator / /path\//.source.length; // c",
+            r"const value = numerator /= denominator; // c",
+            r"if (ready) /path\//.test(value); // c",
+            r"if (ready) {} /path\//.test(value); // c",
+            r"const value = count++ / denominator; // c",
+            r"const value = count-- / denominator; // c",
+            r"const value = count! / denominator; // c",
+            r"const value = generic<Type> / denominator; // c",
+            r"const value = object.return / denominator; // c",
+            r"/path\//.test(value); // c",
+            r#"const expression = /[/"'`*] // unclosed"#,
+            r"const expression = /[[a]--[/]]/v; // c",
+        ] {
+            let result = scan_line(line, ScanState::Normal, &syntax);
+            assert!(result.uncertain, "{line}");
+            assert_eq!(result.comment_start, None, "{line}");
+            assert_eq!(result.state, ScanState::Normal, "{line}");
+            assert_eq!(
+                replaced_indices(&[line, "const next = 1; // c"], FileKind::JavaScript),
+                vec![1],
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn regex_boundaries_preserve_comments_and_block_comment_state() {
+        assert_eq!(
+            replacement(r"const expression = /path\//// c", FileKind::JavaScript),
+            Some(pair("// c", r"const expression = /path\//"))
+        );
+        let lines = [
+            r#"const expression = /[/*"'`]/; /* real block"#,
+            "// inside the block",
+            "*/ const next = 1; // c",
+        ];
+        assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![2]);
+    }
+
+    #[test]
+    fn division_keeps_later_multiline_template_and_block_comment_state() {
+        let syntax = string_syntax(FileKind::JavaScript).expect("JavaScript syntax");
+        for operand in ["total", "42", "values[0]", "'total'", "\"total\"", "`total`", "total++"] {
+            let opening = format!("const value = {operand} / count + `");
+            let result = scan_line(&opening, ScanState::Normal, &syntax);
+            assert!(result.uncertain, "{opening}");
+            assert_eq!(result.state, ScanState::InTemplate, "{opening}");
+            let lines = [
+                opening.as_str(),
+                "// literal; text must stay unchanged",
+                "`;",
+                "const next = 1; // c",
+            ];
+            assert_eq!(
+                lines_inside_strings(&lines, FileKind::JavaScript),
+                vec![false, true, true, false]
+            );
+            assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![3]);
+        }
+        let lines = [
+            "const value = total / count; /* block",
+            "still inside; // not a trailing comment",
+            "*/ const next = 1; // c",
+        ];
+        let result = scan_line(lines[0], ScanState::Normal, &syntax);
+        assert_eq!(result.state, ScanState::InBlockComment(1));
+        assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![2]);
+    }
+
+    #[test]
+    fn ambiguous_slashes_protect_possible_multiline_constructs() {
+        let syntax = string_syntax(FileKind::JavaScript).expect("JavaScript syntax");
+        for opening in [
+            "const value = total() / count + `",
+            "const value = { total: 1 } / count + `",
+            "const value = total() / count; /* block",
+            r#"if (ready) /["'`/]/.test(value);"#,
+            r#"const value = total() / count + "\"#,
+            r#"const expression = /[/"'`* // unclosed"#,
+            r"const expression = /unfinished\",
+            "const value = /[[a]--[/]]/v + `",
+        ] {
+            let result = scan_line(opening, ScanState::Normal, &syntax);
+            assert!(result.uncertain, "{opening}");
+            assert_eq!(result.state, ScanState::Uncertain, "{opening}");
+            let lines = [
+                opening,
+                "// literal; not prose",
+                "`; // still uncertain",
+                "const next = 1; // c",
+            ];
+            assert_eq!(
+                lines_inside_strings(&lines, FileKind::JavaScript),
+                vec![false, true, true, true]
+            );
+            assert!(replaced_indices(&lines, FileKind::JavaScript).is_empty());
         }
     }
 }

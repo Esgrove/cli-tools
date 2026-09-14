@@ -302,4 +302,103 @@ mod test_format {
         assert_eq!(second.fixed_text, None, "second pass changed:\n{fixed}");
         assert!(second.violations.iter().all(|violation| !violation.fixable));
     }
+
+    #[test]
+    fn javascript_regex_object_is_preserved_while_real_comments_are_formatted() {
+        let text = concat!(
+            "const config = {\n",
+            "  test: /node_modules\\/(react|react-dom)\\//,\n",
+            "  name: 'react',\n",
+            "  chunks: 'all',\n",
+            "};\n",
+            "const expression = /[/*\"'`]/g; // Match a delimiter.\n",
+            "const next = 1; // Keep this comment.\n",
+        );
+        let expected = concat!(
+            "const config = {\n",
+            "  test: /node_modules\\/(react|react-dom)\\//,\n",
+            "  name: 'react',\n",
+            "  chunks: 'all',\n",
+            "};\n",
+            "// Match a delimiter.\n",
+            "const expression = /[/*\"'`]/g;\n",
+            "// Keep this comment.\n",
+            "const next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        let first = format(text, FileKind::JavaScript, &options);
+        assert_eq!(first.fixed_text.as_deref(), Some(expected));
+        assert_eq!(check(text, FileKind::JavaScript, &options), first.violations);
+        assert_eq!(
+            format(expected, FileKind::JavaScript, &options),
+            FormatResult::default()
+        );
+    }
+
+    #[test]
+    fn javascript_regex_only_source_needs_no_formatting() {
+        let text = concat!(
+            "const config = {\n",
+            "  test: /node_modules\\/(react|react-dom)\\//,\n",
+            "};\n",
+            "if (ready) /path\\//.test(value);\n",
+            "const expression = /[/*\"'`]/g;\n",
+            "const nested = /[[a]--[/]]/v;\n",
+        );
+        let options = FormatOptions::default();
+        assert_eq!(format(text, FileKind::JavaScript, &options), FormatResult::default());
+        assert!(check(text, FileKind::JavaScript, &options).is_empty());
+    }
+
+    #[test]
+    fn javascript_division_preserves_multiline_template_content() {
+        let text = concat!(
+            "const value = total / count + `\n",
+            "// literal; text must stay unchanged\n",
+            "// even when it looks like wrapped\n",
+            "// prose.\n",
+            "`;\n",
+            "const next = 1; // Keep this comment.\n",
+        );
+        let expected = concat!(
+            "const value = total / count + `\n",
+            "// literal; text must stay unchanged\n",
+            "// even when it looks like wrapped\n",
+            "// prose.\n",
+            "`;\n",
+            "// Keep this comment.\n",
+            "const next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        assert_eq!(
+            format(text, FileKind::JavaScript, &options).fixed_text.as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            format(expected, FileKind::JavaScript, &options),
+            FormatResult::default()
+        );
+    }
+
+    #[test]
+    fn javascript_uncertain_slashes_preserve_remaining_source() {
+        let options = FormatOptions::default();
+        for opening in [
+            "const value = total() / count + `\n",
+            "const value = /[[a]--[/]]/v + `\n",
+        ] {
+            let text = format!(
+                "{opening}{}",
+                concat!(
+                    "// literal; text must stay unchanged\n",
+                    "// even when it looks like wrapped\n",
+                    "// prose.\n",
+                    "`;\n",
+                    "const next = 1; // Keep this comment in place when state is uncertain.\n",
+                )
+            );
+            assert_eq!(format(&text, FileKind::JavaScript, &options), FormatResult::default());
+            assert!(check(&text, FileKind::JavaScript, &options).is_empty());
+        }
+    }
 }
