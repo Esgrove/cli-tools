@@ -625,14 +625,14 @@ fn regex_can_start(prefix: &str) -> bool {
 
 /// Find the end of a same-line slash-delimited regex, including its flags.
 ///
-/// Escapes and character classes hide slash and quote characters.
-/// Unescaped quotes outside classes could instead start strings after division or within paths.
+/// Escapes and character classes hide slash characters.
+/// Unescaped quotes can start strings after division or within paths, even inside a presumed regex class.
 /// Nested classes may use Unicode set syntax, so leave them unchanged rather than guess at their boundaries.
 fn find_regex_end(chars: &[(usize, char)], mut index: usize) -> Option<usize> {
     let mut in_class = false;
     while let Some(&(_, character)) = chars.get(index) {
         match character {
-            '\n' | '\r' | '\u{2028}' | '\u{2029}' => return None,
+            '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\'' | '"' | '`' => return None,
             '\\' => {
                 let &(_, escaped) = chars.get(index + 1)?;
                 if matches!(escaped, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
@@ -644,7 +644,6 @@ fn find_regex_end(chars: &[(usize, char)], mut index: usize) -> Option<usize> {
             '[' if in_class => return None,
             '[' => in_class = true,
             ']' => in_class = false,
-            '\'' | '"' | '`' if !in_class => return None,
             '/' if !in_class => {
                 index += 1;
                 while chars.get(index).is_some_and(|(_, flag)| flag.is_ascii_alphabetic()) {
@@ -1769,7 +1768,9 @@ mod test_regex_literals {
     fn quoted_slashes_after_division_and_in_paths_are_not_regex_boundaries() {
         for (kind, code) in [
             (FileKind::Python, r#"value = default / len("/# not a comment")"#),
+            (FileKind::Python, r#"value = default / len(["]/# not a comment"])"#),
             (FileKind::Shell, r#"path=/"foo/bar # literal""#),
+            (FileKind::Shell, r#"path=/["]foo/bar # literal""#),
         ] {
             assert_eq!(replacement(code, kind), None, "{code}");
             assert_eq!(replaced_indices(&[code, "next = 1 # c"], kind), vec![1], "{code}");
@@ -1783,14 +1784,19 @@ mod test_regex_literals {
         ] {
             let marker = string_syntax(kind).expect("source syntax").line_marker;
             for identifier in ["default", "typeof", "void", "delete", "do", "new", "extends", "case"] {
-                let code = format!("value = {identifier} / len(\"/{marker} not a comment\")");
-                assert_eq!(replacement(&code, kind), None, "{kind:?}: {code}");
+                for argument in [
+                    format!("\"/{marker} not a comment\""),
+                    format!("[\"]/{marker} not a comment\"]"),
+                ] {
+                    let code = format!("value = {identifier} / len({argument})");
+                    assert_eq!(replacement(&code, kind), None, "{kind:?}: {code}");
+                }
             }
         }
     }
 
     #[test]
-    fn regexes_with_unescaped_quotes_outside_classes_are_left_unchanged() {
+    fn regexes_with_unescaped_quotes_are_left_unchanged() {
         for kind in [
             FileKind::JavaScript,
             FileKind::CLike,
@@ -1807,6 +1813,9 @@ mod test_regex_literals {
                 r"pattern = /foo'bar/;",
                 r"pattern = /foo`bar/;",
                 r#"pattern = /"'`\/\/*/dgimsuy;"#,
+                r#"pattern = /["'`/]/;"#,
+                r#"pattern = /[#"'/]/;"#,
+                r#"pattern = /[/*"'`]/;"#,
             ] {
                 assert_eq!(replacement(code, kind), None, "{kind:?}: {code}");
                 assert_eq!(
@@ -1826,7 +1835,7 @@ mod test_regex_literals {
         assert_eq!(replacement(code, swift), None);
         assert_eq!(replacement(&format!("{code} // c"), swift), Some(pair("// c", code)));
         for kind in [FileKind::Python, FileKind::Shell, FileKind::Toml, FileKind::Yaml] {
-            let code = r#"pattern = /[#"'/]/"#;
+            let code = r"pattern = /[ #/]/";
             assert_eq!(replacement(code, kind), None, "{kind:?}");
             assert_eq!(
                 replacement(&format!("{code} # c"), kind),
@@ -1956,7 +1965,7 @@ mod test_regex_literals {
     }
 
     #[test]
-    fn regex_literals_hide_comment_markers_quotes_and_escaped_delimiters() {
+    fn regex_literals_hide_comment_markers_and_escaped_delimiters() {
         for code in [
             r"test: /node_modules\/(react|react-dom)\//,",
             r"const expression = /a\/b/;",
@@ -1967,7 +1976,6 @@ mod test_regex_literals {
             r"const expression = /[/*]/;",
             r"const expression = /[//]/;",
             r"const expression = /[\]\/]/;",
-            r#"const expression = /["'`/]/;"#,
             r"const expression = /=/;",
             r"const expressions = [/a\//, /b\//];",
             r"const expression = /😀\//u;",
@@ -2059,7 +2067,7 @@ mod test_regex_literals {
             Some(pair("// c", r"const expression = /path\//"))
         );
         let lines = [
-            r#"const expression = /[/*"'`]/; /* real block"#,
+            r"const expression = /[/*]/; /* real block",
             "// inside the block",
             "*/ const next = 1; // c",
         ];

@@ -311,7 +311,7 @@ mod test_format {
             "  name: 'react',\n",
             "  chunks: 'all',\n",
             "};\n",
-            "const expression = /[/*\"'`]/g; // Match a delimiter.\n",
+            "const expression = /[/*]/g; // Match a delimiter.\n",
             "const next = 1; // Keep this comment.\n",
         );
         let expected = concat!(
@@ -321,7 +321,7 @@ mod test_format {
             "  chunks: 'all',\n",
             "};\n",
             "// Match a delimiter.\n",
-            "const expression = /[/*\"'`]/g;\n",
+            "const expression = /[/*]/g;\n",
             "// Keep this comment.\n",
             "const next = 1;\n",
         );
@@ -353,8 +353,8 @@ mod test_format {
 
     #[test]
     fn regex_hashes_are_preserved_while_real_hash_comments_are_formatted() {
-        let text = "pattern = /[ #'\"/]/ # Match a delimiter.\nnext = 1 # Keep this comment.\n";
-        let expected = "# Match a delimiter.\npattern = /[ #'\"/]/\n# Keep this comment.\nnext = 1\n";
+        let text = "pattern = /[ #/]/ # Match a delimiter.\nnext = 1 # Keep this comment.\n";
+        let expected = "# Match a delimiter.\npattern = /[ #/]/\n# Keep this comment.\nnext = 1\n";
         let options = FormatOptions::default();
         for kind in [FileKind::Python, FileKind::Shell, FileKind::Toml, FileKind::Yaml] {
             assert_eq!(
@@ -371,7 +371,9 @@ mod test_format {
         let options = FormatOptions::default();
         for (kind, code) in [
             (FileKind::Python, r#"value = default / len("/# not a comment")"#),
+            (FileKind::Python, r#"value = default / len(["]/# not a comment"])"#),
             (FileKind::Shell, r#"path=/"foo/bar # literal""#),
+            (FileKind::Shell, r#"path=/["]foo/bar # literal""#),
         ] {
             assert_eq!(format(code, kind, &options), FormatResult::default(), "{kind:?}");
             let text = format!("{code}\nnext = 1 # Keep this comment.\n");
