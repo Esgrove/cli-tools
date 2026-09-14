@@ -123,12 +123,14 @@ pub enum Rank {
     ClauseTier4,
     /// Before a subordinating conjunction such as "because" or "while".
     ClauseTier3,
-    /// After a comma, colon, or dash.
+    /// After a comma or dash.
     Punctuation,
     /// Before a coordinating conjunction such as "but" or "or".
     ClauseTier2,
     /// Before "and".
     ClauseTier1,
+    /// After a colon introducing an explanation or list.
+    Colon,
     /// After the end of a sentence.
     Sentence,
     /// A break the formatter inserted itself, for example after a semicolon rewrite.
@@ -418,7 +420,8 @@ impl Rank {
             Self::Punctuation => Self::ClauseTier3,
             Self::ClauseTier2 => Self::Punctuation,
             Self::ClauseTier1 => Self::ClauseTier2,
-            Self::Sentence => Self::ClauseTier1,
+            Self::Colon => Self::ClauseTier1,
+            Self::Sentence => Self::Colon,
             Self::Forced => Self::Sentence,
         }
     }
@@ -735,7 +738,8 @@ mod test_rank {
     #[test]
     fn lowering_moves_one_step_down_and_stops_at_word() {
         assert_eq!(Rank::Forced.lowered(), Rank::Sentence);
-        assert_eq!(Rank::Sentence.lowered(), Rank::ClauseTier1);
+        assert_eq!(Rank::Sentence.lowered(), Rank::Colon);
+        assert_eq!(Rank::Colon.lowered(), Rank::ClauseTier1);
         assert_eq!(Rank::ClauseTier1.lowered(), Rank::ClauseTier2);
         assert_eq!(Rank::ClauseTier2.lowered(), Rank::Punctuation);
         assert_eq!(Rank::Punctuation.lowered(), Rank::ClauseTier3);
@@ -751,7 +755,8 @@ mod test_rank {
         assert!(Rank::ClauseTier3 < Rank::Punctuation);
         assert!(Rank::Punctuation < Rank::ClauseTier2);
         assert!(Rank::ClauseTier2 < Rank::ClauseTier1);
-        assert!(Rank::ClauseTier1 < Rank::Sentence);
+        assert!(Rank::ClauseTier1 < Rank::Colon);
+        assert!(Rank::Colon < Rank::Sentence);
         assert!(Rank::Sentence < Rank::Forced);
     }
 }

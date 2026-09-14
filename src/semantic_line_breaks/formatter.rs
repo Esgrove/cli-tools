@@ -302,4 +302,238 @@ mod test_format {
         assert_eq!(second.fixed_text, None, "second pass changed:\n{fixed}");
         assert!(second.violations.iter().all(|violation| !violation.fixable));
     }
+
+    #[test]
+    fn regex_object_is_preserved_while_real_comments_are_formatted() {
+        let text = concat!(
+            "const config = {\n",
+            "  test: /node_modules\\/(react|react-dom)\\//,\n",
+            "  name: 'react',\n",
+            "  chunks: 'all',\n",
+            "};\n",
+            "const expression = /[/*]/g; // Match a delimiter.\n",
+            "const next = 1; // Keep this comment.\n",
+        );
+        let expected = concat!(
+            "const config = {\n",
+            "  test: /node_modules\\/(react|react-dom)\\//,\n",
+            "  name: 'react',\n",
+            "  chunks: 'all',\n",
+            "};\n",
+            "// Match a delimiter.\n",
+            "const expression = /[/*]/g;\n",
+            "// Keep this comment.\n",
+            "const next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
+            let first = format(text, kind, &options);
+            assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
+            assert_eq!(check(text, kind, &options), first.violations);
+            assert_eq!(format(expected, kind, &options), FormatResult::default());
+        }
+    }
+
+    #[test]
+    fn regex_only_source_needs_no_formatting() {
+        let text = concat!(
+            "const config = {\n",
+            "  test: /node_modules\\/(react|react-dom)\\//,\n",
+            "};\n",
+            "if (ready) /path\\//.test(value);\n",
+            "const expression = /[/*\"'`]/g;\n",
+            "const nested = /[[a]--[/]]/v;\n",
+        );
+        let options = FormatOptions::default();
+        for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
+            assert_eq!(format(text, kind, &options), FormatResult::default(), "{kind:?}");
+            assert!(check(text, kind, &options).is_empty());
+        }
+    }
+
+    #[test]
+    fn contextual_identifiers_format_real_comments_without_changing_block_contents() {
+        let text = concat!(
+            "let value = new / divisor; // note\n",
+            "let value = new / divisor; /// doc note\n",
+            "let value = new / divisor; //// longer note\n",
+            "let value = new / divisor; /* block\n",
+            "code // literal; not prose\n",
+            "code /// literal; not prose\n",
+            "code //// literal; not prose\n",
+            "// wrapped block\n",
+            "// content.\n",
+            "*/ let next = 1; // next note\n",
+        );
+        let expected = concat!(
+            "// note\n",
+            "let value = new / divisor;\n",
+            "let value = new / divisor; /// doc note\n",
+            "let value = new / divisor; //// longer note\n",
+            "let value = new / divisor; /* block\n",
+            "code // literal; not prose\n",
+            "code /// literal; not prose\n",
+            "code //// literal; not prose\n",
+            "// wrapped block\n",
+            "// content.\n",
+            "// next note\n",
+            "*/ let next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
+            let first = format(text, kind, &options);
+            assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
+            assert_eq!(check(text, kind, &options), first.violations, "{kind:?}");
+            assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn contextual_regexes_keep_attached_comments_and_format_idempotently() {
+        let text = concat!(
+            "return /foo/;\n",
+            "return /foo/// attached note\n",
+            "return /foo;/// comment\n",
+            "return /foo;//// comment\n",
+            "return /path\\//// note\n",
+            "new /[/*]//* block\n",
+            "code // literal; not prose\n",
+            "*/ let next = 1; // next note\n",
+        );
+        let expected = concat!(
+            "return /foo/;\n",
+            "// attached note\n",
+            "return /foo/\n",
+            "return /foo;/// comment\n",
+            "return /foo;//// comment\n",
+            "// note\n",
+            "return /path\\//\n",
+            "new /[/*]//* block\n",
+            "code // literal; not prose\n",
+            "// next note\n",
+            "*/ let next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
+            let first = format(text, kind, &options);
+            assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
+            assert_eq!(check(text, kind, &options), first.violations, "{kind:?}");
+            assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn regex_hashes_are_preserved_while_real_hash_comments_are_formatted() {
+        let text = "pattern = /[ #/]/ # Match a delimiter.\nnext = 1 # Keep this comment.\n";
+        let expected = "# Match a delimiter.\npattern = /[ #/]/\n# Keep this comment.\nnext = 1\n";
+        let options = FormatOptions::default();
+        for kind in [FileKind::Python, FileKind::Shell, FileKind::Toml, FileKind::Yaml] {
+            assert_eq!(
+                format(text, kind, &options).fixed_text.as_deref(),
+                Some(expected),
+                "{kind:?}"
+            );
+            assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn quoted_slashes_in_division_and_paths_preserve_code() {
+        let options = FormatOptions::default();
+        for (kind, code) in [
+            (FileKind::Python, r#"value = default / len("/# not a comment")"#),
+            (FileKind::Python, r#"value = default / len(["]/# not a comment"])"#),
+            (FileKind::Shell, r#"path=/"foo/bar # literal""#),
+            (FileKind::Shell, r#"path=/["]foo/bar # literal""#),
+        ] {
+            assert_eq!(format(code, kind, &options), FormatResult::default(), "{kind:?}");
+            let text = format!("{code}\nnext = 1 # Keep this comment.\n");
+            let expected = format!("{code}\n# Keep this comment.\nnext = 1\n");
+            assert_eq!(
+                format(&text, kind, &options).fixed_text.as_deref(),
+                Some(expected.as_str()),
+                "{kind:?}"
+            );
+            assert_eq!(format(&expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn uncertain_slashes_preserve_heredocs_and_block_scalars() {
+        let options = FormatOptions::default();
+        for (kind, text) in [
+            (
+                FileKind::Shell,
+                "DIR=/root cat <<EOF /dev/stdin\nliteral # not a comment\nEOF\n",
+            ),
+            (FileKind::Yaml, "foo/\"bar\": |\n  literal # not a comment\n"),
+            (
+                FileKind::Shell,
+                "DIR=/\"root\" cat <<'EOF'\nliteral # not a comment\nEOF\n",
+            ),
+            (
+                FileKind::Shell,
+                "cat <<'EOF' DIR=/\"root\"\nliteral # not a comment\nEOF\n",
+            ),
+            (
+                FileKind::Yaml,
+                "/path\"key\": |\n  literal # not a comment\nnext: value\n",
+            ),
+        ] {
+            assert_eq!(format(text, kind, &options), FormatResult::default(), "{text}");
+            assert!(check(text, kind, &options).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn javascript_division_preserves_multiline_template_content() {
+        let text = concat!(
+            "const value = total / count + `\n",
+            "// literal; text must stay unchanged\n",
+            "// even when it looks like wrapped\n",
+            "// prose.\n",
+            "`;\n",
+            "const next = 1; // Keep this comment.\n",
+        );
+        let expected = concat!(
+            "const value = total / count + `\n",
+            "// literal; text must stay unchanged\n",
+            "// even when it looks like wrapped\n",
+            "// prose.\n",
+            "`;\n",
+            "// Keep this comment.\n",
+            "const next = 1;\n",
+        );
+        let options = FormatOptions::default();
+        assert_eq!(
+            format(text, FileKind::JavaScript, &options).fixed_text.as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            format(expected, FileKind::JavaScript, &options),
+            FormatResult::default()
+        );
+    }
+
+    #[test]
+    fn javascript_uncertain_slashes_preserve_remaining_source() {
+        let options = FormatOptions::default();
+        for opening in [
+            "const value = total() / count + `\n",
+            "const value = /[[a]--[/]]/v + `\n",
+        ] {
+            let text = format!(
+                "{opening}{}",
+                concat!(
+                    "// literal; text must stay unchanged\n",
+                    "// even when it looks like wrapped\n",
+                    "// prose.\n",
+                    "`;\n",
+                    "const next = 1; // Keep this comment in place when state is uncertain.\n",
+                )
+            );
+            assert_eq!(format(&text, FileKind::JavaScript, &options), FormatResult::default());
+            assert!(check(&text, FileKind::JavaScript, &options).is_empty());
+        }
+    }
 }

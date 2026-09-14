@@ -9,6 +9,7 @@
 //! so the break points that read best and spread the text most evenly over the lines win.
 
 use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -46,6 +47,11 @@ const TOO_LONG_COST: usize = 10_000_000;
 ///
 /// Such a break may cut a phrase in two instead of separating two clauses.
 const BARE_CONJUNCTION_COST: usize = 250_000;
+
+/// Cost of passing a colon that could end a sufficiently filled line in a long run.
+///
+/// An explanation reads better on its own line, even when keeping it with its introduction saves a line.
+const SKIPPED_COLON_COST: usize = 1_000_000;
 
 /// Cost of breaking in the middle of a clause, only reachable when word breaks are allowed.
 const WORD_BREAK_COST: usize = 1_000_000_000_000;
@@ -340,6 +346,8 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
             Rank::Forced
         } else if is_sentence_end(tokens, index - 1, options) {
             Rank::Sentence
+        } else if previous.trailing.contains(':') {
+            Rank::Colon
         } else if previous.ends_clause_punctuation() {
             clause.map_or(Rank::Punctuation, |clause| clause.max(Rank::Punctuation))
         } else {
@@ -1282,6 +1290,7 @@ fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, o
             *slot = Some(boundary.rank);
         }
     }
+    let colon_counts = cumulative_colon_counts(&ranks);
     // The width of a line, which loses the space that joined it to the previous line.
     let span_width = |from: usize, to: usize| {
         let head = widths.get(from).copied().unwrap_or_default();
@@ -1302,10 +1311,17 @@ fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, o
             cost: usize::MAX,
             line_end: count,
         };
+        let colon_range = if span_width(start, count) > budget {
+            reachable_boundary_range(&widths, start, budget)
+        } else {
+            0..0
+        };
         collect_line_candidates(start, count, budget, &ranks, &span_width, &mut candidates);
         for end in candidates.iter().copied() {
             let tail = plans.get(end).map_or(usize::MAX, |plan| plan.cost);
-            let cost = line_cost(tokens, start, end, budget, &ranks, &span_width).saturating_add(tail);
+            let cost = line_cost(tokens, start, end, budget, &ranks, &span_width)
+                .saturating_add(skipped_colon_cost(&colon_counts, &colon_range, end))
+                .saturating_add(tail);
             // Candidates come in reading order, so the last one of an equal cost fills the line the most.
             if cost <= best.cost {
                 best = LinePlan { cost, line_end: end };
@@ -1369,6 +1385,37 @@ fn collect_line_candidates(
 /// Rank of the boundary before the token at `index`, or `None` when no line may end there.
 fn rank_at(ranks: &[Option<Rank>], index: usize) -> Option<Rank> {
     ranks.get(index).copied().flatten()
+}
+
+/// Count colon boundaries before each token index for constant-time range queries.
+fn cumulative_colon_counts(ranks: &[Option<Rank>]) -> Vec<usize> {
+    let mut counts = Vec::with_capacity(ranks.len() + 1);
+    let mut total = 0;
+    counts.push(total);
+    for rank in ranks {
+        total += usize::from(*rank == Some(Rank::Colon));
+        counts.push(total);
+    }
+    counts
+}
+
+/// Find the boundary range that fills at least half the line without exceeding its budget.
+///
+/// Cumulative widths are sorted, so two binary searches suffice for each line start.
+fn reachable_boundary_range(widths: &[usize], start: usize, budget: usize) -> Range<usize> {
+    let remaining = widths.get(start + 1..).unwrap_or_default();
+    let offset = widths.get(start).copied().unwrap_or_default() + usize::from(start > 0);
+    let min_fill = budget * MIN_FILL_PERCENT / 100;
+    let first = remaining.partition_point(|width| width.saturating_sub(offset) < min_fill);
+    let last = remaining.partition_point(|width| width.saturating_sub(offset) <= budget);
+    start + 1 + first..start + 1 + last
+}
+
+/// Query the penalty for reachable colons strictly before the candidate line end.
+fn skipped_colon_cost(counts: &[usize], reachable: &Range<usize>, end: usize) -> usize {
+    let first = counts.get(reachable.start.min(end)).copied().unwrap_or_default();
+    let last = counts.get(reachable.end.min(end)).copied().unwrap_or_default();
+    last.saturating_sub(first).saturating_mul(SKIPPED_COLON_COST)
 }
 
 /// Cost of a line that covers the tokens `start..end` of the run.
@@ -1445,6 +1492,7 @@ fn width_cost(budget: usize, width: usize) -> usize {
 const fn break_cost(rank: Rank) -> usize {
     match rank {
         Rank::Forced | Rank::Sentence => 0,
+        Rank::Colon => 5_000,
         Rank::ClauseTier1 => 10_000,
         Rank::ClauseTier2 => 25_000,
         Rank::Punctuation => 50_000,
@@ -1834,9 +1882,109 @@ mod test_sentence_merge {
 }
 
 #[cfg(test)]
+mod test_colon_penalties {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn precomputed_penalties_match_boundary_scanning() {
+        for text in [
+            "",
+            "A sentence with no colons.",
+            "Introduction: first clause: second clause: final clause.",
+            "説明: a longer clause with `code: inside` and (a label: value), then more: text.",
+        ] {
+            let tokens = tokens(text);
+            let count = tokens.len();
+            let widths = cumulative_widths(&tokens);
+            let mut ranks = vec![None; count + 1];
+            for boundary in find_boundaries(&tokens, &FormatOptions::default()) {
+                ranks[boundary.before] = Some(boundary.rank);
+            }
+            let colon_counts = cumulative_colon_counts(&ranks);
+            let span_width = |start: usize, end: usize| {
+                widths[end]
+                    .saturating_sub(widths[start])
+                    .saturating_sub(usize::from(start > 0))
+            };
+            for budget in 0..=widths.last().copied().unwrap_or_default() + 1 {
+                for start in 0..count {
+                    let reachable = if span_width(start, count) > budget {
+                        reachable_boundary_range(&widths, start, budget)
+                    } else {
+                        0..0
+                    };
+                    for end in start + 1..=count {
+                        let expected = if span_width(start, count) > budget {
+                            (start + 1..end)
+                                .filter(|boundary| {
+                                    let width = span_width(start, *boundary);
+                                    ranks[*boundary] == Some(Rank::Colon)
+                                        && width >= budget * MIN_FILL_PERCENT / 100
+                                        && width <= budget
+                                })
+                                .count()
+                                * SKIPPED_COLON_COST
+                        } else {
+                            0
+                        };
+                        assert_eq!(
+                            skipped_colon_cost(&colon_counts, &reachable, end),
+                            expected,
+                            "{text:?}, start={start}, end={end}, budget={budget}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod test_break_choice {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn a_colon_introduces_explanatory_clauses_on_separate_lines() {
+        let lines = [
+            "Checks that a raw `TOUCH_DRAG` action value is fully valid for the form: correct shape and",
+            "modes (via `isDragGestureShape`), then the pure value rules in `validateDragGestureValue`",
+            "(endpoint ranges and duration). Reuses the same shared helper `DragFields` validates against",
+            "instead of re-implementing the rules here, so this fixture list and the component can't",
+            "silently diverge again.",
+            "Uses `DragFields`'s default duration bounds (`{ min: 0.001 }` seconds) so a zero or negative",
+            "duration is rejected here exactly like it would be in the actual form.",
+        ];
+        let options = FormatOptions::with_width(120);
+        let outcome = reflow_paragraph(&paragraph(&lines, " * "), &options);
+        let expected = [
+            "Checks that a raw `TOUCH_DRAG` action value is fully valid for the form:",
+            "correct shape and modes (via `isDragGestureShape`),",
+            "then the pure value rules in `validateDragGestureValue` (endpoint ranges and duration).",
+            "Reuses the same shared helper `DragFields` validates against instead of re-implementing the rules here,",
+            "so this fixture list and the component can't silently diverge again.",
+            "Uses `DragFields`'s default duration bounds (`{ min: 0.001 }` seconds)",
+            "so a zero or negative duration is rejected here exactly like it would be in the actual form.",
+        ];
+        assert_eq!(outcome.lines, Some(expected.map(str::to_string).to_vec()));
+        assert_eq!(reflow_paragraph(&paragraph(&expected, " * "), &options).lines, None);
+    }
+
+    #[test]
+    fn a_short_colon_sentence_stays_on_one_line() {
+        assert_eq!(reflow(&["Validate the form: check shape and modes."], 120).lines, None);
+    }
+
+    #[test]
+    fn a_short_colon_label_does_not_force_an_underfilled_line() {
+        let outcome = reflow(
+            &["Note: validate the input shape and modes, then check the endpoint ranges and duration."],
+            60,
+        );
+        let lines = outcome.lines.expect("the sentence should wrap");
+        assert_ne!(lines.first().map(String::as_str), Some("Note:"));
+    }
 
     #[test]
     fn a_fitting_conjunction_wins_over_an_overflowing_sentence_end() {
@@ -2104,6 +2252,8 @@ mod test_boundaries {
     #[test]
     fn ranks_punctuation_and_clause_words() {
         assert_eq!(rank_before("a, b and c", 1), Some(Rank::Punctuation));
+        assert_eq!(rank_before("a b: c", 2), Some(Rank::Colon));
+        assert_eq!(rank_before("a b: and c", 2), Some(Rank::Colon));
         assert_eq!(rank_before("a, b and c", 2), Some(Rank::ClauseTier1));
         assert_eq!(rank_before("a b, and c", 2), Some(Rank::ClauseTier1));
         assert_eq!(rank_before("a b but c", 2), Some(Rank::ClauseTier2));
@@ -2112,6 +2262,14 @@ mod test_boundaries {
         assert_eq!(rank_before("a b for example c", 2), Some(Rank::ClauseTier3));
         assert_eq!(rank_before("First one. Second", 2), Some(Rank::Sentence));
         assert_eq!(rank_before("a b c d", 2), Some(Rank::Word));
+    }
+
+    #[test]
+    fn colons_inside_atoms_and_brackets_are_not_preferred_boundaries() {
+        assert_eq!(rank_before("x y (label: value) z", 3), Some(Rank::Word));
+        assert_eq!(rank_before("x y `label: value` z", 3), Some(Rank::Word));
+        assert_eq!(rank_before("x y https://example.com z", 3), Some(Rank::Word));
+        assert_eq!(rank_before("x y module::item z", 3), Some(Rank::Word));
     }
 
     #[test]
