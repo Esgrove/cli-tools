@@ -304,7 +304,7 @@ mod test_format {
     }
 
     #[test]
-    fn javascript_regex_object_is_preserved_while_real_comments_are_formatted() {
+    fn regex_object_is_preserved_while_real_comments_are_formatted() {
         let text = concat!(
             "const config = {\n",
             "  test: /node_modules\\/(react|react-dom)\\//,\n",
@@ -326,17 +326,16 @@ mod test_format {
             "const next = 1;\n",
         );
         let options = FormatOptions::default();
-        let first = format(text, FileKind::JavaScript, &options);
-        assert_eq!(first.fixed_text.as_deref(), Some(expected));
-        assert_eq!(check(text, FileKind::JavaScript, &options), first.violations);
-        assert_eq!(
-            format(expected, FileKind::JavaScript, &options),
-            FormatResult::default()
-        );
+        for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
+            let first = format(text, kind, &options);
+            assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
+            assert_eq!(check(text, kind, &options), first.violations);
+            assert_eq!(format(expected, kind, &options), FormatResult::default());
+        }
     }
 
     #[test]
-    fn javascript_regex_only_source_needs_no_formatting() {
+    fn regex_only_source_needs_no_formatting() {
         let text = concat!(
             "const config = {\n",
             "  test: /node_modules\\/(react|react-dom)\\//,\n",
@@ -346,8 +345,25 @@ mod test_format {
             "const nested = /[[a]--[/]]/v;\n",
         );
         let options = FormatOptions::default();
-        assert_eq!(format(text, FileKind::JavaScript, &options), FormatResult::default());
-        assert!(check(text, FileKind::JavaScript, &options).is_empty());
+        for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
+            assert_eq!(format(text, kind, &options), FormatResult::default(), "{kind:?}");
+            assert!(check(text, kind, &options).is_empty());
+        }
+    }
+
+    #[test]
+    fn regex_hashes_are_preserved_while_real_hash_comments_are_formatted() {
+        let text = "pattern = /[ #'\"/]/ # Match a delimiter.\nnext = 1 # Keep this comment.\n";
+        let expected = "# Match a delimiter.\npattern = /[ #'\"/]/\n# Keep this comment.\nnext = 1\n";
+        let options = FormatOptions::default();
+        for kind in [FileKind::Python, FileKind::Shell, FileKind::Toml, FileKind::Yaml] {
+            assert_eq!(
+                format(text, kind, &options).fixed_text.as_deref(),
+                Some(expected),
+                "{kind:?}"
+            );
+            assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
+        }
     }
 
     #[test]

@@ -489,7 +489,7 @@ and a sentence that does not fit on one line is spread evenly over the lines it 
 In long sentences, a colon after a substantial introduction is preferred over balancing the line lengths,
 so the explanation or list starts on its own line.
 Semicolons and em dashes are rewritten, and trailing comments are moved above the code.
-JavaScript regex literals are preserved.
+Slash-delimited regex literals are protected across supported source languages.
 When ambiguous slash syntax could hide a multiline string or comment, the remaining source is left unchanged.
 The line limit is read from project config files such as `.editorconfig`, `rustfmt.toml`, and `pyproject.toml`.
 The default mode reports violations and exits with code 1.

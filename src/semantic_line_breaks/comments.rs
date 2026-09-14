@@ -2,7 +2,7 @@
 //!
 //! Finds line comment blocks, block comments, and Python docstrings in source files
 //! and hands their content to the Markdown splitter.
-//! Also implements the string aware scanner that detects comments sharing a line with code
+//! Also implements the string and regex aware scanner that detects comments sharing a line with code
 //! and produces the replacement lines that move such comments above the code.
 
 use std::sync::LazyLock;
@@ -66,7 +66,7 @@ pub enum ScanState {
     InHeredoc(String),
     /// Inside a YAML block scalar with lines indented more than the given width.
     InBlockScalar(usize),
-    /// An ambiguous JavaScript slash may hide a multiline construct, so the remaining source is protected.
+    /// An ambiguous slash may hide a multiline construct, so the remaining source is protected.
     Uncertain,
 }
 
@@ -103,8 +103,6 @@ pub struct StringSyntax {
     heredoc: bool,
     /// Whether YAML block scalars exist.
     block_scalars: bool,
-    /// Whether JavaScript regex literals must be distinguished from division.
-    regex_guard: bool,
 }
 
 /// A comment found after code on the same line.
@@ -251,7 +249,7 @@ pub fn fix_trailing_comments(
 struct Cursor {
     /// Index into the character vector.
     index: usize,
-    /// Whether division makes comment relocation unsafe without preventing string state tracking.
+    /// Whether an ambiguous construct prevents safe comment relocation.
     uncertain: bool,
     /// Heredoc terminator to enter after this line.
     pending_heredoc: Option<String>,
@@ -486,29 +484,60 @@ fn scan_normal(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax:
         cursor.index += 2;
         return NormalStep::Continue(ScanState::Normal);
     }
-    if syntax.regex_guard && character == '/' {
-        let prefix = line.get(..byte).unwrap_or_default();
-        if division_can_start(prefix) {
-            cursor.uncertain = true;
+    if character == '/' {
+        return scan_slash(line, chars, cursor, syntax);
+    }
+    cursor.index += 1;
+    NormalStep::Continue(ScanState::Normal)
+}
+
+/// Skip regex literals without mistaking division operators or ordinary paths for their contents.
+fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
+    let Some(&(byte, _)) = chars.get(cursor.index) else {
+        return NormalStep::Continue(ScanState::Normal);
+    };
+    let prefix = line.get(..byte).unwrap_or_default();
+    if division_can_start(prefix) {
+        cursor.index += 1;
+        if chars
+            .get(cursor.index)
+            .is_some_and(|(_, character)| *character == '=' || *character == '/' && syntax.line_marker != "//")
+        {
             cursor.index += 1;
+        }
+        return NormalStep::Continue(ScanState::Normal);
+    }
+    let rest = line.get(byte..).unwrap_or_default();
+    if let Some(end) = find_regex_end(chars, cursor.index + 1) {
+        if regex_can_start(prefix) {
+            cursor.index = end;
             return NormalStep::Continue(ScanState::Normal);
         }
-        if !regex_can_start(prefix) {
-            return uncertain_regex(line.get(byte..).unwrap_or_default(), chars.len(), cursor);
+        let end_byte = chars.get(end).map_or(line.len(), |&(offset, _)| offset);
+        let candidate = line.get(byte..end_byte).unwrap_or_default();
+        if candidate.contains(syntax.line_marker)
+            || candidate.contains(['\\', '\'', '"', '`'])
+            || syntax.block_comment.is_some_and(|(open, _)| candidate.contains(open))
+        {
+            return uncertain_regex(rest, chars.len(), cursor, syntax);
         }
-        let Some(end) = find_regex_end(chars, index + 1) else {
-            return uncertain_regex(line.get(byte..).unwrap_or_default(), chars.len(), cursor);
-        };
-        cursor.index = end;
-        return NormalStep::Continue(ScanState::Normal);
+    } else if rest.contains(['\\', '[', '\'', '"', '`'])
+        || syntax.block_comment.is_some_and(|(open, _)| rest.contains(open))
+    {
+        return uncertain_regex(rest, chars.len(), cursor, syntax);
     }
     cursor.index += 1;
     NormalStep::Continue(ScanState::Normal)
 }
 
 /// Preserve subsequent source when an unsupported regex may hide a multiline construct.
-fn uncertain_regex(rest: &str, line_length: usize, cursor: &mut Cursor) -> NormalStep {
-    if rest.contains('`') || rest.contains("/*") || rest.ends_with('\\') {
+fn uncertain_regex(rest: &str, line_length: usize, cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
+    if rest.contains('`') && syntax.backtick != Backtick::None
+        || syntax.block_comment.is_some_and(|(open, _)| rest.contains(open))
+        || rest.ends_with('\\')
+        || syntax.multiline_strings && rest.contains('"')
+        || syntax.triple_quotes && (rest.contains("\"\"\"") || rest.contains("'''"))
+    {
         cursor.index = line_length;
         cursor.uncertain = true;
         NormalStep::Continue(ScanState::Uncertain)
@@ -558,7 +587,7 @@ fn division_can_start(prefix: &str) -> bool {
 
 /// Recognize contexts that require an expression rather than a division operator.
 ///
-/// Closing parentheses and braces, line starts, and TypeScript postfix operators are ambiguous.
+/// Closing parentheses and braces, line starts, and postfix operators are ambiguous.
 /// Leaving those lines alone is safer than interpreting regex contents as comments or strings.
 fn regex_can_start(prefix: &str) -> bool {
     let prefix = prefix.trim_end();
@@ -594,7 +623,7 @@ fn regex_can_start(prefix: &str) -> bool {
     }
 }
 
-/// Find the end of a same-line JavaScript regex, including its flags.
+/// Find the end of a same-line slash-delimited regex, including its flags.
 ///
 /// Escapes and character classes hide slash and quote characters.
 /// Nested classes may use Unicode set syntax, so leave them unchanged rather than guess at their boundaries.
@@ -683,7 +712,7 @@ fn is_triple(chars: &[(usize, char)], index: usize, quote: char) -> bool {
 
 /// Whether a line starts in a multiline string or follows an unresolved multiline construct.
 ///
-/// Ambiguous JavaScript slashes can hide template or block comment boundaries.
+/// Ambiguous slashes can hide string or block comment boundaries.
 /// Protect the remaining source when those boundaries cannot be recovered safely.
 fn lines_inside_strings(lines: &[&str], kind: FileKind) -> Vec<bool> {
     let Some(syntax) = string_syntax(kind) else {
@@ -837,7 +866,6 @@ const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
         marker_needs_leading_space: false,
         heredoc: false,
         block_scalars: false,
-        regex_guard: false,
     };
     let syntax = match kind {
         FileKind::Rust => StringSyntax {
@@ -853,7 +881,6 @@ const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
         FileKind::JavaScript => StringSyntax {
             single_quote: SingleQuote::String,
             backtick: Backtick::Template,
-            regex_guard: true,
             ..base
         },
         FileKind::Go => StringSyntax {
@@ -1681,12 +1708,15 @@ mod test_trailing_other_languages {
     }
 
     #[test]
-    fn javascript_regex_escapes_do_not_hide_real_comments() {
+    fn regex_escapes_do_not_hide_real_comments() {
         assert_eq!(
             replacement("const r = /a\\/b/; // c", FileKind::JavaScript),
             Some(pair("// c", "const r = /a\\/b/;"))
         );
-        assert_eq!(replacement("const d = a / b; // c", FileKind::JavaScript), None);
+        assert_eq!(
+            replacement("const d = a / b; // c", FileKind::JavaScript),
+            Some(pair("// c", "const d = a / b;"))
+        );
         assert_eq!(
             replacement("const r = /a\\/\\/b/; // c", FileKind::JavaScript),
             Some(pair("// c", "const r = /a\\/\\/b/;"))
@@ -1729,9 +1759,146 @@ mod test_trailing_other_languages {
 }
 
 #[cfg(test)]
-mod test_javascript_regex {
+mod test_regex_literals {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn swift_bare_regex_and_hash_comment_syntax_are_protected() {
+        let swift = FileKind::from_extension("swift").expect("Swift is supported");
+        assert_eq!(swift, FileKind::CLike);
+        let code = r"let pattern = /node_modules\/(react|react-dom)\//";
+        assert_eq!(replacement(code, swift), None);
+        assert_eq!(replacement(&format!("{code} // c"), swift), Some(pair("// c", code)));
+        for kind in [FileKind::Python, FileKind::Shell, FileKind::Toml, FileKind::Yaml] {
+            let code = r#"pattern = /[#"'/]/"#;
+            assert_eq!(replacement(code, kind), None, "{kind:?}");
+            assert_eq!(
+                replacement(&format!("{code} # c"), kind),
+                Some(pair("# c", code)),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_division_preserves_trailing_comments_across_syntaxes() {
+        for kind in [
+            FileKind::JavaScript,
+            FileKind::CLike,
+            FileKind::Rust,
+            FileKind::Go,
+            FileKind::Python,
+            FileKind::Shell,
+            FileKind::Toml,
+            FileKind::Yaml,
+        ] {
+            let marker = string_syntax(kind).expect("source syntax").line_marker;
+            let comment = format!("{marker} c");
+            for code in [
+                "value = numerator / denominator",
+                "value = numerator / denominator / divisor",
+                "value = total() / count",
+                "value = total /= count",
+                "value = count++ / denominator",
+                "value = count! / denominator",
+                "value = generic<Type> / denominator",
+            ] {
+                assert_eq!(
+                    replacement(&format!("{code} {comment}"), kind),
+                    Some(pair(&comment, code)),
+                    "{kind:?}: {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn floor_division_paths_and_urls_are_not_regex_literals() {
+        for code in [
+            "value = 12 // 4",
+            "value = total() // count",
+            "value //= count",
+            "value = total / count",
+        ] {
+            assert_eq!(
+                replacement(&format!("{code} # c"), FileKind::Python),
+                Some(pair("# c", code))
+            );
+        }
+        for code in [
+            "/usr/bin/true",
+            "/bin/echo 'hello'",
+            "cp /source /destination",
+            "path=/root",
+            "path=/usr/bin",
+        ] {
+            assert_eq!(
+                replacement(&format!("{code} # c"), FileKind::Shell),
+                Some(pair("# c", code)),
+                "{code}"
+            );
+        }
+        for kind in [
+            FileKind::Rust,
+            FileKind::Go,
+            FileKind::CLike,
+            FileKind::Shell,
+            FileKind::Yaml,
+        ] {
+            let code = "url = https://example.com/path";
+            let marker = string_syntax(kind).expect("source syntax").line_marker;
+            let comment = format!("{marker} c");
+            assert_eq!(
+                replacement(&format!("{code} {comment}"), kind),
+                Some(pair(&comment, code)),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn division_preserves_multiline_strings_across_syntaxes() {
+        for (kind, opening, closing) in [
+            (FileKind::Rust, "let value = total / count + \"", "\";"),
+            (FileKind::Go, "value := total / count + `", "`"),
+            (FileKind::Python, "value = total // count + \"\"\"", "\"\"\""),
+            (FileKind::Shell, "cat /root <<'EOF'", "EOF"),
+        ] {
+            let marker = string_syntax(kind).expect("source syntax").line_marker;
+            let interior = format!("{marker} literal; text must stay unchanged");
+            let following = format!("next = 1 {marker} c");
+            let lines = [opening, interior.as_str(), closing, following.as_str()];
+            assert_eq!(
+                lines_inside_strings(&lines, kind),
+                vec![false, true, true, false],
+                "{kind:?}"
+            );
+            assert_eq!(replaced_indices(&lines, kind), vec![3], "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn unsupported_regexes_protect_following_multiline_source_across_syntaxes() {
+        for (kind, delimiter) in [
+            (FileKind::Rust, "\""),
+            (FileKind::Go, "`"),
+            (FileKind::CLike, "\"\"\""),
+            (FileKind::Python, "\"\"\""),
+            (FileKind::Toml, "\"\"\""),
+        ] {
+            let syntax = string_syntax(kind).expect("source syntax");
+            let opening = format!("value = /[[a]--[/]]/ + {delimiter}");
+            let interior = format!("{} literal; not prose", syntax.line_marker);
+            let lines = [opening.as_str(), interior.as_str(), delimiter];
+            assert_eq!(
+                scan_line(&opening, ScanState::Normal, &syntax).state,
+                ScanState::Uncertain
+            );
+            assert_eq!(lines_inside_strings(&lines, kind), vec![false, true, true], "{kind:?}");
+            assert!(replaced_indices(&lines, kind).is_empty(), "{kind:?}");
+        }
+    }
 
     #[test]
     fn regex_literals_hide_comment_markers_quotes_and_escaped_delimiters() {
@@ -1751,12 +1918,25 @@ mod test_javascript_regex {
             r"const expressions = [/a\//, /b\//];",
             r"const expression = /😀\//u;",
         ] {
-            assert_eq!(replacement(code, FileKind::JavaScript), None, "{code}");
-            assert_eq!(
-                replacement(&format!("{code} // real comment"), FileKind::JavaScript),
-                Some(pair("// real comment", code)),
-                "{code}"
-            );
+            for kind in [
+                FileKind::JavaScript,
+                FileKind::CLike,
+                FileKind::Rust,
+                FileKind::Go,
+                FileKind::Python,
+                FileKind::Shell,
+                FileKind::Toml,
+                FileKind::Yaml,
+            ] {
+                let marker = string_syntax(kind).expect("source syntax").line_marker;
+                let comment = format!("{marker} real comment");
+                assert_eq!(replacement(code, kind), None, "{kind:?}: {code}");
+                assert_eq!(
+                    replacement(&format!("{code} {comment}"), kind),
+                    Some(pair(&comment, code)),
+                    "{kind:?}: {code}"
+                );
+            }
         }
     }
 
@@ -1800,19 +1980,10 @@ mod test_javascript_regex {
     fn ambiguous_or_unclosed_regexes_leave_no_persistent_state() {
         let syntax = string_syntax(FileKind::JavaScript).expect("JavaScript syntax");
         for line in [
-            r"const value = numerator / denominator; // c",
-            r"const value = numerator / denominator / divisor; // c",
             r"const value = numerator / /path\//.source.length; // c",
-            r"const value = numerator /= denominator; // c",
             r"if (ready) /path\//.test(value); // c",
             r"if (ready) {} /path\//.test(value); // c",
-            r"const value = count++ / denominator; // c",
-            r"const value = count-- / denominator; // c",
-            r"const value = count! / denominator; // c",
-            r"const value = generic<Type> / denominator; // c",
-            r"const value = object.return / denominator; // c",
             r"/path\//.test(value); // c",
-            r#"const expression = /[/"'`*] // unclosed"#,
             r"const expression = /[[a]--[/]]/v; // c",
         ] {
             let result = scan_line(line, ScanState::Normal, &syntax);
@@ -1847,7 +2018,7 @@ mod test_javascript_regex {
         for operand in ["total", "42", "values[0]", "'total'", "\"total\"", "`total`", "total++"] {
             let opening = format!("const value = {operand} / count + `");
             let result = scan_line(&opening, ScanState::Normal, &syntax);
-            assert!(result.uncertain, "{opening}");
+            assert!(!result.uncertain, "{opening}");
             assert_eq!(result.state, ScanState::InTemplate, "{opening}");
             let lines = [
                 opening.as_str(),
@@ -1861,14 +2032,19 @@ mod test_javascript_regex {
             );
             assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![3]);
         }
-        let lines = [
+        for opening in [
             "const value = total / count; /* block",
-            "still inside; // not a trailing comment",
-            "*/ const next = 1; // c",
-        ];
-        let result = scan_line(lines[0], ScanState::Normal, &syntax);
-        assert_eq!(result.state, ScanState::InBlockComment(1));
-        assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![2]);
+            "const value = total() / count; /* block",
+        ] {
+            let lines = [
+                opening,
+                "still inside; // not a trailing comment",
+                "*/ const next = 1; // c",
+            ];
+            let result = scan_line(lines[0], ScanState::Normal, &syntax);
+            assert_eq!(result.state, ScanState::InBlockComment(1));
+            assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![2]);
+        }
     }
 
     #[test]
@@ -1877,7 +2053,6 @@ mod test_javascript_regex {
         for opening in [
             "const value = total() / count + `",
             "const value = { total: 1 } / count + `",
-            "const value = total() / count; /* block",
             r#"if (ready) /["'`/]/.test(value);"#,
             r#"const value = total() / count + "\"#,
             r#"const expression = /[/"'`* // unclosed"#,
