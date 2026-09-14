@@ -47,6 +47,11 @@ const TOO_LONG_COST: usize = 10_000_000;
 /// Such a break may cut a phrase in two instead of separating two clauses.
 const BARE_CONJUNCTION_COST: usize = 250_000;
 
+/// Cost of passing a colon that could end a sufficiently filled line in a long run.
+///
+/// An explanation reads better on its own line, even when keeping it with its introduction saves a line.
+const SKIPPED_COLON_COST: usize = 1_000_000;
+
 /// Cost of breaking in the middle of a clause, only reachable when word breaks are allowed.
 const WORD_BREAK_COST: usize = 1_000_000_000_000;
 
@@ -340,6 +345,8 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
             Rank::Forced
         } else if is_sentence_end(tokens, index - 1, options) {
             Rank::Sentence
+        } else if previous.trailing.contains(':') {
+            Rank::Colon
         } else if previous.ends_clause_punctuation() {
             clause.map_or(Rank::Punctuation, |clause| clause.max(Rank::Punctuation))
         } else {
@@ -1387,6 +1394,15 @@ fn line_cost(
     if let Some(rank) = rank {
         cost = cost.saturating_add(boundary_cost(tokens, end, rank));
     }
+    if span_width(start, count) > budget {
+        let min_fill = budget * MIN_FILL_PERCENT / 100;
+        for boundary in start + 1..end {
+            let width = span_width(start, boundary);
+            if rank_at(ranks, boundary) == Some(Rank::Colon) && width >= min_fill && width <= budget {
+                cost = cost.saturating_add(SKIPPED_COLON_COST);
+            }
+        }
+    }
     if width > budget {
         if !overflow_is_earned(start, count, budget, rank, ranks, span_width) {
             cost = cost.saturating_add(WEAK_OVERFLOW_COST);
@@ -1445,6 +1461,7 @@ fn width_cost(budget: usize, width: usize) -> usize {
 const fn break_cost(rank: Rank) -> usize {
     match rank {
         Rank::Forced | Rank::Sentence => 0,
+        Rank::Colon => 5_000,
         Rank::ClauseTier1 => 10_000,
         Rank::ClauseTier2 => 25_000,
         Rank::Punctuation => 50_000,
@@ -1839,6 +1856,47 @@ mod test_break_choice {
     use super::*;
 
     #[test]
+    fn a_colon_introduces_explanatory_clauses_on_separate_lines() {
+        let lines = [
+            "Checks that a raw `TOUCH_DRAG` action value is fully valid for the form: correct shape and",
+            "modes (via `isDragGestureShape`), then the pure value rules in `validateDragGestureValue`",
+            "(endpoint ranges and duration). Reuses the same shared helper `DragFields` validates against",
+            "instead of re-implementing the rules here, so this fixture list and the component can't",
+            "silently diverge again.",
+            "Uses `DragFields`'s default duration bounds (`{ min: 0.001 }` seconds) so a zero or negative",
+            "duration is rejected here exactly like it would be in the actual form.",
+        ];
+        let options = FormatOptions::with_width(120);
+        let outcome = reflow_paragraph(&paragraph(&lines, " * "), &options);
+        let expected = [
+            "Checks that a raw `TOUCH_DRAG` action value is fully valid for the form:",
+            "correct shape and modes (via `isDragGestureShape`),",
+            "then the pure value rules in `validateDragGestureValue` (endpoint ranges and duration).",
+            "Reuses the same shared helper `DragFields` validates against instead of re-implementing the rules here,",
+            "so this fixture list and the component can't silently diverge again.",
+            "Uses `DragFields`'s default duration bounds (`{ min: 0.001 }` seconds)",
+            "so a zero or negative duration is rejected here exactly like it would be in the actual form.",
+        ];
+        assert_eq!(outcome.lines, Some(expected.map(str::to_string).to_vec()));
+        assert_eq!(reflow_paragraph(&paragraph(&expected, " * "), &options).lines, None);
+    }
+
+    #[test]
+    fn a_short_colon_sentence_stays_on_one_line() {
+        assert_eq!(reflow(&["Validate the form: check shape and modes."], 120).lines, None);
+    }
+
+    #[test]
+    fn a_short_colon_label_does_not_force_an_underfilled_line() {
+        let outcome = reflow(
+            &["Note: validate the input shape and modes, then check the endpoint ranges and duration."],
+            60,
+        );
+        let lines = outcome.lines.expect("the sentence should wrap");
+        assert_ne!(lines.first().map(String::as_str), Some("Note:"));
+    }
+
+    #[test]
     fn a_fitting_conjunction_wins_over_an_overflowing_sentence_end() {
         let lines = [concat!(
             "The current directory placeholder is used as both the first input and first output root, ",
@@ -2104,6 +2162,8 @@ mod test_boundaries {
     #[test]
     fn ranks_punctuation_and_clause_words() {
         assert_eq!(rank_before("a, b and c", 1), Some(Rank::Punctuation));
+        assert_eq!(rank_before("a b: c", 2), Some(Rank::Colon));
+        assert_eq!(rank_before("a b: and c", 2), Some(Rank::Colon));
         assert_eq!(rank_before("a, b and c", 2), Some(Rank::ClauseTier1));
         assert_eq!(rank_before("a b, and c", 2), Some(Rank::ClauseTier1));
         assert_eq!(rank_before("a b but c", 2), Some(Rank::ClauseTier2));
@@ -2112,6 +2172,14 @@ mod test_boundaries {
         assert_eq!(rank_before("a b for example c", 2), Some(Rank::ClauseTier3));
         assert_eq!(rank_before("First one. Second", 2), Some(Rank::Sentence));
         assert_eq!(rank_before("a b c d", 2), Some(Rank::Word));
+    }
+
+    #[test]
+    fn colons_inside_atoms_and_brackets_are_not_preferred_boundaries() {
+        assert_eq!(rank_before("x y (label: value) z", 3), Some(Rank::Word));
+        assert_eq!(rank_before("x y `label: value` z", 3), Some(Rank::Word));
+        assert_eq!(rank_before("x y https://example.com z", 3), Some(Rank::Word));
+        assert_eq!(rank_before("x y module::item z", 3), Some(Rank::Word));
     }
 
     #[test]
