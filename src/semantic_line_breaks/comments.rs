@@ -11,6 +11,7 @@ use regex::Regex;
 
 use super::markdown;
 use super::types::{FileKind, FormatOptions, Region, Violation, ViolationKind};
+use crate::{leading_whitespace, starts_with_ignore_case};
 
 /// Matches the opening of a Python docstring and captures indentation, string prefix, quotes, and the rest.
 static RE_DOCSTRING_OPEN: LazyLock<Regex> =
@@ -833,13 +834,6 @@ fn is_directive(text: &str, options: &FormatOptions) -> bool {
         .any(|prefix| starts_with_ignore_case(normalized, prefix))
 }
 
-/// Whether the text starts with the prefix, ignoring ASCII case.
-fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
-    text.as_bytes()
-        .get(..prefix.len())
-        .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
-}
-
 /// Scanner result for a line the scanner cannot interpret.
 const fn uncertain_result() -> ScanResult {
     ScanResult {
@@ -1011,12 +1005,6 @@ fn line_marker<'a>(trimmed: &str, markers: &[&'a str]) -> Option<&'a str> {
 fn comment_content<'a>(trimmed: &'a str, marker: &str) -> &'a str {
     let rest = trimmed.strip_prefix(marker).unwrap_or(trimmed);
     rest.strip_prefix(' ').unwrap_or(rest)
-}
-
-/// Leading whitespace of a line.
-fn leading_whitespace(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    line.get(..line.len() - trimmed.len()).unwrap_or_default()
 }
 
 /// Add regions for a block comment starting at `index` and return the index after it.

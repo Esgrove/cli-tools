@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 pub mod date;
+pub mod diff;
 pub mod dir_move;
 pub mod dot_rename;
 pub mod dupe_find;
@@ -13,11 +14,18 @@ pub mod file_hash;
 pub mod resolution;
 pub mod scan_cache;
 pub mod semantic_line_breaks;
+pub mod utils;
 pub mod video_info;
 
+pub use diff::{color_diff, diff_lines, show_diff};
 pub use resolution::Resolution;
+pub use utils::{
+    get_relative_path_from_current_working_directory, get_relative_path_or_filename, glob_to_regex, leading_whitespace,
+    lowercase_extension, os_str_to_string, path_to_file_extension_string, path_to_file_stem_string,
+    path_to_filename_string, path_to_string, path_to_string_relative, path_to_string_relative_to,
+    starts_with_ignore_case, strings_from,
+};
 
-use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -28,7 +36,6 @@ use anyhow::{Context, Result};
 use clap::Command;
 use clap_complete::Shell;
 use colored::{ColoredString, Colorize};
-use difference::{Changeset, Difference};
 use jiff::{Timestamp, tz::TimeZone};
 use regex::Regex;
 use tokio::sync::Semaphore;
@@ -186,69 +193,6 @@ pub fn format_text_with_highlight(text: &str, match_range: Option<MatchRange>) -
 #[must_use]
 pub fn colorize_bool(value: bool) -> ColoredString {
     if value { "true".green() } else { "false".red() }
-}
-
-/// Create a coloured diff for the given strings.
-pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
-    let changeset = Changeset::new(old, new, "");
-    let mut old_diff = String::new();
-    let mut new_diff = String::new();
-
-    if stacked {
-        // Find the starting index of the first matching sequence for a nicer visual alignment.
-        // For example:
-        //   Constantine - Onde As Satisfaction (Club Tool).aif
-        //        Darude - Onde As Satisfaction (Constantine Club Tool).aif
-        // Instead of:
-        //   Constantine - Onde As Satisfaction (Club Tool).aif
-        //   Darude - Onde As Satisfaction (Constantine Club Tool).aif
-        for diff in &changeset.diffs {
-            if let Difference::Same(x) = diff {
-                if x.chars().all(char::is_whitespace) || x.chars().count() < 3 {
-                    continue;
-                }
-
-                // Add leading whitespace so that the first matching sequence lines up.
-                if let (Some(old_index), Some(new_index)) = (old.find(x), new.find(x)) {
-                    match old_index.cmp(&new_index) {
-                        Ordering::Greater => {
-                            new_diff = " ".repeat(old_index.saturating_sub(new_index));
-                        }
-                        Ordering::Less => {
-                            old_diff = " ".repeat(new_index.saturating_sub(old_index));
-                        }
-                        Ordering::Equal => {}
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    for diff in changeset.diffs {
-        match diff {
-            Difference::Same(ref x) => {
-                old_diff.push_str(x);
-                new_diff.push_str(x);
-            }
-            Difference::Add(ref x) => {
-                if x.chars().all(char::is_whitespace) {
-                    new_diff.push_str(&x.on_green().to_string());
-                } else {
-                    new_diff.push_str(&x.green().to_string());
-                }
-            }
-            Difference::Rem(ref x) => {
-                if x.chars().all(char::is_whitespace) {
-                    old_diff.push_str(&x.on_red().to_string());
-                } else {
-                    old_diff.push_str(&x.red().to_string());
-                }
-            }
-        }
-    }
-
-    (old_diff, new_diff)
 }
 
 /// Collapse repeated filename separators and trim separators from both ends.
@@ -832,51 +776,6 @@ pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Re
     Ok(dunce::simplified(&output_path).to_path_buf())
 }
 
-/// Gets the relative path or filename from a full path based on a root directory.
-///
-/// If the full path is within the root directory, the function returns the relative path.
-/// Otherwise, it returns just the filename. If the filename cannot be determined, the
-/// full path is returned.
-///
-/// ```rust
-/// use std::path::Path;
-/// use cli_tools::get_relative_path_or_filename;
-///
-/// let root = Path::new("/root/dir");
-/// let full_path = root.join("subdir/file.txt");
-/// let relative_path = get_relative_path_or_filename(&full_path, root);
-/// assert_eq!(relative_path, "subdir/file.txt");
-///
-/// let outside_path = Path::new("/root/dir/another.txt");
-/// let relative_or_filename = get_relative_path_or_filename(&outside_path, root);
-/// assert_eq!(relative_or_filename, "another.txt");
-/// ```
-#[must_use]
-pub fn get_relative_path_or_filename(full_path: &Path, root: &Path) -> String {
-    if full_path == root {
-        return os_str_to_string(full_path.file_name().unwrap_or_default());
-    }
-    full_path.strip_prefix(root).map_or_else(
-        |_| {
-            full_path.file_name().map_or_else(
-                || full_path.display().to_string(),
-                |name| name.to_string_lossy().to_string(),
-            )
-        },
-        |relative_path| relative_path.display().to_string(),
-    )
-}
-
-/// Convert the given path to be relative to the current working directory.
-/// Returns the original path if the relative path cannot be created.
-#[must_use]
-pub fn get_relative_path_from_current_working_directory(path: &Path) -> PathBuf {
-    env::current_dir().map_or_else(
-        |_| path.to_path_buf(),
-        |current_dir| path.strip_prefix(&current_dir).unwrap_or(path).to_path_buf(),
-    )
-}
-
 /// Get a unique file path, adding a counter suffix if the file already exists.
 ///
 /// Given a directory and filename components,
@@ -1007,54 +906,6 @@ fn paths_refer_to_same_file_by_canonical_path(left: &Path, right: &Path) -> bool
     }
 }
 
-/// Convert `OsStr` to String with invalid Unicode handling.
-pub fn os_str_to_string(name: &OsStr) -> String {
-    name.to_str().map_or_else(
-        || name.to_string_lossy().replace('\u{FFFD}', ""),
-        std::string::ToString::to_string,
-    )
-}
-
-/// Convert given path to string with invalid Unicode handling.
-pub fn path_to_string(path: &Path) -> String {
-    path.to_str().map_or_else(
-        || path.to_string_lossy().to_string().replace('\u{FFFD}', ""),
-        std::string::ToString::to_string,
-    )
-}
-
-/// Convert given path to filename string with invalid Unicode handling.
-#[must_use]
-pub fn path_to_filename_string(path: &Path) -> String {
-    os_str_to_string(path.file_name().unwrap_or_default())
-}
-
-/// Convert given path to file stem string with invalid Unicode handling.
-#[must_use]
-pub fn path_to_file_stem_string(path: &Path) -> String {
-    os_str_to_string(path.file_stem().unwrap_or_default())
-}
-
-/// Convert given path to file extension lowercase string with invalid Unicode handling.
-#[must_use]
-pub fn path_to_file_extension_string(path: &Path) -> String {
-    os_str_to_string(path.extension().unwrap_or_default()).to_lowercase()
-}
-
-/// Get the file extension from a string path and return it in lowercase.
-#[must_use]
-pub fn lowercase_extension(path: &str) -> Option<String> {
-    Path::new(path)
-        .extension()
-        .map(|extension| extension.to_string_lossy().to_lowercase())
-}
-
-/// Get relative path and convert to string with invalid unicode handling.
-#[must_use]
-pub fn path_to_string_relative(path: &Path) -> String {
-    path_to_string(&get_relative_path_from_current_working_directory(path))
-}
-
 /// Format a Unix timestamp as a local datetime string.
 #[must_use]
 pub fn format_timestamp(timestamp: i64) -> String {
@@ -1163,15 +1014,6 @@ macro_rules! print_dimmed {
     ($($arg:tt)*) => {
         $crate::print_dimmed(&format!($($arg)*))
     };
-}
-
-/// Print a stacked diff of the changes.
-pub fn show_diff(old: &str, new: &str) {
-    let (old_diff, new_diff) = color_diff(old, new, true);
-    println!("{old_diff}");
-    if old_diff != new_diff {
-        println!("{new_diff}");
-    }
 }
 
 /// Delete a file, moving to trash when possible.
@@ -1741,7 +1583,7 @@ mod format_duration_tests {
 #[cfg(test)]
 mod path_utility_tests {
     use super::*;
-    use std::ffi::OsStr;
+
     use std::fs::File;
     use tempfile::tempdir;
 
@@ -1861,67 +1703,6 @@ mod path_utility_tests {
     }
 
     #[test]
-    fn path_to_string_basic() {
-        let path = Path::new("test/path/file.txt");
-        assert_eq!(path_to_string(path), "test/path/file.txt");
-    }
-
-    #[test]
-    fn path_to_filename_string_basic() {
-        let path = Path::new("test/path/file.txt");
-        assert_eq!(path_to_filename_string(path), "file.txt");
-    }
-
-    #[test]
-    fn path_to_file_stem_string_basic() {
-        let path = Path::new("test/path/file.txt");
-        assert_eq!(path_to_file_stem_string(path), "file");
-    }
-
-    #[test]
-    fn path_to_file_extension_string_basic() {
-        let path = Path::new("test/path/file.TXT");
-        assert_eq!(path_to_file_extension_string(path), "txt");
-    }
-
-    #[test]
-    fn path_to_file_extension_string_no_extension() {
-        let path = Path::new("README");
-        assert_eq!(path_to_file_extension_string(path), "");
-    }
-
-    #[test]
-    fn lowercase_extension_basic() {
-        assert_eq!(lowercase_extension("test/path/file.TXT"), Some("txt".to_string()));
-    }
-
-    #[test]
-    fn lowercase_extension_no_extension() {
-        assert_eq!(lowercase_extension("README"), None);
-    }
-
-    #[test]
-    fn os_str_to_string_basic() {
-        let os_str = OsStr::new("test.txt");
-        assert_eq!(os_str_to_string(os_str), "test.txt");
-    }
-
-    #[test]
-    fn get_relative_path_or_filename_within_root() {
-        let root = Path::new("/root/dir");
-        let full_path = root.join("subdir/file.txt");
-        let result = get_relative_path_or_filename(&full_path, root);
-        assert_eq!(result, "subdir/file.txt");
-    }
-
-    #[test]
-    fn get_relative_path_or_filename_same_as_root() {
-        let root = Path::new("/root/dir");
-        let result = get_relative_path_or_filename(root, root);
-        assert_eq!(result, "dir");
-    }
-
-    #[test]
     fn get_normalized_file_name_and_extension_basic() {
         let path = Path::new("test/file.txt");
         let (stem, ext) = get_normalized_file_name_and_extension(path).unwrap();
@@ -1969,60 +1750,6 @@ mod directory_utility_tests {
         let dir = tempdir().unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         assert!(!is_directory_empty(dir.path()));
-    }
-}
-
-#[cfg(test)]
-mod color_diff_tests {
-    use super::*;
-
-    #[test]
-    fn identical_strings() {
-        let (old, new) = color_diff("hello", "hello", false);
-        assert_eq!(old, "hello");
-        assert_eq!(new, "hello");
-    }
-
-    #[test]
-    fn completely_different_strings() {
-        let (old, new) = color_diff("abc", "xyz", false);
-        assert!(old.contains("abc"));
-        assert!(new.contains("xyz"));
-    }
-
-    #[test]
-    fn partial_change() {
-        let (old, new) = color_diff("hello world", "hello there", false);
-        assert!(old.contains("hello"));
-        assert!(new.contains("hello"));
-    }
-
-    #[test]
-    fn stacked_mode() {
-        let (old, new) = color_diff("prefix.name", "different.name", true);
-        assert!(old.contains("name"));
-        assert!(new.contains("name"));
-    }
-
-    #[test]
-    fn empty_strings() {
-        let (old, new) = color_diff("", "", false);
-        assert_eq!(old, "");
-        assert_eq!(new, "");
-    }
-
-    #[test]
-    fn addition_only() {
-        let (old, new) = color_diff("test", "testing", false);
-        assert!(old.contains("test"));
-        assert!(new.contains("test"));
-    }
-
-    #[test]
-    fn removal_only() {
-        let (old, new) = color_diff("testing", "test", false);
-        assert!(old.contains("test"));
-        assert!(new.contains("test"));
     }
 }
 
@@ -2152,29 +1879,6 @@ mod trash_or_delete_tests {
 }
 
 #[cfg(test)]
-mod show_diff_tests {
-    use super::*;
-
-    #[test]
-    fn show_diff_does_not_panic_on_identical() {
-        // Just ensure it doesn't panic
-        show_diff("same text", "same text");
-    }
-
-    #[test]
-    fn show_diff_does_not_panic_on_different() {
-        show_diff("old text", "new text");
-    }
-
-    #[test]
-    fn show_diff_does_not_panic_on_empty() {
-        show_diff("", "");
-        show_diff("text", "");
-        show_diff("", "text");
-    }
-}
-
-#[cfg(test)]
 mod network_path_tests {
     use super::*;
 
@@ -2199,26 +1903,6 @@ mod network_path_tests {
     fn non_windows_always_false() {
         let path = Path::new("/home/user/file.txt");
         assert!(!is_network_path(path));
-    }
-}
-
-#[cfg(test)]
-mod relative_path_tests {
-    use super::*;
-
-    #[test]
-    fn get_relative_path_from_cwd_returns_path() {
-        let path = Path::new("some/relative/path.txt");
-        let result = get_relative_path_from_current_working_directory(path);
-        // Should return the same path since it's already relative
-        assert_eq!(result, path);
-    }
-
-    #[test]
-    fn path_to_string_relative_converts() {
-        let path = Path::new("test/file.txt");
-        let result = path_to_string_relative(path);
-        assert!(result.contains("file.txt"));
     }
 }
 
@@ -2261,23 +1945,6 @@ mod additional_path_utility_tests {
 
         let result = get_unique_path(dir.path(), "file", "file", "");
         assert_eq!(result, dir.path().join("file.1"));
-    }
-
-    #[test]
-    fn get_relative_path_or_filename_outside_root() {
-        let root = Path::new("/some/root");
-        let path = Path::new("/different/path/file.txt");
-        let result = get_relative_path_or_filename(path, root);
-        assert_eq!(result, "file.txt");
-    }
-
-    #[test]
-    fn get_relative_path_or_filename_no_filename() {
-        let root = Path::new("/some/root");
-        let path = Path::new("/");
-        let result = get_relative_path_or_filename(path, root);
-        // Should return the full path display when no filename
-        assert!(!result.is_empty());
     }
 
     #[test]
@@ -2389,18 +2056,6 @@ mod additional_shared_helper_tests {
 
         assert_eq!(output, dunce::simplified(temp_directory.path()));
         assert_eq!(whitespace_output, output);
-        Ok(())
-    }
-
-    #[test]
-    fn relative_path_strips_current_working_directory() -> anyhow::Result<()> {
-        let current_directory = env::current_dir()?;
-        let absolute_path = current_directory.join("nested").join("file.txt");
-
-        assert_eq!(
-            get_relative_path_from_current_working_directory(&absolute_path),
-            PathBuf::from("nested").join("file.txt")
-        );
         Ok(())
     }
 

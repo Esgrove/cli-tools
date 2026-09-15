@@ -22,12 +22,12 @@ use rayon::prelude::*;
 use cli_tools::semantic_line_breaks::project_config::{WidthSource, discover_width};
 use cli_tools::semantic_line_breaks::types::DEFAULT_MAX_WIDTH;
 use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, check, format};
-use cli_tools::{print_error, print_yellow};
+use cli_tools::{diff_lines, print_error, print_yellow};
 
 use crate::Args;
 use crate::config::Config;
-use crate::files::{collect_files, display_path, display_path_relative};
-use crate::output::{Summary, diff_lines, format_violation, print_summary};
+use crate::files::collect_files;
+use crate::output::{Summary, format_violation, print_summary};
 
 /// Directory and file kind a project width applies to.
 type WidthKey = (PathBuf, FileKind);
@@ -128,7 +128,7 @@ impl<'config> RunContext<'config> {
 
     /// Path of the file as it should be printed.
     fn display(&self, file: &Path) -> String {
-        display_path_relative(file, self.working_directory.as_deref())
+        cli_tools::path_to_string_relative_to(file, self.working_directory.as_deref())
     }
 }
 
@@ -359,7 +359,7 @@ fn fix_file(
 /// Name of the place the line width came from, for the verbose report.
 fn width_origin(settings: &FileSettings<'_>, config: &Config) -> String {
     match settings.source {
-        Some(source) => format!("{} in {}", source.key, display_path(&source.file)),
+        Some(source) => format!("{} in {}", source.key, cli_tools::path_to_string_relative(&source.file)),
         None if config.width.is_some() => "options".to_string(),
         None => "default".to_string(),
     }
