@@ -449,6 +449,13 @@ pub fn is_hidden_tokio(entry: &tokio::fs::DirEntry) -> bool {
     name_bytes.first() == Some(&b'.')
 }
 
+/// Check if a path is a hidden file or directory (name starts with '.')
+#[must_use]
+pub fn is_hidden_path(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().first() == Some(&b'.'))
+}
+
 /// Check if entry is a system directory that should be skipped.
 /// Returns true for OS-specific directories like `$RECYCLE.BIN`, `.Spotlight-V100`, or `lost+found`.
 #[must_use]
@@ -575,6 +582,14 @@ pub const fn available_disk_space(_path: &Path) -> Option<u64> {
 #[must_use]
 pub fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
     is_hidden(entry) || is_system_directory(entry)
+}
+
+/// Check if a path should be skipped (hidden or system directory).
+/// Combines `is_hidden_path` and `is_system_directory_path` checks,
+/// for walkers that do not hand out a [`walkdir::DirEntry`].
+#[must_use]
+pub fn should_skip_path(path: &Path) -> bool {
+    is_hidden_path(path) || is_system_directory_path(path)
 }
 
 /// Check if directory is empty (contains no files or subdirectories)

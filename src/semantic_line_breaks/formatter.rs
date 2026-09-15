@@ -250,7 +250,15 @@ mod test_split_and_assemble {
 #[cfg(test)]
 mod test_format {
     use super::*;
-    use crate::semantic_line_breaks::types::ViolationKind;
+    use crate::semantic_line_breaks::types::{RuleSet, ViolationKind};
+
+    /// Options with every rule on, including the opt-in trailing comment rule.
+    fn all_rules() -> FormatOptions {
+        FormatOptions {
+            rules: RuleSet::ALL,
+            ..FormatOptions::default()
+        }
+    }
 
     #[test]
     fn check_matches_format_violations() {
@@ -284,13 +292,47 @@ mod test_format {
     #[test]
     fn moves_trailing_comment_above_code_with_crlf() {
         let text = "fn f() {\r\n    let x = 1; // one\r\n}\r\n";
-        let result = format(text, FileKind::Rust, &FormatOptions::default());
+        let result = format(text, FileKind::Rust, &all_rules());
         assert_eq!(
             result.fixed_text.as_deref(),
             Some("fn f() {\r\n    // one\r\n    let x = 1;\r\n}\r\n")
         );
         assert_eq!(result.violations[0].kind, ViolationKind::TrailingComment);
         assert_eq!(result.violations[0].line, 2);
+    }
+
+    #[test]
+    fn a_trailing_comment_under_a_comment_is_reported_but_left_in_place() {
+        let text = concat!(
+            "// Various dotted prefixes all below threshold of 15\n",
+            "std::fs::write(root.join(\"One.Two.File.001.mp4\"), \"\").unwrap(); // 6 chars\n",
+        );
+        let result = format(text, FileKind::Rust, &all_rules());
+        assert_eq!(result.fixed_text, None);
+        assert_eq!(result.violations.len(), 1);
+        assert_eq!(result.violations[0].kind, ViolationKind::TrailingComment);
+        assert_eq!(result.violations[0].line, 2);
+        assert!(!result.violations[0].fixable);
+    }
+
+    #[test]
+    fn a_trailing_comment_without_a_comment_above_is_still_moved() {
+        let text = "let x = 1; // 6 chars\n";
+        let result = format(text, FileKind::Rust, &all_rules());
+        assert_eq!(result.fixed_text.as_deref(), Some("// 6 chars\nlet x = 1;\n"));
+        assert!(result.violations[0].fixable);
+        // The fixed text is stable, the moved comment is not merged into anything.
+        let second = format("// 6 chars\nlet x = 1;\n", FileKind::Rust, &all_rules());
+        assert_eq!(second.fixed_text, None);
+        assert!(second.violations.is_empty());
+    }
+
+    #[test]
+    fn the_trailing_rule_is_off_unless_it_is_enabled() {
+        let text = "let x = 1; // one\n";
+        let result = format(text, FileKind::Rust, &FormatOptions::default());
+        assert_eq!(result.fixed_text, None);
+        assert!(result.violations.is_empty());
     }
 
     #[test]
@@ -355,7 +397,7 @@ mod test_format {
             "// Keep this comment.\n",
             "const next = 1;\n",
         );
-        let options = FormatOptions::default();
+        let options = all_rules();
         for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
             let first = format(text, kind, &options);
             assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
@@ -406,15 +448,23 @@ mod test_format {
             "code //// literal; not prose\n",
             "// wrapped block\n",
             "// content.\n",
-            "// next note\n",
-            "*/ let next = 1;\n",
+            // The block content line above the code keeps the trailing comment in place,
+            // so nothing is inserted inside the block comment.
+            "*/ let next = 1; // next note\n",
         );
-        let options = FormatOptions::default();
+        let options = all_rules();
         for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
             let first = format(text, kind, &options);
             assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
             assert_eq!(check(text, kind, &options), first.violations, "{kind:?}");
-            assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
+            // The trailing comment that cannot be moved is still reported, so only the fix is checked.
+            let second = format(expected, kind, &options);
+            assert_eq!(second.fixed_text, None, "{kind:?}");
+            assert!(
+                second.violations.iter().all(|violation| !violation.fixable),
+                "{kind:?}: {:?}",
+                second.violations
+            );
         }
     }
 
@@ -443,7 +493,7 @@ mod test_format {
             "// next note\n",
             "*/ let next = 1;\n",
         );
-        let options = FormatOptions::default();
+        let options = all_rules();
         for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
             let first = format(text, kind, &options);
             assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
@@ -456,7 +506,7 @@ mod test_format {
     fn regex_hashes_are_preserved_while_real_hash_comments_are_formatted() {
         let text = "pattern = /[ #/]/ # Match a delimiter.\nnext = 1 # Keep this comment.\n";
         let expected = "# Match a delimiter.\npattern = /[ #/]/\n# Keep this comment.\nnext = 1\n";
-        let options = FormatOptions::default();
+        let options = all_rules();
         for kind in [FileKind::Python, FileKind::Shell, FileKind::Toml, FileKind::Yaml] {
             assert_eq!(
                 format(text, kind, &options).fixed_text.as_deref(),
@@ -469,7 +519,7 @@ mod test_format {
 
     #[test]
     fn quoted_slashes_in_division_and_paths_preserve_code() {
-        let options = FormatOptions::default();
+        let options = all_rules();
         for (kind, code) in [
             (FileKind::Python, r#"value = default / len("/# not a comment")"#),
             (FileKind::Python, r#"value = default / len(["]/# not a comment"])"#),
@@ -534,7 +584,7 @@ mod test_format {
             "// Keep this comment.\n",
             "const next = 1;\n",
         );
-        let options = FormatOptions::default();
+        let options = all_rules();
         assert_eq!(
             format(text, FileKind::JavaScript, &options).fixed_text.as_deref(),
             Some(expected)

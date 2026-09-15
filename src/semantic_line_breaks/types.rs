@@ -607,6 +607,19 @@ impl RuleSet {
         trailing_comment: true,
     };
 
+    /// Rules enabled when the caller asks for no particular set.
+    ///
+    /// Trailing comment fixing is left out.
+    /// It rewrites code lines and the result often reads worse than the original,
+    /// so it has to be asked for.
+    pub const DEFAULT: Self = Self {
+        line_too_long: true,
+        mid_clause_break: true,
+        semicolon: true,
+        em_dash: true,
+        trailing_comment: false,
+    };
+
     /// No rules enabled.
     pub const NONE: Self = Self {
         line_too_long: false,
@@ -647,7 +660,7 @@ impl RuleSet {
 
 impl Default for RuleSet {
     fn default() -> Self {
-        Self::ALL
+        Self::DEFAULT
     }
 }
 
@@ -669,7 +682,7 @@ impl Default for FormatOptions {
             tab_width: DEFAULT_TAB_WIDTH,
             join_sentences: false,
             allow_word_break: false,
-            rules: RuleSet::ALL,
+            rules: RuleSet::DEFAULT,
             abbreviations: crate::strings_from(DEFAULT_ABBREVIATIONS),
             clause_starters: Vec::new(),
             directive_prefixes: crate::strings_from(DEFAULT_DIRECTIVE_PREFIXES),
@@ -1117,7 +1130,7 @@ mod test_options_and_prefixes {
         let defaults = FormatOptions::default();
         assert_eq!(options.max_width, 72);
         assert_eq!(options.tab_width, DEFAULT_TAB_WIDTH);
-        assert_eq!(options.rules, RuleSet::ALL);
+        assert_eq!(options.rules, RuleSet::DEFAULT);
         assert_eq!(options.abbreviations, defaults.abbreviations);
         assert_eq!(options.directive_prefixes, defaults.directive_prefixes);
         assert_eq!(options.preserve_lowercase, defaults.preserve_lowercase);
@@ -1128,8 +1141,8 @@ mod test_options_and_prefixes {
     }
 
     #[test]
-    fn the_rule_set_defaults_to_all_rules() {
-        assert_eq!(RuleSet::default(), RuleSet::ALL);
+    fn the_rule_set_defaults_to_every_rule_except_trailing_comments() {
+        assert_eq!(RuleSet::default(), RuleSet::DEFAULT);
         assert_eq!(RuleSet::from_kinds(&[]), RuleSet::NONE);
         for kind in [
             ViolationKind::LineTooLong,
@@ -1142,6 +1155,18 @@ mod test_options_and_prefixes {
             assert!(!RuleSet::NONE.is_enabled(kind), "{kind} should be disabled in NONE");
             assert!(RuleSet::from_kinds(&[kind]).is_enabled(kind));
         }
+    }
+
+    #[test]
+    fn the_default_rule_set_differs_from_all_rules_only_in_trailing_comments() {
+        const { assert!(!RuleSet::DEFAULT.trailing_comment) };
+        assert_eq!(
+            RuleSet {
+                trailing_comment: true,
+                ..RuleSet::DEFAULT
+            },
+            RuleSet::ALL
+        );
     }
 
     #[test]

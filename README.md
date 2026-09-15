@@ -494,14 +494,19 @@ whenever the clause it introduces carries on past it,
 so the explanation or list starts on a line of its own.
 Text inside backticks, Markdown links, and inline formatting such as `**bold**`, `_italic_`,
 and `~~strikethrough~~` is never broken, and a span that was split by hand is joined back together.
-Semicolons are rewritten as separate sentences, and trailing comments are moved above the code.
+Semicolons are rewritten as separate sentences.
 An em dash becomes a period and a new sentence, or a colon where the text before it names what follows.
 A pair of dashes that encloses an aside becomes a pair of commas,
 and a dash that is kept never ends or starts a line.
 Aligned column blocks, such as the environment table of a usage comment, are left as they are.
 Slash-delimited regex literals are protected across supported source languages.
 When ambiguous slash syntax could hide a multiline string or comment, the remaining source is left unchanged.
+With `--trailing`, a comment sharing a line with code is moved onto its own line above it.
+That rule rewrites code lines and the result often reads worse than the original, so it is off by default.
+A trailing comment whose code line already has a comment above it is reported but not moved,
+since the two notes would be reflowed into one sentence.
 The line limit is read from project config files such as `.editorconfig`, `rustfmt.toml`, and `pyproject.toml`.
+Paths ignored by git are skipped, unless `--no-ignore` says otherwise.
 Files are checked in parallel, one worker per core unless `--jobs` says otherwise,
 and the report is printed in file order so a run is reproducible.
 The default mode reports violations and exits with code 1.
@@ -526,9 +531,11 @@ Options:
   -j, --join-sentences          Also pack consecutive short sentences up to the line limit
   -w, --width <N>               Maximum line length including indentation and comment marker (default: from project config or 120)
   -i, --ignore-project-config   Do not read the line length from project config files such as .editorconfig, rustfmt.toml, or pyproject.toml
-  -R, --rules <RULES>           Rules to enable (default: all) [possible values: too-long, mid-clause, semicolon, em-dash, trailing]
+  -R, --rules <RULES>           Rules to enable (default: every rule except trailing comments) [possible values: too-long, mid-clause, semicolon, em-dash, trailing]
+  -T, --trailing                Also move trailing comments to their own line above the code
   -e, --extensions <EXTENSION>  Only process files with these extensions
-  -x, --exclude <PATTERN>       Skip paths with a directory or file name equal to this text
+  -x, --exclude <PATTERN>       Skip paths with a directory or file name equal to this text, in addition to the default excludes
+  -n, --no-ignore               Do not skip paths ignored by git
   -t, --type <KIND>             Force the file kind, required with --stdin [possible values: rust, c, javascript, go, python, shell, toml, yaml, dockerfile, makefile, ruby, sql, lua, markdown]
   -s, --stdin                   Read text from stdin and write the formatted result to stdout
   -b, --word-break              Allow breaking at a plain word boundary when no clause boundary fits

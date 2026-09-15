@@ -26,6 +26,7 @@ dunce = "1.0.5"
 encoding_rs = "0.8.41"
 futures = "0.3.34"
 git2 = { version = "0.21.0", features = ["ssh", "https"] }
+ignore = "0.4.33"
 indicatif = { version = "0.18.6", features = ["tokio", "futures", "rayon"] }
 itertools = "0.15.0"
 num_cpus = "1.17.0"

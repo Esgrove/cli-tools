@@ -12,7 +12,7 @@ use regex::Regex;
 use super::markdown;
 use super::scanner::{ScanState, scan_line_buffered};
 use super::string_syntax::{StringSyntax, string_syntax};
-use super::types::{FileKind, FormatOptions, Region, Violation, ViolationKind};
+use super::types::{CommentStyle, FileKind, FormatOptions, Region, Violation, ViolationKind};
 use crate::{leading_whitespace, starts_with_ignore_case};
 
 /// Matches the opening of a Python docstring and captures indentation, string prefix, quotes, and the rest.
@@ -159,6 +159,22 @@ pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineS
     regions
 }
 
+/// Whether a line comment already sits directly above the given line.
+///
+/// A comment moved above such a line would be reflowed together with the comment above it,
+/// which merges two separate notes into one sentence, so those lines are reported but not fixed.
+fn has_comment_line_above(lines: &[&str], index: usize, style: &CommentStyle, inside_string: &[bool]) -> bool {
+    let Some(previous) = index.checked_sub(1) else {
+        return false;
+    };
+    if inside_string.get(previous).copied().unwrap_or(false) {
+        return false;
+    }
+    lines
+        .get(previous)
+        .is_some_and(|line| line_marker(line.trim_start(), style.line_markers).is_some())
+}
+
 /// Find trailing comments and build replacement line pairs for each affected line.
 ///
 /// Returns one entry per input line, `Some((comment_line, code_line))` for lines to split,
@@ -185,6 +201,7 @@ pub fn fix_trailing_comments_scanned(
     let Some(syntax) = string_syntax(kind) else {
         return (replacements, violations);
     };
+    let style = kind.comment_style();
     for (index, line) in lines.iter().enumerate() {
         let Some(comment_start) = scan.comment_start.get(index).copied().flatten() else {
             continue;
@@ -193,6 +210,19 @@ pub fn fix_trailing_comments_scanned(
             continue;
         };
         if is_directive(&trailing.text, options) {
+            continue;
+        }
+        // A comment moved above a line that already has a comment above it joins that comment block,
+        // and the reflow then merges two separate notes into one sentence.
+        // The move is reported so the line can be fixed by hand, but it is not made automatically.
+        if has_comment_line_above(lines, index, &style, &scan.inside_string) {
+            violations.push(Violation {
+                line: index + 1,
+                column: Some(trailing.column),
+                kind: ViolationKind::TrailingComment,
+                message: "comment shares a line with code, a comment already sits above it".into(),
+                fixable: false,
+            });
             continue;
         }
         let indent = leading_whitespace(line);
@@ -738,6 +768,73 @@ mod test_docstrings {
         assert_eq!(paragraph(&regions[0]).first_prefix, "# ");
         assert_eq!(paragraph(&regions[0]).lines, vec!["a", "b"]);
         assert_eq!(regions[1], verbatim_region(2, 3));
+    }
+}
+
+#[cfg(test)]
+mod test_comment_above_code {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_comment_directly_above_the_code_blocks_the_move() {
+        let lines = [
+            "// Various dotted prefixes all below threshold of 15",
+            "let x = 1; // 6 chars",
+        ];
+        let (replacements, violations) = fix(&lines, FileKind::Rust);
+        assert!(replacements.iter().all(Option::is_none));
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].kind, ViolationKind::TrailingComment);
+        assert_eq!(violations[0].line, 2);
+        assert!(!violations[0].fixable);
+        assert!(violations[0].message.contains("a comment already sits above it"));
+    }
+
+    #[test]
+    fn a_doc_comment_above_the_code_also_blocks_the_move() {
+        let lines = ["/// documented", "let x = 1; // note"];
+        let (replacements, violations) = fix(&lines, FileKind::Rust);
+        assert!(replacements.iter().all(Option::is_none));
+        assert!(!violations[0].fixable);
+    }
+
+    #[test]
+    fn a_blank_line_above_the_code_still_allows_the_move() {
+        let lines = ["// a note", "", "let x = 1; // 6 chars"];
+        let (replacements, violations) = fix(&lines, FileKind::Rust);
+        assert_eq!(replacements[2], Some(pair("// 6 chars", "let x = 1;")));
+        assert!(violations[0].fixable);
+    }
+
+    #[test]
+    fn code_above_the_code_still_allows_the_move() {
+        let lines = ["let y = 2;", "let x = 1; // 6 chars"];
+        let (replacements, _) = fix(&lines, FileKind::Rust);
+        assert_eq!(replacements[1], Some(pair("// 6 chars", "let x = 1;")));
+    }
+
+    #[test]
+    fn the_first_line_of_a_file_still_allows_the_move() {
+        assert_eq!(
+            replacement("let x = 1; // one", FileKind::Rust),
+            Some(pair("// one", "let x = 1;"))
+        );
+    }
+
+    #[test]
+    fn a_hash_comment_above_the_code_blocks_the_move() {
+        let lines = ["# a note", "value = 1  # 6 chars"];
+        let (replacements, violations) = fix(&lines, FileKind::Python);
+        assert!(replacements.iter().all(Option::is_none));
+        assert!(!violations[0].fixable);
+    }
+
+    #[test]
+    fn a_comment_inside_a_string_above_the_code_does_not_block_the_move() {
+        let lines = ["let text = \"", "// not a comment", "\";", "let x = 1; // note"];
+        let (replacements, _) = fix(&lines, FileKind::Rust);
+        assert_eq!(replacements[3], Some(pair("// note", "let x = 1;")));
     }
 }
 

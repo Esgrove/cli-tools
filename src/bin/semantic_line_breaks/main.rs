@@ -56,17 +56,25 @@ pub struct Args {
     #[arg(short, long)]
     ignore_project_config: bool,
 
-    /// Rules to enable (default: all)
+    /// Rules to enable (default: every rule except trailing comments)
     #[arg(short = 'R', long, value_delimiter = ',', value_name = "RULES")]
     rules: Vec<cli_tools::semantic_line_breaks::ViolationKind>,
+
+    /// Also move trailing comments to their own line above the code
+    #[arg(short = 'T', long)]
+    trailing: bool,
 
     /// Only process files with these extensions
     #[arg(short, long, num_args = 1, action = clap::ArgAction::Append, value_name = "EXTENSION")]
     extensions: Vec<String>,
 
-    /// Skip paths with a directory or file name equal to this text
+    /// Skip paths with a directory or file name equal to this text, in addition to the default excludes
     #[arg(short = 'x', long, num_args = 1, action = clap::ArgAction::Append, value_name = "PATTERN")]
     exclude: Vec<String>,
+
+    /// Do not skip paths ignored by git
+    #[arg(short = 'n', long)]
+    no_ignore: bool,
 
     /// Force the file kind, required with --stdin
     #[arg(short = 't', long = "type", value_name = "KIND")]

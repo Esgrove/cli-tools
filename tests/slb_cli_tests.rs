@@ -294,7 +294,7 @@ fn a_trailing_comment_is_moved_above_the_code() {
     let directory = temporary_directory();
     let path = write_file(&directory, "trailing.rs", "let width = 80; // default width\n");
 
-    let output = run(&[&argument(&path), "--fix"]);
+    let output = run(&[&argument(&path), "--trailing", "--fix"]);
 
     assert_eq!(exit_code(&output), 0);
     assert_eq!(
@@ -304,11 +304,48 @@ fn a_trailing_comment_is_moved_above_the_code() {
 }
 
 #[test]
+fn a_trailing_comment_is_left_alone_without_the_trailing_flag() {
+    let directory = temporary_directory();
+    let path = write_file(&directory, "trailing.rs", "let width = 80; // default width\n");
+
+    let output = run(&[&argument(&path), "--fix"]);
+
+    assert_eq!(exit_code(&output), 0);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("file should be readable"),
+        "let width = 80; // default width\n"
+    );
+}
+
+#[test]
+fn a_trailing_comment_under_a_comment_is_reported_but_not_fixed() {
+    let directory = temporary_directory();
+    let path = write_file(
+        &directory,
+        "trailing.rs",
+        "// Various dotted prefixes all below threshold of 15\nlet width = 80; // 6 chars\n",
+    );
+
+    let output = run(&[&argument(&path), "--trailing", "--fix"]);
+
+    assert_eq!(exit_code(&output), 1);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("file should be readable"),
+        "// Various dotted prefixes all below threshold of 15\nlet width = 80; // 6 chars\n"
+    );
+    assert!(
+        stdout(&output).contains("a comment already sits above it"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
 fn a_directive_comment_is_left_on_the_code_line() {
     let directory = temporary_directory();
     let path = write_file(&directory, "directive.rs", "let value = 1; // clippy::all\n");
 
-    let output = run(&[&argument(&path), "--fix"]);
+    let output = run(&[&argument(&path), "--trailing", "--fix"]);
 
     assert_eq!(exit_code(&output), 0);
     assert_eq!(
@@ -348,6 +385,52 @@ fn excluded_directories_are_skipped_when_walking() {
         stdout(&output).contains("Checked 1 file, no violations"),
         "{}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn a_command_line_exclude_keeps_the_default_excludes() {
+    let directory = temporary_directory();
+    write_file(&directory, "target/long.rs", TWO_SENTENCES);
+    write_file(&directory, "other/long.rs", TWO_SENTENCES);
+    write_file(&directory, "kept/clean.rs", "/// Short comment.\n");
+
+    let output = run(&[&argument(directory.path()), "-w", "40", "--exclude", "other"]);
+
+    assert_eq!(exit_code(&output), 0);
+    assert!(
+        stdout(&output).contains("Checked 1 file, no violations"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn gitignored_files_are_skipped_unless_the_ignore_rules_are_off() {
+    let directory = temporary_directory();
+    write_file(&directory, ".gitignore", "generated/\n");
+    write_file(&directory, "generated/long.rs", TWO_SENTENCES);
+    write_file(&directory, "kept/clean.rs", "/// Short comment.\n");
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(directory.path())
+        .status()
+        .expect("git init should run");
+
+    let output = run(&[&argument(directory.path()), "-w", "40"]);
+    assert_eq!(exit_code(&output), 0);
+    assert!(
+        stdout(&output).contains("Checked 1 file, no violations"),
+        "{}",
+        stdout(&output)
+    );
+
+    let without_ignore = run(&[&argument(directory.path()), "-w", "40", "--no-ignore", "--quiet"]);
+    assert_eq!(exit_code(&without_ignore), 1);
+    assert!(
+        stdout(&without_ignore).contains("Checked 2 files"),
+        "{}",
+        stdout(&without_ignore)
     );
 }
 

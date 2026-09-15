@@ -52,6 +52,8 @@ pub struct SlbConfig {
     #[serde(default)]
     pub rules: Vec<String>,
     #[serde(default)]
+    pub use_gitignore: Option<bool>,
+    #[serde(default)]
     pub use_project_config: Option<bool>,
     #[serde(default)]
     pub verbose: bool,
@@ -85,6 +87,7 @@ pub struct Config {
     pub rules: RuleSet,
     pub stdin: bool,
     pub project_width: bool,
+    pub use_gitignore: bool,
     pub verbose: bool,
     pub width: Option<usize>,
 }
@@ -126,7 +129,9 @@ impl Config {
     ///
     /// Command line values win over the config file, which wins over the built-in defaults.
     /// Extension lists (abbreviations, directive prefixes, lowercase words) add to the defaults.
-    /// Clause starters and excludes replace the defaults when given.
+    /// Clause starters replace the defaults when given.
+    /// An exclude list in the config file replaces the defaults,
+    /// while command line excludes add to whichever list was resolved.
     ///
     /// # Errors
     /// Returns an error if the config file cannot be read or parsed or names an unknown rule.
@@ -139,9 +144,9 @@ impl Config {
     /// # Errors
     /// Returns an error if the user config names an unknown rule.
     pub fn from_args_and_user_config(args: &Args, user_config: SlbConfig) -> Result<Self> {
-        let rules = if args.rules.is_empty() {
+        let mut rules = if args.rules.is_empty() {
             if user_config.rules.is_empty() {
-                RuleSet::ALL
+                RuleSet::DEFAULT
             } else {
                 let kinds = user_config
                     .rules
@@ -156,16 +161,22 @@ impl Config {
         } else {
             RuleSet::from_kinds(&args.rules)
         };
+        if args.trailing {
+            rules.trailing_comment = true;
+        }
 
-        let exclude = if args.exclude.is_empty() {
-            if user_config.exclude.is_empty() {
-                cli_tools::strings_from(DEFAULT_EXCLUDES)
-            } else {
-                user_config.exclude
-            }
+        // The command line excludes narrow the walk further,
+        // so they add to the resolved list instead of replacing it.
+        let mut exclude = if user_config.exclude.is_empty() {
+            cli_tools::strings_from(DEFAULT_EXCLUDES)
         } else {
-            args.exclude.clone()
+            user_config.exclude
         };
+        for pattern in &args.exclude {
+            if !exclude.contains(pattern) {
+                exclude.push(pattern.clone());
+            }
+        }
 
         let extensions = if args.extensions.is_empty() {
             user_config.extensions
@@ -193,6 +204,7 @@ impl Config {
             rules,
             stdin: args.stdin,
             project_width: !args.ignore_project_config && user_config.use_project_config.unwrap_or(true),
+            use_gitignore: !args.no_ignore && user_config.use_gitignore.unwrap_or(true),
             verbose: args.verbose || user_config.verbose,
             width: args.width.or(user_config.width),
         })
@@ -308,7 +320,8 @@ mod test_config_from_args {
         assert!(config.rules.em_dash);
         assert!(!config.rules.trailing_comment);
         assert_eq!(config.width, Some(80));
-        assert_eq!(config.exclude, vec!["docs"]);
+        // The fixture config sets exclude = ["target"], and the command line value adds to it.
+        assert_eq!(config.exclude, vec!["target", "docs"]);
         assert!(config.project_width);
     }
 
@@ -319,7 +332,8 @@ mod test_config_from_args {
     fn fixture_config_values_are_merged_with_defaults() {
         let args = Args::try_parse_from(["slb", "--extensions", ".RS"]).expect("arguments should parse");
         let config = Config::from_args(&args).expect("config should build");
-        assert_eq!(config.rules, RuleSet::ALL);
+        // The fixture config lists every rule except the opt-in trailing comment rule.
+        assert_eq!(config.rules, RuleSet::DEFAULT);
         assert_eq!(config.exclude, vec!["target"]);
         assert_eq!(config.extensions, vec!["rs"]);
         assert_eq!(config.clause_starters, vec!["meanwhile"]);
@@ -358,7 +372,8 @@ mod test_config_merge {
     #[test]
     fn an_empty_user_config_gives_the_built_in_defaults() {
         let config = config(&["slb"], "").expect("config should build");
-        assert_eq!(config.rules, RuleSet::ALL);
+        assert_eq!(config.rules, RuleSet::DEFAULT);
+        assert!(!config.rules.trailing_comment);
         assert_eq!(config.exclude, cli_tools::strings_from(DEFAULT_EXCLUDES));
         assert!(config.extensions.is_empty());
         assert!(config.width.is_none());
@@ -398,7 +413,47 @@ mod test_config_merge {
         assert_eq!(config.exclude, vec!["generated"]);
 
         let overridden = config_with_exclude_option();
-        assert_eq!(overridden.exclude, vec!["docs"]);
+        assert_eq!(overridden.exclude, vec!["generated", "docs"]);
+    }
+
+    #[test]
+    fn a_command_line_exclude_adds_to_the_built_in_defaults() {
+        let config = config(&["slb", "--exclude", "docs"], "").expect("config should build");
+        assert!(config.exclude.contains(&"target".to_string()));
+        assert!(config.exclude.contains(&"node_modules".to_string()));
+        assert_eq!(config.exclude.last(), Some(&"docs".to_string()));
+    }
+
+    #[test]
+    fn a_command_line_exclude_already_in_the_list_is_not_repeated() {
+        let config = config(&["slb", "--exclude", "target"], "").expect("config should build");
+        assert_eq!(config.exclude, cli_tools::strings_from(DEFAULT_EXCLUDES));
+    }
+
+    #[test]
+    fn the_trailing_flag_adds_the_trailing_comment_rule() {
+        let default_rules = config(&["slb", "--trailing"], "").expect("config should build");
+        assert_eq!(default_rules.rules, RuleSet::ALL);
+
+        let with_rules = config(&["slb", "--rules", "semicolon", "--trailing"], "").expect("config should build");
+        assert!(with_rules.rules.semicolon);
+        assert!(with_rules.rules.trailing_comment);
+        assert!(!with_rules.rules.line_too_long);
+    }
+
+    #[test]
+    fn gitignore_is_used_unless_turned_off() {
+        assert!(config(&["slb"], "").expect("config should build").use_gitignore);
+        assert!(
+            !config(&["slb", "--no-ignore"], "")
+                .expect("config should build")
+                .use_gitignore
+        );
+        assert!(
+            !config(&["slb"], "[slb]\nuse_gitignore = false\n")
+                .expect("config should build")
+                .use_gitignore
+        );
     }
 
     /// Config with an exclude given on the command line and another one in the user config.
@@ -445,6 +500,6 @@ mod test_config_merge {
         assert_eq!(options.clause_starters, vec!["meanwhile"]);
         assert!(options.abbreviations.contains(&"approx.".to_string()));
         assert!(options.preserve_lowercase.contains(&"ffmpeg".to_string()));
-        assert_eq!(options.rules, RuleSet::ALL);
+        assert_eq!(options.rules, RuleSet::DEFAULT);
     }
 }

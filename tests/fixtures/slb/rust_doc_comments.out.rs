@@ -17,8 +17,7 @@
 /// Returns an error when the input is empty.
 pub fn parse(input: &str) -> Header {
     // Use the default width for now.
-    // default width
-    let width = 80;
+    let width = 80; // default width
     // not a URL comment
     let url = "http://example.com";
     Header::new(input, width) // clippy::allow
