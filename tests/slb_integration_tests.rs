@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, format};
+use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, RuleSet, format};
 
 /// Directory holding the fixture pairs.
 fn fixture_directory() -> PathBuf {
@@ -41,7 +41,11 @@ fn assert_fixture(input_name: &str, output_name: &str) {
     let input = read_fixture(input_name);
     let expected = read_fixture(output_name);
     let kind = FileKind::from_path(Path::new(output_name)).expect("fixture should have a known kind");
-    let options = FormatOptions::default();
+    // The fixtures cover the opt-in trailing comment rule too, so every rule is on here.
+    let options = FormatOptions {
+        rules: RuleSet::ALL,
+        ..FormatOptions::default()
+    };
 
     let result = format(&input, kind, &options);
     let actual = result.fixed_text.unwrap_or_else(|| input.clone());

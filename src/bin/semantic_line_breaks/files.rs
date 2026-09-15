@@ -1,12 +1,13 @@
 //! File discovery and filtering for `slb`.
 //!
-//! Walks the given input paths, skips excluded directories and unsupported file types,
+//! Walks the given input paths, skips ignored and excluded directories and unsupported file types,
 //! and applies the extension filter to build the list of files to process.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
-use walkdir::WalkDir;
+use ignore::WalkBuilder;
 
 use cli_tools::print_yellow;
 use cli_tools::semantic_line_breaks::FileKind;
@@ -28,6 +29,8 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
     };
 
     let excludes_have_separator = config.exclude.iter().any(|pattern| pattern.contains('/'));
+    // The filter runs on the walker's own threads, so it needs an owned handle on the excludes.
+    let excludes = Arc::new(config.exclude.clone());
     let mut files = Vec::new();
     for root in roots {
         if root.is_file() {
@@ -41,14 +44,25 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
             }
             continue;
         }
-        // The hidden and system directory skip does not apply to the root,
-        // so an explicitly given directory such as ".github" is still walked.
-        let walker = WalkDir::new(&root).into_iter().filter_entry(|entry| {
-            (entry.depth() == 0 || !cli_tools::should_skip_entry(entry))
-                && !is_excluded(entry.path(), config, excludes_have_separator)
-        });
+        // The standard filters are off so the hidden and system directory skip stays here,
+        // where it can exempt the root and let an explicitly given directory such as ".github" through.
+        // Gitignore rules only apply inside a git repository,
+        // so the exclude list stays as the safety net everywhere else.
+        let filter_excludes = Arc::clone(&excludes);
+        let walker = WalkBuilder::new(&root)
+            .standard_filters(false)
+            .git_ignore(config.use_gitignore)
+            .git_global(config.use_gitignore)
+            .git_exclude(config.use_gitignore)
+            .ignore(config.use_gitignore)
+            .parents(config.use_gitignore)
+            .filter_entry(move |entry| {
+                (entry.depth() == 0 || !cli_tools::should_skip_path(entry.path()))
+                    && !is_excluded(entry.path(), &filter_excludes, excludes_have_separator)
+            })
+            .build();
         for entry in walker.filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
+            if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
                 continue;
             }
             let path = entry.into_path();
@@ -69,13 +83,13 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
 ///
 /// The whole path is only rendered as text when some pattern holds a separator,
 /// since that rendering costs an allocation for every entry of the walk.
-fn is_excluded(path: &Path, config: &Config, any_pattern_has_separator: bool) -> bool {
+fn is_excluded(path: &Path, excludes: &[String], any_pattern_has_separator: bool) -> bool {
     let path_string = if any_pattern_has_separator {
         path.to_string_lossy().replace('\\', "/")
     } else {
         String::new()
     };
-    config.exclude.iter().any(|pattern| {
+    excludes.iter().any(|pattern| {
         if pattern.contains('/') {
             path_string.contains(pattern.trim_matches('/'))
         } else {
@@ -115,7 +129,7 @@ mod test_helpers {
     /// Whether the path is excluded, working out the separator flag the way the walk does.
     pub fn excluded(path: &Path, config: &Config) -> bool {
         let any_pattern_has_separator = config.exclude.iter().any(|pattern| pattern.contains('/'));
-        super::is_excluded(path, config, any_pattern_has_separator)
+        super::is_excluded(path, &config.exclude, any_pattern_has_separator)
     }
 
     /// Build a config from command line arguments as the binary would.
@@ -235,6 +249,57 @@ mod test_collect_files {
         .expect("collecting should succeed");
 
         assert_eq!(collected_names(&files), vec!["lib.rs"]);
+    }
+
+    #[test]
+    fn gitignored_files_are_not_walked() {
+        let directory = temporary_directory();
+        write(&directory, ".gitignore", "generated/\n");
+        write(&directory, "lib.rs", "// comment\n");
+        write(&directory, "generated/api.rs", "// comment\n");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .expect("git init should run");
+
+        let files = collect_files(&[directory.path().to_path_buf()], &config_with(vec![], vec![]))
+            .expect("collecting should succeed");
+
+        assert_eq!(collected_names(&files), vec!["lib.rs"]);
+    }
+
+    #[test]
+    fn gitignored_files_are_walked_with_the_ignore_rules_off() {
+        let directory = temporary_directory();
+        write(&directory, ".gitignore", "generated/\n");
+        write(&directory, "lib.rs", "// comment\n");
+        write(&directory, "generated/api.rs", "// comment\n");
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(directory.path())
+            .status()
+            .expect("git init should run");
+
+        let mut config = config_with(vec![], vec![]);
+        config.use_gitignore = false;
+
+        let files = collect_files(&[directory.path().to_path_buf()], &config).expect("collecting should succeed");
+
+        assert_eq!(collected_names(&files), vec!["api.rs", "lib.rs"]);
+    }
+
+    #[test]
+    fn a_gitignore_outside_a_repository_is_not_applied() {
+        let directory = temporary_directory();
+        write(&directory, ".gitignore", "generated/\n");
+        write(&directory, "lib.rs", "// comment\n");
+        write(&directory, "generated/api.rs", "// comment\n");
+
+        let files = collect_files(&[directory.path().to_path_buf()], &config_with(vec![], vec![]))
+            .expect("collecting should succeed");
+
+        assert_eq!(collected_names(&files), vec!["api.rs", "lib.rs"]);
     }
 
     #[test]

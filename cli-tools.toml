@@ -366,7 +366,10 @@ replace = [
 # Read the line length from project config files such as .editorconfig, rustfmt.toml, and pyproject.toml
 # use_project_config = true
 
-# Rules to enable
+# Rules to enable.
+# The "trailing" rule moves a comment sharing a line with code onto its own line above.
+# It rewrites code lines and the result often reads worse than the original,
+# so it is off unless listed here or asked for with --trailing.
 # rules = ["too-long", "mid-clause", "semicolon", "em-dash", "trailing"]
 
 # Also pack consecutive short sentences up to the line limit
@@ -378,8 +381,13 @@ replace = [
 # Only process files with these extensions (empty means all supported file types)
 # extensions = []
 
-# Skip paths with a directory or file name equal to any of these
+# Skip paths with a directory or file name equal to any of these.
+# Setting this replaces the built-in list, while --exclude on the command line adds to it.
 # exclude = ["target", "node_modules", "build", "dist", "cdk.out", "coverage", ".venv", "venv", "vendor"]
+
+# Skip paths ignored by git, using .gitignore, .ignore, the global ignore file, and .git/info/exclude.
+# Only applies inside a git repository, elsewhere the exclude list above is the only filter.
+# use_gitignore = true
 
 # Abbreviations that do not end a sentence (added to the built-in list)
 # abbreviations = []

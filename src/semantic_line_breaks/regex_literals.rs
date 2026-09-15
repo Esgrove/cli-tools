@@ -648,10 +648,18 @@ mod test_regex_literals {
         );
         let lines = [
             r"const expression = /[/*]/; /* real block",
-            "// inside the block",
+            "inside the block",
             "*/ const next = 1; // c",
         ];
         assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![2]);
+
+        // A comment line just above the code keeps the trailing comment in place.
+        let with_comment_above = [
+            r"const expression = /[/*]/; /* real block",
+            "// inside the block",
+            "*/ const next = 1; // c",
+        ];
+        assert!(replaced_indices(&with_comment_above, FileKind::JavaScript).is_empty());
     }
 
     #[test]

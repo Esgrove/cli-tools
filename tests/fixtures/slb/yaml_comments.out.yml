@@ -1,6 +1,5 @@
 # Top level comment that wraps in the middle.
-# trailing note
-key: value
+key: value # trailing note
 url: http://example.com/#anchor
 script: |
   echo "# not a comment"
