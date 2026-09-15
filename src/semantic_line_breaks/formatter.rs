@@ -48,8 +48,14 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
     let mut violations = Vec::new();
     let mut working: Vec<(Cow<'_, str>, &str)> = Vec::with_capacity(source.len());
     let mut trailing_changed = false;
-    if kind.supports_trailing_comment_check() && options.rules.trailing_comment {
-        let (replacements, trailing_violations) = comments::fix_trailing_comments(&texts, kind, options);
+    // The trailing comment pass and the region split both need the same scan of the same lines,
+    // so it is taken once here and handed to both.
+    let scan = (kind != FileKind::Markdown).then(|| comments::scan_lines(&texts, kind));
+    if kind.supports_trailing_comment_check()
+        && options.rules.trailing_comment
+        && let Some(scan) = &scan
+    {
+        let (replacements, trailing_violations) = comments::fix_trailing_comments_scanned(&texts, kind, options, scan);
         violations.extend(trailing_violations);
         for (line, replacement) in source.iter().zip(replacements) {
             match replacement {
@@ -67,11 +73,14 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
 
     let working_texts: Vec<&str> = working.iter().map(|(text, _)| text.as_ref()).collect();
     let (output, prose_violations) = if trailing_changed {
-        let original_violations = prose_pass(&texts, kind, options).1;
-        let output = produce_fix.then(|| prose_pass(&working_texts, kind, options).0);
+        // Moving a comment onto its own line shifts the lines below it,
+        // so the violations come from the original numbering and the fixed text from the new lines,
+        // which need their own scan.
+        let original_violations = prose_pass(&texts, kind, options, false, scan.as_ref()).1;
+        let output = produce_fix.then(|| prose_pass(&working_texts, kind, options, true, None).0);
         (output, original_violations)
     } else {
-        let (output, prose_violations) = prose_pass(&working_texts, kind, options);
+        let (output, prose_violations) = prose_pass(&working_texts, kind, options, produce_fix, scan.as_ref());
         (produce_fix.then_some(output), prose_violations)
     };
     violations.extend(prose_violations);
@@ -110,44 +119,65 @@ fn split_lines(text: &str) -> Vec<SourceLine<'_>> {
 }
 
 /// Reflow every prose paragraph in the lines and return the new lines and the violations found.
-fn prose_pass<'a>(lines: &[&'a str], kind: FileKind, options: &FormatOptions) -> (Vec<Cow<'a, str>>, Vec<Violation>) {
+///
+/// The lines are only collected when `produce_fix` is set,
+/// so a check run never builds the text it would not use.
+fn prose_pass<'a>(
+    lines: &[&'a str],
+    kind: FileKind,
+    options: &FormatOptions,
+    produce_fix: bool,
+    scan: Option<&comments::LineScan>,
+) -> (Vec<Cow<'a, str>>, Vec<Violation>) {
     let regions = if kind == FileKind::Markdown {
         markdown::split_paragraphs(lines, "", 0, true)
     } else {
-        comments::split_source_regions(lines, kind)
+        scan.map_or_else(
+            || comments::split_source_regions(lines, kind),
+            |scan| comments::split_source_regions_scanned(lines, kind, scan),
+        )
     };
-    let mut output: Vec<Cow<'a, str>> = Vec::with_capacity(lines.len());
+    let capacity = if produce_fix { lines.len() } else { 0 };
+    let mut output: Vec<Cow<'a, str>> = Vec::with_capacity(capacity);
     let mut violations = Vec::new();
     let mut cursor = 0;
     for region in regions {
         match region {
             Region::Verbatim { end, .. } => {
-                copy_lines(lines, cursor, end, &mut output);
+                if produce_fix {
+                    copy_lines(lines, cursor, end, &mut output);
+                }
                 cursor = cursor.max(end);
             }
             Region::Paragraph(paragraph) => {
-                copy_lines(lines, cursor, paragraph.start_line, &mut output);
-                let outcome = prose::reflow_paragraph(&paragraph, options);
+                if produce_fix {
+                    copy_lines(lines, cursor, paragraph.start_line, &mut output);
+                }
+                let outcome = prose::reflow_paragraph(&paragraph, options, produce_fix);
                 violations.extend(outcome.violations);
-                match outcome.lines {
-                    Some(new_lines) => {
-                        let last_index = new_lines.len().saturating_sub(1);
-                        for (index, content) in new_lines.iter().enumerate() {
-                            let suffix = if index == last_index {
-                                paragraph.last_suffix.as_str()
-                            } else {
-                                ""
-                            };
-                            output.push(Cow::Owned(format!("{}{content}{suffix}", paragraph.prefix_for(index))));
+                if produce_fix {
+                    match outcome.lines {
+                        Some(new_lines) => {
+                            let last_index = new_lines.len().saturating_sub(1);
+                            for (index, content) in new_lines.iter().enumerate() {
+                                let suffix = if index == last_index {
+                                    paragraph.last_suffix.as_str()
+                                } else {
+                                    ""
+                                };
+                                output.push(Cow::Owned(format!("{}{content}{suffix}", paragraph.prefix_for(index))));
+                            }
                         }
+                        None => copy_lines(lines, paragraph.start_line, paragraph.end_line, &mut output),
                     }
-                    None => copy_lines(lines, paragraph.start_line, paragraph.end_line, &mut output),
                 }
                 cursor = cursor.max(paragraph.end_line);
             }
         }
     }
-    copy_lines(lines, cursor, lines.len(), &mut output);
+    if produce_fix {
+        copy_lines(lines, cursor, lines.len(), &mut output);
+    }
     (output, violations)
 }
 

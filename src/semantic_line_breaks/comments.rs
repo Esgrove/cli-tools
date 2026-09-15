@@ -127,12 +127,72 @@ pub struct ScanResult {
     pub uncertain: bool,
 }
 
+/// What one pass of the scanner found about every line of a file.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LineScan {
+    /// Whether the line starts inside a multi line string, template, heredoc, or an uncertain region.
+    inside_string: Vec<bool>,
+    /// Byte offset where a trailing comment starts, for the lines that have one.
+    comment_start: Vec<Option<usize>>,
+}
+
+/// Scan every line once, recording what both the region split and the trailing comment fix need.
+///
+/// Both passes drive the same state machine over the same lines,
+/// so running it once and keeping both answers halves the character level work for a file.
+///
+/// Ambiguous slashes can hide string or block comment boundaries,
+/// so a line is reported as inside a string when those boundaries cannot be recovered safely.
+#[must_use]
+pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
+    let count = lines.len();
+    let Some(syntax) = string_syntax(kind) else {
+        return LineScan {
+            inside_string: vec![false; count],
+            comment_start: vec![None; count],
+        };
+    };
+    let mut scan = LineScan {
+        inside_string: Vec::with_capacity(count),
+        comment_start: Vec::with_capacity(count),
+    };
+    let mut state = ScanState::Normal;
+    let mut characters = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        scan.inside_string.push(matches!(
+            state,
+            ScanState::InString(_)
+                | ScanState::InTripleQuote(_)
+                | ScanState::InRawString(_)
+                | ScanState::InTemplate
+                | ScanState::InBacktickRaw
+                | ScanState::InHeredoc(_)
+                | ScanState::Uncertain
+        ));
+        // A shebang is a comment line of its own, so it holds neither code nor the start of a string.
+        if index == 0 && line.starts_with("#!") {
+            scan.comment_start.push(None);
+            continue;
+        }
+        let result = scan_line_buffered(line, std::mem::take(&mut state), &syntax, &mut characters);
+        state = result.state;
+        scan.comment_start.push(result.comment_start);
+    }
+    scan
+}
+
 /// Split source lines into verbatim regions and comment paragraphs.
 #[must_use]
 pub fn split_source_regions(lines: &[&str], kind: FileKind) -> Vec<Region> {
+    split_source_regions_scanned(lines, kind, &scan_lines(lines, kind))
+}
+
+/// Split source lines into verbatim regions and comment paragraphs, reusing an existing scan.
+#[must_use]
+pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineScan) -> Vec<Region> {
     let style = kind.comment_style();
     let count = lines.len();
-    let inside_string = lines_inside_strings(lines, kind);
+    let inside_string = &scan.inside_string;
     let mut regions = Vec::new();
     let mut index = 0;
     while index < count {
@@ -206,20 +266,24 @@ pub fn fix_trailing_comments(
     kind: FileKind,
     options: &FormatOptions,
 ) -> (Vec<Option<(String, String)>>, Vec<Violation>) {
+    fix_trailing_comments_scanned(lines, kind, options, &scan_lines(lines, kind))
+}
+
+/// Find the trailing comments and build the replacement lines, reusing an existing scan.
+#[must_use]
+pub fn fix_trailing_comments_scanned(
+    lines: &[&str],
+    kind: FileKind,
+    options: &FormatOptions,
+    scan: &LineScan,
+) -> (Vec<Option<(String, String)>>, Vec<Violation>) {
     let mut replacements = vec![None; lines.len()];
     let mut violations = Vec::new();
     let Some(syntax) = string_syntax(kind) else {
         return (replacements, violations);
     };
-    let mut state = ScanState::Normal;
-    let mut characters = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        if index == 0 && line.starts_with("#!") {
-            continue;
-        }
-        let result = scan_line_buffered(line, state, &syntax, &mut characters);
-        state = result.state;
-        let Some(comment_start) = result.comment_start else {
+        let Some(comment_start) = scan.comment_start.get(index).copied().flatten() else {
             continue;
         };
         let Some(trailing) = trailing_comment(line, comment_start, &syntax) else {
@@ -234,7 +298,7 @@ pub fn fix_trailing_comments(
             line: index + 1,
             column: Some(trailing.column),
             kind: ViolationKind::TrailingComment,
-            message: "comment shares a line with code, move it to its own line above".to_string(),
+            message: "comment shares a line with code, move it to its own line above".into(),
             fixable: true,
         });
         if let Some(slot) = replacements.get_mut(index) {
@@ -742,35 +806,6 @@ fn is_triple(chars: &[(usize, char)], index: usize, quote: char) -> bool {
     })
 }
 
-/// Whether a line starts in a multiline string or follows an unresolved multiline construct.
-///
-/// Ambiguous slashes can hide string or block comment boundaries.
-/// Protect the remaining source when those boundaries cannot be recovered safely.
-fn lines_inside_strings(lines: &[&str], kind: FileKind) -> Vec<bool> {
-    let Some(syntax) = string_syntax(kind) else {
-        return vec![false; lines.len()];
-    };
-    let mut state = ScanState::Normal;
-    let mut characters = Vec::new();
-    lines
-        .iter()
-        .map(|line| {
-            let inside = matches!(
-                state,
-                ScanState::InString(_)
-                    | ScanState::InTripleQuote(_)
-                    | ScanState::InRawString(_)
-                    | ScanState::InTemplate
-                    | ScanState::InBacktickRaw
-                    | ScanState::InHeredoc(_)
-                    | ScanState::Uncertain
-            );
-            state = scan_line_buffered(line, std::mem::take(&mut state), &syntax, &mut characters).state;
-            inside
-        })
-        .collect()
-}
-
 /// Split a line at a comment marker byte offset into code and comment text.
 fn trailing_comment(line: &str, comment_start: usize, syntax: &StringSyntax) -> Option<TrailingComment> {
     let code = line.get(..comment_start)?.trim_end();
@@ -1169,6 +1204,11 @@ mod test_helpers {
             expected_start = end;
         }
         assert_eq!(expected_start, count, "regions do not reach the end of the input");
+    }
+
+    /// Whether each line starts inside a multi line string.
+    pub fn lines_inside_strings(lines: &[&str], kind: FileKind) -> Vec<bool> {
+        super::scan_lines(lines, kind).inside_string
     }
 
     /// Run the trailing comment scanner with default options.

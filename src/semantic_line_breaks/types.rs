@@ -220,7 +220,9 @@ pub struct Violation {
     /// Rule category.
     pub kind: ViolationKind,
     /// Human readable explanation.
-    pub message: String,
+    ///
+    /// Most messages are fixed text, so they are borrowed rather than allocated per violation.
+    pub message: Cow<'static, str>,
     /// Whether fix mode can repair this violation.
     pub fixable: bool,
 }
@@ -911,7 +913,7 @@ mod test_violation_kind {
             line: 12,
             column: None,
             kind: ViolationKind::Semicolon,
-            message: "semicolon joins clauses".to_string(),
+            message: "semicolon joins clauses".into(),
             fixable: false,
         };
         assert_eq!(violation.to_string(), "12: semicolon: semicolon joins clauses");

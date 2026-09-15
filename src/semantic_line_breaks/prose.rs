@@ -103,8 +103,13 @@ const CLAUSE_TIER_3: &[&str] = &[
     "i.e",
 ];
 
-/// Two word connectors, treated like tier 3.
-const CLAUSE_PAIRS: &[&str] = &["for example", "such as", "as well as", "in order to"];
+/// Two word connectors, treated like tier 3, held as the pair of words they are compared against.
+const CLAUSE_PAIRS: &[(&str, &str)] = &[
+    ("for", "example"),
+    ("such", "as"),
+    ("as", "well as"),
+    ("in", "order to"),
+];
 
 /// Conjunctions that join two phrases as often as two clauses,
 /// such as "the first input and the first output root".
@@ -154,6 +159,41 @@ static RE_LOWERCASE_WORD: LazyLock<Regex> =
 static RE_MARKDOWN_STRUCTURE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:[-+*>|]|#+|\d+[.)]|```.*|~~~.*)$").expect("Invalid Markdown structure regex"));
 
+/// Longest clause word that the table can hold, which bounds the lowercasing buffer.
+const MAX_CLAUSE_WORD: usize = 16;
+
+/// Clause words with their break quality, sorted by word.
+///
+/// The tier lists above stay the source of truth.
+/// Sorting them into one table lets a lookup compare a word against a handful of candidates
+/// instead of scanning every tier in turn, which is the hottest comparison in the formatter.
+static CLAUSE_WORDS: LazyLock<Vec<(&'static str, Rank)>> = LazyLock::new(|| {
+    let tiers = [
+        (CLAUSE_TIER_1, Rank::ClauseTier1),
+        (CLAUSE_TIER_2, Rank::ClauseTier2),
+        (CLAUSE_TIER_3, Rank::ClauseTier3),
+        (CLAUSE_TIER_4, Rank::ClauseTier4),
+    ];
+    let mut words: Vec<(&'static str, Rank)> = tiers
+        .into_iter()
+        .flat_map(|(list, rank)| list.iter().map(move |word| (*word, rank)))
+        .collect();
+    words.sort_unstable_by_key(|(word, _)| *word);
+    words
+});
+
+/// Content of one line the reflow produced.
+///
+/// Keeping the description instead of the text lets a check run decide whether a paragraph changed,
+/// and how wide its lines would be, without building any of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OutputContent {
+    /// Line taken unchanged from the paragraph.
+    Source(usize),
+    /// Line rebuilt by joining the tokens with single spaces.
+    Tokens(Vec<Token>),
+}
+
 /// A candidate break position between two tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Boundary {
@@ -188,10 +228,64 @@ pub struct Segment {
 /// Result of reflowing a paragraph.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReflowOutcome {
-    /// New content lines with hard break markers, or `None` when the paragraph is unchanged.
+    /// New content lines with hard break markers, built only when the caller asked for a fix.
     pub lines: Option<Vec<String>>,
+    /// Whether the reflow would change the paragraph.
+    pub changed: bool,
     /// Violations found in the paragraph.
     pub violations: Vec<Violation>,
+}
+
+impl OutputContent {
+    /// Whether the content is exactly the paragraph line at `index`.
+    fn matches_line(&self, paragraph: &Paragraph, index: usize) -> bool {
+        let Some(line) = paragraph.lines.get(index) else {
+            return false;
+        };
+        match self {
+            Self::Source(source) => paragraph.lines.get(*source).is_some_and(|source| source == line),
+            Self::Tokens(tokens) => tokens_match_line(tokens, line),
+        }
+    }
+
+    /// Width of the content in characters, without its prefix.
+    fn width(&self, paragraph: &Paragraph) -> usize {
+        match self {
+            Self::Source(source) => paragraph.lines.get(*source).map_or(0, |line| line.chars().count()),
+            Self::Tokens(tokens) => tokens_width(tokens),
+        }
+    }
+
+    /// The content as text.
+    fn into_text(self, paragraph: &Paragraph) -> String {
+        match self {
+            Self::Source(source) => paragraph.lines.get(source).cloned().unwrap_or_default(),
+            Self::Tokens(tokens) => join_tokens(&tokens),
+        }
+    }
+}
+
+/// Whether joining the tokens with single spaces would produce exactly the given line.
+///
+/// Comparing in place answers the question without building the joined line,
+/// which is all a check run needs.
+fn tokens_match_line(tokens: &[Token], line: &str) -> bool {
+    let mut rest = line;
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 {
+            match rest.strip_prefix(' ') {
+                Some(tail) => rest = tail,
+                None => return false,
+            }
+        }
+        for part in [token.leading.as_str(), token.core.as_str(), token.trailing.as_str()] {
+            match rest.strip_prefix(part) {
+                Some(tail) => rest = tail,
+                None => return false,
+            }
+        }
+    }
+    rest.is_empty()
 }
 
 /// Tokenize one content line into words and atoms.
@@ -309,26 +403,39 @@ pub fn clause_rank(tokens: &[Token], index: usize, options: &FormatOptions) -> O
     }
     let word = token.core.as_str();
     if let Some(next) = tokens.get(index + 1)
-        && CLAUSE_PAIRS.iter().any(|pair| is_word_pair(pair, word, &next.core))
+        && CLAUSE_PAIRS
+            .iter()
+            .any(|(first, second)| first.eq_ignore_ascii_case(word) && second.eq_ignore_ascii_case(&next.core))
     {
         return Some(Rank::ClauseTier3);
     }
-    if contains_word(CLAUSE_TIER_1, word) {
-        Some(Rank::ClauseTier1)
-    } else if contains_word(CLAUSE_TIER_2, word) {
-        Some(Rank::ClauseTier2)
-    } else if contains_word(CLAUSE_TIER_3, word) {
-        Some(Rank::ClauseTier3)
-    } else if contains_word(CLAUSE_TIER_4, word)
-        || options
-            .clause_starters
-            .iter()
-            .any(|starter| starter.eq_ignore_ascii_case(word))
-    {
-        Some(Rank::ClauseTier4)
-    } else {
-        None
+    if let Some(rank) = clause_word_rank(word) {
+        return Some(rank);
     }
+    options
+        .clause_starters
+        .iter()
+        .any(|starter| starter.eq_ignore_ascii_case(word))
+        .then_some(Rank::ClauseTier4)
+}
+
+/// Rank of a clause word in the table, ignoring ASCII case.
+///
+/// A word longer than every clause word cannot be one, so it is rejected on its length alone.
+fn clause_word_rank(word: &str) -> Option<Rank> {
+    let bytes = word.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_CLAUSE_WORD {
+        return None;
+    }
+    let mut lowercase = [0u8; MAX_CLAUSE_WORD];
+    for (slot, byte) in lowercase.iter_mut().zip(bytes) {
+        *slot = byte.to_ascii_lowercase();
+    }
+    let key = lowercase.get(..bytes.len())?;
+    let index = CLAUSE_WORDS
+        .binary_search_by(|(candidate, _)| candidate.as_bytes().cmp(key))
+        .ok()?;
+    CLAUSE_WORDS.get(index).map(|(_, rank)| *rank)
 }
 
 /// Find all break candidates between the tokens, ranked by quality.
@@ -337,19 +444,25 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
     let mut boundaries = Vec::new();
     let depths = token_depths(tokens, collect_bracket_events);
     let emphasis = token_depths(tokens, collect_emphasis_events);
+    // The rank of the token before the boundary is the rank the previous boundary looked up,
+    // so carrying it over halves the number of clause lookups.
+    let mut previous_clause = clause_rank(tokens, 0, options);
     for index in 1..tokens.len() {
+        let current_clause = clause_rank(tokens, index, options);
         let (Some(previous), Some(current)) = (tokens.get(index - 1), tokens.get(index)) else {
             continue;
         };
         let depth = depths.get(index).copied().unwrap_or_default() + emphasis.get(index).copied().unwrap_or_default();
         if starts_markdown_structure(current) {
+            previous_clause = current_clause;
             continue;
         }
-        let clause = if index >= 2 && clause_rank(tokens, index - 1, options).is_none() {
-            clause_rank(tokens, index, options)
+        let clause = if index >= 2 && previous_clause.is_none() {
+            current_clause
         } else {
             None
         };
+        previous_clause = current_clause;
         let mut rank = if previous.force_break_after {
             Rank::Forced
         } else if is_sentence_end(tokens, index - 1, options) {
@@ -493,7 +606,7 @@ fn retain_matched_events(events: &mut Vec<(usize, bool)>) {
 /// Delimited text is skipped, so a marker inside a code span, a link, or a URL does not count.
 /// Other kinds are read as prose, since `_italic` looks the same as an identifier on its own.
 fn collect_emphasis_events(token: &Token, position: usize, events: &mut Vec<(usize, bool)>) {
-    if is_delimited(token.kind) {
+    if is_delimited(token.kind) || !holds_emphasis_marker(token) {
         return;
     }
     let (opening, open_marker) = emphasis_run(
@@ -551,6 +664,20 @@ fn emphasis_run(characters: impl Iterator<Item = char>) -> (usize, char) {
     (0, '\0')
 }
 
+/// Whether any part of the token holds a marker character at all.
+///
+/// A run has to start from a marker, so a token without one delimits nothing,
+/// and most words in prose hold none.
+fn holds_emphasis_marker(token: &Token) -> bool {
+    [
+        token.leading.as_bytes(),
+        token.core.as_bytes(),
+        token.trailing.as_bytes(),
+    ]
+    .iter()
+    .any(|part| part.iter().any(|byte| matches!(byte, b'*' | b'_' | b'~')))
+}
+
 /// Whether the character marks emphasis or strikethrough in Markdown.
 const fn is_emphasis_marker(character: char) -> bool {
     matches!(character, '*' | '_' | '~')
@@ -600,8 +727,11 @@ pub fn is_mid_clause_break(line_a: &[Token], line_b: &[Token], hard_break: HardB
 }
 
 /// Reflow a paragraph: join mid-clause breaks, reword semicolons and dashes, and re-break long lines.
+///
+/// The new lines are only built when `produce_fix` is set,
+/// so a check run pays for the decisions but not for the text.
 #[must_use]
-pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> ReflowOutcome {
+pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_fix: bool) -> ReflowOutcome {
     let line_offset = paragraph.start_line + 1;
     let first_budget = options
         .max_width
@@ -619,6 +749,7 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
         };
         return ReflowOutcome {
             lines: None,
+            changed: false,
             violations,
         };
     }
@@ -633,7 +764,7 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
     reword_segments(&mut segments, options, line_offset, &mut violations);
     merge_changed_sentences(&mut segments, options);
 
-    let mut output: Vec<(String, HardBreak)> = Vec::new();
+    let mut output: Vec<(OutputContent, HardBreak)> = Vec::with_capacity(paragraph.lines.len());
     let mut is_first_line = true;
     for segment in segments {
         let should_split = segment.modified || options.rules.line_too_long;
@@ -655,9 +786,10 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
         };
         let unchanged_line = if pieces.len() == 1 { source_line } else { None };
         for piece in pieces {
-            let content = unchanged_line
-                .and_then(|line| paragraph.lines.get(line).cloned())
-                .unwrap_or_else(|| join_tokens(&piece));
+            let content = match unchanged_line {
+                Some(line) if line < paragraph.lines.len() => OutputContent::Source(line),
+                _ => OutputContent::Tokens(piece),
+            };
             output.push((content, HardBreak::None));
             emitted_any = true;
         }
@@ -667,10 +799,10 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
     }
 
     let mut changed = output.len() != paragraph.lines.len()
-        || output
-            .iter()
-            .zip(paragraph.lines.iter().zip(&paragraph.hard_breaks))
-            .any(|((content, hard_break), (line, original_break))| content != line || hard_break != original_break);
+        || output.iter().enumerate().any(|(index, (content, hard_break))| {
+            let original_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
+            *hard_break != original_break || !content.matches_line(paragraph, index)
+        });
 
     if changed && !fits_as_well_as_before(&output, paragraph, options, hard_limit) {
         // Joining lines that cannot be broken again would replace readable lines with a longer one.
@@ -693,13 +825,21 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
             && second.kind == ViolationKind::LineTooLong
     });
 
-    let lines = changed.then(|| {
+    let lines = (changed && produce_fix).then(|| {
         output
             .into_iter()
-            .map(|(content, hard_break)| format!("{content}{}", hard_break.marker()))
+            .map(|(content, hard_break)| {
+                let mut line = content.into_text(paragraph);
+                line.push_str(hard_break.marker());
+                line
+            })
             .collect()
     });
-    ReflowOutcome { lines, violations }
+    ReflowOutcome {
+        lines,
+        changed,
+        violations,
+    }
 }
 
 /// Whether the reflowed lines are no longer than the lines the paragraph started with.
@@ -707,20 +847,18 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions) -> Reflo
 /// A line may use the soft overflow, but reflowing must never push a line past the hard limit
 /// when the paragraph did not start out that long.
 fn fits_as_well_as_before(
-    output: &[(String, HardBreak)],
+    output: &[(OutputContent, HardBreak)],
     paragraph: &Paragraph,
     options: &FormatOptions,
     hard_limit: usize,
 ) -> bool {
-    let line_width = |index: usize, content: &str, hard_break: HardBreak| {
-        prefix_width(paragraph.prefix_for(index), options.tab_width)
-            + content.chars().count()
-            + hard_break.marker().len()
+    let line_width = |index: usize, width: usize, hard_break: HardBreak| {
+        prefix_width(paragraph.prefix_for(index), options.tab_width) + width + hard_break.marker().len()
     };
     let output_width = output
         .iter()
         .enumerate()
-        .map(|(index, (content, hard_break))| line_width(index, content, *hard_break))
+        .map(|(index, (content, hard_break))| line_width(index, content.width(paragraph), *hard_break))
         .max()
         .unwrap_or_default();
     if output_width <= hard_limit {
@@ -732,7 +870,7 @@ fn fits_as_well_as_before(
         .enumerate()
         .map(|(index, line)| {
             let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
-            line_width(index, line, hard_break)
+            line_width(index, line.chars().count(), hard_break)
         })
         .max()
         .unwrap_or_default();
@@ -1000,12 +1138,6 @@ fn contains_word(words: &[&str], word: &str) -> bool {
     words.iter().any(|candidate| candidate.eq_ignore_ascii_case(word))
 }
 
-/// Whether the two words form the given two word phrase, ignoring ASCII case.
-fn is_word_pair(pair: &str, first: &str, second: &str) -> bool {
-    pair.split_once(' ')
-        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(first) && right.eq_ignore_ascii_case(second))
-}
-
 /// Whether the word is a configured abbreviation that never ends a sentence.
 fn is_abbreviation(core: &str, options: &FormatOptions) -> bool {
     if core.is_ascii() {
@@ -1068,7 +1200,7 @@ fn build_segments(
                 line: paragraph.start_line + index,
                 column: None,
                 kind: ViolationKind::MidClauseBreak,
-                message: message.to_string(),
+                message: message.into(),
                 fixable: true,
             });
         }
@@ -1140,7 +1272,7 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
                 line,
                 column: None,
                 kind: ViolationKind::EmDash,
-                message: "dash at the edge of a sentence cannot be rewritten automatically".to_string(),
+                message: "dash at the edge of a sentence cannot be rewritten automatically".into(),
                 fixable: false,
             });
             continue;
@@ -1164,7 +1296,7 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
             line,
             column: None,
             kind: ViolationKind::EmDash,
-            message: dash_message(punctuation).to_string(),
+            message: dash_message(punctuation).into(),
             fixable: true,
         });
         segment.modified = true;
@@ -1288,7 +1420,7 @@ fn reword_semicolons(
                     line,
                     column: None,
                     kind: ViolationKind::Semicolon,
-                    message: format!("semicolon joins clauses, {reason}"),
+                    message: format!("semicolon joins clauses, {reason}").into(),
                     fixable: false,
                 });
                 continue;
@@ -1318,7 +1450,7 @@ fn reword_semicolons(
                 line,
                 column: None,
                 kind: ViolationKind::Semicolon,
-                message: "semicolon replaced with a period and a new sentence".to_string(),
+                message: "semicolon replaced with a period and a new sentence".into(),
                 fixable: true,
             });
         }
@@ -1492,12 +1624,6 @@ fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, o
         }
     }
     let colon_counts = cumulative_colon_counts(&ranks);
-    // The width of a line, which loses the space that joined it to the previous line.
-    let span_width = |from: usize, to: usize| {
-        let head = widths.get(from).copied().unwrap_or_default();
-        let tail = widths.get(to).copied().unwrap_or_default();
-        tail.saturating_sub(head).saturating_sub(usize::from(from > 0))
-    };
 
     // The run is walked backwards so the plan for every tail is known when a line is measured against it.
     let empty_tail = LinePlan {
@@ -1512,15 +1638,15 @@ fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, o
             cost: usize::MAX,
             line_end: count,
         };
-        let colon_range = if span_width(start, count) > budget {
+        let colon_range = if span_width(&widths, start, count) > budget {
             reachable_boundary_range(&widths, start, budget)
         } else {
             0..0
         };
-        collect_line_candidates(start, count, budget, &ranks, &span_width, &mut candidates);
+        collect_line_candidates(start, count, budget, &ranks, &widths, &mut candidates);
         for end in candidates.iter().copied() {
             let tail = plans.get(end).map_or(usize::MAX, |plan| plan.cost);
-            let cost = line_cost(tokens, start, end, budget, &ranks, &span_width)
+            let cost = line_cost(tokens, start, end, budget, &ranks, &widths)
                 .saturating_add(skipped_colon_cost(&colon_counts, &colon_range, end))
                 .saturating_add(tail);
             // Candidates come in reading order, so the last one of an equal cost fills the line the most.
@@ -1542,17 +1668,26 @@ fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, o
     breaks
 }
 
+/// Width of the tokens `from..to` set on one line.
+///
+/// The line loses the space that joined its first token to the previous one.
+fn span_width(widths: &[usize], from: usize, to: usize) -> usize {
+    let head = widths.get(from).copied().unwrap_or_default();
+    let tail = widths.get(to).copied().unwrap_or_default();
+    tail.saturating_sub(head).saturating_sub(usize::from(from > 0))
+}
+
 /// Collect the token indices where the line that starts at `start` may end, in reading order.
 fn collect_line_candidates(
     start: usize,
     count: usize,
     budget: usize,
     ranks: &[Option<Rank>],
-    span_width: &dyn Fn(usize, usize) -> usize,
+    widths: &[usize],
     candidates: &mut Vec<usize>,
 ) {
     candidates.clear();
-    if span_width(start, count) <= budget {
+    if span_width(widths, start, count) <= budget {
         candidates.push(count);
         return;
     }
@@ -1562,7 +1697,7 @@ fn collect_line_candidates(
     // and counts the same.
     let sentence_end = (start + 1..count)
         .filter(|end| rank_at(ranks, *end).is_some_and(|rank| rank >= Rank::Sentence))
-        .take_while(|end| span_width(start, *end) <= budget)
+        .take_while(|end| span_width(widths, start, *end) <= budget)
         .last();
     if let Some(end) = sentence_end {
         candidates.push(end);
@@ -1573,7 +1708,7 @@ fn collect_line_candidates(
     // however little of the line it fills, as long as the clause it introduces carries on past it.
     let colon = (start + 1..count)
         .filter(|end| rank_at(ranks, *end) == Some(Rank::Colon))
-        .take_while(|end| span_width(start, *end) <= budget)
+        .take_while(|end| span_width(widths, start, *end) <= budget)
         .last();
     if let Some(end) = colon
         && end - start >= MIN_COLON_INTRODUCTION_WORDS
@@ -1588,7 +1723,7 @@ fn collect_line_candidates(
             continue;
         }
         candidates.push(end);
-        if span_width(start, end) > budget + SOFT_OVERFLOW {
+        if span_width(widths, start, end) > budget + SOFT_OVERFLOW {
             // One boundary past the limit is kept for text that cannot be broken within it,
             // such as a long URL at the start of the line.
             break;
@@ -1648,17 +1783,17 @@ fn line_cost(
     end: usize,
     budget: usize,
     ranks: &[Option<Rank>],
-    span_width: &dyn Fn(usize, usize) -> usize,
+    widths: &[usize],
 ) -> usize {
     let count = tokens.len();
-    let width = span_width(start, end);
+    let width = span_width(widths, start, end);
     let rank = if end < count { rank_at(ranks, end) } else { None };
     let mut cost = width_cost(budget, width);
     if let Some(rank) = rank {
         cost = cost.saturating_add(boundary_cost(tokens, end, rank));
     }
     if width > budget {
-        if !overflow_is_earned(start, count, budget, rank, ranks, span_width) {
+        if !overflow_is_earned(start, count, budget, rank, ranks, widths) {
             cost = cost.saturating_add(WEAK_OVERFLOW_COST);
         }
         let excess = width.saturating_sub(budget + SOFT_OVERFLOW);
@@ -1736,7 +1871,7 @@ fn overflow_is_earned(
     budget: usize,
     rank: Option<Rank>,
     ranks: &[Option<Rank>],
-    span_width: &dyn Fn(usize, usize) -> usize,
+    widths: &[usize],
 ) -> bool {
     // The end of the run and a sentence end are the best breaks there are,
     // so only a coordinating conjunction or better is worth staying inside the budget for.
@@ -1746,7 +1881,7 @@ fn overflow_is_earned(
     };
     let min_fill = budget * MIN_FILL_PERCENT / 100;
     !(start + 1..count).any(|end| {
-        let width = span_width(start, end);
+        let width = span_width(widths, start, end);
         rank_at(ranks, end).is_some_and(|candidate| candidate >= blocking) && width >= min_fill && width <= budget
     })
 }
@@ -1760,7 +1895,7 @@ fn report_too_long(tokens: &[Token], line_offset: usize, reason: &str, violation
         line,
         column: None,
         kind: ViolationKind::LineTooLong,
-        message: format!("line exceeds the limit and {reason}"),
+        message: format!("line exceeds the limit and {reason}").into(),
         fixable: false,
     });
 }
@@ -1787,15 +1922,21 @@ fn over_long_line_violations(
     hard_limit: usize,
     changed: bool,
 ) -> Vec<Violation> {
+    let first_prefix = prefix_width(&paragraph.first_prefix, options.tab_width);
+    let rest_prefix = prefix_width(&paragraph.rest_prefix, options.tab_width);
     paragraph
         .lines
         .iter()
         .enumerate()
         .filter_map(|(index, line)| {
             let marker = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
-            let width = prefix_width(paragraph.prefix_for(index), options.tab_width)
-                + line.chars().count()
-                + marker.marker().len();
+            let prefix = if index == 0 { first_prefix } else { rest_prefix };
+            // A character count is never larger than a byte count,
+            // so a line that is short in bytes cannot reach the limit and needs no counting.
+            if prefix + line.len() + marker.marker().len() <= options.max_width {
+                return None;
+            }
+            let width = prefix + line.chars().count() + marker.marker().len();
             let fixable = changed && width > options.max_width;
             if !fixable && width <= hard_limit {
                 return None;
@@ -1804,7 +1945,7 @@ fn over_long_line_violations(
                 line: paragraph.start_line + index + 1,
                 column: None,
                 kind: ViolationKind::LineTooLong,
-                message: format!("line is {width} characters, limit is {}", options.max_width),
+                message: format!("line is {width} characters, limit is {}", options.max_width).into(),
                 fixable,
             })
         })
@@ -1840,7 +1981,7 @@ mod test_helpers {
 
     /// Reflow lines with the given width and default options.
     pub fn reflow(lines: &[&str], width: usize) -> ReflowOutcome {
-        reflow_paragraph(&paragraph(lines, ""), &FormatOptions::with_width(width))
+        reflow_paragraph(&paragraph(lines, ""), &FormatOptions::with_width(width), true)
     }
 
     /// Violation kinds and fixability of an outcome.
@@ -1897,7 +2038,11 @@ mod test_reflow_safety {
     fn a_prefix_that_leaves_no_budget_is_reported_but_not_reflowed() {
         let options = FormatOptions::with_width(20);
         let prefix = "                    // ";
-        let outcome = reflow_paragraph(&paragraph(&["a line of prose that is far too long"], prefix), &options);
+        let outcome = reflow_paragraph(
+            &paragraph(&["a line of prose that is far too long"], prefix),
+            &options,
+            true,
+        );
         assert_eq!(outcome.lines, None);
         assert_eq!(summary(&outcome), vec![(ViolationKind::LineTooLong, false)]);
     }
@@ -1912,7 +2057,11 @@ mod test_reflow_safety {
             ..FormatOptions::with_width(20)
         };
         let prefix = "                    // ";
-        let outcome = reflow_paragraph(&paragraph(&["a line of prose that is far too long"], prefix), &options);
+        let outcome = reflow_paragraph(
+            &paragraph(&["a line of prose that is far too long"], prefix),
+            &options,
+            true,
+        );
         assert_eq!(outcome.lines, None);
         assert!(outcome.violations.is_empty());
     }
@@ -1923,7 +2072,7 @@ mod test_reflow_safety {
             "and `shopifyEventHandler` in `packages/api` consumes them to link the product back to its Iron Bank",
             "item through an `ironbank_id` metafield.",
         ];
-        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
 
         assert_eq!(outcome.lines, None, "the paragraph should be left as it is");
         assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, false)]);
@@ -1932,7 +2081,7 @@ mod test_reflow_safety {
     #[test]
     fn a_join_that_stays_within_the_limit_is_applied() {
         let lines = ["a short line that ends with the", "word that continues the clause."];
-        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
 
         assert_eq!(
             outcome.lines,
@@ -1969,7 +2118,7 @@ mod test_brackets {
             "The query compiler only handles primitives (string, number,",
             "boolean, null, Date, Buffer). Arrays are passed through unchanged.",
         ];
-        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines,
             Some(vec![
@@ -1992,7 +2141,7 @@ mod test_brackets {
             "The resolver walks up the directory tree (it reads .editorconfig, rustfmt.toml, ",
             "pyproject.toml, setup.cfg and .clang-format in that order) and caches the result."
         )];
-        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines,
             Some(vec![
@@ -2008,7 +2157,7 @@ mod test_brackets {
     #[test]
     fn no_break_is_made_inside_brackets() {
         let lines = ["one two three four (alpha, beta or gamma) five six seven eight nine ten"];
-        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(40));
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(40), true);
         let reflowed = outcome.lines.expect("the line should be reflowed");
         for line in &reflowed {
             assert_eq!(
@@ -2041,7 +2190,7 @@ mod test_brackets {
             "Call `foo(bar` with the flag and then read the result",
             "from the buffer that the call returns.",
         ];
-        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines,
             Some(vec![
@@ -2055,7 +2204,7 @@ mod test_brackets {
     fn a_hard_break_inside_brackets_is_kept() {
         let mut paragraph = paragraph(&["text with (an open bracket", "and the rest) after it"], "");
         paragraph.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
-        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120), true);
         assert_eq!(outcome.lines, None);
         assert!(outcome.violations.is_empty());
     }
@@ -2079,7 +2228,7 @@ mod test_sentence_merge {
             "when the input is",
             "truncated.",
         ];
-        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines,
             Some(vec![
@@ -2093,7 +2242,7 @@ mod test_sentence_merge {
     #[test]
     fn a_sentence_that_has_its_own_line_is_kept_on_it() {
         let lines = ["Use the default width for now.", "default width"];
-        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines, None,
             "a line ending a sentence must not absorb the next line"
@@ -2104,7 +2253,7 @@ mod test_sentence_merge {
     fn a_hard_break_stops_the_merge() {
         let mut paragraph = paragraph(&["text that continues", "onto the next line"], "");
         paragraph.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
-        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120), true);
         assert_eq!(outcome.lines, None);
     }
 
@@ -2201,7 +2350,11 @@ mod test_break_choice {
         };
         // Allowing word breaks only adds them as candidates.
         // Running over the soft limit stays far cheaper than cutting a clause in two.
-        let outcome = reflow_paragraph(&paragraph(&["one two three four five six seven eight"], ""), &options);
+        let outcome = reflow_paragraph(
+            &paragraph(&["one two three four five six seven eight"], ""),
+            &options,
+            true,
+        );
         assert_eq!(outcome.lines, None);
         assert_eq!(summary(&outcome), vec![(ViolationKind::LineTooLong, false)]);
     }
@@ -2213,7 +2366,7 @@ mod test_break_choice {
             "but have no way to disambiguate themselves, so they're just ambiguous, ",
             "not \"unique by hierarchyPath\"."
         )];
-        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines.expect("the sentence should wrap"),
             vec![
@@ -2254,7 +2407,7 @@ mod test_break_choice {
             "duration is rejected here exactly like it would be in the actual form.",
         ];
         let options = FormatOptions::with_width(120);
-        let outcome = reflow_paragraph(&paragraph(&lines, " * "), &options);
+        let outcome = reflow_paragraph(&paragraph(&lines, " * "), &options, true);
         let expected = [
             "Checks that a raw `TOUCH_DRAG` action value is fully valid for the form:",
             "correct shape and modes (via `isDragGestureShape`),",
@@ -2265,7 +2418,10 @@ mod test_break_choice {
             "so a zero or negative duration is rejected here exactly like it would be in the actual form.",
         ];
         assert_eq!(outcome.lines, Some(expected.map(str::to_string).to_vec()));
-        assert_eq!(reflow_paragraph(&paragraph(&expected, " * "), &options).lines, None);
+        assert_eq!(
+            reflow_paragraph(&paragraph(&expected, " * "), &options, true).lines,
+            None
+        );
     }
 
     #[test]
@@ -2289,7 +2445,7 @@ mod test_break_choice {
             "The current directory placeholder is used as both the first input and first output root, ",
             "and no database is attached. Tests that need a database can use struct update syntax."
         )];
-        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120), true);
         let reflowed = outcome.lines.expect("the paragraph should be reflowed");
         assert_eq!(
             reflowed.first().map(String::as_str),
@@ -2307,7 +2463,7 @@ mod test_break_choice {
             "A forced break marks a sentence the formatter created itself, ",
             "such as a rewritten semicolon, and counts the same."
         )];
-        let outcome = reflow_paragraph(&paragraph(&lines, "        // "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "        // "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines,
             Some(vec![
@@ -2324,7 +2480,7 @@ mod test_break_choice {
             "Skips empty names, ignored group names, ignored prefixes, ",
             "names matching the parent directory, and runtime-ignored names."
         )];
-        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines,
             Some(vec![
@@ -2340,7 +2496,7 @@ mod test_break_choice {
             "The current directory placeholder is used as both the first input and first output root, ",
             "and no database is attached."
         )];
-        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph(&lines, "    /// "), &FormatOptions::with_width(120), true);
         assert_eq!(
             outcome.lines,
             Some(vec![
@@ -2379,7 +2535,7 @@ mod test_unchanged_lines {
             "Root/a.txt       <- first",
             "One sentence here. Another sentence there.",
         ];
-        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(30));
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(30), true);
         let reflowed = outcome.lines.expect("the paragraph should be reflowed");
         assert_eq!(
             reflowed.first().map(String::as_str),
@@ -2398,7 +2554,7 @@ mod test_unchanged_lines {
             "A very long line with several   spaces that would otherwise be reflowed here.",
             "Another line; with a semicolon \u{2014} and a dash.",
         ];
-        let outcome = reflow_paragraph(&paragraph(&lines, ""), &options);
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &options, true);
         assert_eq!(outcome.lines, None);
         assert!(outcome.violations.is_empty());
     }
@@ -2607,6 +2763,35 @@ mod test_boundaries {
     use super::test_helpers::*;
     use super::*;
     use crate::semantic_line_breaks::types::RuleSet;
+
+    #[test]
+    fn the_clause_table_holds_every_tier_word() {
+        let tiers = [
+            (CLAUSE_TIER_1, Rank::ClauseTier1),
+            (CLAUSE_TIER_2, Rank::ClauseTier2),
+            (CLAUSE_TIER_3, Rank::ClauseTier3),
+            (CLAUSE_TIER_4, Rank::ClauseTier4),
+        ];
+        let mut count = 0;
+        for (list, rank) in tiers {
+            for word in list {
+                assert_eq!(clause_word_rank(word), Some(rank), "{word}");
+                assert_eq!(clause_word_rank(&word.to_uppercase()), Some(rank), "{word}");
+                count += 1;
+            }
+        }
+        assert_eq!(CLAUSE_WORDS.len(), count);
+        assert!(
+            CLAUSE_WORDS.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "the table has to stay sorted for the binary search"
+        );
+        assert_eq!(clause_word_rank(""), None);
+        assert_eq!(clause_word_rank("header"), None);
+        assert_eq!(
+            clause_word_rank("a word that is far too long to be a clause word"),
+            None
+        );
+    }
 
     #[test]
     fn emphasis_spans_hold_together() {
@@ -2830,6 +3015,7 @@ mod test_reflow {
         let again = reflow_paragraph(
             &paragraph(&lines.iter().map(String::as_str).collect::<Vec<_>>(), ""),
             &FormatOptions::with_width(60),
+            true,
         );
         assert_eq!(again.lines, None);
         assert!(again.violations.is_empty());
@@ -2892,7 +3078,7 @@ mod test_reflow {
         let mut paragraph = paragraph(&[text], "");
         paragraph.first_prefix = "1. ".to_string();
         paragraph.rest_prefix = "   ".to_string();
-        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(60));
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(60), true);
         let lines = outcome.lines.expect("should reflow");
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|line| line.chars().count() + 3 <= 60), "{lines:?}");
@@ -2904,7 +3090,7 @@ mod test_reflow {
             join_sentences: true,
             ..FormatOptions::with_width(120)
         };
-        let outcome = reflow_paragraph(&paragraph(&["A short one.", "Another short one."], ""), &options);
+        let outcome = reflow_paragraph(&paragraph(&["A short one.", "Another short one."], ""), &options, true);
         assert_eq!(outcome.lines, Some(vec!["A short one. Another short one.".to_string()]));
     }
 
@@ -2920,6 +3106,7 @@ mod test_reflow {
         let outcome = reflow_paragraph(
             &paragraph(&["the quick brown fox", "jumps over the dog."], ""),
             &options,
+            true,
         );
         assert_eq!(outcome.lines, None);
         assert!(outcome.violations.is_empty());
@@ -2929,7 +3116,7 @@ mod test_reflow {
     fn keeps_hard_break_marker_on_its_line() {
         let mut paragraph = paragraph(&["roses are red", "violets are blue"], "");
         paragraph.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
-        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120));
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120), true);
         assert_eq!(outcome.lines, None);
     }
 
@@ -3035,7 +3222,7 @@ mod test_rewording {
         );
         assert_eq!(summary(&outcome), vec![(ViolationKind::EmDash, true)]);
         assert_eq!(
-            outcome.violations.first().map(|violation| violation.message.as_str()),
+            outcome.violations.first().map(|violation| violation.message.as_ref()),
             Some("dash replaced with a period and a new sentence")
         );
     }
@@ -3074,7 +3261,11 @@ mod test_rewording {
             preserve_lowercase: vec!["npm".to_string()],
             ..FormatOptions::with_width(120)
         };
-        let outcome = reflow_paragraph(&paragraph(&["the runner — npm handles the install step"], ""), &options);
+        let outcome = reflow_paragraph(
+            &paragraph(&["the runner — npm handles the install step"], ""),
+            &options,
+            true,
+        );
         assert_eq!(
             outcome.lines,
             Some(vec!["the runner: npm handles the install step".to_string()])
@@ -3124,7 +3315,7 @@ mod test_rewording {
             let outcome = reflow(&[text], 120);
             assert_eq!(outcome.lines, Some(vec![expected.to_string()]), "{text}");
             assert_eq!(
-                outcome.violations.first().map(|violation| violation.message.as_str()),
+                outcome.violations.first().map(|violation| violation.message.as_ref()),
                 Some("dash replaced with a colon"),
                 "{text}"
             );
@@ -3167,7 +3358,7 @@ mod test_rewording {
             },
             ..FormatOptions::with_width(120)
         };
-        let outcome = reflow_paragraph(&paragraph(&["a; b — c"], ""), &options);
+        let outcome = reflow_paragraph(&paragraph(&["a; b — c"], ""), &options, true);
         assert_eq!(outcome.lines, None);
         assert!(outcome.violations.is_empty());
     }

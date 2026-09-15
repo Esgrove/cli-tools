@@ -244,12 +244,12 @@ pub fn looks_like_code(line: &str) -> bool {
     if text.ends_with(';') && has_code_characters {
         return true;
     }
-    if RE_CODE_KEYWORD.is_match(text)
-        && (has_code_characters || text.ends_with(';') || text.starts_with(['#', '/', '$']))
+    if (has_code_characters || text.ends_with(';') || text.starts_with(['#', '/', '$']))
+        && RE_CODE_KEYWORD.is_match(text)
     {
         return true;
     }
-    if RE_COMMAND_FLAG.is_match(text) {
+    if text.contains("--") && RE_COMMAND_FLAG.is_match(text) {
         return true;
     }
     if text.contains("::")
@@ -262,7 +262,7 @@ pub fn looks_like_code(line: &str) -> bool {
     {
         return true;
     }
-    RE_CALL_LINE.is_match(text)
+    text.contains('(') && RE_CALL_LINE.is_match(text)
 }
 
 /// Build the paragraph region for a list item spanning `index..end`.
@@ -345,39 +345,51 @@ const fn verbatim(start_line: usize, from: usize, to: usize) -> Region {
 }
 
 /// Classify one line, looking at the following line for table detection.
+///
+/// Every pattern below is anchored at the start of the line,
+/// so the first character of the text decides which of them can match at all.
+/// Checking that first keeps a line of ordinary prose, which is the common case,
+/// from running the whole chain of patterns.
 fn classify(line: &str, next: Option<&str>) -> LineClass {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return LineClass::Blank;
     }
-    if let Some(captures) = RE_FENCE.captures(line)
+    let first = trimmed.as_bytes().first().copied().unwrap_or(b' ');
+    if matches!(first, b'`' | b'~')
+        && let Some(captures) = RE_FENCE.captures(line)
         && let Some(fence) = captures.get(1)
     {
         let marker = fence.as_str().chars().next().unwrap_or('`');
         return LineClass::FenceOpen(marker, fence.as_str().chars().count());
     }
-    if trimmed.starts_with("$$") {
+    if first == b'$' && trimmed.starts_with("$$") {
         return LineClass::MathFence;
     }
-    if trimmed.starts_with("<!--") {
+    if first == b'<' && trimmed.starts_with("<!--") {
         return LineClass::HtmlComment;
     }
-    if RE_HEADING.is_match(line) || RE_RULE.is_match(line) || RE_LINK_REFERENCE.is_match(line) {
+    if first == b'#' && RE_HEADING.is_match(line)
+        || matches!(first, b'-' | b'*' | b'_' | b'=' | b'~' | b'#' | b'/' | b'+') && RE_RULE.is_match(line)
+        || first == b'[' && RE_LINK_REFERENCE.is_match(line)
+    {
         return LineClass::Verbatim;
     }
-    if trimmed.starts_with('|') || next.is_some_and(|next| line.contains('|') && RE_TABLE_SEPARATOR.is_match(next)) {
+    if first == b'|' || next.is_some_and(|next| line.contains('|') && RE_TABLE_SEPARATOR.is_match(next)) {
         return LineClass::Verbatim;
     }
-    if RE_TABLE_SEPARATOR.is_match(line) && line.contains('|') {
+    if matches!(first, b'|' | b':' | b'-') && line.contains('|') && RE_TABLE_SEPARATOR.is_match(line) {
         return LineClass::Verbatim;
     }
-    if RE_HTML_BLOCK.is_match(line) {
+    if first == b'<' && RE_HTML_BLOCK.is_match(line) {
         return LineClass::HtmlBlock;
     }
-    if RE_BLOCKQUOTE.is_match(line) {
+    if first == b'>' && RE_BLOCKQUOTE.is_match(line) {
         return LineClass::Blockquote;
     }
-    if let Some(captures) = RE_LIST_ITEM.captures(line) {
+    if (matches!(first, b'-' | b'*' | b'+') || first.is_ascii_digit())
+        && let Some(captures) = RE_LIST_ITEM.captures(line)
+    {
         if captures.get(5).is_none() {
             return LineClass::Verbatim;
         }
@@ -386,10 +398,11 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
         });
         return LineClass::ListItem(content_start);
     }
-    if RE_STANDALONE_LINK.is_match(line) {
+    // Every alternative of the standalone link pattern needs a bracket or a scheme separator.
+    if (line.contains('[') || line.contains("://")) && RE_STANDALONE_LINK.is_match(line) {
         return LineClass::Verbatim;
     }
-    if RE_FIELD.is_match(line) {
+    if matches!(first, b':' | b'@') && RE_FIELD.is_match(line) {
         return LineClass::Field;
     }
     LineClass::Text
@@ -464,9 +477,10 @@ fn make_paragraph(
         line.contains(IGNORE_MARKER)
             || looks_like_code(line)
             || RE_ALIGNED_COLUMNS.is_match(line)
-            || line
-                .chars()
-                .any(|character| ('\u{2500}'..='\u{257F}').contains(&character))
+            || !line.is_ascii()
+                && line
+                    .chars()
+                    .any(|character| ('\u{2500}'..='\u{257F}').contains(&character))
     });
     if must_skip {
         return Region::Verbatim {

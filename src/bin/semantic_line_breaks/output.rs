@@ -124,7 +124,7 @@ mod test_violation_messages {
             line: 7,
             column,
             kind,
-            message: "line is 130 characters, limit is 120".to_string(),
+            message: "line is 130 characters, limit is 120".into(),
             fixable,
         }
     }

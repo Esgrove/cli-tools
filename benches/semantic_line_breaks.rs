@@ -271,7 +271,7 @@ fn bench_reflow(criterion: &mut Criterion) {
     let paragraph = paragraph();
     let mut group = criterion.benchmark_group("reflow_paragraph");
     group.bench_function("clauses_to_lines", |bencher| {
-        bencher.iter(|| reflow_paragraph(black_box(&paragraph), &options));
+        bencher.iter(|| reflow_paragraph(black_box(&paragraph), &options, true));
     });
     group.finish();
 }
