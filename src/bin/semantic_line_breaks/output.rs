@@ -28,6 +28,26 @@ pub struct Summary {
     pub remaining: usize,
 }
 
+impl Summary {
+    /// Fold the counters of one processed file into the summary.
+    pub const fn add(&mut self, processed: bool, violations: usize, fixable: usize, written: bool, remaining: usize) {
+        if !processed {
+            return;
+        }
+        self.files += 1;
+        if violations == 0 {
+            return;
+        }
+        self.files_with_violations += 1;
+        self.violations += violations;
+        self.fixable += fixable;
+        if written {
+            self.files_fixed += 1;
+        }
+        self.remaining += remaining;
+    }
+}
+
 /// Format one violation for the terminal.
 pub fn format_violation(path: &str, violation: &Violation, after_fix: bool) -> String {
     let kind = violation.kind.to_string();
@@ -43,20 +63,13 @@ pub fn format_violation(path: &str, violation: &Violation, after_fix: bool) -> S
     format!("{}: {kind}: {}", location.cyan(), violation.message)
 }
 
-/// Print a line based diff between the original and fixed text.
-pub fn print_diff(path: &str, original: &str, fixed: &str) {
-    for line in diff_lines(path, original, fixed) {
-        println!("{line}");
-    }
-}
-
 /// Print the final summary line.
 pub fn print_summary(summary: &Summary, config: &Config) {
     println!("{}", summary_message(summary, config));
 }
 
 /// Lines of a line based diff between the original and fixed text, including the file header.
-fn diff_lines(path: &str, original: &str, fixed: &str) -> Vec<String> {
+pub fn diff_lines(path: &str, original: &str, fixed: &str) -> Vec<String> {
     let mut lines = vec![format!("--- {path}").bold().to_string()];
     let changeset = Changeset::new(original, fixed, "\n");
     for difference in &changeset.diffs {

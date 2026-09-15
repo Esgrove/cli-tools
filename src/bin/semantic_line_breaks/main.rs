@@ -80,6 +80,10 @@ pub struct Args {
     #[arg(short = 'b', long)]
     word_break: bool,
 
+    /// Number of worker threads, 0 for one per core
+    #[arg(short = 'J', long, value_name = "N", default_value_t = 0)]
+    jobs: usize,
+
     /// Only print the summary
     #[arg(short, long)]
     quiet: bool,

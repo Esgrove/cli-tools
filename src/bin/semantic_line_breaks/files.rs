@@ -14,7 +14,10 @@ use cli_tools::semantic_line_breaks::FileKind;
 use crate::config::Config;
 
 /// Collect the files to process from the given paths, walking directories recursively.
-pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<PathBuf>> {
+///
+/// The file kind is decided during the walk and carried with the path,
+/// so it does not have to be worked out from the name a second time.
+pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf, FileKind)>> {
     let roots: Vec<PathBuf> = if paths.is_empty() {
         vec![cli_tools::resolve_input_path(None)?]
     } else {
@@ -24,11 +27,12 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<PathBuf>>
             .collect::<Result<Vec<_>>>()?
     };
 
+    let excludes_have_separator = config.exclude.iter().any(|pattern| pattern.contains('/'));
     let mut files = Vec::new();
     for root in roots {
         if root.is_file() {
-            if config.kind.is_some() || FileKind::from_path(&root).is_some() {
-                files.push(root);
+            if let Some(kind) = config.kind.or_else(|| FileKind::from_path(&root)) {
+                files.push((root, kind));
             } else {
                 print_yellow!("Skipping unsupported file type: {}", display_path(&root));
             }
@@ -37,27 +41,37 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<PathBuf>>
         // The hidden and system directory skip does not apply to the root,
         // so an explicitly given directory such as ".github" is still walked.
         let walker = WalkDir::new(&root).into_iter().filter_entry(|entry| {
-            (entry.depth() == 0 || !cli_tools::should_skip_entry(entry)) && !is_excluded(entry.path(), config)
+            (entry.depth() == 0 || !cli_tools::should_skip_entry(entry))
+                && !is_excluded(entry.path(), config, excludes_have_separator)
         });
         for entry in walker.filter_map(Result::ok) {
             if !entry.file_type().is_file() {
                 continue;
             }
             let path = entry.into_path();
-            let kind_known = config.kind.is_some() || FileKind::from_path(&path).is_some();
-            if kind_known && matches_extensions(&path, config) {
-                files.push(path);
+            let Some(kind) = config.kind.or_else(|| FileKind::from_path(&path)) else {
+                continue;
+            };
+            if matches_extensions(&path, config) {
+                files.push((path, kind));
             }
         }
     }
-    files.sort();
-    files.dedup();
+    files.sort_by(|(left, _), (right, _)| left.cmp(right));
+    files.dedup_by(|(left, _), (right, _)| left == right);
     Ok(files)
 }
 
 /// Whether the path has a component equal to an exclude pattern, or contains a pattern with a separator.
-fn is_excluded(path: &Path, config: &Config) -> bool {
-    let path_string = path.to_string_lossy().replace('\\', "/");
+///
+/// The whole path is only rendered as text when some pattern holds a separator,
+/// since that rendering costs an allocation for every entry of the walk.
+fn is_excluded(path: &Path, config: &Config, any_pattern_has_separator: bool) -> bool {
+    let path_string = if any_pattern_has_separator {
+        path.to_string_lossy().replace('\\', "/")
+    } else {
+        String::new()
+    };
     config.exclude.iter().any(|pattern| {
         if pattern.contains('/') {
             path_string.contains(pattern.trim_matches('/'))
@@ -94,6 +108,17 @@ pub fn display_path(path: &Path) -> String {
         .to_string()
 }
 
+/// Path relative to the given working directory for display.
+///
+/// Taking the directory as an argument keeps the run from asking the system for it once per file.
+pub fn display_path_relative(path: &Path, working_directory: Option<&Path>) -> String {
+    working_directory
+        .and_then(|directory| path.strip_prefix(directory).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 #[cfg(test)]
 mod test_helpers {
     use clap::Parser;
@@ -101,6 +126,12 @@ mod test_helpers {
 
     use super::*;
     use crate::Args;
+
+    /// Whether the path is excluded, working out the separator flag the way the walk does.
+    pub fn excluded(path: &Path, config: &Config) -> bool {
+        let any_pattern_has_separator = config.exclude.iter().any(|pattern| pattern.contains('/'));
+        super::is_excluded(path, config, any_pattern_has_separator)
+    }
 
     /// Build a config from command line arguments as the binary would.
     pub fn config(arguments: &[&str]) -> Config {
@@ -135,10 +166,10 @@ mod test_helpers {
     }
 
     /// File names of the collected files, sorted.
-    pub fn collected_names(paths: &[PathBuf]) -> Vec<String> {
-        let mut names: Vec<String> = paths
+    pub fn collected_names(files: &[(PathBuf, FileKind)]) -> Vec<String> {
+        let mut names: Vec<String> = files
             .iter()
-            .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            .map(|(path, _)| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
             .collect();
         names.sort();
         names
@@ -153,15 +184,15 @@ mod test_file_filters {
     #[test]
     fn exclude_matches_whole_components_only() {
         let config = config_with(vec!["build"], vec![]);
-        assert!(is_excluded(Path::new("project/build/out.rs"), &config));
-        assert!(!is_excluded(Path::new("project/src/builder.rs"), &config));
+        assert!(excluded(Path::new("project/build/out.rs"), &config));
+        assert!(!excluded(Path::new("project/src/builder.rs"), &config));
     }
 
     #[test]
     fn exclude_with_separator_matches_path_substring() {
         let config = config_with(vec!["docs/generated"], vec![]);
-        assert!(is_excluded(Path::new("repo/docs/generated/api.md"), &config));
-        assert!(!is_excluded(Path::new("repo/docs/manual/api.md"), &config));
+        assert!(excluded(Path::new("repo/docs/generated/api.md"), &config));
+        assert!(!excluded(Path::new("repo/docs/manual/api.md"), &config));
     }
 
     #[test]
@@ -257,7 +288,7 @@ mod test_collect_files {
             .expect("collecting should succeed");
 
         assert_eq!(files.len(), 1);
-        assert!(files.first().is_some_and(|collected| collected.ends_with("lib.rs")));
+        assert!(files.first().is_some_and(|(path, _)| path.ends_with("lib.rs")));
     }
 
     #[test]
@@ -317,7 +348,7 @@ mod test_collect_files {
         let files = collect_files(&[], &config_with(vec!["target"], vec!["toml"])).expect("collecting should succeed");
 
         assert!(
-            files.iter().any(|path| path.ends_with("Cargo.toml")),
+            files.iter().any(|(path, _)| path.ends_with("Cargo.toml")),
             "the working directory should be walked: {files:?}"
         );
     }

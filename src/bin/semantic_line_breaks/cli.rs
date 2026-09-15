@@ -3,24 +3,153 @@
 //! Runs the requested mode over the collected files or over stdin,
 //! resolves the line width for each file, writes fixes in fix mode,
 //! and collects the counters used for the final summary.
+//!
+//! Files are independent, so they are processed in parallel.
+//! Each file renders its own output, which the main thread then prints in file order,
+//! so the output does not depend on the order the threads happen to finish in.
 
+use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use rayon::prelude::*;
 
-use cli_tools::semantic_line_breaks::project_config::WidthResolver;
+use cli_tools::semantic_line_breaks::project_config::{WidthSource, discover_width};
 use cli_tools::semantic_line_breaks::types::DEFAULT_MAX_WIDTH;
 use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, check, format};
 use cli_tools::{print_error, print_yellow};
 
 use crate::Args;
 use crate::config::Config;
-use crate::files::{collect_files, display_path};
-use crate::output::{Summary, format_violation, print_diff, print_summary};
+use crate::files::{collect_files, display_path, display_path_relative};
+use crate::output::{Summary, diff_lines, format_violation, print_summary};
+
+/// Directory and file kind a project width applies to.
+type WidthKey = (PathBuf, FileKind);
+
+/// Everything one processed file produced, ready to be printed and counted.
+#[derive(Debug, Default)]
+struct FileOutcome {
+    /// Lines to print for the file, already formatted and coloured.
+    lines: Vec<String>,
+    /// Message to report on the error stream when the file could not be processed.
+    error: Option<String>,
+    /// Whether the file was read and checked.
+    processed: bool,
+    /// Violations found in the file.
+    violations: usize,
+    /// Violations that fix mode can repair.
+    fixable: usize,
+    /// Whether the file was rewritten.
+    written: bool,
+    /// Violations left after writing the fixed text.
+    remaining: usize,
+}
+
+/// State shared by every file of a run, built once before the parallel pass.
+struct RunContext<'config> {
+    /// Configuration for the run.
+    config: &'config Config,
+    /// Width source per directory and file kind, empty unless the width comes from a project config file.
+    widths: HashMap<WidthKey, Option<WidthSource>>,
+    /// Format options per line width the run can use.
+    ///
+    /// The option lists never change between files, so cloning them once per width
+    /// replaces cloning them once per file.
+    options: HashMap<usize, FormatOptions>,
+    /// Format options for the default width, used when no other width applies.
+    default_options: FormatOptions,
+    /// Current working directory, so the printed paths can be shortened without asking for it per file.
+    working_directory: Option<PathBuf>,
+}
+
+/// Line width for one file, the options that carry it, and where the width came from.
+struct FileSettings<'context> {
+    /// Resolved line width.
+    width: usize,
+    /// Format options holding that width.
+    options: &'context FormatOptions,
+    /// Project config file the width came from, when it did.
+    source: Option<&'context WidthSource>,
+}
+
+impl<'config> RunContext<'config> {
+    /// Resolve the project widths for the collected files and build the format options for every width.
+    fn new(config: &'config Config, files: &[(PathBuf, FileKind)]) -> Self {
+        let widths = resolve_project_widths(config, files);
+        let mut options = HashMap::new();
+        let discovered = widths
+            .values()
+            .filter_map(|source| source.as_ref().map(|source| source.width));
+        for width in discovered.chain(config.width) {
+            options.entry(width).or_insert_with(|| config.format_options(width));
+        }
+        Self {
+            config,
+            widths,
+            options,
+            default_options: config.format_options(DEFAULT_MAX_WIDTH),
+            working_directory: env::current_dir().ok(),
+        }
+    }
+
+    /// Settings for one file.
+    ///
+    /// The width is read back from the chosen options, so the two can never disagree.
+    fn settings(&self, file: &Path, kind: FileKind) -> FileSettings<'_> {
+        let source = if self.config.width.is_some() {
+            None
+        } else {
+            self.width_source(file, kind)
+        };
+        let width = self
+            .config
+            .width
+            .or_else(|| source.map(|source| source.width))
+            .unwrap_or(DEFAULT_MAX_WIDTH);
+        let options = self.options.get(&width).unwrap_or(&self.default_options);
+        FileSettings {
+            width: options.max_width,
+            options,
+            source,
+        }
+    }
+
+    /// Project width source for the directory of the given file.
+    fn width_source(&self, file: &Path, kind: FileKind) -> Option<&WidthSource> {
+        let directory = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        self.widths.get(&(directory, kind))?.as_ref()
+    }
+
+    /// Path of the file as it should be printed.
+    fn display(&self, file: &Path) -> String {
+        display_path_relative(file, self.working_directory.as_deref())
+    }
+}
+
+/// Width source for every directory and file kind of the run, resolved once per directory.
+///
+/// Returns an empty map when the width cannot come from a project config file,
+/// so nothing is read from disk in that case.
+fn resolve_project_widths(config: &Config, files: &[(PathBuf, FileKind)]) -> HashMap<WidthKey, Option<WidthSource>> {
+    if config.width.is_some() || !config.project_width {
+        return HashMap::new();
+    }
+    let mut directories: HashMap<WidthKey, PathBuf> = HashMap::new();
+    for (file, kind) in files {
+        let directory = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        directories.entry((directory, *kind)).or_insert_with(|| file.clone());
+    }
+    directories
+        .into_par_iter()
+        .map(|((directory, kind), file)| ((directory, kind), discover_width(&file, kind)))
+        .collect()
+}
 
 /// Check or fix all files matching the given arguments and return the process exit code.
 ///
@@ -38,12 +167,22 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let mut resolver = WidthResolver::new();
+    let outcomes = process_files(&files, &config)?;
     let mut summary = Summary::default();
-    for file in &files {
-        if let Err(error) = process_file(file, &config, &mut resolver, &mut summary) {
-            print_error!("{}: {error:#}", display_path(file));
+    for outcome in &outcomes {
+        if let Some(error) = &outcome.error {
+            print_error!("{error}");
         }
+        for line in &outcome.lines {
+            println!("{line}");
+        }
+        summary.add(
+            outcome.processed,
+            outcome.violations,
+            outcome.fixable,
+            outcome.written,
+            outcome.remaining,
+        );
     }
     print_summary(&summary, &config);
 
@@ -53,6 +192,24 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         summary.violations > 0
     };
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
+}
+
+/// Process every collected file and return the outcomes in file order.
+///
+/// The files are independent, so they are mapped in parallel and only the printing is sequential.
+/// One thread keeps the run single threaded, which makes a timing comparison reproducible.
+fn process_files(files: &[(PathBuf, FileKind)], config: &Config) -> Result<Vec<FileOutcome>> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.jobs)
+        .build()
+        .context("Failed to start the worker threads")?;
+    Ok(pool.install(|| {
+        let context = RunContext::new(config, files);
+        files
+            .par_iter()
+            .map(|(file, kind)| process_file(file, *kind, &context))
+            .collect()
+    }))
 }
 
 /// Format text from stdin and write the result to stdout.
@@ -82,62 +239,76 @@ fn run_stdin(config: &Config) -> Result<ExitCode> {
     })
 }
 
-/// Check or fix one file and update the summary.
-fn process_file(file: &Path, config: &Config, resolver: &mut WidthResolver, summary: &mut Summary) -> Result<()> {
-    let Some(kind) = config.kind.or_else(|| FileKind::from_path(file)) else {
-        return Ok(());
-    };
+/// Check or fix one file and return what should be printed and counted for it.
+fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOutcome {
+    let config = context.config;
+    let mut outcome = FileOutcome::default();
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::InvalidData => {
             if config.verbose {
-                print_yellow!("Skipping file with invalid UTF-8: {}", display_path(file));
+                let message = format!("Skipping file with invalid UTF-8: {}", context.display(file));
+                outcome.lines.push(message.yellow().to_string());
             }
-            return Ok(());
+            return outcome;
         }
-        Err(error) => return Err(error).with_context(|| "Failed to read file"),
+        Err(error) => {
+            outcome.error = Some(format!("{}: Failed to read file: {error}", context.display(file)));
+            return outcome;
+        }
     };
 
-    let (width, source) = resolve_width(file, kind, config, resolver);
-    let options = config.format_options(width);
+    let settings = context.settings(file, kind);
     // The fixed text is only needed to write it or to print the diff,
     // and building it costs an extra pass over every file with a trailing comment.
     let result = if config.fix || config.print {
-        format(&text, kind, &options)
+        format(&text, kind, settings.options)
     } else {
         FormatResult {
-            violations: check(&text, kind, &options),
+            violations: check(&text, kind, settings.options),
             fixed_text: None,
         }
     };
-    summary.files += 1;
-    let path = display_path(file);
+    outcome.processed = true;
 
     if config.verbose {
-        println!("{} (width {width} from {source})", path.cyan());
+        let path = context.display(file);
+        let origin = width_origin(&settings, config);
+        outcome
+            .lines
+            .push(format!("{} (width {} from {origin})", path.cyan(), settings.width));
     }
     if result.violations.is_empty() {
-        return Ok(());
+        return outcome;
     }
-    summary.files_with_violations += 1;
-    summary.violations += result.violations.len();
-    summary.fixable += result.violations.iter().filter(|violation| violation.fixable).count();
+    outcome.violations = result.violations.len();
+    outcome.fixable = result.violations.iter().filter(|violation| violation.fixable).count();
 
+    let path = context.display(file);
     if config.fix {
-        fix_file(file, &path, &text, &result, kind, &options, config, summary)?;
+        fix_file(
+            file,
+            &path,
+            &text,
+            &result,
+            kind,
+            settings.options,
+            config,
+            &mut outcome,
+        );
     } else {
         if !config.quiet {
             for violation in &result.violations {
-                println!("{}", format_violation(&path, violation, false));
+                outcome.lines.push(format_violation(&path, violation, false));
             }
         }
         if config.print
             && let Some(fixed) = &result.fixed_text
         {
-            print_diff(&path, &text, fixed);
+            outcome.lines.extend(diff_lines(&path, &text, fixed));
         }
     }
-    Ok(())
+    outcome
 }
 
 /// Write the fixed text and report what remains.
@@ -150,55 +321,48 @@ fn fix_file(
     kind: FileKind,
     options: &FormatOptions,
     config: &Config,
-    summary: &mut Summary,
-) -> Result<()> {
+    outcome: &mut FileOutcome,
+) {
     let Some(fixed) = &result.fixed_text else {
-        summary.remaining += result.violations.len();
+        outcome.remaining = result.violations.len();
         if !config.quiet {
             for violation in &result.violations {
-                println!("{}", format_violation(path, violation, true));
+                outcome.lines.push(format_violation(path, violation, true));
             }
         }
-        return Ok(());
+        return;
     };
-    fs::write(file, fixed).with_context(|| "Failed to write file")?;
-    summary.files_fixed += 1;
+    if let Err(error) = fs::write(file, fixed) {
+        outcome.error = Some(format!("{path}: Failed to write file: {error}"));
+        outcome.remaining = result.violations.len();
+        return;
+    }
+    outcome.written = true;
     let remaining = check(fixed, kind, options);
     let fixed_count = result.violations.len().saturating_sub(remaining.len());
     if !config.quiet {
-        println!(
-            "{}",
-            format!(
-                "Fixed {} in {path}",
-                cli_tools::count_label(fixed_count, "violation", "violations")
-            )
-            .green()
+        let message = format!(
+            "Fixed {} in {path}",
+            cli_tools::count_label(fixed_count, "violation", "violations")
         );
+        outcome.lines.push(message.green().to_string());
         for violation in &remaining {
-            println!("{}", format_violation(path, violation, true));
+            outcome.lines.push(format_violation(path, violation, true));
         }
     }
     if config.print {
-        print_diff(path, text, fixed);
+        outcome.lines.extend(diff_lines(path, text, fixed));
     }
-    summary.remaining += remaining.len();
-    Ok(())
+    outcome.remaining = remaining.len();
 }
 
-/// Resolve the line width for a file and describe where it came from.
-fn resolve_width(file: &Path, kind: FileKind, config: &Config, resolver: &mut WidthResolver) -> (usize, String) {
-    if let Some(width) = config.width {
-        return (width, "options".to_string());
+/// Name of the place the line width came from, for the verbose report.
+fn width_origin(settings: &FileSettings<'_>, config: &Config) -> String {
+    match settings.source {
+        Some(source) => format!("{} in {}", source.key, display_path(&source.file)),
+        None if config.width.is_some() => "options".to_string(),
+        None => "default".to_string(),
     }
-    if config.project_width
-        && let Some(source) = resolver.resolve(file, kind)
-    {
-        return (
-            source.width,
-            format!("{} in {}", source.key, display_path(&source.file)),
-        );
-    }
-    (DEFAULT_MAX_WIDTH, "default".to_string())
 }
 
 #[cfg(test)]
@@ -241,6 +405,35 @@ mod test_helpers {
             .tempdir()
             .expect("temporary directory should be created")
     }
+
+    /// Resolve the width for one file the way a run does, with the name of where it came from.
+    pub fn width_of(path: &std::path::Path, config: &Config) -> (usize, String) {
+        let kind = FileKind::from_path(path).expect("the fixture should have a known kind");
+        let files = vec![(path.to_path_buf(), kind)];
+        let context = RunContext::new(config, &files);
+        let settings = context.settings(path, kind);
+        let origin = width_origin(&settings, config);
+        (settings.width, origin)
+    }
+
+    /// Process one file the way a run does, returning its outcome and the summary it folds into.
+    pub fn process_one(path: &std::path::Path, config: &Config) -> (FileOutcome, Summary) {
+        let Some(kind) = config.kind.or_else(|| FileKind::from_path(path)) else {
+            return (FileOutcome::default(), Summary::default());
+        };
+        let files = vec![(path.to_path_buf(), kind)];
+        let context = RunContext::new(config, &files);
+        let outcome = process_file(path, kind, &context);
+        let mut summary = Summary::default();
+        summary.add(
+            outcome.processed,
+            outcome.violations,
+            outcome.fixable,
+            outcome.written,
+            outcome.remaining,
+        );
+        (outcome, summary)
+    }
 }
 
 #[cfg(test)]
@@ -255,10 +448,7 @@ mod test_process_file {
     #[test]
     fn check_mode_counts_violations_without_touching_the_file() {
         let (_directory, path) = file_with("check.rs", LONG_COMMENT);
-        let mut resolver = WidthResolver::new();
-        let mut summary = Summary::default();
-        process_file(&path, &config(&["slb", "-w", "40", "-q"]), &mut resolver, &mut summary)
-            .expect("processing should succeed");
+        let (_outcome, summary) = process_one(&path, &config(&["slb", "-w", "40", "-q"]));
 
         assert_eq!(summary.files, 1);
         assert_eq!(summary.files_with_violations, 1);
@@ -275,15 +465,7 @@ mod test_process_file {
     #[test]
     fn fix_mode_rewrites_the_file_and_leaves_nothing_fixable() {
         let (_directory, path) = file_with("fix.rs", LONG_COMMENT);
-        let mut resolver = WidthResolver::new();
-        let mut summary = Summary::default();
-        process_file(
-            &path,
-            &config(&["slb", "-w", "40", "-q", "--fix"]),
-            &mut resolver,
-            &mut summary,
-        )
-        .expect("processing should succeed");
+        let (_outcome, summary) = process_one(&path, &config(&["slb", "-w", "40", "-q", "--fix"]));
 
         assert_eq!(summary.files_fixed, 1);
         assert_eq!(summary.remaining, 0);
@@ -296,9 +478,7 @@ mod test_process_file {
     #[test]
     fn a_file_without_violations_is_only_counted() {
         let (_directory, path) = file_with("clean.rs", "/// Short comment.\nfn parse() {}\n");
-        let mut resolver = WidthResolver::new();
-        let mut summary = Summary::default();
-        process_file(&path, &config(&["slb", "-q"]), &mut resolver, &mut summary).expect("processing should succeed");
+        let (_outcome, summary) = process_one(&path, &config(&["slb", "-q"]));
 
         assert_eq!(summary.files, 1);
         assert_eq!(summary.files_with_violations, 0);
@@ -308,9 +488,7 @@ mod test_process_file {
     #[test]
     fn an_unknown_file_type_is_skipped() {
         let (_directory, path) = file_with("data.bin", "content\n");
-        let mut resolver = WidthResolver::new();
-        let mut summary = Summary::default();
-        process_file(&path, &config(&["slb"]), &mut resolver, &mut summary).expect("processing should succeed");
+        let (_outcome, summary) = process_one(&path, &config(&["slb"]));
 
         assert_eq!(summary.files, 0);
     }
@@ -318,15 +496,7 @@ mod test_process_file {
     #[test]
     fn the_forced_kind_overrides_the_file_extension() {
         let (_directory, path) = file_with("comments.unknown", "# A short comment.\n");
-        let mut resolver = WidthResolver::new();
-        let mut summary = Summary::default();
-        process_file(
-            &path,
-            &config(&["slb", "--type", "shell", "-q"]),
-            &mut resolver,
-            &mut summary,
-        )
-        .expect("processing should succeed");
+        let (_outcome, summary) = process_one(&path, &config(&["slb", "--type", "shell", "-q"]));
 
         assert_eq!(summary.files, 1);
     }
@@ -335,27 +505,19 @@ mod test_process_file {
     fn invalid_utf8_is_skipped_without_an_error() {
         let (_directory, path) = file_with("clean.rs", "");
         fs::write(&path, [0x2f, 0x2f, 0x20, 0xff, 0xfe, 0x0a]).expect("file should be written");
-        let mut resolver = WidthResolver::new();
-        let mut summary = Summary::default();
-        process_file(&path, &config(&["slb", "-v"]), &mut resolver, &mut summary).expect("processing should succeed");
+        let (_outcome, summary) = process_one(&path, &config(&["slb", "-v"]));
 
         assert_eq!(summary.files, 0);
     }
 
     #[test]
-    fn a_missing_file_is_an_error() {
+    fn a_missing_file_is_reported_as_an_error() {
         let directory = temporary_directory();
-        let mut resolver = WidthResolver::new();
-        let mut summary = Summary::default();
-        let error = process_file(
-            &directory.path().join("missing.rs"),
-            &config(&["slb"]),
-            &mut resolver,
-            &mut summary,
-        )
-        .expect_err("a missing file should fail");
+        let (outcome, summary) = process_one(&directory.path().join("missing.rs"), &config(&["slb"]));
 
-        assert!(format!("{error:#}").contains("Failed to read file"));
+        assert_eq!(summary.files, 0);
+        let error = outcome.error.expect("a missing file should be reported");
+        assert!(error.contains("Failed to read file"), "{error}");
     }
 }
 
@@ -378,7 +540,7 @@ mod test_fix_file {
             }],
             fixed_text: None,
         };
-        let mut summary = Summary::default();
+        let mut outcome = FileOutcome::default();
         fix_file(
             &path,
             "unfixable.rs",
@@ -387,12 +549,11 @@ mod test_fix_file {
             FileKind::Rust,
             &options,
             &config(&["slb", "--fix", "-q"]),
-            &mut summary,
-        )
-        .expect("fixing should succeed");
+            &mut outcome,
+        );
 
-        assert_eq!(summary.remaining, 1);
-        assert_eq!(summary.files_fixed, 0);
+        assert_eq!(outcome.remaining, 1);
+        assert!(!outcome.written);
         assert_eq!(
             fs::read_to_string(&path).expect("file should be readable"),
             "/// Text.\n",
@@ -414,7 +575,7 @@ mod test_fix_file {
             }],
             fixed_text: None,
         };
-        let mut summary = Summary::default();
+        let mut outcome = FileOutcome::default();
         fix_file(
             &path,
             "unfixable.rs",
@@ -423,11 +584,11 @@ mod test_fix_file {
             FileKind::Rust,
             &options,
             &config(&["slb", "--fix"]),
-            &mut summary,
-        )
-        .expect("fixing should succeed");
+            &mut outcome,
+        );
 
-        assert_eq!(summary.remaining, 1);
+        assert_eq!(outcome.remaining, 1);
+        assert_eq!(outcome.lines.len(), 1, "the remaining violation should be reported");
     }
 
     #[test]
@@ -436,7 +597,7 @@ mod test_fix_file {
         let (_directory, path) = file_with("dash.rs", text);
         let options = FormatOptions::with_width(120);
         let result = format(text, FileKind::Rust, &options);
-        let mut summary = Summary::default();
+        let mut outcome = FileOutcome::default();
         fix_file(
             &path,
             "dash.rs",
@@ -445,11 +606,10 @@ mod test_fix_file {
             FileKind::Rust,
             &options,
             &config(&["slb", "--fix"]),
-            &mut summary,
-        )
-        .expect("fixing should succeed");
+            &mut outcome,
+        );
 
-        assert!(summary.remaining > 0, "the unfixable dash should remain");
+        assert!(outcome.remaining > 0, "the unfixable dash should remain");
     }
 
     #[test]
@@ -460,7 +620,7 @@ mod test_fix_file {
             violations: vec![],
             fixed_text: Some("/// After.\n".to_string()),
         };
-        let mut summary = Summary::default();
+        let mut outcome = FileOutcome::default();
         fix_file(
             &path,
             "fixed.rs",
@@ -469,12 +629,11 @@ mod test_fix_file {
             FileKind::Rust,
             &options,
             &config(&["slb", "--fix", "--print"]),
-            &mut summary,
-        )
-        .expect("fixing should succeed");
+            &mut outcome,
+        );
 
-        assert_eq!(summary.files_fixed, 1);
-        assert_eq!(summary.remaining, 0);
+        assert!(outcome.written);
+        assert_eq!(outcome.remaining, 0);
         assert_eq!(
             fs::read_to_string(&path).expect("file should be readable"),
             "/// After.\n"
@@ -483,7 +642,7 @@ mod test_fix_file {
 }
 
 #[cfg(test)]
-mod test_resolve_width {
+mod test_width_resolution {
     use super::test_helpers::*;
     use super::*;
 
@@ -495,8 +654,7 @@ mod test_resolve_width {
             "max_width = 80\n",
         )
         .expect("config should be written");
-        let mut resolver = WidthResolver::new();
-        let (width, source) = resolve_width(&path, FileKind::Rust, &config(&["slb", "-w", "70"]), &mut resolver);
+        let (width, source) = width_of(&path, &config(&["slb", "-w", "70"]));
 
         assert_eq!(width, 70);
         assert_eq!(source, "options");
@@ -510,8 +668,7 @@ mod test_resolve_width {
             "max_width = 80\n",
         )
         .expect("config should be written");
-        let mut resolver = WidthResolver::new();
-        let (width, source) = resolve_width(&path, FileKind::Rust, &config_without_width(&["slb"]), &mut resolver);
+        let (width, source) = width_of(&path, &config_without_width(&["slb"]));
 
         assert_eq!(width, 80);
         assert!(source.starts_with("max_width in "));
@@ -526,13 +683,7 @@ mod test_resolve_width {
             "max_width = 80\n",
         )
         .expect("config should be written");
-        let mut resolver = WidthResolver::new();
-        let (width, source) = resolve_width(
-            &path,
-            FileKind::Rust,
-            &config_without_width(&["slb", "--ignore-project-config"]),
-            &mut resolver,
-        );
+        let (width, source) = width_of(&path, &config_without_width(&["slb", "--ignore-project-config"]));
 
         assert_eq!(width, DEFAULT_MAX_WIDTH);
         assert_eq!(source, "default");
@@ -541,8 +692,7 @@ mod test_resolve_width {
     #[test]
     fn the_default_width_is_used_without_any_config() {
         let (_directory, path) = file_with("main.rs", "fn main() {}\n");
-        let mut resolver = WidthResolver::new();
-        let (width, source) = resolve_width(&path, FileKind::Rust, &config_without_width(&["slb"]), &mut resolver);
+        let (width, source) = width_of(&path, &config_without_width(&["slb"]));
 
         assert_eq!(width, DEFAULT_MAX_WIDTH);
         assert_eq!(source, "default");
@@ -551,8 +701,7 @@ mod test_resolve_width {
     #[test]
     fn the_user_config_width_is_reported_as_an_option() {
         let (_directory, path) = file_with("main.rs", "fn main() {}\n");
-        let mut resolver = WidthResolver::new();
-        let (width, source) = resolve_width(&path, FileKind::Rust, &config(&["slb"]), &mut resolver);
+        let (width, source) = width_of(&path, &config(&["slb"]));
 
         assert_eq!(width, 110, "the user config used during tests sets the width");
         assert_eq!(source, "options");

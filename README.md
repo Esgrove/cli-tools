@@ -527,6 +527,7 @@ Options:
   -t, --type <KIND>             Force the file kind, required with --stdin [possible values: rust, c, javascript, go, python, shell, toml, yaml, dockerfile, makefile, ruby, sql, lua, markdown]
   -s, --stdin                   Read text from stdin and write the formatted result to stdout
   -b, --word-break              Allow breaking at a plain word boundary when no clause boundary fits
+  -J, --jobs <N>                Number of worker threads, 0 for one per core [default: 0]
   -q, --quiet                   Only print the summary
   -v, --verbose                 Print processed files and the resolved line width
   -h, --help                    Print help (see more with '--help')
