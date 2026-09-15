@@ -23,6 +23,19 @@ fn read_fixture(name: &str) -> String {
     fs::read_to_string(&path).expect("failed to read fixture file")
 }
 
+/// Every `*.in.*` fixture paired with the name of its expected output.
+fn fixture_pairs() -> Vec<(String, String)> {
+    let entries = fs::read_dir(fixture_directory()).expect("fixture directory should exist");
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let (stem, rest) = name.split_once(".in.")?;
+            Some((name.clone(), format!("{stem}.out.{rest}")))
+        })
+        .collect()
+}
+
 /// Format the input fixture and compare with the expected output, then check idempotence.
 fn assert_fixture(input_name: &str, output_name: &str) {
     let input = read_fixture(input_name);
@@ -107,13 +120,57 @@ fn markdown_readme_fixture() {
 }
 
 #[test]
+fn markdown_github_fixture() {
+    assert_fixture("markdown_github.in.md", "markdown_github.out.md");
+}
+
+#[test]
+fn markdown_emphasis_fixture() {
+    assert_fixture("markdown_emphasis.in.md", "markdown_emphasis.out.md");
+}
+
+#[test]
+fn dash_and_colon_fixture() {
+    assert_fixture("dash_and_colon.in.rs", "dash_and_colon.out.rs");
+}
+
+#[test]
+fn ruby_comments_fixture() {
+    assert_fixture("ruby_comments.in.rb", "ruby_comments.out.rb");
+}
+
+#[test]
+fn lua_comments_fixture() {
+    assert_fixture("lua_comments.in.lua", "lua_comments.out.lua");
+}
+
+#[test]
+fn dockerfile_fixture() {
+    assert_fixture("container.in.dockerfile", "container.out.dockerfile");
+}
+
+#[test]
+fn makefile_fixture() {
+    assert_fixture("build_rules.in.mk", "build_rules.out.mk");
+}
+
+#[test]
+fn every_fixture_pair_formats_to_its_expected_output() {
+    let mut pairs = fixture_pairs();
+    pairs.sort();
+    assert!(
+        pairs.len() >= 19,
+        "expected every fixture pair to be found, got {pairs:?}"
+    );
+    for (input, output) in pairs {
+        assert_fixture(&input, &output);
+    }
+}
+
+#[test]
 fn every_input_fixture_has_an_expected_output() {
-    let entries = fs::read_dir(fixture_directory()).expect("fixture directory should exist");
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some((stem, rest)) = name.split_once(".in.") {
-            let expected = fixture_directory().join(format!("{stem}.out.{rest}"));
-            assert!(expected.exists(), "missing expected output for {name}");
-        }
+    for (input, output) in fixture_pairs() {
+        let expected = fixture_directory().join(&output);
+        assert!(expected.exists(), "missing expected output for {input}");
     }
 }
