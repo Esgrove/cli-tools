@@ -41,6 +41,9 @@ cargo nextest run
 # Run tests with coverage report (text output)
 cargo llvm-cov nextest
 
+# Build with debug symbols for a profiler, since the release profile carries none
+cargo build --profile profiling --bin <name>
+
 # Run all benchmarks
 cargo bench
 

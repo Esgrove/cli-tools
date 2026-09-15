@@ -499,6 +499,8 @@ Aligned column blocks, such as the environment table of a usage comment, are lef
 Slash-delimited regex literals are protected across supported source languages.
 When ambiguous slash syntax could hide a multiline string or comment, the remaining source is left unchanged.
 The line limit is read from project config files such as `.editorconfig`, `rustfmt.toml`, and `pyproject.toml`.
+Files are checked in parallel, one worker per core unless `--jobs` says otherwise,
+and the report is printed in file order so a run is reproducible.
 The default mode reports violations and exits with code 1.
 Use `--fix` to rewrite files, `--print` to show a diff,
 or `--stdin` to format text from stdin for editor and git hook integration.
