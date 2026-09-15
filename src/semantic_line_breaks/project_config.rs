@@ -392,6 +392,27 @@ mod test_editorconfig {
     use super::*;
 
     #[test]
+    fn a_line_without_a_key_value_separator_is_skipped() {
+        let root = temp_root();
+        write_file(
+            root.path(),
+            ".editorconfig",
+            "root = true\nnot a key value line\n[*]\nmax_line_length = 90\n",
+        );
+        let file = write_file(root.path(), "main.rs", "fn main() {}\n");
+        let source = discover_width(&file, FileKind::Rust).expect("the width should be found");
+        assert_eq!(source.width, 90);
+    }
+
+    #[test]
+    fn a_kind_without_its_own_config_file_finds_no_width() {
+        let root = temp_root();
+        write_file(root.path(), ".rustfmt.toml", "max_width = 90\n");
+        let file = write_file(root.path(), "build.sh", "echo hello\n");
+        assert!(discover_width(&file, FileKind::Shell).is_none());
+    }
+
+    #[test]
     fn wildcard_section_applies_to_any_file() {
         let root = temp_root();
         let config = write_file(root.path(), ".editorconfig", "[*]\nmax_line_length = 100\n");
@@ -672,6 +693,20 @@ mod test_python {
     }
 
     #[test]
+    fn setup_cfg_flake8_ignores_the_keys_it_does_not_know() {
+        let root = temp_root();
+        write_file(
+            root.path(),
+            "setup.cfg",
+            "[flake8]\nmax-complexity = 10\nselect = E,W\nmax-line-length = 99\n",
+        );
+        let python_file = file_path(root.path(), "a.py");
+
+        let result = discover_width(&python_file, FileKind::Python).expect("expected a width");
+        assert_eq!(result.width, 99);
+    }
+
+    #[test]
     fn setup_cfg_flake8_is_ignored_for_rust() {
         let root = temp_root();
         write_file(root.path(), "setup.cfg", "[flake8]\nmax-line-length = 99\n");
@@ -832,6 +867,22 @@ mod test_glob_to_regex {
         assert!(regex.is_match("a/b.rs"));
         assert!(regex.is_match("a/b/c.rs"));
         assert!(regex.is_match("a.rs"));
+    }
+
+    #[test]
+    fn a_double_star_inside_a_name_matches_anything() {
+        let regex = glob_to_regex("a**b.rs").expect("glob should convert");
+        assert!(regex.is_match("ab.rs"));
+        assert!(regex.is_match("a-middle-b.rs"));
+        assert!(!regex.is_match("a.rs"));
+    }
+
+    #[test]
+    fn a_character_class_is_kept_as_it_is() {
+        let regex = glob_to_regex("[abc].rs").expect("glob should convert");
+        assert!(regex.is_match("a.rs"));
+        assert!(regex.is_match("c.rs"));
+        assert!(!regex.is_match("d.rs"));
     }
 
     #[test]

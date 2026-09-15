@@ -1791,6 +1791,60 @@ mod test_trailing_other_languages {
 }
 
 #[cfg(test)]
+mod test_scanner_edges {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_long_lifetime_is_not_a_character_literal() {
+        assert_eq!(
+            replacement("fn read<'a_very_long_lifetime>() {} // note", FileKind::Rust),
+            Some(pair("// note", "fn read<'a_very_long_lifetime>() {}"))
+        );
+    }
+
+    #[test]
+    fn an_unterminated_character_escape_does_not_swallow_the_comment() {
+        assert_eq!(
+            replacement(r"let bad = '\not_a_real_escape; // note", FileKind::Rust),
+            Some(pair("// note", r"let bad = '\not_a_real_escape;"))
+        );
+    }
+
+    #[test]
+    fn a_raw_string_at_the_start_of_a_line_hides_a_marker() {
+        assert_eq!(
+            replacement(r#"r"a // b".to_string(); // note"#, FileKind::Rust),
+            Some(pair("// note", r#"r"a // b".to_string();"#))
+        );
+        assert_eq!(
+            replacement(r#"br"a // b".to_vec(); // note"#, FileKind::Rust),
+            Some(pair("// note", r#"br"a // b".to_vec();"#))
+        );
+    }
+
+    #[test]
+    fn a_block_comment_that_opens_on_the_last_line_is_verbatim() {
+        let regions = split_source_regions(&["let x = 1;", "/* unterminated"], FileKind::Rust);
+        assert_tiles(&regions, 2);
+        assert!(regions.iter().all(|region| matches!(region, Region::Verbatim { .. })));
+    }
+
+    #[test]
+    fn code_after_the_closing_quotes_leaves_a_docstring_verbatim() {
+        let lines = [
+            "def f():",
+            "    \"\"\"Summary line that is long enough to matter.",
+            "    \"\"\" + tail",
+            "    return 1",
+        ];
+        let regions = split_source_regions(&lines, FileKind::Python);
+        assert_tiles(&regions, 4);
+        assert!(regions.iter().all(|region| matches!(region, Region::Verbatim { .. })));
+    }
+}
+
+#[cfg(test)]
 mod test_regex_literals {
     use super::test_helpers::*;
     use super::*;

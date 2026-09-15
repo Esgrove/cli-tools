@@ -601,6 +601,12 @@ mod test_markdown_verbatim {
     use super::test_helpers::*;
 
     #[test]
+    fn a_table_separator_without_a_row_above_it_is_verbatim() {
+        let regions = split_comment(&[":---: | :---:", "| a   | b   |"]);
+        assert_eq!(regions, vec![verbatim_region(0, 1), verbatim_region(1, 2)]);
+    }
+
+    #[test]
     fn a_two_column_usage_block_is_verbatim() {
         let lines = [
             "Environment:",

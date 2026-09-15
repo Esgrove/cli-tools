@@ -196,6 +196,30 @@ fn stdin_mode_passes_unchanged_text_through() {
 }
 
 #[test]
+fn stdin_mode_exits_with_one_when_a_violation_cannot_be_fixed() {
+    let output = run_with_stdin(&["--stdin", "--type", "rust"], "// — a dash that cannot be rewritten\n");
+    assert_eq!(exit_code(&output), 1);
+    assert_eq!(stdout(&output), "// — a dash that cannot be rewritten\n");
+    assert!(plain(&stderr(&output)).contains("em-dash"), "{}", stderr(&output));
+}
+
+#[test]
+fn fix_mode_reports_the_violations_it_could_not_fix() {
+    let directory = temporary_directory();
+    let source = "// run it; then check the result\nlet x = 1;\n// — a dash that cannot be rewritten\n";
+    let file = write_file(&directory, "notes.rs", source);
+    let output = run(&["--fix", &argument(&file)]);
+    assert_eq!(exit_code(&output), 1);
+    let text = plain(&stdout(&output));
+    assert!(text.contains("Fixed 1 violation"), "{text}");
+    assert!(text.contains("em-dash"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the file should be readable"),
+        "// run it. Then check the result\nlet x = 1;\n// — a dash that cannot be rewritten\n"
+    );
+}
+
+#[test]
 fn stdin_mode_requires_the_type_option() {
     let output = run_with_stdin(&["--stdin"], "Text.\n");
 

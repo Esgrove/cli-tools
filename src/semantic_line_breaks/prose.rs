@@ -1891,6 +1891,31 @@ mod test_command_text {
 mod test_reflow_safety {
     use super::test_helpers::*;
     use super::*;
+    use crate::semantic_line_breaks::types::RuleSet;
+
+    #[test]
+    fn a_prefix_that_leaves_no_budget_is_reported_but_not_reflowed() {
+        let options = FormatOptions::with_width(20);
+        let prefix = "                    // ";
+        let outcome = reflow_paragraph(&paragraph(&["a line of prose that is far too long"], prefix), &options);
+        assert_eq!(outcome.lines, None);
+        assert_eq!(summary(&outcome), vec![(ViolationKind::LineTooLong, false)]);
+    }
+
+    #[test]
+    fn a_narrow_budget_reports_nothing_when_the_length_rule_is_off() {
+        let options = FormatOptions {
+            rules: RuleSet {
+                line_too_long: false,
+                ..RuleSet::ALL
+            },
+            ..FormatOptions::with_width(20)
+        };
+        let prefix = "                    // ";
+        let outcome = reflow_paragraph(&paragraph(&["a line of prose that is far too long"], prefix), &options);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
 
     #[test]
     fn a_join_that_cannot_be_broken_again_is_not_applied() {
@@ -2169,6 +2194,19 @@ mod test_break_choice {
     use super::*;
 
     #[test]
+    fn a_word_break_costs_more_than_running_over_the_limit() {
+        let options = FormatOptions {
+            allow_word_break: true,
+            ..FormatOptions::with_width(24)
+        };
+        // Allowing word breaks only adds them as candidates.
+        // Running over the soft limit stays far cheaper than cutting a clause in two.
+        let outcome = reflow_paragraph(&paragraph(&["one two three four five six seven eight"], ""), &options);
+        assert_eq!(outcome.lines, None);
+        assert_eq!(summary(&outcome), vec![(ViolationKind::LineTooLong, false)]);
+    }
+
+    #[test]
     fn an_introduction_that_ends_in_a_colon_gets_its_own_line() {
         let lines = [concat!(
             "Skip objects without a hierarchyPath: they share the same other fields as a sibling ",
@@ -2372,6 +2410,36 @@ mod test_tokenizer {
     use super::*;
 
     #[test]
+    fn an_unterminated_code_span_is_not_an_atom() {
+        assert_eq!(
+            kinds("run `unterminated code here"),
+            vec![TokenKind::Word, TokenKind::Word, TokenKind::Word, TokenKind::Word,]
+        );
+    }
+
+    #[test]
+    fn a_reference_style_link_is_one_atom() {
+        assert_eq!(
+            kinds("see [the docs][docs] now"),
+            vec![TokenKind::Word, TokenKind::Link, TokenKind::Word]
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_bracket_is_not_a_link() {
+        assert_eq!(
+            kinds("see [the docs now"),
+            vec![TokenKind::Word, TokenKind::Word, TokenKind::Word, TokenKind::Word,]
+        );
+    }
+
+    #[test]
+    fn the_width_of_no_tokens_is_zero() {
+        assert_eq!(tokens_width(&[]), 0);
+        assert!(join_tokens(&[]).is_empty());
+    }
+
+    #[test]
     fn a_code_span_with_spaces_stays_one_atom() {
         let tokens = tokens("run `a; b.c() and more` now");
         assert_eq!(
@@ -2488,6 +2556,27 @@ mod test_tokenizer {
 mod test_sentence_end {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn a_non_ascii_abbreviation_does_not_end_a_sentence() {
+        let options = FormatOptions {
+            abbreviations: vec!["esim.".to_string()],
+            ..FormatOptions::default()
+        };
+        let tokens = tokens("katso esim. tätä kohtaa");
+        assert!(is_abbreviation("esim", &options));
+        assert!(!is_abbreviation("tätä", &options));
+        assert!(!is_sentence_end(&tokens, 1, &options));
+    }
+
+    #[test]
+    fn an_index_past_the_tokens_ends_no_sentence() {
+        let options = FormatOptions::default();
+        let tokens = tokens("one sentence.");
+        assert!(!is_sentence_end(&tokens, tokens.len(), &options));
+        assert!(!is_sentence_end(&tokens, tokens.len() - 1, &options));
+        assert!(!is_sentence_end(&[], 0, &options));
+    }
 
     fn is_end(text: &str, index: usize) -> bool {
         is_sentence_end(&tokens(text), index, &FormatOptions::default())
@@ -2975,6 +3064,39 @@ mod test_rewording {
             Some(vec![
                 "the form stays clean.".to_string(),
                 "Save is disabled until an edit".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_dash_becomes_a_colon_before_a_word_that_stays_lowercase() {
+        let options = FormatOptions {
+            preserve_lowercase: vec!["npm".to_string()],
+            ..FormatOptions::with_width(120)
+        };
+        let outcome = reflow_paragraph(&paragraph(&["the runner — npm handles the install step"], ""), &options);
+        assert_eq!(
+            outcome.lines,
+            Some(vec!["the runner: npm handles the install step".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_dash_becomes_a_period_before_text_that_needs_no_capital() {
+        let outcome = reflow(&["the counter — 42 items were found in the archive"], 120);
+        assert_eq!(
+            outcome.lines,
+            Some(vec!["the counter. 42 items were found in the archive".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_semicolon_after_a_closing_bracket_is_rewritten() {
+        let outcome = reflow(&["the first value (the total) is read; the second one is ignored"], 120);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "the first value (the total) is read. The second one is ignored".to_string()
             ])
         );
     }
