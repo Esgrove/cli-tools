@@ -489,7 +489,8 @@ and a sentence that does not fit on one line is spread evenly over the lines it 
 In long sentences, a colon after an introduction of three words or more takes its own line
 whenever the clause it introduces carries on past it,
 so the explanation or list starts on a line of its own.
-Text inside backticks, Markdown links, and emphasis markers such as `**bold text**` is never broken.
+Text inside backticks, Markdown links, and inline formatting such as `**bold**`, `_italic_`,
+and `~~strikethrough~~` is never broken, and a span that was split by hand is joined back together.
 Semicolons are rewritten as separate sentences, and trailing comments are moved above the code.
 An em dash becomes a period and a new sentence, or a colon where the text before it names what follows.
 A pair of dashes that encloses an aside becomes a pair of commas,

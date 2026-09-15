@@ -490,9 +490,10 @@ fn retain_matched_events(events: &mut Vec<(usize, bool)>) {
 /// Append the emphasis span events of the token as `(position, opens)` events.
 ///
 /// A token that carries both of its own markers, such as `*strong*`, delimits no span past itself.
-/// The inner text of an atom is skipped, so a marker in a code span or a link does not count.
+/// Delimited text is skipped, so a marker inside a code span, a link, or a URL does not count.
+/// Other kinds are read as prose, since `_italic` looks the same as an identifier on its own.
 fn collect_emphasis_events(token: &Token, position: usize, events: &mut Vec<(usize, bool)>) {
-    if token.is_atom() {
+    if is_delimited(token.kind) {
         return;
     }
     let (opening, open_marker) = emphasis_run(
@@ -510,6 +511,10 @@ fn collect_emphasis_events(token: &Token, position: usize, events: &mut Vec<(usi
             .chain(token.core.chars().rev())
             .chain(token.leading.chars().rev()),
     );
+    // A single tilde delimits nothing, unlike a single asterisk or underscore,
+    // so a home directory such as `~/.config` never opens a span.
+    let opening = if open_marker == '~' && opening < 2 { 0 } else { opening };
+    let closing = if close_marker == '~' && closing < 2 { 0 } else { closing };
     if opening > 0 && closing > 0 && open_marker == close_marker {
         return;
     }
@@ -546,9 +551,17 @@ fn emphasis_run(characters: impl Iterator<Item = char>) -> (usize, char) {
     (0, '\0')
 }
 
-/// Whether the character marks emphasis in Markdown.
+/// Whether the character marks emphasis or strikethrough in Markdown.
 const fn is_emphasis_marker(character: char) -> bool {
-    matches!(character, '*' | '_')
+    matches!(character, '*' | '_' | '~')
+}
+
+/// Whether the token is delimited text whose inner characters are literal.
+const fn is_delimited(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Code | TokenKind::Link | TokenKind::Html | TokenKind::Url
+    )
 }
 
 /// Characters of the token that affect bracket nesting, skipping the inner text of an atom.
@@ -2511,6 +2524,18 @@ mod test_boundaries {
         assert_eq!(rank_before("read the **bold text here** now", 3), Some(Rank::Word));
         assert_eq!(rank_before("read the _two words_ now", 3), Some(Rank::Word));
         assert_eq!(rank_before("read the **bold, text here** now", 3), Some(Rank::Word));
+        // The first word of the span looks like an identifier on its own, but the markers pair up.
+        assert_eq!(rank_before("use _an italic phrase_ in prose", 2), Some(Rank::Word));
+        assert_eq!(rank_before("use _an italic phrase_ in prose", 3), Some(Rank::Word));
+        assert_eq!(rank_before("drop ~~two struck words~~ now", 3), Some(Rank::Word));
+    }
+
+    #[test]
+    fn a_single_tilde_opens_no_span() {
+        assert_eq!(
+            rank_before("copy ~/.config and ~/.cache, and more", 4),
+            Some(Rank::ClauseTier1)
+        );
     }
 
     #[test]
