@@ -28,6 +28,13 @@ pub const SOFT_OVERFLOW: usize = 10;
 /// Minimum fill of the budget, in percent, for a boundary to count as a reachable strong break.
 const MIN_FILL_PERCENT: usize = 50;
 
+/// Minimum number of words before a colon for the text to introduce what follows it.
+///
+/// A label of one or two words, such as "Note:" or "Legacy compatibility:",
+/// reads as part of the first clause rather than as an introduction of its own,
+/// so it stays on the line with the text it labels.
+const MIN_COLON_INTRODUCTION_WORDS: usize = 3;
+
 /// Weight of the width a line runs over the budget, relative to the width it leaves unused.
 ///
 /// Going over the soft limit reads worse than stopping short by the same amount,
@@ -328,12 +335,13 @@ pub fn clause_rank(tokens: &[Token], index: usize, options: &FormatOptions) -> O
 #[must_use]
 pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundary> {
     let mut boundaries = Vec::new();
-    let depths = bracket_depths(tokens);
+    let depths = token_depths(tokens, collect_bracket_events);
+    let emphasis = token_depths(tokens, collect_emphasis_events);
     for index in 1..tokens.len() {
         let (Some(previous), Some(current)) = (tokens.get(index - 1), tokens.get(index)) else {
             continue;
         };
-        let depth = depths.get(index).copied().unwrap_or_default();
+        let depth = depths.get(index).copied().unwrap_or_default() + emphasis.get(index).copied().unwrap_or_default();
         if starts_markdown_structure(current) {
             continue;
         }
@@ -353,8 +361,10 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
         } else {
             clause.unwrap_or(Rank::Word)
         };
-        if depth > 0 {
-            // Text inside brackets belongs together, so a break there is a last resort.
+        if depth > 0 || touches_dash(previous, current) {
+            // Text inside brackets or emphasis markers belongs together, so a break there is a last resort.
+            // A dash that was kept would be left dangling at the end of a line,
+            // or read as a list marker at the start of the next one.
             rank = Rank::Word;
         } else if rank == Rank::Word {
             let closes_group = previous.trailing.contains([')', ']']);
@@ -368,26 +378,62 @@ pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundar
     boundaries
 }
 
-/// Bracket nesting depth before each token, counting only brackets that are closed later.
+/// Whether the boundary between the two tokens sits next to a dash that was not rewritten.
+fn touches_dash(previous: &Token, current: &Token) -> bool {
+    previous.kind == TokenKind::Dash || current.kind == TokenKind::Dash || previous.trailing.ends_with(['—', '–'])
+}
+
+/// Collects the group opening and closing events of one token at the given position.
+type EventCollector = fn(&Token, usize, &mut Vec<(usize, bool)>);
+
+/// Group nesting depth before each token, counting only the groups that are closed later.
 ///
-/// A bracket that is never closed is ignored,
-/// so a stray parenthesis in prose does not make the rest of the text unbreakable.
+/// A group that is never closed is ignored,
+/// so a stray parenthesis or emphasis marker in prose does not make the rest of the text unbreakable.
 ///
-/// Returns an empty vector when the tokens hold no brackets, since every depth is then zero.
-fn bracket_depths(tokens: &[Token]) -> Vec<usize> {
+/// Returns an empty vector when the tokens hold no groups, since every depth is then zero.
+fn token_depths(tokens: &[Token], collect: EventCollector) -> Vec<usize> {
     let mut events = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
-        collect_bracket_events(token, index, &mut events);
+        collect(token, index, &mut events);
     }
     if events.is_empty() {
         return Vec::new();
     }
-    retain_matched_brackets(&mut events);
+    matched_depths(&mut events, tokens.len())
+}
 
-    let mut depths = Vec::with_capacity(tokens.len());
+/// Whether each paragraph line ends inside a group that closes on a later line.
+///
+/// Returns an empty vector when the lines hold no groups.
+fn lines_ending_inside(line_tokens: &[Vec<Token>], collect: EventCollector) -> Vec<bool> {
+    let mut events = Vec::new();
+    for (index, tokens) in line_tokens.iter().enumerate() {
+        for token in tokens {
+            collect(token, index, &mut events);
+        }
+    }
+    if events.is_empty() {
+        return Vec::new();
+    }
+    matched_depths(&mut events, line_tokens.len())
+        .into_iter()
+        .skip(1)
+        .map(|depth| depth > 0)
+        .collect()
+}
+
+/// Nesting depth before each position, counting only the events that pair up.
+///
+/// The result holds one entry more than `count`,
+/// so the entry after the last position gives the depth the positions end at.
+fn matched_depths(events: &mut Vec<(usize, bool)>, count: usize) -> Vec<usize> {
+    retain_matched_events(events);
+
+    let mut depths = Vec::with_capacity(count + 1);
     let mut depth = 0usize;
     let mut next = 0;
-    for index in 0..tokens.len() {
+    for index in 0..=count {
         depths.push(depth);
         while let Some(&(position, opens)) = events.get(next) {
             if position != index {
@@ -398,37 +444,6 @@ fn bracket_depths(tokens: &[Token]) -> Vec<usize> {
         }
     }
     depths
-}
-
-/// Whether each paragraph line ends inside a bracket that closes on a later line.
-///
-/// Returns an empty vector when the lines hold no brackets.
-fn lines_ending_inside_brackets(line_tokens: &[Vec<Token>]) -> Vec<bool> {
-    let mut events = Vec::new();
-    for (index, tokens) in line_tokens.iter().enumerate() {
-        for token in tokens {
-            collect_bracket_events(token, index, &mut events);
-        }
-    }
-    if events.is_empty() {
-        return Vec::new();
-    }
-    retain_matched_brackets(&mut events);
-
-    let mut inside = Vec::with_capacity(line_tokens.len());
-    let mut depth = 0usize;
-    let mut next = 0;
-    for index in 0..line_tokens.len() {
-        while let Some(&(position, opens)) = events.get(next) {
-            if position != index {
-                break;
-            }
-            depth = if opens { depth + 1 } else { depth.saturating_sub(1) };
-            next += 1;
-        }
-        inside.push(depth > 0);
-    }
-    inside
 }
 
 /// Append the bracket characters of the token as `(position, opens)` events.
@@ -448,8 +463,8 @@ fn collect_bracket_events(token: &Token, position: usize, events: &mut Vec<(usiz
     }
 }
 
-/// Drop the events of brackets that are never opened or never closed.
-fn retain_matched_brackets(events: &mut Vec<(usize, bool)>) {
+/// Drop the events of groups that are never opened or never closed.
+fn retain_matched_events(events: &mut Vec<(usize, bool)>) {
     let mut matched = vec![false; events.len()];
     let mut open_events: Vec<usize> = Vec::new();
     for (index, (_, opens)) in events.iter().enumerate() {
@@ -470,6 +485,70 @@ fn retain_matched_brackets(events: &mut Vec<(usize, bool)>) {
         index += 1;
         keep
     });
+}
+
+/// Append the emphasis span events of the token as `(position, opens)` events.
+///
+/// A token that carries both of its own markers, such as `*strong*`, delimits no span past itself.
+/// The inner text of an atom is skipped, so a marker in a code span or a link does not count.
+fn collect_emphasis_events(token: &Token, position: usize, events: &mut Vec<(usize, bool)>) {
+    if token.is_atom() {
+        return;
+    }
+    let (opening, open_marker) = emphasis_run(
+        token
+            .leading
+            .chars()
+            .chain(token.core.chars())
+            .chain(token.trailing.chars()),
+    );
+    let (closing, close_marker) = emphasis_run(
+        token
+            .trailing
+            .chars()
+            .rev()
+            .chain(token.core.chars().rev())
+            .chain(token.leading.chars().rev()),
+    );
+    if opening > 0 && closing > 0 && open_marker == close_marker {
+        return;
+    }
+    if opening > 0 {
+        events.push((position, true));
+    }
+    if closing > 0 {
+        events.push((position, false));
+    }
+}
+
+/// Length of the emphasis marker run the characters start with, and the marker character.
+///
+/// Punctuation around the run is skipped, so `(**bold` reads as a run of two and `words*,` as a run of one.
+/// Text has to follow the run for it to delimit a span,
+/// so a token made only of markers, such as the multiplication sign in `a * b`, gives a length of zero.
+fn emphasis_run(characters: impl Iterator<Item = char>) -> (usize, char) {
+    let mut marker = '\0';
+    let mut run = 0usize;
+    for character in characters {
+        if run == 0 {
+            if is_emphasis_marker(character) {
+                marker = character;
+                run = 1;
+            } else if !is_opener(character) && !is_trailing_closer(character) {
+                return (0, '\0');
+            }
+        } else if character == marker {
+            run += 1;
+        } else {
+            return (run, marker);
+        }
+    }
+    (0, '\0')
+}
+
+/// Whether the character marks emphasis in Markdown.
+const fn is_emphasis_marker(character: char) -> bool {
+    matches!(character, '*' | '_')
 }
 
 /// Characters of the token that affect bracket nesting, skipping the inner text of an atom.
@@ -945,7 +1024,8 @@ fn build_segments(
     let mut segments = Vec::new();
     let mut violations = Vec::new();
     let mut current: Option<Segment> = None;
-    let inside_brackets = lines_ending_inside_brackets(&line_tokens);
+    let inside_brackets = lines_ending_inside(&line_tokens, collect_bracket_events);
+    let inside_emphasis = lines_ending_inside(&line_tokens, collect_emphasis_events);
     for (index, tokens) in line_tokens.into_iter().enumerate() {
         let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
         let Some(mut segment) = current.take() else {
@@ -958,13 +1038,16 @@ fn build_segments(
             continue;
         };
         let previous_break = paragraph.hard_breaks.get(index - 1).copied().unwrap_or_default();
-        let inside_bracket =
-            previous_break == HardBreak::None && inside_brackets.get(index - 1).copied().unwrap_or_default();
+        let unclosed_bracket = inside_brackets.get(index - 1).copied().unwrap_or_default();
+        let unclosed_emphasis = inside_emphasis.get(index - 1).copied().unwrap_or_default();
+        let inside_group = previous_break == HardBreak::None && (unclosed_bracket || unclosed_emphasis);
         let mid_clause = options.rules.mid_clause_break
-            && (inside_bracket || is_mid_clause_break(&segment.tokens, &tokens, previous_break, options));
+            && (inside_group || is_mid_clause_break(&segment.tokens, &tokens, previous_break, options));
         if mid_clause {
-            let message = if inside_bracket {
+            let message = if unclosed_bracket && inside_group {
                 "line breaks inside brackets"
+            } else if inside_group {
+                "line breaks inside an emphasized phrase"
             } else {
                 "line breaks in the middle of a clause"
             };
@@ -1008,7 +1091,7 @@ fn reword_segments(
 ) {
     if options.rules.em_dash {
         for segment in segments.iter_mut() {
-            reword_dashes(segment, line_offset, violations);
+            reword_dashes(segment, options, line_offset, violations);
         }
     }
     if options.rules.semicolon {
@@ -1016,19 +1099,29 @@ fn reword_segments(
     }
 }
 
-/// Replace standalone dashes with commas.
-fn reword_dashes(segment: &mut Segment, line_offset: usize, violations: &mut Vec<Violation>) {
-    if !segment.tokens.iter().any(|token| token.kind == TokenKind::Dash) {
+/// Replace standalone dashes with the punctuation that reads best in their place.
+///
+/// A single dash usually extends the sentence it sits in,
+/// so it becomes a period and the text after it becomes a new sentence.
+/// When that text cannot start a sentence the dash becomes a colon instead,
+/// which introduces the rest without changing a word.
+/// A pair of dashes in one sentence encloses an aside, so both become commas.
+fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: usize, violations: &mut Vec<Violation>) {
+    let dashes: Vec<usize> = segment
+        .tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.kind == TokenKind::Dash)
+        .map(|(index, _)| index)
+        .collect();
+    if dashes.is_empty() {
         return;
     }
     let count = segment.tokens.len();
-    let mut result: Vec<Token> = Vec::with_capacity(count);
-    for (index, token) in segment.tokens.drain(..).enumerate() {
-        if token.kind != TokenKind::Dash {
-            result.push(token);
-            continue;
-        }
-        let line = line_offset + token.origin_line;
+    let depths = token_depths(&segment.tokens, collect_bracket_events);
+    let mut removed = vec![false; count];
+    for index in dashes {
+        let line = line_offset + segment.tokens.get(index).map_or(0, |token| token.origin_line);
         if index == 0 || index + 1 == count {
             violations.push(Violation {
                 line,
@@ -1037,25 +1130,114 @@ fn reword_dashes(segment: &mut Segment, line_offset: usize, violations: &mut Vec
                 message: "dash at the edge of a sentence cannot be rewritten automatically".to_string(),
                 fixable: false,
             });
-            result.push(token);
             continue;
         }
-        if let Some(previous) = result.last_mut()
-            && !previous.ends_clause_punctuation()
-            && !previous.ends_sentence_punctuation()
+        let (punctuation, capitalized, new_sentence) = dash_rewrite(&segment.tokens, index, &depths, options);
+        if let Some(previous) = segment.tokens.get_mut(index - 1) {
+            if let Some(punctuation) = punctuation {
+                previous.trailing.push(punctuation);
+            }
+            previous.force_break_after |= new_sentence;
+        }
+        if let Some(core) = capitalized
+            && let Some(next) = segment.tokens.get_mut(index + 1)
         {
-            previous.trailing.push(',');
+            next.core = core;
+        }
+        if let Some(slot) = removed.get_mut(index) {
+            *slot = true;
         }
         violations.push(Violation {
             line,
             column: None,
             kind: ViolationKind::EmDash,
-            message: "dash replaced with a comma".to_string(),
+            message: dash_message(punctuation).to_string(),
             fixable: true,
         });
         segment.modified = true;
     }
-    segment.tokens = result;
+    let mut index = 0;
+    segment.tokens.retain(|_| {
+        let keep = !removed.get(index).copied().unwrap_or_default();
+        index += 1;
+        keep
+    });
+}
+
+/// Punctuation that replaces the dash at `index`, the capitalized core of the token after it,
+/// and whether the rewrite starts a new sentence.
+///
+/// No punctuation means the text before the dash already ends a clause,
+/// so the dash is dropped and nothing takes its place.
+/// A comma is used where a new sentence would read wrong:
+/// inside brackets, between a pair of dashes that enclose an aside,
+/// before a single trailing word, and before a clause word that carries the sentence on.
+/// A colon is used where the text before the dash names what follows it,
+/// and where code like text on either side rules out capitalizing a name into a new sentence.
+fn dash_rewrite(
+    tokens: &[Token],
+    index: usize,
+    depths: &[usize],
+    options: &FormatOptions,
+) -> (Option<char>, Option<String>, bool) {
+    let previous = tokens.get(index - 1);
+    let next = tokens.get(index + 1);
+    if previous.is_some_and(|previous| previous.ends_clause_punctuation() || previous.ends_sentence_punctuation()) {
+        return (None, None, false);
+    }
+    let inside_brackets = depths.get(index).copied().unwrap_or_default() > 0;
+    let sentence = sentence_bounds(tokens, index, options);
+    let encloses_aside = tokens
+        .get(sentence.clone())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .any(|(offset, token)| sentence.start + offset != index && token.kind == TokenKind::Dash);
+    // A single word after the dash trails the sentence as an afterthought,
+    // and a sentence of its own would read as a fragment.
+    let trails_sentence = index + 2 >= sentence.end;
+    // A clause word after the dash joins what follows to the clause before it,
+    // so "a semicolon — and a dash" continues the sentence instead of starting a new one.
+    let joins_clause = clause_rank(tokens, index + 1, options).is_some();
+    if inside_brackets || encloses_aside || trails_sentence || joins_clause {
+        return (Some(','), None, false);
+    }
+    // A name before the dash is what the text after it describes,
+    // as in `"a_file.mp4" — index 29`, which a colon introduces without touching a word.
+    let labels_what_follows =
+        previous.is_some_and(|previous| previous.is_atom() || is_quoted(previous) || looks_like_code(previous));
+    if labels_what_follows || next.is_some_and(looks_like_code) {
+        return (Some(':'), None, false);
+    }
+    if let Some(core) = next.and_then(|next| capitalize_token(next, options)) {
+        return (Some('.'), Some(core), true);
+    }
+    if next.is_some_and(can_start_sentence_unchanged) {
+        return (Some('.'), None, true);
+    }
+    (Some(':'), None, false)
+}
+
+/// Token range of the sentence that holds the token at `index`.
+fn sentence_bounds(tokens: &[Token], index: usize, options: &FormatOptions) -> Range<usize> {
+    let start = (0..index)
+        .rev()
+        .find(|position| is_sentence_end(tokens, *position, options))
+        .map_or(0, |position| position + 1);
+    let end = (index..tokens.len())
+        .find(|position| is_sentence_end(tokens, *position, options))
+        .map_or(tokens.len(), |position| position + 1);
+    start..end
+}
+
+/// Message for the dash violation the punctuation resolves it with.
+const fn dash_message(punctuation: Option<char>) -> &'static str {
+    match punctuation {
+        Some('.') => "dash replaced with a period and a new sentence",
+        Some(':') => "dash replaced with a colon",
+        Some(_) => "dash replaced with a comma",
+        None => "dash removed where the text already ends a clause",
+    }
 }
 
 /// Split clauses joined with a semicolon into separate sentences.
@@ -1158,6 +1340,12 @@ fn semicolon_refusal(
         return Some("the next word cannot be capitalized");
     }
     None
+}
+
+/// Whether the token is wrapped in quotes, which makes it a name rather than a word of the sentence.
+fn is_quoted(token: &Token) -> bool {
+    token.leading.contains(['"', '\'', '\u{201c}', '\u{2018}'])
+        && token.trailing.contains(['"', '\'', '\u{201d}', '\u{2019}'])
 }
 
 /// Whether a token is code-like enough that rewording it would be wrong.
@@ -1368,6 +1556,20 @@ fn collect_line_candidates(
         return;
     }
 
+    // An introduction that ends in a colon reads best on its own line,
+    // however little of the line it fills, as long as the clause it introduces carries on past it.
+    let colon = (start + 1..count)
+        .filter(|end| rank_at(ranks, *end) == Some(Rank::Colon))
+        .take_while(|end| span_width(start, *end) <= budget)
+        .last();
+    if let Some(end) = colon
+        && end - start >= MIN_COLON_INTRODUCTION_WORDS
+        && continues_past(ranks, end, count)
+    {
+        candidates.push(end);
+        return;
+    }
+
     for end in start + 1..count {
         if rank_at(ranks, end).is_none() {
             continue;
@@ -1380,6 +1582,14 @@ fn collect_line_candidates(
         }
     }
     candidates.push(count);
+}
+
+/// Whether the text after the boundary holds another boundary a line may end at.
+///
+/// A colon followed by a comma or a stronger boundary separates an introduction from a clause that continues,
+/// which is what makes the colon the better place to break.
+fn continues_past(ranks: &[Option<Rank>], end: usize, count: usize) -> bool {
+    (end + 1..count).any(|index| rank_at(ranks, index).is_some_and(|rank| rank >= Rank::Punctuation))
 }
 
 /// Rank of the boundary before the token at `index`, or `None` when no line may end there.
@@ -1946,6 +2156,42 @@ mod test_break_choice {
     use super::*;
 
     #[test]
+    fn an_introduction_that_ends_in_a_colon_gets_its_own_line() {
+        let lines = [concat!(
+            "Skip objects without a hierarchyPath: they share the same other fields as a sibling ",
+            "but have no way to disambiguate themselves, so they're just ambiguous, ",
+            "not \"unique by hierarchyPath\"."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, "// "), &FormatOptions::with_width(120));
+        assert_eq!(
+            outcome.lines.expect("the sentence should wrap"),
+            vec![
+                "Skip objects without a hierarchyPath:".to_string(),
+                "they share the same other fields as a sibling but have no way to disambiguate themselves,".to_string(),
+                "so they're just ambiguous, not \"unique by hierarchyPath\".".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_colon_needs_a_boundary_after_it_to_take_a_line() {
+        let boundary_ranks = |text: &str| {
+            let tokens = tokens(text);
+            let mut ranks = vec![None; tokens.len() + 1];
+            for boundary in find_boundaries(&tokens, &FormatOptions::default()) {
+                ranks[boundary.before] = Some(boundary.rank);
+            }
+            (ranks, tokens.len())
+        };
+        let (ranks, count) = boundary_ranks("the first note: it counts the marker, and the indentation");
+        assert_eq!(rank_at(&ranks, 3), Some(Rank::Colon));
+        assert!(continues_past(&ranks, 3, count));
+        let (ranks, count) = boundary_ranks("the first note: it counts the marker of the line");
+        assert_eq!(rank_at(&ranks, 3), Some(Rank::Colon));
+        assert!(!continues_past(&ranks, 3, count));
+    }
+
+    #[test]
     fn a_colon_introduces_explanatory_clauses_on_separate_lines() {
         let lines = [
             "Checks that a raw `TOUCH_DRAG` action value is fully valid for the form: correct shape and",
@@ -2113,6 +2359,16 @@ mod test_tokenizer {
     use super::*;
 
     #[test]
+    fn a_code_span_with_spaces_stays_one_atom() {
+        let tokens = tokens("run `a; b.c() and more` now");
+        assert_eq!(
+            kinds("run `a; b.c() and more` now"),
+            vec![TokenKind::Word, TokenKind::Code, TokenKind::Word]
+        );
+        assert_eq!(tokens.get(1).map(Token::text), Some("`a; b.c() and more`".to_string()));
+    }
+
+    #[test]
     fn keeps_code_span_as_one_atom() {
         let tokens = tokens("call `a; b.c()` now");
         assert_eq!(tokens.len(), 3);
@@ -2248,6 +2504,55 @@ mod test_sentence_end {
 mod test_boundaries {
     use super::test_helpers::*;
     use super::*;
+    use crate::semantic_line_breaks::types::RuleSet;
+
+    #[test]
+    fn emphasis_spans_hold_together() {
+        assert_eq!(rank_before("read the **bold text here** now", 3), Some(Rank::Word));
+        assert_eq!(rank_before("read the _two words_ now", 3), Some(Rank::Word));
+        assert_eq!(rank_before("read the **bold, text here** now", 3), Some(Rank::Word));
+    }
+
+    #[test]
+    fn a_break_is_allowed_around_an_emphasis_span() {
+        assert_eq!(rank_before("a, **bold text** b", 1), Some(Rank::Punctuation));
+        assert_eq!(rank_before("**bold text**, and b", 2), Some(Rank::ClauseTier1));
+    }
+
+    #[test]
+    fn an_unpaired_marker_leaves_the_text_breakable() {
+        assert_eq!(rank_before("a _private value, and b", 3), Some(Rank::ClauseTier1));
+        assert_eq!(rank_before("the total is a * b, and more", 6), Some(Rank::ClauseTier1));
+        assert_eq!(
+            rank_before("call snake_case_name, and more", 2),
+            Some(Rank::ClauseTier1)
+        );
+    }
+
+    #[test]
+    fn a_marker_inside_an_atom_opens_no_span() {
+        assert_eq!(rank_before("run `a_b c_d` here, and more", 3), Some(Rank::ClauseTier1));
+    }
+
+    #[test]
+    fn no_line_ends_with_a_kept_dash() {
+        let options = FormatOptions {
+            rules: RuleSet {
+                em_dash: false,
+                ..RuleSet::ALL
+            },
+            ..FormatOptions::default()
+        };
+        let tokens = tokenize_line("the value — a plain integer", 0, false);
+        let boundaries = find_boundaries(&tokens, &options);
+        // A lone dash never starts a line, so the only boundary beside it is the one after it.
+        let beside: Vec<(usize, Rank)> = boundaries
+            .iter()
+            .filter(|boundary| (2..=3).contains(&boundary.before))
+            .map(|boundary| (boundary.before, boundary.rank))
+            .collect();
+        assert_eq!(beside, vec![(3, Rank::Word)]);
+    }
 
     #[test]
     fn ranks_punctuation_and_clause_words() {
@@ -2608,13 +2913,93 @@ mod test_rewording {
     }
 
     #[test]
-    fn dashes_become_commas() {
-        assert_eq!(reflow(&["a — b"], 120).lines, Some(vec!["a, b".to_string()]));
-        assert_eq!(reflow(&["a—b"], 120).lines, Some(vec!["a, b".to_string()]));
-        assert_eq!(reflow(&["a -- b"], 120).lines, Some(vec!["a, b".to_string()]));
-        assert_eq!(reflow(&["a, — b"], 120).lines, Some(vec!["a, b".to_string()]));
-        assert_eq!(reflow(&["a – b"], 120).lines, Some(vec!["a, b".to_string()]));
-        assert_eq!(summary(&reflow(&["a — b"], 120)), vec![(ViolationKind::EmDash, true)]);
+    fn a_dash_becomes_a_period_and_a_new_sentence() {
+        let outcome = reflow(&["the form stays clean — save is disabled until an edit"], 120);
+        assert_eq!(
+            outcome.lines,
+            Some(vec!["the form stays clean. Save is disabled until an edit".to_string()])
+        );
+        assert_eq!(summary(&outcome), vec![(ViolationKind::EmDash, true)]);
+        assert_eq!(
+            outcome.violations.first().map(|violation| violation.message.as_str()),
+            Some("dash replaced with a period and a new sentence")
+        );
+    }
+
+    #[test]
+    fn every_dash_spelling_starts_a_new_sentence() {
+        for text in [
+            "the form stays clean — save is disabled now",
+            "the form stays clean—save is disabled now",
+            "the form stays clean -- save is disabled now",
+            "the form stays clean – save is disabled now",
+        ] {
+            assert_eq!(
+                reflow(&[text], 120).lines,
+                Some(vec!["the form stays clean. Save is disabled now".to_string()]),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rewritten_dash_breaks_the_line_when_the_sentences_do_not_fit() {
+        let outcome = reflow(&["the form stays clean — save is disabled until an edit"], 30);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "the form stays clean.".to_string(),
+                "Save is disabled until an edit".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_dash_becomes_a_colon_around_a_name() {
+        for (text, expected) in [
+            (
+                "the counter — snake_case_name holds the total",
+                "the counter: snake_case_name holds the total",
+            ),
+            (
+                "\"a_file.mp4\" — index 29 of the list",
+                "\"a_file.mp4\": index 29 of the list",
+            ),
+            (
+                "`primaryValue` — the form renders the target",
+                "`primaryValue`: the form renders the target",
+            ),
+            (
+                "\"PhotoLabs\" — lowercase s after the name",
+                "\"PhotoLabs\": lowercase s after the name",
+            ),
+        ] {
+            let outcome = reflow(&[text], 120);
+            assert_eq!(outcome.lines, Some(vec![expected.to_string()]), "{text}");
+            assert_eq!(
+                outcome.violations.first().map(|violation| violation.message.as_str()),
+                Some("dash replaced with a colon"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dash_stays_a_comma_where_a_new_sentence_would_read_wrong() {
+        // A pair encloses an aside, a clause word carries the sentence on,
+        // a single word trails it, and brackets hold a whole aside.
+        for (text, expected) in [
+            (
+                "the value — a plain integer — is read",
+                "the value, a plain integer, is read",
+            ),
+            ("it uses a semicolon — and a dash", "it uses a semicolon, and a dash"),
+            ("the parser is fast — really", "the parser is fast, really"),
+            ("the parser (fast — really) wins", "the parser (fast, really) wins"),
+            ("the value, — a plain integer", "the value, a plain integer"),
+        ] {
+            assert_eq!(reflow(&[text], 120).lines, Some(vec![expected.to_string()]), "{text}");
+        }
     }
 
     #[test]

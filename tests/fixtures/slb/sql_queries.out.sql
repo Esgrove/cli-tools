@@ -1,5 +1,5 @@
 -- Collect the monthly totals for the report. The caller filters by the account identifier.
--- The query uses a window function, it needs at least version 8.0 of the server.
+-- The query uses a window function. It needs at least version 8.0 of the server.
 SELECT
     account_id,
     SUM(amount) AS total

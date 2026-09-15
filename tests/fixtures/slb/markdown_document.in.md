@@ -13,6 +13,8 @@ narrow column; it also uses a semicolon — and a dash.
 onto a lazy line.
 - Short item.
 
+A paragraph that runs past the limit and ends with **a bold phrase that must stay together** so the break lands before it.
+
 1. Numbered item with `code; inside` that should
    stay together.
 

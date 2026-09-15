@@ -90,9 +90,9 @@ static RE_CODE_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
 static RE_COMMAND_FLAG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|\s)--[A-Za-z][\w-]*").expect("Invalid command flag regex"));
 
-/// Matches two or more runs of aligned column spacing.
+/// Matches a run of aligned column spacing, such as the gap between a name and its description.
 static RE_ALIGNED_COLUMNS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\S\s{3,}\S.*\S\s{3,}\S").expect("Invalid aligned columns regex"));
+    LazyLock::new(|| Regex::new(r"\S\s{3,}\S").expect("Invalid aligned columns regex"));
 
 /// Classification of one content line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -599,6 +599,34 @@ mod test_helpers {
 #[cfg(test)]
 mod test_markdown_verbatim {
     use super::test_helpers::*;
+
+    #[test]
+    fn a_two_column_usage_block_is_verbatim() {
+        let lines = [
+            "Environment:",
+            "  SERVER_PORT       game port to expect (default 9339)",
+            "  PUBLIC_HOST_IP    address handed to clients for the realtime connection",
+            "  SKIP_DOCKER       set to 1 to assume that the database is already up",
+        ];
+        let regions = split_comment(&lines);
+        assert_eq!(regions, vec![verbatim_region(0, 4)]);
+        assert_tiles(&regions, 4);
+    }
+
+    #[test]
+    fn a_single_wide_gap_marks_a_line_as_aligned() {
+        let regions = split_comment(&["-f, --fix       rewrite files in place"]);
+        assert_eq!(regions, vec![verbatim_region(0, 1)]);
+    }
+
+    #[test]
+    fn a_double_space_inside_prose_is_still_prose() {
+        let regions = split_comment(&["one sentence ends.  Another one starts."]);
+        assert_eq!(
+            paragraph(&regions[0]).lines,
+            vec!["one sentence ends.  Another one starts."]
+        );
+    }
 
     #[test]
     fn blank_lines_are_verbatim_between_paragraphs() {

@@ -486,9 +486,15 @@ Options:
 Check and format prose in code comments, docstrings, and Markdown with semantic line breaks.
 Lines are broken at sentence and clause boundaries within a soft 120 character limit,
 and a sentence that does not fit on one line is spread evenly over the lines it needs.
-In long sentences, a colon after a substantial introduction is preferred over balancing the line lengths,
-so the explanation or list starts on its own line.
-Semicolons and em dashes are rewritten, and trailing comments are moved above the code.
+In long sentences, a colon after an introduction of three words or more takes its own line
+whenever the clause it introduces carries on past it,
+so the explanation or list starts on a line of its own.
+Text inside backticks, Markdown links, and emphasis markers such as `**bold text**` is never broken.
+Semicolons are rewritten as separate sentences, and trailing comments are moved above the code.
+An em dash becomes a period and a new sentence, or a colon where the text before it names what follows.
+A pair of dashes that encloses an aside becomes a pair of commas,
+and a dash that is kept never ends or starts a line.
+Aligned column blocks, such as the environment table of a usage comment, are left as they are.
 Slash-delimited regex literals are protected across supported source languages.
 When ambiguous slash syntax could hide a multiline string or comment, the remaining source is left unchanged.
 The line limit is read from project config files such as `.editorconfig`, `rustfmt.toml`, and `pyproject.toml`.

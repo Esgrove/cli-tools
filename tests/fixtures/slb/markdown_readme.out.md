@@ -3,7 +3,7 @@
 [![Build](https://github.com/example/project/actions/workflows/ci.yml/badge.svg)](https://github.com/example/project/actions)
 
 A collection of command line utilities. Every tool is a separate binary.
-The tools share one configuration file, the sections are named after the binaries.
+The tools share one configuration file. The sections are named after the binaries.
 
 ## Install
 
