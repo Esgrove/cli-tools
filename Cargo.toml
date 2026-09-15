@@ -149,6 +149,12 @@ lto = true
 # https://doc.rust-lang.org/rustc/codegen-options/index.html#codegen-units
 codegen-units = 1
 
+# Release build that keeps debug symbols, so a profiler can name the inlined frames.
+# Build with: cargo build --profile profiling --bin <name>
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [lints.rust]
 unsafe_code = "deny"
 
