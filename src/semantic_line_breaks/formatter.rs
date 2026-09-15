@@ -8,7 +8,7 @@ use std::borrow::Cow;
 
 use super::comments;
 use super::markdown;
-use super::prose;
+use super::reflow;
 use super::types::{FileKind, FormatOptions, FormatResult, Region, Violation};
 
 /// One line of the input with its original line ending.
@@ -153,7 +153,7 @@ fn prose_pass<'a>(
                 if produce_fix {
                     copy_lines(lines, cursor, paragraph.start_line, &mut output);
                 }
-                let outcome = prose::reflow_paragraph(&paragraph, options, produce_fix);
+                let outcome = reflow::reflow_paragraph(&paragraph, options, produce_fix);
                 violations.extend(outcome.violations);
                 if produce_fix {
                     match outcome.lines {

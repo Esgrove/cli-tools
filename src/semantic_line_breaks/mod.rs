@@ -5,12 +5,19 @@
 //! stay within the configured width, and avoid semicolons, em dashes, and trailing comments.
 //! The public entry points are [`check`] and [`format`].
 
+pub mod boundaries;
 pub mod comments;
 pub mod formatter;
+pub mod line_breaks;
 pub mod markdown;
 pub mod project_config;
-pub mod prose;
+pub mod reflow;
+pub mod rewording;
+pub mod tokenizer;
 pub mod types;
+
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 pub use formatter::{check, format};
 pub use types::{
