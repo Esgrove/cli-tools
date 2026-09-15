@@ -100,24 +100,46 @@ re-export from the library. Do not duplicate code in benchmark files.
 
 ## Project Structure
 
-- `src/lib.rs` - Shared library code (utilities, macros, common functions)
-- `src/config.rs` - User configuration file handling
+- `src/lib.rs` - Library root: module declarations, re-exports, and the shared helpers not yet split out
+- `src/utils.rs` - Shared path and text helpers (path to display string, relative paths, glob to regex)
+- `src/diff.rs` - Coloured diff rendering (`color_diff` and `show_diff` for renames, `diff_lines` for files)
 - `src/date.rs` - Date parsing and formatting utilities
-- `src/dir_move/` - Algorithmic types and functions for dir_move (prefix grouping, matching)
-- `src/dupe_find/` - Algorithmic types and functions for dupe_find (normalization, grouping)
-- `src/semantic_line_breaks/` - Algorithmic types and functions for slb (prose tokenizing, reflow, Markdown splitting, comment scanning, project config width discovery)
-- `src/bin/` - Individual CLI tool binaries:
-    - `dir_move.rs` → `dirmove` - Move files to matching directories
+- `src/file_hash.rs` - File hashing
+- `src/resolution.rs` - Video resolution parsing and labelling
+- `src/scan_cache.rs` - Cache for directory scan results
+- `src/video_info.rs` - Video metadata from ffprobe
+- `src/dir_move/` - Algorithmic types and functions for dirmove (prefix grouping, matching)
+- `src/dot_rename/` - Algorithmic types and functions for dots (formatting, renaming)
+- `src/dupe_find/` - Algorithmic types and functions for dupefind (normalization, grouping)
+- `src/semantic_line_breaks/` - Algorithmic types and functions for slb:
+    - `types.rs` - Shared enums, structs, and format options
+    - `formatter.rs` - The check and fix pipeline, the public entry points
+    - `tokenizer.rs` - Splitting a prose line into words and unbreakable atoms
+    - `boundaries.rs` - Sentence and clause boundary ranking, bracket and emphasis nesting
+    - `line_breaks.rs` - Break point planning and the cost model
+    - `rewording.rs` - Segment building, semicolon and dash rewording
+    - `reflow.rs` - Paragraph reflow, the entry point the formatter calls per paragraph
+    - `comments.rs` - Comment block, docstring, and trailing comment extraction
+    - `scanner.rs` - String aware line scanner
+    - `regex_literals.rs` - Regex literal versus division detection
+    - `string_syntax.rs` - Per language string and comment syntax table
+    - `markdown.rs` - Markdown aware paragraph splitting
+    - `project_config.rs` - Line width discovery from project config files
+- `src/bin/` - Individual CLI tool binaries, each a directory with a `main.rs` unless noted:
+    - `dir_move/` → `dirmove` - Move files to matching directories
     - `divider.rs` → `div` - Print divider comments
-    - `dots.rs` → `dots` - Rename files to use dot formatting
-    - `flip_date.rs` → `flipdate` - Flip dates in filenames
-    - `qtorrent` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming, show torrent stats
-    - `resolution.rs` → `vres` - Add video resolution to file names
-    - `semantic_line_breaks` → `slb` - Check and format prose with semantic line breaks
+    - `dots/` → `dots` - Rename files to use dot formatting
+    - `dupe_find/` → `dupefind` - Find duplicate files
+    - `flip_date/` → `flipdate` - Flip dates in filenames
+    - `qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming, show torrent stats
+    - `rx_rename.rs` → `rxrename` - Rename files with a regular expression
+    - `semantic_line_breaks/` → `slb` - Check and format prose with semantic line breaks
+    - `thumbnail/` → `thumbs` - Create video thumbnail sheets
     - `version_tag.rs` → `vtag` - Create git version tags for a project (Rust, C++, Python)
-    - `video_convert` → `vconvert` - Video conversion to HEVC/MP4
-    - `video_stats` → `vstats` - Collect and print video file statistics
-    - `visa_parse.rs` → `visaparse` - Parse Finvoice XML credit card statements and collect data
+    - `video_convert/` → `vconvert` - Video conversion to HEVC/MP4
+    - `video_resolution/` → `vres` - Add video resolution to file names
+    - `video_stats/` → `vstats` - Collect and print video file statistics
+    - `visa_parse/` → `visaparse` - Parse Finvoice XML credit card statements and collect data
 
 ## Code organization
 
@@ -127,6 +149,18 @@ re-export from the library. Do not duplicate code in benchmark files.
 - Functions after implementations
 - In implementations, Order public methods before private methods
 - In implementations, put associated functions last
+
+### File size
+
+- Once a source file passes 1000 lines, split it into smaller modules.
+  Going over 1000 is fine when most of the file is test code.
+- Split along the concerns the file has grown into, one file per concern,
+  and give each new file its own `//!` documentation naming that concern.
+- Extract helper and unrelated parts instead of growing one file.
+  A helper that is not specific to the tool belongs in a shared library module
+  such as `src/utils.rs` or `src/diff.rs`, never inside a binary under `src/bin/`.
+- Keep an item's visibility as narrow as it can be.
+  A helper that only crosses into a sibling module of the same parent is `pub(super)`, not `pub`.
 
 ## Code Style and Conventions
 
@@ -161,6 +195,10 @@ Do not wrap prose by splitting a sentence at an arbitrary point in the middle.
 
 - **NEVER use nested modules inside test modules** - all test modules must be separate root-level `#[cfg(test)]` modules
 - Do NOT wrap test modules in a single parent `mod tests` module
+- When a split leaves several files sharing test helpers,
+  put the helpers in a `#[cfg(test)]` gated module declared from `mod.rs`,
+  which is still a root-level `#[cfg(test)]` module.
+  See `src/semantic_line_breaks/test_helpers.rs`.
 
 ### Test module structure example
 
