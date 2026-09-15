@@ -734,3 +734,221 @@ mod ffpprobe_tests {
         assert_eq!(result.height, 576);
     }
 }
+
+#[cfg(test)]
+mod test_gather_video_files {
+    use super::*;
+
+    /// Temporary directory with a visible name, so the walker does not skip it as hidden.
+    fn temporary_directory() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("vres_test")
+            .tempdir()
+            .expect("temporary directory should be created")
+    }
+
+    /// Create a file inside the directory, creating parent directories as needed.
+    fn write(directory: &Path, relative: &str) -> PathBuf {
+        let path = directory.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("parent directories should be created");
+        }
+        std::fs::write(&path, b"video").expect("file should be written");
+        path
+    }
+
+    /// File names of the gathered files, sorted.
+    fn names(files: &[PathBuf]) -> Vec<String> {
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn keeps_video_files_and_skips_other_types() {
+        let directory = temporary_directory();
+        write(directory.path(), "movie.mp4");
+        write(directory.path(), "clip.mkv");
+        write(directory.path(), "notes.txt");
+        write(directory.path(), "cover.jpg");
+
+        let files = gather_video_files(directory.path(), false, false)
+            .await
+            .expect("gathering should succeed");
+
+        assert_eq!(names(&files), vec!["clip.mkv", "movie.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_already_has_a_resolution_label_is_skipped() {
+        let directory = temporary_directory();
+        write(directory.path(), "movie.mp4");
+        write(directory.path(), "labelled.1080p.mp4");
+
+        let files = gather_video_files(directory.path(), false, false)
+            .await
+            .expect("gathering should succeed");
+
+        assert_eq!(names(&files), vec!["movie.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn a_full_resolution_in_the_name_is_still_gathered_so_it_can_be_replaced() {
+        let directory = temporary_directory();
+        write(directory.path(), "movie.1920x1080.mp4");
+
+        let files = gather_video_files(directory.path(), false, false)
+            .await
+            .expect("gathering should succeed");
+
+        assert_eq!(names(&files), vec!["movie.1920x1080.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn delete_mode_keeps_files_whose_label_is_below_the_high_resolutions() {
+        let directory = temporary_directory();
+        write(directory.path(), "small.480p.mp4");
+        write(directory.path(), "large.1080p.mp4");
+
+        let files = gather_video_files(directory.path(), false, true)
+            .await
+            .expect("gathering should succeed");
+
+        assert_eq!(
+            names(&files),
+            vec!["small.480p.mp4"],
+            "delete mode only skips the high resolution labels"
+        );
+    }
+
+    #[tokio::test]
+    async fn subdirectories_are_only_walked_when_recursing() {
+        let directory = temporary_directory();
+        write(directory.path(), "top.mp4");
+        write(directory.path(), "nested/deep.mp4");
+
+        let shallow = gather_video_files(directory.path(), false, false)
+            .await
+            .expect("gathering should succeed");
+        let deep = gather_video_files(directory.path(), true, false)
+            .await
+            .expect("gathering should succeed");
+
+        assert_eq!(names(&shallow), vec!["top.mp4"]);
+        assert_eq!(names(&deep), vec!["deep.mp4", "top.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn hidden_files_are_skipped_in_both_modes() {
+        let directory = temporary_directory();
+        write(directory.path(), "movie.mp4");
+        write(directory.path(), ".hidden.mp4");
+
+        let shallow = gather_video_files(directory.path(), false, false)
+            .await
+            .expect("gathering should succeed");
+        let deep = gather_video_files(directory.path(), true, false)
+            .await
+            .expect("gathering should succeed");
+
+        assert_eq!(names(&shallow), vec!["movie.mp4"]);
+        assert_eq!(names(&deep), vec!["movie.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_directory_is_an_error_without_recursing() {
+        let directory = temporary_directory();
+
+        let result = gather_video_files(&directory.path().join("missing"), false, false).await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_empty_directory_gathers_nothing() {
+        let directory = temporary_directory();
+
+        let files = gather_video_files(directory.path(), true, false)
+            .await
+            .expect("gathering should succeed");
+
+        assert!(files.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_delete_low_resolution_files {
+    use super::*;
+
+    /// Config in dryrun mode, so no test ever deletes a file.
+    fn config(verbose: bool) -> Config {
+        Config {
+            debug: false,
+            delete_limit: Some(720),
+            dryrun: true,
+            overwrite: false,
+            path: PathBuf::from("."),
+            recurse: false,
+            verbose,
+        }
+    }
+
+    /// Probe result for a file of the given resolution.
+    fn result(name: &str, width: u32, height: u32) -> FFProbeResult {
+        FFProbeResult {
+            file: PathBuf::from(name),
+            resolution: Resolution::new(width, height),
+        }
+    }
+
+    /// File names of the kept results, sorted.
+    fn kept(results: &[FFProbeResult]) -> Vec<String> {
+        let mut names: Vec<String> = results
+            .iter()
+            .map(|entry| entry.file.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn files_below_the_limit_are_dropped_from_the_remaining_list() {
+        let results = vec![
+            result("small.mp4", 640, 480),
+            result("large.mp4", 1920, 1080),
+            result("exact.mp4", 1280, 720),
+        ];
+
+        let remaining = delete_low_resolution_files(results, 720, &config(true));
+
+        assert_eq!(kept(&remaining), vec!["exact.mp4", "large.mp4"]);
+    }
+
+    #[test]
+    fn nothing_below_the_limit_keeps_every_file() {
+        let results = vec![result("large.mp4", 1920, 1080), result("exact.mp4", 1280, 720)];
+
+        let remaining = delete_low_resolution_files(results, 720, &config(true));
+
+        assert_eq!(kept(&remaining), vec!["exact.mp4", "large.mp4"]);
+    }
+
+    #[test]
+    fn an_empty_list_stays_empty() {
+        let remaining = delete_low_resolution_files(Vec::new(), 720, &config(false));
+
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn a_quiet_run_reports_less_but_keeps_the_same_files() {
+        let results = vec![result("small.mp4", 640, 480), result("large.mp4", 1920, 1080)];
+
+        let remaining = delete_low_resolution_files(results, 720, &config(false));
+
+        assert_eq!(kept(&remaining), vec!["large.mp4"]);
+    }
+}

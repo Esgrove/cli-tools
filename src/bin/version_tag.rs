@@ -613,3 +613,233 @@ mod test_project_names {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod version_tag_test_helpers {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Repository with one commit per given version, each changing `Cargo.toml`.
+    ///
+    /// The signature is set in the repository config,
+    /// so tagging works without depending on the machine's global git config.
+    pub fn repository_with_versions(versions: &[&str]) -> (TempDir, Repository) {
+        let directory = TempDir::new().expect("temporary directory");
+        let repository = Repository::init(directory.path()).expect("the repository should initialize");
+        {
+            let mut config = repository.config().expect("the config should be readable");
+            config.set_str("user.name", "Test").expect("name should be set");
+            config
+                .set_str("user.email", "test@example.com")
+                .expect("email should be set");
+        }
+
+        let signature = git2::Signature::now("Test", "test@example.com").expect("signature should be created");
+        let mut parent: Option<Oid> = None;
+        for version in versions {
+            std::fs::write(
+                directory.path().join("Cargo.toml"),
+                format!("[package]\nname = \"demo\"\nversion = \"{version}\"\n"),
+            )
+            .expect("the manifest should be written");
+
+            let mut index = repository.index().expect("the index should be readable");
+            index
+                .add_path(Path::new("Cargo.toml"))
+                .expect("the manifest should be staged");
+            index.write().expect("the index should be written");
+            let tree_id = index.write_tree().expect("the tree should be written");
+            let tree = repository.find_tree(tree_id).expect("the tree should be found");
+
+            let parent_commit = parent.map(|oid| repository.find_commit(oid).expect("the parent should be found"));
+            let parents: Vec<&git2::Commit<'_>> = parent_commit.iter().collect();
+            parent = Some(
+                repository
+                    .commit(
+                        Some("HEAD"),
+                        &signature,
+                        &signature,
+                        &format!("version {version}"),
+                        &tree,
+                        &parents,
+                    )
+                    .expect("the commit should be created"),
+            );
+        }
+        (directory, repository)
+    }
+
+    /// Tag names in the repository, sorted.
+    pub fn tag_names(repository: &Repository) -> Vec<String> {
+        let mut names: Vec<String> = repository
+            .tag_names(None)
+            .expect("tags should be readable")
+            .iter()
+            .flatten()
+            .flatten()
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names
+    }
+}
+
+#[cfg(test)]
+mod test_version_tag {
+    use super::version_tag_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn a_tag_is_created_for_every_version_change() {
+        let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0", "1.0.0"]);
+
+        version_tag(&directory.path().to_path_buf(), false, false, true, false, false).expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["v0.1.0", "v0.2.0", "v1.0.0"]);
+    }
+
+    #[test]
+    fn a_version_that_did_not_change_is_tagged_once() {
+        let (directory, repository) = repository_with_versions(&["0.1.0", "0.1.0", "0.2.0"]);
+
+        version_tag(&directory.path().to_path_buf(), false, false, true, false, false).expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["v0.1.0", "v0.2.0"]);
+    }
+
+    #[test]
+    fn a_dryrun_creates_no_tags() {
+        let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0"]);
+
+        version_tag(&directory.path().to_path_buf(), false, true, false, false, false)
+            .expect("a dryrun should succeed");
+
+        assert!(tag_names(&repository).is_empty());
+    }
+
+    #[test]
+    fn running_twice_leaves_the_existing_tags_alone() {
+        let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0"]);
+        let path = directory.path().to_path_buf();
+
+        version_tag(&path, false, false, false, false, false).expect("tagging should succeed");
+        version_tag(&path, false, false, true, false, false).expect("a second run should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["v0.1.0", "v0.2.0"]);
+    }
+
+    #[test]
+    fn a_manifest_that_does_not_parse_is_skipped() {
+        let (directory, repository) = repository_with_versions(&["0.1.0"]);
+        std::fs::write(directory.path().join("Cargo.toml"), "this is not toml at all\n")
+            .expect("the manifest should be written");
+        let signature = git2::Signature::now("Test", "test@example.com").expect("signature");
+        let mut index = repository.index().expect("index");
+        index.add_path(Path::new("Cargo.toml")).expect("staged");
+        index.write().expect("written");
+        let tree_id = index.write_tree().expect("tree");
+        let tree = repository.find_tree(tree_id).expect("tree found");
+        let head = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("head commit");
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "broken", &tree, &[&head])
+            .expect("commit");
+
+        version_tag(&directory.path().to_path_buf(), false, false, true, false, false)
+            .expect("an unparseable manifest should be skipped");
+
+        assert_eq!(tag_names(&repository), vec!["v0.1.0"]);
+    }
+
+    #[test]
+    fn a_directory_without_a_manifest_is_an_error() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        let error = version_tag(&directory.path().to_path_buf(), false, true, false, false, false)
+            .expect_err("a directory without a manifest should fail");
+
+        assert!(error.to_string().contains("No supported project manifest"), "{error}");
+    }
+
+    #[test]
+    fn pushing_in_a_dryrun_needs_no_remote() {
+        let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0"]);
+
+        version_tag(&directory.path().to_path_buf(), true, true, true, false, false)
+            .expect("a dryrun push should succeed");
+        version_tag(&directory.path().to_path_buf(), true, true, true, true, false)
+            .expect("a combined dryrun push should succeed");
+
+        assert!(tag_names(&repository).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_tag_helpers {
+    use super::version_tag_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn creating_a_tag_names_it_and_records_the_message() {
+        let (_directory, repository) = repository_with_versions(&["1.2.3"]);
+        let head = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("head commit");
+
+        create_version_tag(&repository, "v1.2.3", "1.2.3", head.id(), false).expect("the tag should be created");
+
+        assert_eq!(tag_names(&repository), vec!["v1.2.3"]);
+    }
+
+    #[test]
+    fn creating_a_tag_in_a_dryrun_records_nothing() {
+        let (_directory, repository) = repository_with_versions(&["1.2.3"]);
+        let head = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("head commit");
+
+        create_version_tag(&repository, "v1.2.3", "1.2.3", head.id(), true).expect("a dryrun should succeed");
+
+        assert!(tag_names(&repository).is_empty());
+    }
+
+    #[test]
+    fn an_existing_tag_is_recognised_and_an_unrelated_name_is_not() {
+        let (_directory, repository) = repository_with_versions(&["1.2.3"]);
+        let head = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("head commit");
+        create_version_tag(&repository, "v1.2.3", "1.2.3", head.id(), false).expect("the tag should be created");
+
+        assert!(tag_name_exists(&repository, "v1.2.3").expect("tags should be readable"));
+        assert!(!tag_name_exists(&repository, "v9.9.9").expect("tags should be readable"));
+    }
+
+    #[test]
+    fn a_repository_without_tags_reports_none() {
+        let (_directory, repository) = repository_with_versions(&["1.2.3"]);
+
+        assert!(!tag_name_exists(&repository, "v1.2.3").expect("tags should be readable"));
+    }
+
+    #[test]
+    fn pushing_in_a_dryrun_reports_without_a_remote() {
+        let (_directory, repository) = repository_with_versions(&["1.2.3"]);
+
+        push_tag(&repository, "v1.2.3", true).expect("a dryrun push should succeed");
+        push_all_tags(&repository, &["v1.2.3".to_string()], true).expect("a dryrun push should succeed");
+    }
+
+    #[test]
+    fn pushing_without_a_remote_is_an_error() {
+        let (_directory, repository) = repository_with_versions(&["1.2.3"]);
+
+        assert!(push_tag(&repository, "v1.2.3", false).is_err());
+        assert!(push_all_tags(&repository, &["v1.2.3".to_string()], false).is_err());
+    }
+}

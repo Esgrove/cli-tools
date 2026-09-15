@@ -234,11 +234,6 @@ impl DupeFind {
                 .bold()
         );
 
-        if self.config.dryrun {
-            // Create the duplicates directory if it doesn't exist
-            std::fs::create_dir_all(&duplicates_dir)?;
-        }
-
         for group in duplicates {
             let group_name = group.display_name();
 
@@ -334,5 +329,174 @@ mod test_gather_files {
         assert!(non_recursive.is_empty());
         assert_eq!(recursive.len(), 1);
         assert_eq!(recursive[0].filename, "video.mp4");
+    }
+}
+
+#[cfg(test)]
+mod test_move_duplicates {
+    use super::*;
+    use cli_tools::dupe_find::DupeFileInfo;
+
+    /// Finder rooted at the directory, always in dryrun mode so no test moves a file.
+    fn dryrun_finder(root: PathBuf) -> DupeFind {
+        DupeFind {
+            roots: vec![root],
+            config: Config {
+                debug: false,
+                dryrun: true,
+                extensions: vec!["mp4".to_string()],
+                hash_compare: false,
+                ignore_matches: vec![],
+                move_files: true,
+                patterns: vec![],
+                prefix_ignores: vec![],
+                recurse: false,
+                verbose: false,
+            },
+        }
+    }
+
+    /// Duplicate group of files created inside the directory.
+    fn group_in(directory: &Path, names: &[&str]) -> DuplicateGroup {
+        let files: Vec<DupeFileInfo> = names
+            .iter()
+            .map(|name| {
+                let path = directory.join(name);
+                std::fs::write(&path, b"video").expect("file should be written");
+                DupeFileInfo::new(path, "mp4".to_string())
+            })
+            .collect();
+        DuplicateGroup::new("movie".to_string(), files)
+    }
+
+    #[test]
+    fn a_dryrun_moves_nothing_and_creates_no_directory() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.1080p.mp4", "movie.720p.mp4"]);
+
+        dryrun_finder(directory.path().to_path_buf())
+            .move_duplicates(&[group])
+            .expect("a dryrun should succeed");
+
+        assert!(directory.path().join("movie.1080p.mp4").is_file());
+        assert!(directory.path().join("movie.720p.mp4").is_file());
+        assert!(
+            !directory.path().join("Duplicates").exists(),
+            "a dryrun should not create the duplicates directory"
+        );
+    }
+
+    #[test]
+    fn no_duplicate_groups_is_a_no_op() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        dryrun_finder(directory.path().to_path_buf())
+            .move_duplicates(&[])
+            .expect("an empty list should succeed");
+
+        assert!(!directory.path().join("Duplicates").exists());
+    }
+
+    #[test]
+    fn several_groups_are_all_reported() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let first = group_in(directory.path(), &["one.1080p.mp4", "one.720p.mp4"]);
+        let second = group_in(directory.path(), &["two.1080p.mp4", "two.720p.mp4"]);
+
+        dryrun_finder(directory.path().to_path_buf())
+            .move_duplicates(&[first, second])
+            .expect("a dryrun should succeed");
+
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("directory should be readable")
+                .count(),
+            4,
+            "every file should still be in place"
+        );
+    }
+
+    #[test]
+    fn without_a_root_the_working_directory_is_used() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.1080p.mp4"]);
+        let finder = DupeFind {
+            roots: Vec::new(),
+            ..dryrun_finder(directory.path().to_path_buf())
+        };
+
+        finder.move_duplicates(&[group]).expect("a dryrun should succeed");
+
+        assert!(directory.path().join("movie.1080p.mp4").is_file());
+    }
+}
+
+#[cfg(test)]
+mod test_new {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn a_given_path_becomes_the_only_root() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let path = directory.path().to_string_lossy().into_owned();
+        let args = Args::try_parse_from(["dupefind", &path]).expect("arguments should parse");
+
+        let finder = DupeFind::new(args).expect("an existing path should be accepted");
+
+        assert_eq!(finder.roots.len(), 1);
+        assert!(finder.roots[0].ends_with(directory.path().file_name().expect("the directory should have a name")));
+    }
+
+    #[test]
+    fn several_given_paths_all_become_roots() {
+        let first = tempfile::TempDir::new().expect("temporary directory");
+        let second = tempfile::TempDir::new().expect("temporary directory");
+        let args = Args::try_parse_from([
+            "dupefind",
+            &first.path().to_string_lossy(),
+            &second.path().to_string_lossy(),
+        ])
+        .expect("arguments should parse");
+
+        let finder = DupeFind::new(args).expect("existing paths should be accepted");
+
+        assert_eq!(finder.roots.len(), 2);
+    }
+
+    #[test]
+    fn a_missing_path_is_rejected() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let missing = directory.path().join("missing");
+        let args = Args::try_parse_from(["dupefind", &missing.to_string_lossy()]).expect("arguments should parse");
+
+        assert!(DupeFind::new(args).is_err());
+    }
+
+    #[test]
+    fn the_configured_paths_are_used_when_none_are_given() {
+        let args = Args::try_parse_from(["dupefind"]).expect("arguments should parse");
+
+        // The test config names paths that do not exist, so resolving them fails,
+        // which is what proves the configured paths were the ones tried.
+        let Err(error) = DupeFind::new(args) else {
+            panic!("the configured paths do not exist, so this should fail");
+        };
+
+        assert!(
+            error.to_string().contains("videos") || error.to_string().contains("movies"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_default_flag_uses_the_configured_default_paths() {
+        let args = Args::try_parse_from(["dupefind", "--default"]).expect("arguments should parse");
+
+        let Err(error) = DupeFind::new(args) else {
+            panic!("the configured default path does not exist, so this should fail");
+        };
+
+        assert!(error.to_string().contains("default"), "{error}");
     }
 }

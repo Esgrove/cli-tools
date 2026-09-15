@@ -195,7 +195,7 @@ impl Database {
     /// # Errors
     /// Returns an error if the database cannot be created.
     #[cfg(test)]
-    fn open_in_memory() -> Result<Self> {
+    pub(crate) fn open_in_memory() -> Result<Self> {
         let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
 
         let database = Self { connection };

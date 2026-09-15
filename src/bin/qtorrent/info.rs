@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 use colored::Colorize;
 
-use cli_tools::print_dimmed;
-
 use crate::QtorrentArgs;
 use crate::SortOrder;
 use crate::config::Config;
@@ -126,9 +124,17 @@ fn sort_torrents(torrents: &mut [&TorrentListItem], sort: SortOrder) {
 
 /// Print torrent statistics summary and optionally individual torrent details.
 fn print_statistics(torrents: &HashMap<String, TorrentListItem>, options: &PrintOptions) {
+    for line in statistics_lines(torrents, options) {
+        println!("{line}");
+    }
+}
+
+/// Lines of the torrent statistics report.
+///
+/// The lines are built rather than printed directly so they can be checked in a test.
+fn statistics_lines(torrents: &HashMap<String, TorrentListItem>, options: &PrintOptions) -> Vec<String> {
     if torrents.is_empty() {
-        print_dimmed("No torrents found");
-        return;
+        return vec!["No torrents found".dimmed().to_string()];
     }
 
     let mut completed: Vec<&TorrentListItem> = Vec::new();
@@ -165,83 +171,80 @@ fn print_statistics(torrents: &HashMap<String, TorrentListItem>, options: &Print
     sort_torrents(&mut downloading, options.sort);
     sort_torrents(&mut not_started, options.sort);
 
-    // Print summary
-    print_stat_line("Total torrents", torrents.len(), total_size);
-    print_stat_line("Completed", completed.len(), completed_size);
+    let mut lines = vec![
+        stat_line("Total torrents", torrents.len(), total_size),
+        stat_line("Completed", completed.len(), completed_size),
+    ];
 
     if !downloading.is_empty() {
-        print_stat_line("Downloading", downloading.len(), downloading_size);
+        lines.push(stat_line("Downloading", downloading.len(), downloading_size));
     }
 
     if !not_started.is_empty() {
-        print_stat_line("Not started", not_started.len(), not_started_size);
+        lines.push(stat_line("Not started", not_started.len(), not_started_size));
     }
 
-    // Print individual torrent details in list or verbose mode
+    // Individual torrent details in list or verbose mode
     if options.list {
-        print_torrent_sections_list(&completed, &downloading, &not_started, options.verbose);
+        lines.extend(torrent_section_list_lines(
+            &completed,
+            &downloading,
+            &not_started,
+            options.verbose,
+        ));
     } else if options.verbose {
-        print_torrent_sections_verbose(&completed, &downloading, &not_started);
+        lines.extend(torrent_section_detail_lines(&completed, &downloading, &not_started));
     }
+    lines
 }
 
-/// Print a single summary stat line.
-fn print_stat_line(label: &str, count: usize, size: u64) {
-    println!(
+/// One summary stat line.
+fn stat_line(label: &str, count: usize, size: u64) -> String {
+    format!(
         "{:<20} {:>5} {:>10}",
         label,
         count.to_string().bold(),
         cli_tools::format_size(size).dimmed(),
-    );
+    )
 }
 
-/// Print completed and incomplete sections in list mode (one line per torrent).
-fn print_torrent_sections_list(
+/// Completed and incomplete sections in list mode, one line per torrent.
+fn torrent_section_list_lines(
     completed: &[&TorrentListItem],
     downloading: &[&TorrentListItem],
     not_started: &[&TorrentListItem],
     verbose: bool,
-) {
-    if !completed.is_empty() {
-        for torrent in completed {
-            print_torrent_list_line(torrent, verbose);
-        }
-    }
-
-    let incomplete_count = downloading.len() + not_started.len();
-    if incomplete_count > 0 {
-        for torrent in downloading {
-            print_torrent_list_line(torrent, verbose);
-        }
-        for torrent in not_started {
-            print_torrent_list_line(torrent, verbose);
-        }
-    }
+) -> Vec<String> {
+    completed
+        .iter()
+        .chain(downloading)
+        .chain(not_started)
+        .map(|torrent| torrent_list_line(torrent, verbose))
+        .collect()
 }
 
-/// Print completed and incomplete sections in verbose mode (multi-line per torrent).
-fn print_torrent_sections_verbose(
+/// Completed and incomplete sections in verbose mode, several lines per torrent.
+fn torrent_section_detail_lines(
     completed: &[&TorrentListItem],
     downloading: &[&TorrentListItem],
     not_started: &[&TorrentListItem],
-) {
+) -> Vec<String> {
+    let mut lines = Vec::new();
     if !completed.is_empty() {
-        println!("\n{}", format!("Completed ({}):", completed.len()).green());
+        lines.push(format!("\n{}", format!("Completed ({}):", completed.len()).green()));
         for torrent in completed {
-            print_torrent_detail(torrent);
+            lines.extend(torrent_detail_lines(torrent));
         }
     }
 
     let incomplete_count = downloading.len() + not_started.len();
     if incomplete_count > 0 {
-        println!("\n{}", format!("Incomplete ({incomplete_count}):").yellow());
-        for torrent in downloading {
-            print_torrent_detail(torrent);
-        }
-        for torrent in not_started {
-            print_torrent_detail(torrent);
+        lines.push(format!("\n{}", format!("Incomplete ({incomplete_count}):").yellow()));
+        for torrent in downloading.iter().chain(not_started) {
+            lines.extend(torrent_detail_lines(torrent));
         }
     }
+    lines
 }
 
 /// Format progress percentage with color coding.
@@ -260,10 +263,10 @@ fn format_progress(torrent: &TorrentListItem) -> String {
     }
 }
 
-/// Print a single torrent as one compact line.
+/// One torrent as a single compact line.
 ///
 /// When verbose is enabled, additional columns are shown: ratio, added date, and completed date.
-fn print_torrent_list_line(torrent: &TorrentListItem, verbose: bool) {
+fn torrent_list_line(torrent: &TorrentListItem, verbose: bool) -> String {
     let size = cli_tools::format_size(torrent.size.max(0) as u64);
     let progress = format_progress(torrent);
 
@@ -280,55 +283,58 @@ fn print_torrent_list_line(torrent: &TorrentListItem, verbose: bool) {
             .completion_on
             .map_or_else(|| "-".to_string(), cli_tools::format_timestamp);
 
-        println!(
+        format!(
             "{progress}  {size:>10}  {:<16}  {ratio:>6}  {}  {}  {}{}",
             torrent.save_path.dimmed(),
             added.dimmed(),
             completed.dimmed(),
             torrent.name,
             tags_str.dimmed(),
-        );
+        )
     } else {
-        println!(
+        format!(
             "{progress}  {size:>10}  {:<16}  {}{}",
             torrent.save_path.dimmed(),
             torrent.name,
             tags_str.dimmed(),
-        );
+        )
     }
 }
 
-/// Print full details for a single torrent (multi-line format).
-fn print_torrent_detail(torrent: &TorrentListItem) {
+/// Full details for one torrent, as several lines.
+fn torrent_detail_lines(torrent: &TorrentListItem) -> Vec<String> {
     let size = cli_tools::format_size(torrent.size.max(0) as u64);
     let progress = format_progress(torrent);
 
-    println!("  {}", torrent.name.bold());
-    println!("    {:<14} {:>6}  {:<14} {}", "Progress:", progress, "Size:", size);
-    println!(
-        "    {:<14} {:<20}  {:<14} {}",
-        "Ratio:",
-        format!("{:.2}", torrent.ratio),
-        "Save path:",
-        torrent.save_path.dimmed(),
-    );
-    println!(
-        "    {:<14} {}",
-        "Added:",
-        cli_tools::format_timestamp(torrent.added_on).dimmed(),
-    );
+    let mut lines = vec![
+        format!("  {}", torrent.name.bold()),
+        format!("    {:<14} {:>6}  {:<14} {}", "Progress:", progress, "Size:", size),
+        format!(
+            "    {:<14} {:<20}  {:<14} {}",
+            "Ratio:",
+            format!("{:.2}", torrent.ratio),
+            "Save path:",
+            torrent.save_path.dimmed(),
+        ),
+        format!(
+            "    {:<14} {}",
+            "Added:",
+            cli_tools::format_timestamp(torrent.added_on).dimmed(),
+        ),
+    ];
 
     if let Some(completed_on) = torrent.completion_on {
-        println!(
+        lines.push(format!(
             "    {:<14} {}",
             "Completed:",
             cli_tools::format_timestamp(completed_on).dimmed(),
-        );
+        ));
     }
 
     if !torrent.tags.is_empty() {
-        println!("    {:<14} {}", "Tags:", torrent.tags.cyan());
+        lines.push(format!("    {:<14} {}", "Tags:", torrent.tags.cyan()));
     }
+    lines
 }
 
 #[cfg(test)]
@@ -418,5 +424,168 @@ mod test_torrent_classification {
         assert!(format_progress(&torrent("complete", 1.0, None, 1, "/a")).contains("100%"));
         assert!(format_progress(&torrent("downloading", 0.5, None, 1, "/a")).contains("50%"));
         assert!(format_progress(&torrent("waiting", 0.0, None, 1, "/a")).contains("0%"));
+    }
+}
+
+#[cfg(test)]
+mod test_statistics_lines {
+    use super::*;
+
+    /// Message without the terminal color codes.
+    fn plain(message: &str) -> String {
+        let mut result = String::with_capacity(message.len());
+        let mut characters = message.chars();
+        while let Some(character) = characters.next() {
+            if character != '\u{1b}' {
+                result.push(character);
+                continue;
+            }
+            for escape in characters.by_ref() {
+                if escape == 'm' {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    /// Torrent with the given name, progress, size, and tags.
+    fn torrent(name: &str, progress: f64, size: i64, tags: &str) -> TorrentListItem {
+        TorrentListItem {
+            hash: name.to_string(),
+            name: name.to_string(),
+            added_on: 1_700_000_000,
+            completion_on: if progress >= 1.0 { Some(1_700_000_100) } else { None },
+            progress,
+            ratio: 1.25,
+            save_path: "/downloads".to_string(),
+            size,
+            tags: tags.to_string(),
+        }
+    }
+
+    /// Torrents keyed by hash, as the client returns them.
+    fn torrents(items: Vec<TorrentListItem>) -> HashMap<String, TorrentListItem> {
+        items.into_iter().map(|item| (item.hash.clone(), item)).collect()
+    }
+
+    /// Print options for the given modes.
+    fn options(list: bool, verbose: bool) -> PrintOptions {
+        PrintOptions {
+            sort: SortOrder::Name,
+            list,
+            verbose,
+        }
+    }
+
+    /// The whole report as one plain string.
+    fn report(items: Vec<TorrentListItem>, list: bool, verbose: bool) -> String {
+        plain(&statistics_lines(&torrents(items), &options(list, verbose)).join("\n"))
+    }
+
+    #[test]
+    fn an_empty_list_reports_that_nothing_was_found() {
+        let text = report(Vec::new(), false, false);
+
+        assert_eq!(text, "No torrents found");
+    }
+
+    #[test]
+    fn the_summary_counts_and_sizes_every_category() {
+        let text = report(
+            vec![
+                torrent("done", 1.0, 1024 * 1024, ""),
+                torrent("half", 0.5, 2 * 1024 * 1024, ""),
+                torrent("queued", 0.0, 4 * 1024 * 1024, ""),
+            ],
+            false,
+            false,
+        );
+
+        assert!(text.contains("Total torrents"), "{text}");
+        assert!(text.contains("Completed"), "{text}");
+        assert!(text.contains("Downloading"), "{text}");
+        assert!(text.contains("Not started"), "{text}");
+        assert!(text.contains("7.00 MB"), "the total size should be the sum: {text}");
+    }
+
+    #[test]
+    fn categories_with_nothing_in_them_are_left_out() {
+        let text = report(vec![torrent("done", 1.0, 1024, "")], false, false);
+
+        assert!(text.contains("Completed"), "{text}");
+        assert!(!text.contains("Downloading"), "{text}");
+        assert!(!text.contains("Not started"), "{text}");
+    }
+
+    #[test]
+    fn list_mode_prints_one_line_per_torrent() {
+        let text = report(
+            vec![
+                torrent("done", 1.0, 1024, ""),
+                torrent("half", 0.5, 1024, ""),
+                torrent("queued", 0.0, 1024, ""),
+            ],
+            true,
+            false,
+        );
+
+        for name in ["done", "half", "queued"] {
+            assert!(text.contains(name), "{name} should be listed: {text}");
+        }
+        assert!(!text.contains("Progress:"), "list mode should stay compact: {text}");
+    }
+
+    #[test]
+    fn verbose_list_mode_adds_the_ratio_and_the_dates() {
+        let compact = report(vec![torrent("done", 1.0, 1024, "")], true, false);
+        let verbose = report(vec![torrent("done", 1.0, 1024, "")], true, true);
+
+        assert!(verbose.contains("1.25"), "the ratio should be shown: {verbose}");
+        assert!(verbose.len() > compact.len());
+    }
+
+    #[test]
+    fn verbose_mode_prints_the_section_headings_and_the_details() {
+        let text = report(
+            vec![torrent("done", 1.0, 1024, "movies"), torrent("half", 0.5, 1024, "")],
+            false,
+            true,
+        );
+
+        assert!(text.contains("Completed (1):"), "{text}");
+        assert!(text.contains("Incomplete (1):"), "{text}");
+        assert!(text.contains("Progress:"), "{text}");
+        assert!(text.contains("Save path:"), "{text}");
+        assert!(
+            text.contains("Completed:"),
+            "a finished torrent has a completion date: {text}"
+        );
+        assert!(text.contains("movies"), "tags should be shown: {text}");
+    }
+
+    #[test]
+    fn an_unfinished_torrent_has_no_completion_date_and_no_tag_line() {
+        let text = report(vec![torrent("half", 0.5, 1024, "")], false, true);
+
+        assert!(text.contains("Incomplete (1):"), "{text}");
+        assert!(!text.contains("Completed:"), "{text}");
+        assert!(!text.contains("Tags:"), "{text}");
+    }
+
+    #[test]
+    fn a_negative_size_is_counted_as_zero() {
+        let text = report(vec![torrent("broken", 1.0, -1, "")], false, false);
+
+        assert!(text.contains("0 B"), "{text}");
+    }
+
+    #[test]
+    fn printing_the_statistics_does_not_panic() {
+        let items = torrents(vec![torrent("done", 1.0, 1024, "tag")]);
+
+        print_statistics(&items, &options(false, false));
+        print_statistics(&items, &options(true, true));
+        print_statistics(&HashMap::new(), &options(false, false));
     }
 }

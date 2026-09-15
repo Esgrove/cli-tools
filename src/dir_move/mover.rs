@@ -690,3 +690,86 @@ mod test_move_files {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test_move_single_file {
+    use super::*;
+
+    /// Hidden progress bar, so a test prints no bar.
+    fn progress_bar() -> ProgressBar {
+        ProgressBar::hidden()
+    }
+
+    #[test]
+    fn a_plain_rename_advances_the_progress_bar() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let source = directory.path().join("source.txt");
+        let destination = directory.path().join("destination.txt");
+        std::fs::write(&source, b"content").expect("file should be written");
+        let bar = progress_bar();
+
+        move_single_file(&source, &destination, 7, &bar, true).expect("the move should succeed");
+
+        assert!(destination.is_file());
+        assert!(!source.exists());
+        assert_eq!(bar.position(), 7);
+    }
+
+    #[test]
+    fn a_missing_source_with_the_file_already_moved_is_treated_as_done() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let source = directory.path().join("gone.txt");
+        let destination = directory.path().join("already.txt");
+        std::fs::write(&destination, b"content").expect("file should be written");
+        let bar = progress_bar();
+
+        move_single_file(&source, &destination, 7, &bar, false).expect("an already moved file should succeed");
+
+        assert_eq!(bar.position(), 7, "the bar should still account for the bytes");
+    }
+
+    #[test]
+    fn a_missing_source_with_no_destination_is_an_error() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let source = directory.path().join("gone.txt");
+        let destination = directory.path().join("missing.txt");
+
+        let error = move_single_file(&source, &destination, 7, &progress_bar(), false)
+            .expect_err("a missing source should fail");
+
+        assert!(error.to_string().contains("source is gone"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_source_with_a_differently_sized_destination_is_an_error() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let source = directory.path().join("gone.txt");
+        let destination = directory.path().join("partial.txt");
+        std::fs::write(&destination, b"short").expect("file should be written");
+
+        let error = move_single_file(&source, &destination, 7, &progress_bar(), false)
+            .expect_err("a partial destination should fail");
+
+        assert!(error.to_string().contains("source is gone"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod test_create_move_progress_bar {
+    use super::*;
+
+    #[test]
+    fn a_hidden_bar_reports_no_length() {
+        let bar = create_move_progress_bar(1024, true);
+
+        assert!(bar.is_hidden());
+    }
+
+    #[test]
+    fn a_visible_bar_carries_the_given_length() {
+        let bar = create_move_progress_bar(1024, false);
+
+        assert_eq!(bar.length(), Some(1024));
+        bar.finish_and_clear();
+    }
+}

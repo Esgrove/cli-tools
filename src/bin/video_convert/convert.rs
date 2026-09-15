@@ -74,10 +74,14 @@ impl VideoConvert {
         // Handle database modes
         if let Some(db_mode) = self.config.database_mode {
             return match db_mode {
-                DatabaseMode::Clear => clear_database(),
-                DatabaseMode::Show => show_database_contents(&self.config),
-                DatabaseMode::ListExtensions => list_extensions(self.config.verbose),
-                DatabaseMode::CleanScanCache => clean_scan_cache(self.config.verbose),
+                DatabaseMode::Clear => Database::open_default().and_then(|db| clear_database(&db)),
+                DatabaseMode::Show => Database::open_default().and_then(|db| show_database_contents(&db, &self.config)),
+                DatabaseMode::ListExtensions => {
+                    Database::open_default().and_then(|db| list_extensions(&db, self.config.verbose))
+                }
+                DatabaseMode::CleanScanCache => {
+                    Database::open_default().and_then(|mut db| clean_scan_cache(&mut db, self.config.verbose))
+                }
                 DatabaseMode::Process => self.run_from_database(),
             };
         }

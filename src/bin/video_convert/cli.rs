@@ -107,8 +107,7 @@ impl std::fmt::Display for SortOrder {
 }
 
 /// Remove stale entries from the scan cache whose files no longer exist on disk.
-pub fn clean_scan_cache(verbose: bool) -> Result<()> {
-    let mut database = Database::open_default()?;
+pub fn clean_scan_cache(database: &mut Database, verbose: bool) -> Result<()> {
     if verbose {
         println!("{}", format!("Database: {}", Database::path().display()).bold());
     }
@@ -137,16 +136,14 @@ pub fn clean_scan_cache(verbose: bool) -> Result<()> {
 }
 
 /// Clear all entries from the database.
-pub fn clear_database() -> Result<()> {
-    let database = Database::open_default()?;
+pub fn clear_database(database: &Database) -> Result<()> {
     let cleared = database.clear()?;
     println!("{}", format!("Cleared {cleared} entries from database").green());
     Ok(())
 }
 
 /// List file extension counts in the database.
-pub fn list_extensions(verbose: bool) -> Result<()> {
-    let database = Database::open_default()?;
+pub fn list_extensions(database: &Database, verbose: bool) -> Result<()> {
     if verbose {
         println!("{}", format!("Database: {}", Database::path().display()).bold());
         println!();
@@ -188,8 +185,7 @@ pub fn list_extensions(verbose: bool) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if the database cannot be opened or queried.
-pub fn show_database_contents(config: &Config) -> Result<()> {
-    let database = Database::open_default()?;
+pub fn show_database_contents(database: &Database, config: &Config) -> Result<()> {
     if config.verbose {
         println!("{}", format!("Database: {}", Database::path().display()).bold());
         println!();
@@ -393,5 +389,196 @@ mod database_mode_tests {
         let mode = DatabaseMode::Process;
         let debug = format!("{mode:?}");
         assert!(debug.contains("Process"));
+    }
+}
+
+#[cfg(test)]
+mod test_database_reporting {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::database::{PendingAction, PendingFileFilter};
+    use crate::types::VideoInfo;
+
+    /// Video info for a file of the given size and bitrate.
+    fn video_info(size_bytes: u64, bitrate_kbps: u64) -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps,
+            size_bytes,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    /// Database holding one pending file per given extension.
+    fn database_with(extensions: &[&str]) -> Database {
+        let database = Database::open_in_memory().expect("the database should open");
+        for (index, extension) in extensions.iter().enumerate() {
+            let path = PathBuf::from(format!("/videos/movie{index}.{extension}"));
+            database
+                .upsert_pending_file(
+                    &path,
+                    extension,
+                    &video_info(1_000_000 * (index as u64 + 1), 8000),
+                    PendingAction::Convert,
+                )
+                .expect("the file should be recorded");
+        }
+        database
+    }
+
+    #[test]
+    fn listing_extensions_of_an_empty_database_reports_nothing_found() {
+        let database = Database::open_in_memory().expect("the database should open");
+
+        list_extensions(&database, true).expect("listing should succeed");
+    }
+
+    #[test]
+    fn listing_extensions_reports_every_extension_and_the_total() {
+        let database = database_with(&["mp4", "mkv", "mkv"]);
+
+        list_extensions(&database, false).expect("listing should succeed");
+        list_extensions(&database, true).expect("listing should succeed");
+
+        let stats = database.get_extension_stats().expect("stats should be available");
+        assert_eq!(stats.len(), 2, "each extension should be counted once: {stats:?}");
+        let total: u64 = stats.iter().map(|entry| entry.count).sum();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn showing_an_empty_database_stops_after_the_statistics() {
+        let database = Database::open_in_memory().expect("the database should open");
+
+        show_database_contents(&database, &Config::default()).expect("showing should succeed");
+    }
+
+    #[test]
+    fn showing_the_database_lists_the_pending_files() {
+        let database = database_with(&["mp4", "mkv"]);
+
+        show_database_contents(
+            &database,
+            &Config {
+                verbose: true,
+                ..Config::default()
+            },
+        )
+        .expect("showing should succeed");
+    }
+
+    #[test]
+    fn the_display_limit_reports_how_many_files_are_left() {
+        let database = database_with(&["mp4", "mkv", "avi"]);
+
+        show_database_contents(
+            &database,
+            &Config {
+                display_limit: Some(1),
+                ..Config::default()
+            },
+        )
+        .expect("showing should succeed");
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_is_reported() {
+        let database = database_with(&["mp4"]);
+
+        show_database_contents(
+            &database,
+            &Config {
+                db_filter: PendingFileFilter {
+                    extensions: vec!["webm".to_string()],
+                    ..PendingFileFilter::default()
+                },
+                ..Config::default()
+            },
+        )
+        .expect("showing should succeed");
+    }
+
+    #[test]
+    fn every_pending_action_is_rendered() {
+        let database = Database::open_in_memory().expect("the database should open");
+        for (index, action) in [PendingAction::Convert, PendingAction::Remux, PendingAction::SubtitleMux]
+            .into_iter()
+            .enumerate()
+        {
+            database
+                .upsert_pending_file(
+                    &PathBuf::from(format!("/videos/movie{index}.mkv")),
+                    "mkv",
+                    &video_info(1_000_000, 8000),
+                    action,
+                )
+                .expect("the file should be recorded");
+        }
+
+        show_database_contents(&database, &Config::default()).expect("showing should succeed");
+    }
+
+    #[test]
+    fn clearing_removes_every_entry() {
+        let database = database_with(&["mp4", "mkv"]);
+
+        clear_database(&database).expect("clearing should succeed");
+
+        let stats = database.get_stats().expect("stats should be available");
+        assert_eq!(stats.total_files, 0);
+    }
+
+    #[test]
+    fn cleaning_an_empty_scan_cache_reports_it_is_empty() {
+        let mut database = Database::open_in_memory().expect("the database should open");
+
+        clean_scan_cache(&mut database, true).expect("cleaning should succeed");
+
+        assert_eq!(database.scanned_file_count().expect("count should be available"), 0);
+    }
+
+    #[test]
+    fn cleaning_drops_the_entries_whose_files_are_gone() {
+        let mut database = Database::open_in_memory().expect("the database should open");
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let present = directory.path().join("present.mp4");
+        std::fs::write(&present, b"video").expect("file should be written");
+        database
+            .upsert_scanned_file(&present, &video_info(1_000_000, 8000))
+            .expect("the file should be recorded");
+        database
+            .upsert_scanned_file(&directory.path().join("missing.mp4"), &video_info(1_000_000, 8000))
+            .expect("the file should be recorded");
+
+        assert_eq!(database.scanned_file_count().expect("count should be available"), 2);
+
+        clean_scan_cache(&mut database, false).expect("cleaning should succeed");
+
+        assert_eq!(
+            database.scanned_file_count().expect("count should be available"),
+            1,
+            "only the missing file should be dropped"
+        );
+    }
+
+    #[test]
+    fn cleaning_reports_when_every_entry_is_still_valid() {
+        let mut database = Database::open_in_memory().expect("the database should open");
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let present = directory.path().join("present.mp4");
+        std::fs::write(&present, b"video").expect("file should be written");
+        database
+            .upsert_scanned_file(&present, &video_info(1_000_000, 8000))
+            .expect("the file should be recorded");
+
+        clean_scan_cache(&mut database, false).expect("cleaning should succeed");
+
+        assert_eq!(database.scanned_file_count().expect("count should be available"), 1);
     }
 }
