@@ -18,6 +18,9 @@ use super::types::{
     FormatOptions, HardBreak, Paragraph, Rank, Token, TokenKind, Violation, ViolationKind, is_closer, is_opener,
 };
 
+/// The em dash, which the dash rewrite reads as a clause separator.
+const EM_DASH: char = '\u{2014}';
+
 /// Number of characters a line may exceed the maximum width by before it is considered too long.
 ///
 /// The width is a soft target.
@@ -187,11 +190,11 @@ static CLAUSE_WORDS: LazyLock<Vec<(&'static str, Rank)>> = LazyLock::new(|| {
 /// Keeping the description instead of the text lets a check run decide whether a paragraph changed,
 /// and how wide its lines would be, without building any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OutputContent {
+enum OutputContent<'text> {
     /// Line taken unchanged from the paragraph.
     Source(usize),
     /// Line rebuilt by joining the tokens with single spaces.
-    Tokens(Vec<Token>),
+    Tokens(Vec<Token<'text>>),
 }
 
 /// A candidate break position between two tokens.
@@ -214,9 +217,9 @@ struct LinePlan {
 
 /// A run of tokens that is reflowed as one unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Segment {
+pub struct Segment<'text> {
     /// Tokens of the segment in order.
-    pub tokens: Vec<Token>,
+    pub tokens: Vec<Token<'text>>,
     /// Hard break marker at the end of the segment.
     pub hard_break: HardBreak,
     /// Whether joining or rewording changed the segment, forcing a re-split.
@@ -236,7 +239,7 @@ pub struct ReflowOutcome {
     pub violations: Vec<Violation>,
 }
 
-impl OutputContent {
+impl OutputContent<'_> {
     /// Whether the content is exactly the paragraph line at `index`.
     fn matches_line(&self, paragraph: &Paragraph, index: usize) -> bool {
         let Some(line) = paragraph.lines.get(index) else {
@@ -269,7 +272,7 @@ impl OutputContent {
 ///
 /// Comparing in place answers the question without building the joined line,
 /// which is all a check run needs.
-fn tokens_match_line(tokens: &[Token], line: &str) -> bool {
+fn tokens_match_line(tokens: &[Token<'_>], line: &str) -> bool {
     let mut rest = line;
     for (index, token) in tokens.iter().enumerate() {
         if index > 0 {
@@ -278,7 +281,7 @@ fn tokens_match_line(tokens: &[Token], line: &str) -> bool {
                 None => return false,
             }
         }
-        for part in [token.leading.as_str(), token.core.as_str(), token.trailing.as_str()] {
+        for part in [token.leading.as_ref(), token.core.as_ref(), token.trailing.as_ref()] {
             match rest.strip_prefix(part) {
                 Some(tail) => rest = tail,
                 None => return false,
@@ -293,26 +296,27 @@ fn tokens_match_line(tokens: &[Token], line: &str) -> bool {
 /// When `normalize_dashes` is set, em dashes attached to words are separated into standalone dash tokens
 /// so the em dash rewrite can handle them uniformly.
 #[must_use]
-pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) -> Vec<Token> {
-    let normalized: Cow<'_, str> = if normalize_dashes && content.contains('—') {
-        Cow::Owned(content.replace('—', " — "))
-    } else {
-        Cow::Borrowed(content)
-    };
-    let chars: Vec<char> = normalized.chars().collect();
+pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) -> Vec<Token<'_>> {
     let mut tokens = Vec::new();
     let mut position = 0;
-    while position < chars.len() {
-        while chars.get(position).is_some_and(|character| character.is_whitespace()) {
-            position += 1;
-        }
-        if position >= chars.len() {
+    while position < content.len() {
+        let rest = content.get(position..).unwrap_or_default();
+        let Some(character) = rest.chars().next() else {
             break;
+        };
+        if character.is_whitespace() {
+            position += character.len_utf8();
+            continue;
         }
-        let chunk_end = chunk_end(&chars, position);
-        let (token, end) = read_token(&chars, position, chunk_end, origin_line);
+        // An em dash stands on its own, so the dash rewrite sees it whatever it was written against.
+        let end = if normalize_dashes && character == EM_DASH {
+            position + EM_DASH.len_utf8()
+        } else {
+            chunk_end(content, position, normalize_dashes)
+        };
+        let (token, next) = read_token(content, position, end, origin_line);
         tokens.push(token);
-        position = end.max(position + 1);
+        position = next.max(position + character.len_utf8());
     }
     demote_command_separators(&mut tokens);
     tokens
@@ -322,7 +326,7 @@ pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) 
 ///
 /// A line such as `pnpm run migrate -- --env dev` uses the double hyphen to separate arguments,
 /// so rewriting it as a dash would corrupt the command.
-fn demote_command_separators(tokens: &mut [Token]) {
+fn demote_command_separators(tokens: &mut [Token<'_>]) {
     for index in 0..tokens.len() {
         let next_is_flag = tokens
             .get(index + 1)
@@ -340,7 +344,7 @@ fn demote_command_separators(tokens: &mut [Token]) {
 
 /// Whether the token at `index` ends a sentence and the following token starts a new one.
 #[must_use]
-pub fn is_sentence_end(tokens: &[Token], index: usize, options: &FormatOptions) -> bool {
+pub fn is_sentence_end(tokens: &[Token<'_>], index: usize, options: &FormatOptions) -> bool {
     let Some(token) = tokens.get(index) else {
         return false;
     };
@@ -352,13 +356,13 @@ pub fn is_sentence_end(tokens: &[Token], index: usize, options: &FormatOptions) 
 
 /// Whether `token` ends a sentence that `next` continues after.
 #[must_use]
-pub fn is_sentence_boundary(token: &Token, next: &Token, options: &FormatOptions) -> bool {
+pub fn is_sentence_boundary(token: &Token<'_>, next: &Token, options: &FormatOptions) -> bool {
     ends_sentence(token, options) && starts_sentence(next)
 }
 
 /// Whether the token ends a sentence, ignoring what follows it.
 #[must_use]
-pub fn ends_sentence(token: &Token, options: &FormatOptions) -> bool {
+pub fn ends_sentence(token: &Token<'_>, options: &FormatOptions) -> bool {
     if !token.ends_sentence_punctuation() {
         return false;
     }
@@ -380,7 +384,7 @@ pub fn ends_sentence(token: &Token, options: &FormatOptions) -> bool {
 }
 
 /// Whether the token can start a new sentence.
-fn starts_sentence(token: &Token) -> bool {
+fn starts_sentence(token: &Token<'_>) -> bool {
     if matches!(
         token.kind,
         TokenKind::Code | TokenKind::Link | TokenKind::Url | TokenKind::Html
@@ -396,12 +400,12 @@ fn starts_sentence(token: &Token) -> bool {
 
 /// Rank of the clause word at `index`, or `None` when the token is not a clause starter.
 #[must_use]
-pub fn clause_rank(tokens: &[Token], index: usize, options: &FormatOptions) -> Option<Rank> {
+pub fn clause_rank(tokens: &[Token<'_>], index: usize, options: &FormatOptions) -> Option<Rank> {
     let token = tokens.get(index)?;
     if token.kind != TokenKind::Word {
         return None;
     }
-    let word = token.core.as_str();
+    let word = token.core.as_ref();
     if let Some(next) = tokens.get(index + 1)
         && CLAUSE_PAIRS
             .iter()
@@ -440,7 +444,7 @@ fn clause_word_rank(word: &str) -> Option<Rank> {
 
 /// Find all break candidates between the tokens, ranked by quality.
 #[must_use]
-pub fn find_boundaries(tokens: &[Token], options: &FormatOptions) -> Vec<Boundary> {
+pub fn find_boundaries(tokens: &[Token<'_>], options: &FormatOptions) -> Vec<Boundary> {
     let mut boundaries = Vec::new();
     let depths = token_depths(tokens, collect_bracket_events);
     let emphasis = token_depths(tokens, collect_emphasis_events);
@@ -505,7 +509,7 @@ type EventCollector = fn(&Token, usize, &mut Vec<(usize, bool)>);
 /// so a stray parenthesis or emphasis marker in prose does not make the rest of the text unbreakable.
 ///
 /// Returns an empty vector when the tokens hold no groups, since every depth is then zero.
-fn token_depths(tokens: &[Token], collect: EventCollector) -> Vec<usize> {
+fn token_depths(tokens: &[Token<'_>], collect: EventCollector) -> Vec<usize> {
     let mut events = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         collect(token, index, &mut events);
@@ -519,7 +523,7 @@ fn token_depths(tokens: &[Token], collect: EventCollector) -> Vec<usize> {
 /// Whether each paragraph line ends inside a group that closes on a later line.
 ///
 /// Returns an empty vector when the lines hold no groups.
-fn lines_ending_inside(line_tokens: &[Vec<Token>], collect: EventCollector) -> Vec<bool> {
+fn lines_ending_inside(line_tokens: &[Vec<Token<'_>>], collect: EventCollector) -> Vec<bool> {
     let mut events = Vec::new();
     for (index, tokens) in line_tokens.iter().enumerate() {
         for token in tokens {
@@ -563,9 +567,9 @@ fn matched_depths(events: &mut Vec<(usize, bool)>, count: usize) -> Vec<usize> {
 ///
 /// Brackets are ASCII, so the parts are scanned as bytes to avoid decoding every character.
 /// The inner text of an atom is skipped, so a bracket in a code span or a link does not count.
-fn collect_bracket_events(token: &Token, position: usize, events: &mut Vec<(usize, bool)>) {
-    let core = if token.is_atom() { "" } else { token.core.as_str() };
-    for part in [token.leading.as_str(), core, token.trailing.as_str()] {
+fn collect_bracket_events(token: &Token<'_>, position: usize, events: &mut Vec<(usize, bool)>) {
+    let core = if token.is_atom() { "" } else { token.core.as_ref() };
+    for part in [token.leading.as_ref(), core, token.trailing.as_ref()] {
         for byte in part.bytes() {
             match byte {
                 b'(' | b'[' => events.push((position, true)),
@@ -605,7 +609,7 @@ fn retain_matched_events(events: &mut Vec<(usize, bool)>) {
 /// A token that carries both of its own markers, such as `*strong*`, delimits no span past itself.
 /// Delimited text is skipped, so a marker inside a code span, a link, or a URL does not count.
 /// Other kinds are read as prose, since `_italic` looks the same as an identifier on its own.
-fn collect_emphasis_events(token: &Token, position: usize, events: &mut Vec<(usize, bool)>) {
+fn collect_emphasis_events(token: &Token<'_>, position: usize, events: &mut Vec<(usize, bool)>) {
     if is_delimited(token.kind) || !holds_emphasis_marker(token) {
         return;
     }
@@ -668,7 +672,7 @@ fn emphasis_run(characters: impl Iterator<Item = char>) -> (usize, char) {
 ///
 /// A run has to start from a marker, so a token without one delimits nothing,
 /// and most words in prose hold none.
-fn holds_emphasis_marker(token: &Token) -> bool {
+fn holds_emphasis_marker(token: &Token<'_>) -> bool {
     [
         token.leading.as_bytes(),
         token.core.as_bytes(),
@@ -692,14 +696,19 @@ const fn is_delimited(kind: TokenKind) -> bool {
 }
 
 /// Characters of the token that affect bracket nesting, skipping the inner text of an atom.
-fn bracket_characters(token: &Token) -> impl Iterator<Item = char> + '_ {
-    let core = if token.is_atom() { "" } else { token.core.as_str() };
+fn bracket_characters<'token>(token: &'token Token<'_>) -> impl Iterator<Item = char> + 'token {
+    let core = if token.is_atom() { "" } else { token.core.as_ref() };
     token.leading.chars().chain(core.chars()).chain(token.trailing.chars())
 }
 
 /// Whether the break between two consecutive lines falls in the middle of a clause.
 #[must_use]
-pub fn is_mid_clause_break(line_a: &[Token], line_b: &[Token], hard_break: HardBreak, options: &FormatOptions) -> bool {
+pub fn is_mid_clause_break(
+    line_a: &[Token<'_>],
+    line_b: &[Token<'_>],
+    hard_break: HardBreak,
+    options: &FormatOptions,
+) -> bool {
     if hard_break != HardBreak::None || line_a.len() < MIN_TOKENS_FOR_MID_CLAUSE {
         return false;
     }
@@ -888,7 +897,7 @@ pub fn prefix_width(prefix: &str, tab_width: usize) -> usize {
 
 /// Total width of the tokens joined with single spaces.
 #[must_use]
-pub fn tokens_width(tokens: &[Token]) -> usize {
+pub fn tokens_width(tokens: &[Token<'_>]) -> usize {
     if tokens.is_empty() {
         return 0;
     }
@@ -897,7 +906,7 @@ pub fn tokens_width(tokens: &[Token]) -> usize {
 
 /// Join the tokens with single spaces.
 #[must_use]
-pub fn join_tokens(tokens: &[Token]) -> String {
+pub fn join_tokens(tokens: &[Token<'_>]) -> String {
     let mut result = String::with_capacity(tokens_width(tokens));
     for (index, token) in tokens.iter().enumerate() {
         if index > 0 {
@@ -921,31 +930,38 @@ pub fn capitalize(word: &str) -> String {
     })
 }
 
-/// Index one past the last non-whitespace character of the chunk starting at `start`.
-fn chunk_end(chars: &[char], start: usize) -> usize {
-    let mut end = start;
-    while chars.get(end).is_some_and(|character| !character.is_whitespace()) {
-        end += 1;
+/// Byte index one past the last non-whitespace character of the chunk starting at `start`.
+///
+/// An em dash ends the chunk when the dash rewrite is on,
+/// so a dash written against a word becomes a token of its own.
+fn chunk_end(text: &str, start: usize, split_dashes: bool) -> usize {
+    let rest = text.get(start..).unwrap_or_default();
+    for (offset, character) in rest.char_indices() {
+        if character.is_whitespace() || split_dashes && character == EM_DASH {
+            return start + offset;
+        }
     }
-    end
+    text.len()
 }
 
-/// Read one token starting at `start`, returning the token and the index where it ends.
-fn read_token(chars: &[char], start: usize, word_end: usize, origin_line: usize) -> (Token, usize) {
+/// Read one token starting at `start`, returning the token and the byte index where it ends.
+fn read_token(text: &str, start: usize, word_end: usize, origin_line: usize) -> (Token<'_>, usize) {
     let mut leading_end = start;
     while leading_end < word_end {
-        let Some(&character) = chars.get(leading_end) else {
+        let chunk = text.get(leading_end..word_end).unwrap_or_default();
+        let Some(character) = chunk.chars().next() else {
             break;
         };
+        // A marker opens emphasis only when the same one appears again in the chunk.
         let is_emphasis = matches!(character, '*' | '_')
-            && chars
-                .get(leading_end + 1..word_end)
-                .is_some_and(|rest| rest.contains(&character));
-        if atom_at(chars, leading_end).is_some() {
+            && chunk
+                .get(character.len_utf8()..)
+                .is_some_and(|tail| tail.contains(character));
+        if atom_at(text, leading_end).is_some() {
             break;
         }
         if is_opener(character) || is_emphasis {
-            leading_end += 1;
+            leading_end += character.len_utf8();
         } else {
             break;
         }
@@ -953,69 +969,67 @@ fn read_token(chars: &[char], start: usize, word_end: usize, origin_line: usize)
     if leading_end >= word_end {
         leading_end = start;
     }
+    let leading = text.get(start..leading_end).unwrap_or_default();
 
-    let (atom_end, atom_kind) = atom_at(chars, leading_end).map_or((None, None), |(end, kind)| (Some(end), Some(kind)));
-    let leading: String = chars.get(start..leading_end).unwrap_or_default().iter().collect();
-
-    if let (Some(atom_end), Some(kind)) = (atom_end, atom_kind) {
-        let tail_end = chunk_end(chars, atom_end);
-        let tail: &[char] = chars.get(atom_end..tail_end).unwrap_or_default();
-        let mut trailing_start = tail.len();
-        while trailing_start > 0
-            && tail
-                .get(trailing_start - 1)
-                .is_some_and(|character| is_trailing_closer(*character))
-        {
-            trailing_start -= 1;
-        }
-        let mut core: String = chars.get(leading_end..atom_end).unwrap_or_default().iter().collect();
-        core.extend(tail.get(..trailing_start).unwrap_or_default());
-        let trailing: String = tail.get(trailing_start..).unwrap_or_default().iter().collect();
-        let token = Token {
-            leading,
-            core,
-            trailing,
+    if let Some((atom_end, kind)) = atom_at(text, leading_end) {
+        // The atom and the punctuation after it are one run of the line, so the core is one slice of it.
+        let tail_end = chunk_end(text, atom_end, false);
+        let tail = text.get(atom_end..tail_end).unwrap_or_default();
+        let trailing_start = atom_end + trailing_punctuation_start(tail, 0);
+        let core = text.get(leading_end..trailing_start).unwrap_or_default();
+        let trailing = text.get(trailing_start..tail_end).unwrap_or_default();
+        let token = Token::new(
+            Cow::Borrowed(leading),
+            Cow::Borrowed(core),
+            Cow::Borrowed(trailing),
             kind,
             origin_line,
-            force_break_after: false,
-        };
+        );
         return (token, tail_end);
     }
 
-    let chunk: &[char] = chars.get(leading_end..word_end).unwrap_or_default();
-    let mut core_end = chunk.len();
-    while core_end > 1
-        && chunk
-            .get(core_end - 1)
-            .is_some_and(|character| is_trailing_closer(*character))
-    {
-        let closes_bracket = chunk
-            .get(core_end - 1)
-            .is_some_and(|character| matches!(character, ')' | ']'));
-        if closes_bracket && has_unclosed_bracket(chunk.get(..core_end - 1).unwrap_or_default()) {
-            break;
-        }
-        core_end -= 1;
-    }
-    let core: String = chunk.get(..core_end).unwrap_or_default().iter().collect();
-    let trailing: String = chunk.get(core_end..).unwrap_or_default().iter().collect();
-    let kind = classify_core(&core, leading.is_empty() && trailing.is_empty());
-    let token = Token {
-        leading,
-        core,
-        trailing,
+    let chunk = text.get(leading_end..word_end).unwrap_or_default();
+    let keep = chunk.chars().next().map_or(0, char::len_utf8);
+    let core_end = trailing_punctuation_start(chunk, keep);
+    let core = chunk.get(..core_end).unwrap_or_default();
+    let trailing = chunk.get(core_end..).unwrap_or_default();
+    let kind = classify_core(core, leading.is_empty() && trailing.is_empty());
+    let token = Token::new(
+        Cow::Borrowed(leading),
+        Cow::Borrowed(core),
+        Cow::Borrowed(trailing),
         kind,
         origin_line,
-        force_break_after: false,
-    };
+    );
     (token, word_end)
 }
 
-/// Whether the characters contain more opening than closing brackets.
-fn has_unclosed_bracket(chars: &[char]) -> bool {
-    let depth = chars.iter().fold(0i64, |depth, character| match character {
-        '(' | '[' => depth + 1,
-        ')' | ']' => depth - 1,
+/// Byte offset where the closing punctuation at the end of the chunk starts.
+///
+/// At least `keep` bytes are left in front of it, so a token is never all punctuation,
+/// and a closing bracket that belongs to an unclosed one inside the chunk stays in the core.
+fn trailing_punctuation_start(chunk: &str, keep: usize) -> usize {
+    let mut end = chunk.len();
+    while end > keep {
+        let Some((offset, character)) = chunk.get(..end).and_then(|head| head.char_indices().next_back()) else {
+            break;
+        };
+        if !is_trailing_closer(character) {
+            break;
+        }
+        if matches!(character, ')' | ']') && has_unclosed_bracket(chunk.get(..offset).unwrap_or_default()) {
+            break;
+        }
+        end = offset;
+    }
+    end
+}
+
+/// Whether the text holds more opening than closing brackets.
+fn has_unclosed_bracket(text: &str) -> bool {
+    let depth = text.bytes().fold(0i64, |depth, byte| match byte {
+        b'(' | b'[' => depth + 1,
+        b')' | b']' => depth - 1,
         _ => depth,
     });
     depth > 0
@@ -1026,22 +1040,18 @@ const fn is_trailing_closer(character: char) -> bool {
     is_closer(character) || matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | '…' | '—' | '–')
 }
 
-/// Detect an unbreakable atom starting at `start`, returning its end index and kind.
-fn atom_at(chars: &[char], start: usize) -> Option<(usize, TokenKind)> {
-    let &first = chars.get(start)?;
-    match first {
-        '`' => backtick_span_end(chars, start).map(|end| (end, TokenKind::Code)),
-        '[' => link_end(chars, start).map(|end| (end, TokenKind::Link)),
-        '!' if chars.get(start + 1) == Some(&'[') => link_end(chars, start + 1).map(|end| (end, TokenKind::Link)),
-        '<' => {
-            let next = chars.get(start + 1)?;
-            if next.is_ascii_alphabetic() || matches!(next, '/' | '!') {
-                let end = chars
-                    .iter()
-                    .enumerate()
-                    .skip(start + 1)
-                    .find(|(_, character)| **character == '>')
-                    .map(|(index, _)| index + 1)?;
+/// Detect an unbreakable atom starting at `start`, returning its end byte index and kind.
+fn atom_at(text: &str, start: usize) -> Option<(usize, TokenKind)> {
+    let rest = text.get(start..)?;
+    let bytes = rest.as_bytes();
+    match *bytes.first()? {
+        b'`' => backtick_span_end(text, start).map(|end| (end, TokenKind::Code)),
+        b'[' => link_end(text, start).map(|end| (end, TokenKind::Link)),
+        b'!' if bytes.get(1) == Some(&b'[') => link_end(text, start + 1).map(|end| (end, TokenKind::Link)),
+        b'<' => {
+            let next = *bytes.get(1)?;
+            if next.is_ascii_alphabetic() || matches!(next, b'/' | b'!') {
+                let end = rest.find('>').map(|offset| start + offset + 1)?;
                 Some((end, TokenKind::Html))
             } else {
                 None
@@ -1051,19 +1061,14 @@ fn atom_at(chars: &[char], start: usize) -> Option<(usize, TokenKind)> {
     }
 }
 
-/// End index of a backtick code span starting at `start`, matching runs of equal length.
-fn backtick_span_end(chars: &[char], start: usize) -> Option<usize> {
-    let mut run = 0;
-    while chars.get(start + run) == Some(&'`') {
-        run += 1;
-    }
+/// End byte index of a backtick code span starting at `start`, matching runs of equal length.
+fn backtick_span_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let run = backtick_run(bytes, start);
     let mut index = start + run;
-    while index < chars.len() {
-        if chars.get(index) == Some(&'`') {
-            let mut closing = 0;
-            while chars.get(index + closing) == Some(&'`') {
-                closing += 1;
-            }
+    while index < bytes.len() {
+        if bytes.get(index) == Some(&b'`') {
+            let closing = backtick_run(bytes, index);
             if closing == run {
                 return Some(index + closing);
             }
@@ -1075,23 +1080,34 @@ fn backtick_span_end(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-/// End index of a Markdown link or image starting at the `[` at `start`.
-fn link_end(chars: &[char], start: usize) -> Option<usize> {
-    let close_bracket = matching_close(chars, start, '[', ']')?;
-    match chars.get(close_bracket + 1) {
-        Some('(') => matching_close(chars, close_bracket + 1, '(', ')').map(|end| end + 1),
-        Some('[') => matching_close(chars, close_bracket + 1, '[', ']').map(|end| end + 1),
+/// Number of backticks in a row at `start`.
+fn backtick_run(bytes: &[u8], start: usize) -> usize {
+    let mut run = 0;
+    while bytes.get(start + run) == Some(&b'`') {
+        run += 1;
+    }
+    run
+}
+
+/// End byte index of a Markdown link or image starting at the `[` at `start`.
+fn link_end(text: &str, start: usize) -> Option<usize> {
+    let close_bracket = matching_close(text, start, b'[', b']')?;
+    match text.as_bytes().get(close_bracket + 1) {
+        Some(b'(') => matching_close(text, close_bracket + 1, b'(', b')').map(|end| end + 1),
+        Some(b'[') => matching_close(text, close_bracket + 1, b'[', b']').map(|end| end + 1),
         _ => None,
     }
 }
 
-/// Index of the bracket closing the one at `start`, counting nesting.
-fn matching_close(chars: &[char], start: usize, open: char, close: char) -> Option<usize> {
+/// Byte index of the bracket closing the one at `start`, counting nesting.
+fn matching_close(text: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = text.as_bytes();
     let mut depth = 0usize;
-    for (index, &character) in chars.iter().enumerate().skip(start) {
-        if character == open {
+    for index in start..bytes.len() {
+        let byte = *bytes.get(index)?;
+        if byte == open {
             depth += 1;
-        } else if character == close {
+        } else if byte == close {
             depth = depth.checked_sub(1)?;
             if depth == 0 {
                 return Some(index);
@@ -1152,7 +1168,7 @@ fn is_abbreviation(core: &str, options: &FormatOptions) -> bool {
 }
 
 /// Whether placing the token at a line start would change Markdown structure.
-fn starts_markdown_structure(token: &Token) -> bool {
+fn starts_markdown_structure(token: &Token<'_>) -> bool {
     let text = token.text_cow();
     let can_be_structure = text
         .starts_with(|character: char| matches!(character, '-' | '+' | '*' | '>' | '|' | '#' | '`' | '~' | '0'..='9'));
@@ -1161,11 +1177,11 @@ fn starts_markdown_structure(token: &Token) -> bool {
 }
 
 /// Group paragraph lines into segments, joining lines that end mid-clause.
-fn build_segments(
+fn build_segments<'text>(
     paragraph: &Paragraph,
-    line_tokens: Vec<Vec<Token>>,
+    line_tokens: Vec<Vec<Token<'text>>>,
     options: &FormatOptions,
-) -> (Vec<Segment>, Vec<Violation>) {
+) -> (Vec<Segment<'text>>, Vec<Violation>) {
     let mut segments = Vec::new();
     let mut violations = Vec::new();
     let mut current: Option<Segment> = None;
@@ -1280,14 +1296,14 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
         let (punctuation, capitalized, new_sentence) = dash_rewrite(&segment.tokens, index, &depths, options);
         if let Some(previous) = segment.tokens.get_mut(index - 1) {
             if let Some(punctuation) = punctuation {
-                previous.trailing.push(punctuation);
+                previous.push_trailing(punctuation);
             }
             previous.force_break_after |= new_sentence;
         }
         if let Some(core) = capitalized
             && let Some(next) = segment.tokens.get_mut(index + 1)
         {
-            next.core = core;
+            next.set_core(core);
         }
         if let Some(slot) = removed.get_mut(index) {
             *slot = true;
@@ -1320,7 +1336,7 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
 /// A colon is used where the text before the dash names what follows it,
 /// and where code like text on either side rules out capitalizing a name into a new sentence.
 fn dash_rewrite(
-    tokens: &[Token],
+    tokens: &[Token<'_>],
     index: usize,
     depths: &[usize],
     options: &FormatOptions,
@@ -1364,7 +1380,7 @@ fn dash_rewrite(
 }
 
 /// Token range of the sentence that holds the token at `index`.
-fn sentence_bounds(tokens: &[Token], index: usize, options: &FormatOptions) -> Range<usize> {
+fn sentence_bounds(tokens: &[Token<'_>], index: usize, options: &FormatOptions) -> Range<usize> {
     let start = (0..index)
         .rev()
         .find(|position| is_sentence_end(tokens, *position, options))
@@ -1429,8 +1445,7 @@ fn reword_semicolons(
             if let Some(segment) = segments.get_mut(segment_index)
                 && let Some(token) = segment.tokens.get_mut(token_index)
             {
-                token.trailing.pop();
-                token.trailing.push('.');
+                token.replace_trailing_end('.');
                 token.force_break_after = within_segment;
                 segment.modified = true;
             }
@@ -1443,7 +1458,7 @@ fn reword_semicolons(
                 && let Some(next_segment) = segments.get_mut(next_segment)
                 && let Some(next_token) = next_segment.tokens.get_mut(next_index)
             {
-                next_token.core = new_core;
+                next_token.set_core(new_core);
                 next_segment.modified = true;
             }
             violations.push(Violation {
@@ -1459,7 +1474,7 @@ fn reword_semicolons(
 
 /// Reason the semicolon after `tokens[index]` cannot be rewritten, or `None` when it can.
 fn semicolon_refusal(
-    tokens: &[Token],
+    tokens: &[Token<'_>],
     index: usize,
     next: Option<&Token>,
     options: &FormatOptions,
@@ -1488,13 +1503,13 @@ fn semicolon_refusal(
 }
 
 /// Whether the token is wrapped in quotes, which makes it a name rather than a word of the sentence.
-fn is_quoted(token: &Token) -> bool {
+fn is_quoted(token: &Token<'_>) -> bool {
     token.leading.contains(['"', '\'', '\u{201c}', '\u{2018}'])
         && token.trailing.contains(['"', '\'', '\u{201d}', '\u{2019}'])
 }
 
 /// Whether a token is code-like enough that rewording it would be wrong.
-fn looks_like_code(token: &Token) -> bool {
+fn looks_like_code(token: &Token<'_>) -> bool {
     match token.kind {
         TokenKind::Identifier => true,
         TokenKind::Word => {
@@ -1506,7 +1521,7 @@ fn looks_like_code(token: &Token) -> bool {
 }
 
 /// Whether the token can start a sentence without changing its text.
-fn can_start_sentence_unchanged(token: &Token) -> bool {
+fn can_start_sentence_unchanged(token: &Token<'_>) -> bool {
     if matches!(
         token.kind,
         TokenKind::Code | TokenKind::Url | TokenKind::Link | TokenKind::Html | TokenKind::Number | TokenKind::Version
@@ -1521,7 +1536,7 @@ fn can_start_sentence_unchanged(token: &Token) -> bool {
 }
 
 /// Capitalized core for a token that starts a new sentence, or `None` when no change is needed or possible.
-fn capitalize_token(token: &Token, options: &FormatOptions) -> Option<String> {
+fn capitalize_token(token: &Token<'_>, options: &FormatOptions) -> Option<String> {
     if token.kind != TokenKind::Word || !RE_LOWERCASE_WORD.is_match(&token.core) {
         return None;
     }
@@ -1564,15 +1579,15 @@ fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &FormatOptions)
 }
 
 /// Break a run of tokens into lines that fit the budgets, preferring semantic boundaries.
-fn split_tokens(
-    tokens: Vec<Token>,
+fn split_tokens<'text>(
+    tokens: Vec<Token<'text>>,
     first_budget: usize,
     rest_budget: usize,
     is_first_line: &mut bool,
     options: &FormatOptions,
     line_offset: usize,
     violations: &mut Vec<Violation>,
-) -> Vec<Vec<Token>> {
+) -> Vec<Vec<Token<'text>>> {
     if tokens.is_empty() {
         return Vec::new();
     }
@@ -1612,7 +1627,12 @@ fn split_tokens(
 /// The whole run is planned at once so that the lines come out balanced.
 /// Of the break sets that use equally good boundaries the most even one wins,
 /// so a long sentence becomes two medium length lines instead of one full line and a short remainder.
-fn plan_line_breaks(tokens: &[Token], first_budget: usize, rest_budget: usize, options: &FormatOptions) -> Vec<usize> {
+fn plan_line_breaks(
+    tokens: &[Token<'_>],
+    first_budget: usize,
+    rest_budget: usize,
+    options: &FormatOptions,
+) -> Vec<usize> {
     let count = tokens.len();
     let widths = cumulative_widths(tokens);
     let mut ranks = vec![None; count + 1];
@@ -1778,7 +1798,7 @@ fn skipped_colon_cost(counts: &[usize], reachable: &Range<usize>, end: usize) ->
 
 /// Cost of a line that covers the tokens `start..end` of the run.
 fn line_cost(
-    tokens: &[Token],
+    tokens: &[Token<'_>],
     start: usize,
     end: usize,
     budget: usize,
@@ -1807,7 +1827,7 @@ fn line_cost(
 /// A comma or a colon before a conjunction marks the end of a clause, so the break reads as intended there.
 /// The same conjunction without one may only join two parts of a phrase,
 /// which is a worse place to break than the width of the lines alone suggests.
-fn boundary_cost(tokens: &[Token], index: usize, rank: Rank) -> usize {
+fn boundary_cost(tokens: &[Token<'_>], index: usize, rank: Rank) -> usize {
     let cost = break_cost(rank);
     if !tokens
         .get(index)
@@ -1887,7 +1907,7 @@ fn overflow_is_earned(
 }
 
 /// Record an unfixable too long line violation at the first token of the run.
-fn report_too_long(tokens: &[Token], line_offset: usize, reason: &str, violations: &mut Vec<Violation>) {
+fn report_too_long(tokens: &[Token<'_>], line_offset: usize, reason: &str, violations: &mut Vec<Violation>) {
     let line = tokens
         .first()
         .map_or(line_offset, |token| line_offset + token.origin_line);
@@ -1901,7 +1921,7 @@ fn report_too_long(tokens: &[Token], line_offset: usize, reason: &str, violation
 }
 
 /// Cumulative widths where entry `k` is the width of the first `k` tokens joined with spaces.
-fn cumulative_widths(tokens: &[Token]) -> Vec<usize> {
+fn cumulative_widths(tokens: &[Token<'_>]) -> Vec<usize> {
     let mut widths = Vec::with_capacity(tokens.len() + 1);
     widths.push(0);
     let mut total = 0;
@@ -1957,7 +1977,7 @@ mod test_helpers {
     use super::*;
 
     /// Tokenize one line with dash normalization enabled.
-    pub fn tokens(text: &str) -> Vec<Token> {
+    pub fn tokens(text: &str) -> Vec<Token<'_>> {
         tokenize_line(text, 0, true)
     }
 

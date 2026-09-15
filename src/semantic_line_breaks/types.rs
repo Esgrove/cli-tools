@@ -229,19 +229,21 @@ pub struct Violation {
 
 /// A prose token: a word or an unbreakable atom with surrounding punctuation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Token {
+pub struct Token<'text> {
     /// Opening punctuation such as `(` or `"`.
-    pub leading: String,
+    pub leading: Cow<'text, str>,
     /// The word or atom body.
-    pub core: String,
+    pub core: Cow<'text, str>,
     /// Closing punctuation such as `.` or `,)`.
-    pub trailing: String,
+    pub trailing: Cow<'text, str>,
     /// Token classification.
     pub kind: TokenKind,
     /// Index of the paragraph line this token came from.
     pub origin_line: usize,
     /// Whether the formatter inserted a forced break after this token.
     pub force_break_after: bool,
+    /// Width in characters, kept in step by the methods that change the text.
+    width: u32,
 }
 
 /// A run of prose lines sharing one prefix.
@@ -455,18 +457,58 @@ impl HardBreak {
     }
 }
 
-impl Token {
-    /// Create a plain word token.
+impl<'text> Token<'text> {
+    /// Create a token from the parts of one chunk of a line.
     #[must_use]
-    pub fn word(core: &str, origin_line: usize) -> Self {
+    pub fn new(
+        leading: Cow<'text, str>,
+        core: Cow<'text, str>,
+        trailing: Cow<'text, str>,
+        kind: TokenKind,
+        origin_line: usize,
+    ) -> Self {
+        let width = token_width(&leading, &core, &trailing);
         Self {
-            leading: String::new(),
-            core: core.to_string(),
-            trailing: String::new(),
-            kind: TokenKind::Word,
+            leading,
+            core,
+            trailing,
+            kind,
             origin_line,
             force_break_after: false,
+            width,
         }
+    }
+
+    /// Create a plain word token.
+    #[must_use]
+    pub fn word(core: &'text str, origin_line: usize) -> Self {
+        Self::new(
+            Cow::Borrowed(""),
+            Cow::Borrowed(core),
+            Cow::Borrowed(""),
+            TokenKind::Word,
+            origin_line,
+        )
+    }
+
+    /// Replace the core text, for example with a capitalized word.
+    pub fn set_core(&mut self, core: String) {
+        self.core = Cow::Owned(core);
+        self.width = token_width(&self.leading, &self.core, &self.trailing);
+    }
+
+    /// Add closing punctuation to the token.
+    pub fn push_trailing(&mut self, character: char) {
+        self.trailing.to_mut().push(character);
+        self.width = token_width(&self.leading, &self.core, &self.trailing);
+    }
+
+    /// Replace the last character of the closing punctuation.
+    pub fn replace_trailing_end(&mut self, character: char) {
+        let trailing = self.trailing.to_mut();
+        trailing.pop();
+        trailing.push(character);
+        self.width = token_width(&self.leading, &self.core, &self.trailing);
     }
 
     /// Full text of the token including surrounding punctuation.
@@ -494,9 +536,12 @@ impl Token {
     }
 
     /// Width of the token in characters.
+    ///
+    /// The width is worked out once when the token is built,
+    /// since it is asked for several times per token on every pass.
     #[must_use]
-    pub fn width(&self) -> usize {
-        self.leading.chars().count() + self.core.chars().count() + self.trailing.chars().count()
+    pub const fn width(&self) -> usize {
+        self.width as usize
     }
 
     /// Whether the token is an unbreakable atom whose inner punctuation carries no meaning.
@@ -648,6 +693,22 @@ impl fmt::Display for Violation {
     }
 }
 
+/// Width of the text in characters, counting bytes when every one of them is ASCII.
+#[must_use]
+pub fn text_width(text: &str) -> usize {
+    if text.is_ascii() {
+        text.len()
+    } else {
+        text.chars().count()
+    }
+}
+
+/// Width of the three parts of a token in characters.
+fn token_width(leading: &str, core: &str, trailing: &str) -> u32 {
+    let width = text_width(leading) + text_width(core) + text_width(trailing);
+    u32::try_from(width).unwrap_or(u32::MAX)
+}
+
 /// Whether the character closes a bracket or quote.
 #[must_use]
 pub const fn is_closer(character: char) -> bool {
@@ -704,21 +765,41 @@ mod test_file_kind {
 }
 
 #[cfg(test)]
+mod test_token_builders {
+    use super::*;
+
+    /// Build a token with the given punctuation around a word.
+    pub fn wrapped(leading: &'static str, core: &'static str, trailing: &'static str) -> Token<'static> {
+        Token::new(
+            Cow::Borrowed(leading),
+            Cow::Borrowed(core),
+            Cow::Borrowed(trailing),
+            TokenKind::Word,
+            0,
+        )
+    }
+}
+
+#[cfg(test)]
 mod test_token {
     use super::*;
 
     #[test]
     fn width_and_text_include_punctuation() {
-        let token = Token {
-            leading: "(".to_string(),
-            core: "ääkkönen".to_string(),
-            trailing: ").".to_string(),
-            kind: TokenKind::Word,
-            origin_line: 0,
-            force_break_after: false,
-        };
+        let token = Token::new(
+            Cow::Borrowed("("),
+            Cow::Borrowed("ääkkönen"),
+            Cow::Borrowed(")."),
+            TokenKind::Word,
+            0,
+        );
         assert_eq!(token.text(), "(ääkkönen).");
         assert_eq!(token.width(), 11);
+        assert_eq!(
+            token.width(),
+            token.characters().count(),
+            "the cached width has to match"
+        );
         assert!(token.ends_sentence_punctuation());
         assert!(!token.ends_clause_punctuation());
     }
@@ -726,10 +807,25 @@ mod test_token {
     #[test]
     fn clause_punctuation_ignores_closers() {
         let mut token = Token::word("value", 0);
-        token.trailing = ",\"".to_string();
+        token.push_trailing(',');
+        token.push_trailing('"');
+        assert_eq!(token.trailing, ",\"");
         assert!(token.ends_clause_punctuation());
-        token.trailing = "\")".to_string();
-        assert!(!token.ends_clause_punctuation());
+        assert!(!super::test_token_builders::wrapped("", "value", "\")").ends_clause_punctuation());
+    }
+
+    #[test]
+    fn the_cached_width_follows_every_change() {
+        let mut token = Token::word("value", 0);
+        assert_eq!(token.width(), 5);
+        token.push_trailing('.');
+        assert_eq!(token.width(), 6);
+        assert_eq!(token.width(), token.characters().count());
+        token.set_core("ääkkönen".to_string());
+        assert_eq!(token.width(), 9);
+        assert_eq!(token.width(), token.characters().count());
+        token.replace_trailing_end('!');
+        assert_eq!(token.width(), token.characters().count());
     }
 }
 
@@ -936,18 +1032,14 @@ mod test_token_helpers {
         assert!(matches!(bare.text_cow(), Cow::Borrowed("value")));
         assert_eq!(bare.text(), "value");
 
-        let mut wrapped = Token::word("value", 0);
-        wrapped.leading = "(".to_string();
-        wrapped.trailing = ").".to_string();
+        let wrapped = super::test_token_builders::wrapped("(", "value", ").");
         assert!(matches!(wrapped.text_cow(), Cow::Owned(_)));
         assert_eq!(wrapped.text_cow(), "(value).");
     }
 
     #[test]
     fn characters_yield_the_whole_token_in_order() {
-        let mut token = Token::word("value", 0);
-        token.leading = "[".to_string();
-        token.trailing = "],".to_string();
+        let token = super::test_token_builders::wrapped("[", "value", "],");
         assert_eq!(token.characters().collect::<String>(), "[value],");
         assert_eq!(token.width(), 8);
     }
@@ -958,8 +1050,7 @@ mod test_token_helpers {
         assert_eq!(bare.first_char(), Some('w'));
         assert_eq!(bare.origin_line, 3);
 
-        let mut wrapped = Token::word("word", 0);
-        wrapped.leading = "\"".to_string();
+        let wrapped = super::test_token_builders::wrapped("\"", "word", "");
         assert_eq!(wrapped.first_char(), Some('"'));
 
         let empty = Token::word("", 0);
@@ -968,16 +1059,12 @@ mod test_token_helpers {
 
     #[test]
     fn ends_with_opener_checks_the_last_character_of_the_token() {
-        let mut token = Token::word("call", 0);
+        let token = Token::word("call", 0);
         assert!(!token.ends_with_opener());
-        token.trailing = "(".to_string();
-        assert!(token.ends_with_opener());
+        assert!(super::test_token_builders::wrapped("", "call", "(").ends_with_opener());
 
-        let mut core_only = Token::word("(", 0);
-        assert!(core_only.ends_with_opener());
-        core_only.core = String::new();
-        core_only.leading = "[".to_string();
-        assert!(core_only.ends_with_opener());
+        assert!(Token::word("(", 0).ends_with_opener());
+        assert!(super::test_token_builders::wrapped("[", "", "").ends_with_opener());
     }
 
     #[test]
@@ -995,10 +1082,7 @@ mod test_token_helpers {
             (TokenKind::Html, true),
         ];
         for (kind, is_atom) in kinds {
-            let token = Token {
-                kind,
-                ..Token::word("x", 0)
-            };
+            let token = Token::new(Cow::Borrowed(""), Cow::Borrowed("x"), Cow::Borrowed(""), kind, 0);
             assert_eq!(token.is_atom(), is_atom, "{kind:?}");
         }
     }
