@@ -203,6 +203,11 @@ pub fn fix_trailing_comments_scanned(
     };
     let style = kind.comment_style();
     for (index, line) in lines.iter().enumerate() {
+        // This pass works line by line, so an unselected line can be passed over exactly
+        // rather than by the paragraph the prose pass has to take or leave as a whole.
+        if !options.line_ranges.contains_line(index + 1) {
+            continue;
+        }
         let Some(comment_start) = scan.comment_start.get(index).copied().flatten() else {
             continue;
         };

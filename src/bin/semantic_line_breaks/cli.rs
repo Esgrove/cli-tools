@@ -21,7 +21,7 @@ use rayon::prelude::*;
 
 use cli_tools::semantic_line_breaks::project_config::{WidthSource, discover_width};
 use cli_tools::semantic_line_breaks::types::DEFAULT_MAX_WIDTH;
-use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, check, format};
+use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, LineRanges, check, format};
 use cli_tools::{diff_lines, print_error, print_yellow};
 
 use crate::Args;
@@ -266,6 +266,7 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
         FormatResult {
             violations: check(&text, kind, settings.options),
             fixed_text: None,
+            fixed_line_ranges: LineRanges::default(),
         }
     };
     outcome.processed = true;
@@ -538,6 +539,7 @@ mod test_fix_file {
                 fixable: false,
             }],
             fixed_text: None,
+            fixed_line_ranges: LineRanges::default(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(
@@ -573,6 +575,7 @@ mod test_fix_file {
                 fixable: false,
             }],
             fixed_text: None,
+            fixed_line_ranges: LineRanges::default(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(
@@ -618,6 +621,7 @@ mod test_fix_file {
         let result = FormatResult {
             violations: vec![],
             fixed_text: Some("/// After.\n".to_string()),
+            fixed_line_ranges: LineRanges::default(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(

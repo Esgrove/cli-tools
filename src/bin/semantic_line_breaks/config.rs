@@ -13,7 +13,7 @@ use serde::Deserialize;
 use cli_tools::semantic_line_breaks::types::{
     DEFAULT_ABBREVIATIONS, DEFAULT_DIRECTIVE_PREFIXES, DEFAULT_PRESERVE_LOWERCASE, DEFAULT_TAB_WIDTH,
 };
-use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, RuleSet, ViolationKind};
+use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, LineRanges, RuleSet, ViolationKind};
 
 use crate::Args;
 
@@ -219,6 +219,7 @@ impl Config {
             join_sentences: self.join_sentences,
             allow_word_break: self.allow_word_break,
             rules: self.rules,
+            line_ranges: LineRanges::default(),
             abbreviations: self.abbreviations.clone(),
             clause_starters: self.clause_starters.clone(),
             directive_prefixes: self.directive_prefixes.clone(),
@@ -503,3 +504,4 @@ mod test_config_merge {
         assert_eq!(options.rules, RuleSet::DEFAULT);
     }
 }
+

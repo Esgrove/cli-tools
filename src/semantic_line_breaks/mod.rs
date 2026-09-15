@@ -24,6 +24,6 @@ pub(crate) mod test_helpers;
 
 pub use formatter::{check, format};
 pub use types::{
-    FileKind, FormatOptions, FormatResult, HardBreak, Paragraph, Rank, Region, RuleSet, Token, TokenKind, Violation,
-    ViolationKind,
+    FileKind, FormatOptions, FormatResult, HardBreak, LineRanges, Paragraph, Rank, Region, RuleSet, Token, TokenKind,
+    Violation, ViolationKind,
 };
