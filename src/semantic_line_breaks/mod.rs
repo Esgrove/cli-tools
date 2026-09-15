@@ -12,7 +12,10 @@ pub mod line_breaks;
 pub mod markdown;
 pub mod project_config;
 pub mod reflow;
+pub mod regex_literals;
 pub mod rewording;
+pub mod scanner;
+pub mod string_syntax;
 pub mod tokenizer;
 pub mod types;
 
