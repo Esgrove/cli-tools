@@ -10,6 +10,7 @@
 mod cli;
 mod config;
 mod files;
+mod line_selection;
 mod output;
 
 use std::path::PathBuf;
@@ -20,6 +21,8 @@ use clap_complete::Shell;
 
 use cli_tools::print_error;
 use cli_tools::semantic_line_breaks::FileKind;
+
+use crate::line_selection::LineSpec;
 
 #[derive(Parser)]
 #[command(
@@ -63,6 +66,18 @@ pub struct Args {
     /// Also move trailing comments to their own line above the code
     #[arg(short = 'T', long)]
     trailing: bool,
+
+    /// Only check and fix these lines, for example "10-25" or "src/main.rs:14"
+    ///
+    /// Takes lines and ranges for a single file, such as "10" or "10-25,40",
+    /// or locations in the form the report prints, such as "src/main.rs:14" or "src/main.rs:14-20",
+    /// so a reported violation can be pasted back in as the thing to fix.
+    /// A column after the line is ignored.
+    /// Commas separate values, and a range following a location belongs to the file it named.
+    /// A paragraph overlapping the selection is reflowed in full,
+    /// since reflow joins and splits a paragraph as one unit.
+    #[arg(short = 'l', long, num_args = 1, action = clap::ArgAction::Append, value_name = "RANGES")]
+    lines: Vec<LineSpec>,
 
     /// Only process files with these extensions
     #[arg(short, long, num_args = 1, action = clap::ArgAction::Append, value_name = "EXTENSION")]

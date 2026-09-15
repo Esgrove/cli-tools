@@ -505,6 +505,9 @@ With `--trailing`, a comment sharing a line with code is moved onto its own line
 That rule rewrites code lines and the result often reads worse than the original, so it is off by default.
 A trailing comment whose code line already has a comment above it is reported but not moved,
 since the two notes would be reflowed into one sentence.
+With `--lines`, only the lines named are checked and fixed,
+which keeps a run over an edited file from reflowing the paragraphs that were not touched.
+The forms a selection can take are described under Line selection below.
 The line limit is read from project config files such as `.editorconfig`, `rustfmt.toml`, and `pyproject.toml`.
 Paths ignored by git are skipped, unless `--no-ignore` says otherwise.
 Files are checked in parallel, one worker per core unless `--jobs` says otherwise,
@@ -533,6 +536,7 @@ Options:
   -i, --ignore-project-config   Do not read the line length from project config files such as .editorconfig, rustfmt.toml, or pyproject.toml
   -R, --rules <RULES>           Rules to enable (default: every rule except trailing comments) [possible values: too-long, mid-clause, semicolon, em-dash, trailing]
   -T, --trailing                Also move trailing comments to their own line above the code
+  -l, --lines <RANGES>          Only check and fix these lines, for example "10-25" or "src/main.rs:14"
   -e, --extensions <EXTENSION>  Only process files with these extensions
   -x, --exclude <PATTERN>       Skip paths with a directory or file name equal to this text, in addition to the default excludes
   -n, --no-ignore               Do not skip paths ignored by git
@@ -545,6 +549,79 @@ Options:
   -h, --help                    Print help (see more with '--help')
   -V, --version                 Print version
 ```
+
+### Line selection
+
+`--lines` limits both checking and fixing to the lines it names,
+so a run over a file that was just edited leaves the paragraphs that were not touched alone.
+This is what makes the tool usable from an editor hook or from a coding agent,
+which changes a handful of lines and wants a diff of the same size.
+
+A value is either lines and ranges for a single file,
+or a location in the form the violation report prints.
+
+| Value | Selects |
+| --- | --- |
+| `14` | line 14 |
+| `10-25` | lines 10 to 25 |
+| `10-25,40` | lines 10 to 25 and line 40 |
+| `src/main.rs:14` | line 14 of that file |
+| `src/main.rs:14-20` | lines 14 to 20 of that file |
+| `src/main.rs:14:33` | line 14 of that file, the column is ignored |
+| `src/main.rs:14,20` | lines 14 and 20 of that file |
+| `src/a.rs:5,src/b.rs:9` | line 5 of one file and line 9 of another |
+
+Commas separate the parts of a value,
+and a part without a path belongs to the file the part before it named,
+so the path only has to be written once.
+The column is ignored so that a line of the report can be pasted back in as the thing to fix.
+Line numbers are read from the end of a value, so a Windows path keeps its drive letter.
+`--lines` can be repeated, and each one starts over,
+so a plain range in one of them never picks up the file named in another.
+
+A location names the file to work on,
+so no path argument is needed when the value already carries one.
+A file named that way also skips the extension filter,
+which means a location works for a file type the config does not list.
+
+```shell
+# Fix only the lines that were edited, in one file
+slb --fix --lines 10-25 src/main.rs
+
+# Fix one line of one file, naming no path of its own
+slb --fix --lines src/main.rs:14
+
+# Paste a reported violation back in, column and all
+slb --fix --lines client/GameMain.cpp:1414:33
+
+# Select several ranges of the same file, writing the path once
+slb --fix --lines src/main.rs:14,20-25,40
+
+# Select lines in more than one file
+slb --fix --lines src/a.rs:5,src/b.rs:9
+
+# Report the violations of the changed lines without fixing them
+slb --lines src/main.rs:14-20
+
+# Format the selected lines of text on stdin
+slb --stdin --type rust --lines 10-25 < src/main.rs
+```
+
+Selecting a line takes the whole paragraph or comment block holding it,
+since reflow joins and splits a paragraph as one unit,
+and half of a reflowed paragraph would read worse than either whole.
+A trailing comment is matched line by line instead, because that rule works that way.
+
+The selection applies to the default reporting mode as well as to `--fix`,
+so a check over the changed lines alone still exits with code 1 when one of them is wrong.
+After a fix the selection follows the lines to where they moved,
+so a violation that could not be repaired is still reported even when the fix pushed it further down the file.
+
+Two combinations are refused rather than guessed at.
+Plain ranges with more than one file would apply the same line numbers to every one of them,
+so a location is required once the run covers more than a single file.
+Mixing plain ranges with locations in one value leaves it unclear which file the plain ranges belong to.
+With `--stdin` only plain ranges are accepted, since the text has no path.
 
 ## Vtag
 
