@@ -34,7 +34,10 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
             if let Some(kind) = config.kind.or_else(|| FileKind::from_path(&root)) {
                 files.push((root, kind));
             } else {
-                print_yellow!("Skipping unsupported file type: {}", display_path(&root));
+                print_yellow!(
+                    "Skipping unsupported file type: {}",
+                    cli_tools::path_to_string_relative(&root)
+                );
             }
             continue;
         }
@@ -99,24 +102,6 @@ fn matches_extensions(path: &Path, config: &Config) -> bool {
         .extensions
         .iter()
         .any(|allowed| *allowed == extension || *allowed == file_name)
-}
-
-/// Path relative to the current working directory for display.
-pub fn display_path(path: &Path) -> String {
-    cli_tools::get_relative_path_from_current_working_directory(path)
-        .display()
-        .to_string()
-}
-
-/// Path relative to the given working directory for display.
-///
-/// Taking the directory as an argument keeps the run from asking the system for it once per file.
-pub fn display_path_relative(path: &Path, working_directory: Option<&Path>) -> String {
-    working_directory
-        .and_then(|directory| path.strip_prefix(directory).ok())
-        .unwrap_or(path)
-        .display()
-        .to_string()
 }
 
 #[cfg(test)]
@@ -357,25 +342,5 @@ mod test_collect_files {
     fn a_missing_path_is_an_error() {
         let directory = temporary_directory();
         assert!(collect_files(&[directory.path().join("missing")], &config_with(vec![], vec![])).is_err());
-    }
-}
-
-#[cfg(test)]
-mod test_display_path {
-    use super::test_helpers::*;
-    use super::*;
-
-    #[test]
-    fn a_path_in_the_working_directory_is_shown_relative() {
-        let current = std::env::current_dir().expect("current directory should be available");
-        let path = current.join("src").join("lib.rs");
-        assert_eq!(display_path(&path), format!("src{}lib.rs", std::path::MAIN_SEPARATOR));
-    }
-
-    #[test]
-    fn a_path_outside_the_working_directory_is_shown_as_is() {
-        let directory = temporary_directory();
-        let path = write(&directory, "outside.rs", "// comment\n");
-        assert!(display_path(&path).ends_with("outside.rs"));
     }
 }

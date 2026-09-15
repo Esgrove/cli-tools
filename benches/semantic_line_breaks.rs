@@ -7,10 +7,13 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+use cli_tools::glob_to_regex;
+use cli_tools::semantic_line_breaks::boundaries::{clause_rank, find_boundaries};
 use cli_tools::semantic_line_breaks::comments::{fix_trailing_comments, split_source_regions};
 use cli_tools::semantic_line_breaks::markdown::split_paragraphs;
-use cli_tools::semantic_line_breaks::project_config::{discover_width, glob_to_regex};
-use cli_tools::semantic_line_breaks::prose::{clause_rank, find_boundaries, reflow_paragraph, tokenize_line};
+use cli_tools::semantic_line_breaks::project_config::discover_width;
+use cli_tools::semantic_line_breaks::reflow::reflow_paragraph;
+use cli_tools::semantic_line_breaks::tokenizer::tokenize_line;
 use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, HardBreak, Paragraph, check, format};
 
 /// A long sentence with several clause boundaries.

@@ -670,10 +670,10 @@ impl Default for FormatOptions {
             join_sentences: false,
             allow_word_break: false,
             rules: RuleSet::ALL,
-            abbreviations: to_strings(DEFAULT_ABBREVIATIONS),
+            abbreviations: crate::strings_from(DEFAULT_ABBREVIATIONS),
             clause_starters: Vec::new(),
-            directive_prefixes: to_strings(DEFAULT_DIRECTIVE_PREFIXES),
-            preserve_lowercase: to_strings(DEFAULT_PRESERVE_LOWERCASE),
+            directive_prefixes: crate::strings_from(DEFAULT_DIRECTIVE_PREFIXES),
+            preserve_lowercase: crate::strings_from(DEFAULT_PRESERVE_LOWERCASE),
         }
     }
 }
@@ -722,11 +722,6 @@ pub const fn is_closer(character: char) -> bool {
 #[must_use]
 pub const fn is_opener(character: char) -> bool {
     matches!(character, '(' | '[' | '{' | '"' | '\'' | '“' | '‘' | '«')
-}
-
-/// Convert a static string slice list into owned strings.
-fn to_strings(values: &[&str]) -> Vec<String> {
-    values.iter().map(std::string::ToString::to_string).collect()
 }
 
 #[cfg(test)]

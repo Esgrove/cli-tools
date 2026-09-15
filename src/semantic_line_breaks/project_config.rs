@@ -13,6 +13,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::types::FileKind;
+use crate::glob_to_regex;
 
 /// Matches a Prettier `printWidth` setting in JSON or YAML.
 static RE_PRINT_WIDTH: LazyLock<Regex> =
@@ -89,45 +90,6 @@ pub fn discover_width(file: &Path, kind: FileKind) -> Option<WidthSource> {
         }
     }
     None
-}
-
-/// Convert an editorconfig glob into an anchored regular expression.
-#[must_use]
-pub fn glob_to_regex(glob: &str) -> Option<Regex> {
-    let mut pattern = String::from("^");
-    let chars: Vec<char> = glob.chars().collect();
-    let mut index = 0;
-    let mut in_braces = false;
-    while let Some(&character) = chars.get(index) {
-        match character {
-            '*' if chars.get(index + 1) == Some(&'*') => {
-                if chars.get(index + 2) == Some(&'/') {
-                    pattern.push_str("(?:.*/)?");
-                    index += 3;
-                } else {
-                    pattern.push_str(".*");
-                    index += 2;
-                }
-                continue;
-            }
-            '*' => pattern.push_str("[^/]*"),
-            '?' => pattern.push_str("[^/]"),
-            '{' => {
-                in_braces = true;
-                pattern.push_str("(?:");
-            }
-            '}' if in_braces => {
-                in_braces = false;
-                pattern.push(')');
-            }
-            ',' if in_braces => pattern.push('|'),
-            '[' | ']' => pattern.push(character),
-            _ => pattern.push_str(&regex::escape(&character.to_string())),
-        }
-        index += 1;
-    }
-    pattern.push('$');
-    Regex::new(&pattern).ok()
 }
 
 /// Width from an `.editorconfig` in the directory, and whether that file declares itself the root.
@@ -846,65 +808,5 @@ mod test_width_resolver {
             Some(100)
         );
         assert_eq!(resolver.resolve(&python_file, FileKind::Python), None);
-    }
-}
-
-#[cfg(test)]
-mod test_glob_to_regex {
-    use super::*;
-
-    #[test]
-    fn single_star_does_not_cross_directories() {
-        let regex = glob_to_regex("*.rs").expect("glob should convert");
-        assert!(regex.is_match("a.rs"));
-        assert!(!regex.is_match("a/b.rs"));
-        assert!(!regex.is_match("a.rst"));
-    }
-
-    #[test]
-    fn double_star_crosses_directories() {
-        let regex = glob_to_regex("**/*.rs").expect("glob should convert");
-        assert!(regex.is_match("a/b.rs"));
-        assert!(regex.is_match("a/b/c.rs"));
-        assert!(regex.is_match("a.rs"));
-    }
-
-    #[test]
-    fn a_double_star_inside_a_name_matches_anything() {
-        let regex = glob_to_regex("a**b.rs").expect("glob should convert");
-        assert!(regex.is_match("ab.rs"));
-        assert!(regex.is_match("a-middle-b.rs"));
-        assert!(!regex.is_match("a.rs"));
-    }
-
-    #[test]
-    fn a_character_class_is_kept_as_it_is() {
-        let regex = glob_to_regex("[abc].rs").expect("glob should convert");
-        assert!(regex.is_match("a.rs"));
-        assert!(regex.is_match("c.rs"));
-        assert!(!regex.is_match("d.rs"));
-    }
-
-    #[test]
-    fn question_mark_matches_single_character() {
-        let regex = glob_to_regex("?.md").expect("glob should convert");
-        assert!(regex.is_match("a.md"));
-        assert!(!regex.is_match("ab.md"));
-        assert!(!regex.is_match(".md"));
-    }
-
-    #[test]
-    fn brace_alternation_matches_both_extensions() {
-        let regex = glob_to_regex("*.{md,markdown}").expect("glob should convert");
-        assert!(regex.is_match("a.md"));
-        assert!(regex.is_match("a.markdown"));
-        assert!(!regex.is_match("a.mdx"));
-    }
-
-    #[test]
-    fn literal_characters_are_escaped() {
-        let regex = glob_to_regex("a.b").expect("glob should convert");
-        assert!(regex.is_match("a.b"));
-        assert!(!regex.is_match("axb"));
     }
 }

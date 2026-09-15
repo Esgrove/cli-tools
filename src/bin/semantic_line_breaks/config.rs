@@ -159,7 +159,7 @@ impl Config {
 
         let exclude = if args.exclude.is_empty() {
             if user_config.exclude.is_empty() {
-                to_strings(DEFAULT_EXCLUDES)
+                cli_tools::strings_from(DEFAULT_EXCLUDES)
             } else {
                 user_config.exclude
             }
@@ -217,7 +217,7 @@ impl Config {
 
 /// Built-in defaults followed by the user's additions, lowercased and without duplicates.
 fn extend_defaults(defaults: &[&str], extra: Vec<String>) -> Vec<String> {
-    let mut values = to_strings(defaults);
+    let mut values = cli_tools::strings_from(defaults);
     for value in extra {
         let value = value.trim().to_lowercase();
         if !value.is_empty() && !values.contains(&value) {
@@ -225,11 +225,6 @@ fn extend_defaults(defaults: &[&str], extra: Vec<String>) -> Vec<String> {
         }
     }
     values
-}
-
-/// Convert a static string list into owned strings.
-fn to_strings(values: &[&str]) -> Vec<String> {
-    values.iter().map(std::string::ToString::to_string).collect()
 }
 
 #[cfg(test)]
@@ -364,14 +359,14 @@ mod test_config_merge {
     fn an_empty_user_config_gives_the_built_in_defaults() {
         let config = config(&["slb"], "").expect("config should build");
         assert_eq!(config.rules, RuleSet::ALL);
-        assert_eq!(config.exclude, to_strings(DEFAULT_EXCLUDES));
+        assert_eq!(config.exclude, cli_tools::strings_from(DEFAULT_EXCLUDES));
         assert!(config.extensions.is_empty());
         assert!(config.width.is_none());
         assert!(config.project_width);
         assert!(!config.join_sentences);
         assert!(!config.allow_word_break);
         assert!(config.clause_starters.is_empty());
-        assert_eq!(config.abbreviations, to_strings(DEFAULT_ABBREVIATIONS));
+        assert_eq!(config.abbreviations, cli_tools::strings_from(DEFAULT_ABBREVIATIONS));
     }
 
     #[test]

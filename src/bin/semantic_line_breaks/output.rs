@@ -5,7 +5,6 @@
 //! The message building is kept separate from the printing so it can be tested.
 
 use colored::{ColoredString, Colorize};
-use difference::{Changeset, Difference};
 
 use cli_tools::semantic_line_breaks::Violation;
 
@@ -66,24 +65,6 @@ pub fn format_violation(path: &str, violation: &Violation, after_fix: bool) -> S
 /// Print the final summary line.
 pub fn print_summary(summary: &Summary, config: &Config) {
     println!("{}", summary_message(summary, config));
-}
-
-/// Lines of a line based diff between the original and fixed text, including the file header.
-pub fn diff_lines(path: &str, original: &str, fixed: &str) -> Vec<String> {
-    let mut lines = vec![format!("--- {path}").bold().to_string()];
-    let changeset = Changeset::new(original, fixed, "\n");
-    for difference in &changeset.diffs {
-        match difference {
-            Difference::Same(_) => {}
-            Difference::Rem(removed) => {
-                lines.extend(removed.lines().map(|line| format!("- {line}").red().to_string()));
-            }
-            Difference::Add(added) => {
-                lines.extend(added.lines().map(|line| format!("+ {line}").green().to_string()));
-            }
-        }
-    }
-    lines
 }
 
 /// The final summary line for the processed files.
@@ -198,34 +179,6 @@ mod test_violation_messages {
             assert!(message.contains("semicolon"));
             assert!(message.contains("a.rs:7"));
         }
-    }
-}
-
-#[cfg(test)]
-mod test_diff_lines {
-    use super::*;
-
-    #[test]
-    fn lists_removed_and_added_lines_with_a_header() {
-        let lines = diff_lines(
-            "a.rs",
-            "// one sentence. And another.\n",
-            "// one sentence.\n// And another.\n",
-        );
-        assert!(lines.first().is_some_and(|header| header.contains("--- a.rs")));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("- // one sentence. And another."))
-        );
-        assert!(lines.iter().any(|line| line.contains("+ // one sentence.")));
-        assert!(lines.iter().any(|line| line.contains("+ // And another.")));
-    }
-
-    #[test]
-    fn unchanged_text_produces_only_the_header() {
-        let lines = diff_lines("a.rs", "// same\n", "// same\n");
-        assert_eq!(lines.len(), 1);
     }
 }
 

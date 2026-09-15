@@ -10,6 +10,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::types::{HardBreak, Paragraph, Region};
+use crate::leading_whitespace;
 
 /// Marker text that excludes the surrounding paragraph from formatting.
 pub const IGNORE_MARKER: &str = "slb-ignore";
@@ -519,12 +520,6 @@ fn strip_hard_break(content: &str, allowed: bool) -> (String, HardBreak) {
         return (content.trim_end().to_string(), HardBreak::Spaces);
     }
     (content.trim_end().to_string(), HardBreak::None)
-}
-
-/// Leading whitespace of a line.
-fn leading_whitespace(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    line.get(..line.len() - trimmed.len()).unwrap_or_default()
 }
 
 /// Width of the leading whitespace, counting a tab as four columns.
