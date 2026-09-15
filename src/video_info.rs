@@ -8,8 +8,6 @@ use std::process::Command;
 use anyhow::Context;
 use colored::Colorize;
 
-use crate::print_dimmed;
-
 pub use crate::resolution::Resolution;
 
 /// Video file information gathered from filesystem metadata and ffprobe.
@@ -169,8 +167,18 @@ impl VideoStats {
     /// Print a combined summary of all collected video stats.
     ///
     /// When `verbose` is true, all resolution entries are shown.
-    /// Otherwise, only the top 5 resolutions by count are displayed.
+    /// Otherwise, only the top rows by count are displayed.
     pub fn print_summary(&self, verbose: bool) {
+        for line in self.summary_lines(verbose) {
+            println!("{line}");
+        }
+    }
+
+    /// Lines of the combined summary, empty when fewer than two files were collected.
+    ///
+    /// The lines are built rather than printed directly so they can be checked in a test.
+    #[must_use]
+    pub fn summary_lines(&self, verbose: bool) -> Vec<String> {
         let total_resolutions: usize = self.resolutions.values().sum();
         let total_codecs: usize = self.codecs.values().sum();
         let total = total_resolutions
@@ -180,23 +188,25 @@ impl VideoStats {
             .max(self.file_sizes.len());
 
         if total < 2 {
-            return;
+            return Vec::new();
         }
 
-        println!();
-        println!("{}", format!("Video Statistics ({total} files):").cyan().bold());
-
-        self.print_resolution_stats(verbose);
-        self.print_duration_stats();
-        self.print_codec_stats();
-        self.print_bitrate_stats();
-        self.print_file_size_stats();
+        let mut lines = vec![
+            String::new(),
+            format!("Video Statistics ({total} files):").cyan().bold().to_string(),
+        ];
+        lines.extend(self.resolution_lines(verbose));
+        lines.extend(self.duration_line());
+        lines.extend(self.codec_line());
+        lines.extend(self.bitrate_line());
+        lines.extend(self.file_size_line());
+        lines
     }
 
-    /// Print resolution statistics using fuzzy resolution labels for grouping.
-    fn print_resolution_stats(&self, verbose: bool) {
+    /// Resolution lines, grouped by fuzzy resolution label and sorted by count.
+    fn resolution_lines(&self, verbose: bool) -> Vec<String> {
         if self.resolutions.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let smallest = self
@@ -210,7 +220,7 @@ impl VideoStats {
             .max_by_key(|r| r.pixel_count())
             .expect("non-empty");
 
-        println!("  {}: {smallest} — {biggest}", "Resolutions".bold());
+        let mut lines = vec![format!("  {}: {smallest} — {biggest}", "Resolutions".bold())];
 
         // Aggregate counts by fuzzy resolution label, tracking max width for proper sorting
         let mut label_counts: HashMap<Cow<'static, str>, (usize, u32)> = HashMap::new();
@@ -246,7 +256,7 @@ impl VideoStats {
             .unwrap_or(0);
 
         for (label, (count, _)) in display_labels {
-            println!("    {label:>max_label_width$}: {count:>max_count_width$}");
+            lines.push(format!("    {label:>max_label_width$}: {count:>max_count_width$}"));
         }
 
         if !verbose && total_labels > Self::MAX_RESOLUTION_ROWS {
@@ -257,18 +267,23 @@ impl VideoStats {
                 .iter()
                 .map(|(_, (count, _))| count)
                 .sum();
-            print_dimmed!(
-                "    ... {} with {}",
-                crate::count_label(remaining_labels, "more resolution", "more resolutions"),
-                crate::count_label(remaining_files, "file", "files")
+            lines.push(
+                format!(
+                    "    ... {} with {}",
+                    crate::count_label(remaining_labels, "more resolution", "more resolutions"),
+                    crate::count_label(remaining_files, "file", "files")
+                )
+                .dimmed()
+                .to_string(),
             );
         }
+        lines
     }
 
-    /// Print duration statistics.
-    fn print_duration_stats(&self) {
+    /// Duration line, or `None` when no duration was collected.
+    fn duration_line(&self) -> Option<String> {
         if self.durations.is_empty() {
-            return;
+            return None;
         }
 
         let min_duration = self.durations.iter().copied().reduce(f64::min).expect("non-empty");
@@ -276,42 +291,42 @@ impl VideoStats {
         let average = self.durations.iter().sum::<f64>() / self.durations.len() as f64;
         let median = compute_median_f64(&self.durations);
 
-        println!(
+        Some(format!(
             "  {}: {} — {} | avg: {} | median: {}",
             "Durations".bold(),
             crate::format_duration_seconds(min_duration),
             crate::format_duration_seconds(max_duration),
             crate::format_duration_seconds(average),
             crate::format_duration_seconds(median),
-        );
+        ))
     }
 
-    /// Print codec statistics.
-    fn print_codec_stats(&self) {
+    /// Codec line, or `None` when no codec was collected.
+    ///
+    /// A single codec is named on its own, several are named with their counts.
+    fn codec_line(&self) -> Option<String> {
         if self.codecs.is_empty() {
-            return;
+            return None;
         }
 
         let mut sorted_codecs: Vec<_> = self.codecs.iter().collect();
         sorted_codecs.sort_by(|a, b| b.1.cmp(a.1));
 
         let codec_summary: Vec<String> = if sorted_codecs.len() == 1 {
-            // Single codec: just show the name without count
             sorted_codecs.iter().map(|(codec, _)| (*codec).clone()).collect()
         } else {
-            // Multiple codecs: show name with count in parentheses
             sorted_codecs
                 .iter()
                 .map(|(codec, count)| format!("{codec} ({count})"))
                 .collect()
         };
-        println!("  {}: {}", "Codecs".bold(), codec_summary.join(", "));
+        Some(format!("  {}: {}", "Codecs".bold(), codec_summary.join(", ")))
     }
 
-    /// Print bitrate statistics.
-    fn print_bitrate_stats(&self) {
+    /// Bitrate line in megabits per second, or `None` when no bitrate was collected.
+    fn bitrate_line(&self) -> Option<String> {
         if self.bitrates_kbps.is_empty() {
-            return;
+            return None;
         }
 
         let min_bitrate = *self.bitrates_kbps.iter().min().expect("non-empty");
@@ -319,20 +334,20 @@ impl VideoStats {
         let average = self.bitrates_kbps.iter().sum::<u64>() as f64 / self.bitrates_kbps.len() as f64;
         let median = compute_median_u64(&self.bitrates_kbps);
 
-        println!(
+        Some(format!(
             "  {}: {:.2} Mbps — {:.2} Mbps | avg: {:.2} Mbps | median: {:.2} Mbps",
             "Bitrates".bold(),
             min_bitrate as f64 / 1000.0,
             max_bitrate as f64 / 1000.0,
             average / 1000.0,
             median as f64 / 1000.0,
-        );
+        ))
     }
 
-    /// Print file size statistics.
-    fn print_file_size_stats(&self) {
+    /// File size line, or `None` when no file size was collected.
+    fn file_size_line(&self) -> Option<String> {
         if self.file_sizes.is_empty() {
-            return;
+            return None;
         }
 
         let min_size = *self.file_sizes.iter().min().expect("non-empty");
@@ -343,7 +358,7 @@ impl VideoStats {
         let median = compute_median_u64(&self.file_sizes);
         let total: u64 = self.file_sizes.iter().sum();
 
-        println!(
+        Some(format!(
             "  {}: {} — {} | avg: {} | median: {} | total: {}",
             "File sizes".bold(),
             crate::format_size(min_size),
@@ -351,7 +366,7 @@ impl VideoStats {
             crate::format_size(average_u64),
             crate::format_size(median),
             crate::format_size(total),
-        );
+        ))
     }
 }
 
@@ -802,5 +817,205 @@ mod test_parse_ffprobe_output {
 
         assert_eq!(info.codec.as_deref(), Some("h264"));
         assert_eq!(info.resolution, Some(Resolution::new(1280, 720)));
+    }
+}
+
+#[cfg(test)]
+mod test_summary_lines {
+    use super::*;
+
+    /// Message without the terminal color codes.
+    ///
+    /// Colors are on when the terminal supports them,
+    /// which otherwise splits the text with escape sequences.
+    fn plain(message: &str) -> String {
+        let mut result = String::with_capacity(message.len());
+        let mut characters = message.chars();
+        while let Some(character) = characters.next() {
+            if character != '\u{1b}' {
+                result.push(character);
+                continue;
+            }
+            for escape in characters.by_ref() {
+                if escape == 'm' {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    /// Stats collected from the given infos.
+    fn stats(infos: &[VideoInfo]) -> VideoStats {
+        let mut stats = VideoStats::new();
+        for info in infos {
+            stats.add(info);
+        }
+        stats
+    }
+
+    /// Info with the given resolution, duration, codec, bitrate, and size.
+    fn info(width: u32, height: u32, duration: f64, codec: &str, bitrate_kbps: u64, size_bytes: u64) -> VideoInfo {
+        VideoInfo {
+            size_bytes: Some(size_bytes),
+            resolution: Some(Resolution::new(width, height)),
+            duration: Some(duration),
+            codec: Some(codec.to_string()),
+            bitrate_kbps: Some(bitrate_kbps),
+        }
+    }
+
+    /// The whole summary as one plain string.
+    fn summary(stats: &VideoStats, verbose: bool) -> String {
+        plain(&stats.summary_lines(verbose).join("\n"))
+    }
+
+    #[test]
+    fn a_single_file_produces_no_summary() {
+        let stats = stats(&[info(1920, 1080, 60.0, "h264", 4000, 1_000_000)]);
+
+        assert!(stats.summary_lines(false).is_empty());
+    }
+
+    #[test]
+    fn no_files_produce_no_summary() {
+        assert!(VideoStats::new().summary_lines(false).is_empty());
+        assert!(VideoStats::default().summary_lines(true).is_empty());
+    }
+
+    #[test]
+    fn reports_every_section_for_two_files() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+            info(3840, 2160, 120.0, "hevc", 12000, 8_000_000),
+        ]);
+
+        let text = summary(&stats, false);
+
+        assert!(text.contains("Video Statistics (2 files):"), "{text}");
+        assert!(text.contains("Resolutions"), "{text}");
+        assert!(text.contains("Durations"), "{text}");
+        assert!(text.contains("Codecs"), "{text}");
+        assert!(text.contains("Bitrates"), "{text}");
+        assert!(text.contains("File sizes"), "{text}");
+    }
+
+    #[test]
+    fn the_resolution_range_runs_from_the_smallest_to_the_biggest() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+            info(3840, 2160, 60.0, "h264", 4000, 1_000_000),
+        ]);
+
+        let text = summary(&stats, false);
+
+        assert!(text.contains("1920x1080 — 3840x2160"), "{text}");
+    }
+
+    #[test]
+    fn a_single_codec_is_named_without_a_count() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+        ]);
+
+        let text = summary(&stats, false);
+
+        assert!(text.contains("Codecs: h264"), "{text}");
+        assert!(!text.contains("h264 ("), "a lone codec needs no count: {text}");
+    }
+
+    #[test]
+    fn several_codecs_are_named_with_their_counts_most_common_first() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "hevc", 4000, 1_000_000),
+            info(1920, 1080, 60.0, "hevc", 4000, 1_000_000),
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+        ]);
+
+        let text = summary(&stats, false);
+
+        assert!(text.contains("Codecs: hevc (2), h264 (1)"), "{text}");
+    }
+
+    #[test]
+    fn the_bitrate_line_reports_megabits_per_second() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "h264", 2000, 1_000_000),
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+        ]);
+
+        let text = summary(&stats, false);
+
+        assert!(
+            text.contains("Bitrates: 2.00 Mbps — 4.00 Mbps | avg: 3.00 Mbps | median: 3.00 Mbps"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_file_size_line_reports_the_range_and_the_total() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "h264", 4000, 1024 * 1024),
+            info(1920, 1080, 60.0, "h264", 4000, 3 * 1024 * 1024),
+        ]);
+
+        let text = summary(&stats, false);
+
+        assert!(text.contains("File sizes"), "{text}");
+        assert!(text.contains("total: 4.00"), "the total should be the sum: {text}");
+    }
+
+    #[test]
+    fn only_the_top_resolution_rows_are_listed_unless_verbose() {
+        let infos: Vec<VideoInfo> = (0..VideoStats::MAX_RESOLUTION_ROWS + 3)
+            .map(|index| {
+                let height = 100 + index as u32 * 100;
+                info(height * 2, height, 60.0, "h264", 4000, 1_000_000)
+            })
+            .collect();
+        let stats = stats(&infos);
+
+        let short = summary(&stats, false);
+        let long = summary(&stats, true);
+
+        assert!(
+            short.contains("more resolutions"),
+            "the rest should be summarised: {short}"
+        );
+        assert!(
+            !long.contains("more resolutions"),
+            "verbose should list every row: {long}"
+        );
+        assert!(long.lines().count() > short.lines().count());
+    }
+
+    #[test]
+    fn missing_fields_leave_their_sections_out() {
+        let bare = VideoInfo {
+            resolution: Some(Resolution::new(1920, 1080)),
+            ..VideoInfo::default()
+        };
+        let stats = stats(&[bare.clone(), bare]);
+
+        let text = summary(&stats, false);
+
+        assert!(text.contains("Resolutions"), "{text}");
+        assert!(!text.contains("Durations"), "{text}");
+        assert!(!text.contains("Codecs"), "{text}");
+        assert!(!text.contains("Bitrates"), "{text}");
+        assert!(!text.contains("File sizes"), "{text}");
+    }
+
+    #[test]
+    fn printing_the_summary_does_not_panic() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+            info(3840, 2160, 120.0, "hevc", 12000, 8_000_000),
+        ]);
+
+        stats.print_summary(false);
+        stats.print_summary(true);
+        VideoStats::new().print_summary(true);
     }
 }

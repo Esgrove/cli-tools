@@ -276,8 +276,14 @@ pub fn format_duration_seconds(seconds: f64) -> String {
 /// then checks for the global directory.
 /// If neither exist, creates and uses the user-specific dir.
 fn get_shell_completion_dir(shell: Shell, name: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().expect("Failed to get home directory");
+    let home = dirs::home_dir().context("Failed to get home directory")?;
+    shell_completion_dir_in(&home, shell, name)
+}
 
+/// Determine the completion directory under the given home directory.
+///
+/// Taking the home directory as an argument keeps the decision testable.
+fn shell_completion_dir_in(home: &Path, shell: Shell, name: &str) -> Result<PathBuf> {
     // Special handling for oh-my-zsh.
     // Create custom "plugin", which will then have to be loaded in .zshrc
     if shell == Shell::Zsh {
@@ -367,9 +373,16 @@ pub fn get_user_confirmation(message: &str, default: bool) -> std::io::Result<bo
     let hint = if default { "[Y/n]" } else { "[y/N]" };
     print!("{message} {hint} ");
     io::stdout().flush()?;
+    read_confirmation(io::stdin().lock(), default)
+}
 
+/// Read one answer from the reader and decide what it means.
+///
+/// An empty answer takes the default, "y" and "yes" are yes, and anything else is no.
+/// Taking the reader as an argument keeps the decision testable.
+fn read_confirmation(mut reader: impl io::BufRead, default: bool) -> std::io::Result<bool> {
     let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    reader.read_line(&mut input)?;
 
     let trimmed = input.trim().to_lowercase();
     if trimmed.is_empty() {
@@ -2113,5 +2126,123 @@ mod tokio_directory_entry_tests {
         assert!(system_found);
         assert!(ordinary_found);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_read_confirmation {
+    use super::*;
+
+    #[test]
+    fn an_empty_answer_takes_the_default() {
+        assert!(read_confirmation(&b"\n"[..], true).expect("should read"));
+        assert!(!read_confirmation(&b"\n"[..], false).expect("should read"));
+        assert!(read_confirmation(&b"   \n"[..], true).expect("should read"));
+    }
+
+    #[test]
+    fn yes_answers_are_accepted_in_any_case() {
+        for answer in ["y\n", "Y\n", "yes\n", "YES\n", " Yes \n"] {
+            assert!(
+                read_confirmation(answer.as_bytes(), false).expect("should read"),
+                "{answer:?} should mean yes"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_else_means_no_even_when_the_default_is_yes() {
+        for answer in ["n\n", "no\n", "nope\n", "maybe\n", "1\n"] {
+            assert!(
+                !read_confirmation(answer.as_bytes(), true).expect("should read"),
+                "{answer:?} should mean no"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_input_takes_the_default() {
+        assert!(read_confirmation(&b""[..], true).expect("should read"));
+        assert!(!read_confirmation(&b""[..], false).expect("should read"));
+    }
+}
+
+#[cfg(test)]
+mod test_shell_completion_dir {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Temporary home directory standing in for the user's own.
+    fn home() -> TempDir {
+        TempDir::new().expect("temporary directory")
+    }
+
+    #[test]
+    fn an_oh_my_zsh_install_gets_a_custom_plugin_directory() {
+        let home = home();
+        std::fs::create_dir_all(home.path().join(".oh-my-zsh/custom/plugins")).expect("plugins directory");
+
+        let directory = shell_completion_dir_in(home.path(), Shell::Zsh, "slb").expect("a directory should be chosen");
+
+        assert_eq!(directory, home.path().join(".oh-my-zsh/custom/plugins/slb"));
+        assert!(directory.is_dir(), "the plugin directory should be created");
+    }
+
+    #[test]
+    fn oh_my_zsh_handling_only_applies_to_zsh() {
+        let home = home();
+        std::fs::create_dir_all(home.path().join(".oh-my-zsh/custom/plugins")).expect("plugins directory");
+        let expected = home.path().join(".config/fish/completions");
+        std::fs::create_dir_all(&expected).expect("fish directory");
+
+        let directory = shell_completion_dir_in(home.path(), Shell::Fish, "slb").expect("a directory should be chosen");
+
+        assert_eq!(directory, expected);
+    }
+
+    #[test]
+    fn an_existing_user_directory_is_used_as_it_is() {
+        let home = home();
+        let expected = home.path().join(".bash_completion.d");
+        std::fs::create_dir_all(&expected).expect("bash directory");
+
+        let directory = shell_completion_dir_in(home.path(), Shell::Bash, "slb").expect("a directory should be chosen");
+
+        assert_eq!(directory, expected);
+    }
+
+    #[test]
+    fn a_missing_directory_is_created_for_the_user() {
+        let home = home();
+
+        // On a non-Windows host the user and global PowerShell paths are the same,
+        // so neither exists and the directory has to be created.
+        let directory =
+            shell_completion_dir_in(home.path(), Shell::PowerShell, "slb").expect("a directory should be chosen");
+
+        assert_eq!(directory, home.path().join(".config/powershell/completions"));
+        assert!(directory.is_dir(), "the directory should be created");
+    }
+
+    #[test]
+    fn a_shell_without_a_known_directory_is_rejected() {
+        let home = home();
+
+        let error = shell_completion_dir_in(home.path(), Shell::Elvish, "slb")
+            .expect_err("elvish has no global directory to fall back to");
+
+        assert!(error.to_string().contains("Unsupported shell"), "{error}");
+    }
+
+    #[test]
+    fn an_existing_elvish_directory_is_used() {
+        let home = home();
+        let expected = home.path().join(".elvish");
+        std::fs::create_dir_all(&expected).expect("elvish directory");
+
+        let directory =
+            shell_completion_dir_in(home.path(), Shell::Elvish, "slb").expect("a directory should be chosen");
+
+        assert_eq!(directory, expected);
     }
 }
