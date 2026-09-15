@@ -185,6 +185,11 @@ mod cli_args_tests {
     use super::*;
 
     #[test]
+    fn the_command_definition_is_valid() {
+        QtorrentArgs::command().debug_assert();
+    }
+
+    #[test]
     fn parses_multiple_paths() {
         let args =
             QtorrentArgs::try_parse_from(["test", "/path/one.torrent", "/path/two.torrent"]).expect("should parse");

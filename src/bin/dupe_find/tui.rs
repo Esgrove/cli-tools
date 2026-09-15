@@ -707,3 +707,346 @@ mod test_file_scoring {
         assert_eq!(find_best_file_index(&[]), 0);
     }
 }
+
+#[cfg(test)]
+mod tui_test_helpers {
+    use super::*;
+
+    /// File info for a path, with the extension taken from the name.
+    pub fn file(path: &str) -> DupeFileInfo {
+        let extension = std::path::Path::new(path)
+            .extension()
+            .map(|value| value.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        DupeFileInfo::new(PathBuf::from(path), extension)
+    }
+
+    /// Video info with the given dimensions, duration, and codec.
+    pub fn video_info(width: u32, height: u32, codec: &str) -> VideoInfo {
+        VideoInfo {
+            size_bytes: Some(1024 * 1024),
+            resolution: Some(cli_tools::Resolution::new(width, height)),
+            duration: Some(120.0),
+            codec: Some(codec.to_string()),
+            bitrate_kbps: Some(4000),
+        }
+    }
+
+    /// Render the interface into a test buffer and return it as one string per row.
+    pub fn render(
+        files: &[&DupeFileInfo],
+        state: &TuiState,
+        metadata: &HashMap<PathBuf, VideoInfo>,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height))
+            .expect("the test terminal should be created");
+        let mut list_state = ListState::default();
+        terminal
+            .draw(|frame| render_ui(frame, "group-key", files, state, &mut list_state, 1, 3, metadata))
+            .expect("the interface should render");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer.cell((column, row)).map_or(" ", ratatui::buffer::Cell::symbol))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod test_format_file_detail_lines {
+    use super::tui_test_helpers::*;
+    use super::*;
+
+    /// The visible text of the rendered lines, one string per line.
+    fn text(lines: &[Line<'static>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn the_selected_file_is_marked_with_an_arrow() {
+        let info = file("/videos/movie.1080p.mp4");
+
+        let selected = text(&format_file_detail_lines(&info, 0, 0, &HashMap::new()));
+        let other = text(&format_file_detail_lines(&info, 1, 0, &HashMap::new()));
+
+        assert!(selected[0].starts_with("► "), "{selected:?}");
+        assert!(other[0].starts_with("  "), "{other:?}");
+    }
+
+    #[test]
+    fn the_path_is_shown_in_full() {
+        let info = file("/videos/movie.1080p.mp4");
+
+        let lines = text(&format_file_detail_lines(&info, 0, 0, &HashMap::new()));
+
+        assert!(lines[0].contains("/videos/movie.1080p.mp4"), "{lines:?}");
+    }
+
+    #[test]
+    fn known_metadata_is_listed_for_the_file() {
+        let info = file("/videos/movie.mp4");
+        let mut metadata = HashMap::new();
+        metadata.insert(info.path.clone(), video_info(1920, 1080, "hevc"));
+
+        let joined = text(&format_file_detail_lines(&info, 0, 0, &metadata)).join("\n");
+
+        assert!(joined.contains("1080"), "the resolution should be shown: {joined}");
+        assert!(joined.contains("hevc"), "the codec should be shown: {joined}");
+    }
+
+    #[test]
+    fn a_file_without_metadata_still_renders() {
+        let info = file("/videos/movie.mp4");
+
+        let lines = format_file_detail_lines(&info, 0, 0, &HashMap::new());
+
+        assert!(!lines.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_render_ui {
+    use super::tui_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn shows_the_group_position_and_every_file_name() {
+        let first = file("/videos/movie.1080p.mp4");
+        let second = file("/videos/movie.720p.mp4");
+        let files = vec![&first, &second];
+
+        let rows = render(&files, &TuiState::new(), &HashMap::new(), 120, 40).join("\n");
+
+        assert!(rows.contains("movie.1080p.mp4"), "{rows}");
+        assert!(rows.contains("movie.720p.mp4"), "{rows}");
+        assert!(rows.contains('3'), "the group count should be shown: {rows}");
+    }
+
+    #[test]
+    fn edit_mode_shows_the_buffer_being_typed() {
+        let only = file("/videos/movie.mp4");
+        let files = vec![&only];
+        let mut state = TuiState::new();
+        state.start_editing("new name");
+
+        let rows = render(&files, &state, &HashMap::new(), 120, 40).join("\n");
+
+        assert!(rows.contains("new name"), "the edit buffer should be shown: {rows}");
+    }
+
+    #[test]
+    fn the_confirmation_dialog_is_rendered() {
+        let only = file("/videos/movie.mp4");
+        let files = vec![&only];
+        let mut state = TuiState::new();
+        state.confirming = true;
+
+        let rows = render(&files, &state, &HashMap::new(), 120, 40).join("\n");
+
+        assert!(!rows.trim().is_empty(), "the dialog should draw something");
+    }
+
+    #[test]
+    fn rename_only_mode_is_rendered() {
+        let only = file("/videos/movie.mp4");
+        let files = vec![&only];
+        let mut state = TuiState::new();
+        state.start_editing("renamed");
+        state.rename_only = true;
+
+        let rows = render(&files, &state, &HashMap::new(), 120, 40).join("\n");
+
+        assert!(rows.contains("renamed"), "{rows}");
+    }
+
+    #[test]
+    fn metadata_is_rendered_for_the_listed_files() {
+        let video = PathBuf::from("/videos/movie.mp4");
+        let only = file("/videos/movie.mp4");
+        let files = vec![&only];
+        let mut metadata = HashMap::new();
+        metadata.insert(video, video_info(3840, 2160, "hevc"));
+
+        let rows = render(&files, &TuiState::new(), &metadata, 120, 40).join("\n");
+
+        assert!(rows.contains("2160"), "{rows}");
+    }
+
+    #[test]
+    fn a_narrow_short_terminal_does_not_panic() {
+        let only = file("/videos/movie.mp4");
+        let files = vec![&only];
+
+        let rows = render(&files, &TuiState::new(), &HashMap::new(), 20, 8);
+
+        assert_eq!(rows.len(), 8);
+    }
+
+    #[test]
+    fn many_files_do_not_overflow_the_layout() {
+        let owned: Vec<DupeFileInfo> = (0..12)
+            .map(|index| file(&format!("/videos/movie.{index}.mp4")))
+            .collect();
+        let files: Vec<&DupeFileInfo> = owned.iter().collect();
+
+        let rows = render(&files, &TuiState::new(), &HashMap::new(), 100, 24);
+
+        assert_eq!(rows.len(), 24);
+    }
+}
+
+#[cfg(test)]
+mod test_apply_actions {
+    use super::tui_test_helpers::*;
+    use super::*;
+
+    /// Temporary directory holding one file per given name.
+    fn group_in(directory: &std::path::Path, names: &[&str]) -> DuplicateGroup {
+        let files = names
+            .iter()
+            .map(|name| {
+                let path = directory.join(name);
+                std::fs::write(&path, b"content").expect("file should be written");
+                file(&path.to_string_lossy())
+            })
+            .collect();
+        DuplicateGroup::new("movie".to_string(), files)
+    }
+
+    #[test]
+    fn skip_and_quit_actions_do_nothing() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.mp4"]);
+        let actions = vec![
+            GroupAction {
+                group_index: 0,
+                action: DuplicateAction::Skip,
+            },
+            GroupAction {
+                group_index: 0,
+                action: DuplicateAction::Quit,
+            },
+        ];
+
+        apply_actions(&[group], &actions).expect("skipped groups should succeed");
+
+        assert!(directory.path().join("movie.mp4").is_file(), "nothing should change");
+    }
+
+    #[test]
+    fn rename_only_renames_the_selected_file() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.mp4"]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::RenameOnly {
+                rename_index: 0,
+                new_name: "better.name".to_string(),
+            },
+        }];
+
+        apply_actions(&[group], &actions).expect("the rename should succeed");
+
+        assert!(directory.path().join("better.name.mp4").is_file());
+        assert!(!directory.path().join("movie.mp4").exists());
+    }
+
+    #[test]
+    fn a_rename_to_the_same_name_is_a_no_op() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.mp4"]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::RenameOnly {
+                rename_index: 0,
+                new_name: "movie".to_string(),
+            },
+        }];
+
+        apply_actions(&[group], &actions).expect("the rename should succeed");
+
+        assert!(directory.path().join("movie.mp4").is_file());
+    }
+
+    #[test]
+    fn keeping_the_only_file_renames_it_without_deleting_anything() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.mp4"]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: Some("kept".to_string()),
+            },
+        }];
+
+        apply_actions(&[group], &actions).expect("the rename should succeed");
+
+        assert!(directory.path().join("kept.mp4").is_file());
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("directory should be readable")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn keeping_the_only_file_without_a_new_name_changes_nothing() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.mp4"]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: None,
+            },
+        }];
+
+        apply_actions(&[group], &actions).expect("the action should succeed");
+
+        assert!(directory.path().join("movie.mp4").is_file());
+    }
+
+    #[test]
+    fn a_group_index_outside_the_list_is_an_error() {
+        let actions = vec![GroupAction {
+            group_index: 7,
+            action: DuplicateAction::RenameOnly {
+                rename_index: 0,
+                new_name: "name".to_string(),
+            },
+        }];
+
+        let error = apply_actions(&[], &actions).expect_err("an unknown group should fail");
+
+        assert!(error.to_string().contains("out of bounds"), "{error}");
+    }
+
+    #[test]
+    fn a_file_index_outside_the_group_is_an_error() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.mp4"]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::RenameOnly {
+                rename_index: 5,
+                new_name: "name".to_string(),
+            },
+        }];
+
+        let error = apply_actions(&[group], &actions).expect_err("an unknown file should fail");
+
+        assert!(error.to_string().contains("unavailable"), "{error}");
+    }
+}

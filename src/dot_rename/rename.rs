@@ -1587,3 +1587,489 @@ mod test_extension_only_rename {
         assert_eq!(files.len(), 0, "Already normalized files should not be renamed");
     }
 }
+
+#[cfg(test)]
+mod rename_test_helpers {
+    use super::*;
+    use std::fs::{self, File};
+    use tempfile::TempDir;
+
+    /// Temporary directory with a visible name, so the walker does not skip it as hidden.
+    pub fn temporary_directory() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("dots_test")
+            .tempdir()
+            .expect("temporary directory should be created")
+    }
+
+    /// Create a file inside the directory, creating parent directories as needed.
+    pub fn write(directory: &Path, relative: &str) -> PathBuf {
+        let path = directory.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent directories should be created");
+        }
+        File::create(&path).expect("file should be created");
+        path
+    }
+
+    /// Create a directory inside the directory.
+    pub fn directory(parent: &Path, relative: &str) -> PathBuf {
+        let path = parent.join(relative);
+        fs::create_dir_all(&path).expect("directory should be created");
+        path
+    }
+
+    /// Names of the entries directly inside the directory, sorted.
+    pub fn entries(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .expect("directory should be readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Instance rooted at the directory with the given config.
+    pub fn dots(root: &Path, config: DotRenameConfig, path_given: bool) -> DotRename {
+        DotRename::new(root.to_path_buf(), config, path_given)
+    }
+}
+
+#[cfg(test)]
+mod test_run_files {
+    use super::rename_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn renames_the_files_of_the_root_directory() {
+        let temporary = temporary_directory();
+        write(temporary.path(), "some file name.txt");
+        write(temporary.path(), "another_file.txt");
+
+        dots(temporary.path(), DotRenameConfig::default(), false)
+            .run()
+            .expect("the run should succeed");
+
+        assert_eq!(
+            entries(temporary.path()),
+            vec!["Another.File.txt", "Some.File.Name.txt"]
+        );
+    }
+
+    #[test]
+    fn dryrun_leaves_every_file_alone() {
+        let temporary = temporary_directory();
+        write(temporary.path(), "some file name.txt");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                dryrun: true,
+                verbose: true,
+                debug: true,
+                ..Default::default()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["some file name.txt"]);
+    }
+
+    #[test]
+    fn a_directory_of_already_formatted_files_is_left_alone() {
+        let temporary = temporary_directory();
+        write(temporary.path(), "Already.Formatted.txt");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                verbose: true,
+                ..Default::default()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Already.Formatted.txt"]);
+    }
+
+    #[test]
+    fn a_single_file_path_is_renamed_on_its_own() {
+        let temporary = temporary_directory();
+        let file = write(temporary.path(), "some file.txt");
+        write(temporary.path(), "other file.txt");
+
+        dots(
+            &file,
+            DotRenameConfig {
+                verbose: true,
+                ..Default::default()
+            },
+            true,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Some.File.txt", "other file.txt"]);
+    }
+
+    #[test]
+    fn renaming_directories_with_a_file_as_input_is_an_error() {
+        let temporary = temporary_directory();
+        let file = write(temporary.path(), "some file.txt");
+
+        let error = dots(
+            &file,
+            DotRenameConfig {
+                rename_directories: true,
+                ..Default::default()
+            },
+            true,
+        )
+        .run()
+        .expect_err("a file input should be rejected");
+
+        assert!(error.to_string().contains("Cannot rename directories"));
+    }
+
+    #[test]
+    fn recursing_renames_files_in_subdirectories() {
+        let temporary = temporary_directory();
+        let nested = directory(temporary.path(), "nested dir");
+        write(&nested, "deep file.txt");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(&nested), vec!["Deep.File.txt"]);
+    }
+}
+
+#[cfg(test)]
+mod test_run_directories {
+    use super::rename_test_helpers::*;
+    use super::*;
+
+    fn config() -> DotRenameConfig {
+        DotRenameConfig {
+            rename_directories: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn renames_the_directories_inside_the_root() {
+        let temporary = temporary_directory();
+        directory(temporary.path(), "some dir name");
+        directory(temporary.path(), "another_dir");
+
+        dots(temporary.path(), config(), false)
+            .run()
+            .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Another Dir", "Some Dir Name"]);
+    }
+
+    #[test]
+    fn a_given_directory_renames_itself_rather_than_its_children() {
+        let temporary = temporary_directory();
+        let target = directory(temporary.path(), "some dir name");
+        directory(&target, "inner dir");
+
+        dots(&target, config(), true).run().expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Some Dir Name"]);
+        assert_eq!(
+            entries(&temporary.path().join("Some Dir Name")),
+            vec!["inner dir"],
+            "only the given directory should be renamed"
+        );
+    }
+
+    #[test]
+    fn recursing_renames_the_deepest_directories_first() {
+        let temporary = temporary_directory();
+        let outer = directory(temporary.path(), "outer dir");
+        directory(&outer, "inner dir");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                recurse: true,
+                ..config()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Outer Dir"]);
+        assert_eq!(entries(&temporary.path().join("Outer Dir")), vec!["Inner Dir"]);
+    }
+
+    #[test]
+    fn the_include_filter_limits_the_renamed_directories() {
+        let temporary = temporary_directory();
+        directory(temporary.path(), "keep this");
+        directory(temporary.path(), "skip that");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                include: vec!["keep".to_string()],
+                ..config()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Keep This", "skip that"]);
+    }
+
+    #[test]
+    fn nothing_to_rename_reports_and_succeeds() {
+        let temporary = temporary_directory();
+        directory(temporary.path(), "Already Formatted");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                verbose: true,
+                ..config()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Already Formatted"]);
+    }
+}
+
+#[cfg(test)]
+mod test_directory_merge {
+    use super::rename_test_helpers::*;
+    use super::*;
+
+    fn config() -> DotRenameConfig {
+        DotRenameConfig {
+            rename_directories: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn merging_into_an_existing_directory_moves_the_files_and_drops_the_source() {
+        let temporary = temporary_directory();
+        let source = directory(temporary.path(), "some_dir");
+        write(&source, "file one.txt");
+        write(&source, "nested/file two.txt");
+        directory(temporary.path(), "Some Dir");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                verbose: true,
+                ..config()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Some Dir"]);
+        let target = temporary.path().join("Some Dir");
+        assert!(target.join("file one.txt").is_file());
+        assert!(target.join("nested").join("file two.txt").is_file());
+        assert!(!source.exists(), "the emptied source directory should be removed");
+    }
+
+    #[test]
+    fn a_conflicting_file_is_kept_unless_overwrite_is_set() {
+        let temporary = temporary_directory();
+        let source = directory(temporary.path(), "some_dir");
+        std::fs::write(source.join("same.txt"), b"from source").expect("file should be written");
+        let target = directory(temporary.path(), "Some Dir");
+        std::fs::write(target.join("same.txt"), b"from target").expect("file should be written");
+
+        dots(temporary.path(), config(), false)
+            .run()
+            .expect("the run should succeed");
+
+        let content = std::fs::read_to_string(target.join("same.txt")).expect("the file should exist");
+        assert_eq!(content, "from target", "the existing file should survive");
+        assert!(
+            source.join("same.txt").is_file(),
+            "the source file should be left behind"
+        );
+    }
+
+    #[test]
+    fn overwrite_replaces_the_conflicting_file() {
+        let temporary = temporary_directory();
+        let source = directory(temporary.path(), "some_dir");
+        std::fs::write(source.join("same.txt"), b"from source").expect("file should be written");
+        let target = directory(temporary.path(), "Some Dir");
+        std::fs::write(target.join("same.txt"), b"from target").expect("file should be written");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                overwrite: true,
+                verbose: true,
+                ..config()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        let content = std::fs::read_to_string(target.join("same.txt")).expect("the file should exist");
+        assert_eq!(content, "from source", "the moved file should win");
+        assert!(!source.exists(), "the emptied source directory should be removed");
+    }
+
+    #[test]
+    fn dryrun_reports_the_merge_without_moving_anything() {
+        let temporary = temporary_directory();
+        let source = directory(temporary.path(), "some_dir");
+        write(&source, "file one.txt");
+        directory(temporary.path(), "Some Dir");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                dryrun: true,
+                ..config()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert!(source.join("file one.txt").is_file(), "nothing should move in a dryrun");
+        assert_eq!(entries(temporary.path()), vec!["Some Dir", "some_dir"]);
+    }
+}
+
+#[cfg(test)]
+mod test_rename_conflicts {
+    use super::rename_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn an_existing_target_is_skipped_by_default() {
+        let temporary = temporary_directory();
+        std::fs::write(temporary.path().join("some file.txt"), b"source").expect("file should be written");
+        std::fs::write(temporary.path().join("Some.File.txt"), b"target").expect("file should be written");
+
+        dots(temporary.path(), DotRenameConfig::default(), false)
+            .run()
+            .expect("the run should succeed");
+
+        let content = std::fs::read_to_string(temporary.path().join("Some.File.txt")).expect("the file should exist");
+        assert_eq!(content, "target");
+        assert!(temporary.path().join("some file.txt").is_file());
+    }
+
+    #[test]
+    fn increment_name_renames_beside_the_existing_file() {
+        let temporary = temporary_directory();
+        write(temporary.path(), "some file.txt");
+        write(temporary.path(), "Some.File.txt");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                increment_name: true,
+                ..Default::default()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        assert_eq!(
+            entries(temporary.path()),
+            vec!["Some.File.2.txt", "Some.File.txt"],
+            "the incremented name should be used"
+        );
+    }
+
+    #[test]
+    fn overwrite_replaces_the_existing_file() {
+        let temporary = temporary_directory();
+        std::fs::write(temporary.path().join("some file.txt"), b"source").expect("file should be written");
+        std::fs::write(temporary.path().join("Some.File.txt"), b"target").expect("file should be written");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                overwrite: true,
+                ..Default::default()
+            },
+            false,
+        )
+        .run()
+        .expect("the run should succeed");
+
+        let content = std::fs::read_to_string(temporary.path().join("Some.File.txt")).expect("the file should exist");
+        assert_eq!(content, "source");
+        assert_eq!(entries(temporary.path()), vec!["Some.File.txt"]);
+    }
+
+    #[test]
+    fn a_capitalization_only_change_goes_through_a_temporary_file() {
+        let temporary = temporary_directory();
+        std::fs::write(temporary.path().join("photo.JPG"), b"image").expect("file should be written");
+
+        dots(temporary.path(), DotRenameConfig::default(), false)
+            .run()
+            .expect("the run should succeed");
+
+        assert_eq!(entries(temporary.path()), vec!["Photo.jpg"]);
+        let content = std::fs::read_to_string(temporary.path().join("Photo.jpg")).expect("the file should exist");
+        assert_eq!(content, "image");
+    }
+}
+
+#[cfg(test)]
+mod test_get_incremented_path {
+    use super::rename_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn the_first_free_index_starts_at_two() {
+        let temporary = temporary_directory();
+        let taken = write(temporary.path(), "Name.txt");
+
+        let incremented = DotRename::get_incremented_path(&taken).expect("a free path should be found");
+
+        assert_eq!(incremented, temporary.path().join("Name.2.txt"));
+    }
+
+    #[test]
+    fn taken_indexes_are_skipped() {
+        let temporary = temporary_directory();
+        let taken = write(temporary.path(), "Name.txt");
+        write(temporary.path(), "Name.2.txt");
+        write(temporary.path(), "Name.3.txt");
+
+        let incremented = DotRename::get_incremented_path(&taken).expect("a free path should be found");
+
+        assert_eq!(incremented, temporary.path().join("Name.4.txt"));
+    }
+}

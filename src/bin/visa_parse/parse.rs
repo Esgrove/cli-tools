@@ -541,7 +541,7 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
     let count = items.len();
     let average = if count > 0 { total_sum / count as f64 } else { 0.0 };
 
-    println!("Average items per file: {:.1}", items.len() / num_files);
+    println!("Average items per file: {:.1}", count as f64 / num_files as f64);
     println!("Total sum: {total_sum:.2}€");
     println!("Average sum: {average:.2}€");
     println!("Unique names: {}", totals.len());
@@ -1900,5 +1900,282 @@ mod test_replace_pairs {
         assert!(REPLACE_START.contains(&"K-MARKET"));
         assert!(REPLACE_START.contains(&"STOCKMANN"));
         assert!(REPLACE_START.contains(&"PAYPAL BANDCAMP"));
+    }
+}
+
+#[cfg(test)]
+mod test_parse_files {
+    use super::*;
+
+    /// Absolute path to the fixture directory, so a test does not depend on the working directory.
+    fn fixture_directory() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
+    }
+
+    #[test]
+    fn collects_and_sorts_the_items_of_every_file() {
+        let root = fixture_directory();
+        let files = vec![root.join("visa_year_transition.xml"), root.join("visa_sample.xml")];
+
+        let items = parse_files(&root, files, false).expect("the fixtures should parse");
+
+        assert!(
+            items.len() > 8,
+            "both fixtures should contribute items: {}",
+            items.len()
+        );
+        assert!(
+            items.windows(2).all(|pair| pair[0] <= pair[1]),
+            "parse_files should return the items sorted"
+        );
+    }
+
+    #[test]
+    fn verbose_output_does_not_change_the_items() {
+        let root = fixture_directory();
+        let file = vec![root.join("visa_sample.xml")];
+
+        let quiet = parse_files(&root, file.clone(), false).expect("the fixture should parse");
+        let verbose = parse_files(&root, file, true).expect("the fixture should parse");
+
+        assert_eq!(quiet, verbose);
+    }
+
+    #[test]
+    fn a_file_without_transactions_contributes_nothing() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let empty = directory.path().join("empty.xml");
+        std::fs::write(&empty, "<Finvoice></Finvoice>\n").expect("file should be written");
+
+        let items = parse_files(directory.path(), vec![empty], false).expect("an empty file should parse");
+
+        assert!(items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_write_to_csv {
+    use super::*;
+
+    fn items() -> Vec<VisaItem> {
+        vec![
+            VisaItem {
+                date: Date::new(2024, 1, 5).expect("valid date"),
+                name: "K-MARKET".to_string(),
+                sum: 25.5,
+            },
+            VisaItem {
+                date: Date::new(2024, 2, 17).expect("valid date"),
+                name: "WOLT".to_string(),
+                sum: 18.9,
+            },
+        ]
+    }
+
+    #[test]
+    fn writes_a_header_and_one_row_per_item() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        write_to_csv(&items(), directory.path()).expect("the csv should be written");
+
+        let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
+        assert_eq!(
+            content,
+            "Date,Sum,Name\n2024.01.05,25.50,K-MARKET\n2024.02.17,18.90,WOLT\n"
+        );
+    }
+
+    #[test]
+    fn an_output_path_naming_a_csv_file_is_used_as_it_is() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let output = directory.path().join("purchases.CSV");
+
+        write_to_csv(&items(), &output).expect("the csv should be written");
+
+        assert!(output.exists(), "the given file name should be used");
+        assert!(!directory.path().join("VISA.csv").exists());
+    }
+
+    #[test]
+    fn an_existing_file_is_replaced_rather_than_appended_to() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let output = directory.path().join("VISA.csv");
+        std::fs::write(&output, "stale content that must not survive\n").expect("file should be written");
+
+        write_to_csv(&items(), directory.path()).expect("the csv should be written");
+
+        let content = std::fs::read_to_string(&output).expect("the csv should exist");
+        assert!(!content.contains("stale"));
+        assert_eq!(content.lines().count(), 3);
+    }
+
+    #[test]
+    fn no_items_writes_only_the_header() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        write_to_csv(&[], directory.path()).expect("the csv should be written");
+
+        let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
+        assert_eq!(content, "Date,Sum,Name\n");
+    }
+}
+
+#[cfg(test)]
+mod test_write_to_excel {
+    use super::*;
+
+    fn items() -> Vec<VisaItem> {
+        vec![
+            VisaItem {
+                date: Date::new(2024, 1, 5).expect("valid date"),
+                name: "K-MARKET".to_string(),
+                sum: 25.5,
+            },
+            VisaItem {
+                date: Date::new(2024, 2, 17).expect("valid date"),
+                name: "WOLT".to_string(),
+                sum: 18.9,
+            },
+        ]
+    }
+
+    #[test]
+    fn writes_a_workbook_for_the_items_and_the_totals() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let totals = calculate_totals_for_each_name(&items());
+
+        write_to_excel(&items(), &totals, directory.path()).expect("the workbook should be written");
+
+        let output = directory.path().join("VISA.xlsx");
+        let size = std::fs::metadata(&output).expect("the workbook should exist").len();
+        // The writer produces a zip container, so any real workbook is well over a few hundred bytes.
+        assert!(size > 1000, "the workbook looks empty at {size} bytes");
+    }
+
+    #[test]
+    fn an_output_path_naming_an_xlsx_file_is_used_as_it_is() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let output = directory.path().join("purchases.xlsx");
+
+        write_to_excel(&items(), &[], &output).expect("the workbook should be written");
+
+        assert!(output.exists(), "the given file name should be used");
+        assert!(!directory.path().join("VISA.xlsx").exists());
+    }
+
+    #[test]
+    fn no_items_is_an_error_because_the_sheet_needs_a_first_date() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        let error = write_to_excel(&[], &[], directory.path()).expect_err("an empty workbook should fail");
+
+        assert!(error.to_string().contains("without items"));
+    }
+}
+
+#[cfg(test)]
+mod test_visa_parse {
+    use super::*;
+
+    /// Config for the fixture directory, writing into the given output directory.
+    fn config(output: &Path, print: bool) -> Config {
+        Config {
+            input_path: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures"),
+            output_path: output.to_path_buf(),
+            print,
+            number: 3,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn writes_both_reports_for_the_fixture_directory() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        visa_parse(&config(directory.path(), false)).expect("the fixtures should parse");
+
+        let csv = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
+        assert!(csv.starts_with("Date,Sum,Name\n"));
+        assert!(csv.lines().count() > 9, "every fixture item should be a row: {csv}");
+        assert!(directory.path().join("VISA.xlsx").exists(), "the workbook should exist");
+    }
+
+    #[test]
+    fn print_mode_writes_no_files() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        visa_parse(&config(directory.path(), true)).expect("the fixtures should parse");
+
+        assert!(!directory.path().join("VISA.csv").exists());
+        assert!(!directory.path().join("VISA.xlsx").exists());
+    }
+
+    #[test]
+    fn verbose_mode_prints_the_totals_and_still_writes() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let mut config = config(directory.path(), false);
+        config.verbose = true;
+
+        visa_parse(&config).expect("the fixtures should parse");
+
+        assert!(directory.path().join("VISA.csv").exists());
+    }
+
+    #[test]
+    fn a_directory_without_xml_files_is_an_error() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let config = Config {
+            input_path: directory.path().to_path_buf(),
+            output_path: directory.path().to_path_buf(),
+            print: true,
+            number: 3,
+            verbose: false,
+        };
+
+        let error = visa_parse(&config).expect_err("an empty directory should fail");
+
+        assert!(error.to_string().contains("No XML files to parse"));
+    }
+}
+
+#[cfg(test)]
+mod test_print_statistics {
+    use super::*;
+
+    fn items() -> Vec<VisaItem> {
+        vec![
+            VisaItem {
+                date: Date::new(2024, 1, 5).expect("valid date"),
+                name: "K-MARKET".to_string(),
+                sum: 25.5,
+            },
+            VisaItem {
+                date: Date::new(2024, 2, 17).expect("valid date"),
+                name: "WOLT".to_string(),
+                sum: 18.9,
+            },
+        ]
+    }
+
+    #[test]
+    fn reports_the_totals_without_panicking() {
+        let items = items();
+        let totals = calculate_totals_for_each_name(&items);
+
+        print_statistics(&items, &totals, 1, false, 3);
+        print_statistics(&items, &totals, 2, true, 3);
+    }
+
+    #[test]
+    fn asking_for_more_totals_than_exist_is_not_an_error() {
+        let items = items();
+        let totals = calculate_totals_for_each_name(&items);
+
+        print_statistics(&items, &totals, 1, true, 100);
+    }
+
+    #[test]
+    fn no_items_reports_a_zero_average() {
+        print_statistics(&[], &[], 1, true, 3);
     }
 }

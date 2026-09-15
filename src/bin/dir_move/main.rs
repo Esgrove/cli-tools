@@ -136,3 +136,102 @@ fn main() -> anyhow::Result<()> {
         DirMove::try_from_args(args)?.run()
     }
 }
+
+#[cfg(test)]
+mod test_args {
+    use super::*;
+
+    #[test]
+    fn parses_defaults() {
+        let args = DirMoveArgs::try_parse_from(["dirmove"]).expect("default arguments should parse");
+        assert!(args.command.is_none());
+        assert!(args.path.is_empty());
+        assert!(args.output.is_empty());
+        assert!(!args.auto);
+        assert!(!args.create);
+        assert!(!args.debug);
+        assert!(!args.force);
+        assert!(!args.files_only);
+        assert!(args.group.is_none());
+        assert!(args.min_prefix_chars.is_none());
+        assert!(!args.print);
+        assert!(!args.recurse);
+        assert!(!args.show_db);
+        assert!(!args.verbose);
+    }
+
+    #[test]
+    fn parses_combined_flags() {
+        let args = DirMoveArgs::try_parse_from([
+            "dirmove", "input", "second", "-O", "out", "-a", "-c", "-D", "-f", "-F", "-p", "-r", "-S", "-v", "-g", "3",
+            "-m", "4",
+        ])
+        .expect("combined arguments should parse");
+        assert_eq!(args.path, vec![PathBuf::from("input"), PathBuf::from("second")]);
+        assert_eq!(args.output, vec![PathBuf::from("out")]);
+        assert!(args.auto);
+        assert!(args.create);
+        assert!(args.debug);
+        assert!(args.force);
+        assert!(args.files_only);
+        assert!(args.print);
+        assert!(args.recurse);
+        assert!(args.show_db);
+        assert!(args.verbose);
+        assert_eq!(args.group, Some(3));
+        assert_eq!(args.min_prefix_chars, Some(4));
+    }
+
+    #[test]
+    fn the_repeatable_pattern_options_collect_every_value() {
+        let args = DirMoveArgs::try_parse_from([
+            "dirmove",
+            "-n",
+            "keep",
+            "-n",
+            "also-keep",
+            "-e",
+            "drop",
+            "-i",
+            "prefix",
+            "-I",
+            "group",
+            "-P",
+            "part",
+            "-o",
+            "override",
+            "-u",
+            "unpack",
+            "-M",
+            "pattern:dirname",
+        ])
+        .expect("repeated arguments should parse");
+        assert_eq!(args.include, vec!["keep", "also-keep"]);
+        assert_eq!(args.exclude, vec!["drop"]);
+        assert_eq!(args.prefix_ignore, vec!["prefix"]);
+        assert_eq!(args.ignored_group_name, vec!["group"]);
+        assert_eq!(args.ignored_group_part, vec!["part"]);
+        assert_eq!(args.prefix_override, vec!["override"]);
+        assert_eq!(args.unpack_directory, vec!["unpack"]);
+        assert_eq!(args.custom_mapping, vec!["pattern:dirname"]);
+    }
+
+    #[test]
+    fn rejects_an_unknown_option() {
+        assert!(DirMoveArgs::try_parse_from(["dirmove", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_completion_and_has_valid_command_definition() {
+        let args = DirMoveArgs::try_parse_from(["dirmove", "completion", "zsh", "--install"])
+            .expect("completion should parse");
+        assert!(matches!(
+            args.command,
+            Some(DirMoveCommand::Completion {
+                shell: Shell::Zsh,
+                install: true
+            })
+        ));
+        DirMoveArgs::command().debug_assert();
+    }
+}

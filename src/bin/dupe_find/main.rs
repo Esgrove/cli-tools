@@ -93,6 +93,11 @@ mod cli_args_tests {
     use super::*;
 
     #[test]
+    fn the_command_definition_is_valid() {
+        Args::command().debug_assert();
+    }
+
+    #[test]
     fn parses_multiple_pattern_args() {
         let args = Args::try_parse_from(["test", "-g", "ABC-\\d+", "-g", "XYZ-\\d+"]).expect("should parse");
         assert_eq!(args.pattern.len(), 2);

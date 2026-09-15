@@ -127,6 +127,11 @@ mod div_tests {
     use super::*;
 
     #[test]
+    fn the_command_definition_is_valid() {
+        Args::command().debug_assert();
+    }
+
+    #[test]
     fn test_centered_divider_empty() {
         let count = 12usize;
         let result = format_centered_divider("", count, '%');

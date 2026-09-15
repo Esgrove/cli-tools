@@ -78,3 +78,49 @@ fn main() -> Result<()> {
     let config = Config::from_args(&args)?;
     visa_parse(&config)
 }
+
+#[cfg(test)]
+mod test_args {
+    use super::*;
+
+    #[test]
+    fn parses_defaults() {
+        let args = VisaParseArgs::try_parse_from(["visaparse"]).expect("default arguments should parse");
+        assert!(args.command.is_none());
+        assert!(args.path.is_none());
+        assert!(args.output.is_none());
+        assert!(!args.print);
+        assert!(args.number.is_none());
+        assert!(!args.verbose);
+    }
+
+    #[test]
+    fn parses_combined_flags() {
+        let args = VisaParseArgs::try_parse_from(["visaparse", "statements", "-o", "out.csv", "-p", "-n", "12", "-v"])
+            .expect("combined arguments should parse");
+        assert_eq!(args.path, Some(PathBuf::from("statements")));
+        assert_eq!(args.output.as_deref(), Some("out.csv"));
+        assert!(args.print);
+        assert_eq!(args.number, Some(12));
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn rejects_a_non_numeric_count() {
+        assert!(VisaParseArgs::try_parse_from(["visaparse", "--number", "many"]).is_err());
+    }
+
+    #[test]
+    fn parses_completion_and_has_valid_command_definition() {
+        let args = VisaParseArgs::try_parse_from(["visaparse", "completion", "bash", "--install"])
+            .expect("completion should parse");
+        assert!(matches!(
+            args.command,
+            Some(VisaParseCommand::Completion {
+                shell: Shell::Bash,
+                install: true
+            })
+        ));
+        VisaParseArgs::command().debug_assert();
+    }
+}
