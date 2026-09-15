@@ -81,8 +81,9 @@ struct NormalizedFilename {
 
 /// Runtime state and configuration for a `dirmove` invocation.
 ///
-/// `input_roots` and `output_roots` are independent sets: files and source directories are gathered
-/// from every input root and matched against destination directories under every output root.
+/// `input_roots` and `output_roots` are independent sets:
+/// files and source directories are gathered from every input root
+/// and matched against destination directories under every output root.
 /// Implicit destinations use the first output root.
 pub struct DirMove {
     input_roots: Vec<PathBuf>,
@@ -165,9 +166,9 @@ impl NormalizedFilename {
 impl Default for DirMove {
     /// Create a minimal `DirMove` for tests that do not need filesystem roots.
     ///
-    /// The current directory placeholder is used as both the first input and first output root, and
-    /// no database is attached. Tests that need a database can use struct update syntax to override
-    /// only the `database` field.
+    /// The current directory placeholder is used as both the first input and first output root,
+    /// and no database is attached.
+    /// Tests that need a database can use struct update syntax to override only the `database` field.
     fn default() -> Self {
         let placeholder_root = PathBuf::from(".");
         Self {
@@ -182,9 +183,8 @@ impl Default for DirMove {
 impl DirMove {
     /// Run the configured operations in the standard `dirmove` order.
     ///
-    /// Existing maintenance steps run first, then whole-directory merge offers are made before
-    /// normal file-to-directory matching. Create mode runs last and uses the first output root for
-    /// newly-created directories.
+    /// Existing maintenance steps run first, then whole-directory merge offers are made before normal file-to-directory matching.
+    /// Create mode runs last and uses the first output root for newly-created directories.
     pub fn run(&self) -> anyhow::Result<()> {
         if self.config.show_db {
             if let Some(db) = &self.database {
@@ -231,8 +231,8 @@ impl DirMove {
 
     /// Return the first configured output root for implicit destination creation.
     ///
-    /// Create mode and custom directory prompts use this root when a destination directory must be
-    /// created rather than selected from existing output directories.
+    /// Create mode and custom directory prompts use this root when a destination directory must be created
+    /// rather than selected from existing output directories.
     fn first_output_root(&self) -> &Path {
         self.output_roots
             .first()
@@ -378,8 +378,9 @@ impl DirMove {
 
     /// Find output-directory merge pairs where one sibling has a configured ignored prefix.
     ///
-    /// Each output root is scanned independently. With `--recurse`, every nested output directory
-    /// can act as a sibling parent; otherwise only the output roots themselves are checked.
+    /// Each output root is scanned independently.
+    /// With `--recurse`, every nested output directory can act as a sibling parent.
+    /// Otherwise only the output roots themselves are checked.
     fn find_merge_candidates(&self) -> anyhow::Result<Vec<MergePair>> {
         let mut all_pairs = Vec::new();
         let parent_directories = self.collect_parent_directories_for_merge();
@@ -396,8 +397,8 @@ impl DirMove {
 
     /// Collect output parent directories that should be checked for prefix merge candidates.
     ///
-    /// Prefix merges operate on destination directories, so every output root is included. Recursive
-    /// mode adds every directory under each output root as a potential sibling parent.
+    /// Prefix merges operate on destination directories, so every output root is included.
+    /// Recursive mode adds every directory under each output root as a potential sibling parent.
     fn collect_parent_directories_for_merge(&self) -> Vec<PathBuf> {
         let mut parent_directories: HashSet<PathBuf> = self
             .output_roots
@@ -586,8 +587,8 @@ impl DirMove {
 
     /// Delete unwanted directories and unpack configured directory names across every input root.
     ///
-    /// This pass runs before file matching so cleaned/unpacked input trees are reflected in later
-    /// file and directory merge offers.
+    /// This pass runs before file matching
+    /// so cleaned/unpacked input trees are reflected in later file and directory merge offers.
     fn unpack_directories(&self) -> anyhow::Result<()> {
         let (unwanted, candidates) = self.collect_unwanted_and_unpack_candidates();
 
@@ -652,8 +653,9 @@ impl DirMove {
 
     /// Collect unwanted directories to delete and unpack candidates from every input root.
     ///
-    /// The input roots themselves are never candidates. Without `--recurse`, only direct children of
-    /// each input root are inspected; with `--recurse`, nested directories are inspected too.
+    /// The input roots themselves are never candidates.
+    /// Without `--recurse`, only direct children of each input root are inspected.
+    /// With `--recurse`, nested directories are inspected too.
     fn collect_unwanted_and_unpack_candidates(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let mut unwanted_directories = Vec::new();
         let mut unpack_candidates = Vec::new();
@@ -738,8 +740,7 @@ impl DirMove {
                     info.file_moves.extend(nested_info.file_moves);
                     info.directory_moves.extend(nested_info.directory_moves);
                 } else if self.contains_unpack_directory(&path) {
-                    // Non-matching directory contains nested unpack dirs, recurse into it
-                    // with this directory as the new parent.
+                    // Non-matching directory contains nested unpack dirs, recurse into it with this directory as the new parent.
                     let nested_info = self.collect_unpack_info(&path, &target);
                     info.file_moves.extend(nested_info.file_moves);
                     info.directory_moves.extend(nested_info.directory_moves);
@@ -859,7 +860,7 @@ impl DirMove {
             touched_dirs.insert(src_parent.to_path_buf());
         }
 
-        // Rename is preferred; if it fails (e.g. cross-device), fall back to copy+remove.
+        // Rename is preferred. If it fails (e.g. cross-device), fall back to copy+remove.
         if std::fs::rename(source, target).is_err() {
             std::fs::copy(source, target)?;
             std::fs::remove_file(source)?;
@@ -868,9 +869,9 @@ impl DirMove {
         Ok(())
     }
 
-    /// Prune empty directories under `root_dir`, but only when they are within the subtree and
-    /// are considered "touched" by this tool. Also removes `root_dir` itself if it is empty
-    /// (even if it was already empty and matched).
+    /// Prune empty directories under `root_dir`,
+    /// but only when they are within the subtree and are considered "touched" by this tool.
+    /// Also removes `root_dir` itself if it is empty (even if it was already empty and matched).
     #[allow(clippy::unnecessary_wraps)]
     fn prune_empty_dirs_under(&self, root_dir: &Path, touched_dirs: &mut HashSet<PathBuf>) -> anyhow::Result<()> {
         use walkdir::WalkDir;
@@ -922,9 +923,9 @@ impl DirMove {
 
     /// Collect direct child directories from every input root for whole-directory merge matching.
     ///
-    /// Only immediate children are considered because this pass is meant to offer moving a whole
-    /// top-level input directory before considering individual files. Hidden, system, unwanted, and
-    /// excluded directory names are skipped. Explicit file inputs do not contribute directories.
+    /// Only immediate children are considered because this pass is meant to offer moving a whole top-level input directory
+    /// before considering individual files. Hidden, system, unwanted, and excluded directory names are skipped.
+    /// Explicit file inputs do not contribute directories.
     fn collect_input_directories_for_merge(&self) -> anyhow::Result<Vec<PathBuf>> {
         let mut directories = Vec::new();
         let mut seen_paths = HashSet::new();
@@ -971,10 +972,10 @@ impl DirMove {
 
     /// Offer whole-directory merges for input directories with matching output directories.
     ///
-    /// A source directory matches when its normalized directory name equals an output directory's
-    /// normalized name. When several output directories match, the same priority as file matching is
-    /// used: deeper nested output directories first, then longer directory names. This pass is
-    /// skipped entirely by `--files-only`.
+    /// A source directory matches when its normalized directory name equals an output directory's normalized name.
+    /// When several output directories match, the same priority as file matching is used:
+    /// deeper nested output directories first, then longer directory names.
+    /// This pass is skipped entirely by `--files-only`.
     fn move_input_directories_to_matching_output(&self, directories: &[DirectoryInfo]) -> anyhow::Result<()> {
         let source_directories = self.collect_input_directories_for_merge()?;
         if source_directories.is_empty() {
@@ -1034,9 +1035,9 @@ impl DirMove {
 
     /// Print and optionally execute one whole-directory merge offer.
     ///
-    /// Confirmed merges move the contents of each source directory into the selected target output
-    /// directory and remove the source directory if it becomes empty. Existing target entries are
-    /// skipped unless `--force` is enabled.
+    /// Confirmed merges move the contents of each source directory into the selected target output directory
+    /// and remove the source directory if it becomes empty.
+    /// Existing target entries are skipped unless `--force` is enabled.
     fn process_directory_merge_match(
         &self,
         target_directory: &DirectoryInfo,
@@ -1100,9 +1101,9 @@ impl DirMove {
 
     /// Match input files to existing output directories and move confirmed file groups.
     ///
-    /// Candidate directories are gathered from all output roots. Unless `--files-only` is set,
-    /// matching input directories are offered for whole-directory merge before direct files are
-    /// collected and routed to output directories.
+    /// Candidate directories are gathered from all output roots.
+    /// Unless `--files-only` is set, matching input directories are offered for whole-directory merge
+    /// before direct files are collected and routed to output directories.
     fn move_files_to_dir(&self) -> anyhow::Result<()> {
         let directories = self.collect_directories_in_root()?;
         if directories.is_empty() {
@@ -1258,8 +1259,8 @@ impl DirMove {
 
     /// Find the highest-priority output directory for a custom mapping target name.
     ///
-    /// When the same mapped directory exists under multiple output roots, this uses the same
-    /// directory priority order as normal file matching.
+    /// When the same mapped directory exists under multiple output roots,
+    /// this uses the same directory priority order as normal file matching.
     fn find_directory_for_custom_mapping(
         &self,
         mapping: &CustomMapping,
@@ -1278,8 +1279,8 @@ impl DirMove {
 
     /// Collect candidate destination directories from every output root.
     ///
-    /// Without `--recurse`, only direct child directories of each output root are considered. With
-    /// `--recurse`, nested directories are included and later prioritized by depth during matching.
+    /// Without `--recurse`, only direct child directories of each output root are considered.
+    /// With `--recurse`, nested directories are included and later prioritized by depth during matching.
     /// Duplicate paths are ignored when roots overlap.
     fn collect_directories_in_root(&self) -> anyhow::Result<Vec<DirectoryInfo>> {
         let mut directories = Vec::new();
@@ -1332,8 +1333,8 @@ impl DirMove {
 
     /// Collect direct input files from every input root.
     ///
-    /// Explicit file inputs are included directly. Directory inputs contribute only their direct
-    /// child files; this preserves the existing non-recursive file matching behavior.
+    /// Explicit file inputs are included directly. Directory inputs contribute only their direct child files.
+    /// This preserves the existing non-recursive file matching behavior.
     fn collect_files_in_root(&self) -> anyhow::Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut seen_paths = HashSet::new();
@@ -1355,8 +1356,8 @@ impl DirMove {
 
     /// Add one file to a collection if it passes include/exclude filters and is not duplicated.
     ///
-    /// Paths are deduplicated exactly as provided by the filesystem walk; callers should pass
-    /// resolved roots to avoid multiple spellings of the same file where that matters.
+    /// Paths are deduplicated exactly as provided by the filesystem walk.
+    /// Callers should pass resolved roots to avoid multiple spellings of the same file where that matters.
     fn collect_one_file(&self, file_path: &Path, files: &mut Vec<PathBuf>, seen_paths: &mut HashSet<PathBuf>) {
         let file_name = cli_tools::path_to_filename_string(file_path).to_lowercase();
 
@@ -1410,8 +1411,8 @@ impl DirMove {
     /// Match files to directories based on normalized name matching.
     ///
     /// Returns a map from directory index into `directories` to the matching indices in `files`.
-    /// Directory priority is controlled by `sorted_directory_indices`, so recursive scans prefer
-    /// deeper destinations before broader shallow matches.
+    /// Directory priority is controlled by `sorted_directory_indices`,
+    /// so recursive scans prefer deeper destinations before broader shallow matches.
     fn match_files_to_directories(
         &self,
         files: &[PathBuf],
@@ -1479,9 +1480,8 @@ impl DirMove {
 
     /// Return directory indices in match priority order.
     ///
-    /// Deeper output directories are preferred first so recursive scans route to the most nested
-    /// matching destination. Directory name length breaks same-depth ties, favoring more specific
-    /// names before shorter broad matches.
+    /// Deeper output directories are preferred first so recursive scans route to the most nested matching destination.
+    /// Directory name length breaks same-depth ties, favoring more specific names before shorter broad matches.
     fn sorted_directory_indices(&self, directories: &[DirectoryInfo]) -> Vec<usize> {
         let mut indexed_directories: Vec<_> = directories.iter().enumerate().collect();
         indexed_directories.sort_by(|(_, left), (_, right)| {
@@ -1495,9 +1495,10 @@ impl DirMove {
 
     /// Compute a directory's depth relative to the output root that contains it.
     ///
-    /// If multiple output roots contain the directory, the deepest relative depth is used so nested
-    /// matches still win when roots overlap. Paths outside all output roots fall back to absolute
-    /// component count, which keeps ordering deterministic for synthetic tests.
+    /// If multiple output roots contain the directory, the deepest relative depth is used
+    /// so nested matches still win when roots overlap.
+    /// Paths outside all output roots fall back to absolute component count,
+    /// which keeps ordering deterministic for synthetic tests.
     fn directory_match_depth(&self, dir: &DirectoryInfo) -> usize {
         self.output_roots
             .iter()
@@ -1603,8 +1604,8 @@ impl DirMove {
 
     /// Format a destination directory for prompts relative to the nearest output root.
     ///
-    /// With multiple output roots this avoids displaying long absolute paths when the destination
-    /// can be shown relative to one of the configured roots.
+    /// With multiple output roots this avoids displaying long absolute paths
+    /// when the destination can be shown relative to one of the configured roots.
     fn get_directory_display_path(&self, dir: &DirectoryInfo) -> String {
         self.output_roots
             .iter()
@@ -1764,9 +1765,8 @@ impl DirMove {
 
     /// Collect files with their processed names for create-mode grouping.
     ///
-    /// All configured input roots are scanned for direct child files, and explicit file inputs are
-    /// included directly. Newly-created directories still use the first output root as their
-    /// implicit destination.
+    /// All configured input roots are scanned for direct child files, and explicit file inputs are included directly.
+    /// Newly-created directories still use the first output root as their implicit destination.
     fn collect_files_with_names(&self) -> anyhow::Result<Vec<FileInfo<'static>>> {
         let mut files_with_names: Vec<FileInfo<'static>> = Vec::new();
         let mut seen_paths = HashSet::new();
@@ -1801,9 +1801,8 @@ impl DirMove {
 
     /// Add one file to the create-mode collection after applying filters and name preprocessing.
     ///
-    /// The original name has configured dot-prefix ignores stripped before numeric/resolution/glue
-    /// filtering. This mirrors the previous create-mode behavior while allowing multiple input
-    /// roots and explicit file inputs.
+    /// The original name has configured dot-prefix ignores stripped before numeric/resolution/glue filtering.
+    /// This mirrors the previous create-mode behavior while allowing multiple input roots and explicit file inputs.
     fn collect_one_file_with_name(
         &self,
         file_path: &Path,
@@ -1851,14 +1850,14 @@ impl DirMove {
     /// Returns a map from display prefix to (files, `prefix_parts`) where `prefix_parts` indicates specificity.
     #[allow(clippy::too_many_lines)]
     fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, PrefixGroup> {
-        // Use normalized keys (no dots, lowercase) for grouping to handle
-        // both case variations and dot-separated vs concatenated prefixes
+        // Use normalized keys (no dots, lowercase) for grouping to handle both case variations
+        // and dot-separated vs concatenated prefixes
         let mut prefix_groups: HashMap<String, PrefixGroupBuilder> = HashMap::new();
 
         let file_count = files_with_names.len() as u64;
 
-        // Extract config fields needed by parallel closures to avoid capturing
-        // non-Sync `self` (which contains a rusqlite Database).
+        // Extract config fields needed by parallel closures to avoid capturing non-Sync `self`
+        // (which contains a rusqlite Database).
         let min_group_size = self.config.min_group_size;
         let min_prefix_chars = self.config.min_prefix_chars;
         let ignored_group_names = &self.config.ignored_group_names;
@@ -2139,8 +2138,8 @@ impl DirMove {
     }
 
     /// Check whether a proposed directory name should be skipped.
-    /// Skips empty names, ignored group names, ignored prefixes, names
-    /// matching the parent directory, and runtime-ignored names.
+    /// Skips empty names, ignored group names, ignored prefixes,
+    /// names matching the parent directory, and runtime-ignored names.
     fn should_skip_group(
         &self,
         dir_name: &str,
@@ -2657,8 +2656,8 @@ impl DirMove {
 
     /// Create a `DirMove` with one input root and one output root.
     ///
-    /// This is the compatibility constructor for existing single-root tests; internally it stores
-    /// both roots in the multi-root lists used by the matching pipeline.
+    /// This is the compatibility constructor for existing single-root tests.
+    /// Internally it stores both roots in the multi-root lists used by the matching pipeline.
     #[cfg(test)]
     pub fn new_with_output(root: PathBuf, output_root: PathBuf, config: Config) -> Self {
         Self::new_with_roots(vec![root], vec![output_root], config)
@@ -2666,8 +2665,9 @@ impl DirMove {
 
     /// Resolve the legacy single input/output root pair.
     ///
-    /// Tests and older single-root paths use this helper. When either side is omitted it delegates
-    /// to `resolve_root_sets` and returns the first resolved input and output roots.
+    /// Tests and older single-root paths use this helper.
+    /// When either side is omitted it delegates to `resolve_root_sets`
+    /// and returns the first resolved input and output roots.
     #[cfg(test)]
     fn resolve_roots(input: Option<&Path>, output: Option<&Path>) -> anyhow::Result<(PathBuf, PathBuf)> {
         let inputs = input.map_or_else(Vec::new, |path| vec![path.to_path_buf()]);
@@ -2679,9 +2679,9 @@ impl DirMove {
     /// Resolve input and output root sets from CLI paths.
     ///
     /// Inputs and outputs are not paired. Every input path contributes files/directories to scan,
-    /// and every output path contributes candidate destination directories. If no input is given,
-    /// the current directory is used. If no output is given, the resolved input roots are reused as
-    /// output roots.
+    /// and every output path contributes candidate destination directories.
+    /// If no input is given, the current directory is used.
+    /// If no output is given, the resolved input roots are reused as output roots.
     fn resolve_root_sets(inputs: &[PathBuf], outputs: &[PathBuf]) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
         let input_roots = if inputs.is_empty() {
             vec![cli_tools::resolve_input_path(None)?]
@@ -2706,8 +2706,8 @@ impl DirMove {
 
     /// Create a `DirMove` from resolved input and output root sets.
     ///
-    /// For implicit destinations, such as create mode, the first output root is used even when
-    /// multiple output roots are available for matching. Both root lists must be non-empty.
+    /// For implicit destinations, such as create mode, the first output root is used even
+    /// when multiple output roots are available for matching. Both root lists must be non-empty.
     fn new_with_roots(input_roots: Vec<PathBuf>, output_roots: Vec<PathBuf>, config: Config) -> Self {
         let database = match Database::open_default() {
             Ok(database) => Some(database),
@@ -2758,8 +2758,7 @@ pub mod test_helpers {
 
     /// Create a test `DirMove` with independent input and output root sets.
     ///
-    /// The first output root is used for implicit create-mode destinations, matching production
-    /// initialization behavior.
+    /// The first output root is used for implicit create-mode destinations, matching production initialization behavior.
     pub fn make_dirmove_with_roots(input_roots: Vec<PathBuf>, output_roots: Vec<PathBuf>, config: Config) -> DirMove {
         DirMove {
             input_roots,
@@ -4966,8 +4965,7 @@ mod test_parent_directory_skipped {
 
     #[test]
     fn ignored_group_name_checked_after_prefix_strip() {
-        // When a prefix_ignore is stripped, the remaining name should still be
-        // checked against ignored_group_names
+        // When a prefix_ignore is stripped, the remaining name should still be checked against ignored_group_names
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -5099,8 +5097,8 @@ mod test_parent_directory_skipped {
 
 #[cfg(test)]
 mod test_stripped_name_filtering_integration {
-    //! Integration tests verifying that `ignored_group_names` and `prefix_ignores`
-    //! are checked after stripping prefixes from directory names.
+    //! Integration tests verifying that `ignored_group_names` and `prefix_ignores` are checked
+    //! after stripping prefixes from directory names.
 
     use super::*;
 
@@ -5496,7 +5494,8 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Name.x265.Thing.002.mp4"), "").unwrap();
         std::fs::write(root.join("Name.X265.Thing.003.mp4"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_parts(vec!["x265"]); // lowercase in config
+        // lowercase in config
+        let config = Config::test_with_ignored_group_parts(vec!["x265"]);
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -5520,7 +5519,8 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("DL.x265.TEST.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("DL.x265.TEST.Video.003.mp4"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_parts(vec![]); // empty list
+        // empty list
+        let config = Config::test_with_ignored_group_parts(vec![]);
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -5543,7 +5543,8 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Studio.x265.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.x265.Video.003.mp4"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_parts(vec!["x26"]); // partial match
+        // partial match
+        let config = Config::test_with_ignored_group_parts(vec!["x26"]);
         let dirmove = DirMove::new(root, config);
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
@@ -8065,9 +8066,8 @@ mod test_realistic_grouping {
     fn user_can_reject_specific_group_and_use_broader_one() {
         // Simulates the scenario from the user's example:
         // User has files like "Galaxy.Quest.Episode.01.mp4"
-        // Tool offers "Galaxy.Quest.Episode" first (most specific)
-        // User rejects it, wants "Galaxy.Quest" instead
-        // Both options should be available in the groups
+        // Tool offers "Galaxy.Quest.Episode" first (most specific) User rejects it,
+        // wants "Galaxy.Quest" instead Both options should be available in the groups
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -8241,8 +8241,7 @@ mod test_realistic_grouping {
 
     #[test]
     fn rejected_group_files_remain_available_for_next_group() {
-        // When a group is skipped (not moved), its files should still be available
-        // for the next offered group
+        // When a group is skipped (not moved), its files should still be available for the next offered group
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -8632,12 +8631,12 @@ mod test_realistic_grouping {
 
     #[test]
     fn non_contiguous_parts_do_not_form_group() {
-        // Files where filtering makes non-adjacent parts appear adjacent should NOT
-        // form multi-part prefix groups. Only the single-part prefix should match.
+        // Files where filtering makes non-adjacent parts appear adjacent should NOT form multi-part prefix groups.
+        // Only the single-part prefix should match.
         //
-        // Example: "Site.2023.04.13.Person.video.mp4" after filtering becomes
-        // "Site.Person.video.mp4", but "Site.Person" should NOT be a valid 2-part
-        // prefix because "Site" and "Person" are not adjacent in the original.
+        // Example: "Site.2023.04.13.Person.video.mp4" after filtering becomes "Site.Person.video.mp4",
+        // but "Site.Person" should NOT be a valid 2-part prefix
+        // because "Site" and "Person" are not adjacent in the original.
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -8924,12 +8923,12 @@ mod test_realistic_grouping {
         std::fs::write(root.join("PhotoLab.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("Photo.Lab.Image.03.jpg"), "").unwrap();
 
-        // "PhotoLabs" — lowercase 's' after "PhotoLab", NOT a word boundary
+        // "PhotoLabs": lowercase 's' after "PhotoLab", NOT a word boundary
         std::fs::write(root.join("PhotoLabs.Image.01.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabs.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabs.Image.03.jpg"), "").unwrap();
 
-        // "PhotoLabPro" — uppercase 'P' after "PhotoLab", IS a word boundary
+        // "PhotoLabPro": uppercase 'P' after "PhotoLab", IS a word boundary
         std::fs::write(root.join("PhotoLabPro.Image.01.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabPro.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabPro.Image.03.jpg"), "").unwrap();
@@ -9233,7 +9232,8 @@ mod test_varied_prefix_grouping {
 
         // Different content that should NOT match - totally different first parts
         std::fs::write(root.join("Premium.OtherStudio.File.001.mp4"), "").unwrap();
-        std::fs::write(root.join("MyContentMaker.Video.001.mp4"), "").unwrap(); // Different name entirely
+        // Different name entirely
+        std::fs::write(root.join("MyContentMaker.Video.001.mp4"), "").unwrap();
 
         let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Premium", "HD"], 3));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -9724,8 +9724,10 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Premium.BigRedStudio.Film.006.mp4"), "").unwrap();
 
         // Close but not matching - different words entirely
-        std::fs::write(root.join("Big.Blue.House.Film.001.mp4"), "").unwrap(); // Different second and third
-        std::fs::write(root.join("Small.Red.Barn.Film.001.mp4"), "").unwrap(); // Different first and third
+        // Different second and third
+        std::fs::write(root.join("Big.Blue.House.Film.001.mp4"), "").unwrap();
+        // Different first and third
+        std::fs::write(root.join("Small.Red.Barn.Film.001.mp4"), "").unwrap();
 
         // Noise
         std::fs::write(root.join("Unrelated.Content.File.mp4"), "").unwrap();
@@ -9807,7 +9809,8 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Ver3.StudioName.Different.01.mp4"), "").unwrap();
 
         // Noise
-        std::fs::write(root.join("Ver2StudioName.Wrong.01.mp4"), "").unwrap(); // No dot
+        // No dot
+        std::fs::write(root.join("Ver2StudioName.Wrong.01.mp4"), "").unwrap();
         std::fs::write(root.join("Random.Other.File.mp4"), "").unwrap();
 
         let dirmove = DirMove::new(root, Config::test_with_ignores_and_group_size(vec!["Ver2"], 3));
@@ -9852,9 +9855,8 @@ mod test_varied_prefix_grouping {
     }
 
     /// Tests for the `min_prefix_chars` configuration option.
-    /// This option sets the minimum character count for single-word prefixes
-    /// to be considered valid group names. Default is 5 to avoid false matches
-    /// with short names like "alex", "name", etc.
+    /// This option sets the minimum character count for single-word prefixes to be considered valid group names.
+    /// Default is 5 to avoid false matches with short names like "alex", "name", etc.
     #[cfg(test)]
     mod test_min_prefix_chars {
         use super::test_helpers::*;
@@ -9961,8 +9963,7 @@ mod test_varied_prefix_grouping {
 
         #[test]
         fn unicode_chars_counted_correctly() {
-            // Unicode characters should be counted as single chars, not bytes
-            // "日本語" has 3 chars but 9 bytes in UTF-8
+            // Unicode characters should be counted as single chars, not bytes "日本語" has 3 chars but 9 bytes in UTF-8
             let files = make_test_files(&["日本語.Video.001.mp4", "日本語.Video.002.mp4", "日本語.Video.003.mp4"]);
 
             // With min_prefix_chars=3, "日本語" (3 chars) should be included
@@ -10500,7 +10501,8 @@ mod test_varied_prefix_grouping {
 
         // Completely different
         std::fs::write(root.join("OtherContent.File.mp4"), "").unwrap();
-        std::fs::write(root.join("MyStudio.Different.mp4"), "").unwrap(); // "Studio" not at start
+        // "Studio" not at start
+        std::fs::write(root.join("MyStudio.Different.mp4"), "").unwrap();
 
         let dirmove = DirMove::new(root, Config::test_with_group_size(2));
         let files_with_names = dirmove.collect_files_with_names().unwrap();
@@ -10641,8 +10643,8 @@ mod test_second_pass_starts_with_matching {
         let files_with_names = dirmove.collect_files_with_names().unwrap();
         let groups = dirmove.collect_all_prefix_groups(&files_with_names);
 
-        // Use exact key match to avoid accidentally matching a more specific group
-        // like "JosephExample.Episode" (which only has 3 files).
+        // Use exact key match to avoid accidentally matching a more specific group like "JosephExample.Episode"
+        // (which only has 3 files).
         let group = groups
             .iter()
             .find(|(key, _)| key.to_lowercase() == "josephexample")
@@ -10756,8 +10758,8 @@ mod test_second_pass_starts_with_matching {
 
     #[test]
     fn contiguity_check_prevents_false_positive_in_second_pass() {
-        // Second pass must verify contiguity — a file where the group key appears
-        // only non-contiguously should NOT be added.
+        // Second pass must verify contiguity.
+        // A file where the group key appears only non-contiguously should NOT be added.
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 

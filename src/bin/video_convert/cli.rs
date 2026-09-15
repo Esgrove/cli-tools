@@ -225,7 +225,8 @@ pub fn show_database_contents(database: &Database, config: &Config) -> Result<()
 
         for file in files.iter().take(display_count) {
             // Use fixed widths for consistent alignment:
-            // size: 9 chars (e.g. "19.20 GB "), bitrate: 10 chars (e.g. "15.0 Mbps "), duration: 10 chars (e.g. "3h 01m 18s")
+            // size: 9 chars (e.g. "19.20 GB "), bitrate:
+            // 10 chars (e.g. "15.0 Mbps "), duration: 10 chars (e.g. "3h 01m 18s")
             let size_str = cli_tools::format_size(file.size_bytes);
             let bitrate_str = format!("{:.1} Mbps", file.bitrate_kbps as f64 / 1000.0);
             let duration_str = cli_tools::format_duration(std::time::Duration::from_secs_f64(file.duration));

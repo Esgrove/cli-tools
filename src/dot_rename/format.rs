@@ -128,8 +128,8 @@ impl DotFormat<'_> {
     /// Format a file or directory name.
     ///
     /// Filenames should be given without the file extension.
-    /// This is the main entry point for name formatting and applies all configured
-    /// transformations including replacements, date reordering, prefix/suffix, etc.
+    /// This is the main entry point for name formatting and applies all configured transformations including replacements,
+    /// date reordering, prefix/suffix, etc.
     #[must_use]
     pub fn format_name(&self, file_name: &str) -> String {
         let mut new_name = String::from(file_name);

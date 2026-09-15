@@ -403,8 +403,7 @@ fn render_ui(
     // 2 for borders + 1 per file
     let file_list_height = (files.len() as u16).saturating_add(2).min(area.height / 3);
 
-    // Calculate how many lines the details section needs
-    // 2 for borders + 3 lines per file (path, metadata, separator)
+    // Calculate how many lines the details section needs 2 for borders + 3 lines per file (path, metadata, separator)
     let details_height = (files.len() as u16)
         .saturating_mul(3)
         .saturating_add(2)

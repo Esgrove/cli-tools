@@ -88,8 +88,7 @@ impl ScanCache {
 
     /// Ensure the `scanned_files` table exists.
     ///
-    /// The schema is identical to the one created by `vconvert` so both
-    /// tools can read and write the same table.
+    /// The schema is identical to the one created by `vconvert` so both tools can read and write the same table.
     fn initialise(&self) -> Result<()> {
         self.connection
             .execute_batch(
@@ -132,8 +131,7 @@ impl ScanCache {
 
     /// Load every cached entry into a `HashMap` keyed by full path string.
     ///
-    /// This allows callers to do O(1) lookups and decide which files still
-    /// need to be probed.
+    /// This allows callers to do O(1) lookups and decide which files still need to be probed.
     ///
     /// # Errors
     /// Returns an error if the database query fails.
@@ -265,6 +263,8 @@ impl ScanCache {
             let bitrate_kbps = info.bitrate_kbps.unwrap_or(0);
             let duration = info.duration.unwrap_or(0.0);
             let (width, height) = info.resolution.map_or((0u32, 0u32), |r| (r.width, r.height));
+            // frames per second not available in shared VideoInfo
+            let frames_per_second = 0.0f64;
 
             transaction
                 .execute(
@@ -289,7 +289,7 @@ impl ScanCache {
                         duration,
                         width,
                         height,
-                        0.0f64, // frames_per_second (not available in shared VideoInfo)
+                        frames_per_second,
                         now,
                     ],
                 )
@@ -321,8 +321,7 @@ impl CachedFileHash {
     }
 }
 
-/// A row from the `scanned_files` cache with non-optional fields matching the
-/// database schema.
+/// A row from the `scanned_files` cache with non-optional fields matching the database schema.
 ///
 /// This is intentionally separate from `VideoInfo` (which uses `Option` fields)
 /// because the database columns are `NOT NULL`.

@@ -376,8 +376,7 @@ impl Config {
 
 /// Add a group name to `ignored_group_names` in a TOML document string.
 /// The name is stored as-is (not normalized) so the config stays human-readable.
-/// Inserts the name in case-insensitive alphabetical order and formats the array
-/// with one entry per line.
+/// Inserts the name in case-insensitive alphabetical order and formats the array with one entry per line.
 /// Returns the modified document string and whether the name was added.
 fn add_ignored_name_to_toml(content: &str, name: &str) -> Result<(String, bool)> {
     let mut document = content

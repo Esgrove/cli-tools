@@ -611,8 +611,8 @@ impl Database {
 
     /// Insert or update a scanned file cache entry.
     ///
-    /// Called after every ffprobe run so the result can be reused on subsequent scans
-    /// without re-running ffprobe, as long as the file size has not changed.
+    /// Called after every ffprobe run so the result can be reused on subsequent scans without re-running ffprobe,
+    /// as long as the file size has not changed.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
@@ -758,8 +758,7 @@ impl Database {
 
     /// Load all scanned file cache entries into a `HashMap` keyed by full path.
     ///
-    /// This allows O(1) lookups during the analysis phase instead of issuing
-    /// individual SQL queries per file.
+    /// This allows O(1) lookups during the analysis phase instead of issuing individual SQL queries per file.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
@@ -795,11 +794,10 @@ impl Database {
 
     /// Remove scanned cache entries for files that no longer exist on disk.
     ///
-    /// Groups paths by drive letter (on Windows) or mount-point prefix so that
-    /// filesystem `exists()` checks for different drives run in parallel via
-    /// Rayon, avoiding head-of-line blocking when one drive is slow or offline.
-    /// The resulting list of missing paths is then deleted in a single database
-    /// transaction.
+    /// Groups paths by drive letter (on Windows) or mount-point prefix
+    /// so that filesystem `exists()` checks for different drives run in parallel via Rayon,
+    /// avoiding head-of-line blocking when one drive is slow or offline.
+    /// The resulting list of missing paths is then deleted in a single database transaction.
     ///
     /// Returns the number of entries removed.
     ///
@@ -1034,7 +1032,7 @@ fn drive_key(path: &Path) -> String {
         return drive.to_uppercase();
     }
 
-    // Unix / fallback — everything is on one root
+    // Unix / fallback. Everything is on one root
     "/".to_string()
 }
 
@@ -1547,7 +1545,8 @@ mod tests {
                 ..Default::default()
             })
             .expect("Failed to get files");
-        assert_eq!(filtered.len(), 0); // a.mp4 has low bitrate, c.mp4 is remux
+        // a.mp4 has low bitrate, c.mp4 is remux
+        assert_eq!(filtered.len(), 0);
 
         // Filter: any file with high bitrate
         let filtered = database
@@ -2031,7 +2030,7 @@ mod tests {
             .upsert_scanned_file(&path, &info)
             .expect("Failed to upsert scanned file");
 
-        // Query with a different size — should not match.
+        // Query with a different size. Should not match.
         let result = database
             .find_scanned_file(&path, info.size_bytes + 1)
             .expect("Failed to query scanned file");

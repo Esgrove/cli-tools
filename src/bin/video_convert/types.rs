@@ -47,7 +47,7 @@ pub struct AnalysisFilter {
     pub(crate) min_duration: Option<f64>,
     /// Maximum duration threshold in seconds.
     pub(crate) max_duration: Option<f64>,
-    /// Minimum resolution — both width and height must be at least this many pixels.
+    /// Minimum resolution. Both width and height must be at least this many pixels.
     pub(crate) min_resolution: Option<u32>,
     /// Whether to overwrite existing output files.
     pub(crate) overwrite: bool,
@@ -64,13 +64,13 @@ pub struct VideoFile {
     pub(crate) size_bytes: u64,
 }
 
-/// Result of running ffprobe on a cache miss, bundling everything needed to
-/// write the result back to the scan cache and continue with analysis.
+/// Result of running ffprobe on a cache miss,
+/// bundling everything needed to write the result back to the scan cache and continue with analysis.
 pub struct VideoInfoCache {
     /// Classification result for the file.
     pub(crate) result: AnalysisResult,
-    /// Original file path, kept separately so the caller can write the cache
-    /// entry without digging into the `AnalysisResult` enum.
+    /// Original file path, kept separately
+    /// so the caller can write the cache entry without digging into the `AnalysisResult` enum.
     pub(crate) path: PathBuf,
     /// `VideoInfo` from ffprobe to persist in the scan cache.
     /// `None` only when ffprobe itself failed.
@@ -538,8 +538,8 @@ impl VideoInfo {
                     "r_frame_rate" => {
                         // Parse fractional framerate like "30/1" or "30000/1001".
                         // Only accept the first valid value within a reasonable range,
-                        // as ffprobe may output multiple streams where later entries
-                        // can have bogus values like 0/1 or 90000/1 (timebase).
+                        // as ffprobe may output multiple streams
+                        // where later entries can have bogus values like 0/1 or 90000/1 (timebase).
                         if frames_per_second.is_none()
                             && let Some((num, den)) = value.split_once('/')
                             && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())

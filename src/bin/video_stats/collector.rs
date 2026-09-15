@@ -209,8 +209,8 @@ impl StatsCollector {
 
 /// Probe video files concurrently using semaphore-limited async tasks.
 ///
-/// Each ffprobe call runs in a blocking task with concurrency controlled
-/// by a semaphore sized for I/O-bound work (`num_cpus * 2`).
+/// Each ffprobe call runs in a blocking task with concurrency controlled by a semaphore sized for I/O-bound work
+/// (`num_cpus * 2`).
 /// Returns the successfully probed files and the number of errors.
 async fn probe_files_async(files: Vec<PathBuf>, root: &Path) -> (Vec<ProbedFile>, usize) {
     let semaphore = create_semaphore_for_io_bound();

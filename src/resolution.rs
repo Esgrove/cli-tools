@@ -57,10 +57,9 @@ static RE_P_LABEL: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Cache of resolution-specific regexes for known resolutions.
 ///
-/// This cache stores pre-compiled regexes for common resolutions to avoid
-/// repeated regex compilation. The key is (width, height) and the value is
-/// a regex that matches that specific resolution in either orientation
-/// (`WxH` or `HxW`) with optional "Vertical" prefix.
+/// This cache stores pre-compiled regexes for common resolutions to avoid repeated regex compilation.
+/// The key is (width, height) and the value is a regex that matches
+/// that specific resolution in either orientation (`WxH` or `HxW`) with optional "Vertical" prefix.
 static RESOLUTION_REGEX_CACHE: LazyLock<HashMap<(u32, u32), Regex>> = LazyLock::new(|| {
     let mut cache = HashMap::new();
     for &(width, height) in KNOWN_RESOLUTIONS {
@@ -175,8 +174,8 @@ impl Resolution {
     /// This regex matches only full dimension formats like `WIDTHxHEIGHT` (e.g., 1920x1080, 640x480)
     /// with optional "Vertical." prefix. It does NOT match short labels like "1080p", "720p", etc.
     ///
-    /// Dimensions must be 3-4 digits each. The pattern is case-insensitive and uses word
-    /// boundaries to prevent partial matches.
+    /// Dimensions must be 3-4 digits each.
+    /// The pattern is case-insensitive and uses word boundaries to prevent partial matches.
     ///
     /// # Examples
     ///
@@ -196,9 +195,8 @@ impl Resolution {
 
     /// Get a reference to the static regex pattern for standard resolution p-labels.
     ///
-    /// This regex matches only standard resolution labels (480p, 540p, 544p, 576p, 600p,
-    /// 720p, 1080p, 1440p, 2160p) with optional "Vertical." prefix. It does NOT match
-    /// full dimension formats like "1920x1080".
+    /// This regex matches only standard resolution labels (480p, 540p, 544p, 576p, 600p, 720p, 1080p, 1440p, 2160p)
+    /// with optional "Vertical." prefix. It does NOT match full dimension formats like "1920x1080".
     ///
     /// The pattern is case-insensitive and uses word boundaries to prevent partial matches.
     ///
@@ -220,11 +218,11 @@ impl Resolution {
 
     /// Get a regex that matches this specific resolution's full dimension format.
     ///
-    /// For known resolutions (defined in `KNOWN_RESOLUTIONS`), returns a cached
-    /// pre-compiled regex. For unknown resolutions, compiles a new regex on demand.
+    /// For known resolutions (defined in `KNOWN_RESOLUTIONS`), returns a cached pre-compiled regex.
+    /// For unknown resolutions, compiles a new regex on demand.
     ///
-    /// The regex matches the resolution in either orientation (`WxH` or `HxW`) with
-    /// optional "Vertical" prefix (dot after "Vertical" is optional).
+    /// The regex matches the resolution in either orientation (`WxH` or `HxW`)
+    /// with optional "Vertical" prefix (dot after "Vertical" is optional).
     ///
     /// # Examples
     ///
@@ -1525,7 +1523,8 @@ mod test_dimension_regex {
     fn all_cached_resolutions_match_both_orientations() {
         for &(width, height) in KNOWN_RESOLUTIONS {
             if width == height {
-                continue; // Skip square resolutions
+                // Skip square resolutions
+                continue;
             }
 
             let resolution = Resolution::new(width, height);

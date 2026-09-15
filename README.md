@@ -254,7 +254,9 @@ Options:
 
 ### Filter Options
 
-The filter options (`-b`/`--bitrate`, `-B`/`--max-bitrate`, `-u`/`--min-duration`, `-U`/`--max-duration`, `-R`/`--min-resolution`, `-t`/`--extension`, `-c`/`--count`) work for both normal scanning mode and database mode (`-D`/`--from-db`, `-S`/`--show-db`).
+The filter options
+(`-b`/`--bitrate`, `-B`/`--max-bitrate`, `-u`/`--min-duration`, `-U`/`--max-duration`, `-R`/`--min-resolution`, `-t`/`--extension`, `-c`/`--count`)
+work for both normal scanning mode and database mode (`-D`/`--from-db`, `-S`/`--show-db`).
 
 ### Database Commands
 
@@ -412,7 +414,8 @@ Options:
 Add torrents to qBittorrent with automatic file renaming.
 Parses `.torrent` files and adds them to qBittorrent,
 automatically setting the output filename or folder name based on the torrent filename.
-For multi-file torrents, offers to rename the root folder and supports filtering files by extension, name, or minimum size.
+For multi-file torrents,
+offers to rename the root folder and supports filtering files by extension, name, or minimum size.
 
 ```console
 Add torrents to qBittorrent with automatic file renaming

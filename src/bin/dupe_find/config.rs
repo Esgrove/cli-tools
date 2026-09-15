@@ -54,8 +54,8 @@ pub struct Config {
     pub(crate) dryrun: bool,
     pub(crate) extensions: Vec<String>,
     pub(crate) hash_compare: bool,
-    /// Pattern match texts to ignore (case-insensitive). Groups whose display name
-    /// matches any of these strings will be skipped.
+    /// Pattern match texts to ignore (case-insensitive).
+    /// Groups whose display name matches any of these strings will be skipped.
     pub(crate) ignore_matches: Vec<String>,
     pub(crate) move_files: bool,
     pub(crate) patterns: Vec<Regex>,

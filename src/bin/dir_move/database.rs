@@ -1,7 +1,7 @@
 //! `SQLite` database operations for `dir_move`.
 //!
-//! Stores directory names that have been used or seen, to use as primary candidates
-//! for group names when creating new directories.
+//! Stores directory names that have been used or seen,
+//! to use as primary candidates for group names when creating new directories.
 
 use std::path::PathBuf;
 

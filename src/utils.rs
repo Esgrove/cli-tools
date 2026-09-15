@@ -75,8 +75,7 @@ pub fn path_to_string_relative_to(path: &Path, working_directory: Option<&Path>)
 /// Gets the relative path or filename from a full path based on a root directory.
 ///
 /// If the full path is within the root directory, the function returns the relative path.
-/// Otherwise, it returns just the filename. If the filename cannot be determined, the
-/// full path is returned.
+/// Otherwise, it returns just the filename. If the filename cannot be determined, the full path is returned.
 ///
 /// ```rust
 /// use std::path::Path;

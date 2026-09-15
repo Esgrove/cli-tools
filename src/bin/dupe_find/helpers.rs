@@ -31,8 +31,8 @@ pub const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg}
 
 /// Collect metadata for all files in duplicate groups using ffprobe.
 ///
-/// Checks the shared scan cache first so that files already analysed by
-/// `vconvert` or a previous `dupefind` run are not probed again.
+/// Checks the shared scan cache first
+/// so that files already analysed by `vconvert` or a previous `dupefind` run are not probed again.
 /// Newly probed results are written back to the cache.
 pub fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf, VideoInfo> {
     let all_files: Vec<PathBuf> = groups
@@ -231,8 +231,8 @@ fn find_hash_matches_with_cache(
 
 /// Collect video metadata concurrently using async tasks limited by a semaphore.
 ///
-/// Each ffprobe call runs in a blocking task with concurrency controlled
-/// by a semaphore sized for input and output work.
+/// Each ffprobe call runs in a blocking task with concurrency controlled by a semaphore sized for input
+/// and output work.
 async fn collect_metadata_async(files: Vec<PathBuf>) -> HashMap<PathBuf, VideoInfo> {
     let semaphore = create_semaphore_for_io_bound();
 

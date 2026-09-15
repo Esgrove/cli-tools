@@ -2,8 +2,8 @@
 //!
 //! This CLI tool parses `.torrent` files and adds them to qBittorrent via the `WebUI` API,
 //! automatically renaming the output file based on the torrent filename.
-//! The `info` subcommand connects to qBittorrent and displays statistics
-//! about existing torrents, including counts, sizes, and completion status.
+//! The `info` subcommand connects to qBittorrent and displays statistics about existing torrents,
+//! including counts, sizes, and completion status.
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 

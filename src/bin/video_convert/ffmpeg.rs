@@ -1,6 +1,7 @@
 //! `FFmpeg` and ffprobe command handling for video conversion.
 //!
-//! Builds media processing commands, probes stream metadata, runs child processes in isolation, and validates muxed output.
+//! Builds media processing commands, probes stream metadata,
+//! runs child processes in isolation, and validates muxed output.
 
 use std::collections::BTreeSet;
 use std::path::Path;

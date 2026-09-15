@@ -98,8 +98,8 @@ impl TorrentInfo {
     /// This returns the raw name without any filtering applied.
     /// Use `clean_suggested_name` to apply `remove_from_name` filtering.
     ///
-    /// If `ignore_filename_patterns` is provided and the torrent filename contains any of these
-    /// strings, the filename is ignored and the internal name is used instead.
+    /// If `ignore_filename_patterns` is provided and the torrent filename contains any of these strings,
+    /// the filename is ignored and the internal name is used instead.
     #[allow(clippy::option_if_let_else)]
     pub(crate) fn suggested_name_raw(&self, ignore_filename_patterns: &[String]) -> Cow<'_, str> {
         // Try to get name from torrent filename first, unless it matches ignore patterns
@@ -307,8 +307,8 @@ pub fn find_downloaded_directory(torrent_path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Return the path of a torrent file in `downloaded_directory` sharing the same file name as
-/// `torrent_path`, if one exists and is not `torrent_path` itself.
+/// Return the path of a torrent file in `downloaded_directory` sharing the same file name as `torrent_path`,
+/// if one exists and is not `torrent_path` itself.
 pub fn existing_torrent_in_downloaded(downloaded_directory: &Path, torrent_path: &Path) -> Option<PathBuf> {
     let file_name = torrent_path.file_name()?;
     let target = downloaded_directory.join(file_name);

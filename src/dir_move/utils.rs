@@ -78,9 +78,8 @@ pub fn filter_numeric_resolution_and_glue_parts(filename: &str) -> String {
 /// Longer prefixes are preferred as they provide more specific grouping.
 /// Also handles case variations and dot-separated vs concatenated forms.
 ///
-/// Unlike prefix-only matching, this function extracts candidates from all positions
-/// in the filename, allowing common group names that appear in the middle of filenames
-/// to be detected.
+/// Unlike prefix-only matching, this function extracts candidates from all positions in the filename,
+/// allowing common group names that appear in the middle of filenames to be detected.
 ///
 /// The file extension (last part after the final dot) is excluded from candidate generation.
 #[must_use]
@@ -199,20 +198,18 @@ pub fn count_prefix_chars(prefix: &str) -> usize {
 
 /// Check if pre-computed [`FileInfo`] parts contain the given normalized target.
 ///
-/// Delegates to [`FilteredParts::prefix_matches_normalized`] which uses the pre-split
-/// and pre-lowercased single, 2-part, and 3-part combinations stored on `FilteredParts`
-/// to avoid redundant `split('.')`, `to_lowercase()`, and `format!()` calls in the
-/// O(N × K × N) hot loop inside `find_prefix_candidates`.
+/// Delegates to [`FilteredParts::prefix_matches_normalized`] which uses the pre-split and pre-lowercased single,
+/// 2-part, and 3-part combinations stored on `FilteredParts` to avoid redundant `split('.')`, `to_lowercase()`,
+/// and `format!()` calls in the O(N × K × N) hot loop inside `find_prefix_candidates`.
 #[must_use]
 pub fn prefix_matches_normalized_precomputed(file_info: &FileInfo<'_>, target_normalized: &str) -> bool {
     file_info.filtered_parts.prefix_matches_normalized(target_normalized)
 }
 
-/// Inner implementation of contiguity checking that takes a pre-computed
-/// `prefix_combined` (the joined, lowercased prefix parts).
+/// Inner implementation of contiguity checking that takes a pre-computed `prefix_combined` (the joined, lowercased prefix parts).
 ///
-/// Call this directly when the same `prefix_parts` are checked against many files
-/// to avoid recomputing the `join + lowercase` on every call.
+/// Call this directly
+/// when the same `prefix_parts` are checked against many files to avoid recomputing the `join + lowercase` on every call.
 #[must_use]
 pub fn parts_are_contiguous_with_combined(
     original_parts: &[String],
@@ -348,16 +345,14 @@ mod test_helpers {
     }
 
     /// Check contiguity by splitting the original filename on the fly.
-    /// Convenience wrapper for tests — production code uses
-    /// [`parts_are_contiguous_with_combined`] directly.
+    /// Convenience wrapper for tests. Production code uses [`parts_are_contiguous_with_combined`] directly.
     pub fn parts_are_contiguous_in_original(original_filename: &str, prefix_parts: &[&str]) -> bool {
         let original_parts: Vec<String> = original_filename.split('.').map(String::from).collect();
         parts_are_contiguous_in_original_precomputed(&original_parts, prefix_parts)
     }
 
     /// Check contiguity using pre-split original parts.
-    /// Convenience wrapper for tests — production code uses
-    /// [`parts_are_contiguous_with_combined`] directly.
+    /// Convenience wrapper for tests. Production code uses [`parts_are_contiguous_with_combined`] directly.
     pub fn parts_are_contiguous_in_original_precomputed(original_parts: &[String], prefix_parts: &[&str]) -> bool {
         if prefix_parts.is_empty() {
             return true;
@@ -476,7 +471,7 @@ mod test_word_boundary {
 
     #[test]
     fn mid_codepoint_position_returns_false() {
-        // 'Ö' is bytes [0xC3, 0x96] — position 7 lands inside the 'Ö' codepoint
+        // 'Ö' is bytes [0xC3, 0x96]. Position 7 lands inside the 'Ö' codepoint
         assert!(!FilteredParts::has_word_boundary_at("StudioÖversikt", 7));
     }
 
@@ -490,7 +485,7 @@ mod test_word_boundary {
     fn scandic_chars_preserve_boundary_logic_in_prefix() {
         // "HälsoCenter" → 'C' (uppercase) after "Hälso" at byte 6 (H=1 + ä=2 + l=1 + s=1 + o=1)
         assert!(FilteredParts::has_word_boundary_at("HälsoCenter", 6));
-        // "Hälsosam" → 's' (lowercase) after "Hälso" — not a boundary
+        // "Hälsosam" → 's' (lowercase) after "Hälso": not a boundary
         assert!(!FilteredParts::has_word_boundary_at("Hälsosam", 6));
     }
 }
@@ -825,8 +820,8 @@ mod test_contiguity {
 
     #[test]
     fn extended_prefix_matches_longer_concatenated() {
-        // "StudioAlphaProductions" starts with "StudioAlpha", so it SHOULD match
-        // prefix ["Studio", "Alpha"]. This allows grouping files like:
+        // "StudioAlphaProductions" starts with "StudioAlpha", so it SHOULD match prefix ["Studio", "Alpha"].
+        // This allows grouping files like:
         // - Studio.Alpha.Video.mp4
         // - StudioAlpha.Film.mp4
         // - StudioAlphaProductions.Movie.mp4
@@ -1150,9 +1145,8 @@ mod test_filtering {
 
 #[cfg(test)]
 /// Tests for prefix candidate finding with ORIGINAL filenames.
-/// These tests use the original test filenames from before position-agnostic matching
-/// was implemented. Assertions have been updated to reflect the new behavior where
-/// group names can be found at any position in the filename.
+/// These tests use the original test filenames from before position-agnostic matching was implemented.
+/// Assertions have been updated to reflect the new behavior where group names can be found at any position in the filename.
 mod test_prefix_candidates {
     use super::test_helpers::*;
     use super::*;
@@ -1240,9 +1234,8 @@ mod test_prefix_candidates {
             "Some.Name.Thing.v2.mp4",
             "Some.Name.Other.v1.mp4",
         ]);
-        // With min_group_size=3: only prefixes with 3+ files qualify
-        // 3-part "Some.Name.Thing" has 2 files < 3, so excluded
-        // 2-part "Some.Name" has 3 files >= 3, 1-part "Some" has 3 files >= 3
+        // With min_group_size=3: only prefixes with 3+ files qualify 3-part "Some.Name.Thing" has 2 files < 3,
+        // so excluded 2-part "Some.Name" has 3 files >= 3, 1-part "Some" has 3 files >= 3
         let candidates = find_prefix_candidates("Some.Name.Thing.v1.mp4", &files, 3, 1);
         assert!(candidates.iter().any(|c| c.prefix == "Some.Name" && c.match_count == 3));
         assert!(candidates.iter().any(|c| c.prefix == "Some" && c.match_count == 3));
@@ -2285,8 +2278,8 @@ mod test_file_extension_exclusion {
 
     #[test]
     fn name_that_looks_like_extension_at_non_extension_position() {
-        // A word that looks like an extension but isn't at the extension position
-        // should still be considered (e.g., "mp4" as part of a name)
+        // A word that looks like an extension but isn't at the extension position should still be considered
+        // (e.g., "mp4" as part of a name)
         let files = make_test_files(&[
             "Convert.mp4.to.mkv.Guide.One.pdf",
             "Convert.mp4.to.mkv.Guide.Two.pdf",

@@ -1233,7 +1233,7 @@ impl QTorrent {
 
     /// Move the torrent file into the downloaded directory and log the outcome.
     ///
-    /// Errors are reported as warnings; they do not abort the surrounding workflow.
+    /// Errors are reported as warnings. They do not abort the surrounding workflow.
     fn move_torrent_file(torrent_path: &Path, downloaded_directory: &Path) {
         match utils::move_torrent_to_downloaded(torrent_path, downloaded_directory) {
             Ok(destination) => {
@@ -1251,7 +1251,7 @@ impl QTorrent {
 
     /// Move a skipped duplicate torrent file to the trash and log the outcome.
     ///
-    /// Errors are reported as warnings; they do not abort the surrounding workflow.
+    /// Errors are reported as warnings. They do not abort the surrounding workflow.
     fn trash_duplicate_torrent_file(torrent_path: &Path) {
         match trash::delete(torrent_path) {
             Ok(()) => {

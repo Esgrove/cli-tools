@@ -1,7 +1,6 @@
 //! Benchmarks for `dir_move` prefix grouping, file matching, and filtering logic.
 //!
-//! Uses the algorithmic types and functions extracted to the `cli_tools::dir_move`
-//! library module.
+//! Uses the algorithmic types and functions extracted to the `cli_tools::dir_move` library module.
 
 #![allow(clippy::indexing_slicing, clippy::string_slice)]
 
@@ -463,7 +462,8 @@ fn bench_find_prefix_candidates_medium(c: &mut Criterion) {
     let mut group = c.benchmark_group("dir_move/find_prefix_candidates/medium");
 
     // Benchmark finding candidates for the first file in each logical group
-    let representative_indices = [0, 5, 13]; // Jane.Doe, John.Smith, Third.Series
+    // Jane.Doe, John.Smith, Third.Series
+    let representative_indices = [0, 5, 13];
     for &index in &representative_indices {
         let label = &files[index].filtered_name;
         let label_short = if label.len() > 30 { &label[..30] } else { label.as_ref() };
@@ -499,7 +499,7 @@ fn bench_find_prefix_candidates_large(c: &mut Criterion) {
     });
 
     group.bench_function("standalone_file", |b| {
-        // "Standalone.Movie.2024.1080p.BluRay.mp4" — index 29
+        // "Standalone.Movie.2024.1080p.BluRay.mp4": index 29
         b.iter(|| {
             find_prefix_candidates(
                 black_box(&files[29].filtered_name),
@@ -535,8 +535,7 @@ fn bench_find_prefix_candidates_large(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark finding candidates across all files (simulates the first pass of
-/// `collect_all_prefix_groups`).
+/// Benchmark finding candidates across all files (simulates the first pass of `collect_all_prefix_groups`).
 fn bench_find_prefix_candidates_all_files(c: &mut Criterion) {
     let mut group = c.benchmark_group("dir_move/find_prefix_candidates/all_files");
 
@@ -598,7 +597,8 @@ fn bench_mixed_conventions(c: &mut Criterion) {
     group.bench_function("concatenated_file", |b| {
         b.iter(|| {
             find_prefix_candidates(
-                black_box(&files[0].filtered_name), // JaneDoe...
+                // JaneDoe...
+                black_box(&files[0].filtered_name),
                 black_box(&files),
                 black_box(2),
                 black_box(5),
@@ -610,7 +610,8 @@ fn bench_mixed_conventions(c: &mut Criterion) {
     group.bench_function("dotted_file", |b| {
         b.iter(|| {
             find_prefix_candidates(
-                black_box(&files[1].filtered_name), // Jane.Doe...
+                // Jane.Doe...
+                black_box(&files[1].filtered_name),
                 black_box(&files),
                 black_box(2),
                 black_box(5),
@@ -622,7 +623,8 @@ fn bench_mixed_conventions(c: &mut Criterion) {
     group.bench_function("lowercase_file", |b| {
         b.iter(|| {
             find_prefix_candidates(
-                black_box(&files[2].filtered_name), // janedoe...
+                // janedoe...
+                black_box(&files[2].filtered_name),
                 black_box(&files),
                 black_box(2),
                 black_box(5),

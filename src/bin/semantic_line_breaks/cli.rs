@@ -59,8 +59,7 @@ struct RunContext<'config> {
     widths: HashMap<WidthKey, Option<WidthSource>>,
     /// Format options per line width the run can use.
     ///
-    /// The option lists never change between files, so cloning them once per width
-    /// replaces cloning them once per file.
+    /// The option lists never change between files, so cloning them once per width replaces cloning them once per file.
     options: HashMap<usize, FormatOptions>,
     /// Format options for the default width, used when no other width applies.
     default_options: FormatOptions,

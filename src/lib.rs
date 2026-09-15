@@ -55,12 +55,12 @@ const PROJECT_NAME: &str = env!("CARGO_PKG_NAME");
 
 /// Path to the user config file: `$HOME/.config/cli-tools.toml`.
 ///
-/// When the lib itself is compiled under `#[cfg(test)]`, returns the fixture directly at
-/// compile time — no runtime check needed.
+/// When the lib itself is compiled under `#[cfg(test)]`, returns the fixture directly at compile time.
+/// No runtime check needed.
 ///
-/// For binary tests the lib is compiled in normal mode, so the non-test static detects the
-/// test context at runtime via `CARGO_MANIFEST_DIR`, which Cargo injects as a runtime env var
-/// for every `cargo test` invocation across all binaries.
+/// For binary tests the lib is compiled in normal mode,
+/// so the non-test static detects the test context at runtime via `CARGO_MANIFEST_DIR`,
+/// which Cargo injects as a runtime env var for every `cargo test` invocation across all binaries.
 ///
 /// Returns `None` if the home directory cannot be determined (production path only).
 #[cfg(not(test))]
@@ -199,9 +199,8 @@ pub fn colorize_bool(value: bool) -> ColoredString {
 ///
 /// This is useful when producing a cleaned display filename
 /// after removing tokens such as codecs, resolutions, or release tags.
-/// Consecutive separators made from dots, hyphens, underscores, or whitespace
-/// are reduced to the first separator in each sequence,
-/// then any remaining separator is trimmed from both ends.
+/// Consecutive separators made from dots, hyphens, underscores,
+/// or whitespace are reduced to the first separator in each sequence, then any remaining separator is trimmed from both ends.
 ///
 /// # Examples
 ///
@@ -415,8 +414,8 @@ pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, St
     // Rust uses Unicode NFD (Normalization Form Decomposed) by default,
     // which converts special chars like "å" to "a\u{30a}",
     // which then get printed as a regular "a".
-    // Use NFC (Normalization Form Composed) from unicode_normalization crate
-    // to retain the correct format and not cause issues later on.
+    // Use NFC (Normalization Form Composed)
+    // from unicode_normalization crate to retain the correct format and not cause issues later on.
     // https://github.com/unicode-rs/unicode-normalization
 
     Ok((
@@ -501,10 +500,10 @@ pub fn is_network_path(path: &Path) -> bool {
         let mut root: Vec<u16> = prefix_str.encode_wide().collect();
         if root.get(1).is_some_and(|value| *value == u16::from(b':')) {
             root.push(u16::from(b'\\'));
-            root.push(0); // null terminator
+            // null terminator
+            root.push(0);
 
-            // SAFETY: GetDriveTypeW is a safe Windows API call that only reads
-            // the null-terminated string to determine drive type
+            // SAFETY: GetDriveTypeW is a safe Windows API call that only reads the null-terminated string to determine drive type
             #[allow(unsafe_code)]
             let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
             return drive_type == DRIVE_REMOTE;
@@ -533,7 +532,7 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-    // `GetDiskFreeSpaceExW` expects a directory; use the parent directory for file paths.
+    // `GetDiskFreeSpaceExW` expects a directory. Use the parent directory for file paths.
     let directory = if path.is_dir() {
         path
     } else {
@@ -541,12 +540,13 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
     };
 
     let mut wide: Vec<u16> = directory.as_os_str().encode_wide().collect();
-    wide.push(0); // null terminator
+    // null terminator
+    wide.push(0);
 
     let mut free_bytes_available: u64 = 0;
-    // SAFETY: GetDiskFreeSpaceExW reads the null-terminated directory path and writes the
-    // number of free bytes available to the caller into the out-parameter. The remaining
-    // out-parameters are null, which the API explicitly allows.
+    // SAFETY: GetDiskFreeSpaceExW reads the null-terminated directory path
+    // and writes the number of free bytes available to the caller into the out-parameter.
+    // The remaining out-parameters are null, which the API explicitly allows.
     #[allow(unsafe_code)]
     let result = unsafe {
         GetDiskFreeSpaceExW(
@@ -562,8 +562,8 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
 
 /// Get the available disk space in bytes for the volume containing the given path.
 ///
-/// On non-Windows platforms the available space cannot be determined without an
-/// additional dependency, so this always returns `None`.
+/// On non-Windows platforms the available space cannot be determined without an additional dependency,
+/// so this always returns `None`.
 #[cfg(not(windows))]
 #[must_use]
 pub const fn available_disk_space(_path: &Path) -> Option<u64> {
@@ -1046,8 +1046,8 @@ pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
 
 /// Create a semaphore for I/O-bound work.
 ///
-/// Uses `num_cpus * 2` permits, which allows enough concurrency for I/O-bound
-/// tasks (like running ffprobe) without overwhelming the system.
+/// Uses `num_cpus * 2` permits, which allows enough concurrency for I/O-bound tasks
+/// (like running ffprobe) without overwhelming the system.
 #[must_use]
 pub fn create_semaphore_for_io_bound() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(num_cpus::get_physical() * 2))

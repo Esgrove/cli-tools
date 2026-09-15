@@ -37,8 +37,7 @@ impl MoveReport {
 
 /// Move files to the target directory, creating it if needed.
 ///
-/// Uses `rename` first for fast same-device moves, then falls back to
-/// copy-verify-delete for cross-device moves.
+/// Uses `rename` first for fast same-device moves, then falls back to copy-verify-delete for cross-device moves.
 ///
 /// # Errors
 ///

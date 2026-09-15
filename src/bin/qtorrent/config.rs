@@ -369,8 +369,8 @@ impl Config {
 
     /// Resolve tags for a given torrent file path.
     ///
-    /// If the torrent filename (without extension) starts with one of the configured
-    /// `tag_overwrite_prefixes` (case-insensitive), returns the associated tag value.
+    /// If the torrent filename (without extension) starts with one of the configured `tag_overwrite_prefixes`
+    /// (case-insensitive), returns the associated tag value.
     /// Prefix rules take precedence over path rules.
     /// If no prefix matches, `tag_overwrite_paths` can match the torrent file's directory path.
     /// Otherwise, returns the default `tags` value from config.
@@ -549,8 +549,7 @@ fn path_components_match_score(
 
 /// Deserialize `[[prefix, tag], ...]` pairs into sorted `TagOverwrite` rules.
 ///
-/// Lowercases prefixes for case-insensitive matching and sorts by prefix length
-/// descending for longest-match-first semantics.
+/// Lowercases prefixes for case-insensitive matching and sorts by prefix length descending for longest-match-first semantics.
 fn deserialize_tag_overwrite_prefixes<'de, D>(deserializer: D) -> std::result::Result<Vec<TagOverwrite>, D::Error>
 where
     D: serde::Deserializer<'de>,

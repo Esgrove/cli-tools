@@ -8,8 +8,7 @@ use cli_tools::print_error;
 
 use crate::types::ProcessableFile;
 
-/// Minimum free disk space required before converting a file, as a multiple of the
-/// original file size.
+/// Minimum free disk space required before converting a file, as a multiple of the original file size.
 const MIN_DISK_SPACE_FACTOR: u64 = 2;
 
 /// Return a copy of a path with its extension removed.

@@ -1,8 +1,7 @@
 //! Benchmarks for the dot-rename formatting pipeline.
 //!
-//! These benchmarks measure the performance of filename formatting operations
-//! including replacements, date reordering, special character removal, and
-//! prefix/suffix application.
+//! These benchmarks measure the performance of filename formatting operations including replacements,
+//! date reordering, special character removal, and prefix/suffix application.
 
 #![allow(clippy::string_slice)]
 

@@ -373,8 +373,8 @@ impl FilteredFiles<'_> {
 
 /// Parse a single torrent file.
 ///
-/// Applies file filtering and determines whether to treat this as a multi-file torrent
-/// based on how many files will actually be included after filtering.
+/// Applies file filtering and determines whether to treat this
+/// as a multi-file torrent based on how many files will actually be included after filtering.
 pub fn parse_torrent(path: &Path, config: &Config) -> Result<TorrentInfo> {
     let filter = &config.file_filter;
     let bytes = fs::read(path).context("Failed to read torrent file")?;
@@ -495,9 +495,8 @@ pub fn to_hex(bytes: &[u8]) -> String {
 
 /// Extract the raw `info` dictionary bytes from a torrent file.
 ///
-/// This finds the `info` key in the top-level dictionary and returns
-/// the raw bytes of the value (the info dictionary), which can then
-/// be hashed to get the correct info hash.
+/// This finds the `info` key in the top-level dictionary and returns the raw bytes of the value (the info dictionary),
+/// which can then be hashed to get the correct info hash.
 ///
 /// # Errors
 /// Returns an error if the info dictionary cannot be found.
@@ -565,7 +564,8 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
             if data.get(pos).is_none() {
                 bail!("Malformed bencode list");
             }
-            Ok(pos + 1) // +1 for the 'e'
+            // +1 for the 'e'
+            Ok(pos + 1)
         }
         // Dictionary: d<key><value>...e
         b'd' => {
@@ -585,7 +585,8 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
             if data.get(pos).is_none() {
                 bail!("Malformed bencode dictionary");
             }
-            Ok(pos + 1) // +1 for the 'e'
+            // +1 for the 'e'
+            Ok(pos + 1)
         }
         // String: <length>:<content>
         b'0'..=b'9' => {
@@ -930,10 +931,12 @@ mod test_file_filter {
 
     #[test]
     fn excludes_by_size() {
-        let min_size = 10 * 1024 * 1024; // 10 MB
+        // 10 MB
+        let min_size = 10 * 1024 * 1024;
         let filter = FileFilter::new(vec![], vec![], Some(min_size), true, None, None);
 
-        let file = make_file_info("movie/small.mp4", 1_000_000); // 1 MB
+        // 1 MB
+        let file = make_file_info("movie/small.mp4", 1_000_000);
         let reason = filter.should_exclude(&file);
 
         assert!(reason.is_some());
@@ -1580,7 +1583,7 @@ mod test_parse_torrent_all_files_excluded {
         let torrent_path = create_multi_file_torrent(temp_dir.path(), "test.torrent");
 
         let mut config = default_config();
-        // Both files are 500 bytes; require at least 1 MB
+        // Both files are 500 bytes. Require at least 1 MB
         config.file_filter = FileFilter::new(vec![], vec![], Some(1024 * 1024), true, None, None);
 
         let info = parse_torrent(&torrent_path, &config).expect("should parse");

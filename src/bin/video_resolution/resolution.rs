@@ -79,7 +79,7 @@ impl FFProbeResult {
                 // No full resolution was removed, file is already correct
                 Ok(None)
             } else {
-                // Full resolution was removed but label already exists — fix duplicate
+                // Full resolution was removed but label already exists. Fix duplicate
                 let mut new_file_name = format!("{cleaned_name}.{extension}");
                 remove_extra_dots(&mut new_file_name);
                 let new_path = self.file.with_file_name(&new_file_name);

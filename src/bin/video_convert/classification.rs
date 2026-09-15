@@ -273,8 +273,8 @@ pub fn should_include_file(config: &Config, file: &VideoFile) -> bool {
 
 /// Run ffprobe on a file and classify the result.
 ///
-/// Returns a `VideoInfoCache` containing the analysis result, the file path, and the
-/// `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
+/// Returns a `VideoInfoCache` containing the analysis result, the file path,
+/// and the `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
 pub fn probe_and_classify(
     file: VideoFile,
     subtitle_files: Vec<SubtitleFile>,
@@ -1027,7 +1027,7 @@ mod test_classify_bitrate_filtering {
 
     #[test]
     fn bitrate_filter_does_not_apply_to_remux() {
-        // hevc in mkv needs remux — bitrate limits should not block it
+        // hevc in mkv needs remux. Bitrate limits should not block it
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let info = VideoInfo {
             codec: "hevc".to_string(),
@@ -1242,7 +1242,7 @@ mod test_classify_resolution_filtering {
 
     #[test]
     fn vertical_video_uses_smaller_dimension() {
-        // 1080x720 vertical — smaller dimension is 720 which is below 1080 min
+        // 1080x720 vertical. Smaller dimension is 720 which is below 1080 min
         let file = VideoFile::new(Path::new("/videos/vertical.mkv"), 0);
         let info = VideoInfo {
             codec: "h264".to_string(),
@@ -1405,7 +1405,7 @@ mod test_classify_output_exists {
 
     #[test]
     fn rename_skipped_when_output_exists_no_overwrite() {
-        // hevc in mp4 without suffix — rename target already exists
+        // hevc in mp4 without suffix. Rename target already exists
         let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
         let source = temp_dir.path().join("video.mp4");
         let output = temp_dir.path().join("video.x265.mp4");
@@ -1511,7 +1511,7 @@ mod test_classify_combined_filters {
 
     #[test]
     fn first_failing_filter_wins_bitrate_before_duration() {
-        // Both bitrate and duration fail — bitrate check comes first
+        // Both bitrate and duration fail. Bitrate check comes first
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let info = VideoInfo {
             codec: "h264".to_string(),

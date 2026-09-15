@@ -203,8 +203,8 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
 
 /// Run ffprobe on all files concurrently and return successfully parsed results.
 ///
-/// Errors from individual ffprobe calls are printed to stderr and the
-/// corresponding files are excluded from the returned results.
+/// Errors from individual ffprobe calls are printed to stderr
+/// and the corresponding files are excluded from the returned results.
 async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<FFProbeResult>> {
     let semaphore = create_semaphore_for_io_bound();
 
@@ -291,14 +291,18 @@ pub fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
 
     let width = lines
         .next()
-        .and_then(|line| line.get(6..)) // Skip "width="
-        .map(|w| w.strip_suffix(b"\r").unwrap_or(w)) // Handle Windows CRLF
+        // Skip "width="
+        .and_then(|line| line.get(6..))
+        // Handle Windows CRLF
+        .map(|w| w.strip_suffix(b"\r").unwrap_or(w))
         .ok_or_else(|| anyhow!("Missing width"))?;
 
     let height = lines
         .next()
-        .and_then(|line| line.get(7..)) // Skip "height="
-        .map(|h| h.strip_suffix(b"\r").unwrap_or(h)) // Handle Windows CRLF
+        // Skip "height="
+        .and_then(|line| line.get(7..))
+        // Handle Windows CRLF
+        .map(|h| h.strip_suffix(b"\r").unwrap_or(h))
         .ok_or_else(|| anyhow!("Missing height"))?;
 
     // SAFETY: ffprobe output is always valid ASCII digits

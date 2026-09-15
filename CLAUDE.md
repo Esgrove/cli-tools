@@ -74,12 +74,11 @@ cargo install cargo-llvm-cov
 
 ## Benchmarks
 
-Benchmarks use [Criterion.rs](https://github.com/criterion-rs/criterion.rs) for
-statistically rigorous microbenchmarking. Benchmark files live in `benches/`.
+Benchmarks use [Criterion.rs](https://github.com/criterion-rs/criterion.rs) for statistically rigorous microbenchmarking.
+Benchmark files live in `benches/`.
 
-The core algorithmic functions benchmarked for `dir_move` and `dupe_find` are
-extracted into library modules (`src/dir_move/` and `src/dupe_find/`) so that
-benchmarks can import them directly without duplicating code.
+The core algorithmic functions benchmarked for `dir_move` and `dupe_find` are extracted into library modules
+(`src/dir_move/` and `src/dupe_find/`) so that benchmarks can import them directly without duplicating code.
 
 ### Benchmark structure
 
@@ -94,9 +93,9 @@ benchmarks can import them directly without duplicating code.
 
 ### Adding new benchmarks
 
-When extracting algorithmic code from a binary for benchmarking, move the pure
-functions and types to a library module under `src/` and have the binary
-re-export from the library. Do not duplicate code in benchmark files.
+When extracting algorithmic code from a binary for benchmarking,
+move the pure functions and types to a library module under `src/` and have the binary re-export from the library.
+Do not duplicate code in benchmark files.
 
 ## Project Structure
 

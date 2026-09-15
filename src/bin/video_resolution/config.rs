@@ -1,8 +1,7 @@
 //! Configuration module for the resolution binary.
 //!
-//! This module handles reading configuration from both CLI arguments and the user
-//! config file (`~/.config/cli-tools.toml`). CLI arguments take priority over
-//! config file settings.
+//! This module handles reading configuration from both CLI arguments and the user config file
+//! (`~/.config/cli-tools.toml`). CLI arguments take priority over config file settings.
 //!
 //! # Example config file section
 //!

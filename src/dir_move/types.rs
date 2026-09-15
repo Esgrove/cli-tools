@@ -29,9 +29,8 @@ pub struct DirectoryInfo {
 /// Information about a file for grouping purposes.
 /// Uses `Cow` for efficient string handling - avoids cloning when possible.
 ///
-/// Includes pre-computed split and lowercased parts to avoid redundant work
-/// in hot loops where `prefix_matches_normalized` and `parts_are_contiguous_in_original`
-/// are called O(N × K × N) times.
+/// Includes pre-computed split and lowercased parts to avoid redundant work in hot loops
+/// where `prefix_matches_normalized` and `parts_are_contiguous_in_original` are called O(N × K × N) times.
 pub struct FileInfo<'a> {
     /// Path to the file.
     pub path: Cow<'a, Path>,
@@ -47,10 +46,9 @@ pub struct FileInfo<'a> {
 
 /// Pre-computed part combinations from a filtered filename for efficient prefix matching.
 ///
-/// Stores single, 2-part, and 3-part combinations in both lowercased and original-cased
-/// forms. This eliminates redundant `split('.')`, `to_lowercase()`, and `format!()` calls
-/// in the O(N × K × N) hot loops inside `find_prefix_candidates` and
-/// `prefix_matches_normalized`.
+/// Stores single, 2-part, and 3-part combinations in both lowercased and original-cased forms.
+/// This eliminates redundant `split('.')`, `to_lowercase()`,
+/// and `format!()` calls in the O(N × K × N) hot loops inside `find_prefix_candidates` and `prefix_matches_normalized`.
 pub struct FilteredParts {
     /// Single parts, lowercased (e.g., `["photo", "lab", "image"]`).
     pub parts_lower: Vec<String>,
@@ -189,9 +187,8 @@ impl fmt::Debug for FileInfo<'_> {
 }
 
 impl FilteredParts {
-    /// Create a new `FilteredParts` by splitting the filtered name on `'.'` and
-    /// pre-computing all single, 2-part, and 3-part combinations in both lowercased
-    /// and original-cased forms.
+    /// Create a new `FilteredParts` by splitting the filtered name on `'.'` and pre-computing all single, 2-part,
+    /// and 3-part combinations in both lowercased and original-cased forms.
     pub fn new(filtered_name: &str) -> Self {
         let parts_original: Vec<String> = filtered_name.split('.').map(String::from).collect();
 
@@ -235,9 +232,8 @@ impl FilteredParts {
 
     /// Check if any pre-computed part combination matches the given normalized target.
     ///
-    /// Checks single parts, 2-part, and 3-part lowered combinations against
-    /// `target_normalized`, requiring a valid word boundary (checked on the
-    /// corresponding original-cased parts) for `starts_with` matches.
+    /// Checks single parts, 2-part, and 3-part lowered combinations against `target_normalized`,
+    /// requiring a valid word boundary (checked on the corresponding original-cased parts) for `starts_with` matches.
     #[must_use]
     pub fn prefix_matches_normalized(&self, target_normalized: &str) -> bool {
         if target_normalized.is_empty() {
@@ -277,12 +273,10 @@ impl FilteredParts {
         false
     }
 
-    /// Check if there is a valid word boundary at byte position `prefix_len`
-    /// in the **original-cased** text.
+    /// Check if there is a valid word boundary at byte position `prefix_len` in the **original-cased** text.
     ///
-    /// The position is a byte offset (typically from `str::len()` on a lowercased
-    /// counterpart). If it does not fall on a UTF-8 character boundary in
-    /// `original_text`, the function conservatively returns `false`.
+    /// The position is a byte offset (typically from `str::len()` on a lowercased counterpart).
+    /// If it does not fall on a UTF-8 character boundary in `original_text`, the function conservatively returns `false`.
     ///
     /// Handles Unicode letters (including Scandic characters such as Ä, Ö, Ü, Å)
     /// by inspecting the `char` values on either side of the boundary.
@@ -313,8 +307,7 @@ impl FilteredParts {
         } else if !next.is_alphanumeric() {
             true
         } else {
-            // next is a lowercase letter (ASCII or Unicode) — only a boundary
-            // if the previous character was a digit.
+            // next is a lowercase letter (ASCII or Unicode). Only a boundary if the previous character was a digit.
             prev.is_ascii_digit()
         }
     }
@@ -721,21 +714,21 @@ mod test_filtered_parts_prefix_matches {
 
     #[test]
     fn starts_with_at_word_boundary_uppercase() {
-        // "PhotoLabTV" — 'T' after "PhotoLab" is uppercase, valid boundary
+        // "PhotoLabTV": 'T' after "PhotoLab" is uppercase, valid boundary
         let parts = FilteredParts::new("PhotoLabTV.Image.jpg");
         assert!(parts.prefix_matches_normalized("photolab"));
     }
 
     #[test]
     fn starts_with_rejected_at_lowercase_continuation() {
-        // "PhotoLabs" — 's' after "PhotoLab" is lowercase, NOT a boundary
+        // "PhotoLabs": 's' after "PhotoLab" is lowercase, NOT a boundary
         let parts = FilteredParts::new("PhotoLabs.Image.jpg");
         assert!(!parts.prefix_matches_normalized("photolab"));
     }
 
     #[test]
     fn starts_with_at_digit_boundary() {
-        // "Studio2" — '2' after "Studio" is a digit following a letter, valid boundary
+        // "Studio2": '2' after "Studio" is a digit following a letter, valid boundary
         let parts = FilteredParts::new("Studio2.Video.mp4");
         assert!(parts.prefix_matches_normalized("studio"));
     }
@@ -788,14 +781,14 @@ mod test_filtered_parts_prefix_matches {
 
     #[test]
     fn prefix_not_at_start_of_any_part() {
-        // "XPhotoLab" does not start with "photolab" — "x" comes first
+        // "XPhotoLab" does not start with "photolab": "x" comes first
         let parts = FilteredParts::new("XPhotoLab.Image.jpg");
         assert!(!parts.prefix_matches_normalized("photolab"));
     }
 
     #[test]
     fn all_uppercase_name_with_word_boundary() {
-        // "PHOTOLABPRO" — all uppercase, boundary at position 8 sees 'P' (uppercase) → match
+        // "PHOTOLABPRO": all uppercase, boundary at position 8 sees 'P' (uppercase) → match
         let parts = FilteredParts::new("PHOTOLABPRO.Image.jpg");
         assert!(parts.prefix_matches_normalized("photolab"));
     }
@@ -848,7 +841,7 @@ mod test_filtered_parts_prefix_matches {
 
     #[test]
     fn scandic_two_part_combined_exact_match() {
-        // "Häl.so" combined is "hälso" (lowered) — exact match
+        // "Häl.so" combined is "hälso" (lowered). Exact match
         let parts = FilteredParts::new("Häl.so.Video.001.mp4");
         assert!(parts.prefix_matches_normalized("hälso"));
     }

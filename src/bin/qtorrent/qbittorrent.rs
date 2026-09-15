@@ -1,7 +1,6 @@
 //! qBittorrent `WebUI` API client module.
 //!
-//! Provides functions to interact with the qBittorrent `WebUI` API
-//! for authentication and adding torrents.
+//! Provides functions to interact with the qBittorrent `WebUI` API for authentication and adding torrents.
 //!
 //! Documentation:
 //! <https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0)>
