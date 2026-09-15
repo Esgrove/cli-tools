@@ -16,6 +16,7 @@ use cli_tools::semantic_line_breaks::types::{
 use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, RuleSet, ViolationKind};
 
 use crate::Args;
+use crate::line_selection::LineSelection;
 
 /// Directory names skipped by default when walking directories.
 pub const DEFAULT_EXCLUDES: &[&str] = &[
@@ -81,6 +82,7 @@ pub struct Config {
     pub join_sentences: bool,
     pub jobs: usize,
     pub kind: Option<FileKind>,
+    pub line_selection: LineSelection,
     pub preserve_lowercase: Vec<String>,
     pub print: bool,
     pub quiet: bool,
@@ -178,6 +180,13 @@ impl Config {
             }
         }
 
+        // Stdin has no path, so a location cannot name anything there and is refused before it is resolved.
+        let line_selection = if args.stdin {
+            LineSelection::for_stdin(&args.lines)?
+        } else {
+            LineSelection::parse(&args.lines)?
+        };
+
         let extensions = if args.extensions.is_empty() {
             user_config.extensions
         } else {
@@ -198,6 +207,7 @@ impl Config {
             join_sentences: args.join_sentences || user_config.join_sentences,
             jobs: args.jobs,
             kind: args.kind,
+            line_selection,
             preserve_lowercase: extend_defaults(DEFAULT_PRESERVE_LOWERCASE, user_config.preserve_lowercase),
             print: args.print,
             quiet: args.quiet,
@@ -219,6 +229,9 @@ impl Config {
             join_sentences: self.join_sentences,
             allow_word_break: self.allow_word_break,
             rules: self.rules,
+            // The ranges given without a path apply to the one file of the run and to stdin.
+            // A file named by a spec of its own gets its own ranges, which the run context puts in place.
+            line_ranges: self.line_selection.bare().clone(),
             abbreviations: self.abbreviations.clone(),
             clause_starters: self.clause_starters.clone(),
             directive_prefixes: self.directive_prefixes.clone(),
@@ -501,5 +514,63 @@ mod test_config_merge {
         assert!(options.abbreviations.contains(&"approx.".to_string()));
         assert!(options.preserve_lowercase.contains(&"ffmpeg".to_string()));
         assert_eq!(options.rules, RuleSet::DEFAULT);
+    }
+}
+
+#[cfg(test)]
+mod test_config_line_selection {
+    use clap::Parser;
+
+    use super::*;
+
+    /// Build the config, reporting a rejected argument the same way a failure to build it is reported.
+    fn config_from(arguments: &[&str]) -> Result<Config> {
+        let args = Args::try_parse_from(arguments).map_err(|error| anyhow::anyhow!("{error}"))?;
+        Config::from_args(&args)
+    }
+
+    #[test]
+    fn no_line_selection_leaves_the_options_unrestricted() {
+        let config = config_from(&["slb"]).expect("config should build");
+        assert!(config.line_selection.is_empty());
+        assert!(config.format_options(120).line_ranges.is_empty());
+    }
+
+    #[test]
+    fn plain_ranges_reach_the_format_options() {
+        let config = config_from(&["slb", "--lines", "10-25,40"]).expect("config should build");
+        let options = config.format_options(120);
+        assert!(options.line_ranges.contains_line(10));
+        assert!(options.line_ranges.contains_line(40));
+        assert!(!options.line_ranges.contains_line(30));
+    }
+
+    #[test]
+    fn a_comma_separates_several_values() {
+        let config = config_from(&["slb", "--lines", "5", "--lines", "9"]).expect("config should build");
+        let options = config.format_options(120);
+        assert!(options.line_ranges.contains_line(5));
+        assert!(options.line_ranges.contains_line(9));
+        assert!(!options.line_ranges.contains_line(7));
+    }
+
+    #[test]
+    fn a_location_keeps_the_plain_ranges_empty() {
+        let config = config_from(&["slb", "--lines", "README.md:3"]).expect("config should build");
+        assert!(config.format_options(120).line_ranges.is_empty());
+        assert!(!config.line_selection.is_empty());
+        assert_eq!(config.line_selection.paths().len(), 1);
+    }
+
+    #[test]
+    fn a_line_range_that_cannot_be_parsed_is_refused_by_the_argument_parser() {
+        assert!(config_from(&["slb", "--lines", "abc"]).is_err());
+        assert!(config_from(&["slb", "--lines", "0"]).is_err());
+    }
+
+    #[test]
+    fn a_location_is_refused_with_stdin() {
+        assert!(config_from(&["slb", "--stdin", "--type", "rust", "--lines", "README.md:3"]).is_err());
+        assert!(config_from(&["slb", "--stdin", "--type", "rust", "--lines", "3"]).is_ok());
     }
 }

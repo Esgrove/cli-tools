@@ -8,6 +8,7 @@
 //! Each file renders its own output, which the main thread then prints in file order,
 //! so the output does not depend on the order the threads happen to finish in.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -21,7 +22,7 @@ use rayon::prelude::*;
 
 use cli_tools::semantic_line_breaks::project_config::{WidthSource, discover_width};
 use cli_tools::semantic_line_breaks::types::DEFAULT_MAX_WIDTH;
-use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, check, format};
+use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, LineRanges, check, format};
 use cli_tools::{diff_lines, print_error, print_yellow};
 
 use crate::Args;
@@ -71,8 +72,8 @@ struct RunContext<'config> {
 struct FileSettings<'context> {
     /// Resolved line width.
     width: usize,
-    /// Format options holding that width.
-    options: &'context FormatOptions,
+    /// Format options holding that width, owned only for a file with a line selection of its own.
+    options: Cow<'context, FormatOptions>,
     /// Project config file the width came from, when it did.
     source: Option<&'context WidthSource>,
 }
@@ -112,6 +113,17 @@ impl<'config> RunContext<'config> {
             .or_else(|| source.map(|source| source.width))
             .unwrap_or(DEFAULT_MAX_WIDTH);
         let options = self.options.get(&width).unwrap_or(&self.default_options);
+        // The ranges given without a path are already in the cached options,
+        // so only a file named by a spec of its own needs options built for it.
+        let ranges = self.config.line_selection.ranges_for(file);
+        let options = if *ranges == options.line_ranges {
+            Cow::Borrowed(options)
+        } else {
+            Cow::Owned(FormatOptions {
+                line_ranges: ranges.clone(),
+                ..options.clone()
+            })
+        };
         FileSettings {
             width: options.max_width,
             options,
@@ -160,7 +172,17 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         return run_stdin(&config);
     }
 
-    let files = collect_files(&args.paths, &config)?;
+    // A location such as "src/main.rs:14" names the file to work on,
+    // so it stands in for the input path when no path was given.
+    let selected_paths = config.line_selection.paths();
+    let paths = if args.paths.is_empty() && !selected_paths.is_empty() {
+        selected_paths
+    } else {
+        args.paths.clone()
+    };
+    let mut files = collect_files(&paths, &config)?;
+    config.line_selection.validate(&files)?;
+    files.retain(|(file, _)| config.line_selection.is_empty() || config.line_selection.includes_file(file));
     if files.is_empty() {
         print_yellow!("No supported files found");
         return Ok(ExitCode::SUCCESS);
@@ -227,10 +249,10 @@ fn run_stdin(config: &Config) -> Result<ExitCode> {
             eprintln!("{}", format_violation("stdin", violation, true));
         }
     }
-    let remaining = result
-        .fixed_text
-        .as_deref()
-        .map_or_else(|| result.violations.len(), |fixed| check(fixed, kind, &options).len());
+    let remaining = result.fixed_text.as_deref().map_or_else(
+        || result.violations.len(),
+        |fixed| check(fixed, kind, &recheck_options(&options, &result)).len(),
+    );
     Ok(if remaining > 0 {
         ExitCode::FAILURE
     } else {
@@ -261,11 +283,12 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
     // The fixed text is only needed to write it or to print the diff,
     // and building it costs an extra pass over every file with a trailing comment.
     let result = if config.fix || config.print {
-        format(&text, kind, settings.options)
+        format(&text, kind, &settings.options)
     } else {
         FormatResult {
-            violations: check(&text, kind, settings.options),
+            violations: check(&text, kind, &settings.options),
             fixed_text: None,
+            fixed_line_ranges: LineRanges::default(),
         }
     };
     outcome.processed = true;
@@ -291,7 +314,7 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
             &text,
             &result,
             kind,
-            settings.options,
+            &settings.options,
             config,
             &mut outcome,
         );
@@ -337,7 +360,7 @@ fn fix_file(
         return;
     }
     outcome.written = true;
-    let remaining = check(fixed, kind, options);
+    let remaining = check(fixed, kind, &recheck_options(options, result));
     let fixed_count = result.violations.len().saturating_sub(remaining.len());
     if !config.quiet {
         let message = format!(
@@ -353,6 +376,20 @@ fn fix_file(
         outcome.lines.extend(diff_lines(path, text, fixed));
     }
     outcome.remaining = remaining.len();
+}
+
+/// Options for checking the fixed text of a run again.
+///
+/// Reflowing a paragraph changes how many lines it needs,
+/// so a selected range covers different line numbers in the fixed text than in the original one.
+fn recheck_options<'options>(options: &'options FormatOptions, result: &FormatResult) -> Cow<'options, FormatOptions> {
+    if options.line_ranges.is_empty() || result.fixed_line_ranges == options.line_ranges {
+        return Cow::Borrowed(options);
+    }
+    Cow::Owned(FormatOptions {
+        line_ranges: result.fixed_line_ranges.clone(),
+        ..options.clone()
+    })
 }
 
 /// Name of the place the line width came from, for the verbose report.
@@ -538,6 +575,7 @@ mod test_fix_file {
                 fixable: false,
             }],
             fixed_text: None,
+            fixed_line_ranges: LineRanges::default(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(
@@ -573,6 +611,7 @@ mod test_fix_file {
                 fixable: false,
             }],
             fixed_text: None,
+            fixed_line_ranges: LineRanges::default(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(
@@ -618,6 +657,7 @@ mod test_fix_file {
         let result = FormatResult {
             violations: vec![],
             fixed_text: Some("/// After.\n".to_string()),
+            fixed_line_ranges: LineRanges::default(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(

@@ -514,6 +514,165 @@ fn several_paths_are_checked_in_one_run() {
 }
 
 #[test]
+fn a_line_selection_fixes_only_the_block_it_names() {
+    let directory = temporary_directory();
+    let content = format!("{TWO_SENTENCES}fn first() {{}}\n\n{TWO_SENTENCES}fn second() {{}}\n");
+    let path = write_file(&directory, "lines.rs", &content);
+
+    let output = run(&[&argument(&path), "-w", "40", "--fix", "--lines", "4"]);
+
+    assert_eq!(exit_code(&output), 0);
+    let fixed = std::fs::read_to_string(&path).expect("file should be readable");
+    assert_eq!(
+        fixed,
+        "/// One sentence that is already quite long. Another sentence follows it here.\n\
+         fn first() {}\n\n\
+         /// One sentence that is already quite long.\n\
+         /// Another sentence follows it here.\n\
+         fn second() {}\n"
+    );
+}
+
+#[test]
+fn a_run_without_a_line_selection_fixes_every_block() {
+    let directory = temporary_directory();
+    let content = format!("{TWO_SENTENCES}fn first() {{}}\n\n{TWO_SENTENCES}fn second() {{}}\n");
+    let path = write_file(&directory, "all.rs", &content);
+
+    let output = run(&[&argument(&path), "-w", "40", "--fix"]);
+
+    assert_eq!(exit_code(&output), 0);
+    let fixed = std::fs::read_to_string(&path).expect("file should be readable");
+    assert_eq!(
+        fixed.matches("/// Another sentence follows it here.").count(),
+        2,
+        "{fixed}"
+    );
+}
+
+#[test]
+fn a_line_selection_reports_only_the_block_it_names() {
+    let directory = temporary_directory();
+    let content = format!("{TWO_SENTENCES}fn first() {{}}\n\n{TWO_SENTENCES}fn second() {{}}\n");
+    let path = write_file(&directory, "report.rs", &content);
+
+    let output = run(&[&argument(&path), "-w", "40", "--lines", "4"]);
+
+    assert_eq!(exit_code(&output), 1);
+    let text = plain(&stdout(&output));
+    assert!(text.contains("report.rs:4:"), "{text}");
+    assert!(!text.contains("report.rs:1:"), "{text}");
+}
+
+#[test]
+fn a_location_selects_the_file_to_process_on_its_own() {
+    let directory = temporary_directory();
+    let path = write_file(&directory, "located.rs", TWO_SENTENCES);
+    let other = write_file(&directory, "other.rs", TWO_SENTENCES);
+
+    let output = run(&["-w", "40", "--fix", "--lines", &format!("{}:1", argument(&path))]);
+
+    assert_eq!(exit_code(&output), 0);
+    let fixed = std::fs::read_to_string(&path).expect("file should be readable");
+    assert_eq!(
+        fixed,
+        "/// One sentence that is already quite long.\n/// Another sentence follows it here.\n"
+    );
+    let untouched = std::fs::read_to_string(&other).expect("file should be readable");
+    assert_eq!(untouched, TWO_SENTENCES);
+}
+
+#[test]
+fn a_location_copied_from_the_report_can_be_pasted_back_in() {
+    let directory = temporary_directory();
+    let path = write_file(&directory, "pasted.rs", "fn one() {} // A note.\n");
+
+    // The trailing rule prints a column after the line, which the selection has to accept.
+    let location = format!("{}:1:13", argument(&path));
+    let output = run(&["--fix", "--trailing", "--lines", &location]);
+
+    assert_eq!(exit_code(&output), 0);
+    let fixed = std::fs::read_to_string(&path).expect("file should be readable");
+    assert_eq!(fixed, "// A note.\nfn one() {}\n");
+}
+
+#[test]
+fn a_location_takes_more_than_one_range_after_it() {
+    let directory = temporary_directory();
+    let content = format!("{TWO_SENTENCES}fn first() {{}}\n\n{TWO_SENTENCES}fn second() {{}}\n");
+    let path = write_file(&directory, "both.rs", &content);
+
+    // The path is written once, and the range after it belongs to the same file.
+    let output = run(&["-w", "40", "--fix", "--lines", &format!("{}:1,4", argument(&path))]);
+
+    assert_eq!(exit_code(&output), 0);
+    let fixed = std::fs::read_to_string(&path).expect("file should be readable");
+    assert_eq!(
+        fixed.matches("/// Another sentence follows it here.").count(),
+        2,
+        "{fixed}"
+    );
+}
+
+#[test]
+fn plain_line_ranges_are_refused_for_more_than_one_file() {
+    let directory = temporary_directory();
+    let first = write_file(&directory, "first.rs", TWO_SENTENCES);
+    let second = write_file(&directory, "second.rs", TWO_SENTENCES);
+
+    let output = run(&[&argument(&first), &argument(&second), "--lines", "1"]);
+
+    assert_eq!(exit_code(&output), 2);
+    let text = plain(&stderr(&output));
+    assert!(text.contains("need a single file"), "{text}");
+    assert!(text.contains("file:line"), "{text}");
+}
+
+#[test]
+fn a_line_selection_that_names_an_unknown_file_is_refused() {
+    let directory = temporary_directory();
+    let path = write_file(&directory, "known.rs", TWO_SENTENCES);
+    let other = write_file(&directory, "excluded.rs", TWO_SENTENCES);
+
+    let output = run(&[&argument(&path), "--lines", &format!("{}:1", argument(&other))]);
+
+    assert_eq!(exit_code(&output), 2);
+    assert!(
+        plain(&stderr(&output)).contains("is not among the files to process"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn stdin_mode_formats_only_the_selected_lines() {
+    let content = format!("{TWO_SENTENCES}fn first() {{}}\n\n{TWO_SENTENCES}fn second() {{}}\n");
+
+    let output = run_with_stdin(&["--stdin", "--type", "rust", "-w", "40", "--lines", "4"], &content);
+
+    assert_eq!(
+        stdout(&output),
+        "/// One sentence that is already quite long. Another sentence follows it here.\n\
+         fn first() {}\n\n\
+         /// One sentence that is already quite long.\n\
+         /// Another sentence follows it here.\n\
+         fn second() {}\n"
+    );
+}
+
+#[test]
+fn stdin_mode_refuses_a_line_selection_with_a_path() {
+    let output = run_with_stdin(&["--stdin", "--type", "rust", "--lines", "file.rs:4"], TWO_SENTENCES);
+
+    assert_eq!(exit_code(&output), 2);
+    assert!(
+        plain(&stderr(&output)).contains("Only plain line ranges can be given with --stdin"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn the_completion_subcommand_prints_a_script() {
     let output = run(&["completion", "bash"]);
 
