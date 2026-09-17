@@ -444,25 +444,27 @@ fn capitalize_token(token: &Token<'_>, options: &FormatOptions) -> Option<String
 /// Breaks at sentence ends and hard breaks are always kept,
 /// so sentences that already have their own line stay on it.
 pub(super) fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &FormatOptions) {
-    let mut index = 0;
-    while index + 1 < segments.len() {
-        let Some(first) = segments.get(index) else { break };
-        let Some(second) = segments.get(index + 1) else { break };
-        let inside_sentence = first.hard_break == HardBreak::None
-            && !second.tokens.is_empty()
-            && first.tokens.last().is_some_and(|last| !ends_sentence(last, options));
-        if inside_sentence && (first.modified || second.modified) {
-            let second = segments.remove(index + 1);
-            if let Some(first) = segments.get_mut(index) {
-                first.tokens.extend(second.tokens);
-                first.hard_break = second.hard_break;
-                first.modified = true;
-                first.source_line = None;
-            }
+    let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
+    for next in segments.drain(..) {
+        let should_merge = merged.last().is_some_and(|previous: &Segment| {
+            previous.hard_break == HardBreak::None
+                && !next.tokens.is_empty()
+                && previous.tokens.last().is_some_and(|last| !ends_sentence(last, options))
+                && (previous.modified || next.modified)
+        });
+        if should_merge {
+            let previous = merged
+                .last_mut()
+                .expect("just checked should_merge against merged.last()");
+            previous.tokens.extend(next.tokens);
+            previous.hard_break = next.hard_break;
+            previous.modified = true;
+            previous.source_line = None;
         } else {
-            index += 1;
+            merged.push(next);
         }
     }
+    *segments = merged;
 }
 
 #[cfg(test)]
