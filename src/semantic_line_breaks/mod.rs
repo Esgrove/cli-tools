@@ -7,23 +7,32 @@
 
 pub mod boundaries;
 pub mod comments;
+pub mod file_kind;
 pub mod formatter;
 pub mod line_breaks;
+pub mod line_ranges;
 pub mod markdown;
+pub mod options;
+pub mod paragraph;
 pub mod project_config;
+pub mod rank;
 pub mod reflow;
 pub mod regex_literals;
 pub mod rewording;
 pub mod scanner;
 pub mod string_syntax;
+pub mod token;
 pub mod tokenizer;
-pub mod types;
+pub mod violation;
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
+pub use file_kind::FileKind;
 pub use formatter::{check, format};
-pub use types::{
-    FileKind, FormatOptions, FormatResult, HardBreak, LineRanges, Paragraph, Rank, Region, RuleSet, Token, TokenKind,
-    Violation, ViolationKind,
-};
+pub use line_ranges::LineRanges;
+pub use options::{FormatOptions, FormatResult, RuleSet};
+pub use paragraph::{HardBreak, Paragraph, Region};
+pub use rank::Rank;
+pub use token::{Token, TokenKind};
+pub use violation::{Violation, ViolationKind};

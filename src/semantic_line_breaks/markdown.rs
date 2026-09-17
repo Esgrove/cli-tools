@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::types::{HardBreak, Paragraph, Region};
+use super::paragraph::{HardBreak, Paragraph, Region};
 use crate::leading_whitespace;
 
 /// Marker text that excludes the surrounding paragraph from formatting.

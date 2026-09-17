@@ -20,8 +20,8 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 
+use cli_tools::semantic_line_breaks::options::DEFAULT_MAX_WIDTH;
 use cli_tools::semantic_line_breaks::project_config::{WidthSource, discover_width};
-use cli_tools::semantic_line_breaks::types::DEFAULT_MAX_WIDTH;
 use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, LineRanges, check, format};
 use cli_tools::{diff_lines, print_error, print_yellow};
 

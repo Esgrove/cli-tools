@@ -9,10 +9,13 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::file_kind::{CommentStyle, FileKind};
 use super::markdown;
+use super::options::FormatOptions;
+use super::paragraph::Region;
 use super::scanner::{ScanState, scan_line_buffered};
 use super::string_syntax::{StringSyntax, string_syntax};
-use super::types::{CommentStyle, FileKind, FormatOptions, Region, Violation, ViolationKind};
+use super::violation::{Violation, ViolationKind};
 use crate::{leading_whitespace, starts_with_ignore_case};
 
 /// Matches the opening of a Python docstring and captures indentation, string prefix, quotes, and the rest.
@@ -437,7 +440,7 @@ fn docstring_regions(lines: &[&str], index: usize, regions: &mut Vec<Region>) ->
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use super::{FileKind, FormatOptions, Region, Violation, fix_trailing_comments};
-    use crate::semantic_line_breaks::types::Paragraph;
+    use crate::semantic_line_breaks::paragraph::Paragraph;
 
     /// Build a verbatim region for the given half open range.
     pub const fn verbatim_region(start: usize, end: usize) -> Region {
@@ -1169,7 +1172,7 @@ mod test_trailing_other_languages {
 #[cfg(test)]
 mod test_strings_are_not_comments {
     use super::*;
-    use crate::semantic_line_breaks::types::Paragraph;
+    use crate::semantic_line_breaks::paragraph::Paragraph;
 
     #[test]
     fn comment_like_lines_inside_raw_string_are_verbatim() {

@@ -4,8 +4,8 @@
 //! and regex literal support of each language,
 //! which is what the scanner needs to tell a comment apart from a string.
 
+use super::file_kind::FileKind;
 use super::scanner::{Backtick, SingleQuote};
-use super::types::FileKind;
 
 /// String and comment syntax of a language for the trailing comment scanner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::types::FileKind;
+use super::file_kind::FileKind;
 use crate::glob_to_regex;
 
 /// Matches a Prettier `printWidth` setting in JSON or YAML.

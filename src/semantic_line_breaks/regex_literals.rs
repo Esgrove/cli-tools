@@ -169,9 +169,9 @@ pub(super) fn comment_starts_at(chars: &[(usize, char)], index: usize, syntax: &
 mod test_regex_literals {
     use crate::semantic_line_breaks::comments::test_helpers::*;
 
+    use super::super::file_kind::FileKind;
     use super::super::scanner::{ScanState, scan_line};
     use super::super::string_syntax::string_syntax;
-    use super::super::types::FileKind;
 
     #[test]
     fn contextual_identifiers_preserve_real_trailing_comments() {

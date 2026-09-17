@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 use serde::Deserialize;
 
-use cli_tools::semantic_line_breaks::types::{
+use cli_tools::semantic_line_breaks::options::{
     DEFAULT_ABBREVIATIONS, DEFAULT_DIRECTIVE_PREFIXES, DEFAULT_PRESERVE_LOWERCASE, DEFAULT_TAB_WIDTH,
 };
 use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, RuleSet, ViolationKind};

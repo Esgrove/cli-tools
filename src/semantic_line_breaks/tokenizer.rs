@@ -10,7 +10,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::types::{FormatOptions, Token, TokenKind, is_closer, is_opener};
+use super::options::FormatOptions;
+use super::token::{Token, TokenKind, is_closer, is_opener};
 
 /// The em dash, which the dash rewrite reads as a clause separator.
 const EM_DASH: char = '\u{2014}';

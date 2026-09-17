@@ -4,9 +4,13 @@
 //! so the modules split out of the prose engine can share them.
 
 use super::boundaries::find_boundaries;
+use super::options::FormatOptions;
+use super::paragraph::{HardBreak, Paragraph};
+use super::rank::Rank;
 use super::reflow::{ReflowOutcome, reflow_paragraph};
+use super::token::{Token, TokenKind};
 use super::tokenizer::tokenize_line;
-use super::types::{FormatOptions, HardBreak, Paragraph, Rank, Token, TokenKind, ViolationKind};
+use super::violation::ViolationKind;
 
 /// Tokenize one line with dash normalization enabled.
 pub fn tokens(text: &str) -> Vec<Token<'_>> {
