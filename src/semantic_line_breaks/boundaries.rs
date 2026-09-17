@@ -6,8 +6,11 @@
 
 use std::sync::LazyLock;
 
+use super::options::FormatOptions;
+use super::paragraph::HardBreak;
+use super::rank::Rank;
+use super::token::{Token, TokenKind, is_opener};
 use super::tokenizer::{contains_word, is_abbreviation, is_trailing_closer, starts_markdown_structure};
-use super::types::{FormatOptions, HardBreak, Rank, Token, TokenKind, is_opener};
 
 /// Minimum number of words before a colon for the text to introduce what follows it.
 ///
@@ -549,8 +552,8 @@ mod test_sentence_end {
 mod test_boundaries {
     use super::super::tokenizer::tokenize_line;
     use super::*;
+    use crate::semantic_line_breaks::options::RuleSet;
     use crate::semantic_line_breaks::test_helpers::*;
-    use crate::semantic_line_breaks::types::RuleSet;
 
     #[test]
     fn the_clause_table_holds_every_tier_word() {
@@ -704,7 +707,7 @@ mod test_boundaries {
 #[cfg(test)]
 mod test_brackets {
     use super::super::reflow::reflow_paragraph;
-    use super::super::types::ViolationKind;
+    use super::super::violation::ViolationKind;
     use super::*;
     use crate::semantic_line_breaks::test_helpers::*;
 

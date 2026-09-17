@@ -511,7 +511,8 @@ mod test_scanner_edges {
     use crate::semantic_line_breaks::comments::test_helpers::*;
 
     use super::super::comments::split_source_regions;
-    use super::super::types::{FileKind, Region};
+    use super::super::file_kind::FileKind;
+    use super::super::paragraph::Region;
 
     #[test]
     fn a_long_lifetime_is_not_a_character_literal() {

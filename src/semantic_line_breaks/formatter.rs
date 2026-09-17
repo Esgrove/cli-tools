@@ -7,9 +7,13 @@
 use std::borrow::Cow;
 
 use super::comments;
+use super::file_kind::FileKind;
+use super::line_ranges::LineRanges;
 use super::markdown;
+use super::options::{FormatOptions, FormatResult};
+use super::paragraph::Region;
 use super::reflow;
-use super::types::{FileKind, FormatOptions, FormatResult, LineRanges, Region, Violation};
+use super::violation::Violation;
 
 /// One line of the input with its original line ending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,7 +353,8 @@ mod test_split_and_assemble {
 #[cfg(test)]
 mod test_format {
     use super::*;
-    use crate::semantic_line_breaks::types::{RuleSet, ViolationKind};
+    use crate::semantic_line_breaks::options::RuleSet;
+    use crate::semantic_line_breaks::violation::ViolationKind;
 
     /// Options with every rule on, including the opt-in trailing comment rule.
     fn all_rules() -> FormatOptions {
@@ -720,7 +725,7 @@ mod test_format {
 #[cfg(test)]
 mod test_line_range_scoping {
     use super::*;
-    use crate::semantic_line_breaks::types::RuleSet;
+    use crate::semantic_line_breaks::options::RuleSet;
 
     /// Three doc comment blocks, each one sentence too long for the width, with code between them.
     const THREE_BLOCKS: &str = "\

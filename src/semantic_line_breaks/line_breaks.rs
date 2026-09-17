@@ -9,9 +9,13 @@
 use std::ops::Range;
 
 use super::boundaries::{MIN_COLON_INTRODUCTION_WORDS, PHRASE_CONJUNCTIONS, find_boundaries};
+use super::options::FormatOptions;
+use super::paragraph::Paragraph;
+use super::rank::Rank;
 use super::reflow::{prefix_width, tokens_width};
+use super::token::Token;
 use super::tokenizer::contains_word;
-use super::types::{FormatOptions, Paragraph, Rank, Token, Violation, ViolationKind};
+use super::violation::{Violation, ViolationKind};
 
 /// Number of characters a line may exceed the maximum width by before it is considered too long.
 ///

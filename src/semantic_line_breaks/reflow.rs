@@ -6,9 +6,12 @@
 //! This is the entry point the formatter calls for every prose paragraph.
 
 use super::line_breaks::{Budgets, MIN_BUDGET, SOFT_OVERFLOW, over_long_line_violations, split_tokens};
+use super::options::FormatOptions;
+use super::paragraph::{HardBreak, Paragraph};
 use super::rewording::{build_segments, merge_changed_sentences, reword_segments};
+use super::token::Token;
 use super::tokenizer::tokenize_line;
-use super::types::{FormatOptions, HardBreak, Paragraph, Token, Violation, ViolationKind};
+use super::violation::{Violation, ViolationKind};
 
 /// Characters a rewrap of a hanging indent may add to the width the lines grow by.
 ///
@@ -373,8 +376,8 @@ pub fn capitalize(word: &str) -> String {
 #[cfg(test)]
 mod test_reflow {
     use super::*;
+    use crate::semantic_line_breaks::options::RuleSet;
     use crate::semantic_line_breaks::test_helpers::*;
-    use crate::semantic_line_breaks::types::RuleSet;
 
     #[test]
     fn joins_mid_clause_lines_that_fit() {
@@ -552,8 +555,8 @@ mod test_reflow {
 #[cfg(test)]
 mod test_reflow_safety {
     use super::*;
+    use crate::semantic_line_breaks::options::RuleSet;
     use crate::semantic_line_breaks::test_helpers::*;
-    use crate::semantic_line_breaks::types::RuleSet;
 
     /// A paragraph whose following lines line up under a column of the first one.
     fn hanging(lines: &[&str], first_prefix: &str, rest_prefix: &str) -> Paragraph {
@@ -699,7 +702,7 @@ mod test_reflow_safety {
 
 #[cfg(test)]
 mod test_command_text {
-    use super::super::types::TokenKind;
+    use super::super::token::TokenKind;
     use super::*;
     use crate::semantic_line_breaks::test_helpers::*;
 

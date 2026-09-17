@@ -10,9 +10,12 @@ use super::boundaries::{
     clause_rank, collect_bracket_events, collect_emphasis_events, ends_sentence, is_mid_clause_break, is_sentence_end,
     lines_ending_inside, token_depths,
 };
+use super::options::FormatOptions;
+use super::paragraph::{HardBreak, Paragraph};
 use super::reflow::capitalize;
+use super::token::{Token, TokenKind};
 use super::tokenizer::RE_LOWERCASE_WORD;
-use super::types::{FormatOptions, HardBreak, Paragraph, Token, TokenKind, Violation, ViolationKind};
+use super::violation::{Violation, ViolationKind};
 
 /// A run of tokens that is reflowed as one unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,8 +439,8 @@ pub(super) fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &For
 mod test_rewording {
     use super::super::reflow::reflow_paragraph;
     use super::*;
+    use crate::semantic_line_breaks::options::RuleSet;
     use crate::semantic_line_breaks::test_helpers::*;
-    use crate::semantic_line_breaks::types::RuleSet;
 
     #[test]
     fn semicolon_becomes_period_and_capitalized_sentence() {
