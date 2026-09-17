@@ -541,11 +541,11 @@ fn overflow_is_earned(
         Some(rank) if rank < Rank::Sentence => rank,
         _ => Rank::ClauseTier2,
     };
-    let min_fill = budget * MIN_FILL_PERCENT / 100;
-    !(start + 1..count).any(|end| {
-        let width = span_width(widths, start, end);
-        rank_at(ranks, end).is_some_and(|candidate| candidate >= blocking) && width >= min_fill && width <= budget
-    })
+    // Binary search narrows the scan to the boundaries that could possibly block the overflow,
+    // since only they fill enough of the line without exceeding the budget.
+    let reachable = reachable_boundary_range(widths, start, budget);
+    let end = reachable.end.min(count);
+    !(reachable.start..end).any(|candidate| rank_at(ranks, candidate).is_some_and(|found| found >= blocking))
 }
 
 /// Record an unfixable too long line violation at the first token of the run.
@@ -974,6 +974,50 @@ mod test_colon_penalties {
                             "{text:?}, start={start}, end={end}, budget={budget}"
                         );
                     }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_overflow_is_earned {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn binary_search_matches_the_linear_scan() {
+        let text = "説明: Introduction: first clause: second clause; final clause. Another sentence.";
+        let tokens = tokens(text);
+        let count = tokens.len();
+        let widths = cumulative_widths(&tokens);
+        let mut ranks = vec![None; count + 1];
+        for boundary in find_boundaries(&tokens, &FormatOptions::default()) {
+            ranks[boundary.before] = Some(boundary.rank);
+        }
+        // Brute-force original scan, checked against the binary search below.
+        let brute_force = |start: usize, budget: usize, rank: Option<Rank>| {
+            let blocking = match rank {
+                Some(rank) if rank < Rank::Sentence => rank,
+                _ => Rank::ClauseTier2,
+            };
+            let min_fill = budget * MIN_FILL_PERCENT / 100;
+            !(start + 1..count).any(|end| {
+                let width = span_width(&widths, start, end);
+                rank_at(&ranks, end).is_some_and(|candidate| candidate >= blocking)
+                    && width >= min_fill
+                    && width <= budget
+            })
+        };
+        let max_width = widths.last().copied().unwrap_or_default();
+        for budget in 0..=max_width + 1 {
+            for start in 0..count {
+                for rank in [None, Some(Rank::Word), Some(Rank::Colon)] {
+                    assert_eq!(
+                        overflow_is_earned(start, count, budget, rank, &ranks, &widths),
+                        brute_force(start, budget, rank),
+                        "start={start}, budget={budget}, rank={rank:?}"
+                    );
                 }
             }
         }
