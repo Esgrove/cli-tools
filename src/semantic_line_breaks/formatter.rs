@@ -24,6 +24,14 @@ struct SourceLine<'a> {
     eol: &'a str,
 }
 
+/// One line of the working buffer, produced by the trailing comment pass, with its line ending.
+struct WorkingLine<'a> {
+    /// Line text, owned when the trailing comment pass rewrote it.
+    text: Cow<'a, str>,
+    /// The line ending carried over from the source line it came from.
+    eol: &'a str,
+}
+
 /// Lines a prose pass produced, with the selected ones marked.
 ///
 /// A reflowed paragraph rarely needs as many lines as it came from,
@@ -101,7 +109,7 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
     }
 
     let mut violations = Vec::new();
-    let mut working: Vec<(Cow<'_, str>, &str)> = Vec::with_capacity(source.len());
+    let mut working: Vec<WorkingLine<'_>> = Vec::with_capacity(source.len());
     let mut trailing_changed = false;
     // The selection is given in the original line numbers,
     // so it has to follow the lines the trailing comment pass adds before the prose pass can use it.
@@ -119,18 +127,30 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
         for (line, replacement) in source.iter().zip(replacements) {
             match replacement {
                 Some((comment, code)) => {
-                    working.push((Cow::Owned(comment), line.eol));
-                    working.push((Cow::Owned(code), line.eol));
+                    working.push(WorkingLine {
+                        text: Cow::Owned(comment),
+                        eol: line.eol,
+                    });
+                    working.push(WorkingLine {
+                        text: Cow::Owned(code),
+                        eol: line.eol,
+                    });
                     trailing_changed = true;
                 }
-                None => working.push((Cow::Borrowed(line.text), line.eol)),
+                None => working.push(WorkingLine {
+                    text: Cow::Borrowed(line.text),
+                    eol: line.eol,
+                }),
             }
         }
     } else {
-        working.extend(source.iter().map(|line| (Cow::Borrowed(line.text), line.eol)));
+        working.extend(source.iter().map(|line| WorkingLine {
+            text: Cow::Borrowed(line.text),
+            eol: line.eol,
+        }));
     }
 
-    let working_texts: Vec<&str> = working.iter().map(|(text, _)| text.as_ref()).collect();
+    let working_texts: Vec<&str> = working.iter().map(|line| line.text.as_ref()).collect();
     let (output, prose_violations) = if trailing_changed {
         // Moving a comment onto its own line shifts the lines below it,
         // so the violations come from the original numbering and the fixed text from the new lines,
@@ -302,7 +322,7 @@ fn shift_ranges(ranges: &LineRanges, replacements: &[Option<(String, String)>]) 
 /// Join output lines with line endings taken from the working lines.
 ///
 /// When the line counts differ, the dominant line ending of the original text is used.
-fn assemble(output: &[Cow<'_, str>], working: &[(Cow<'_, str>, &str)], original: &str) -> String {
+fn assemble(output: &[Cow<'_, str>], working: &[WorkingLine<'_>], original: &str) -> String {
     let default_eol = if original.contains("\r\n") { "\r\n" } else { "\n" };
     let trailing_newline = original.ends_with('\n') || original.is_empty();
     let mut result = String::with_capacity(original.len() + 64);
@@ -311,12 +331,12 @@ fn assemble(output: &[Cow<'_, str>], working: &[(Cow<'_, str>, &str)], original:
         result.push_str(line.as_ref());
         if index == last_index {
             if trailing_newline && !output.is_empty() {
-                let eol = working.get(index).map_or(default_eol, |(_, eol)| eol);
+                let eol = working.get(index).map_or(default_eol, |line| line.eol);
                 result.push_str(if eol.is_empty() { default_eol } else { eol });
             }
         } else {
             let eol = if output.len() == working.len() {
-                working.get(index).map_or(default_eol, |(_, eol)| eol)
+                working.get(index).map_or(default_eol, |line| line.eol)
             } else {
                 default_eol
             };
