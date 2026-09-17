@@ -146,8 +146,9 @@ Do not duplicate code in benchmark files.
 - Put all struct definitions before any implementations.
 - Implementations only after last struct definition in the order of struct definitions.
 - Functions after implementations
-- In implementations, Order public methods before private methods
-- In implementations, put associated functions last
+- In implementations, put constructors first: `new` first, then other associated functions that return `Self`
+  (`default`, `from_*`, and similar).
+- After constructors, order public methods before private methods.
 
 ### File size
 
