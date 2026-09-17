@@ -46,4 +46,9 @@ class ArchiveClient {
      * @see #deleteFile
      */
     void restart() {}
+
+    /**
+     * Applies the options string to the session device. For example, a value like {@code region: eu-west-1, timeout: 30s, retries: 3, verbose: true} is parsed before it mutates any persisted state on the device.
+     */
+    void applyOptions(String options) {}
 }
