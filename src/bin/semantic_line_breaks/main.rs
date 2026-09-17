@@ -24,6 +24,22 @@ use cli_tools::semantic_line_breaks::FileKind;
 
 use crate::line_selection::LineSpec;
 
+/// Subcommands for `slb`.
+#[derive(Subcommand)]
+enum SlbCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     author,
@@ -114,22 +130,6 @@ pub struct Args {
     /// Print processed files and the resolved line width
     #[arg(short, long, global = true)]
     verbose: bool,
-}
-
-/// Subcommands for `slb`.
-#[derive(Subcommand)]
-enum SlbCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 /// Parse command line arguments and run the requested mode.
