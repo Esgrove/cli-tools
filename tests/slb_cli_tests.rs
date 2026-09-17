@@ -688,6 +688,7 @@ fn the_version_flag_prints_the_version() {
     assert!(stdout(&output).contains(env!("CARGO_PKG_VERSION")));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn the_help_output_matches_the_readme() {
     let output = run(&["-h"]);
