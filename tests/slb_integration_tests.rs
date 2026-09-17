@@ -159,11 +159,36 @@ fn makefile_fixture() {
 }
 
 #[test]
+fn doc_tags_fixture() {
+    assert_fixture("doc_tags.in.java", "doc_tags.out.java");
+}
+
+#[test]
+fn comment_clauses_fixture() {
+    assert_fixture("comment_clauses.in.c", "comment_clauses.out.c");
+}
+
+#[test]
+fn markdown_balance_fixture() {
+    assert_fixture("markdown_balance.in.md", "markdown_balance.out.md");
+}
+
+#[test]
+fn shell_arguments_fixture() {
+    assert_fixture("shell_arguments.in.sh", "shell_arguments.out.sh");
+}
+
+#[test]
+fn sql_comment_block_fixture() {
+    assert_fixture("sql_comment_block.in.sql", "sql_comment_block.out.sql");
+}
+
+#[test]
 fn every_fixture_pair_formats_to_its_expected_output() {
     let mut pairs = fixture_pairs();
     pairs.sort();
     assert!(
-        pairs.len() >= 19,
+        pairs.len() >= 24,
         "expected every fixture pair to be found, got {pairs:?}"
     );
     for (input, output) in pairs {

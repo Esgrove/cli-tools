@@ -9,3 +9,15 @@ def load_config(path)
   NOTES
   { path: path, banner: banner }
 end
+
+# Merges the user options into the defaults and returns a new hash; neither argument is
+# mutated, and unknown keys in the user hash raise instead of being silently ignored.
+def merge_options(defaults, user)
+  unknown = user.keys - defaults.keys
+  raise ArgumentError, "unknown options: #{unknown}" unless unknown.empty? # fail fast
+
+  defaults.merge(user)
+end
+
+# See https://example.com/cli-tools/config for the full list of recognised options and defaults.
+CONFIG_URL = "https://example.com/cli-tools/config"

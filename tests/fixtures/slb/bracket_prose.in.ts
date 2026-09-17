@@ -13,3 +13,13 @@ export function mapRow(row: Row): Model {
     // so no explicit statement is needed here.
     return toModel(row, colors);
 }
+
+/**
+ * Formats the model for display; see {@link mapRow} for how the fields are derived
+ * from the raw row, and {@link formatDate} for how the timestamp fields are rendered.
+ */
+export function formatModel(model: Model): string {
+    // The fallback label {unknown} is only shown when every other field is missing,
+    // which should not happen for a row that passed validation.
+    return model.label ?? "{unknown}";
+}

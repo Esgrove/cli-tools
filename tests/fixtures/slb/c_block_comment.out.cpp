@@ -10,3 +10,16 @@ int checksum(const char* buffer) {
     const char* url = "http://x";
     return sum;
 }
+
+/**
+ * Reads every frame from the socket until the peer closes the connection or the read deadline elapses,
+ * whichever happens first, and returns the frames collected so far.
+ *
+ * The deadline is measured from the first call, not the last successful read, so a peer
+ * that trickles data one byte at a time is still cut off eventually.
+ */
+std::vector<Frame> readFrames(Socket& socket, std::chrono::milliseconds deadline) {
+    // collected frames
+    std::vector<Frame> frames;
+    return frames;
+}

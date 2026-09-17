@@ -10,5 +10,9 @@ COPY . .
 RUN cargo build --release
 
 FROM debian:bookworm-slim
+# Only the runtime dependencies are installed here; the build toolchain never leaves the build stage,
+# which keeps the final image small and avoids shipping a compiler to production hosts.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/project /usr/local/bin/project
+# See https://example.com/cli-tools/deploy for the full deployment checklist and rollback steps.
 ENTRYPOINT ["project"]

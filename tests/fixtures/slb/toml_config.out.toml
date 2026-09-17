@@ -6,3 +6,11 @@
 width = 120
 # A string value with a hash inside "# not a comment" must not be split.
 exclude = ["target", "node_modules"]
+# See https://example.com/cli-tools/slb for the full list of options and their defaults.
+join_sentences = false
+
+[dupefind]
+# Files below this size are ignored. Hashing them costs more than the disk space they would save.
+min_size = 4096
+# The scanner walks every configured root in turn, and it reports duplicates as it finds them.
+roots = ["~/Downloads", "~/Pictures"]

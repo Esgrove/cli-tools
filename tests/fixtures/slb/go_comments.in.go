@@ -16,3 +16,15 @@ func Parse(input string) (Header, error) {
 	// It stays exactly as it is.
 	return Header{Query: query, Size: size}, nil
 }
+
+// Validate checks that every required field is set; it returns the first error it finds and
+// stops, so a caller that wants every error at once must call it once per field on its own.
+func Validate(header Header) error {
+	if header.Size == 0 {
+		return fmt.Errorf("size must be set") // size zero means unset
+	}
+	return nil
+}
+
+// See https://example.com/wire-format/spec for the byte layout this package implements.
+const SpecURL = "https://example.com/wire-format/spec"

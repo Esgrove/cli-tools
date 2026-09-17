@@ -29,4 +29,20 @@ class ArchiveClient {
     byte[] decode(String hex) {
         return null;
     }
+
+    /**
+     * Deletes a file at {@code devicePath} on the session device through the {@code mobile: deleteFile} script.
+     *
+     * Deletion is idempotent, so a caller may retry the same {@code devicePath}
+     * after a timeout without checking the result of the first attempt.
+     */
+    void deleteFile(String devicePath) {}
+
+    /**
+     * Restarts the session device and waits until it responds again, and the timeout is fixed and not configurable.
+     * See {@link #deleteFile} for the script that runs on shutdown.
+     *
+     * @see #deleteFile
+     */
+    void restart() {}
 }

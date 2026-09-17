@@ -1,5 +1,5 @@
 # Builds and tests the project. Every target is phony because there are no file outputs to track.
-.PHONY: build test
+.PHONY: build test lint clean
 
 # Environment:
 #   CARGO_FLAGS   extra flags passed to every cargo invocation
@@ -10,3 +10,13 @@ build:
 
 test:
 	cargo nextest run
+
+# Runs clippy with the same lint set CI uses.
+# A warning here fails the build locally too, so nothing that would fail CI can be committed without being seen first.
+lint:
+	cargo clippy --all-targets --all-features -- -D warnings
+
+# Removes the target directory and every cached build artifact under it.
+# This is slower than a plain cargo clean, but it also clears artifacts left by other toolchains.
+clean:
+	rm -rf $(TARGET_DIR)

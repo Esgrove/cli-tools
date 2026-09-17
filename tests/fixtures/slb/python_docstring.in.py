@@ -16,3 +16,22 @@ def parse(path: str) -> dict:
         The mapping.
     """
     return {}  # type: ignore
+
+
+def merge(defaults: dict, overrides: dict) -> dict:
+    """Merge two mappings and return a new one; neither argument is mutated, and a shared
+    key takes its value from ``overrides`` instead of from ``defaults``.
+
+    See https://example.com/cli-tools/config for the full precedence rules across every
+    configuration source, including environment variables and command line flags.
+
+    Args:
+        defaults: the base mapping, used for every key that ``overrides`` does not set.
+        overrides: the mapping whose values win when the same key appears in both.
+
+    Returns:
+        A new mapping holding every key from both arguments.
+    """
+    result = dict(defaults)
+    result.update(overrides)  # overrides always win
+    return result

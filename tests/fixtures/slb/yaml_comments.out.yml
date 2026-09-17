@@ -5,3 +5,17 @@ script: |
   echo "# not a comment"
   # also not a comment
 other: 1
+
+# Every job below runs on its own runner.
+# The matrix expands to one job per operating system and architecture pair,
+# so a failure on one combination does not block the others from finishing.
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      # Checkout the repository, then install the toolchain pinned in rust-toolchain.toml.
+      - uses: actions/checkout@v4
+      # build once per matrix entry
+      - run: cargo build --release
