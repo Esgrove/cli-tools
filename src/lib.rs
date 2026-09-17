@@ -2229,13 +2229,16 @@ mod test_shell_completion_dir {
     #[test]
     fn a_missing_directory_is_created_for_the_user() {
         let home = home();
+        let expected = if cfg!(windows) {
+            home.path().join(r"Documents\PowerShell\completions")
+        } else {
+            home.path().join(".config/powershell/completions")
+        };
 
-        // On a non-Windows host the user and global PowerShell paths are the same,
-        // so neither exists and the directory has to be created.
         let directory =
             shell_completion_dir_in(home.path(), Shell::PowerShell, "slb").expect("a directory should be chosen");
 
-        assert_eq!(directory, home.path().join(".config/powershell/completions"));
+        assert_eq!(directory, expected);
         assert!(directory.is_dir(), "the directory should be created");
     }
 
