@@ -111,8 +111,17 @@ pub struct Boundary {
     pub rank: Rank,
 }
 
+/// One bracket or emphasis span boundary, at a token position, opening or closing the span.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SpanEvent {
+    /// Index of the token the boundary sits at.
+    position: usize,
+    /// Whether the boundary opens the span, as opposed to closing it.
+    opens: bool,
+}
+
 /// Collects the group opening and closing events of one token at the given position.
-type EventCollector = fn(&Token, usize, &mut Vec<(usize, bool)>);
+type EventCollector = fn(&Token, usize, &mut Vec<SpanEvent>);
 
 /// Whether the token at `index` ends a sentence and the following token starts a new one.
 #[must_use]
@@ -313,7 +322,7 @@ pub(super) fn lines_ending_inside(line_tokens: &[Vec<Token<'_>>], collect: Event
 ///
 /// The result holds one entry more than `count`,
 /// so the entry after the last position gives the depth the positions end at.
-fn matched_depths(events: &mut Vec<(usize, bool)>, count: usize) -> Vec<usize> {
+fn matched_depths(events: &mut Vec<SpanEvent>, count: usize) -> Vec<usize> {
     retain_matched_events(events);
 
     let mut depths = Vec::with_capacity(count + 1);
@@ -321,28 +330,32 @@ fn matched_depths(events: &mut Vec<(usize, bool)>, count: usize) -> Vec<usize> {
     let mut next = 0;
     for index in 0..=count {
         depths.push(depth);
-        while let Some(&(position, opens)) = events.get(next) {
-            if position != index {
+        while let Some(&event) = events.get(next) {
+            if event.position != index {
                 break;
             }
-            depth = if opens { depth + 1 } else { depth.saturating_sub(1) };
+            depth = if event.opens {
+                depth + 1
+            } else {
+                depth.saturating_sub(1)
+            };
             next += 1;
         }
     }
     depths
 }
 
-/// Append the bracket characters of the token as `(position, opens)` events.
+/// Append the bracket characters of the token as span events.
 ///
 /// Brackets are ASCII, so the parts are scanned as bytes to avoid decoding every character.
 /// The inner text of an atom is skipped, so a bracket in a code span or a link does not count.
-pub(super) fn collect_bracket_events(token: &Token<'_>, position: usize, events: &mut Vec<(usize, bool)>) {
+pub(super) fn collect_bracket_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
     let core = if token.is_atom() { "" } else { token.core.as_ref() };
     for part in [token.leading.as_ref(), core, token.trailing.as_ref()] {
         for byte in part.bytes() {
             match byte {
-                b'(' | b'[' => events.push((position, true)),
-                b')' | b']' => events.push((position, false)),
+                b'(' | b'[' => events.push(SpanEvent { position, opens: true }),
+                b')' | b']' => events.push(SpanEvent { position, opens: false }),
                 _ => {}
             }
         }
@@ -350,11 +363,11 @@ pub(super) fn collect_bracket_events(token: &Token<'_>, position: usize, events:
 }
 
 /// Drop the events of groups that are never opened or never closed.
-fn retain_matched_events(events: &mut Vec<(usize, bool)>) {
+fn retain_matched_events(events: &mut Vec<SpanEvent>) {
     let mut matched = vec![false; events.len()];
     let mut open_events: Vec<usize> = Vec::new();
-    for (index, (_, opens)) in events.iter().enumerate() {
-        if *opens {
+    for (index, event) in events.iter().enumerate() {
+        if event.opens {
             open_events.push(index);
         } else if let Some(open) = open_events.pop() {
             if let Some(slot) = matched.get_mut(open) {
@@ -365,20 +378,16 @@ fn retain_matched_events(events: &mut Vec<(usize, bool)>) {
             }
         }
     }
-    let mut index = 0;
-    events.retain(|_| {
-        let keep = matched.get(index).copied().unwrap_or_default();
-        index += 1;
-        keep
-    });
+    let mut matched = matched.into_iter();
+    events.retain(|_| matched.next().unwrap_or(false));
 }
 
-/// Append the emphasis span events of the token as `(position, opens)` events.
+/// Append the emphasis span events of the token as span events.
 ///
 /// A token that carries both of its own markers, such as `*strong*`, delimits no span past itself.
 /// Delimited text is skipped, so a marker inside a code span, a link, or a URL does not count.
 /// Other kinds are read as prose, since `_italic` looks the same as an identifier on its own.
-pub(super) fn collect_emphasis_events(token: &Token<'_>, position: usize, events: &mut Vec<(usize, bool)>) {
+pub(super) fn collect_emphasis_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
     if is_delimited(token.kind) || !holds_emphasis_marker(token) {
         return;
     }
@@ -405,10 +414,10 @@ pub(super) fn collect_emphasis_events(token: &Token<'_>, position: usize, events
         return;
     }
     if opening > 0 {
-        events.push((position, true));
+        events.push(SpanEvent { position, opens: true });
     }
     if closing > 0 {
-        events.push((position, false));
+        events.push(SpanEvent { position, opens: false });
     }
 }
 
