@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use super::boundaries::{
-    clause_rank, collect_bracket_events, collect_emphasis_events, ends_sentence, is_mid_clause_break, is_sentence_end,
-    lines_ending_inside, token_depths,
+    clause_rank, collect_bracket_events, collect_emphasis_events, collect_quote_events, ends_sentence,
+    is_mid_clause_break, is_sentence_end, lines_ending_inside, token_depths,
 };
 use super::options::FormatOptions;
 use super::paragraph::{HardBreak, Paragraph};
@@ -51,6 +51,7 @@ pub(super) fn build_segments<'text>(
     let mut current: Option<Segment> = None;
     let inside_brackets = lines_ending_inside(&line_tokens, collect_bracket_events);
     let inside_emphasis = lines_ending_inside(&line_tokens, collect_emphasis_events);
+    let inside_quotes = lines_ending_inside(&line_tokens, collect_quote_events);
     for (index, tokens) in line_tokens.into_iter().enumerate() {
         let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
         let Some(mut segment) = current.take() else {
@@ -65,12 +66,16 @@ pub(super) fn build_segments<'text>(
         let previous_break = paragraph.hard_breaks.get(index - 1).copied().unwrap_or_default();
         let unclosed_bracket = inside_brackets.get(index - 1).copied().unwrap_or_default();
         let unclosed_emphasis = inside_emphasis.get(index - 1).copied().unwrap_or_default();
-        let inside_group = previous_break == HardBreak::None && (unclosed_bracket || unclosed_emphasis);
+        let unclosed_quote = inside_quotes.get(index - 1).copied().unwrap_or_default();
+        let inside_group =
+            previous_break == HardBreak::None && (unclosed_bracket || unclosed_emphasis || unclosed_quote);
         let mid_clause = options.rules.mid_clause_break
             && (inside_group || is_mid_clause_break(&segment.tokens, &tokens, previous_break, options));
         if mid_clause {
             let message = if unclosed_bracket && inside_group {
                 "line breaks inside brackets"
+            } else if unclosed_quote && inside_group {
+                "line breaks inside quotes"
             } else if inside_group {
                 "line breaks inside an emphasized phrase"
             } else {
@@ -143,7 +148,7 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
         return;
     }
     let count = segment.tokens.len();
-    let depths = token_depths(&segment.tokens, collect_bracket_events);
+    let depths = bracket_and_quote_depths(&segment.tokens);
     let mut removed = vec![false; count];
     for index in dashes {
         let line = line_offset + segment.tokens.get(index).map_or(0, |token| token.origin_line);
@@ -189,12 +194,21 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
     });
 }
 
+/// Nesting depth of brackets and quotes before each token, the two spans a dash or semicolon must respect.
+fn bracket_and_quote_depths(tokens: &[Token<'_>]) -> Vec<usize> {
+    let brackets = token_depths(tokens, collect_bracket_events);
+    let quotes = token_depths(tokens, collect_quote_events);
+    (0..=tokens.len())
+        .map(|index| brackets.get(index).copied().unwrap_or_default() + quotes.get(index).copied().unwrap_or_default())
+        .collect()
+}
+
 /// Work out the punctuation that replaces the dash at `index` and whether it starts a new sentence.
 ///
 /// No punctuation means the text before the dash already ends a clause,
 /// so the dash is dropped and nothing takes its place.
 /// A comma is used where a new sentence would read wrong:
-/// inside brackets, between a pair of dashes that enclose an aside,
+/// inside brackets or quotes, between a pair of dashes that enclose an aside,
 /// before a single trailing word, and before a clause word that carries the sentence on.
 /// A colon is used where the text before the dash names what follows it,
 /// and where code like text on either side rules out capitalizing a name into a new sentence.
@@ -222,7 +236,7 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
     // and a sentence of its own would read as a fragment.
     let trails_sentence = index + 2 >= sentence_end;
     // A clause word after the dash joins what follows to the clause before it,
-    // so "a semicolon — and a dash" continues the sentence instead of starting a new one.
+    // so "a semicolon, and a dash" continues the sentence instead of starting a new one.
     let joins_clause = clause_rank(tokens, index + 1, options).is_some();
     if inside_brackets || encloses_aside || trails_sentence || joins_clause {
         return DashRewrite {
@@ -295,10 +309,10 @@ fn reword_semicolons(
     for segment_index in 0..segments.len() {
         let token_count = segments.get(segment_index).map_or(0, |segment| segment.tokens.len());
         // The depths are the same for every semicolon of the segment,
-        // so scanning the brackets once keeps the pass linear in the number of tokens.
+        // so scanning the brackets and quotes once keeps the pass linear in the number of tokens.
         let depths = segments
             .get(segment_index)
-            .map(|segment| token_depths(&segment.tokens, collect_bracket_events))
+            .map(|segment| bracket_and_quote_depths(&segment.tokens))
             .unwrap_or_default();
         for token_index in 0..token_count {
             let Some(segment) = segments.get(segment_index) else {
@@ -375,10 +389,10 @@ fn semicolon_refusal(
         return Some("nothing follows it");
     };
     // The table holds the depth before each token,
-    // so the entry after the semicolon is the one that counts the brackets of the semicolon token.
-    // Bracket free text yields an empty table, where every depth is zero.
+    // so the entry after the semicolon is the one that counts the brackets and quotes of the semicolon token.
+    // Bracket and quote free text yields an empty table, where every depth is zero.
     if depths.get(index + 1).copied().unwrap_or_default() > 0 {
-        return Some("it is inside brackets");
+        return Some("it is inside brackets or quotes");
     }
     if looks_like_code(token) || looks_like_code(next) {
         return Some("the text looks like code");
@@ -533,6 +547,15 @@ mod test_rewording {
         let outcome = reflow(&["run `a; b` now"], 120);
         assert_eq!(outcome.lines, None);
         assert!(outcome.violations.is_empty());
+    }
+
+    #[test]
+    fn semicolon_inside_quotes_is_refused() {
+        // "&amp;" holds a literal semicolon, and rewording it would corrupt the entity into
+        // "&amp." followed by a capitalized word that was never a new sentence.
+        let outcome = reflow(&["the key is \"Tietokoneet &amp; tabletit\" in the source data"], 120);
+        assert_eq!(outcome.lines, None);
+        assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, false)]);
     }
 
     #[test]

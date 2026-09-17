@@ -1,7 +1,7 @@
 //! Sentence and clause boundary detection for the semantic line breaks formatter.
 //!
 //! Ranks the places a line may break, from the end of a sentence down to a weak clause boundary,
-//! tracks bracket and emphasis nesting so a break never lands inside a delimited span,
+//! tracks bracket, quote, and emphasis nesting so a break never lands inside a delimited span,
 //! and decides whether two consecutive lines were wrapped in the middle of a clause.
 
 use std::sync::LazyLock;
@@ -229,6 +229,7 @@ pub fn find_boundaries(tokens: &[Token<'_>], options: &FormatOptions) -> Vec<Bou
     let mut boundaries = Vec::new();
     let depths = token_depths(tokens, collect_bracket_events);
     let emphasis = token_depths(tokens, collect_emphasis_events);
+    let quotes = token_depths(tokens, collect_quote_events);
     // The rank of the token before the boundary is the rank the previous boundary looked up,
     // so carrying it over halves the number of clause lookups.
     let mut previous_clause = clause_rank(tokens, 0, options);
@@ -237,7 +238,9 @@ pub fn find_boundaries(tokens: &[Token<'_>], options: &FormatOptions) -> Vec<Bou
         let (Some(previous), Some(current)) = (tokens.get(index - 1), tokens.get(index)) else {
             continue;
         };
-        let depth = depths.get(index).copied().unwrap_or_default() + emphasis.get(index).copied().unwrap_or_default();
+        let depth = depths.get(index).copied().unwrap_or_default()
+            + emphasis.get(index).copied().unwrap_or_default()
+            + quotes.get(index).copied().unwrap_or_default();
         if starts_markdown_structure(current) {
             previous_clause = current_clause;
             continue;
@@ -260,13 +263,14 @@ pub fn find_boundaries(tokens: &[Token<'_>], options: &FormatOptions) -> Vec<Bou
             clause.unwrap_or(Rank::Word)
         };
         if depth > 0 || touches_dash(previous, current) {
-            // Text inside brackets or emphasis markers belongs together, so a break there is a last resort.
+            // Text inside brackets, quotes, or emphasis markers belongs together,
+            // so a break there is a last resort.
             // A dash that was kept would be left dangling at the end of a line,
             // or read as a list marker at the start of the next one.
             rank = Rank::Word;
         } else if rank == Rank::Word {
-            let closes_group = previous.trailing.contains([')', ']', '}']);
-            let opens_group = current.leading.contains(['(', '[', '{']);
+            let closes_group = previous.trailing.contains([')', ']', '}', '"', '\'']);
+            let opens_group = current.leading.contains(['(', '[', '{', '"', '\'']);
             if closes_group || opens_group {
                 rank = Rank::ClauseTier4;
             }
@@ -473,6 +477,25 @@ const fn is_delimited(kind: TokenKind) -> bool {
     )
 }
 
+/// Append the quote span events of the token as span events.
+///
+/// A straight or curly quote mark is the same symbol whether it opens or closes a quoted phrase,
+/// so its role is read from where it sits on the token instead of which character it is:
+/// a leading quote attaches to the word it opens, a trailing quote attaches to the word it closes,
+/// the same way `"hello` and `world"` peel their quote onto the word they sit against.
+/// The inner text of an atom is skipped, so a quote in a code span or a URL does not count.
+pub(super) fn collect_quote_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
+    if is_delimited(token.kind) {
+        return;
+    }
+    if token.leading.contains(['"', '\'', '“', '‘']) {
+        events.push(SpanEvent { position, opens: true });
+    }
+    if token.trailing.contains(['"', '\'', '”', '’']) {
+        events.push(SpanEvent { position, opens: false });
+    }
+}
+
 /// Whether the break between two consecutive lines falls in the middle of a clause.
 #[must_use]
 pub fn is_mid_clause_break(
@@ -490,7 +513,7 @@ pub fn is_mid_clause_break(
     if last.ends_sentence_punctuation() || last.ends_clause_punctuation() || last.ends_with_opener() {
         return false;
     }
-    if last.trailing.contains([')', ']']) || first.leading.contains(['(', '[']) {
+    if last.trailing.contains([')', ']', '"', '\'']) || first.leading.contains(['(', '[', '"', '\'']) {
         return false;
     }
     if clause_rank(line_b, 0, options).is_some() {
@@ -840,6 +863,76 @@ mod test_brackets {
                 "a curly bracket was left open in {line:?} of {reflowed:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test_quotes {
+    use super::super::reflow::reflow_paragraph;
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn demotes_candidates_inside_quotes_and_ranks_quote_edges() {
+        assert_eq!(rank_before("x y \"a, b or c\" z", 3), Some(Rank::Word));
+        assert_eq!(rank_before("x y \"a, b or c\" z", 4), Some(Rank::Word));
+        assert_eq!(rank_before("x y \"a, b or c\" z", 2), Some(Rank::ClauseTier4));
+        assert_eq!(rank_before("x y \"a, b or c\" z", 6), Some(Rank::ClauseTier4));
+    }
+
+    #[test]
+    fn a_single_quoted_word_opens_no_lasting_span() {
+        // The leading and trailing quote of a one word phrase sit on the same token,
+        // so the phrase does not hold the next word's boundary together with it.
+        assert_eq!(rank_before("x \"y\", and z", 2), Some(Rank::ClauseTier1));
+    }
+
+    #[test]
+    fn a_quoted_phrase_that_does_not_fit_stays_on_one_line() {
+        let lines = [concat!(
+            "Something like \"a long quoted phrase that must not be split across two ",
+            "separate lines\" here."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, "/// "), &FormatOptions::with_width(60), true);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "Something like".to_string(),
+                "\"a long quoted phrase that must not be split across two separate lines\"".to_string(),
+                "here.".to_string(),
+            ]),
+            "the quoted phrase should stay on one line"
+        );
+    }
+
+    #[test]
+    fn no_break_is_made_inside_quotes() {
+        let lines = ["one two three four \"alpha, beta or gamma\" five six seven eight nine ten"];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(40), true);
+        let reflowed = outcome.lines.expect("the line should be reflowed");
+        for line in &reflowed {
+            assert_eq!(
+                line.matches('"').count() % 2,
+                0,
+                "a quote was left open in {line:?} of {reflowed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unclosed_quote_does_not_block_breaks_after_it() {
+        let text = "the file has a stray \" opening quote that keeps going on and on and on until the end";
+        let outcome = reflow(&[text], 40);
+        let reflowed = outcome.lines.expect("the line should still be reflowed");
+        assert!(
+            reflowed.len() > 1,
+            "a stray quote must not block breaking: {reflowed:?}"
+        );
+    }
+
+    #[test]
+    fn a_semicolon_inside_quotes_is_not_a_break_point() {
+        assert_eq!(rank_before("x y \"a; b or c\" z", 3), Some(Rank::Word));
     }
 }
 
