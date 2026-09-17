@@ -265,8 +265,8 @@ pub fn find_boundaries(tokens: &[Token<'_>], options: &FormatOptions) -> Vec<Bou
             // or read as a list marker at the start of the next one.
             rank = Rank::Word;
         } else if rank == Rank::Word {
-            let closes_group = previous.trailing.contains([')', ']']);
-            let opens_group = current.leading.contains(['(', '[']);
+            let closes_group = previous.trailing.contains([')', ']', '}']);
+            let opens_group = current.leading.contains(['(', '[', '{']);
             if closes_group || opens_group {
                 rank = Rank::ClauseTier4;
             }
@@ -354,8 +354,8 @@ pub(super) fn collect_bracket_events(token: &Token<'_>, position: usize, events:
     for part in [token.leading.as_ref(), core, token.trailing.as_ref()] {
         for byte in part.bytes() {
             match byte {
-                b'(' | b'[' => events.push(SpanEvent { position, opens: true }),
-                b')' | b']' => events.push(SpanEvent { position, opens: false }),
+                b'(' | b'[' | b'{' => events.push(SpanEvent { position, opens: true }),
+                b')' | b']' | b'}' => events.push(SpanEvent { position, opens: false }),
                 _ => {}
             }
         }
@@ -821,6 +821,25 @@ mod test_brackets {
     fn nested_brackets_are_tracked() {
         assert_eq!(rank_before("x y (a [b, c] d) z", 4), Some(Rank::Word));
         assert_eq!(rank_before("x y (a [b, c] d) z", 2), Some(Rank::ClauseTier4));
+    }
+
+    #[test]
+    fn a_colon_inside_curly_brackets_is_not_a_break_point() {
+        assert_eq!(rank_before("x y {@code mobile: deleteFile} z", 3), Some(Rank::Word));
+    }
+
+    #[test]
+    fn no_break_is_made_inside_curly_brackets() {
+        let lines = ["one two three four {alpha, beta or gamma} five six seven eight nine ten"];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(40), true);
+        let reflowed = outcome.lines.expect("the line should be reflowed");
+        for line in &reflowed {
+            assert_eq!(
+                line.matches('{').count(),
+                line.matches('}').count(),
+                "a curly bracket was left open in {line:?} of {reflowed:?}"
+            );
+        }
     }
 }
 
