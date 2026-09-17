@@ -193,8 +193,7 @@ fn line_level_state(line: &str, state: &mut ScanState) -> Option<ScanResult> {
 
 /// Advance through a string or block comment that started earlier, returning the new state.
 fn continue_state(state: ScanState, chars: &[(usize, char)], index: &mut usize, syntax: &StringSyntax) -> ScanState {
-    let at = |position: usize| chars.get(position).map(|(_, character)| *character);
-    let Some(character) = at(*index) else {
+    let Some(character) = char_at(chars, *index) else {
         return state;
     };
     match state {
@@ -236,7 +235,7 @@ fn continue_state(state: ScanState, chars: &[(usize, char)], index: &mut usize, 
             }
         }
         ScanState::InRawString(hashes) => {
-            if character == '"' && (1..=hashes).all(|offset| at(*index + offset) == Some('#')) {
+            if character == '"' && (1..=hashes).all(|offset| char_at(chars, *index + offset) == Some('#')) {
                 *index += 1 + hashes;
                 ScanState::Normal
             } else {
@@ -263,14 +262,13 @@ fn continue_state(state: ScanState, chars: &[(usize, char)], index: &mut usize, 
 
 /// Scan one character in the normal state.
 fn scan_normal(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
-    let at = |position: usize| chars.get(position).map(|(_, character)| *character);
     let index = cursor.index;
     let Some(&(byte, character)) = chars.get(index) else {
         return NormalStep::Continue(ScanState::Normal);
     };
 
     if rest_starts_with(chars, index, syntax.line_marker) {
-        let previous = index.checked_sub(1).and_then(at);
+        let previous = index.checked_sub(1).and_then(|position| char_at(chars, position));
         let is_url = syntax.line_marker == "//" && previous == Some(':');
         let needs_space = syntax.marker_needs_leading_space
             && previous.is_some_and(|previous| !previous.is_whitespace() && previous != ';');
@@ -300,13 +298,17 @@ fn scan_normal(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax:
     }
     if syntax.rust_raw_strings && character == 'r' && is_raw_string_start(chars, index) {
         let mut hashes = 0;
-        while at(index + 1 + hashes) == Some('#') {
+        while char_at(chars, index + 1 + hashes) == Some('#') {
             hashes += 1;
         }
         cursor.index += 2 + hashes;
         return NormalStep::Continue(ScanState::InRawString(hashes));
     }
-    if syntax.heredoc && character == '<' && at(index + 1) == Some('<') && at(index + 2) != Some('<') {
+    if syntax.heredoc
+        && character == '<'
+        && char_at(chars, index + 1) == Some('<')
+        && char_at(chars, index + 2) != Some('<')
+    {
         if let Some(rest) = line.get(byte..)
             && let Some(captures) = RE_HEREDOC.captures(rest)
         {
@@ -407,19 +409,17 @@ fn scan_quote(chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSynta
     }
 }
 
+/// The character at the byte-indexed position, if any.
+fn char_at(chars: &[(usize, char)], position: usize) -> Option<char> {
+    chars.get(position).map(|(_, character)| *character)
+}
+
 /// Whether the remaining line at the character index starts with `needle`.
 pub(super) fn rest_starts_with(chars: &[(usize, char)], index: usize, needle: &str) -> bool {
-    let mut needle_chars = needle.chars();
-    let mut position = index;
-    loop {
-        let Some(expected) = needle_chars.next() else {
-            return true;
-        };
-        if chars.get(position).is_none_or(|(_, character)| *character != expected) {
-            return false;
-        }
-        position += 1;
-    }
+    needle
+        .chars()
+        .enumerate()
+        .all(|(offset, expected)| char_at(chars, index + offset) == Some(expected))
 }
 
 /// Whether three consecutive `quote` characters start at `index`.
@@ -468,18 +468,17 @@ fn find_string_end(
 
 /// Index after a character literal starting at `start`, or `start + 1` for a lifetime.
 fn skip_char_literal(chars: &[(usize, char)], start: usize) -> usize {
-    let at = |position: usize| chars.get(position).map(|(_, character)| *character);
-    if at(start + 1) == Some('\\') {
+    if char_at(chars, start + 1) == Some('\\') {
         let mut index = start + 2;
         while index < chars.len() && index < start + 12 {
-            if at(index) == Some('\'') {
+            if char_at(chars, index) == Some('\'') {
                 return index + 1;
             }
             index += 1;
         }
         return start + 1;
     }
-    if at(start + 2) == Some('\'') {
+    if char_at(chars, start + 2) == Some('\'') {
         return start + 3;
     }
     start + 1
@@ -487,20 +486,19 @@ fn skip_char_literal(chars: &[(usize, char)], start: usize) -> usize {
 
 /// Whether the `r` at `index` starts a Rust raw string such as `r"` or `br#"`.
 fn is_raw_string_start(chars: &[(usize, char)], index: usize) -> bool {
-    let at = |position: usize| chars.get(position).map(|(_, character)| *character);
     let mut offset = 1;
-    while at(index + offset) == Some('#') {
+    while char_at(chars, index + offset) == Some('#') {
         offset += 1;
     }
-    if at(index + offset) != Some('"') {
+    if char_at(chars, index + offset) != Some('"') {
         return false;
     }
     let is_identifier_char = |character: char| character.is_alphanumeric() || character == '_';
-    match index.checked_sub(1).and_then(at) {
+    match index.checked_sub(1).and_then(|position| char_at(chars, position)) {
         None => true,
         Some('b' | 'c') => index
             .checked_sub(2)
-            .and_then(at)
+            .and_then(|position| char_at(chars, position))
             .is_none_or(|before| !is_identifier_char(before)),
         Some(previous) => !is_identifier_char(previous),
     }
