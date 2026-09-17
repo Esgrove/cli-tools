@@ -17,6 +17,16 @@ use super::token::{Token, TokenKind};
 use super::tokenizer::RE_LOWERCASE_WORD;
 use super::violation::{Violation, ViolationKind};
 
+/// Punctuation, sentence-starting capitalization, and whether a new sentence starts, for a dash rewrite.
+struct DashRewrite {
+    /// Punctuation that replaces the dash, or `None` when the dash is dropped without a replacement.
+    punctuation: Option<char>,
+    /// Capitalized core of the token after the dash, when the rewrite starts a new sentence with it.
+    capitalized_core: Option<String>,
+    /// Whether the rewrite starts a new sentence after the dash.
+    starts_new_sentence: bool,
+}
+
 /// A run of tokens that is reflowed as one unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment<'text> {
@@ -147,14 +157,14 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
             });
             continue;
         }
-        let (punctuation, capitalized, new_sentence) = dash_rewrite(&segment.tokens, index, &depths, options);
+        let rewrite = dash_rewrite(&segment.tokens, index, &depths, options);
         if let Some(previous) = segment.tokens.get_mut(index - 1) {
-            if let Some(punctuation) = punctuation {
+            if let Some(punctuation) = rewrite.punctuation {
                 previous.push_trailing(punctuation);
             }
-            previous.force_break_after |= new_sentence;
+            previous.force_break_after |= rewrite.starts_new_sentence;
         }
-        if let Some(core) = capitalized
+        if let Some(core) = rewrite.capitalized_core
             && let Some(next) = segment.tokens.get_mut(index + 1)
         {
             next.set_core(core);
@@ -166,7 +176,7 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
             line,
             column: None,
             kind: ViolationKind::EmDash,
-            message: dash_message(punctuation).into(),
+            message: dash_message(rewrite.punctuation).into(),
             fixable: true,
         });
         segment.modified = true;
@@ -179,8 +189,7 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
     });
 }
 
-/// Punctuation that replaces the dash at `index`, the capitalized core of the token after it,
-/// and whether the rewrite starts a new sentence.
+/// Work out the punctuation that replaces the dash at `index` and whether it starts a new sentence.
 ///
 /// No punctuation means the text before the dash already ends a clause,
 /// so the dash is dropped and nothing takes its place.
@@ -189,48 +198,69 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
 /// before a single trailing word, and before a clause word that carries the sentence on.
 /// A colon is used where the text before the dash names what follows it,
 /// and where code like text on either side rules out capitalizing a name into a new sentence.
-fn dash_rewrite(
-    tokens: &[Token<'_>],
-    index: usize,
-    depths: &[usize],
-    options: &FormatOptions,
-) -> (Option<char>, Option<String>, bool) {
+fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &FormatOptions) -> DashRewrite {
     let previous = tokens.get(index - 1);
     let next = tokens.get(index + 1);
     if previous.is_some_and(|previous| previous.ends_clause_punctuation() || previous.ends_sentence_punctuation()) {
-        return (None, None, false);
+        return DashRewrite {
+            punctuation: None,
+            capitalized_core: None,
+            starts_new_sentence: false,
+        };
     }
     let inside_brackets = depths.get(index).copied().unwrap_or_default() > 0;
     let sentence = sentence_bounds(tokens, index, options);
+    let sentence_start = sentence.start;
+    let sentence_end = sentence.end;
     let encloses_aside = tokens
-        .get(sentence.clone())
+        .get(sentence)
         .unwrap_or_default()
         .iter()
         .enumerate()
-        .any(|(offset, token)| sentence.start + offset != index && token.kind == TokenKind::Dash);
+        .any(|(offset, token)| sentence_start + offset != index && token.kind == TokenKind::Dash);
     // A single word after the dash trails the sentence as an afterthought,
     // and a sentence of its own would read as a fragment.
-    let trails_sentence = index + 2 >= sentence.end;
+    let trails_sentence = index + 2 >= sentence_end;
     // A clause word after the dash joins what follows to the clause before it,
     // so "a semicolon — and a dash" continues the sentence instead of starting a new one.
     let joins_clause = clause_rank(tokens, index + 1, options).is_some();
     if inside_brackets || encloses_aside || trails_sentence || joins_clause {
-        return (Some(','), None, false);
+        return DashRewrite {
+            punctuation: Some(','),
+            capitalized_core: None,
+            starts_new_sentence: false,
+        };
     }
     // A name before the dash is what the text after it describes,
     // as in `"a_file.mp4" — index 29`, which a colon introduces without touching a word.
     let labels_what_follows =
         previous.is_some_and(|previous| previous.is_atom() || is_quoted(previous) || looks_like_code(previous));
     if labels_what_follows || next.is_some_and(looks_like_code) {
-        return (Some(':'), None, false);
+        return DashRewrite {
+            punctuation: Some(':'),
+            capitalized_core: None,
+            starts_new_sentence: false,
+        };
     }
     if let Some(core) = next.and_then(|next| capitalize_token(next, options)) {
-        return (Some('.'), Some(core), true);
+        return DashRewrite {
+            punctuation: Some('.'),
+            capitalized_core: Some(core),
+            starts_new_sentence: true,
+        };
     }
     if next.is_some_and(can_start_sentence_unchanged) {
-        return (Some('.'), None, true);
+        return DashRewrite {
+            punctuation: Some('.'),
+            capitalized_core: None,
+            starts_new_sentence: true,
+        };
     }
-    (Some(':'), None, false)
+    DashRewrite {
+        punctuation: Some(':'),
+        capitalized_core: None,
+        starts_new_sentence: false,
+    }
 }
 
 /// Token range of the sentence that holds the token at `index`.
