@@ -308,16 +308,7 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
 
     let path = context.display(file);
     if config.fix {
-        fix_file(
-            file,
-            &path,
-            &text,
-            &result,
-            kind,
-            &settings.options,
-            config,
-            &mut outcome,
-        );
+        fix_file(file, &path, &result, kind, &settings.options, config, &mut outcome);
     } else {
         if !config.quiet {
             for violation in &result.violations {
@@ -334,11 +325,9 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
 }
 
 /// Write the fixed text and report what remains.
-#[allow(clippy::too_many_arguments)]
 fn fix_file(
     file: &Path,
     path: &str,
-    text: &str,
     result: &FormatResult,
     kind: FileKind,
     options: &FormatOptions,
@@ -371,9 +360,6 @@ fn fix_file(
         for violation in &remaining {
             outcome.lines.push(format_violation(path, violation, true));
         }
-    }
-    if config.print {
-        outcome.lines.extend(diff_lines(path, text, fixed));
     }
     outcome.remaining = remaining.len();
 }
@@ -581,7 +567,6 @@ mod test_fix_file {
         fix_file(
             &path,
             "unfixable.rs",
-            "/// Text.\n",
             &result,
             FileKind::Rust,
             &options,
@@ -617,7 +602,6 @@ mod test_fix_file {
         fix_file(
             &path,
             "unfixable.rs",
-            "/// Text.\n",
             &result,
             FileKind::Rust,
             &options,
@@ -639,7 +623,6 @@ mod test_fix_file {
         fix_file(
             &path,
             "dash.rs",
-            text,
             &result,
             FileKind::Rust,
             &options,
@@ -663,11 +646,10 @@ mod test_fix_file {
         fix_file(
             &path,
             "fixed.rs",
-            "/// Before.\n",
             &result,
             FileKind::Rust,
             &options,
-            &config(&["slb", "--fix", "--print"]),
+            &config(&["slb", "--fix"]),
             &mut outcome,
         );
 

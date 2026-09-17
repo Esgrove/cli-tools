@@ -44,7 +44,7 @@ pub struct Args {
     fix: bool,
 
     /// Show the changes fix mode would make without writing
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "fix")]
     print: bool,
 
     /// Also pack consecutive short sentences up to the line limit
@@ -174,7 +174,6 @@ mod test_args {
             "src",
             "README.md",
             "--fix",
-            "--print",
             "-j",
             "-w",
             "100",
@@ -195,7 +194,6 @@ mod test_args {
         .expect("combined arguments should parse");
         assert_eq!(args.paths, vec![PathBuf::from("src"), PathBuf::from("README.md")]);
         assert!(args.fix);
-        assert!(args.print);
         assert!(args.join_sentences);
         assert_eq!(args.width, Some(100));
         assert_eq!(args.rules.len(), 2);
@@ -205,6 +203,15 @@ mod test_args {
         assert!(args.word_break);
         assert!(args.quiet);
         assert!(args.verbose);
+    }
+
+    #[test]
+    fn rejects_printing_and_fixing_together() {
+        // Fix mode writes the files, which is exactly what print mode promises not to do.
+        assert!(Args::try_parse_from(["slb", "--fix", "--print"]).is_err());
+        assert!(Args::try_parse_from(["slb", "-p", "-f"]).is_err());
+        assert!(Args::try_parse_from(["slb", "--fix"]).is_ok());
+        assert!(Args::try_parse_from(["slb", "--print"]).is_ok());
     }
 
     #[test]
