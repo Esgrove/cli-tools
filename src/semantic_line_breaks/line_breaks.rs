@@ -29,6 +29,24 @@ const MIN_FILL_PERCENT: usize = 50;
 /// so the overflow counts several times heavier.
 const OVERFLOW_WEIGHT: usize = 4;
 
+/// Weight of the width the line after a break exceeds the line before it by.
+///
+/// Of two lines the first one should be the longer,
+/// so the text of a paragraph stays close to the margin it is read from.
+/// The width that matters here is the one on the page,
+/// since a wider prefix on the following lines makes the same amount of text reach further right.
+const IMBALANCE_WEIGHT: usize = 1;
+
+/// Fill of the budget, in percent, past which a line is crowded against the limit.
+const COMFORTABLE_FILL_PERCENT: usize = 90;
+
+/// Cost of filling a line to the limit where a clause boundary could have ended it comfortably.
+///
+/// A width limit is where a line has to stop, not where it should aim.
+/// A line that runs up against it has no room left for the next edit,
+/// so a clean break a few words earlier is worth the width it gives up.
+const CROWDED_LINE_COST: usize = 1_000_000;
+
 /// Cost of using the soft overflow where a sentence end or a coordinating conjunction could end the line instead.
 const WEAK_OVERFLOW_COST: usize = 5_000_000;
 
@@ -51,8 +69,37 @@ const SKIPPED_COLON_COST: usize = 1_000_000;
 /// Cost of breaking in the middle of a clause, only reachable when word breaks are allowed.
 const WORD_BREAK_COST: usize = 1_000_000_000_000;
 
+/// Conjunctions that introduce the last item of a list.
+///
+/// Only the ones that join items are here.
+/// A "but" joins two clauses, so it never continues a list of names.
+const LIST_CONJUNCTIONS: &[&str] = &["and", "or", "nor"];
+
+/// Smallest number of items a run needs before it reads as a list rather than as a pair.
+const MIN_LIST_ITEMS: usize = 3;
+
 /// Smallest usable budget. Paragraphs with a narrower budget are left alone.
 pub(super) const MIN_BUDGET: usize = 10;
+
+/// Widths the lines of a run have for their text, once their prefixes are taken off the limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Budgets {
+    /// Width the first line of the paragraph has.
+    pub first: usize,
+    /// Width every line after the first one has.
+    pub rest: usize,
+}
+
+/// Widths a line of the run is measured against, worked out once from its budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineWidths {
+    /// Width the line has for its text.
+    budget: usize,
+    /// Width the line aims at, which is short of the budget only when the lines are the formatter's own.
+    target: usize,
+    /// Width the prefix of the line takes from the limit.
+    prefix: usize,
+}
 
 /// Cheapest plan for the lines of a run, counted from one token to the end of the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,11 +110,35 @@ struct LinePlan {
     line_end: usize,
 }
 
+impl LineWidths {
+    /// Work out the widths a line with the given budget is measured against.
+    ///
+    /// `relaid_out` marks a run whose lines the formatter is choosing itself,
+    /// which is the only case where a line aims short of the budget.
+    /// A line the author wrote that already fits is left at the width it has,
+    /// since rewrapping it would move the text around for nothing.
+    const fn new(limit: usize, budget: usize, relaid_out: bool) -> Self {
+        Self {
+            budget,
+            target: if relaid_out {
+                budget * COMFORTABLE_FILL_PERCENT / 100
+            } else {
+                budget
+            },
+            prefix: limit.saturating_sub(budget),
+        }
+    }
+}
+
 /// Break a run of tokens into lines that fit the budgets, preferring semantic boundaries.
+///
+/// `relaid_out` marks a run whose lines the formatter is choosing itself,
+/// because joining or rewording replaced the ones the author wrote.
+/// Such a run may stop short of the limit, while lines that already fit are left where they are.
 pub(super) fn split_tokens<'text>(
     tokens: Vec<Token<'text>>,
-    first_budget: usize,
-    rest_budget: usize,
+    budgets: Budgets,
+    relaid_out: bool,
     is_first_line: &mut bool,
     options: &FormatOptions,
     line_offset: usize,
@@ -76,13 +147,14 @@ pub(super) fn split_tokens<'text>(
     if tokens.is_empty() {
         return Vec::new();
     }
-    let budget = if *is_first_line { first_budget } else { rest_budget };
+    let budget = if *is_first_line { budgets.first } else { budgets.rest };
+    let rest_budget = budgets.rest;
     *is_first_line = false;
-    if tokens_width(&tokens) <= budget {
+    if tokens_width(&tokens) <= LineWidths::new(options.max_width, budget, relaid_out).target {
         return vec![tokens];
     }
 
-    let breaks = plan_line_breaks(&tokens, budget, rest_budget, options);
+    let breaks = plan_line_breaks(&tokens, budget, rest_budget, relaid_out, options);
     let mut pieces: Vec<Vec<Token>> = Vec::with_capacity(breaks.len() + 1);
     let mut rest = tokens;
     let mut line_start = 0;
@@ -116,6 +188,7 @@ fn plan_line_breaks(
     tokens: &[Token<'_>],
     first_budget: usize,
     rest_budget: usize,
+    relaid_out: bool,
     options: &FormatOptions,
 ) -> Vec<usize> {
     let count = tokens.len();
@@ -128,6 +201,7 @@ fn plan_line_breaks(
             *slot = Some(boundary.rank);
         }
     }
+    suppress_list_runs(tokens, &mut ranks, &widths, first_budget.max(rest_budget));
     let colon_counts = cumulative_colon_counts(&ranks);
 
     // The run is walked backwards so the plan for every tail is known when a line is measured against it.
@@ -137,8 +211,13 @@ fn plan_line_breaks(
     };
     let mut plans = vec![empty_tail; count + 1];
     let mut candidates = Vec::new();
+    // Only the first line of the paragraph has a budget of its own,
+    // so the width it aims at and the prefix it carries are the same for every other line.
+    let limit = options.max_width;
+    let first = LineWidths::new(limit, first_budget, relaid_out);
+    let rest = LineWidths::new(limit, rest_budget, relaid_out);
     for start in (0..count).rev() {
-        let budget = if start == 0 { first_budget } else { rest_budget };
+        let LineWidths { budget, target, prefix } = if start == 0 { first } else { rest };
         let mut best = LinePlan {
             cost: usize::MAX,
             line_end: count,
@@ -148,11 +227,23 @@ fn plan_line_breaks(
         } else {
             0..0
         };
-        collect_line_candidates(start, count, budget, &ranks, &widths, &mut candidates);
+        collect_line_candidates(start, count, budget, target, &ranks, &widths, &mut candidates);
         for end in candidates.iter().copied() {
-            let tail = plans.get(end).map_or(usize::MAX, |plan| plan.cost);
-            let cost = line_cost(tokens, start, end, budget, &ranks, &widths)
+            let plan = plans.get(end);
+            let tail = plan.map_or(usize::MAX, |plan| plan.cost);
+            // The line after the candidate is already planned,
+            // so how the two compare is known without looking any further ahead.
+            let imbalance = match plan {
+                Some(plan) if end < count => imbalance_cost(
+                    limit,
+                    prefix + span_width(&widths, start, end),
+                    rest.prefix + span_width(&widths, end, plan.line_end),
+                ),
+                _ => 0,
+            };
+            let cost = line_cost(tokens, start, end, budget, target, &ranks, &widths)
                 .saturating_add(skipped_colon_cost(&colon_counts, &colon_range, end))
+                .saturating_add(imbalance)
                 .saturating_add(tail);
             // Candidates come in reading order, so the last one of an equal cost fills the line the most.
             if cost <= best.cost {
@@ -187,12 +278,13 @@ fn collect_line_candidates(
     start: usize,
     count: usize,
     budget: usize,
+    target: usize,
     ranks: &[Option<Rank>],
     widths: &[usize],
     candidates: &mut Vec<usize>,
 ) {
     candidates.clear();
-    if span_width(widths, start, count) <= budget {
+    if span_width(widths, start, count) <= target {
         candidates.push(count);
         return;
     }
@@ -250,6 +342,51 @@ fn rank_at(ranks: &[Option<Rank>], index: usize) -> Option<Rank> {
     ranks.get(index).copied().flatten()
 }
 
+/// Clear the break candidates inside every list of single word items that fits on one line.
+///
+/// A list such as "alpha, beta, gamma, and delta" reads as one unit,
+/// so a line may end before it or after it but not between two of its items.
+/// The run has to fit the budget, since a list too long for one line has to break somewhere.
+fn suppress_list_runs(tokens: &[Token<'_>], ranks: &mut [Option<Rank>], widths: &[usize], budget: usize) {
+    let count = tokens.len();
+    let mut start = 0;
+    while start < count {
+        let Some(end) = list_run_end(tokens, start) else {
+            start += 1;
+            continue;
+        };
+        if span_width(widths, start, end) <= budget {
+            for slot in ranks.get_mut(start + 1..end).unwrap_or_default() {
+                *slot = None;
+            }
+        }
+        start = end;
+    }
+}
+
+/// One past the last token of the list that starts at `start`, or `None` when no list starts there.
+///
+/// Every item but the last one carries its own comma,
+/// which is what tells a list of names from a sentence that happens to hold commas:
+/// an item of several words leaves all but its last token without one.
+fn list_run_end(tokens: &[Token<'_>], start: usize) -> Option<usize> {
+    let mut end = start;
+    while tokens.get(end).is_some_and(|token| token.trailing.ends_with(',')) {
+        end += 1;
+    }
+    if end - start + 1 < MIN_LIST_ITEMS {
+        return None;
+    }
+    if tokens
+        .get(end)
+        .is_some_and(|token| contains_word(LIST_CONJUNCTIONS, &token.core))
+    {
+        end += 1;
+    }
+    // The last item closes the list, so a run that reaches the end of the text is not one.
+    (end < tokens.len()).then_some(end + 1)
+}
+
 /// Count colon boundaries before each token index for constant-time range queries.
 fn cumulative_colon_counts(ranks: &[Option<Rank>]) -> Vec<usize> {
     let mut counts = Vec::with_capacity(ranks.len() + 1);
@@ -287,6 +424,7 @@ fn line_cost(
     start: usize,
     end: usize,
     budget: usize,
+    target: usize,
     ranks: &[Option<Rank>],
     widths: &[usize],
 ) -> usize {
@@ -296,6 +434,11 @@ fn line_cost(
     let mut cost = width_cost(budget, width);
     if let Some(rank) = rank {
         cost = cost.saturating_add(boundary_cost(tokens, end, rank));
+    }
+    // Between the target and the limit the line is crowded rather than over long,
+    // so it pays only when a boundary could have ended it inside the target.
+    if width > target && width <= budget && !overflow_is_earned(start, count, target, rank, ranks, widths) {
+        cost = cost.saturating_add(CROWDED_LINE_COST);
     }
     if width > budget {
         if !overflow_is_earned(start, count, budget, rank, ranks, widths) {
@@ -344,6 +487,16 @@ fn width_cost(budget: usize, width: usize) -> usize {
         let over = share(width - budget);
         OVERFLOW_WEIGHT * over * over
     }
+}
+
+/// Cost of a line that the line after it is wider than, as a squared per mille of the width limit.
+///
+/// Both widths are the ones the lines have on the page, prefix included,
+/// so an aligned continuation with a wide prefix is measured by what the reader sees.
+/// Squaring matches `width_cost`, so a small difference is free and a lopsided pair is not.
+fn imbalance_cost(limit: usize, rendered: usize, next_rendered: usize) -> usize {
+    let excess = next_rendered.saturating_sub(rendered) * 1000 / limit.max(1);
+    IMBALANCE_WEIGHT * excess * excess
 }
 
 /// Cost of ending a line at a boundary, in the squared share units of `width_cost`.
@@ -629,11 +782,137 @@ mod test_break_choice {
     }
 
     #[test]
+    fn a_rewrapped_run_stops_short_of_the_limit_at_a_comma() {
+        // Joined, the sentence fills the line to the last column,
+        // which leaves no room for the next edit when a comma could end it a few words earlier.
+        let lines = [
+            "The reader role keeps its own search path, so no explicit statement is needed here, and the",
+            "migration stays readable.",
+        ];
+        let outcome = reflow_paragraph(&paragraph(&lines, "-- "), &FormatOptions::with_width(120), true);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "The reader role keeps its own search path, so no explicit statement is needed here,".to_string(),
+                "and the migration stays readable.".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_line_the_author_wrote_is_left_at_the_width_it_has() {
+        // Only a run the formatter lays out itself aims short of the limit.
+        // Rewrapping a line that already fits would move the text around for nothing.
+        let lines = [concat!(
+            "The reader role keeps its own search path, so no explicit statement is needed here, ",
+            "and the migration stays readable."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
+
+    #[test]
+    fn the_longer_of_two_lines_comes_first() {
+        // Every comma of this sentence leaves the rest of it too long for one line,
+        // so the only question is which of the two lines carries the bulk of the text.
+        let lines = [concat!(
+            "The backend, the frontend, and the public API all describe archive entry operations ",
+            "from the archive tool's perspective, not the server's:"
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
+        let reflowed = outcome.lines.expect("the sentence should wrap");
+        let widths: Vec<usize> = reflowed.iter().map(|line| line.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] >= pair[1]),
+            "the lines should not grow towards the end: {reflowed:?}"
+        );
+    }
+
+    #[test]
     fn an_overflowing_conjunction_still_wins_over_a_fitting_comma() {
         let text = "alpha beta gamma delta epsilon zeta eta theta, iota kappa lambda mu nu and xi omicron pi rho sigma tau upsilon phi chi psi omega";
         let outcome = reflow(&[text], 60);
         let lines = outcome.lines.expect("should reflow");
         assert_eq!(lines[0].chars().count(), 70, "a small overshoot is allowed: {lines:?}");
+    }
+}
+
+#[cfg(test)]
+mod test_list_runs {
+    use super::super::reflow::reflow_paragraph;
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    /// End of the list starting at every token index of the text.
+    fn run_ends(text: &str) -> Vec<Option<usize>> {
+        let tokens = tokens(text);
+        (0..tokens.len()).map(|start| list_run_end(&tokens, start)).collect()
+    }
+
+    #[test]
+    fn three_single_word_items_are_a_list() {
+        assert_eq!(run_ends("keeps alpha, beta, gamma together").first(), Some(&None));
+        assert_eq!(run_ends("keeps alpha, beta, gamma together").get(1), Some(&Some(4)));
+    }
+
+    #[test]
+    fn a_conjunction_before_the_last_item_belongs_to_the_list() {
+        let ends = run_ends("targets alpha, beta, gamma, and delta because of it");
+        assert_eq!(ends.get(1), Some(&Some(6)));
+    }
+
+    #[test]
+    fn two_items_are_a_pair_rather_than_a_list() {
+        assert_eq!(run_ends("keeps alpha, beta together").get(1), Some(&None));
+    }
+
+    #[test]
+    fn items_of_several_words_are_not_a_list() {
+        // Only the last token of a multi word item carries the comma,
+        // so no two items ever sit next to each other.
+        let ends = run_ends("skips empty names, ignored group names, runtime ignored names, and the rest");
+        assert!(ends.iter().all(Option::is_none), "{ends:?}");
+    }
+
+    #[test]
+    fn a_list_that_reaches_the_end_of_the_text_is_not_one() {
+        assert!(run_ends("alpha, beta, gamma,").iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn a_list_that_fits_one_line_is_not_split() {
+        let lines = [concat!(
+            "Without an explicit account list, `--upload` targets `alpha`, `beta`, `delta`, `gamma`, ",
+            "`kappa`, `lambda`, `sigma`, and `theta`, because the tool runs one account per environment."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
+        let reflowed = outcome.lines.expect("the sentence should wrap");
+        assert_eq!(
+            reflowed.first().map(String::as_str),
+            Some(concat!(
+                "Without an explicit account list, `--upload` targets `alpha`, `beta`, `delta`, `gamma`, ",
+                "`kappa`, `lambda`, `sigma`, and `theta`,"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_list_too_long_for_one_line_still_breaks() {
+        let lines = [concat!(
+            "The tool targets `alpha`, `beta`, `delta`, `gamma`, `kappa`, `lambda`, `sigma`, `omega`, ",
+            "`sigmadelta`, `kappagamma`, `omegabeta`, and `deltalambda`, because one account is used per environment."
+        )];
+        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
+        let reflowed = outcome.lines.expect("the sentence should wrap");
+        assert!(
+            reflowed.iter().all(|line| line.chars().count() <= 120 + SOFT_OVERFLOW),
+            "a list longer than a line has to break somewhere: {reflowed:?}"
+        );
+        assert!(
+            reflowed.first().is_some_and(|line| line.ends_with("`sigmadelta`,")),
+            "the break should fall between two items of the list: {reflowed:?}"
+        );
     }
 }
 

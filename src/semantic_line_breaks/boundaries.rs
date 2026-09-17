@@ -36,6 +36,7 @@ const CLAUSE_TIER_3: &[&str] = &[
     "if",
     "unless",
     "until",
+    "without",
     "when",
     "whenever",
     "where",

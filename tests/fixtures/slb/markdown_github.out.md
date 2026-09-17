@@ -23,7 +23,8 @@ Clone the repository and build it with `cargo build --release`, which puts the b
 
 ## Usage
 
-Run the tool with no arguments to check the current directory. It walks the tree and reports every violation.
+Run the tool with no arguments to check the current directory.
+It walks the tree and reports every violation.
 
 ### Options
 

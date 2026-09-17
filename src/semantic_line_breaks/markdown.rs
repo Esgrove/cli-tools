@@ -24,6 +24,14 @@ pub const IGNORE_FILE_SEARCH_LINES: usize = 5;
 /// Indentation in spaces that turns a line into an indented code block.
 const CODE_INDENT: usize = 4;
 
+/// Indentation in spaces that marks a block of its own inside a comment.
+///
+/// A comment keeps only what follows its marker and one space,
+/// so a source line such as `#   $1 - the branch name` arrives indented by two.
+/// Four columns is the Markdown rule for a document and too coarse for a comment,
+/// where two columns past the line above already says the text is laid out by hand.
+const COMMENT_INDENT: usize = 2;
+
 /// Matches the opening of a fenced code block.
 static RE_FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s{0,3}(`{3,}|~{3,})").expect("Invalid fence regex"));
 
@@ -127,6 +135,21 @@ enum LineClass {
 /// `is_document` enables front matter detection and hard break markers.
 #[must_use]
 pub fn split_paragraphs(lines: &[&str], base_prefix: &str, start_line: usize, is_document: bool) -> Vec<Region> {
+    let code_indent = if is_document { CODE_INDENT } else { COMMENT_INDENT };
+    split_paragraphs_with(lines, base_prefix, start_line, is_document, code_indent)
+}
+
+/// Split content lines, using the given indentation as the mark of a block of its own.
+///
+/// The indentation belongs to the text the call started from, not to the nesting inside it,
+/// so a blockquote keeps the rule of the document or comment that holds it.
+fn split_paragraphs_with(
+    lines: &[&str],
+    base_prefix: &str,
+    start_line: usize,
+    is_document: bool,
+    code_indent: usize,
+) -> Vec<Region> {
     let mut regions = Vec::new();
     let count = lines.len();
     let mut index = 0;
@@ -187,7 +210,13 @@ pub fn split_paragraphs(lines: &[&str], base_prefix: &str, start_line: usize, is
                     .collect();
                 let inner_refs: Vec<&str> = inner.iter().map(String::as_str).collect();
                 let prefix = format!("{base_prefix}> ");
-                regions.extend(split_paragraphs(&inner_refs, &prefix, start_line + index, false));
+                regions.extend(split_paragraphs_with(
+                    &inner_refs,
+                    &prefix,
+                    start_line + index,
+                    false,
+                    code_indent,
+                ));
                 index = end;
                 continue;
             }
@@ -200,10 +229,10 @@ pub fn split_paragraphs(lines: &[&str], base_prefix: &str, start_line: usize, is
                 continue;
             }
             LineClass::Field | LineClass::Text => {
-                if leading_width(line) >= CODE_INDENT {
+                if leading_width(line) >= code_indent {
                     index + 1
                 } else {
-                    let (end, is_setext) = collect_text(lines, index);
+                    let (end, is_setext) = collect_text(lines, index, code_indent);
                     let region = if is_setext {
                         verbatim(start_line, index, end)
                     } else {
@@ -446,17 +475,21 @@ fn collect_list_item(lines: &[&str], index: usize, content_start: usize) -> usiz
 }
 
 /// End index of a text paragraph starting at `index`, and whether it turned out to be a setext heading.
-fn collect_text(lines: &[&str], index: usize) -> (usize, bool) {
-    let first_line = lines.get(index).copied().unwrap_or_default();
-    let is_section_header = first_line.trim_end().ends_with(':');
-    let base_indent = leading_width(first_line);
+///
+/// A line that ends with a colon introduces what follows it,
+/// so a line indented past it belongs to a block of its own rather than to the sentence.
+/// The comparison is against the line directly above,
+/// since the colon that introduces a block is often not the line the paragraph started from.
+fn collect_text(lines: &[&str], index: usize, code_indent: usize) -> (usize, bool) {
     let mut end = index + 1;
     while let Some(line) = lines.get(end) {
         if RE_SETEXT.is_match(line) {
             return (end + 1, true);
         }
+        let above = lines.get(end - 1).copied().unwrap_or_default();
+        let introduces_block = above.trim_end().ends_with(':');
         if classify(line, lines.get(end + 1).copied()) != LineClass::Text
-            || is_section_header && leading_width(line) >= base_indent + CODE_INDENT
+            || introduces_block && leading_width(line) >= leading_width(above) + code_indent
         {
             break;
         }
@@ -624,8 +657,40 @@ mod test_markdown_verbatim {
             "  SKIP_DOCKER       set to 1 to assume that the database is already up",
         ];
         let regions = split_comment(&lines);
-        assert_eq!(regions, vec![verbatim_region(0, 4)]);
+        // The heading introduces the block and reads as prose.
+        // The entries are indented past it, so each one keeps the columns it was written with.
+        assert_eq!(paragraph(&regions[0]).lines, vec!["Environment:".to_string()]);
+        assert_eq!(
+            regions.get(1..),
+            Some([verbatim_region(1, 2), verbatim_region(2, 3), verbatim_region(3, 4)].as_slice())
+        );
         assert_tiles(&regions, 4);
+    }
+
+    #[test]
+    fn two_columns_of_indentation_start_a_block_in_a_comment() {
+        // A comment keeps only what follows the marker and one space,
+        // so "#   $1 - the branch name" arrives indented by two and has to hold its own line.
+        let lines = ["Arguments:", "  $1 - the branch name", "  $2 - the title"];
+        let regions = split_comment(&lines);
+        assert_eq!(
+            regions.get(1..),
+            Some([verbatim_region(1, 2), verbatim_region(2, 3)].as_slice())
+        );
+        assert_tiles(&regions, 3);
+        // A document keeps the Markdown rule, where two columns is a lazy continuation.
+        let regions = split_document(&lines);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(paragraph(&regions[0]).lines.len(), 3);
+    }
+
+    #[test]
+    fn a_block_is_introduced_by_the_line_above_it_not_by_the_first_one() {
+        // The colon that introduces the entries is the second line, not the line the run began at.
+        let lines = ["Read the notes first.", "Arguments:", "  $1 - the branch name"];
+        let regions = split_comment(&lines);
+        assert_eq!(regions.last(), Some(&verbatim_region(2, 3)));
+        assert_tiles(&regions, 3);
     }
 
     #[test]

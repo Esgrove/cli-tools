@@ -249,6 +249,12 @@ pub struct Token<'text> {
 }
 
 /// A run of prose lines sharing one prefix.
+///
+/// The lines own their text although they are always cut from the text buffer.
+/// Borrowing them would save one allocation per prose line,
+/// at the price of a lifetime running through four more modules, their tests, and the benchmarks.
+/// A check run never builds the reflowed text at all, so the lines are the only text it allocates,
+/// and the split is not what the profile is spent on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paragraph {
     /// Zero based index of the first line in the text buffer.

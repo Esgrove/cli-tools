@@ -2,7 +2,8 @@
 //!
 //! Each item below is its own paragraph, so the cases do not reflow into one another.
 
-/// The promotion lives in form defaults, so it does NOT mark the form dirty. Save stays disabled until an edit.
+/// The promotion lives in form defaults, so it does NOT mark the form dirty.
+/// Save stays disabled until an edit.
 fn sentence_extension() {}
 
 /// The value, a plain integer, is read from the header of every record in the archive.

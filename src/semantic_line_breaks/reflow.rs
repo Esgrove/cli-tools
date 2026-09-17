@@ -5,10 +5,30 @@
 //! and leaving a paragraph untouched when reflowing it would not read better.
 //! This is the entry point the formatter calls for every prose paragraph.
 
-use super::line_breaks::{MIN_BUDGET, SOFT_OVERFLOW, over_long_line_violations, split_tokens};
+use super::line_breaks::{Budgets, MIN_BUDGET, SOFT_OVERFLOW, over_long_line_violations, split_tokens};
 use super::rewording::{build_segments, merge_changed_sentences, reword_segments};
 use super::tokenizer::tokenize_line;
 use super::types::{FormatOptions, HardBreak, Paragraph, Token, Violation, ViolationKind};
+
+/// Characters a rewrap of a hanging indent may add to the width the lines grow by.
+///
+/// The break points are chosen from the text each line has room for,
+/// which is not the width the line ends up with when the lines that follow carry a wider prefix.
+/// A plan that reads as well as the one the author wrote is not worth the lines it unbalances,
+/// so a paragraph that already fit the limit keeps what it had.
+/// A small step is normal, since a break belongs at a boundary rather than at a column.
+const BALANCE_MARGIN: usize = 10;
+
+/// Reason a reflow was refused, kept to explain why the violations it leaves behind are not fixable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// The longest line would come out longer than the paragraph already was.
+    Longer,
+    /// The paragraph fit the limit and a new line would not.
+    OverTheLimit,
+    /// The paragraph fit the limit and its hanging indent would leave the new lines less even.
+    LessBalanced,
+}
 
 /// Content of one line the reflow produced.
 ///
@@ -31,6 +51,17 @@ pub struct ReflowOutcome {
     pub changed: bool,
     /// Violations found in the paragraph.
     pub violations: Vec<Violation>,
+}
+
+impl Refusal {
+    /// What to add to the message of a violation the refusal leaves unfixable.
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Longer => "but reflowing it would only make the longest line longer",
+            Self::OverTheLimit => "but reflowing it would push a line past the limit",
+            Self::LessBalanced => "but reflowing it would leave the lines less even",
+        }
+    }
 }
 
 impl OutputContent<'_> {
@@ -69,15 +100,17 @@ impl OutputContent<'_> {
 #[must_use]
 pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_fix: bool) -> ReflowOutcome {
     let line_offset = paragraph.start_line + 1;
-    let first_budget = options
-        .max_width
-        .saturating_sub(prefix_width(&paragraph.first_prefix, options.tab_width));
-    let rest_budget = options
-        .max_width
-        .saturating_sub(prefix_width(&paragraph.rest_prefix, options.tab_width));
+    let budgets = Budgets {
+        first: options
+            .max_width
+            .saturating_sub(prefix_width(&paragraph.first_prefix, options.tab_width)),
+        rest: options
+            .max_width
+            .saturating_sub(prefix_width(&paragraph.rest_prefix, options.tab_width)),
+    };
     let hard_limit = options.max_width + SOFT_OVERFLOW;
 
-    if first_budget.min(rest_budget) <= MIN_BUDGET {
+    if budgets.first.min(budgets.rest) <= MIN_BUDGET {
         let violations = if options.rules.line_too_long {
             over_long_line_violations(paragraph, options, hard_limit, false)
         } else {
@@ -109,8 +142,8 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
         let pieces = if should_split {
             split_tokens(
                 segment.tokens,
-                first_budget,
-                rest_budget,
+                budgets,
+                segment.modified,
                 &mut is_first_line,
                 options,
                 line_offset,
@@ -140,15 +173,10 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
             *hard_break != original_break || !content.matches_line(paragraph, index)
         });
 
-    if changed && !fits_as_well_as_before(&output, paragraph, options, hard_limit) {
-        // Joining lines that cannot be broken again would replace readable lines with a longer one.
-        // The over-long lines the split attempt reported are never written, so those reports go too,
-        // and the original lines are measured further down like any other unchanged paragraph.
+    let reworded = holds_reworded_fix(&violations);
+    if changed && let Some(refusal) = reflow_refusal(&output, paragraph, options, hard_limit, reworded) {
         changed = false;
-        violations.retain(|violation| violation.kind != ViolationKind::LineTooLong);
-        for violation in &mut violations {
-            violation.fixable = false;
-        }
+        keep_original_lines(&mut violations, refusal);
     }
 
     if options.rules.line_too_long {
@@ -178,6 +206,31 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     }
 }
 
+/// Whether a rule rewrote the sentence rather than only rewrapping it.
+///
+/// A reworded sentence is restructured on purpose,
+/// so it may use the soft overflow like any other text.
+/// Only rewrapping a paragraph that already fit has to keep fitting.
+fn holds_reworded_fix(violations: &[Violation]) -> bool {
+    violations.iter().any(|violation| {
+        violation.fixable && matches!(violation.kind, ViolationKind::Semicolon | ViolationKind::EmDash)
+    })
+}
+
+/// Drop the reports of a refused reflow and explain the ones that are left.
+///
+/// Joining lines that cannot be broken again would replace readable lines with a longer one.
+/// The over-long lines the split attempt reported are never written, so those reports go too,
+/// and the original lines are measured by the caller like any other unchanged paragraph.
+/// What is left carries the reason the fix was refused, so it can be made by hand.
+fn keep_original_lines(violations: &mut Vec<Violation>, refusal: Refusal) {
+    violations.retain(|violation| violation.kind != ViolationKind::LineTooLong);
+    for violation in violations.iter_mut() {
+        violation.fixable = false;
+        violation.message = format!("{}, {}", violation.message, refusal.reason()).into();
+    }
+}
+
 /// Whether joining the tokens with single spaces would produce exactly the given line.
 ///
 /// Comparing in place answers the question without building the joined line,
@@ -201,29 +254,29 @@ fn tokens_match_line(tokens: &[Token<'_>], line: &str) -> bool {
     rest.is_empty()
 }
 
-/// Whether the reflowed lines are no longer than the lines the paragraph started with.
+/// Why the reflowed lines are not worth writing, or `None` when they are.
 ///
 /// A line may use the soft overflow, but reflowing must never push a line past the hard limit
 /// when the paragraph did not start out that long.
-fn fits_as_well_as_before(
+/// A paragraph whose lines all fit the limit is only rewrapped for how it reads,
+/// so it also has to keep fitting and to keep filling its lines from the top.
+/// Rewording is exempt from the width rule, since it rewrites the sentence rather than rewrapping it.
+fn reflow_refusal(
     output: &[(OutputContent, HardBreak)],
     paragraph: &Paragraph,
     options: &FormatOptions,
     hard_limit: usize,
-) -> bool {
+    reworded: bool,
+) -> Option<Refusal> {
     let line_width = |index: usize, width: usize, hard_break: HardBreak| {
         prefix_width(paragraph.prefix_for(index), options.tab_width) + width + hard_break.marker().len()
     };
-    let output_width = output
+    let new_widths: Vec<usize> = output
         .iter()
         .enumerate()
         .map(|(index, (content, hard_break))| line_width(index, content.width(paragraph), *hard_break))
-        .max()
-        .unwrap_or_default();
-    if output_width <= hard_limit {
-        return true;
-    }
-    let original_width = paragraph
+        .collect();
+    let old_widths: Vec<usize> = paragraph
         .lines
         .iter()
         .enumerate()
@@ -231,9 +284,46 @@ fn fits_as_well_as_before(
             let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
             line_width(index, line.chars().count(), hard_break)
         })
-        .max()
-        .unwrap_or_default();
-    output_width <= original_width
+        .collect();
+    let new_max = new_widths.iter().copied().max().unwrap_or_default();
+    let old_max = old_widths.iter().copied().max().unwrap_or_default();
+    if new_max > hard_limit && new_max > old_max {
+        return Some(Refusal::Longer);
+    }
+    if old_max > options.max_width {
+        return None;
+    }
+    if new_max > options.max_width {
+        return (!reworded).then_some(Refusal::OverTheLimit);
+    }
+    // Only a plan that keeps the lines it started with is compared for evenness.
+    // Joining a paragraph or splitting a rewritten sentence changes the line count on purpose,
+    // and there is nothing to compare the new lines against.
+    if new_widths.len() != old_widths.len() {
+        return None;
+    }
+    // With one prefix for every line the cost model already weighs the widths against each other.
+    // A hanging indent is what it cannot see,
+    // since the same amount of text reaches further right on every line after the first.
+    let hanging_indent = prefix_width(&paragraph.rest_prefix, options.tab_width)
+        > prefix_width(&paragraph.first_prefix, options.tab_width);
+    if !hanging_indent {
+        return None;
+    }
+    (descent(&new_widths) > descent(&old_widths) + BALANCE_MARGIN).then_some(Refusal::LessBalanced)
+}
+
+/// Characters by which the lines are wider than the line above them, added up over the paragraph.
+///
+/// Of two lines the first one should be the longer,
+/// so only the steps that go the other way count.
+/// A paragraph that fills its lines from the top scores zero however uneven the last line is.
+fn descent(widths: &[usize]) -> usize {
+    widths
+        .iter()
+        .zip(widths.iter().skip(1))
+        .map(|(current, next)| next.saturating_sub(*current))
+        .sum()
 }
 
 /// Width of a prefix in characters, counting tabs as `tab_width`.
@@ -464,6 +554,75 @@ mod test_reflow_safety {
     use super::*;
     use crate::semantic_line_breaks::test_helpers::*;
     use crate::semantic_line_breaks::types::RuleSet;
+
+    /// A paragraph whose following lines line up under a column of the first one.
+    fn hanging(lines: &[&str], first_prefix: &str, rest_prefix: &str) -> Paragraph {
+        Paragraph {
+            start_line: 0,
+            end_line: lines.len(),
+            first_prefix: first_prefix.to_string(),
+            rest_prefix: rest_prefix.to_string(),
+            last_suffix: String::new(),
+            lines: lines.iter().map(|line| (*line).to_string()).collect(),
+            hard_breaks: vec![HardBreak::None; lines.len()],
+        }
+    }
+
+    #[test]
+    fn a_hanging_indent_keeps_its_lines_when_rewrapping_unbalances_them() {
+        // The only boundary in the description is "which",
+        // which reads no better than the break the author made
+        // and leaves the wide continuation line far longer than the first one.
+        let lines = [
+            "@param archiveEntryIdentifier The id of the archive entry which will be removed",
+            "from the favourites of the signed in reader.",
+        ];
+        let paragraph = hanging(&lines, "     * ", "     *                               ");
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120), true);
+        assert_eq!(outcome.lines, None);
+        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, false)]);
+        assert!(
+            outcome
+                .violations
+                .iter()
+                .all(|violation| { violation.message.contains("would leave the lines less even") }),
+            "{:?}",
+            outcome.violations
+        );
+    }
+
+    #[test]
+    fn a_paragraph_that_fits_is_not_rewrapped_past_the_limit() {
+        let lines = [
+            "@param archiveEntryIdentifier The id of the archive entry which will be added",
+            "to the favourites of the signed in reader.",
+        ];
+        let paragraph = hanging(&lines, "     * ", "     *                               ");
+        let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120), true);
+        assert_eq!(outcome.lines, None);
+        assert!(
+            outcome.violations.iter().all(|violation| {
+                !violation.fixable && violation.message.contains("would push a line past the limit")
+            }),
+            "{:?}",
+            outcome.violations
+        );
+    }
+
+    #[test]
+    fn rewording_may_still_use_the_soft_overflow() {
+        // A rewritten sentence is not a rewrap, so the width rule that guards a rewrap is off.
+        let outcome = reflow(
+            &[
+                "Use `x`; then run the checks and",
+                "read the output (see below)",
+                "for details.",
+            ],
+            60,
+        );
+        let reflowed = outcome.lines.expect("the semicolon should be rewritten");
+        assert!(reflowed.iter().any(|line| line.starts_with("Then run")), "{reflowed:?}");
+    }
 
     #[test]
     fn a_prefix_that_leaves_no_budget_is_reported_but_not_reflowed() {
