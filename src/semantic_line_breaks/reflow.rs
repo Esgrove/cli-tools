@@ -274,22 +274,20 @@ fn reflow_refusal(
     let line_width = |index: usize, width: usize, hard_break: HardBreak| {
         prefix_width(paragraph.prefix_for(index), options.tab_width) + width + hard_break.marker().len()
     };
-    let new_widths: Vec<usize> = output
-        .iter()
-        .enumerate()
-        .map(|(index, (content, hard_break))| line_width(index, content.width(paragraph), *hard_break))
-        .collect();
-    let old_widths: Vec<usize> = paragraph
-        .lines
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
+    let new_widths = || {
+        output
+            .iter()
+            .enumerate()
+            .map(|(index, (content, hard_break))| line_width(index, content.width(paragraph), *hard_break))
+    };
+    let old_widths = || {
+        paragraph.lines.iter().enumerate().map(|(index, line)| {
             let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
             line_width(index, line.chars().count(), hard_break)
         })
-        .collect();
-    let new_max = new_widths.iter().copied().max().unwrap_or_default();
-    let old_max = old_widths.iter().copied().max().unwrap_or_default();
+    };
+    let new_max = new_widths().max().unwrap_or_default();
+    let old_max = old_widths().max().unwrap_or_default();
     if new_max > hard_limit && new_max > old_max {
         return Some(Refusal::Longer);
     }
@@ -302,7 +300,7 @@ fn reflow_refusal(
     // Only a plan that keeps the lines it started with is compared for evenness.
     // Joining a paragraph or splitting a rewritten sentence changes the line count on purpose,
     // and there is nothing to compare the new lines against.
-    if new_widths.len() != old_widths.len() {
+    if output.len() != paragraph.lines.len() {
         return None;
     }
     // With one prefix for every line the cost model already weighs the widths against each other.
@@ -313,6 +311,8 @@ fn reflow_refusal(
     if !hanging_indent {
         return None;
     }
+    let new_widths: Vec<usize> = new_widths().collect();
+    let old_widths: Vec<usize> = old_widths().collect();
     (descent(&new_widths) > descent(&old_widths) + BALANCE_MARGIN).then_some(Refusal::LessBalanced)
 }
 
