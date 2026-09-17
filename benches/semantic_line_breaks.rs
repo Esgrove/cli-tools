@@ -208,6 +208,32 @@ let value = {index};
     document
 }
 
+/// A paragraph of many short clauses joined with semicolons.
+///
+/// Every semicolon is a candidate for rewording,
+/// so the cost of deciding one of them is multiplied by the count.
+/// The `stray` variant adds an unclosed bracket,
+/// which is the input that tells matched bracket counting apart from a running total.
+fn semicolon_paragraph(stray: bool) -> Paragraph {
+    let mut line = if stray {
+        "the run starts (here".to_string()
+    } else {
+        "the run starts here".to_string()
+    };
+    for index in 0..120 {
+        write!(line, "; the step {index} follows the one before it").expect("writing to a string cannot fail");
+    }
+    Paragraph {
+        start_line: 0,
+        end_line: 1,
+        first_prefix: "/// ".to_string(),
+        rest_prefix: "/// ".to_string(),
+        last_suffix: String::new(),
+        lines: vec![line],
+        hard_breaks: vec![HardBreak::None],
+    }
+}
+
 fn paragraph() -> Paragraph {
     let lines: Vec<String> = LONG_SENTENCE
         .split(", ")
@@ -275,6 +301,20 @@ fn bench_reflow(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("reflow_paragraph");
     group.bench_function("clauses_to_lines", |bencher| {
         bencher.iter(|| reflow_paragraph(black_box(&paragraph), &options, true));
+    });
+    group.finish();
+}
+
+fn bench_reword_semicolons(criterion: &mut Criterion) {
+    let options = FormatOptions::with_width(100);
+    let balanced = semicolon_paragraph(false);
+    let stray_bracket = semicolon_paragraph(true);
+    let mut group = criterion.benchmark_group("reword_semicolons");
+    group.bench_function("many_semicolons", |bencher| {
+        bencher.iter(|| reflow_paragraph(black_box(&balanced), &options, true));
+    });
+    group.bench_function("many_semicolons_with_a_stray_bracket", |bencher| {
+        bencher.iter(|| reflow_paragraph(black_box(&stray_bracket), &options, true));
     });
     group.finish();
 }
@@ -409,6 +449,7 @@ criterion_group!(
     bench_boundaries,
     bench_clause_rank,
     bench_reflow,
+    bench_reword_semicolons,
     bench_format,
     bench_check,
     bench_scan,

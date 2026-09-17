@@ -460,12 +460,6 @@ const fn is_delimited(kind: TokenKind) -> bool {
     )
 }
 
-/// Characters of the token that affect bracket nesting, skipping the inner text of an atom.
-pub(super) fn bracket_characters<'token>(token: &'token Token<'_>) -> impl Iterator<Item = char> + 'token {
-    let core = if token.is_atom() { "" } else { token.core.as_ref() };
-    token.leading.chars().chain(core.chars()).chain(token.trailing.chars())
-}
-
 /// Whether the break between two consecutive lines falls in the middle of a clause.
 #[must_use]
 pub fn is_mid_clause_break(

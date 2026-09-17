@@ -7,8 +7,8 @@
 use std::ops::Range;
 
 use super::boundaries::{
-    bracket_characters, clause_rank, collect_bracket_events, collect_emphasis_events, ends_sentence,
-    is_mid_clause_break, is_sentence_end, lines_ending_inside, token_depths,
+    clause_rank, collect_bracket_events, collect_emphasis_events, ends_sentence, is_mid_clause_break, is_sentence_end,
+    lines_ending_inside, token_depths,
 };
 use super::reflow::capitalize;
 use super::tokenizer::RE_LOWERCASE_WORD;
@@ -261,6 +261,12 @@ fn reword_semicolons(
 ) {
     for segment_index in 0..segments.len() {
         let token_count = segments.get(segment_index).map_or(0, |segment| segment.tokens.len());
+        // The depths are the same for every semicolon of the segment,
+        // so scanning the brackets once keeps the pass linear in the number of tokens.
+        let depths = segments
+            .get(segment_index)
+            .map(|segment| token_depths(&segment.tokens, collect_bracket_events))
+            .unwrap_or_default();
         for token_index in 0..token_count {
             let Some(segment) = segments.get(segment_index) else {
                 continue;
@@ -281,7 +287,7 @@ fn reword_semicolons(
             } else {
                 None
             };
-            let refusal = semicolon_refusal(&segment.tokens, token_index, next, options);
+            let refusal = semicolon_refusal(&segment.tokens, token_index, next, &depths, options);
             if let Some(reason) = refusal {
                 violations.push(Violation {
                     line,
@@ -328,20 +334,17 @@ fn semicolon_refusal(
     tokens: &[Token<'_>],
     index: usize,
     next: Option<&Token>,
+    depths: &[usize],
     options: &FormatOptions,
 ) -> Option<&'static str> {
     let token = tokens.get(index)?;
     let Some(next) = next else {
         return Some("nothing follows it");
     };
-    let depth = tokens.iter().take(index + 1).fold(0i64, |depth, token| {
-        bracket_characters(token).fold(depth, |depth, character| match character {
-            '(' | '[' => depth + 1,
-            ')' | ']' => depth - 1,
-            _ => depth,
-        })
-    });
-    if depth > 0 {
+    // The table holds the depth before each token,
+    // so the entry after the semicolon is the one that counts the brackets of the semicolon token.
+    // Bracket free text yields an empty table, where every depth is zero.
+    if depths.get(index + 1).copied().unwrap_or_default() > 0 {
         return Some("it is inside brackets");
     }
     if looks_like_code(token) || looks_like_code(next) {
@@ -574,6 +577,21 @@ mod test_rewording {
                 "the first value (the total) is read. The second one is ignored".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn a_stray_bracket_does_not_decide_the_semicolons_around_it() {
+        // Only the brackets that pair up count,
+        // so an unclosed opener does not make the rest of the line unrewritable
+        // and an unmatched closer does not cancel a real group.
+        let outcome = reflow(&["see the note (item two; the rest is ignored"], 120);
+        assert_eq!(
+            outcome.lines,
+            Some(vec!["see the note (item two. The rest is ignored".to_string()])
+        );
+        let outcome = reflow(&["see b) (item two; the rest is ignored)"], 120);
+        assert_eq!(outcome.lines, None);
+        assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, false)]);
     }
 
     #[test]
