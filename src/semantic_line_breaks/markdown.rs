@@ -382,7 +382,14 @@ fn list_item_paragraph(
             }
         })
         .collect();
-    make_paragraph(
+    // A lazy continuation carries the item on without lining up under it,
+    // and a line the author did not indent may well be a note of its own,
+    // so only an item written with its continuation lines indented is treated as one unit of prose.
+    let indented = item_lines
+        .iter()
+        .skip(1)
+        .all(|item_line| leading_width(item_line) >= content_start);
+    let region = make_paragraph(
         &contents,
         first_prefix,
         rest_prefix,
@@ -390,7 +397,8 @@ fn list_item_paragraph(
         start_line + end,
         is_document,
         notices,
-    )
+    );
+    if indented { mark_list_item(region) } else { region }
 }
 
 /// Build the paragraph region for plain text lines spanning `index..end`.
@@ -627,9 +635,21 @@ fn make_paragraph(
         first_prefix,
         rest_prefix,
         last_suffix: String::new(),
+        list_item: false,
         lines,
         hard_breaks,
     })
+}
+
+/// Mark a paragraph region as the content of a list item.
+fn mark_list_item(region: Region) -> Region {
+    match region {
+        Region::Paragraph(paragraph) => Region::Paragraph(Paragraph {
+            list_item: true,
+            ..paragraph
+        }),
+        verbatim @ Region::Verbatim { .. } => verbatim,
+    }
 }
 
 /// Remove a trailing hard break marker and trailing whitespace from a content line.
@@ -1001,6 +1021,26 @@ mod test_markdown_lists {
         assert_eq!(item.rest_prefix, "  ");
         assert_eq!(item.lines, vec!["foo", "bar"]);
         assert_eq!((item.start_line, item.end_line), (0, 2));
+    }
+
+    #[test]
+    fn an_item_continued_under_its_marker_is_marked_as_a_list_item() {
+        let regions = split_comment(&["- foo", "  bar"]);
+        assert!(paragraph(&regions[0]).list_item);
+    }
+
+    #[test]
+    fn an_item_continued_by_a_lazy_line_is_not_marked_as_a_list_item() {
+        let regions = split_comment(&["- foo", "bar"]);
+        let item = paragraph(&regions[0]);
+        assert_eq!(item.lines, vec!["foo", "bar"]);
+        assert!(!item.list_item);
+    }
+
+    #[test]
+    fn a_text_paragraph_is_no_list_item() {
+        let regions = split_comment(&["foo", "bar"]);
+        assert!(!paragraph(&regions[0]).list_item);
     }
 
     #[test]

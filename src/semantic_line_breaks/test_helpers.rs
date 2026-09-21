@@ -30,8 +30,19 @@ pub fn paragraph(lines: &[&str], prefix: &str) -> Paragraph {
         first_prefix: prefix.to_string(),
         rest_prefix: prefix.to_string(),
         last_suffix: String::new(),
+        list_item: false,
         lines: lines.iter().map(|line| (*line).to_string()).collect(),
         hard_breaks: vec![HardBreak::None; lines.len()],
+    }
+}
+
+/// Build a list item paragraph with the given marker prefix and the matching continuation indent.
+pub fn list_item(lines: &[&str], marker: &str) -> Paragraph {
+    Paragraph {
+        first_prefix: marker.to_string(),
+        rest_prefix: " ".repeat(marker.chars().count()),
+        list_item: true,
+        ..paragraph(lines, "")
     }
 }
 

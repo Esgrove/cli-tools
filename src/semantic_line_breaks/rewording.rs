@@ -10,9 +10,10 @@ use super::boundaries::{
     clause_rank, collect_bracket_events, collect_emphasis_events, collect_quote_events, ends_sentence,
     is_mid_clause_break, is_sentence_end, lines_ending_inside, token_depths,
 };
+use super::line_breaks::comfortable_fill;
 use super::options::FormatOptions;
 use super::paragraph::{HardBreak, Paragraph};
-use super::reflow::capitalize;
+use super::reflow::{capitalize, prefix_width};
 use super::token::{Token, TokenKind};
 use super::tokenizer::{RE_LOWERCASE_WORD, contains_word};
 use super::violation::{Violation, ViolationKind};
@@ -58,6 +59,7 @@ pub(super) fn build_segments<'text>(
     let mut segments = Vec::new();
     let mut violations = Vec::new();
     let mut current: Option<Segment> = None;
+    let pack_sentences = options.join_sentences || list_item_fits_on_one_line(paragraph, options);
     let inside_brackets = lines_ending_inside(&line_tokens, collect_bracket_events);
     let inside_emphasis = lines_ending_inside(&line_tokens, collect_emphasis_events);
     let inside_quotes = lines_ending_inside(&line_tokens, collect_quote_events);
@@ -98,7 +100,7 @@ pub(super) fn build_segments<'text>(
                 fixable: true,
             });
         }
-        let join = mid_clause || (options.join_sentences && previous_break == HardBreak::None);
+        let join = mid_clause || (pack_sentences && previous_break == HardBreak::None);
         if join {
             segment.tokens.extend(tokens);
             segment.hard_break = hard_break;
@@ -119,6 +121,33 @@ pub(super) fn build_segments<'text>(
         segments.push(segment);
     }
     (segments, violations)
+}
+
+/// Whether a list item is short enough for all of its prose to sit on the one line the marker starts.
+///
+/// A list reads best when one item is one line,
+/// so the sentences of an item that fits there are joined rather than left on lines of their own.
+/// The width they have to fit is the comfortable one the formatter lays its own lines out to,
+/// not the limit, so an item is only joined when the line it becomes has room left in it.
+/// A hard break in the middle of an item is the author asking for the lines, so such an item is left alone.
+pub(super) fn list_item_fits_on_one_line(paragraph: &Paragraph, options: &FormatOptions) -> bool {
+    if !paragraph.list_item || !options.rules.mid_clause_break || paragraph.lines.len() < 2 {
+        return false;
+    }
+    if paragraph
+        .hard_breaks
+        .iter()
+        .take(paragraph.lines.len() - 1)
+        .any(|hard_break| *hard_break != HardBreak::None)
+    {
+        return false;
+    }
+    let budget = options
+        .max_width
+        .saturating_sub(prefix_width(&paragraph.first_prefix, options.tab_width));
+    // One space joins each pair of lines, which is what the reflow does with them too.
+    let joined = paragraph.lines.iter().map(|line| line.chars().count()).sum::<usize>() + paragraph.lines.len() - 1;
+    joined <= comfortable_fill(budget)
 }
 
 /// Apply the semicolon and em dash rewrites to all segments.

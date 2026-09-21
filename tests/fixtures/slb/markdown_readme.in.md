@@ -18,6 +18,10 @@ cargo install --locked --path .
 
 - `dirmove` moves files into the directories that match their names, and it can create the directories.
 - `slb` checks prose in comments; it also formats Markdown.
+- `vtag` reads the version from the project file.
+  It then creates the matching git tag.
+- `dupefind` walks the given directories and collects every file it finds there under its own name.
+  It then compares the files that share a name and reports the ones that hold the same bytes.
 - A short item.
 
 1. First run the check mode, which reports the violations and exits with a non-zero code.

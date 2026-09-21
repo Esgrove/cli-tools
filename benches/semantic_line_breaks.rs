@@ -229,6 +229,7 @@ fn semicolon_paragraph(stray: bool) -> Paragraph {
         first_prefix: "/// ".to_string(),
         rest_prefix: "/// ".to_string(),
         last_suffix: String::new(),
+        list_item: false,
         lines: vec![line],
         hard_breaks: vec![HardBreak::None],
     }
@@ -246,6 +247,7 @@ fn paragraph() -> Paragraph {
         first_prefix: "/// ".to_string(),
         rest_prefix: "/// ".to_string(),
         last_suffix: String::new(),
+        list_item: false,
         lines,
         hard_breaks,
     }

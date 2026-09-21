@@ -51,8 +51,18 @@ const OVERFLOW_WEIGHT: usize = 4;
 /// since a wider prefix on the following lines makes the same amount of text reach further right.
 const IMBALANCE_WEIGHT: usize = 1;
 
-/// Fill of the budget, in percent, past which a line is crowded against the limit.
-const COMFORTABLE_FILL_PERCENT: usize = 90;
+/// Share of the budget a line may fill before it is crowded against the limit.
+const COMFORTABLE_FILL_FRACTION: f64 = 0.9;
+
+/// Width a run the formatter lays out itself aims at, out of the budget its line has.
+///
+/// A line the formatter chose stops short of the limit,
+/// so the text on it has room to grow before the next edit has to rewrap it.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(super) fn comfortable_fill(budget: usize) -> usize {
+    (budget as f64 * COMFORTABLE_FILL_FRACTION) as usize
+}
 
 /// Cost of filling a line to the limit where a clause boundary could have ended it comfortably.
 ///
@@ -150,11 +160,7 @@ impl LineWidths {
     fn new(limit: usize, budget: usize, relaid_out: bool, strict: bool) -> Self {
         Self {
             budget,
-            target: if relaid_out {
-                budget * COMFORTABLE_FILL_PERCENT / 100
-            } else {
-                budget
-            },
+            target: if relaid_out { comfortable_fill(budget) } else { budget },
             prefix: limit.saturating_sub(budget),
             overflow: soft_overflow(limit, strict),
         }

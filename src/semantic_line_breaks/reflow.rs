@@ -5,10 +5,12 @@
 //! and leaving a paragraph untouched when reflowing it would not read better.
 //! This is the entry point the formatter calls for every prose paragraph.
 
-use super::line_breaks::{Budgets, MIN_BUDGET, over_long_line_violations, soft_overflow, split_tokens};
+use super::line_breaks::{
+    Budgets, MIN_BUDGET, comfortable_fill, over_long_line_violations, soft_overflow, split_tokens,
+};
 use super::options::FormatOptions;
 use super::paragraph::{HardBreak, Paragraph};
-use super::rewording::{build_segments, merge_changed_sentences, reword_segments};
+use super::rewording::{Segment, build_segments, merge_changed_sentences, reword_segments};
 use super::token::Token;
 use super::tokenizer::tokenize_line;
 use super::violation::{Violation, ViolationKind};
@@ -136,10 +138,11 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     reword_segments(&mut segments, options, line_offset, &mut violations);
     merge_changed_sentences(&mut segments, options);
 
+    let keep_on_one_line = keeps_list_item_on_one_line(paragraph, &segments, budgets.first, options);
     let mut output: Vec<(OutputContent, HardBreak)> = Vec::with_capacity(paragraph.lines.len());
     let mut is_first_line = true;
     for segment in segments {
-        let should_split = segment.modified || options.rules.line_too_long;
+        let should_split = !keep_on_one_line && (segment.modified || options.rules.line_too_long);
         let source_line = if segment.modified { None } else { segment.source_line };
         let mut emitted_any = false;
         let pieces = if should_split {
@@ -170,11 +173,9 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
         }
     }
 
-    let mut changed = output.len() != paragraph.lines.len()
-        || output.iter().enumerate().any(|(index, (content, hard_break))| {
-            let original_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
-            *hard_break != original_break || !content.matches_line(paragraph, index)
-        });
+    let mut changed = output_differs(&output, paragraph);
+    let reported = !violations.is_empty();
+    violations.extend(list_item_violation(paragraph, options, output.len(), reported));
 
     let reworded = holds_reworded_fix(&violations);
     if changed && let Some(refusal) = reflow_refusal(&output, paragraph, options, hard_limit, reworded) {
@@ -255,6 +256,60 @@ fn tokens_match_line(tokens: &[Token<'_>], line: &str) -> bool {
         }
     }
     rest.is_empty()
+}
+
+/// Whether the prose of a list item is kept on the one line its marker starts.
+///
+/// A list reads best when one item is one line,
+/// so an item that fits there is not broken up,
+/// not even at a sentence a semicolon or a dash rewrite created.
+/// The width it has to fit is the comfortable one the formatter lays its own lines out to,
+/// so an item is only kept on one line when that line has room left in it.
+fn keeps_list_item_on_one_line(
+    paragraph: &Paragraph,
+    segments: &[Segment<'_>],
+    budget: usize,
+    options: &FormatOptions,
+) -> bool {
+    options.rules.mid_clause_break
+        && paragraph.list_item
+        && segments.len() == 1
+        && segments
+            .first()
+            .is_some_and(|segment| tokens_width(&segment.tokens) <= comfortable_fill(budget))
+}
+
+/// The violation for a list item the reflow joined onto one line, when the join is the reason for the fix.
+///
+/// A rule that already reports the paragraph is what its fix is made for,
+/// and the join comes along with that fix, so the item is not reported a second time.
+fn list_item_violation(
+    paragraph: &Paragraph,
+    options: &FormatOptions,
+    output_lines: usize,
+    reported: bool,
+) -> Option<Violation> {
+    (!reported
+        && options.rules.mid_clause_break
+        && paragraph.list_item
+        && paragraph.lines.len() > 1
+        && output_lines == 1)
+        .then(|| Violation {
+            line: paragraph.start_line + 1,
+            column: None,
+            kind: ViolationKind::MidClauseBreak,
+            message: "list item is broken over several lines although it fits on one".into(),
+            fixable: true,
+        })
+}
+
+/// Whether the planned lines differ from the ones the paragraph came in with.
+fn output_differs(output: &[(OutputContent, HardBreak)], paragraph: &Paragraph) -> bool {
+    output.len() != paragraph.lines.len()
+        || output.iter().enumerate().any(|(index, (content, hard_break))| {
+            let original_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
+            *hard_break != original_break || !content.matches_line(paragraph, index)
+        })
 }
 
 /// Why the reflowed lines are not worth writing, or `None` when they are.
@@ -554,6 +609,92 @@ mod test_reflow {
 }
 
 #[cfg(test)]
+mod test_list_items {
+    use super::*;
+    use crate::semantic_line_breaks::options::RuleSet;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn an_item_that_fits_is_joined_onto_one_line() {
+        let item = list_item(&["`slb` checks prose in comments.", "It also formats Markdown."], "- ");
+        let outcome = reflow_paragraph(&item, &FormatOptions::with_width(120), true);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "`slb` checks prose in comments. It also formats Markdown.".to_string()
+            ])
+        );
+        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, true)]);
+    }
+
+    #[test]
+    fn an_item_that_would_crowd_the_line_keeps_its_sentence_breaks() {
+        // The two sentences are 36 characters together, past the comfortable fill of the 38 the item has.
+        let item = list_item(&["A first sentence here.", "A second one."], "- ");
+        let outcome = reflow_paragraph(&item, &FormatOptions::with_width(40), true);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
+
+    #[test]
+    fn a_rewritten_semicolon_stays_on_the_line_of_the_item() {
+        let item = list_item(&["`slb` checks prose in comments; it also formats Markdown."], "- ");
+        let outcome = reflow_paragraph(&item, &FormatOptions::with_width(120), true);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "`slb` checks prose in comments. It also formats Markdown.".to_string()
+            ])
+        );
+        assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, true)]);
+    }
+
+    #[test]
+    fn a_rewritten_semicolon_too_long_for_one_line_starts_a_new_line() {
+        let item = list_item(&["`slb` checks prose in comments; it also formats Markdown."], "- ");
+        let outcome = reflow_paragraph(&item, &FormatOptions::with_width(40), true);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "`slb` checks prose in comments.".to_string(),
+                "It also formats Markdown.".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_paragraph_that_is_no_list_item_keeps_one_sentence_per_line() {
+        let outcome = reflow(&["`slb` checks prose in comments.", "It also formats Markdown."], 120);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
+
+    #[test]
+    fn the_mid_clause_rule_turns_the_join_off() {
+        let options = FormatOptions {
+            rules: RuleSet {
+                mid_clause_break: false,
+                ..RuleSet::ALL
+            },
+            ..FormatOptions::with_width(120)
+        };
+        let item = list_item(&["`slb` checks prose in comments.", "It also formats Markdown."], "- ");
+        let outcome = reflow_paragraph(&item, &options, true);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
+
+    #[test]
+    fn an_item_broken_by_hand_at_a_hard_break_is_left_alone() {
+        let mut item = list_item(&["`slb` checks prose in comments.", "It also formats Markdown."], "- ");
+        item.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
+        let outcome = reflow_paragraph(&item, &FormatOptions::with_width(120), true);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod test_reflow_safety {
     use super::*;
     use crate::semantic_line_breaks::options::RuleSet;
@@ -567,6 +708,7 @@ mod test_reflow_safety {
             first_prefix: first_prefix.to_string(),
             rest_prefix: rest_prefix.to_string(),
             last_suffix: String::new(),
+            list_item: false,
             lines: lines.iter().map(|line| (*line).to_string()).collect(),
             hard_breaks: vec![HardBreak::None; lines.len()],
         }

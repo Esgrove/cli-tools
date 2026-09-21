@@ -505,6 +505,9 @@ A dash that is kept never ends or starts a line.
 Aligned column blocks, such as the environment table of a usage comment, are left as they are.
 In Python, the quotes of a docstring that needs more than one line are moved onto lines of their own,
 while a docstring holding one sentence that fits is written on a single line with its quotes around it.
+A Markdown list item keeps all of its prose on the line its marker starts when the prose fits there,
+which keeps the list readable in the raw text,
+and an item too long for one line is broken at its sentence and clause boundaries like any other prose.
 Slash-delimited regex literals are protected across supported source languages.
 When ambiguous slash syntax could hide a multiline string or comment, the remaining source is left unchanged.
 With `--trailing`, a comment sharing a line with code is moved onto its own line above it.

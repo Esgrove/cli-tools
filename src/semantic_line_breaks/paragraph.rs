@@ -45,6 +45,11 @@ pub struct Paragraph {
     pub rest_prefix: String,
     /// Suffix appended to the last line, for example closing docstring quotes.
     pub last_suffix: String,
+    /// Whether the paragraph holds the content of a list item that carries on under its own marker.
+    ///
+    /// An item continued by a lazy line, which is one that does not line up under the marker, is left out,
+    /// since a line the author did not indent may well be meant as a note of its own.
+    pub list_item: bool,
     /// Content lines with prefixes stripped and trailing whitespace removed.
     pub lines: Vec<String>,
     /// Hard break marker of each content line.
@@ -100,6 +105,7 @@ mod test_paragraph {
             first_prefix: "/// - ".to_string(),
             rest_prefix: "///   ".to_string(),
             last_suffix: String::new(),
+            list_item: true,
             lines: vec!["one".to_string(), "two".to_string()],
             hard_breaks: vec![HardBreak::None; 2],
         };
