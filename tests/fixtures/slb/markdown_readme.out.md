@@ -2,8 +2,10 @@
 
 [![Build](https://github.com/example/project/actions/workflows/ci.yml/badge.svg)](https://github.com/example/project/actions)
 
-A collection of command line utilities. Every tool is a separate binary.
-The tools share one configuration file. The sections are named after the binaries.
+A collection of command line utilities.
+Every tool is a separate binary.
+The tools share one configuration file.
+The sections are named after the binaries.
 
 ## Install
 
@@ -17,7 +19,8 @@ cargo install --locked --path .
 ## Usage
 
 - `dirmove` moves files into the directories that match their names, and it can create the directories.
-- `slb` checks prose in comments. It also formats Markdown.
+- `slb` checks prose in comments.
+  It also formats Markdown.
 - A short item.
 
 1. First run the check mode, which reports the violations and exits with a non-zero code.
@@ -27,7 +30,8 @@ cargo install --locked --path .
 | ---- | ------- |
 | slb  | prose   |
 
-> The configuration file is optional. The defaults are used when it is missing.
+> The configuration file is optional.
+> The defaults are used when it is missing.
 
 ### Notes
 

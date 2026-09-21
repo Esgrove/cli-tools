@@ -5,7 +5,9 @@ import os
 
 
 def parse(path: str) -> dict:
-    """Parse the file at the given path and return the parsed mapping. Missing files raise.
+    """
+    Parse the file at the given path and return the parsed mapping.
+    Missing files raise.
 
     Args:
         path: the file path that is
@@ -18,7 +20,8 @@ def parse(path: str) -> dict:
 
 
 def merge(defaults: dict, overrides: dict) -> dict:
-    """Merge two mappings and return a new one.
+    """
+    Merge two mappings and return a new one.
     Neither argument is mutated, and a shared key takes its value from ``overrides`` instead of from ``defaults``.
 
     See https://example.com/cli-tools/config for the full precedence rules across every configuration source,
@@ -35,3 +38,17 @@ def merge(defaults: dict, overrides: dict) -> dict:
     # overrides always win
     result.update(overrides)
     return result
+
+
+def describe(value: str) -> str:
+    """
+    Collect the parts of the value and return them as one line.
+    The order of the parts is kept.
+    Duplicates are dropped.
+    """
+    return value
+
+
+def label(value: str) -> str:
+    """Return the label of the given value."""
+    return value

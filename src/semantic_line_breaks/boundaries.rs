@@ -109,6 +109,8 @@ pub struct Boundary {
     pub before: usize,
     /// Quality of the break.
     pub rank: Rank,
+    /// Whether an ordinary word break may use this boundary as a last resort.
+    pub word_fallback: bool,
 }
 
 /// One bracket or emphasis span boundary, at a token position, opening or closing the span.
@@ -374,7 +376,8 @@ pub fn find_boundaries(tokens: &[Token<'_>], options: &FormatOptions) -> Vec<Bou
         } else {
             clause.unwrap_or(Rank::Word)
         };
-        if depth > 0 || touches_dash(previous, current) {
+        let protected = depth > 0 || touches_dash(previous, current);
+        if protected {
             // Text inside brackets, quotes, or emphasis markers belongs together,
             // so a break there is a last resort.
             // A dash that was kept would be left dangling at the end of a line,
@@ -387,7 +390,11 @@ pub fn find_boundaries(tokens: &[Token<'_>], options: &FormatOptions) -> Vec<Bou
                 rank = Rank::ClauseTier4;
             }
         }
-        boundaries.push(Boundary { before: index, rank });
+        boundaries.push(Boundary {
+            before: index,
+            rank,
+            word_fallback: rank == Rank::Word && !protected,
+        });
     }
     boundaries
 }
@@ -716,6 +723,21 @@ mod test_boundaries {
         assert_eq!(rank_before("x y (a, b or c) z", 4), Some(Rank::Word));
         assert_eq!(rank_before("x y (a, b or c) z", 2), Some(Rank::ClauseTier4));
         assert_eq!(rank_before("x y (a, b or c) z", 6), Some(Rank::ClauseTier4));
+    }
+
+    #[test]
+    fn word_fallbacks_exclude_protected_group_contents() {
+        let options = FormatOptions::default();
+        let plain = find_boundaries(&tokens("alpha beta gamma"), &options);
+        assert!(plain.iter().all(|boundary| boundary.word_fallback));
+
+        let grouped = find_boundaries(&tokens("alpha (beta gamma) delta"), &options);
+        let inside = grouped
+            .iter()
+            .find(|boundary| boundary.before == 2)
+            .expect("the protected word boundary should still be ranked");
+        assert_eq!(inside.rank, Rank::Word);
+        assert!(!inside.word_fallback);
     }
 
     #[test]

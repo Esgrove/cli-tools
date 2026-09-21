@@ -452,17 +452,13 @@ mod test_reflow {
     }
 
     #[test]
-    fn reports_unfixable_when_no_boundary_fits() {
+    fn falls_back_to_word_breaks_when_no_semantic_boundary_fits() {
         let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi, rho sigma";
         let outcome = reflow(&[text], 40);
-        let lines = outcome.lines.expect("should still break at the comma");
-        assert_eq!(lines.len(), 2);
-        assert!(
-            outcome
-                .violations
-                .iter()
-                .any(|violation| violation.kind == ViolationKind::LineTooLong && !violation.fixable)
-        );
+        let lines = outcome.lines.expect("the prose should use safe word boundaries");
+        assert_eq!(lines.len(), 3);
+        assert!(lines.iter().all(|line| line.chars().count() <= 40));
+        assert!(outcome.violations.iter().all(|violation| violation.fixable));
     }
 
     #[test]
@@ -665,15 +661,19 @@ mod test_reflow_safety {
     }
 
     #[test]
-    fn a_join_that_cannot_be_broken_again_is_not_applied() {
+    fn a_join_without_clause_boundaries_falls_back_to_words() {
         let lines = [
-            "and `shopifyEventHandler` in `packages/api` consumes them to link the product back to its Iron Bank",
-            "item through an `ironbank_id` metafield.",
+            "and `eventHandler` in `packages/service` consumes them to link the record back to its generic",
+            "item through a `record_id` metadata field.",
         ];
         let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
 
-        assert_eq!(outcome.lines, None, "the paragraph should be left as it is");
-        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, false)]);
+        let reflowed = outcome
+            .lines
+            .as_ref()
+            .expect("the joined paragraph should use a word boundary");
+        assert!(reflowed.iter().all(|line| line.chars().count() <= 120));
+        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, true)]);
     }
 
     #[test]

@@ -184,11 +184,26 @@ fn sql_comment_block_fixture() {
 }
 
 #[test]
+fn manual_reflow_comments_fixture() {
+    assert_fixture("manual_reflow_comments.in.cpp", "manual_reflow_comments.out.cpp");
+}
+
+#[test]
+fn manual_reflow_markdown_fixture() {
+    assert_fixture("manual_reflow_markdown.in.md", "manual_reflow_markdown.out.md");
+}
+
+#[test]
+fn manual_reflow_python_fixture() {
+    assert_fixture("manual_reflow_python.in.py", "manual_reflow_python.out.py");
+}
+
+#[test]
 fn every_fixture_pair_formats_to_its_expected_output() {
     let mut pairs = fixture_pairs();
     pairs.sort();
     assert!(
-        pairs.len() >= 24,
+        pairs.len() >= 27,
         "expected every fixture pair to be found, got {pairs:?}"
     );
     for (input, output) in pairs {

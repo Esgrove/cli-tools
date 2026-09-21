@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the project and run the tests. The script stops at the first failing command.
+# Build the project and run the tests.
+# The script stops at the first failing command.
 set -euo pipefail
 
 # Environment:

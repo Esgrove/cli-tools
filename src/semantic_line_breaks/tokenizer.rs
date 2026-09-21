@@ -44,7 +44,7 @@ static RE_LETTER_ABBREVIATION: LazyLock<Regex> =
 
 /// Matches a plain lowercase word that can safely be capitalized.
 pub(super) static RE_LOWERCASE_WORD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-z][a-z']*$").expect("Invalid lowercase word regex"));
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z']*(?:-[a-z][a-z']*)*$").expect("Invalid lowercase word regex"));
 
 /// Matches a token that would start a Markdown list item or heading if placed at a line start.
 static RE_MARKDOWN_STRUCTURE: LazyLock<Regex> =

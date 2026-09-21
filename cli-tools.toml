@@ -370,7 +370,8 @@ replace = [
 # The "trailing" rule moves a comment sharing a line with code onto its own line above.
 # It rewrites code lines and the result often reads worse than the original,
 # so it is off unless listed here or asked for with --trailing.
-# rules = ["too-long", "mid-clause", "semicolon", "em-dash", "trailing"]
+# The "docstring" rule moves the quotes of a multi line Python docstring onto lines of their own.
+# rules = ["too-long", "mid-clause", "semicolon", "em-dash", "trailing", "docstring"]
 
 # Also pack consecutive short sentences up to the line limit
 # join_sentences = false

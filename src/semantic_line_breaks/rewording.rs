@@ -547,7 +547,26 @@ mod test_rewording {
     #[test]
     fn semicolon_becomes_period_and_capitalized_sentence() {
         let outcome = reflow(&["run it; then check the result"], 120);
-        assert_eq!(outcome.lines, Some(vec!["run it. Then check the result".to_string()]));
+        assert_eq!(
+            outcome.lines,
+            Some(vec!["run it.".to_string(), "Then check the result".to_string()])
+        );
+        assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, true)]);
+    }
+
+    #[test]
+    fn semicolon_capitalizes_a_hyphenated_lowercase_word() {
+        let outcome = reflow(
+            &["the shared helper runs; per-operation wrappers select arguments"],
+            120,
+        );
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "the shared helper runs.".to_string(),
+                "Per-operation wrappers select arguments".to_string()
+            ])
+        );
         assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, true)]);
     }
 
@@ -593,9 +612,9 @@ mod test_rewording {
     #[test]
     fn semicolon_before_atoms_and_capitals_needs_no_capitalization() {
         let outcome = reflow(&["x y; `y` wins"], 120);
-        assert_eq!(outcome.lines, Some(vec!["x y. `y` wins".to_string()]));
+        assert_eq!(outcome.lines, Some(vec!["x y.".to_string(), "`y` wins".to_string()]));
         let outcome = reflow(&["x y; Foo wins"], 120);
-        assert_eq!(outcome.lines, Some(vec!["x y. Foo wins".to_string()]));
+        assert_eq!(outcome.lines, Some(vec!["x y.".to_string(), "Foo wins".to_string()]));
     }
 
     #[test]
@@ -619,7 +638,10 @@ mod test_rewording {
         let outcome = reflow(&["the form stays clean — save is disabled until an edit"], 120);
         assert_eq!(
             outcome.lines,
-            Some(vec!["the form stays clean. Save is disabled until an edit".to_string()])
+            Some(vec![
+                "the form stays clean.".to_string(),
+                "Save is disabled until an edit".to_string()
+            ])
         );
         assert_eq!(summary(&outcome), vec![(ViolationKind::EmDash, true)]);
         assert_eq!(
@@ -638,7 +660,10 @@ mod test_rewording {
         ] {
             assert_eq!(
                 reflow(&[text], 120).lines,
-                Some(vec!["the form stays clean. Save is disabled now".to_string()]),
+                Some(vec![
+                    "the form stays clean.".to_string(),
+                    "Save is disabled now".to_string()
+                ]),
                 "{text}"
             );
         }
@@ -678,7 +703,10 @@ mod test_rewording {
         let outcome = reflow(&["the counter — 42 items were found in the archive"], 120);
         assert_eq!(
             outcome.lines,
-            Some(vec!["the counter. 42 items were found in the archive".to_string()])
+            Some(vec![
+                "the counter.".to_string(),
+                "42 items were found in the archive".to_string()
+            ])
         );
     }
 
@@ -688,7 +716,8 @@ mod test_rewording {
         assert_eq!(
             outcome.lines,
             Some(vec![
-                "the first value (the total) is read. The second one is ignored".to_string()
+                "the first value (the total) is read.".to_string(),
+                "The second one is ignored".to_string()
             ])
         );
     }
@@ -701,7 +730,10 @@ mod test_rewording {
         let outcome = reflow(&["see the note (item two; the rest is ignored"], 120);
         assert_eq!(
             outcome.lines,
-            Some(vec!["see the note (item two. The rest is ignored".to_string()])
+            Some(vec![
+                "see the note (item two.".to_string(),
+                "The rest is ignored".to_string()
+            ])
         );
         let outcome = reflow(&["see b) (item two; the rest is ignored)"], 120);
         assert_eq!(outcome.lines, None);

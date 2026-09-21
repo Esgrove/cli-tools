@@ -23,6 +23,9 @@ pub enum ViolationKind {
     /// A comment shares a line with code.
     #[value(name = "trailing")]
     TrailingComment,
+    /// Prose shares a line with the quotes of a multi line Python docstring.
+    #[value(name = "docstring")]
+    DocstringQuotes,
 }
 
 /// A single violation of the prose style.
@@ -52,6 +55,7 @@ impl ViolationKind {
             Self::Semicolon => "semicolon",
             Self::EmDash => "em-dash",
             Self::TrailingComment => "trailing",
+            Self::DocstringQuotes => "docstring",
         }
     }
 }
@@ -83,6 +87,7 @@ mod test_violation_kind {
             (ViolationKind::Semicolon, "semicolon"),
             (ViolationKind::EmDash, "em-dash"),
             (ViolationKind::TrailingComment, "trailing"),
+            (ViolationKind::DocstringQuotes, "docstring"),
         ];
         for (kind, name) in expected {
             assert_eq!(kind.name(), name);

@@ -1,5 +1,7 @@
-# Configuration for the formatter. Every section is optional.
-# The width applies to comments and Markdown. It counts the comment marker and the indentation.
+# Configuration for the formatter.
+# Every section is optional.
+# The width applies to comments and Markdown.
+# It counts the comment marker and the indentation.
 
 [slb]
 # Maximum line length including the indentation and the comment marker, which defaults to 120.
@@ -10,7 +12,8 @@ exclude = ["target", "node_modules"]
 join_sentences = false
 
 [dupefind]
-# Files below this size are ignored. Hashing them costs more than the disk space they would save.
+# Files below this size are ignored.
+# Hashing them costs more than the disk space they would save.
 min_size = 4096
 # The scanner walks every configured root in turn, and it reports duplicates as it finds them.
 roots = ["~/Downloads", "~/Pictures"]

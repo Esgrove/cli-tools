@@ -1,4 +1,5 @@
-# Builds and tests the project. Every target is phony because there are no file outputs to track.
+# Builds and tests the project.
+# Every target is phony because there are no file outputs to track.
 .PHONY: build test lint clean
 
 # Environment:

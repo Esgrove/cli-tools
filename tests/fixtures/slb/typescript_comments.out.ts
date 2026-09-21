@@ -1,6 +1,8 @@
 /**
- * Parses the configuration file and returns the resolved settings. The caller handles the errors.
- * The parser is lenient. Unknown keys are ignored, and missing keys fall back to the defaults.
+ * Parses the configuration file and returns the resolved settings.
+ * The caller handles the errors.
+ * The parser is lenient.
+ * Unknown keys are ignored, and missing keys fall back to the defaults.
  */
 export function parseConfig(source: string): Config {
     // The regular expression below must not be treated as a comment even though it contains slashes.

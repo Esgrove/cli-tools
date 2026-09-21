@@ -11,7 +11,8 @@ int main(void) {
     int retries = 0;
     // The buffer is sized for the worst case frame, sixty four kilobytes, plus one byte for the terminator.
     char buffer[65537];
-    // See https://example.com/protocol/spec for the full frame layout. The header is fixed size.
+    // See https://example.com/protocol/spec for the full frame layout.
+    // The header is fixed size.
     retries++;
     return 0;
 }

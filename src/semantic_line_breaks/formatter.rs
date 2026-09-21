@@ -7,6 +7,7 @@
 use std::borrow::Cow;
 
 use super::comments;
+use super::docstrings;
 use super::file_kind::FileKind;
 use super::line_ranges::LineRanges;
 use super::markdown;
@@ -110,50 +111,37 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
     }
 
     let mut violations = Vec::new();
-    let mut working: Vec<WorkingLine<'_>> = Vec::with_capacity(source.len());
-    let mut trailing_changed = false;
-    // The selection is given in the original line numbers,
-    // so it has to follow the lines the trailing comment pass adds before the prose pass can use it.
-    let mut working_ranges = options.line_ranges.clone();
-    // The trailing comment pass and the region split both need the same scan of the same lines,
-    // so it is taken once here and handed to both.
+    // The line splitting passes turn one line into two, so every line below the split moves down.
+    let mut replacements: Vec<Option<(String, String)>> = vec![None; source.len()];
+    // The trailing comment pass, the docstring quote pass, and the region split
+    // all need the same scan of the same lines, so it is taken once here and handed to each of them.
     let scan = (kind != FileKind::Markdown).then(|| comments::scan_lines(&texts, kind));
-    if kind.supports_trailing_comment_check()
-        && options.rules.trailing_comment
-        && let Some(scan) = &scan
-    {
-        let (replacements, trailing_violations) = comments::fix_trailing_comments_scanned(&texts, kind, options, scan);
-        violations.extend(trailing_violations);
-        working_ranges = shift_ranges(&options.line_ranges, &replacements);
-        for (line, replacement) in source.iter().zip(replacements) {
-            match replacement {
-                Some((comment, code)) => {
-                    working.push(WorkingLine {
-                        text: Cow::Owned(comment),
-                        eol: line.eol,
-                    });
-                    working.push(WorkingLine {
-                        text: Cow::Owned(code),
-                        eol: line.eol,
-                    });
-                    trailing_changed = true;
-                }
-                None => working.push(WorkingLine {
-                    text: Cow::Borrowed(line.text),
-                    eol: line.eol,
-                }),
-            }
+    if let Some(scan) = &scan {
+        if kind.supports_trailing_comment_check() && options.rules.trailing_comment {
+            let (trailing_replacements, trailing_violations) =
+                comments::fix_trailing_comments_scanned(&texts, kind, options, scan);
+            violations.extend(trailing_violations);
+            merge_replacements(&mut replacements, trailing_replacements);
         }
-    } else {
-        working.extend(source.iter().map(|line| WorkingLine {
-            text: Cow::Borrowed(line.text),
-            eol: line.eol,
-        }));
+        if options.rules.docstring_quotes {
+            let (quote_replacements, quote_violations) = docstrings::fix_docstring_quotes(&texts, kind, options, scan);
+            violations.extend(quote_violations);
+            merge_replacements(&mut replacements, quote_replacements);
+        }
     }
+    let lines_changed = replacements.iter().any(Option::is_some);
+    // The selection is given in the original line numbers,
+    // so it has to follow the lines the splitting passes added before the prose pass can use it.
+    let working_ranges = if lines_changed {
+        shift_ranges(&options.line_ranges, &replacements)
+    } else {
+        options.line_ranges.clone()
+    };
+    let working = working_lines(&source, replacements);
 
     let working_texts: Vec<&str> = working.iter().map(|line| line.text.as_ref()).collect();
-    let (output, prose_violations, notices) = if trailing_changed {
-        // Moving a comment onto its own line shifts the lines below it,
+    let (output, prose_violations, notices) = if lines_changed {
+        // Splitting a line shifts the lines below it,
         // so the violations come from the original numbering and the fixed text from the new lines,
         // which need their own scan.
         let (_, original_violations, original_notices) =
@@ -294,7 +282,44 @@ fn prose_pass<'a>(
     (output, violations, notices)
 }
 
-/// Move a selection of original lines onto the lines the trailing comment pass produced.
+/// Take the replacements of one pass into the replacements collected so far.
+///
+/// Two passes never claim the same line in practice,
+/// since a comment sharing a line with code is not inside a docstring,
+/// and the line a pass claimed first is kept in case they ever do.
+fn merge_replacements(collected: &mut [Option<(String, String)>], from_pass: Vec<Option<(String, String)>>) {
+    for (slot, replacement) in collected.iter_mut().zip(from_pass) {
+        if slot.is_none() {
+            *slot = replacement;
+        }
+    }
+}
+
+/// Build the lines the prose pass works on, splitting each replaced line into the two lines it became.
+fn working_lines<'a>(source: &[SourceLine<'a>], replacements: Vec<Option<(String, String)>>) -> Vec<WorkingLine<'a>> {
+    let mut working = Vec::with_capacity(source.len());
+    for (line, replacement) in source.iter().zip(replacements) {
+        match replacement {
+            Some((first, second)) => {
+                working.push(WorkingLine {
+                    text: Cow::Owned(first),
+                    eol: line.eol,
+                });
+                working.push(WorkingLine {
+                    text: Cow::Owned(second),
+                    eol: line.eol,
+                });
+            }
+            None => working.push(WorkingLine {
+                text: Cow::Borrowed(line.text),
+                eol: line.eol,
+            }),
+        }
+    }
+    working
+}
+
+/// Move a selection of original lines onto the lines the line splitting passes produced.
 ///
 /// Every applied replacement turns one line into two,
 /// so a line moves down by the number of replacements above it,
@@ -412,7 +437,7 @@ mod test_format {
         let result = format(text, FileKind::Rust, &FormatOptions::default());
         assert_eq!(
             result.fixed_text.as_deref(),
-            Some("/// the quick brown fox jumps over. It is fast, really.\nfn f() {}\n")
+            Some("/// the quick brown fox jumps over.\n/// It is fast, really.\nfn f() {}\n")
         );
         let kinds: Vec<ViolationKind> = result.violations.iter().map(|violation| violation.kind).collect();
         assert_eq!(
@@ -479,14 +504,47 @@ mod test_format {
     }
 
     #[test]
-    fn python_docstring_keeps_quotes_in_place() {
+    fn a_multi_line_python_docstring_gets_its_own_quote_lines() {
         let text = "def f():\n    \"\"\"Parse the header\n    of the file and return it.\n\n    Args:\n        x: the input\n    \"\"\"\n    return 1\n";
         let result = format(text, FileKind::Python, &FormatOptions::default());
         assert_eq!(
             result.fixed_text.as_deref(),
             Some(
-                "def f():\n    \"\"\"Parse the header of the file and return it.\n\n    Args:\n        x: the input\n    \"\"\"\n    return 1\n"
+                "def f():\n    \"\"\"\n    Parse the header of the file and return it.\n\n    Args:\n        x: the input\n    \"\"\"\n    return 1\n"
             )
+        );
+        assert!(
+            result
+                .violations
+                .iter()
+                .any(|violation| violation.kind == ViolationKind::DocstringQuotes && violation.line == 2)
+        );
+    }
+
+    #[test]
+    fn a_one_line_python_docstring_keeps_its_quotes_in_place() {
+        let text = "def f():\n    \"\"\"Parse the header of the file.\"\"\"\n    return 1\n";
+        let result = format(text, FileKind::Python, &FormatOptions::default());
+        assert_eq!(result.fixed_text, None);
+        assert!(result.violations.is_empty());
+    }
+
+    #[test]
+    fn the_docstring_quote_rule_can_be_turned_off() {
+        let text = "def f():\n    \"\"\"Parse the header of the file.\n    Missing files raise.\n    \"\"\"\n";
+        let options = FormatOptions {
+            rules: RuleSet {
+                docstring_quotes: false,
+                ..RuleSet::DEFAULT
+            },
+            ..FormatOptions::default()
+        };
+        let result = format(text, FileKind::Python, &options);
+        assert!(
+            result
+                .violations
+                .iter()
+                .all(|violation| violation.kind != ViolationKind::DocstringQuotes)
         );
     }
 

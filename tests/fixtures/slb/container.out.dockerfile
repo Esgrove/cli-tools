@@ -1,8 +1,10 @@
-# Builds the release image. The final stage only carries the binary and its runtime dependencies.
+# Builds the release image.
+# The final stage only carries the binary and its runtime dependencies.
 FROM rust:1.90 AS build
 WORKDIR /src
 
-# Cache the dependency build. The manifest is copied before the sources on purpose.
+# Cache the dependency build.
+# The manifest is copied before the sources on purpose.
 COPY Cargo.toml Cargo.lock ./
 RUN cargo fetch
 

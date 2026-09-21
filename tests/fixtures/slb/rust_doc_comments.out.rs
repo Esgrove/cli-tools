@@ -7,7 +7,8 @@
 //! let x = 1; // code stays
 //! ```
 
-/// Parse the header. The caller handles errors, always.
+/// Parse the header.
+/// The caller handles errors, always.
 /// Returns the parsed header struct.
 ///
 /// - first item that wraps early

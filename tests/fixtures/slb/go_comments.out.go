@@ -1,4 +1,5 @@
-// Package header provides parsing helpers for the wire format. The caller owns the buffer.
+// Package header provides parsing helpers for the wire format.
+// The caller owns the buffer.
 package header
 
 import "fmt"

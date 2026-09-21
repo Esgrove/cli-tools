@@ -7,6 +7,7 @@
 
 pub mod boundaries;
 pub mod comments;
+pub mod docstrings;
 pub mod file_kind;
 pub mod formatter;
 pub mod line_breaks;

@@ -80,8 +80,11 @@ const BARE_CONJUNCTION_COST: usize = 250_000;
 /// An explanation reads better on its own line, even when keeping it with its introduction saves a line.
 const SKIPPED_COLON_COST: usize = 1_000_000;
 
-/// Cost of breaking in the middle of a clause, only reachable when word breaks are allowed.
-const WORD_BREAK_COST: usize = 1_000_000_000_000;
+/// Cost of breaking in the middle of a clause.
+///
+/// This stays above every semantic break cost,
+/// but below the cost of leaving even one character past the hard limit.
+const WORD_BREAK_COST: usize = 1_000_000;
 
 /// Conjunctions that introduce the last item of a list.
 ///
@@ -115,6 +118,17 @@ struct LineWidths {
     prefix: usize,
     /// Overflow tolerance past the budget, zero in `--strict` mode.
     overflow: usize,
+}
+
+/// The boundaries of a token run as the tables the line planner walks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BreakTable<'a> {
+    /// Rank of the boundary before each token, `None` where no line may end.
+    ranks: &'a [Option<Rank>],
+    /// Width of the run up to each token.
+    widths: &'a [usize],
+    /// Whether the word boundary before each token is safe to break at when nothing better fits.
+    word_fallbacks: &'a [bool],
 }
 
 /// Cheapest plan for the lines of a run, counted from one token to the end of the run.
@@ -167,7 +181,10 @@ pub(super) fn split_tokens<'text>(
     let budget = if *is_first_line { budgets.first } else { budgets.rest };
     let rest_budget = budgets.rest;
     *is_first_line = false;
-    if tokens_width(&tokens) <= LineWidths::new(options.max_width, budget, relaid_out, options.strict).target {
+    let has_forced_break = tokens.iter().any(|token| token.force_break_after);
+    if !has_forced_break
+        && tokens_width(&tokens) <= LineWidths::new(options.max_width, budget, relaid_out, options.strict).target
+    {
         return vec![tokens];
     }
 
@@ -248,15 +265,22 @@ fn plan_line_breaks(
     let count = tokens.len();
     let widths = cumulative_widths(tokens);
     let mut ranks = vec![None; count + 1];
+    let mut word_fallbacks = vec![false; count + 1];
     for boundary in find_boundaries(tokens, options) {
-        if (boundary.rank > Rank::Word || options.allow_word_break)
-            && let Some(slot) = ranks.get_mut(boundary.before)
-        {
+        if let Some(slot) = ranks.get_mut(boundary.before) {
             *slot = Some(boundary.rank);
+        }
+        if let Some(slot) = word_fallbacks.get_mut(boundary.before) {
+            *slot = boundary.word_fallback;
         }
     }
     suppress_list_runs(tokens, &mut ranks, &widths, first_budget.max(rest_budget));
     let colon_counts = cumulative_colon_counts(&ranks);
+    let table = BreakTable {
+        ranks: &ranks,
+        widths: &widths,
+        word_fallbacks: &word_fallbacks,
+    };
     let limit = options.max_width;
 
     // The run is walked backwards so the plan for every tail is known when a line is measured against it.
@@ -284,10 +308,9 @@ fn plan_line_breaks(
         collect_line_candidates(
             start,
             count,
-            budget,
-            line_widths.overflow,
-            &ranks,
-            &widths,
+            line_widths,
+            table,
+            options.allow_word_break,
             &mut candidates,
         );
         for end in candidates.iter().copied() {
@@ -339,12 +362,17 @@ fn span_width(widths: &[usize], from: usize, to: usize) -> usize {
 fn collect_line_candidates(
     start: usize,
     count: usize,
-    budget: usize,
-    overflow: usize,
-    ranks: &[Option<Rank>],
-    widths: &[usize],
+    line_widths: LineWidths,
+    table: BreakTable<'_>,
+    allow_word_break: bool,
     candidates: &mut Vec<usize>,
 ) {
+    let BreakTable {
+        ranks,
+        widths,
+        word_fallbacks,
+    } = table;
+    let LineWidths { budget, overflow, .. } = line_widths;
     candidates.clear();
 
     // A sentence end is the best place to break, whatever the line is filled to.
@@ -373,8 +401,17 @@ fn collect_line_candidates(
         return;
     }
 
+    let has_semantic_break_in_range = (start + 1..count).any(|end| {
+        rank_at(ranks, end).is_some_and(|rank| rank > Rank::Word && span_width(widths, start, end) <= budget + overflow)
+    });
     for end in start + 1..count {
-        if rank_at(ranks, end).is_none() {
+        let Some(rank) = rank_at(ranks, end) else {
+            continue;
+        };
+        if rank == Rank::Word
+            && (!word_fallbacks.get(end).copied().unwrap_or_default()
+                || !allow_word_break && has_semantic_break_in_range)
+        {
             continue;
         }
         candidates.push(end);
@@ -638,25 +675,51 @@ const fn break_cost(rank: Rank) -> usize {
 
 #[cfg(test)]
 mod test_break_choice {
-    use super::super::reflow::reflow_paragraph;
+    use super::super::reflow::{join_tokens, reflow_paragraph};
     use super::*;
     use crate::semantic_line_breaks::test_helpers::*;
 
     #[test]
-    fn a_word_break_costs_more_than_running_over_the_limit() {
+    fn an_allowed_word_break_keeps_every_line_within_the_limit() {
         let options = FormatOptions {
             allow_word_break: true,
             ..FormatOptions::with_width(24)
         };
-        // Allowing word breaks only adds them as candidates.
-        // Running over the soft limit stays far cheaper than cutting a clause in two.
         let outcome = reflow_paragraph(
             &paragraph(&["one two three four five six seven eight"], ""),
             &options,
             true,
         );
-        assert_eq!(outcome.lines, None);
-        assert_eq!(summary(&outcome), vec![(ViolationKind::LineTooLong, false)]);
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "one two three four".to_string(),
+                "five six seven eight".to_string()
+            ])
+        );
+        assert!(outcome.violations.iter().all(|violation| violation.fixable));
+    }
+
+    #[test]
+    fn a_forced_break_splits_text_that_would_fit_on_one_line() {
+        let mut tokens = tokens("First sentence. Second sentence.");
+        tokens[1].force_break_after = true;
+        let mut is_first_line = true;
+        let mut violations = Vec::new();
+        let pieces = split_tokens(
+            tokens,
+            Budgets { first: 120, rest: 120 },
+            true,
+            &mut is_first_line,
+            &FormatOptions::with_width(120),
+            1,
+            &mut violations,
+        );
+        assert_eq!(
+            pieces.iter().map(|piece| join_tokens(piece)).collect::<Vec<_>>(),
+            ["First sentence.", "Second sentence."]
+        );
+        assert!(violations.is_empty());
     }
 
     #[test]

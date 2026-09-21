@@ -66,6 +66,8 @@ pub struct RuleSet {
     pub em_dash: bool,
     /// Report and move trailing comments.
     pub trailing_comment: bool,
+    /// Report and move the quotes of a multi line Python docstring onto their own lines.
+    pub docstring_quotes: bool,
 }
 
 /// Options controlling checking and formatting.
@@ -77,7 +79,7 @@ pub struct FormatOptions {
     pub tab_width: usize,
     /// Pack consecutive short sentences onto one line while they fit.
     pub join_sentences: bool,
-    /// Allow breaking at a plain word boundary when no clause boundary fits.
+    /// Allow plain word boundaries even when a semantic boundary also fits.
     pub allow_word_break: bool,
     /// Treat the maximum width as a hard cap instead of allowing a small overflow past it.
     pub strict: bool,
@@ -122,6 +124,7 @@ impl RuleSet {
         semicolon: true,
         em_dash: true,
         trailing_comment: true,
+        docstring_quotes: true,
     };
 
     /// Rules enabled when the caller asks for no particular set.
@@ -135,6 +138,7 @@ impl RuleSet {
         semicolon: true,
         em_dash: true,
         trailing_comment: false,
+        docstring_quotes: true,
     };
 
     /// No rules enabled.
@@ -144,6 +148,7 @@ impl RuleSet {
         semicolon: false,
         em_dash: false,
         trailing_comment: false,
+        docstring_quotes: false,
     };
 
     /// Enable exactly the given kinds.
@@ -157,6 +162,7 @@ impl RuleSet {
                 ViolationKind::Semicolon => rules.semicolon = true,
                 ViolationKind::EmDash => rules.em_dash = true,
                 ViolationKind::TrailingComment => rules.trailing_comment = true,
+                ViolationKind::DocstringQuotes => rules.docstring_quotes = true,
             }
         }
         rules
@@ -171,6 +177,7 @@ impl RuleSet {
             ViolationKind::Semicolon => self.semicolon,
             ViolationKind::EmDash => self.em_dash,
             ViolationKind::TrailingComment => self.trailing_comment,
+            ViolationKind::DocstringQuotes => self.docstring_quotes,
         }
     }
 }
@@ -222,6 +229,7 @@ mod test_rule_set {
         assert!(!rules.line_too_long);
         assert!(!rules.mid_clause_break);
         assert!(!rules.em_dash);
+        assert!(!rules.docstring_quotes);
         assert!(rules.is_enabled(ViolationKind::Semicolon));
         assert!(!rules.is_enabled(ViolationKind::EmDash));
     }
@@ -257,6 +265,7 @@ mod test_format_options {
             ViolationKind::Semicolon,
             ViolationKind::EmDash,
             ViolationKind::TrailingComment,
+            ViolationKind::DocstringQuotes,
         ] {
             assert!(RuleSet::ALL.is_enabled(kind), "{kind} should be enabled in ALL");
             assert!(!RuleSet::NONE.is_enabled(kind), "{kind} should be disabled in NONE");

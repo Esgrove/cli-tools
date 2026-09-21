@@ -99,7 +99,7 @@ verbose = false
 [slb]
 width = 110
 use_project_config = true
-rules = ["too-long", "mid-clause", "semicolon", "em-dash"]
+rules = ["too-long", "mid-clause", "semicolon", "em-dash", "docstring"]
 join_sentences = false
 allow_word_break = false
 extensions = ["rs", "md"]

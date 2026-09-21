@@ -35,3 +35,15 @@ def merge(defaults: dict, overrides: dict) -> dict:
     result = dict(defaults)
     result.update(overrides)  # overrides always win
     return result
+
+
+def describe(value: str) -> str:
+    """Collect the parts of the value and return them as one line.
+    The order of the parts is kept; duplicates are dropped."""
+    return value
+
+
+def label(value: str) -> str:
+    """Return the label
+    of the given value."""
+    return value

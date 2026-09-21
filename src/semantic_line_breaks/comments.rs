@@ -5,10 +5,7 @@
 //! Also produces the replacement lines that move a comment sharing a line with code above that code.
 //! The scanning this needs lives in [`super::scanner`].
 
-use std::sync::LazyLock;
-
-use regex::Regex;
-
+use super::docstrings::{Docstring, docstring_contents};
 use super::file_kind::{CommentStyle, FileKind};
 use super::markdown;
 use super::markdown::SkipNotice;
@@ -18,10 +15,6 @@ use super::scanner::{ScanState, scan_line_buffered};
 use super::string_syntax::{StringSyntax, string_syntax};
 use super::violation::{Violation, ViolationKind};
 use crate::{leading_whitespace, starts_with_ignore_case};
-
-/// Matches the opening of a Python docstring and captures indentation, string prefix, quotes, and the rest.
-static RE_DOCSTRING_OPEN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^(\s*)([rRuUbBfF]{0,2})("""|''')(.*)$"#).expect("Invalid docstring regex"));
 
 /// A comment found after code on the same line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +34,14 @@ pub struct LineScan {
     inside_string: Vec<bool>,
     /// Byte offset where a trailing comment starts, for the lines that have one.
     comment_start: Vec<Option<usize>>,
+}
+
+impl LineScan {
+    /// Whether the given zero based line starts inside a multi line string or an uncertain region.
+    #[must_use]
+    pub(super) fn starts_inside_string(&self, index: usize) -> bool {
+        self.inside_string.get(index).copied().unwrap_or(false)
+    }
 }
 
 /// Scan every line once, recording what both the region split and the trailing comment fix need.
@@ -410,55 +411,28 @@ fn docstring_regions(
     regions: &mut Vec<Region>,
     notices: &mut Vec<SkipNotice>,
 ) -> Option<usize> {
-    let line = lines.get(index)?;
-    let captures = RE_DOCSTRING_OPEN.captures(line)?;
-    let indent = captures.get(1).map_or("", |group| group.as_str());
-    let prefix = captures.get(2).map_or("", |group| group.as_str());
-    let quote = captures.get(3).map_or("\"\"\"", |group| group.as_str());
-    let rest = captures.get(4).map_or("", |group| group.as_str());
-    if rest.contains(quote) {
-        return None;
-    }
-    let close_index = lines
-        .iter()
-        .enumerate()
-        .skip(index + 1)
-        .find(|(_, candidate)| candidate.contains(quote))
-        .map(|(position, _)| position)?;
-    let close_line = lines.get(close_index)?;
-    let (close_before, close_after) = close_line.split_once(quote)?;
-    let closing_has_content = !close_before.trim().is_empty();
-    if !close_after.trim().is_empty() {
-        return None;
-    }
+    let docstring = Docstring::at(lines, index)?;
+    let indent = docstring.indent;
+    let quote = docstring.quote;
+    let close_index = docstring.close_line;
+    let closing_has_content = docstring.closing_shares_line();
 
-    let mut contents: Vec<&str> = Vec::new();
-    let content_start = if rest.trim().is_empty() {
+    let contents = docstring_contents(lines, &docstring);
+    let content_start = if docstring.opening_shares_line() {
+        index
+    } else {
         regions.push(Region::Verbatim {
             start: index,
             end: index + 1,
         });
         index + 1
-    } else {
-        contents.push(rest);
-        index
     };
-    for body_line in lines.get(index + 1..close_index).unwrap_or_default() {
-        contents.push(body_line.strip_prefix(indent).unwrap_or_else(|| body_line.trim_start()));
-    }
-    if closing_has_content {
-        contents.push(
-            close_before
-                .strip_prefix(indent)
-                .unwrap_or_else(|| close_before.trim_start()),
-        );
-    }
 
     let (mut inner, inner_notices) = markdown::split_paragraphs_with_notices(&contents, indent, content_start, false);
     for region in &mut inner {
         if let Region::Paragraph(paragraph) = region {
-            if paragraph.start_line == index && !rest.trim().is_empty() {
-                paragraph.first_prefix = format!("{indent}{prefix}{quote}");
+            if paragraph.start_line == index && docstring.opening_shares_line() {
+                paragraph.first_prefix = format!("{indent}{}{quote}", docstring.string_prefix);
             }
             if closing_has_content && paragraph.end_line == close_index + 1 {
                 paragraph.last_suffix = quote.to_string();

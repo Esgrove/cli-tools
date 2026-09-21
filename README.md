@@ -503,6 +503,8 @@ but a pair whose enclosed span carries its own verb reads as a full clause,
 so it is left for a person to reword instead of becoming a comma splice.
 A dash that is kept never ends or starts a line.
 Aligned column blocks, such as the environment table of a usage comment, are left as they are.
+In Python, the quotes of a docstring that needs more than one line are moved onto lines of their own,
+while a docstring holding one sentence that fits is written on a single line with its quotes around it.
 Slash-delimited regex literals are protected across supported source languages.
 When ambiguous slash syntax could hide a multiline string or comment, the remaining source is left unchanged.
 With `--trailing`, a comment sharing a line with code is moved onto its own line above it.
@@ -538,7 +540,7 @@ Options:
   -j, --join-sentences          Also pack consecutive short sentences up to the line limit
   -w, --width <N>               Maximum line length including indentation and comment marker (default: from project config or 120)
   -i, --ignore-project-config   Do not read the line length from project config files such as .editorconfig, rustfmt.toml, or pyproject.toml
-  -R, --rules <RULES>           Rules to enable (default: every rule except trailing comments) [possible values: too-long, mid-clause, semicolon, em-dash, trailing]
+  -R, --rules <RULES>           Rules to enable [possible values: too-long, mid-clause, semicolon, em-dash, trailing, docstring]
   -T, --trailing                Also move trailing comments to their own line above the code
   -l, --lines <RANGES>          Only check and fix these lines, for example "10-25" or "src/main.rs:14"
   -e, --extensions <EXTENSION>  Only process files with these extensions
@@ -546,7 +548,7 @@ Options:
   -n, --no-ignore               Do not skip paths ignored by git
   -t, --type <KIND>             Force the file kind, required with --stdin [possible values: rust, c, javascript, go, python, shell, toml, yaml, dockerfile, makefile, ruby, sql, lua, markdown]
   -s, --stdin                   Read text from stdin and write the formatted result to stdout
-  -b, --word-break              Allow breaking at a plain word boundary when no clause boundary fits
+  -b, --word-break              Allow plain word boundaries even when a semantic boundary also fits
   -S, --strict                  Treat the width as a hard cap instead of allowing a small overflow past it
   -J, --jobs <N>                Number of worker threads, 0 for one per core [default: 0]
   -q, --quiet                   Only print the summary

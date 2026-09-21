@@ -1,5 +1,6 @@
 /**
- * Compute the checksum of the buffer and return it. Zero means empty.
+ * Compute the checksum of the buffer and return it.
+ * Zero means empty.
  *
  * @param buffer the input buffer that is read fully.
  */

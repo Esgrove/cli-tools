@@ -59,7 +59,7 @@ pub struct Args {
     #[arg(short, long)]
     ignore_project_config: bool,
 
-    /// Rules to enable (default: every rule except trailing comments)
+    /// Rules to enable
     #[arg(short = 'R', long, value_delimiter = ',', value_name = "RULES")]
     rules: Vec<cli_tools::semantic_line_breaks::ViolationKind>,
 
@@ -99,7 +99,7 @@ pub struct Args {
     #[arg(short, long)]
     stdin: bool,
 
-    /// Allow breaking at a plain word boundary when no clause boundary fits
+    /// Allow plain word boundaries even when a semantic boundary also fits
     #[arg(short = 'b', long)]
     word_break: bool,
 

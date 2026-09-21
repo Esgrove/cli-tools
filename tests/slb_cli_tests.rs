@@ -212,7 +212,7 @@ fn fix_mode_reports_the_violations_it_could_not_fix() {
     assert!(text.contains("em-dash"), "{text}");
     assert_eq!(
         std::fs::read_to_string(&file).expect("the file should be readable"),
-        "// run it. Then check the result\nlet x = 1;\n// — a dash that cannot be rewritten\n"
+        "// run it.\n// Then check the result\nlet x = 1;\n// — a dash that cannot be rewritten\n"
     );
 }
 
