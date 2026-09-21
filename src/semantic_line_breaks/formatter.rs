@@ -10,6 +10,7 @@ use super::comments;
 use super::file_kind::FileKind;
 use super::line_ranges::LineRanges;
 use super::markdown;
+use super::markdown::SkipNotice;
 use super::options::{FormatOptions, FormatResult};
 use super::paragraph::Region;
 use super::reflow;
@@ -83,10 +84,10 @@ impl<'a> ProseOutput<'a> {
     }
 }
 
-/// Check a text buffer and return the violations without producing fixed text.
+/// Check a text buffer and return the violations and skip notices without producing fixed text.
 #[must_use]
-pub fn check(text: &str, kind: FileKind, options: &FormatOptions) -> Vec<Violation> {
-    run(text, kind, options, false).violations
+pub fn check(text: &str, kind: FileKind, options: &FormatOptions) -> FormatResult {
+    run(text, kind, options, false)
 }
 
 /// Check and fix a text buffer.
@@ -151,15 +152,16 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
     }
 
     let working_texts: Vec<&str> = working.iter().map(|line| line.text.as_ref()).collect();
-    let (output, prose_violations) = if trailing_changed {
+    let (output, prose_violations, notices) = if trailing_changed {
         // Moving a comment onto its own line shifts the lines below it,
         // so the violations come from the original numbering and the fixed text from the new lines,
         // which need their own scan.
-        let original_violations = prose_pass(&texts, kind, options, &options.line_ranges, false, scan.as_ref()).1;
+        let (_, original_violations, original_notices) =
+            prose_pass(&texts, kind, options, &options.line_ranges, false, scan.as_ref());
         let output = produce_fix.then(|| prose_pass(&working_texts, kind, options, &working_ranges, true, None).0);
-        (output, original_violations)
+        (output, original_violations, original_notices)
     } else {
-        let (output, prose_violations) = prose_pass(
+        let (output, prose_violations, notices) = prose_pass(
             &working_texts,
             kind,
             options,
@@ -167,7 +169,7 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
             produce_fix,
             scan.as_ref(),
         );
-        (produce_fix.then_some(output), prose_violations)
+        (produce_fix.then_some(output), prose_violations, notices)
     };
     violations.extend(prose_violations);
     violations.sort_by_key(|violation| (violation.line, violation.kind));
@@ -182,6 +184,7 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
         violations,
         fixed_text,
         fixed_line_ranges,
+        skips: notices,
     }
 }
 
@@ -226,13 +229,13 @@ fn prose_pass<'a>(
     ranges: &LineRanges,
     produce_fix: bool,
     scan: Option<&comments::LineScan>,
-) -> (ProseOutput<'a>, Vec<Violation>) {
-    let regions = if kind == FileKind::Markdown {
-        markdown::split_paragraphs(lines, "", 0, true)
+) -> (ProseOutput<'a>, Vec<Violation>, Vec<SkipNotice>) {
+    let (regions, notices) = if kind == FileKind::Markdown {
+        markdown::split_paragraphs_with_notices(lines, "", 0, true)
     } else {
         scan.map_or_else(
-            || comments::split_source_regions(lines, kind),
-            |scan| comments::split_source_regions_scanned(lines, kind, scan),
+            || comments::split_source_regions_with_notices(lines, kind),
+            |scan| comments::split_source_regions_scanned_with_notices(lines, kind, scan),
         )
     };
     let capacity = if produce_fix { lines.len() } else { 0 };
@@ -288,7 +291,7 @@ fn prose_pass<'a>(
     if produce_fix {
         output.copy(lines, cursor, lines.len(), ranges);
     }
-    (output, violations)
+    (output, violations, notices)
 }
 
 /// Move a selection of original lines onto the lines the trailing comment pass produced.
@@ -389,9 +392,18 @@ mod test_format {
         let text = "/// the quick brown fox\n/// jumps over; it is fast — really.\nfn f() {}\n";
         let options = FormatOptions::default();
         assert_eq!(
-            check(text, FileKind::Rust, &options),
+            check(text, FileKind::Rust, &options).violations,
             format(text, FileKind::Rust, &options).violations
         );
+    }
+
+    #[test]
+    fn a_code_like_comment_line_is_reported_as_a_skip_notice() {
+        let text = "/// Some prose here.\n/// let x = foo(bar);\nfn f() {}\n";
+        let result = format(text, FileKind::Rust, &FormatOptions::default());
+        assert_eq!(result.fixed_text, None);
+        assert_eq!(result.skips.len(), 1);
+        assert_eq!(result.skips[0].message, "the line looks like code");
     }
 
     #[test]
@@ -525,7 +537,7 @@ mod test_format {
         for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
             let first = format(text, kind, &options);
             assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
-            assert_eq!(check(text, kind, &options), first.violations);
+            assert_eq!(check(text, kind, &options).violations, first.violations);
             assert_eq!(format(expected, kind, &options), FormatResult::default());
         }
     }
@@ -543,7 +555,7 @@ mod test_format {
         let options = FormatOptions::default();
         for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
             assert_eq!(format(text, kind, &options), FormatResult::default(), "{kind:?}");
-            assert!(check(text, kind, &options).is_empty());
+            assert!(check(text, kind, &options).violations.is_empty());
         }
     }
 
@@ -580,7 +592,7 @@ mod test_format {
         for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
             let first = format(text, kind, &options);
             assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
-            assert_eq!(check(text, kind, &options), first.violations, "{kind:?}");
+            assert_eq!(check(text, kind, &options).violations, first.violations, "{kind:?}");
             // The trailing comment that cannot be moved is still reported, so only the fix is checked.
             let second = format(expected, kind, &options);
             assert_eq!(second.fixed_text, None, "{kind:?}");
@@ -621,7 +633,7 @@ mod test_format {
         for kind in [FileKind::Rust, FileKind::Go, FileKind::CLike, FileKind::JavaScript] {
             let first = format(text, kind, &options);
             assert_eq!(first.fixed_text.as_deref(), Some(expected), "{kind:?}");
-            assert_eq!(check(text, kind, &options), first.violations, "{kind:?}");
+            assert_eq!(check(text, kind, &options).violations, first.violations, "{kind:?}");
             assert_eq!(format(expected, kind, &options), FormatResult::default(), "{kind:?}");
         }
     }
@@ -685,7 +697,7 @@ mod test_format {
             ),
         ] {
             assert_eq!(format(text, kind, &options), FormatResult::default(), "{text}");
-            assert!(check(text, kind, &options).is_empty(), "{text}");
+            assert!(check(text, kind, &options).violations.is_empty(), "{text}");
         }
     }
 
@@ -737,7 +749,7 @@ mod test_format {
                 )
             );
             assert_eq!(format(&text, FileKind::JavaScript, &options), FormatResult::default());
-            assert!(check(&text, FileKind::JavaScript, &options).is_empty());
+            assert!(check(&text, FileKind::JavaScript, &options).violations.is_empty());
         }
     }
 }
@@ -803,7 +815,7 @@ fn third() {}
 
     #[test]
     fn only_the_selected_block_is_reported() {
-        let violations = check(THREE_BLOCKS, FileKind::Rust, &options("4"));
+        let violations = check(THREE_BLOCKS, FileKind::Rust, &options("4")).violations;
         assert_eq!(
             violations.iter().map(|violation| violation.line).collect::<Vec<_>>(),
             vec![4]
@@ -812,7 +824,7 @@ fn third() {}
 
     #[test]
     fn separate_ranges_each_select_their_own_block() {
-        let violations = check(THREE_BLOCKS, FileKind::Rust, &options("1,7"));
+        let violations = check(THREE_BLOCKS, FileKind::Rust, &options("1,7")).violations;
         assert_eq!(
             violations.iter().map(|violation| violation.line).collect::<Vec<_>>(),
             vec![1, 7]

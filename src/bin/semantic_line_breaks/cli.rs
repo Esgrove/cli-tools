@@ -20,15 +20,17 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 
+#[cfg(test)]
+use cli_tools::semantic_line_breaks::LineRanges;
 use cli_tools::semantic_line_breaks::options::DEFAULT_MAX_WIDTH;
 use cli_tools::semantic_line_breaks::project_config::{WidthSource, discover_width};
-use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, LineRanges, check, format};
+use cli_tools::semantic_line_breaks::{FileKind, FormatOptions, FormatResult, check, format};
 use cli_tools::{diff_lines, print_error, print_yellow};
 
 use crate::Args;
 use crate::config::Config;
 use crate::files::collect_files;
-use crate::output::{Summary, format_violation, print_summary};
+use crate::output::{Summary, format_skip_notice, format_violation, print_summary};
 
 /// Directory and file kind a project width applies to.
 type WidthKey = (PathBuf, FileKind);
@@ -50,6 +52,8 @@ struct FileOutcome {
     written: bool,
     /// Violations left after writing the fixed text.
     remaining: usize,
+    /// Paragraphs a heuristic kept verbatim in the file.
+    skipped: usize,
 }
 
 /// State shared by every file of a run, built once before the parallel pass.
@@ -203,6 +207,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             outcome.fixable,
             outcome.written,
             outcome.remaining,
+            outcome.skipped,
         );
     }
     print_summary(&summary, &config);
@@ -251,7 +256,7 @@ fn run_stdin(config: &Config) -> Result<ExitCode> {
     }
     let remaining = result.fixed_text.as_deref().map_or_else(
         || result.violations.len(),
-        |fixed| check(fixed, kind, &recheck_options(&options, &result)).len(),
+        |fixed| check(fixed, kind, &recheck_options(&options, &result)).violations.len(),
     );
     Ok(if remaining > 0 {
         ExitCode::FAILURE
@@ -285,11 +290,7 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
     let result = if config.fix || config.print {
         format(&text, kind, &settings.options)
     } else {
-        FormatResult {
-            violations: check(&text, kind, &settings.options),
-            fixed_text: None,
-            fixed_line_ranges: LineRanges::default(),
-        }
+        check(&text, kind, &settings.options)
     };
     outcome.processed = true;
 
@@ -299,7 +300,11 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
         outcome
             .lines
             .push(format!("{} (width {} from {origin})", path.cyan(), settings.width));
+        for notice in &result.skips {
+            outcome.lines.push(format_skip_notice(&path, notice));
+        }
     }
+    outcome.skipped = result.skips.len();
     if result.violations.is_empty() {
         return outcome;
     }
@@ -350,18 +355,18 @@ fn fix_file(
     }
     outcome.written = true;
     let remaining = check(fixed, kind, &recheck_options(options, result));
-    let fixed_count = result.violations.len().saturating_sub(remaining.len());
+    let fixed_count = result.violations.len().saturating_sub(remaining.violations.len());
     if !config.quiet {
         let message = format!(
             "Fixed {} in {path}",
             cli_tools::count_label(fixed_count, "violation", "violations")
         );
         outcome.lines.push(message.green().to_string());
-        for violation in &remaining {
+        for violation in &remaining.violations {
             outcome.lines.push(format_violation(path, violation, true));
         }
     }
-    outcome.remaining = remaining.len();
+    outcome.remaining = remaining.violations.len();
 }
 
 /// Options for checking the fixed text of a run again.
@@ -453,6 +458,7 @@ mod test_helpers {
             outcome.fixable,
             outcome.written,
             outcome.remaining,
+            outcome.skipped,
         );
         (outcome, summary)
     }
@@ -493,7 +499,7 @@ mod test_process_file {
         assert_eq!(summary.remaining, 0);
         let fixed = fs::read_to_string(&path).expect("file should be readable");
         assert_ne!(fixed, LONG_COMMENT);
-        assert!(fixed.contains("/// One sentence that is already quite long.\n"));
+        assert!(fixed.contains("/// One sentence\n/// that is already quite long.\n"));
         assert!(fixed.ends_with("fn parse() {}\n"));
     }
 
@@ -562,6 +568,7 @@ mod test_fix_file {
             }],
             fixed_text: None,
             fixed_line_ranges: LineRanges::default(),
+            skips: Vec::new(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(
@@ -597,6 +604,7 @@ mod test_fix_file {
             }],
             fixed_text: None,
             fixed_line_ranges: LineRanges::default(),
+            skips: Vec::new(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(
@@ -641,6 +649,7 @@ mod test_fix_file {
             violations: vec![],
             fixed_text: Some("/// After.\n".to_string()),
             fixed_line_ranges: LineRanges::default(),
+            skips: Vec::new(),
         };
         let mut outcome = FileOutcome::default();
         fix_file(
@@ -794,7 +803,7 @@ mod test_run {
         assert!(
             fs::read_to_string(&path)
                 .expect("file should be readable")
-                .contains("/// One sentence that is already quite long.\n")
+                .contains("/// One sentence\n/// that is already quite long.\n")
         );
     }
 }

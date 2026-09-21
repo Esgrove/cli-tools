@@ -144,7 +144,7 @@ fn fix_mode_rewrites_the_file_and_exits_with_zero() {
     let fixed = std::fs::read_to_string(&path).expect("file should be readable");
     assert_eq!(
         fixed,
-        "/// One sentence that is already quite long.\n/// Another sentence follows it here.\n"
+        "/// One sentence\n/// that is already quite long.\n/// Another sentence follows it here.\n"
     );
 }
 
@@ -162,10 +162,7 @@ fn print_mode_shows_a_diff_without_writing_the_file() {
         text.contains("- /// One sentence that is already quite long. Another sentence follows it here."),
         "{text}"
     );
-    assert!(
-        text.contains("+ /// One sentence that is already quite long."),
-        "{text}"
-    );
+    assert!(text.contains("+ /// One sentence"), "{text}");
     assert_eq!(
         std::fs::read_to_string(&path).expect("file should be readable"),
         TWO_SENTENCES,
@@ -252,6 +249,39 @@ fn verbose_mode_prints_the_file_and_the_resolved_width() {
     let text = stdout(&output);
     assert!(text.contains("clean.rs"), "{text}");
     assert!(text.contains("width 110 from options"), "{text}");
+}
+
+#[test]
+fn verbose_mode_prints_a_skip_notice_and_it_does_not_affect_the_exit_code() {
+    let directory = temporary_directory();
+    let path = write_file(
+        &directory,
+        "skipped.rs",
+        "/// Some prose here.\n/// let x = foo(bar);\n",
+    );
+
+    let output = run(&[&argument(&path), "--verbose"]);
+
+    assert_eq!(exit_code(&output), 0);
+    let text = stdout(&output);
+    assert!(text.contains("the line looks like code"), "{text}");
+    assert!(text.contains("kept as is"), "{text}");
+}
+
+#[test]
+fn a_skip_notice_is_hidden_without_verbose_mode() {
+    let directory = temporary_directory();
+    let path = write_file(
+        &directory,
+        "skipped.rs",
+        "/// Some prose here.\n/// let x = foo(bar);\n",
+    );
+
+    let output = run(&[&argument(&path)]);
+
+    assert_eq!(exit_code(&output), 0);
+    let text = stdout(&output);
+    assert!(!text.contains("the line looks like code"), "{text}");
 }
 
 #[test]
@@ -527,7 +557,8 @@ fn a_line_selection_fixes_only_the_block_it_names() {
         fixed,
         "/// One sentence that is already quite long. Another sentence follows it here.\n\
          fn first() {}\n\n\
-         /// One sentence that is already quite long.\n\
+         /// One sentence\n\
+         /// that is already quite long.\n\
          /// Another sentence follows it here.\n\
          fn second() {}\n"
     );
@@ -576,7 +607,7 @@ fn a_location_selects_the_file_to_process_on_its_own() {
     let fixed = std::fs::read_to_string(&path).expect("file should be readable");
     assert_eq!(
         fixed,
-        "/// One sentence that is already quite long.\n/// Another sentence follows it here.\n"
+        "/// One sentence\n/// that is already quite long.\n/// Another sentence follows it here.\n"
     );
     let untouched = std::fs::read_to_string(&other).expect("file should be readable");
     assert_eq!(untouched, TWO_SENTENCES);
@@ -654,7 +685,8 @@ fn stdin_mode_formats_only_the_selected_lines() {
         stdout(&output),
         "/// One sentence that is already quite long. Another sentence follows it here.\n\
          fn first() {}\n\n\
-         /// One sentence that is already quite long.\n\
+         /// One sentence\n\
+         /// that is already quite long.\n\
          /// Another sentence follows it here.\n\
          fn second() {}\n"
     );

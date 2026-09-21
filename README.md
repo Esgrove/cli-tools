@@ -488,7 +488,9 @@ Options:
 
 Check and format prose in code comments, docstrings, and Markdown with semantic line breaks.
 Lines are broken at sentence and clause boundaries within a soft 120 character limit,
-and a sentence that does not fit on one line is spread evenly over the lines it needs.
+which may be exceeded by up to 10 characters when that gives a better break than stopping short;
+`--strict` turns the limit into a hard cap that is never exceeded.
+A sentence that does not fit on one line is spread evenly over the lines it needs.
 In long sentences, a colon after an introduction of three words or more takes its own line
 whenever the clause it introduces carries on past it,
 so the explanation or list starts on a line of its own.
@@ -496,8 +498,10 @@ Text inside backticks, Markdown links, and inline formatting such as `**bold**`,
 and `~~strikethrough~~` is never broken, and a span that was split by hand is joined back together.
 Semicolons are rewritten as separate sentences.
 An em dash becomes a period and a new sentence, or a colon where the text before it names what follows.
-A pair of dashes that encloses an aside becomes a pair of commas,
-and a dash that is kept never ends or starts a line.
+A pair of dashes that encloses a short phrase becomes a pair of commas,
+but a pair whose enclosed span carries its own verb reads as a full clause,
+so it is left for a person to reword instead of becoming a comma splice.
+A dash that is kept never ends or starts a line.
 Aligned column blocks, such as the environment table of a usage comment, are left as they are.
 Slash-delimited regex literals are protected across supported source languages.
 When ambiguous slash syntax could hide a multiline string or comment, the remaining source is left unchanged.
@@ -543,6 +547,7 @@ Options:
   -t, --type <KIND>             Force the file kind, required with --stdin [possible values: rust, c, javascript, go, python, shell, toml, yaml, dockerfile, makefile, ruby, sql, lua, markdown]
   -s, --stdin                   Read text from stdin and write the formatted result to stdout
   -b, --word-break              Allow breaking at a plain word boundary when no clause boundary fits
+  -S, --strict                  Treat the width as a hard cap instead of allowing a small overflow past it
   -J, --jobs <N>                Number of worker threads, 0 for one per core [default: 0]
   -q, --quiet                   Only print the summary
   -v, --verbose                 Print processed files and the resolved line width

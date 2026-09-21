@@ -84,7 +84,7 @@ fn no_fixable_violation_remains_after_fixing_a_source_file() {
         let text = std::fs::read_to_string(&file).expect("source file should be readable");
         let kind = FileKind::from_path(&file).expect("source file should have a known kind");
         let fixed = format(&text, kind, &options).fixed_text.unwrap_or(text);
-        let violations = check(&fixed, kind, &options);
+        let violations = check(&fixed, kind, &options).violations;
         let remaining: Vec<ViolationKind> = violations
             .iter()
             .filter(|violation| violation.fixable)
@@ -148,7 +148,7 @@ fn checking_a_source_file_reports_the_same_violations_as_formatting_it() {
         let text = std::fs::read_to_string(&file).expect("source file should be readable");
         let kind = FileKind::from_path(&file).expect("source file should have a known kind");
         assert_eq!(
-            check(&text, kind, &options),
+            check(&text, kind, &options).violations,
             format(&text, kind, &options).violations,
             "check and format disagree about {}",
             file.display()

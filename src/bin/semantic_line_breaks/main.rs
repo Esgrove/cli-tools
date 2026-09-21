@@ -103,6 +103,10 @@ pub struct Args {
     #[arg(short = 'b', long)]
     word_break: bool,
 
+    /// Treat the width as a hard cap instead of allowing a small overflow past it
+    #[arg(short = 'S', long)]
+    strict: bool,
+
     /// Number of worker threads, 0 for one per core
     #[arg(short = 'J', long, value_name = "N", default_value_t = 0)]
     jobs: usize,
@@ -188,6 +192,7 @@ mod test_args {
             "-t",
             "rust",
             "-b",
+            "-S",
             "-q",
             "-v",
         ])
@@ -201,6 +206,7 @@ mod test_args {
         assert_eq!(args.exclude, vec!["target"]);
         assert_eq!(args.kind, Some(FileKind::Rust));
         assert!(args.word_break);
+        assert!(args.strict);
         assert!(args.quiet);
         assert!(args.verbose);
     }

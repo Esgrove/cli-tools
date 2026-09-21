@@ -29,6 +29,7 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
     ".venv",
     "venv",
     "vendor",
+    "third_party",
 ];
 
 /// User configuration from the `[slb]` section of the config file.
@@ -52,6 +53,8 @@ pub struct SlbConfig {
     pub preserve_lowercase: Vec<String>,
     #[serde(default)]
     pub rules: Vec<String>,
+    #[serde(default)]
+    pub strict: bool,
     #[serde(default)]
     pub use_gitignore: Option<bool>,
     #[serde(default)]
@@ -88,6 +91,7 @@ pub struct Config {
     pub quiet: bool,
     pub rules: RuleSet,
     pub stdin: bool,
+    pub strict: bool,
     pub project_width: bool,
     pub use_gitignore: bool,
     pub verbose: bool,
@@ -213,6 +217,7 @@ impl Config {
             quiet: args.quiet,
             rules,
             stdin: args.stdin,
+            strict: args.strict || user_config.strict,
             project_width: !args.ignore_project_config && user_config.use_project_config.unwrap_or(true),
             use_gitignore: !args.no_ignore && user_config.use_gitignore.unwrap_or(true),
             verbose: args.verbose || user_config.verbose,
@@ -228,6 +233,7 @@ impl Config {
             tab_width: DEFAULT_TAB_WIDTH,
             join_sentences: self.join_sentences,
             allow_word_break: self.allow_word_break,
+            strict: self.strict,
             rules: self.rules,
             // The ranges given without a path apply to the one file of the run and to stdin.
             // A file named by a spec of its own gets its own ranges, which the run context puts in place.
@@ -466,6 +472,17 @@ mod test_config_merge {
             !config(&["slb"], "[slb]\nuse_gitignore = false\n")
                 .expect("config should build")
                 .use_gitignore
+        );
+    }
+
+    #[test]
+    fn strict_is_enabled_by_the_flag_or_the_config() {
+        assert!(!config(&["slb"], "").expect("config should build").strict);
+        assert!(config(&["slb", "--strict"], "").expect("config should build").strict);
+        assert!(
+            config(&["slb"], "[slb]\nstrict = true\n")
+                .expect("config should build")
+                .strict
         );
     }
 

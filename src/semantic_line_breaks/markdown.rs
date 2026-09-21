@@ -5,12 +5,29 @@
 //! such as fenced code, headings, tables, list markers, and lines that look like code.
 //! The same splitter is used for Markdown documents and for the content of comment blocks.
 
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use super::paragraph::{HardBreak, Paragraph, Region};
 use crate::leading_whitespace;
+
+/// A place a paragraph was kept verbatim by a heuristic rather than by Markdown structure.
+///
+/// The paragraphs behind a fenced code block, a heading, a table, or a real list marker
+/// are meant to stay untouched, and skipping them is not worth a word.
+/// A paragraph skipped because a line merely looks like code, has aligned columns,
+/// or uses box drawing characters is different: the heuristic can be wrong,
+/// and a paragraph skipped this way produces no violation at all, so nothing else says it happened.
+/// A notice fills that gap without turning the skip into a violation of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipNotice {
+    /// Zero based index of the line the notice applies to.
+    pub line: usize,
+    /// Reason the paragraph was kept verbatim.
+    pub message: Cow<'static, str>,
+}
 
 /// Marker text that excludes the surrounding paragraph from formatting.
 pub const IGNORE_MARKER: &str = "slb-ignore";
@@ -56,6 +73,16 @@ static RE_TABLE_SEPARATOR: LazyLock<Regex> = LazyLock::new(|| {
 /// Matches the start of an HTML block.
 static RE_HTML_BLOCK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s{0,3}<(?:[A-Za-z][\w-]*|/[A-Za-z][\w-]*|!)").expect("Invalid HTML regex"));
+
+/// Captures the tag name of an HTML start or end tag at the start of a line.
+static RE_HTML_TAG_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s{0,3}</?([A-Za-z][\w-]*)").expect("Invalid HTML tag name regex"));
+
+/// Tag names used inline within prose, such as Javadoc and `JSDoc` markup,
+/// that must not turn the whole paragraph into an untouched HTML block.
+const INLINE_HTML_TAGS: &[&str] = &[
+    "a", "abbr", "b", "br", "code", "em", "i", "kbd", "mark", "p", "small", "span", "strong", "sub", "sup", "u",
+];
 
 /// Matches a link reference definition.
 static RE_LINK_REFERENCE: LazyLock<Regex> =
@@ -135,8 +162,26 @@ enum LineClass {
 /// `is_document` enables front matter detection and hard break markers.
 #[must_use]
 pub fn split_paragraphs(lines: &[&str], base_prefix: &str, start_line: usize, is_document: bool) -> Vec<Region> {
+    split_paragraphs_with_notices(lines, base_prefix, start_line, is_document).0
+}
+
+/// Split content lines the same way [`split_paragraphs`] does, and also return the skip notices.
+#[must_use]
+pub fn split_paragraphs_with_notices(
+    lines: &[&str],
+    base_prefix: &str,
+    start_line: usize,
+    is_document: bool,
+) -> (Vec<Region>, Vec<SkipNotice>) {
     let code_indent = if is_document { CODE_INDENT } else { COMMENT_INDENT };
-    split_paragraphs_with(lines, base_prefix, start_line, is_document, code_indent)
+    let context = SplitContext {
+        base_prefix,
+        start_line,
+        is_document,
+    };
+    let mut notices = Vec::new();
+    let regions = split_paragraphs_with(lines, context, code_indent, &mut notices);
+    (regions, notices)
 }
 
 /// Whether the file opts out of formatting with a marker in its first lines.
@@ -184,17 +229,32 @@ pub fn looks_like_code(line: &str) -> bool {
     text.contains('(') && RE_CALL_LINE.is_match(text)
 }
 
+/// Base prefix, start line, and document mode shared by every paragraph split from one run of lines.
+#[derive(Clone, Copy)]
+struct SplitContext<'a> {
+    /// Prefix prepended to every paragraph prefix, for example the comment marker.
+    base_prefix: &'a str,
+    /// Zero based index of the first line in the text buffer.
+    start_line: usize,
+    /// Whether front matter detection and hard break markers are enabled.
+    is_document: bool,
+}
+
 /// Split content lines, using the given indentation as the mark of a block of its own.
 ///
 /// The indentation belongs to the text the call started from, not to the nesting inside it,
 /// so a blockquote keeps the rule of the document or comment that holds it.
 fn split_paragraphs_with(
     lines: &[&str],
-    base_prefix: &str,
-    start_line: usize,
-    is_document: bool,
+    context: SplitContext<'_>,
     code_indent: usize,
+    notices: &mut Vec<SkipNotice>,
 ) -> Vec<Region> {
+    let SplitContext {
+        base_prefix,
+        start_line,
+        is_document,
+    } = context;
     let mut regions = Vec::new();
     let count = lines.len();
     let mut index = 0;
@@ -255,20 +315,18 @@ fn split_paragraphs_with(
                     .collect();
                 let inner_refs: Vec<&str> = inner.iter().map(String::as_str).collect();
                 let prefix = format!("{base_prefix}> ");
-                regions.extend(split_paragraphs_with(
-                    &inner_refs,
-                    &prefix,
-                    start_line + index,
-                    false,
-                    code_indent,
-                ));
+                let inner_context = SplitContext {
+                    base_prefix: &prefix,
+                    start_line: start_line + index,
+                    is_document: false,
+                };
+                regions.extend(split_paragraphs_with(&inner_refs, inner_context, code_indent, notices));
                 index = end;
                 continue;
             }
             LineClass::ListItem(content_start) => {
                 let end = collect_list_item(lines, index, content_start);
-                let region =
-                    list_item_paragraph(lines, index, end, content_start, base_prefix, start_line, is_document);
+                let region = list_item_paragraph(lines, index, end, content_start, context, notices);
                 regions.push(apply_ignore(region, &mut ignore_next, start_line, index, end));
                 index = end;
                 continue;
@@ -281,7 +339,7 @@ fn split_paragraphs_with(
                     let region = if is_setext {
                         verbatim(start_line, index, end)
                     } else {
-                        text_paragraph(lines, index, end, base_prefix, start_line, is_document)
+                        text_paragraph(lines, index, end, context, notices)
                     };
                     regions.push(apply_ignore(region, &mut ignore_next, start_line, index, end));
                     index = end;
@@ -301,10 +359,14 @@ fn list_item_paragraph(
     index: usize,
     end: usize,
     content_start: usize,
-    base_prefix: &str,
-    start_line: usize,
-    is_document: bool,
+    context: SplitContext<'_>,
+    notices: &mut Vec<SkipNotice>,
 ) -> Region {
+    let SplitContext {
+        base_prefix,
+        start_line,
+        is_document,
+    } = context;
     let item_lines = lines.get(index..end).unwrap_or_default();
     let first_line = item_lines.first().copied().unwrap_or_default();
     let first_prefix = format!("{base_prefix}{}", take_chars(first_line, content_start));
@@ -327,6 +389,7 @@ fn list_item_paragraph(
         start_line + index,
         start_line + end,
         is_document,
+        notices,
     )
 }
 
@@ -335,10 +398,14 @@ fn text_paragraph(
     lines: &[&str],
     index: usize,
     end: usize,
-    base_prefix: &str,
-    start_line: usize,
-    is_document: bool,
+    context: SplitContext<'_>,
+    notices: &mut Vec<SkipNotice>,
 ) -> Region {
+    let SplitContext {
+        base_prefix,
+        start_line,
+        is_document,
+    } = context;
     let text_lines = lines.get(index..end).unwrap_or_default();
     let first_line = text_lines.first().copied().unwrap_or_default();
     let first_indent = leading_whitespace(first_line);
@@ -353,6 +420,7 @@ fn text_paragraph(
         start_line + index,
         start_line + end,
         is_document,
+        notices,
     )
 }
 
@@ -403,7 +471,7 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
     if matches!(first, b'|' | b':' | b'-') && line.contains('|') && RE_TABLE_SEPARATOR.is_match(line) {
         return LineClass::Verbatim;
     }
-    if first == b'<' && RE_HTML_BLOCK.is_match(line) {
+    if first == b'<' && RE_HTML_BLOCK.is_match(line) && !starts_with_inline_html_tag(line) {
         return LineClass::HtmlBlock;
     }
     if first == b'>' && RE_BLOCKQUOTE.is_match(line) {
@@ -428,6 +496,19 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
         return LineClass::Field;
     }
     LineClass::Text
+}
+
+/// Whether the tag that opens or closes `line` is one used inline within prose,
+/// such as Javadoc and `JSDoc` markup, rather than a raw HTML block that must be preserved as is.
+fn starts_with_inline_html_tag(line: &str) -> bool {
+    RE_HTML_TAG_NAME
+        .captures(line)
+        .and_then(|captures| captures.get(1))
+        .is_some_and(|name| {
+            INLINE_HTML_TAGS
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case(name.as_str()))
+        })
 }
 
 /// Index one past the closing fence, or the end of the lines when unterminated.
@@ -490,6 +571,23 @@ fn collect_text(lines: &[&str], index: usize, code_indent: usize) -> (usize, boo
     (end, false)
 }
 
+/// Reason a content line marks its paragraph as code-like, aligned, or box drawn, when it does.
+fn skip_reason(line: &str) -> Option<&'static str> {
+    if looks_like_code(line) {
+        Some("the line looks like code")
+    } else if RE_ALIGNED_COLUMNS.is_match(line) {
+        Some("the line has aligned columns")
+    } else if !line.is_ascii()
+        && line
+            .chars()
+            .any(|character| ('\u{2500}'..='\u{257F}').contains(&character))
+    {
+        Some("the line uses box drawing characters")
+    } else {
+        None
+    }
+}
+
 /// Build a paragraph region, or a verbatim region when the content must not be touched.
 fn make_paragraph(
     contents: &[&str],
@@ -498,17 +596,19 @@ fn make_paragraph(
     start_line: usize,
     end_line: usize,
     hard_breaks_allowed: bool,
+    notices: &mut Vec<SkipNotice>,
 ) -> Region {
-    let must_skip = contents.iter().any(|line| {
-        line.contains(IGNORE_MARKER)
-            || looks_like_code(line)
-            || RE_ALIGNED_COLUMNS.is_match(line)
-            || !line.is_ascii()
-                && line
-                    .chars()
-                    .any(|character| ('\u{2500}'..='\u{257F}').contains(&character))
+    let ignored = contents.iter().any(|line| line.contains(IGNORE_MARKER));
+    let heuristic_skip = contents.iter().enumerate().find_map(|(offset, line)| {
+        skip_reason(line).map(|message| SkipNotice {
+            line: start_line + offset,
+            message: Cow::Borrowed(message),
+        })
     });
-    if must_skip {
+    if ignored || heuristic_skip.is_some() {
+        if let Some(notice) = heuristic_skip {
+            notices.push(notice);
+        }
         return Region::Verbatim {
             start: start_line,
             end: end_line,
@@ -776,6 +876,49 @@ mod test_markdown_verbatim {
     #[test]
     fn html_block_runs_until_a_blank_line() {
         let regions = split_comment(&["<div align=\"center\">", "text inside", "</div>", "", "after"]);
+        assert_eq!(regions[0], verbatim_region(0, 3));
+        assert_eq!(regions[1], verbatim_region(3, 4));
+        assert_eq!(paragraph(&regions[2]).lines, vec!["after"]);
+    }
+
+    #[test]
+    fn a_javadoc_paragraph_opened_with_inline_tags_is_prose() {
+        let regions = split_comment(&["<p><b>Description.</b> More text follows here."]);
+        assert_eq!(
+            paragraph(&regions[0]).lines,
+            vec!["<p><b>Description.</b> More text follows here."]
+        );
+    }
+
+    #[test]
+    fn a_lone_line_break_tag_is_prose() {
+        let regions = split_comment(&["<br>"]);
+        assert_eq!(paragraph(&regions[0]).lines, vec!["<br>"]);
+    }
+
+    #[test]
+    fn a_code_tag_starting_a_line_is_prose() {
+        let regions = split_comment(&["<code>value</code> is set."]);
+        assert_eq!(paragraph(&regions[0]).lines, vec!["<code>value</code> is set."]);
+    }
+
+    #[test]
+    fn an_inline_tag_is_recognized_regardless_of_case() {
+        let regions = split_comment(&["<B>bold</B> text."]);
+        assert_eq!(paragraph(&regions[0]).lines, vec!["<B>bold</B> text."]);
+    }
+
+    #[test]
+    fn a_table_tag_still_starts_an_html_block() {
+        let regions = split_comment(&["<table>", "<tr><td>cell</td></tr>", "</table>", "", "after"]);
+        assert_eq!(regions[0], verbatim_region(0, 3));
+        assert_eq!(regions[1], verbatim_region(3, 4));
+        assert_eq!(paragraph(&regions[2]).lines, vec!["after"]);
+    }
+
+    #[test]
+    fn a_script_tag_still_starts_an_html_block() {
+        let regions = split_comment(&["<script>", "doStuff();", "</script>", "", "after"]);
         assert_eq!(regions[0], verbatim_region(0, 3));
         assert_eq!(regions[1], verbatim_region(3, 4));
         assert_eq!(paragraph(&regions[2]).lines, vec!["after"]);
@@ -1090,6 +1233,59 @@ mod test_markdown_paragraphs {
             .filter(|region| matches!(region, Region::Paragraph(_)))
             .count();
         assert_eq!(paragraph_count, 5);
+    }
+}
+
+#[cfg(test)]
+mod test_skip_notices {
+    use super::*;
+
+    #[test]
+    fn a_code_like_line_produces_a_skip_notice() {
+        let (_, notices) = split_paragraphs_with_notices(&["Some prose here.", "let x = foo(bar);"], "", 0, false);
+        assert_eq!(
+            notices,
+            vec![SkipNotice {
+                line: 1,
+                message: "the line looks like code".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn aligned_columns_produce_a_skip_notice() {
+        let (_, notices) = split_paragraphs_with_notices(&["foo     bar     baz"], "", 0, false);
+        assert_eq!(
+            notices,
+            vec![SkipNotice {
+                line: 0,
+                message: "the line has aligned columns".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_ignore_marker_produces_no_skip_notice() {
+        let (_, notices) = split_paragraphs_with_notices(&["This is prose. slb-ignore"], "", 0, false);
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn a_fenced_code_block_produces_no_skip_notice() {
+        let (_, notices) = split_paragraphs_with_notices(&["```", "let x = 1;", "```"], "", 0, false);
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn a_heading_produces_no_skip_notice() {
+        let (_, notices) = split_paragraphs_with_notices(&["# Title"], "", 0, false);
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn a_real_list_marker_produces_no_skip_notice() {
+        let (_, notices) = split_paragraphs_with_notices(&["- one", "- two"], "", 0, false);
+        assert!(notices.is_empty());
     }
 }
 

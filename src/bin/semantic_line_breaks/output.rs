@@ -6,7 +6,7 @@
 
 use colored::{ColoredString, Colorize};
 
-use cli_tools::semantic_line_breaks::Violation;
+use cli_tools::semantic_line_breaks::{SkipNotice, Violation};
 
 use crate::config::Config;
 
@@ -25,15 +25,26 @@ pub struct Summary {
     pub files_fixed: usize,
     /// Number of violations remaining after fixing.
     pub remaining: usize,
+    /// Number of paragraphs a heuristic kept verbatim, across every processed file.
+    pub skipped: usize,
 }
 
 impl Summary {
     /// Fold the counters of one processed file into the summary.
-    pub const fn add(&mut self, processed: bool, violations: usize, fixable: usize, written: bool, remaining: usize) {
+    pub const fn add(
+        &mut self,
+        processed: bool,
+        violations: usize,
+        fixable: usize,
+        written: bool,
+        remaining: usize,
+        skipped: usize,
+    ) {
         if !processed {
             return;
         }
         self.files += 1;
+        self.skipped += skipped;
         if violations == 0 {
             return;
         }
@@ -62,6 +73,13 @@ pub fn format_violation(path: &str, violation: &Violation, after_fix: bool) -> S
     format!("{}: {kind}: {}", location.cyan(), violation.message)
 }
 
+/// Format one skip notice for the terminal, dimmed since it is not a violation.
+pub fn format_skip_notice(path: &str, notice: &SkipNotice) -> String {
+    format!("{}: {}", format!("{path}:{}", notice.line + 1).cyan(), notice.message)
+        .dimmed()
+        .to_string()
+}
+
 /// Print the final summary line.
 pub fn print_summary(summary: &Summary, config: &Config) {
     println!("{}", summary_message(summary, config));
@@ -70,9 +88,10 @@ pub fn print_summary(summary: &Summary, config: &Config) {
 /// The final summary line for the processed files.
 fn summary_message(summary: &Summary, config: &Config) -> ColoredString {
     let files = cli_tools::count_label(summary.files, "file", "files");
+    let skipped_note = skipped_note(summary);
     if config.fix {
         let message = format!(
-            "Checked {files}, fixed {}, {} remaining",
+            "Checked {files}, fixed {}, {} remaining{skipped_note}",
             cli_tools::count_label(summary.files_fixed, "file", "files"),
             cli_tools::count_label(summary.remaining, "violation", "violations")
         );
@@ -82,15 +101,27 @@ fn summary_message(summary: &Summary, config: &Config) -> ColoredString {
             message.green()
         }
     } else if summary.violations == 0 {
-        format!("Checked {files}, no violations").green()
+        format!("Checked {files}, no violations{skipped_note}").green()
     } else {
         format!(
-            "Checked {files}, found {} in {} ({} fixable)",
+            "Checked {files}, found {} in {} ({} fixable){skipped_note}",
             cli_tools::count_label(summary.violations, "violation", "violations"),
             cli_tools::count_label(summary.files_with_violations, "file", "files"),
             summary.fixable
         )
         .yellow()
+    }
+}
+
+/// Trailing note naming the paragraphs a heuristic kept verbatim, empty when there were none.
+fn skipped_note(summary: &Summary) -> String {
+    if summary.skipped == 0 {
+        String::new()
+    } else {
+        format!(
+            ", {} kept as is",
+            cli_tools::count_label(summary.skipped, "paragraph", "paragraphs")
+        )
     }
 }
 

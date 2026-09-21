@@ -14,8 +14,15 @@ use super::options::FormatOptions;
 use super::paragraph::{HardBreak, Paragraph};
 use super::reflow::capitalize;
 use super::token::{Token, TokenKind};
-use super::tokenizer::RE_LOWERCASE_WORD;
+use super::tokenizer::{RE_LOWERCASE_WORD, contains_word};
 use super::violation::{Violation, ViolationKind};
+
+/// Auxiliary and copular verb forms whose presence marks a span as its own finite clause,
+/// rather than a short phrase, such as a noun phrase or an adverb, that reads fine beside a comma.
+const FINITE_VERB_MARKERS: &[&str] = &[
+    "is", "was", "were", "are", "am", "has", "have", "had", "will", "would", "could", "should", "can", "may", "might",
+    "must", "does", "do", "did",
+];
 
 /// Punctuation, sentence-starting capitalization, and whether a new sentence starts, for a dash rewrite.
 struct DashRewrite {
@@ -25,6 +32,8 @@ struct DashRewrite {
     capitalized_core: Option<String>,
     /// Whether the rewrite starts a new sentence after the dash.
     starts_new_sentence: bool,
+    /// Reason the dash is left for a person to reword, when it cannot be rewritten automatically.
+    unfixable: Option<&'static str>,
 }
 
 /// A run of tokens that is reflowed as one unit.
@@ -193,6 +202,16 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
             continue;
         }
         let rewrite = dash_rewrite(&segment.tokens, index, &depths, options);
+        if let Some(reason) = rewrite.unfixable {
+            violations.push(Violation {
+                line,
+                column: None,
+                kind: ViolationKind::EmDash,
+                message: reason.into(),
+                fixable: false,
+            });
+            continue;
+        }
         if let Some(previous) = segment.tokens.get_mut(index - 1) {
             if let Some(punctuation) = rewrite.punctuation {
                 previous.push_trailing(punctuation);
@@ -238,8 +257,10 @@ fn bracket_and_quote_depths(tokens: &[Token<'_>]) -> Vec<usize> {
 /// No punctuation means the text before the dash already ends a clause,
 /// so the dash is dropped and nothing takes its place.
 /// A comma is used where a new sentence would read wrong:
-/// inside brackets or quotes, between a pair of dashes that enclose an aside,
+/// inside brackets or quotes, between a pair of dashes that encloses a short phrase,
 /// before a single trailing word, and before a clause word that carries the sentence on.
+/// A pair of dashes whose enclosed span carries its own auxiliary or copular verb reads as a full clause,
+/// not a short aside, so it is left for a person to reword instead of becoming a comma splice.
 /// A colon is used where the text before the dash names what follows it,
 /// and where code like text on either side rules out capitalizing a name into a new sentence.
 fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &FormatOptions) -> DashRewrite {
@@ -250,29 +271,60 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
             punctuation: None,
             capitalized_core: None,
             starts_new_sentence: false,
+            unfixable: None,
         };
     }
     let inside_brackets = depths.get(index).copied().unwrap_or_default() > 0;
     let sentence = sentence_bounds(tokens, index, options);
     let sentence_start = sentence.start;
     let sentence_end = sentence.end;
-    let encloses_aside = tokens
+    let partner_dash = tokens
         .get(sentence)
         .unwrap_or_default()
         .iter()
         .enumerate()
-        .any(|(offset, token)| sentence_start + offset != index && token.kind == TokenKind::Dash);
+        .find(|(offset, token)| sentence_start + offset != index && token.kind == TokenKind::Dash)
+        .map(|(offset, _)| sentence_start + offset);
     // A single word after the dash trails the sentence as an afterthought,
     // and a sentence of its own would read as a fragment.
     let trails_sentence = index + 2 >= sentence_end;
     // A clause word after the dash joins what follows to the clause before it,
     // so "a semicolon, and a dash" continues the sentence instead of starting a new one.
     let joins_clause = clause_rank(tokens, index + 1, options).is_some();
-    if inside_brackets || encloses_aside || trails_sentence || joins_clause {
+    if inside_brackets || trails_sentence || joins_clause {
         return DashRewrite {
             punctuation: Some(','),
             capitalized_core: None,
             starts_new_sentence: false,
+            unfixable: None,
+        };
+    }
+    if let Some(partner) = partner_dash {
+        let (span_start, span_end) = if partner > index {
+            (index + 1, partner)
+        } else {
+            (partner + 1, index)
+        };
+        let reads_as_a_clause = tokens
+            .get(span_start..span_end)
+            .unwrap_or_default()
+            .iter()
+            .any(|token| contains_word(FINITE_VERB_MARKERS, &token.core));
+        if reads_as_a_clause {
+            return DashRewrite {
+                punctuation: None,
+                capitalized_core: None,
+                starts_new_sentence: false,
+                unfixable: Some(
+                    "the pair of dashes encloses what reads as its own clause, so it is left for a person to reword",
+                ),
+            };
+        }
+        return DashRewrite {
+            punctuation: Some(','),
+            capitalized_core: None,
+            starts_new_sentence: false,
+            unfixable: None,
         };
     }
     // A name before the dash is what the text after it describes,
@@ -284,6 +336,7 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
             punctuation: Some(':'),
             capitalized_core: None,
             starts_new_sentence: false,
+            unfixable: None,
         };
     }
     if let Some(core) = next.and_then(|next| capitalize_token(next, options)) {
@@ -291,6 +344,7 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
             punctuation: Some('.'),
             capitalized_core: Some(core),
             starts_new_sentence: true,
+            unfixable: None,
         };
     }
     if next.is_some_and(can_start_sentence_unchanged) {
@@ -298,12 +352,14 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
             punctuation: Some('.'),
             capitalized_core: None,
             starts_new_sentence: true,
+            unfixable: None,
         };
     }
     DashRewrite {
         punctuation: Some(':'),
         capitalized_core: None,
         starts_new_sentence: false,
+        unfixable: None,
     }
 }
 
@@ -684,7 +740,7 @@ mod test_rewording {
 
     #[test]
     fn a_dash_stays_a_comma_where_a_new_sentence_would_read_wrong() {
-        // A pair encloses an aside, a clause word carries the sentence on,
+        // A pair encloses a short phrase, a clause word carries the sentence on,
         // a single word trails it, and brackets hold a whole aside.
         for (text, expected) in [
             (
@@ -698,6 +754,27 @@ mod test_rewording {
         ] {
             assert_eq!(reflow(&[text], 120).lines, Some(vec![expected.to_string()]), "{text}");
         }
+    }
+
+    #[test]
+    fn a_dash_pair_enclosing_a_clause_is_left_unfixable() {
+        // The enclosed span carries its own verb, "was", so it reads as a full clause rather than a short aside,
+        // and only a comma splice comes from joining two clauses with commas,
+        // so the pair is left for a person to reword instead of being rewritten to a pair of commas.
+        let outcome = reflow(&["the value — it was miscomputed — is read"], 120);
+        assert_eq!(outcome.lines, None);
+        assert_eq!(
+            summary(&outcome),
+            vec![(ViolationKind::EmDash, false), (ViolationKind::EmDash, false)]
+        );
+        assert!(
+            outcome
+                .violations
+                .iter()
+                .all(|violation| violation.message.contains("reads as its own clause")),
+            "{:?}",
+            outcome.violations
+        );
     }
 
     #[test]

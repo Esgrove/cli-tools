@@ -5,7 +5,7 @@
 //! and leaving a paragraph untouched when reflowing it would not read better.
 //! This is the entry point the formatter calls for every prose paragraph.
 
-use super::line_breaks::{Budgets, MIN_BUDGET, SOFT_OVERFLOW, over_long_line_violations, split_tokens};
+use super::line_breaks::{Budgets, MIN_BUDGET, over_long_line_violations, soft_overflow, split_tokens};
 use super::options::FormatOptions;
 use super::paragraph::{HardBreak, Paragraph};
 use super::rewording::{build_segments, merge_changed_sentences, reword_segments};
@@ -111,7 +111,7 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
             .max_width
             .saturating_sub(prefix_width(&paragraph.rest_prefix, options.tab_width)),
     };
-    let hard_limit = options.max_width + SOFT_OVERFLOW;
+    let hard_limit = options.max_width + soft_overflow(options.max_width, options.strict);
 
     if budgets.first.min(budgets.rest) <= MIN_BUDGET {
         let violations = if options.rules.line_too_long {
@@ -410,7 +410,9 @@ mod test_reflow {
     #[test]
     fn prefers_and_with_small_overshoot_over_comma_and_stays_stable() {
         let text = "alpha beta gamma delta epsilon zeta eta theta, iota kappa lambda mu nu and xi omicron pi rho sigma tau upsilon phi chi psi omega";
-        let outcome = reflow(&[text], 60);
+        // 67 plus its 5% overflow reaches the same 70 character limit the fixed width below relies on.
+        let width = 67;
+        let outcome = reflow(&[text], width);
         let lines = outcome.lines.expect("should reflow");
         assert_eq!(
             lines[0],
@@ -420,7 +422,7 @@ mod test_reflow {
         assert_eq!(lines[1], "and xi omicron pi rho sigma tau upsilon phi chi psi omega");
         let again = reflow_paragraph(
             &paragraph(&lines.iter().map(String::as_str).collect::<Vec<_>>(), ""),
-            &FormatOptions::with_width(60),
+            &FormatOptions::with_width(width),
             true,
         );
         assert_eq!(again.lines, None);
@@ -430,7 +432,9 @@ mod test_reflow {
     #[test]
     fn falls_back_to_comma_when_and_is_below_minimum_fill() {
         let text = "alpha beta and gamma delta epsilon zeta eta theta iota kappa lambda, mu nu xi omicron pi rho sigma tau upsilon";
-        let outcome = reflow(&[text], 60);
+        // 65 plus its 5% overflow reaches the 68 character width of the expected first line below.
+        let width = 65;
+        let outcome = reflow(&[text], width);
         let lines = outcome.lines.expect("should reflow");
         assert_eq!(
             lines[0],
@@ -473,7 +477,8 @@ mod test_reflow {
     fn tolerates_lines_inside_the_soft_overflow() {
         let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron";
         assert_eq!(text.chars().count(), 80);
-        let outcome = reflow(&[text], 75);
+        // 77 plus its 5% overflow reaches the 80 character width of the text above.
+        let outcome = reflow(&[text], 77);
         assert_eq!(outcome.lines, None);
         assert!(outcome.violations.is_empty());
     }
@@ -598,7 +603,7 @@ mod test_reflow_safety {
     fn a_paragraph_that_fits_is_not_rewrapped_past_the_limit() {
         let lines = [
             "@param archiveEntryIdentifier The id of the archive entry which will be added",
-            "to the favourites of the signed in reader.",
+            "to the favourites of the signed in reader of the mobile application.",
         ];
         let paragraph = hanging(&lines, "     * ", "     *                               ");
         let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120), true);

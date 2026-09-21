@@ -31,6 +31,7 @@ pub(crate) mod test_helpers;
 pub use file_kind::FileKind;
 pub use formatter::{check, format};
 pub use line_ranges::LineRanges;
+pub use markdown::SkipNotice;
 pub use options::{FormatOptions, FormatResult, RuleSet};
 pub use paragraph::{HardBreak, Paragraph, Region};
 pub use rank::Rank;

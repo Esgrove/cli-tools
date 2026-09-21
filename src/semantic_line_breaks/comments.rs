@@ -11,6 +11,7 @@ use regex::Regex;
 
 use super::file_kind::{CommentStyle, FileKind};
 use super::markdown;
+use super::markdown::SkipNotice;
 use super::options::FormatOptions;
 use super::paragraph::Region;
 use super::scanner::{ScanState, scan_line_buffered};
@@ -90,16 +91,33 @@ pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
 /// Split source lines into verbatim regions and comment paragraphs.
 #[must_use]
 pub fn split_source_regions(lines: &[&str], kind: FileKind) -> Vec<Region> {
-    split_source_regions_scanned(lines, kind, &scan_lines(lines, kind))
+    split_source_regions_with_notices(lines, kind).0
+}
+
+/// Split source lines the same way [`split_source_regions`] does, and also return the skip notices.
+#[must_use]
+pub fn split_source_regions_with_notices(lines: &[&str], kind: FileKind) -> (Vec<Region>, Vec<SkipNotice>) {
+    split_source_regions_scanned_with_notices(lines, kind, &scan_lines(lines, kind))
 }
 
 /// Split source lines into verbatim regions and comment paragraphs, reusing an existing scan.
 #[must_use]
 pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineScan) -> Vec<Region> {
+    split_source_regions_scanned_with_notices(lines, kind, scan).0
+}
+
+/// Split source lines the same way [`split_source_regions_scanned`] does, and also return the skip notices.
+#[must_use]
+pub fn split_source_regions_scanned_with_notices(
+    lines: &[&str],
+    kind: FileKind,
+    scan: &LineScan,
+) -> (Vec<Region>, Vec<SkipNotice>) {
     let style = kind.comment_style();
     let count = lines.len();
     let inside_string = &scan.inside_string;
     let mut regions = Vec::new();
+    let mut notices = Vec::new();
     let mut index = 0;
     while index < count {
         let Some(line) = lines.get(index) else {
@@ -116,7 +134,7 @@ pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineS
         let trimmed = line.trim_start();
 
         if style.docstrings
-            && let Some(end) = docstring_regions(lines, index, &mut regions)
+            && let Some(end) = docstring_regions(lines, index, &mut regions, &mut notices)
         {
             index = end;
             continue;
@@ -125,7 +143,15 @@ pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineS
         if let Some(block) = style.block
             && trimmed.starts_with(block.open)
         {
-            let end = block_comment_regions(lines, index, block.open, block.close, block.continuation, &mut regions);
+            let end = block_comment_regions(
+                lines,
+                index,
+                block.open,
+                block.close,
+                block.continuation,
+                &mut regions,
+                &mut notices,
+            );
             index = end;
             continue;
         }
@@ -148,7 +174,10 @@ pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineS
                 .map(|comment| comment_content(comment.trim_start(), marker))
                 .collect();
             let prefix = format!("{indent}{marker} ");
-            regions.extend(markdown::split_paragraphs(&contents, &prefix, index, false));
+            let (paragraph_regions, paragraph_notices) =
+                markdown::split_paragraphs_with_notices(&contents, &prefix, index, false);
+            regions.extend(paragraph_regions);
+            notices.extend(paragraph_notices);
             index = end;
             continue;
         }
@@ -159,7 +188,7 @@ pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineS
         });
         index += 1;
     }
-    regions
+    (regions, notices)
 }
 
 /// Find trailing comments and build replacement line pairs for each affected line.
@@ -299,6 +328,7 @@ fn block_comment_regions(
     close: &str,
     continuation: &str,
     regions: &mut Vec<Region>,
+    notices: &mut Vec<SkipNotice>,
 ) -> usize {
     let Some(first) = lines.get(index) else {
         return index + 1;
@@ -358,7 +388,10 @@ fn block_comment_regions(
         } else {
             indent.to_string()
         };
-        regions.extend(markdown::split_paragraphs(&contents, &prefix, inner, false));
+        let (paragraph_regions, paragraph_notices) =
+            markdown::split_paragraphs_with_notices(&contents, &prefix, inner, false);
+        regions.extend(paragraph_regions);
+        notices.extend(paragraph_notices);
         inner = group_end;
     }
     if close_index < lines.len() {
@@ -371,7 +404,12 @@ fn block_comment_regions(
 }
 
 /// Add regions for a Python docstring starting at `index`, returning the index after it when one was found.
-fn docstring_regions(lines: &[&str], index: usize, regions: &mut Vec<Region>) -> Option<usize> {
+fn docstring_regions(
+    lines: &[&str],
+    index: usize,
+    regions: &mut Vec<Region>,
+    notices: &mut Vec<SkipNotice>,
+) -> Option<usize> {
     let line = lines.get(index)?;
     let captures = RE_DOCSTRING_OPEN.captures(line)?;
     let indent = captures.get(1).map_or("", |group| group.as_str());
@@ -416,7 +454,7 @@ fn docstring_regions(lines: &[&str], index: usize, regions: &mut Vec<Region>) ->
         );
     }
 
-    let mut inner = markdown::split_paragraphs(&contents, indent, content_start, false);
+    let (mut inner, inner_notices) = markdown::split_paragraphs_with_notices(&contents, indent, content_start, false);
     for region in &mut inner {
         if let Region::Paragraph(paragraph) = region {
             if paragraph.start_line == index && !rest.trim().is_empty() {
@@ -428,6 +466,7 @@ fn docstring_regions(lines: &[&str], index: usize, regions: &mut Vec<Region>) ->
         }
     }
     regions.extend(inner);
+    notices.extend(inner_notices);
     if !closing_has_content {
         regions.push(Region::Verbatim {
             start: close_index,

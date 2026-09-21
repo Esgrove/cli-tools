@@ -1,6 +1,7 @@
 //! Formatting rule set and the options controlling checking and formatting.
 
 use super::line_ranges::LineRanges;
+use super::markdown::SkipNotice;
 use super::violation::{Violation, ViolationKind};
 
 /// Default maximum line width when no other source provides one.
@@ -78,6 +79,8 @@ pub struct FormatOptions {
     pub join_sentences: bool,
     /// Allow breaking at a plain word boundary when no clause boundary fits.
     pub allow_word_break: bool,
+    /// Treat the maximum width as a hard cap instead of allowing a small overflow past it.
+    pub strict: bool,
     /// Enabled rules.
     pub rules: RuleSet,
     /// Lines to check and fix, empty for the whole text.
@@ -107,6 +110,8 @@ pub struct FormatResult {
     /// Reflowing a paragraph changes how many lines it needs,
     /// so the selection has to be mapped through the fix before the fixed text can be checked again.
     pub fixed_line_ranges: LineRanges,
+    /// Paragraphs a heuristic kept verbatim, worth telling the user about but not a violation.
+    pub skips: Vec<SkipNotice>,
 }
 
 impl RuleSet {
@@ -194,6 +199,7 @@ impl Default for FormatOptions {
             tab_width: DEFAULT_TAB_WIDTH,
             join_sentences: false,
             allow_word_break: false,
+            strict: false,
             rules: RuleSet::DEFAULT,
             line_ranges: LineRanges::default(),
             abbreviations: crate::strings_from(DEFAULT_ABBREVIATIONS),

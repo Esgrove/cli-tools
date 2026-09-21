@@ -17,12 +17,22 @@ use super::token::Token;
 use super::tokenizer::contains_word;
 use super::violation::{Violation, ViolationKind};
 
-/// Number of characters a line may exceed the maximum width by before it is considered too long.
+/// Share of the maximum width a line may exceed it by before it is considered too long.
 ///
 /// The width is a soft target.
 /// Tolerating a small overflow allows breaking before a conjunction
 /// when that reads better than a strict break at a comma.
-pub const SOFT_OVERFLOW: usize = 10;
+const SOFT_OVERFLOW_FRACTION: f64 = 0.05;
+
+/// Overflow tolerance for the given width, zero when `strict` asks for a hard cap at the width.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(super) fn soft_overflow(max_width: usize, strict: bool) -> usize {
+    if strict {
+        0
+    } else {
+        (max_width as f64 * SOFT_OVERFLOW_FRACTION) as usize
+    }
+}
 
 /// Minimum fill of the budget, in percent, for a boundary to count as a reachable strong break.
 const MIN_FILL_PERCENT: usize = 50;
@@ -103,6 +113,8 @@ struct LineWidths {
     target: usize,
     /// Width the prefix of the line takes from the limit.
     prefix: usize,
+    /// Overflow tolerance past the budget, zero in `--strict` mode.
+    overflow: usize,
 }
 
 /// Cheapest plan for the lines of a run, counted from one token to the end of the run.
@@ -121,7 +133,7 @@ impl LineWidths {
     /// which is the only case where a line aims short of the budget.
     /// A line the author wrote that already fits is left at the width it has,
     /// since rewrapping it would move the text around for nothing.
-    const fn new(limit: usize, budget: usize, relaid_out: bool) -> Self {
+    fn new(limit: usize, budget: usize, relaid_out: bool, strict: bool) -> Self {
         Self {
             budget,
             target: if relaid_out {
@@ -130,6 +142,7 @@ impl LineWidths {
                 budget
             },
             prefix: limit.saturating_sub(budget),
+            overflow: soft_overflow(limit, strict),
         }
     }
 }
@@ -154,7 +167,7 @@ pub(super) fn split_tokens<'text>(
     let budget = if *is_first_line { budgets.first } else { budgets.rest };
     let rest_budget = budgets.rest;
     *is_first_line = false;
-    if tokens_width(&tokens) <= LineWidths::new(options.max_width, budget, relaid_out).target {
+    if tokens_width(&tokens) <= LineWidths::new(options.max_width, budget, relaid_out, options.strict).target {
         return vec![tokens];
     }
 
@@ -171,7 +184,7 @@ pub(super) fn split_tokens<'text>(
 
     for (index, piece) in pieces.iter().enumerate() {
         let budget = if index == 0 { budget } else { rest_budget };
-        if tokens_width(piece) > budget + SOFT_OVERFLOW {
+        if tokens_width(piece) > budget + soft_overflow(options.max_width, options.strict) {
             let reason = if piece.len() > 1 {
                 "no clause boundary fits within the line limit"
             } else {
@@ -244,6 +257,7 @@ fn plan_line_breaks(
     }
     suppress_list_runs(tokens, &mut ranks, &widths, first_budget.max(rest_budget));
     let colon_counts = cumulative_colon_counts(&ranks);
+    let limit = options.max_width;
 
     // The run is walked backwards so the plan for every tail is known when a line is measured against it.
     let empty_tail = LinePlan {
@@ -254,11 +268,10 @@ fn plan_line_breaks(
     let mut candidates = Vec::new();
     // Only the first line of the paragraph has a budget of its own,
     // so the width it aims at and the prefix it carries are the same for every other line.
-    let limit = options.max_width;
-    let first = LineWidths::new(limit, first_budget, relaid_out);
-    let rest = LineWidths::new(limit, rest_budget, relaid_out);
+    let first = LineWidths::new(limit, first_budget, relaid_out, options.strict);
+    let rest = LineWidths::new(limit, rest_budget, relaid_out, options.strict);
     for start in (0..count).rev() {
-        let LineWidths { budget, target, prefix } = if start == 0 { first } else { rest };
+        let line_widths @ LineWidths { budget, prefix, .. } = if start == 0 { first } else { rest };
         let mut best = LinePlan {
             cost: usize::MAX,
             line_end: count,
@@ -268,7 +281,15 @@ fn plan_line_breaks(
         } else {
             0..0
         };
-        collect_line_candidates(start, count, budget, target, &ranks, &widths, &mut candidates);
+        collect_line_candidates(
+            start,
+            count,
+            budget,
+            line_widths.overflow,
+            &ranks,
+            &widths,
+            &mut candidates,
+        );
         for end in candidates.iter().copied() {
             let plan = plans.get(end);
             let tail = plan.map_or(usize::MAX, |plan| plan.cost);
@@ -282,7 +303,7 @@ fn plan_line_breaks(
                 ),
                 _ => 0,
             };
-            let cost = line_cost(tokens, start, end, budget, target, &ranks, &widths)
+            let cost = line_cost(tokens, start, end, line_widths, &ranks, &widths)
                 .saturating_add(skipped_colon_cost(&colon_counts, &colon_range, end))
                 .saturating_add(imbalance)
                 .saturating_add(tail);
@@ -319,16 +340,12 @@ fn collect_line_candidates(
     start: usize,
     count: usize,
     budget: usize,
-    target: usize,
+    overflow: usize,
     ranks: &[Option<Rank>],
     widths: &[usize],
     candidates: &mut Vec<usize>,
 ) {
     candidates.clear();
-    if span_width(widths, start, count) <= target {
-        candidates.push(count);
-        return;
-    }
 
     // A sentence end is the best place to break, whatever the line is filled to.
     // A forced break marks a sentence the formatter created itself, such as a rewritten semicolon,
@@ -361,7 +378,7 @@ fn collect_line_candidates(
             continue;
         }
         candidates.push(end);
-        if span_width(widths, start, end) > budget + SOFT_OVERFLOW {
+        if span_width(widths, start, end) > budget + overflow {
             // One boundary past the limit is kept for text that cannot be broken within it,
             // such as a long URL at the start of the line.
             break;
@@ -464,11 +481,16 @@ fn line_cost(
     tokens: &[Token<'_>],
     start: usize,
     end: usize,
-    budget: usize,
-    target: usize,
+    line_widths: LineWidths,
     ranks: &[Option<Rank>],
     widths: &[usize],
 ) -> usize {
+    let LineWidths {
+        budget,
+        target,
+        overflow,
+        ..
+    } = line_widths;
     let count = tokens.len();
     let width = span_width(widths, start, end);
     let rank = if end < count { rank_at(ranks, end) } else { None };
@@ -485,7 +507,7 @@ fn line_cost(
         if !overflow_is_earned(start, count, budget, rank, ranks, widths) {
             cost = cost.saturating_add(WEAK_OVERFLOW_COST);
         }
-        let excess = width.saturating_sub(budget + SOFT_OVERFLOW);
+        let excess = width.saturating_sub(budget + overflow);
         cost = cost.saturating_add(excess.saturating_mul(TOO_LONG_COST));
     }
     cost
@@ -836,9 +858,27 @@ mod test_break_choice {
     #[test]
     fn an_overflowing_conjunction_still_wins_over_a_fitting_comma() {
         let text = "alpha beta gamma delta epsilon zeta eta theta, iota kappa lambda mu nu and xi omicron pi rho sigma tau upsilon phi chi psi omega";
-        let outcome = reflow(&[text], 60);
+        // 67 plus its 5% overflow reaches the same 70 character limit the fixed budget below relies on.
+        let width = 67;
+        assert_eq!(width + soft_overflow(width, false), 70);
+        let outcome = reflow(&[text], width);
         let lines = outcome.lines.expect("should reflow");
         assert_eq!(lines[0].chars().count(), 70, "a small overshoot is allowed: {lines:?}");
+    }
+
+    #[test]
+    fn strict_mode_refuses_the_overflow_a_conjunction_would_otherwise_earn() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta, iota kappa lambda mu nu and xi omicron pi rho sigma tau upsilon phi chi psi omega";
+        let options = FormatOptions {
+            strict: true,
+            ..FormatOptions::with_width(60)
+        };
+        let outcome = reflow_paragraph(&paragraph(&[text], ""), &options, true);
+        let lines = outcome.lines.expect("should reflow");
+        assert!(
+            lines[0].chars().count() <= 60,
+            "--strict must not let a line run past the width: {lines:?}"
+        );
     }
 }
 
@@ -888,7 +928,7 @@ mod test_list_runs {
     fn a_list_that_fits_one_line_is_not_split() {
         let lines = [concat!(
             "Without an explicit account list, `--upload` targets `alpha`, `beta`, `delta`, `gamma`, ",
-            "`kappa`, `lambda`, `sigma`, and `theta`, because the tool runs one account per environment."
+            "`kappa`, `lambda`, and `theta`, because the tool runs one account per environment."
         )];
         let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
         let reflowed = outcome.lines.expect("the sentence should wrap");
@@ -896,7 +936,7 @@ mod test_list_runs {
             reflowed.first().map(String::as_str),
             Some(concat!(
                 "Without an explicit account list, `--upload` targets `alpha`, `beta`, `delta`, `gamma`, ",
-                "`kappa`, `lambda`, `sigma`, and `theta`,"
+                "`kappa`, `lambda`, and `theta`,"
             ))
         );
     }
@@ -910,7 +950,9 @@ mod test_list_runs {
         let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
         let reflowed = outcome.lines.expect("the sentence should wrap");
         assert!(
-            reflowed.iter().all(|line| line.chars().count() <= 120 + SOFT_OVERFLOW),
+            reflowed
+                .iter()
+                .all(|line| line.chars().count() <= 120 + soft_overflow(120, false)),
             "a list longer than a line has to break somewhere: {reflowed:?}"
         );
         assert!(
