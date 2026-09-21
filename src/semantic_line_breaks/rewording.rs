@@ -129,6 +129,36 @@ pub(super) fn reword_segments(
     }
 }
 
+/// Join the segments around a change when the line break between them falls inside a sentence.
+///
+/// Reflowing a sentence means the old break in the middle of it is no longer meaningful,
+/// so the whole sentence is re-broken at its best boundary instead.
+/// Breaks at sentence ends and hard breaks are always kept,
+/// so sentences that already have their own line stay on it.
+pub(super) fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &FormatOptions) {
+    let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
+    for next in segments.drain(..) {
+        let should_merge = merged.last().is_some_and(|previous: &Segment| {
+            previous.hard_break == HardBreak::None
+                && !next.tokens.is_empty()
+                && previous.tokens.last().is_some_and(|last| !ends_sentence(last, options))
+                && (previous.modified || next.modified)
+        });
+        if should_merge {
+            let previous = merged
+                .last_mut()
+                .expect("just checked should_merge against merged.last()");
+            previous.tokens.extend(next.tokens);
+            previous.hard_break = next.hard_break;
+            previous.modified = true;
+            previous.source_line = None;
+        } else {
+            merged.push(next);
+        }
+    }
+    *segments = merged;
+}
+
 /// Replace standalone dashes with the punctuation that reads best in their place.
 ///
 /// A single dash usually extends the sentence it sits in,
@@ -289,16 +319,6 @@ fn sentence_bounds(tokens: &[Token<'_>], index: usize, options: &FormatOptions) 
     start..end
 }
 
-/// Message for the dash violation the punctuation resolves it with.
-const fn dash_message(punctuation: Option<char>) -> &'static str {
-    match punctuation {
-        Some('.') => "dash replaced with a period and a new sentence",
-        Some(':') => "dash replaced with a colon",
-        Some(_) => "dash replaced with a comma",
-        None => "dash removed where the text already ends a clause",
-    }
-}
-
 /// Split clauses joined with a semicolon into separate sentences.
 fn reword_semicolons(
     segments: &mut [Segment],
@@ -451,34 +471,14 @@ fn capitalize_token(token: &Token<'_>, options: &FormatOptions) -> Option<String
     Some(capitalize(&token.core))
 }
 
-/// Join the segments around a change when the line break between them falls inside a sentence.
-///
-/// Reflowing a sentence means the old break in the middle of it is no longer meaningful,
-/// so the whole sentence is re-broken at its best boundary instead.
-/// Breaks at sentence ends and hard breaks are always kept,
-/// so sentences that already have their own line stay on it.
-pub(super) fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &FormatOptions) {
-    let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
-    for next in segments.drain(..) {
-        let should_merge = merged.last().is_some_and(|previous: &Segment| {
-            previous.hard_break == HardBreak::None
-                && !next.tokens.is_empty()
-                && previous.tokens.last().is_some_and(|last| !ends_sentence(last, options))
-                && (previous.modified || next.modified)
-        });
-        if should_merge {
-            let previous = merged
-                .last_mut()
-                .expect("just checked should_merge against merged.last()");
-            previous.tokens.extend(next.tokens);
-            previous.hard_break = next.hard_break;
-            previous.modified = true;
-            previous.source_line = None;
-        } else {
-            merged.push(next);
-        }
+/// Message for the dash violation the punctuation resolves it with.
+const fn dash_message(punctuation: Option<char>) -> &'static str {
+    match punctuation {
+        Some('.') => "dash replaced with a period and a new sentence",
+        Some(':') => "dash replaced with a colon",
+        Some(_) => "dash replaced with a comma",
+        None => "dash removed where the text already ends a clause",
     }
-    *segments = merged;
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Line length discovery from project configuration files.
 //!
-//! Walks up from a file's directory looking for `.editorconfig`, `rustfmt.toml`, `pyproject.toml`,
-//! flake8 configuration, Prettier and markdownlint configuration, and `.clang-format`,
+//! Walks up from a file's directory looking for `.editorconfig`, `rustfmt.toml`, `pyproject.toml`, `.clang-format`,
+//! flake8 configuration, Prettier and markdownlint configuration,
 //! and returns the first line length limit that applies to the file.
 //! Results are cached per directory and file kind.
 

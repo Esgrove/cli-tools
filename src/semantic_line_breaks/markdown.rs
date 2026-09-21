@@ -139,6 +139,51 @@ pub fn split_paragraphs(lines: &[&str], base_prefix: &str, start_line: usize, is
     split_paragraphs_with(lines, base_prefix, start_line, is_document, code_indent)
 }
 
+/// Whether the file opts out of formatting with a marker in its first lines.
+#[must_use]
+pub fn has_ignore_file_marker(lines: &[&str]) -> bool {
+    lines
+        .iter()
+        .take(IGNORE_FILE_SEARCH_LINES)
+        .any(|line| line.contains(IGNORE_FILE_MARKER))
+}
+
+/// Whether a content line looks like source code rather than prose.
+#[must_use]
+pub fn looks_like_code(line: &str) -> bool {
+    let stripped = RE_CODE_SPAN.replace_all(line, "");
+    let text = stripped.trim();
+    if text.is_empty() {
+        return false;
+    }
+    if text.ends_with(['{', '}']) || text.ends_with(");") || text.ends_with("),") {
+        return true;
+    }
+    let has_code_characters = text.contains(['=', '(', '{']) || text.contains("::");
+    if text.ends_with(';') && has_code_characters {
+        return true;
+    }
+    if (has_code_characters || text.ends_with(';') || text.starts_with(['#', '/', '$']))
+        && RE_CODE_KEYWORD.is_match(text)
+    {
+        return true;
+    }
+    if text.contains("--") && RE_COMMAND_FLAG.is_match(text) {
+        return true;
+    }
+    if text.contains("::")
+        || text.contains(" = ")
+        || text.contains(" == ")
+        || text.contains("->")
+        || text.contains("=>")
+        || text.contains("&&")
+        || text.contains("||")
+    {
+        return true;
+    }
+    text.contains('(') && RE_CALL_LINE.is_match(text)
+}
+
 /// Split content lines, using the given indentation as the mark of a block of its own.
 ///
 /// The indentation belongs to the text the call started from, not to the nesting inside it,
@@ -250,51 +295,6 @@ fn split_paragraphs_with(
     regions
 }
 
-/// Whether the file opts out of formatting with a marker in its first lines.
-#[must_use]
-pub fn has_ignore_file_marker(lines: &[&str]) -> bool {
-    lines
-        .iter()
-        .take(IGNORE_FILE_SEARCH_LINES)
-        .any(|line| line.contains(IGNORE_FILE_MARKER))
-}
-
-/// Whether a content line looks like source code rather than prose.
-#[must_use]
-pub fn looks_like_code(line: &str) -> bool {
-    let stripped = RE_CODE_SPAN.replace_all(line, "");
-    let text = stripped.trim();
-    if text.is_empty() {
-        return false;
-    }
-    if text.ends_with(['{', '}']) || text.ends_with(");") || text.ends_with("),") {
-        return true;
-    }
-    let has_code_characters = text.contains(['=', '(', '{']) || text.contains("::");
-    if text.ends_with(';') && has_code_characters {
-        return true;
-    }
-    if (has_code_characters || text.ends_with(';') || text.starts_with(['#', '/', '$']))
-        && RE_CODE_KEYWORD.is_match(text)
-    {
-        return true;
-    }
-    if text.contains("--") && RE_COMMAND_FLAG.is_match(text) {
-        return true;
-    }
-    if text.contains("::")
-        || text.contains(" = ")
-        || text.contains(" == ")
-        || text.contains("->")
-        || text.contains("=>")
-        || text.contains("&&")
-        || text.contains("||")
-    {
-        return true;
-    }
-    text.contains('(') && RE_CALL_LINE.is_match(text)
-}
-
 /// Build the paragraph region for a list item spanning `index..end`.
 fn list_item_paragraph(
     lines: &[&str],
@@ -363,14 +363,6 @@ fn apply_ignore(region: Region, ignore_next: &mut bool, start_line: usize, from:
         verbatim(start_line, from, to)
     } else {
         region
-    }
-}
-
-/// Create a verbatim region for the given local line range.
-const fn verbatim(start_line: usize, from: usize, to: usize) -> Region {
-    Region::Verbatim {
-        start: start_line + from,
-        end: start_line + to,
     }
 }
 
@@ -585,6 +577,14 @@ fn strip_indent(line: &str, count: usize) -> &str {
         }
     }
     line.get(start..).unwrap_or_default()
+}
+
+/// Create a verbatim region for the given local line range.
+const fn verbatim(start_line: usize, from: usize, to: usize) -> Region {
+    Region::Verbatim {
+        start: start_line + from,
+        end: start_line + to,
+    }
 }
 
 #[cfg(test)]

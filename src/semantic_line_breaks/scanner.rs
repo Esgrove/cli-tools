@@ -158,6 +158,14 @@ pub(super) fn scan_line_buffered(
     }
 }
 
+/// Whether the remaining line at the character index starts with `needle`.
+pub(super) fn rest_starts_with(chars: &[(usize, char)], index: usize, needle: &str) -> bool {
+    needle
+        .chars()
+        .enumerate()
+        .all(|(offset, expected)| char_at(chars, index + offset) == Some(expected))
+}
+
 /// Handle states that apply to whole lines, returning the result when the line needs no scanning.
 fn line_level_state(line: &str, state: &mut ScanState) -> Option<ScanResult> {
     match state {
@@ -412,14 +420,6 @@ fn scan_quote(chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSynta
 /// The character at the byte-indexed position, if any.
 fn char_at(chars: &[(usize, char)], position: usize) -> Option<char> {
     chars.get(position).map(|(_, character)| *character)
-}
-
-/// Whether the remaining line at the character index starts with `needle`.
-pub(super) fn rest_starts_with(chars: &[(usize, char)], index: usize, needle: &str) -> bool {
-    needle
-        .chars()
-        .enumerate()
-        .all(|(offset, expected)| char_at(chars, index + offset) == Some(expected))
 }
 
 /// Whether three consecutive `quote` characters start at `index`.

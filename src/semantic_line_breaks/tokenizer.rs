@@ -81,6 +81,38 @@ pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) 
     tokens
 }
 
+/// Whether the character may be peeled off the end of a chunk as closing punctuation.
+pub(super) const fn is_trailing_closer(character: char) -> bool {
+    is_closer(character) || matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | '…' | '—' | '–')
+}
+
+/// Whether the word list contains the word, ignoring ASCII case.
+pub(super) fn contains_word(words: &[&str], word: &str) -> bool {
+    words.iter().any(|candidate| candidate.eq_ignore_ascii_case(word))
+}
+
+/// Whether the word is a configured abbreviation that never ends a sentence.
+pub(super) fn is_abbreviation(core: &str, options: &FormatOptions) -> bool {
+    if core.is_ascii() {
+        return options.abbreviations.iter().any(|abbreviation| {
+            abbreviation
+                .strip_suffix('.')
+                .is_some_and(|word| word.eq_ignore_ascii_case(core))
+        });
+    }
+    let lowercase = format!("{}.", core.to_lowercase());
+    options.abbreviations.contains(&lowercase)
+}
+
+/// Whether placing the token at a line start would change Markdown structure.
+pub(super) fn starts_markdown_structure(token: &Token<'_>) -> bool {
+    let text = token.text_cow();
+    let can_be_structure = text
+        .starts_with(|character: char| matches!(character, '-' | '+' | '*' | '>' | '|' | '#' | '`' | '~' | '0'..='9'));
+    can_be_structure && (RE_MARKDOWN_STRUCTURE.is_match(&text) || text.starts_with('#'))
+        || text.chars().all(is_trailing_closer)
+}
+
 /// Turn a double hyphen that precedes a command line flag into a plain word.
 ///
 /// A line such as `pnpm run migrate -- --env dev` uses the double hyphen to separate arguments,
@@ -206,11 +238,6 @@ fn has_unclosed_bracket(text: &str) -> bool {
     depth > 0
 }
 
-/// Whether the character may be peeled off the end of a chunk as closing punctuation.
-pub(super) const fn is_trailing_closer(character: char) -> bool {
-    is_closer(character) || matches!(character, '.' | ',' | ';' | ':' | '!' | '?' | '…' | '—' | '–')
-}
-
 /// Detect an unbreakable atom starting at `start`, returning its end byte index and kind.
 fn atom_at(text: &str, start: usize) -> Option<(usize, TokenKind)> {
     let rest = text.get(start..)?;
@@ -318,33 +345,6 @@ fn classify_core(core: &str, bare: bool) -> TokenKind {
         return TokenKind::Identifier;
     }
     TokenKind::Word
-}
-
-/// Whether the word list contains the word, ignoring ASCII case.
-pub(super) fn contains_word(words: &[&str], word: &str) -> bool {
-    words.iter().any(|candidate| candidate.eq_ignore_ascii_case(word))
-}
-
-/// Whether the word is a configured abbreviation that never ends a sentence.
-pub(super) fn is_abbreviation(core: &str, options: &FormatOptions) -> bool {
-    if core.is_ascii() {
-        return options.abbreviations.iter().any(|abbreviation| {
-            abbreviation
-                .strip_suffix('.')
-                .is_some_and(|word| word.eq_ignore_ascii_case(core))
-        });
-    }
-    let lowercase = format!("{}.", core.to_lowercase());
-    options.abbreviations.contains(&lowercase)
-}
-
-/// Whether placing the token at a line start would change Markdown structure.
-pub(super) fn starts_markdown_structure(token: &Token<'_>) -> bool {
-    let text = token.text_cow();
-    let can_be_structure = text
-        .starts_with(|character: char| matches!(character, '-' | '+' | '*' | '>' | '|' | '#' | '`' | '~' | '0'..='9'));
-    can_be_structure && (RE_MARKDOWN_STRUCTURE.is_match(&text) || text.starts_with('#'))
-        || text.chars().all(is_trailing_closer)
 }
 
 #[cfg(test)]

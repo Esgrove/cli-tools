@@ -183,6 +183,43 @@ pub(super) fn split_tokens<'text>(
     pieces
 }
 
+/// Violations for original lines that exceed the width limits.
+pub(super) fn over_long_line_violations(
+    paragraph: &Paragraph,
+    options: &FormatOptions,
+    hard_limit: usize,
+    changed: bool,
+) -> Vec<Violation> {
+    let first_prefix = prefix_width(&paragraph.first_prefix, options.tab_width);
+    let rest_prefix = prefix_width(&paragraph.rest_prefix, options.tab_width);
+    paragraph
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let marker = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
+            let prefix = if index == 0 { first_prefix } else { rest_prefix };
+            // A character count is never larger than a byte count,
+            // so a line that is short in bytes cannot reach the limit and needs no counting.
+            if prefix + line.len() + marker.marker().len() <= options.max_width {
+                return None;
+            }
+            let width = prefix + line.chars().count() + marker.marker().len();
+            let fixable = changed && width > options.max_width;
+            if !fixable && width <= hard_limit {
+                return None;
+            }
+            Some(Violation {
+                line: paragraph.start_line + index + 1,
+                column: None,
+                kind: ViolationKind::LineTooLong,
+                message: format!("line is {width} characters, limit is {}", options.max_width).into(),
+                fixable,
+            })
+        })
+        .collect()
+}
+
 /// Plan where a run of tokens breaks into lines, and return the token indices that start a new line.
 ///
 /// The whole run is planned at once so that the lines come out balanced.
@@ -503,25 +540,6 @@ fn imbalance_cost(limit: usize, rendered: usize, next_rendered: usize) -> usize 
     IMBALANCE_WEIGHT * excess * excess
 }
 
-/// Cost of ending a line at a boundary, in the squared share units of `width_cost`.
-///
-/// A sentence end is free.
-/// A weaker boundary has to earn its place:
-/// it costs as much as leaving the share of the budget given in the match unused,
-/// so a clearly better boundary wins over a small gain in balance.
-const fn break_cost(rank: Rank) -> usize {
-    match rank {
-        Rank::Forced | Rank::Sentence => 0,
-        Rank::Colon => 5_000,
-        Rank::ClauseTier1 => 10_000,
-        Rank::ClauseTier2 => 25_000,
-        Rank::Punctuation => 50_000,
-        Rank::ClauseTier3 => 80_000,
-        Rank::ClauseTier4 => 250_000,
-        Rank::Word => WORD_BREAK_COST,
-    }
-}
-
 /// Whether a line that runs over the budget has earned the overflow.
 ///
 /// The width limit is soft,
@@ -577,41 +595,23 @@ fn cumulative_widths(tokens: &[Token<'_>]) -> Vec<usize> {
     widths
 }
 
-/// Violations for original lines that exceed the width limits.
-pub(super) fn over_long_line_violations(
-    paragraph: &Paragraph,
-    options: &FormatOptions,
-    hard_limit: usize,
-    changed: bool,
-) -> Vec<Violation> {
-    let first_prefix = prefix_width(&paragraph.first_prefix, options.tab_width);
-    let rest_prefix = prefix_width(&paragraph.rest_prefix, options.tab_width);
-    paragraph
-        .lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let marker = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
-            let prefix = if index == 0 { first_prefix } else { rest_prefix };
-            // A character count is never larger than a byte count,
-            // so a line that is short in bytes cannot reach the limit and needs no counting.
-            if prefix + line.len() + marker.marker().len() <= options.max_width {
-                return None;
-            }
-            let width = prefix + line.chars().count() + marker.marker().len();
-            let fixable = changed && width > options.max_width;
-            if !fixable && width <= hard_limit {
-                return None;
-            }
-            Some(Violation {
-                line: paragraph.start_line + index + 1,
-                column: None,
-                kind: ViolationKind::LineTooLong,
-                message: format!("line is {width} characters, limit is {}", options.max_width).into(),
-                fixable,
-            })
-        })
-        .collect()
+/// Cost of ending a line at a boundary, in the squared share units of `width_cost`.
+///
+/// A sentence end is free.
+/// A weaker boundary has to earn its place:
+/// it costs as much as leaving the share of the budget given in the match unused,
+/// so a clearly better boundary wins over a small gain in balance.
+const fn break_cost(rank: Rank) -> usize {
+    match rank {
+        Rank::Forced | Rank::Sentence => 0,
+        Rank::Colon => 5_000,
+        Rank::ClauseTier1 => 10_000,
+        Rank::ClauseTier2 => 25_000,
+        Rank::Punctuation => 50_000,
+        Rank::ClauseTier3 => 80_000,
+        Rank::ClauseTier4 => 250_000,
+        Rank::Word => WORD_BREAK_COST,
+    }
 }
 
 #[cfg(test)]

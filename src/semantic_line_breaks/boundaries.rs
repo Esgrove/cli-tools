@@ -22,6 +22,9 @@ pub(super) const MIN_COLON_INTRODUCTION_WORDS: usize = 3;
 /// Minimum number of tokens on a line before a missing terminal punctuation counts as a mid-clause break.
 const MIN_TOKENS_FOR_MID_CLAUSE: usize = 3;
 
+/// Longest clause word that the table can hold, which bounds the lowercasing buffer.
+const MAX_CLAUSE_WORD: usize = 16;
+
 /// Clause words that are the most preferred break points.
 const CLAUSE_TIER_1: &[&str] = &["and"];
 
@@ -78,9 +81,6 @@ const DANGLING_WORDS: &[&str] = &[
     "are", "be", "was", "were", "that", "which", "this", "these", "those", "its", "their", "as", "not", "no", "any",
     "all", "each", "every", "same", "than", "very", "more", "most",
 ];
-
-/// Longest clause word that the table can hold, which bounds the lowercasing buffer.
-const MAX_CLAUSE_WORD: usize = 16;
 
 /// Clause words with their break quality, sorted by word.
 ///
@@ -164,21 +164,6 @@ pub fn ends_sentence(token: &Token<'_>, options: &FormatOptions) -> bool {
     true
 }
 
-/// Whether the token can start a new sentence.
-fn starts_sentence(token: &Token<'_>) -> bool {
-    if matches!(
-        token.kind,
-        TokenKind::Code | TokenKind::Link | TokenKind::Url | TokenKind::Html
-    ) {
-        return true;
-    }
-    token.first_char().is_some_and(|first| {
-        first.is_uppercase()
-            || first.is_ascii_digit()
-            || matches!(first, '"' | '“' | '\'' | '‘' | '(' | '[' | '*' | '_')
-    })
-}
-
 /// Rank of the clause word at `index`, or `None` when the token is not a clause starter.
 #[must_use]
 pub fn clause_rank(tokens: &[Token<'_>], index: usize, options: &FormatOptions) -> Option<Rank> {
@@ -204,23 +189,150 @@ pub fn clause_rank(tokens: &[Token<'_>], index: usize, options: &FormatOptions) 
         .then_some(Rank::ClauseTier4)
 }
 
-/// Rank of a clause word in the table, ignoring ASCII case.
+/// Whether the break between two consecutive lines falls in the middle of a clause.
+#[must_use]
+pub fn is_mid_clause_break(
+    line_a: &[Token<'_>],
+    line_b: &[Token<'_>],
+    hard_break: HardBreak,
+    options: &FormatOptions,
+) -> bool {
+    if hard_break != HardBreak::None || line_a.len() < MIN_TOKENS_FOR_MID_CLAUSE {
+        return false;
+    }
+    let (Some(last), Some(first)) = (line_a.last(), line_b.first()) else {
+        return false;
+    };
+    if last.ends_sentence_punctuation() || last.ends_clause_punctuation() || last.ends_with_opener() {
+        return false;
+    }
+    if last.trailing.contains([')', ']', '"', '\'']) || first.leading.contains(['(', '[', '"', '\'']) {
+        return false;
+    }
+    if clause_rank(line_b, 0, options).is_some() {
+        return false;
+    }
+    if first.text().ends_with(':') || starts_markdown_structure(first) {
+        return false;
+    }
+    let last_is_dangling = last.kind == TokenKind::Word && contains_word(DANGLING_WORDS, &last.core);
+    let first_is_uppercase = first.core.chars().next().is_some_and(char::is_uppercase);
+    if first_is_uppercase && !last_is_dangling && clause_rank(line_a, line_a.len() - 1, options).is_none() {
+        return false;
+    }
+    true
+}
+
+/// Group nesting depth before each token, counting only the groups that are closed later.
 ///
-/// A word longer than every clause word cannot be one, so it is rejected on its length alone.
-fn clause_word_rank(word: &str) -> Option<Rank> {
-    let bytes = word.as_bytes();
-    if bytes.is_empty() || bytes.len() > MAX_CLAUSE_WORD {
-        return None;
+/// A group that is never closed is ignored,
+/// so a stray parenthesis or emphasis marker in prose does not make the rest of the text unbreakable.
+///
+/// Returns an empty vector when the tokens hold no groups, since every depth is then zero.
+pub(super) fn token_depths(tokens: &[Token<'_>], collect: EventCollector) -> Vec<usize> {
+    let mut events = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        collect(token, index, &mut events);
     }
-    let mut lowercase = [0u8; MAX_CLAUSE_WORD];
-    for (slot, byte) in lowercase.iter_mut().zip(bytes) {
-        *slot = byte.to_ascii_lowercase();
+    if events.is_empty() {
+        return Vec::new();
     }
-    let key = lowercase.get(..bytes.len())?;
-    let index = CLAUSE_WORDS
-        .binary_search_by(|(candidate, _)| candidate.as_bytes().cmp(key))
-        .ok()?;
-    CLAUSE_WORDS.get(index).map(|(_, rank)| *rank)
+    matched_depths(&mut events, tokens.len())
+}
+
+/// Whether each paragraph line ends inside a group that closes on a later line.
+///
+/// Returns an empty vector when the lines hold no groups.
+pub(super) fn lines_ending_inside(line_tokens: &[Vec<Token<'_>>], collect: EventCollector) -> Vec<bool> {
+    let mut events = Vec::new();
+    for (index, tokens) in line_tokens.iter().enumerate() {
+        for token in tokens {
+            collect(token, index, &mut events);
+        }
+    }
+    if events.is_empty() {
+        return Vec::new();
+    }
+    matched_depths(&mut events, line_tokens.len())
+        .into_iter()
+        .skip(1)
+        .map(|depth| depth > 0)
+        .collect()
+}
+
+/// Append the bracket characters of the token as span events.
+///
+/// Brackets are ASCII, so the parts are scanned as bytes to avoid decoding every character.
+/// The inner text of an atom is skipped, so a bracket in a code span or a link does not count.
+pub(super) fn collect_bracket_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
+    let core = if token.is_atom() { "" } else { token.core.as_ref() };
+    for part in [token.leading.as_ref(), core, token.trailing.as_ref()] {
+        for byte in part.bytes() {
+            match byte {
+                b'(' | b'[' | b'{' => events.push(SpanEvent { position, opens: true }),
+                b')' | b']' | b'}' => events.push(SpanEvent { position, opens: false }),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Append the emphasis span events of the token as span events.
+///
+/// A token that carries both of its own markers, such as `*strong*`, delimits no span past itself.
+/// Delimited text is skipped, so a marker inside a code span, a link, or a URL does not count.
+/// Other kinds are read as prose, since `_italic` looks the same as an identifier on its own.
+pub(super) fn collect_emphasis_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
+    if is_delimited(token.kind) || !holds_emphasis_marker(token) {
+        return;
+    }
+    let (opening, open_marker) = emphasis_run(
+        token
+            .leading
+            .chars()
+            .chain(token.core.chars())
+            .chain(token.trailing.chars()),
+    );
+    let (closing, close_marker) = emphasis_run(
+        token
+            .trailing
+            .chars()
+            .rev()
+            .chain(token.core.chars().rev())
+            .chain(token.leading.chars().rev()),
+    );
+    // A single tilde delimits nothing, unlike a single asterisk or underscore,
+    // so a home directory such as `~/.config` never opens a span.
+    let opening = if open_marker == '~' && opening < 2 { 0 } else { opening };
+    let closing = if close_marker == '~' && closing < 2 { 0 } else { closing };
+    if opening > 0 && closing > 0 && open_marker == close_marker {
+        return;
+    }
+    if opening > 0 {
+        events.push(SpanEvent { position, opens: true });
+    }
+    if closing > 0 {
+        events.push(SpanEvent { position, opens: false });
+    }
+}
+
+/// Append the quote span events of the token as span events.
+///
+/// A straight or curly quote mark is the same symbol whether it opens or closes a quoted phrase,
+/// so its role is read from where it sits on the token instead of which character it is:
+/// a leading quote attaches to the word it opens, a trailing quote attaches to the word it closes,
+/// the same way `"hello` and `world"` peel their quote onto the word they sit against.
+/// The inner text of an atom is skipped, so a quote in a code span or a URL does not count.
+pub(super) fn collect_quote_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
+    if is_delimited(token.kind) {
+        return;
+    }
+    if token.leading.contains(['"', '\'', '“', '‘']) {
+        events.push(SpanEvent { position, opens: true });
+    }
+    if token.trailing.contains(['"', '\'', '”', '’']) {
+        events.push(SpanEvent { position, opens: false });
+    }
 }
 
 /// Find all break candidates between the tokens, ranked by quality.
@@ -285,43 +397,6 @@ fn touches_dash(previous: &Token, current: &Token) -> bool {
     previous.kind == TokenKind::Dash || current.kind == TokenKind::Dash || previous.trailing.ends_with(['—', '–'])
 }
 
-/// Group nesting depth before each token, counting only the groups that are closed later.
-///
-/// A group that is never closed is ignored,
-/// so a stray parenthesis or emphasis marker in prose does not make the rest of the text unbreakable.
-///
-/// Returns an empty vector when the tokens hold no groups, since every depth is then zero.
-pub(super) fn token_depths(tokens: &[Token<'_>], collect: EventCollector) -> Vec<usize> {
-    let mut events = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
-        collect(token, index, &mut events);
-    }
-    if events.is_empty() {
-        return Vec::new();
-    }
-    matched_depths(&mut events, tokens.len())
-}
-
-/// Whether each paragraph line ends inside a group that closes on a later line.
-///
-/// Returns an empty vector when the lines hold no groups.
-pub(super) fn lines_ending_inside(line_tokens: &[Vec<Token<'_>>], collect: EventCollector) -> Vec<bool> {
-    let mut events = Vec::new();
-    for (index, tokens) in line_tokens.iter().enumerate() {
-        for token in tokens {
-            collect(token, index, &mut events);
-        }
-    }
-    if events.is_empty() {
-        return Vec::new();
-    }
-    matched_depths(&mut events, line_tokens.len())
-        .into_iter()
-        .skip(1)
-        .map(|depth| depth > 0)
-        .collect()
-}
-
 /// Nesting depth before each position, counting only the events that pair up.
 ///
 /// The result holds one entry more than `count`,
@@ -349,21 +424,23 @@ fn matched_depths(events: &mut Vec<SpanEvent>, count: usize) -> Vec<usize> {
     depths
 }
 
-/// Append the bracket characters of the token as span events.
+/// Rank of a clause word in the table, ignoring ASCII case.
 ///
-/// Brackets are ASCII, so the parts are scanned as bytes to avoid decoding every character.
-/// The inner text of an atom is skipped, so a bracket in a code span or a link does not count.
-pub(super) fn collect_bracket_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
-    let core = if token.is_atom() { "" } else { token.core.as_ref() };
-    for part in [token.leading.as_ref(), core, token.trailing.as_ref()] {
-        for byte in part.bytes() {
-            match byte {
-                b'(' | b'[' | b'{' => events.push(SpanEvent { position, opens: true }),
-                b')' | b']' | b'}' => events.push(SpanEvent { position, opens: false }),
-                _ => {}
-            }
-        }
+/// A word longer than every clause word cannot be one, so it is rejected on its length alone.
+fn clause_word_rank(word: &str) -> Option<Rank> {
+    let bytes = word.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_CLAUSE_WORD {
+        return None;
     }
+    let mut lowercase = [0u8; MAX_CLAUSE_WORD];
+    for (slot, byte) in lowercase.iter_mut().zip(bytes) {
+        *slot = byte.to_ascii_lowercase();
+    }
+    let key = lowercase.get(..bytes.len())?;
+    let index = CLAUSE_WORDS
+        .binary_search_by(|(candidate, _)| candidate.as_bytes().cmp(key))
+        .ok()?;
+    CLAUSE_WORDS.get(index).map(|(_, rank)| *rank)
 }
 
 /// Drop the events of groups that are never opened or never closed.
@@ -384,45 +461,6 @@ fn retain_matched_events(events: &mut Vec<SpanEvent>) {
     }
     let mut matched = matched.into_iter();
     events.retain(|_| matched.next().unwrap_or(false));
-}
-
-/// Append the emphasis span events of the token as span events.
-///
-/// A token that carries both of its own markers, such as `*strong*`, delimits no span past itself.
-/// Delimited text is skipped, so a marker inside a code span, a link, or a URL does not count.
-/// Other kinds are read as prose, since `_italic` looks the same as an identifier on its own.
-pub(super) fn collect_emphasis_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
-    if is_delimited(token.kind) || !holds_emphasis_marker(token) {
-        return;
-    }
-    let (opening, open_marker) = emphasis_run(
-        token
-            .leading
-            .chars()
-            .chain(token.core.chars())
-            .chain(token.trailing.chars()),
-    );
-    let (closing, close_marker) = emphasis_run(
-        token
-            .trailing
-            .chars()
-            .rev()
-            .chain(token.core.chars().rev())
-            .chain(token.leading.chars().rev()),
-    );
-    // A single tilde delimits nothing, unlike a single asterisk or underscore,
-    // so a home directory such as `~/.config` never opens a span.
-    let opening = if open_marker == '~' && opening < 2 { 0 } else { opening };
-    let closing = if close_marker == '~' && closing < 2 { 0 } else { closing };
-    if opening > 0 && closing > 0 && open_marker == close_marker {
-        return;
-    }
-    if opening > 0 {
-        events.push(SpanEvent { position, opens: true });
-    }
-    if closing > 0 {
-        events.push(SpanEvent { position, opens: false });
-    }
 }
 
 /// Length of the emphasis marker run the characters start with, and the marker character.
@@ -450,6 +488,21 @@ fn emphasis_run(characters: impl Iterator<Item = char>) -> (usize, char) {
     (0, '\0')
 }
 
+/// Whether the token can start a new sentence.
+fn starts_sentence(token: &Token<'_>) -> bool {
+    if matches!(
+        token.kind,
+        TokenKind::Code | TokenKind::Link | TokenKind::Url | TokenKind::Html
+    ) {
+        return true;
+    }
+    token.first_char().is_some_and(|first| {
+        first.is_uppercase()
+            || first.is_ascii_digit()
+            || matches!(first, '"' | '“' | '\'' | '‘' | '(' | '[' | '*' | '_')
+    })
+}
+
 /// Whether any part of the token holds a marker character at all.
 ///
 /// A run has to start from a marker, so a token without one delimits nothing,
@@ -475,59 +528,6 @@ const fn is_delimited(kind: TokenKind) -> bool {
         kind,
         TokenKind::Code | TokenKind::Link | TokenKind::Html | TokenKind::Url
     )
-}
-
-/// Append the quote span events of the token as span events.
-///
-/// A straight or curly quote mark is the same symbol whether it opens or closes a quoted phrase,
-/// so its role is read from where it sits on the token instead of which character it is:
-/// a leading quote attaches to the word it opens, a trailing quote attaches to the word it closes,
-/// the same way `"hello` and `world"` peel their quote onto the word they sit against.
-/// The inner text of an atom is skipped, so a quote in a code span or a URL does not count.
-pub(super) fn collect_quote_events(token: &Token<'_>, position: usize, events: &mut Vec<SpanEvent>) {
-    if is_delimited(token.kind) {
-        return;
-    }
-    if token.leading.contains(['"', '\'', '“', '‘']) {
-        events.push(SpanEvent { position, opens: true });
-    }
-    if token.trailing.contains(['"', '\'', '”', '’']) {
-        events.push(SpanEvent { position, opens: false });
-    }
-}
-
-/// Whether the break between two consecutive lines falls in the middle of a clause.
-#[must_use]
-pub fn is_mid_clause_break(
-    line_a: &[Token<'_>],
-    line_b: &[Token<'_>],
-    hard_break: HardBreak,
-    options: &FormatOptions,
-) -> bool {
-    if hard_break != HardBreak::None || line_a.len() < MIN_TOKENS_FOR_MID_CLAUSE {
-        return false;
-    }
-    let (Some(last), Some(first)) = (line_a.last(), line_b.first()) else {
-        return false;
-    };
-    if last.ends_sentence_punctuation() || last.ends_clause_punctuation() || last.ends_with_opener() {
-        return false;
-    }
-    if last.trailing.contains([')', ']', '"', '\'']) || first.leading.contains(['(', '[', '"', '\'']) {
-        return false;
-    }
-    if clause_rank(line_b, 0, options).is_some() {
-        return false;
-    }
-    if first.text().ends_with(':') || starts_markdown_structure(first) {
-        return false;
-    }
-    let last_is_dangling = last.kind == TokenKind::Word && contains_word(DANGLING_WORDS, &last.core);
-    let first_is_uppercase = first.core.chars().next().is_some_and(char::is_uppercase);
-    if first_is_uppercase && !last_is_dangling && clause_rank(line_a, line_a.len() - 1, options).is_none() {
-        return false;
-    }
-    true
 }
 
 #[cfg(test)]

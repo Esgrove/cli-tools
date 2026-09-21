@@ -162,22 +162,6 @@ pub fn split_source_regions_scanned(lines: &[&str], kind: FileKind, scan: &LineS
     regions
 }
 
-/// Whether a line comment already sits directly above the given line.
-///
-/// A comment moved above such a line would be reflowed together with the comment above it,
-/// which merges two separate notes into one sentence, so those lines are reported but not fixed.
-fn has_comment_line_above(lines: &[&str], index: usize, style: &CommentStyle, inside_string: &[bool]) -> bool {
-    let Some(previous) = index.checked_sub(1) else {
-        return false;
-    };
-    if inside_string.get(previous).copied().unwrap_or(false) {
-        return false;
-    }
-    lines
-        .get(previous)
-        .is_some_and(|line| line_marker(line.trim_start(), style.line_markers).is_some())
-}
-
 /// Find trailing comments and build replacement line pairs for each affected line.
 ///
 /// Returns one entry per input line, `Some((comment_line, code_line))` for lines to split,
@@ -249,6 +233,31 @@ pub fn fix_trailing_comments_scanned(
     (replacements, violations)
 }
 
+/// The line comment marker the trimmed line starts with, when followed by whitespace or the end of the line.
+pub(super) fn line_marker<'a>(trimmed: &str, markers: &[&'a str]) -> Option<&'a str> {
+    markers.iter().copied().find(|marker| {
+        trimmed
+            .strip_prefix(marker)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
+    })
+}
+
+/// Whether a line comment already sits directly above the given line.
+///
+/// A comment moved above such a line would be reflowed together with the comment above it,
+/// which merges two separate notes into one sentence, so those lines are reported but not fixed.
+fn has_comment_line_above(lines: &[&str], index: usize, style: &CommentStyle, inside_string: &[bool]) -> bool {
+    let Some(previous) = index.checked_sub(1) else {
+        return false;
+    };
+    if inside_string.get(previous).copied().unwrap_or(false) {
+        return false;
+    }
+    lines
+        .get(previous)
+        .is_some_and(|line| line_marker(line.trim_start(), style.line_markers).is_some())
+}
+
 /// Split a line at a comment marker byte offset into code and comment text.
 fn trailing_comment(line: &str, comment_start: usize, syntax: &StringSyntax) -> Option<TrailingComment> {
     let code = line.get(..comment_start)?.trim_end();
@@ -274,15 +283,6 @@ fn is_directive(text: &str, options: &FormatOptions) -> bool {
         .directive_prefixes
         .iter()
         .any(|prefix| starts_with_ignore_case(normalized, prefix))
-}
-
-/// The line comment marker the trimmed line starts with, when followed by whitespace or the end of the line.
-pub(super) fn line_marker<'a>(trimmed: &str, markers: &[&'a str]) -> Option<&'a str> {
-    markers.iter().copied().find(|marker| {
-        trimmed
-            .strip_prefix(marker)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
-    })
 }
 
 /// Comment content after the marker and a single space.

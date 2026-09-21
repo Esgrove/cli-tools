@@ -174,21 +174,6 @@ impl<'text> Token<'text> {
     }
 }
 
-/// Width of the text in characters, counting bytes when every one of them is ASCII.
-fn text_width(text: &str) -> usize {
-    if text.is_ascii() {
-        text.len()
-    } else {
-        text.chars().count()
-    }
-}
-
-/// Width of the three parts of a token in characters.
-fn token_width(leading: &str, core: &str, trailing: &str) -> u32 {
-    let width = text_width(leading) + text_width(core) + text_width(trailing);
-    u32::try_from(width).unwrap_or(u32::MAX)
-}
-
 /// Whether the character closes a bracket or quote.
 #[must_use]
 pub(super) const fn is_closer(character: char) -> bool {
@@ -202,6 +187,21 @@ pub(super) const fn is_closer(character: char) -> bool {
 #[must_use]
 pub(super) const fn is_opener(character: char) -> bool {
     matches!(character, '(' | '[' | '{' | '"' | '\'' | '“' | '‘' | '«')
+}
+
+/// Width of the text in characters, counting bytes when every one of them is ASCII.
+fn text_width(text: &str) -> usize {
+    if text.is_ascii() {
+        text.len()
+    } else {
+        text.chars().count()
+    }
+}
+
+/// Width of the three parts of a token in characters.
+fn token_width(leading: &str, core: &str, trailing: &str) -> u32 {
+    let width = text_width(leading) + text_width(core) + text_width(trailing);
+    u32::try_from(width).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
