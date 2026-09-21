@@ -372,4 +372,66 @@ mod test_docstring_quotes {
         assert!(replacements.iter().all(Option::is_none));
         assert!(violations.is_empty());
     }
+
+    #[test]
+    fn a_short_wrapping_docstring_keeps_quotes_around_one_line() {
+        let (fixed, violations) = fix(&["    \"\"\"Return the label", "    of the given value.\"\"\""]);
+        assert_eq!(
+            fixed,
+            vec!["    \"\"\"Return the label", "    of the given value.\"\"\""]
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn a_blank_line_in_a_docstring_moves_the_quotes() {
+        let (fixed, violations) = fix(&[
+            "    \"\"\"Short summary.",
+            "",
+            "    More detail that still fits the width.",
+            "    \"\"\"",
+        ]);
+        assert_eq!(
+            fixed,
+            vec![
+                "    \"\"\"",
+                "    Short summary.",
+                "",
+                "    More detail that still fits the width.",
+                "    \"\"\"",
+            ]
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].kind, ViolationKind::DocstringQuotes);
+    }
+
+    #[test]
+    fn a_heading_inside_a_docstring_moves_the_quotes() {
+        // No blank line, but the heading is its own region, so the docstring cannot collapse to one line.
+        let (fixed, violations) = fix(&["    \"\"\"# Errors", "    Returns when x.\"\"\""]);
+        assert_eq!(
+            fixed,
+            vec!["    \"\"\"", "    # Errors", "    Returns when x.", "    \"\"\""]
+        );
+        assert_eq!(violations.len(), 2);
+        assert!(
+            violations
+                .iter()
+                .all(|violation| violation.kind == ViolationKind::DocstringQuotes)
+        );
+    }
+
+    #[test]
+    fn a_docstring_too_wide_to_collapse_moves_the_quotes() {
+        let options = FormatOptions {
+            max_width: 40,
+            ..FormatOptions::default()
+        };
+        let lines = ["    \"\"\"Return the long label of the given value.", "    \"\"\""];
+        let scan = scan_lines(&lines, FileKind::Python);
+        let (replacements, violations) = fix_docstring_quotes(&lines, FileKind::Python, &options, &scan);
+        assert!(replacements[0].is_some());
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].kind, ViolationKind::DocstringQuotes);
+    }
 }

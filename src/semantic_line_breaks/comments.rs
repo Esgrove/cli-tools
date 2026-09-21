@@ -1,7 +1,9 @@
 //! Comment extraction and trailing comment detection for the semantic line breaks formatter.
 //!
-//! Finds line comment blocks, block comments, and Python docstrings in source files
+//! Finds line comment blocks and block comments in source files
 //! and hands their content to the Markdown splitter.
+//! Python docstring parsing and quote placement live in [`super::docstrings`],
+//! which this module calls when a triple quoted block opens.
 //! Also produces the replacement lines that move a comment sharing a line with code above that code.
 //! The scanning this needs lives in [`super::scanner`].
 

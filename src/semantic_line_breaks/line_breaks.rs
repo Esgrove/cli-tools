@@ -9,6 +9,7 @@
 use std::ops::Range;
 
 use super::boundaries::{MIN_COLON_INTRODUCTION_WORDS, PHRASE_CONJUNCTIONS, find_boundaries};
+use super::list_runs::suppress_list_runs;
 use super::options::FormatOptions;
 use super::paragraph::Paragraph;
 use super::rank::Rank;
@@ -23,16 +24,6 @@ use super::violation::{Violation, ViolationKind};
 /// Tolerating a small overflow allows breaking before a conjunction
 /// when that reads better than a strict break at a comma.
 const SOFT_OVERFLOW_FRACTION: f64 = 0.05;
-
-/// Overflow tolerance for the given width, zero when `strict` asks for a hard cap at the width.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-pub(super) fn soft_overflow(max_width: usize, strict: bool) -> usize {
-    if strict {
-        0
-    } else {
-        (max_width as f64 * SOFT_OVERFLOW_FRACTION) as usize
-    }
-}
 
 /// Minimum fill of the budget, in percent, for a boundary to count as a reachable strong break.
 const MIN_FILL_PERCENT: usize = 50;
@@ -53,16 +44,6 @@ const IMBALANCE_WEIGHT: usize = 1;
 
 /// Share of the budget a line may fill before it is crowded against the limit.
 const COMFORTABLE_FILL_FRACTION: f64 = 0.9;
-
-/// Width a run the formatter lays out itself aims at, out of the budget its line has.
-///
-/// A line the formatter chose stops short of the limit,
-/// so the text on it has room to grow before the next edit has to rewrap it.
-#[must_use]
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-pub(super) fn comfortable_fill(budget: usize) -> usize {
-    (budget as f64 * COMFORTABLE_FILL_FRACTION) as usize
-}
 
 /// Cost of filling a line to the limit where a clause boundary could have ended it comfortably.
 ///
@@ -95,15 +76,6 @@ const SKIPPED_COLON_COST: usize = 1_000_000;
 /// This stays above every semantic break cost,
 /// but below the cost of leaving even one character past the hard limit.
 const WORD_BREAK_COST: usize = 1_000_000;
-
-/// Conjunctions that introduce the last item of a list.
-///
-/// Only the ones that join items are here.
-/// A "but" joins two clauses, so it never continues a list of names.
-const LIST_CONJUNCTIONS: &[&str] = &["and", "or", "nor"];
-
-/// Smallest number of items a run needs before it reads as a list rather than as a pair.
-const MIN_LIST_ITEMS: usize = 3;
 
 /// Smallest usable budget. Paragraphs with a narrower budget are left alone.
 pub(super) const MIN_BUDGET: usize = 10;
@@ -165,6 +137,26 @@ impl LineWidths {
             overflow: soft_overflow(limit, strict),
         }
     }
+}
+
+/// Overflow tolerance for the given width, zero when `strict` asks for a hard cap at the width.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(super) fn soft_overflow(max_width: usize, strict: bool) -> usize {
+    if strict {
+        0
+    } else {
+        (max_width as f64 * SOFT_OVERFLOW_FRACTION) as usize
+    }
+}
+
+/// Width a run the formatter lays out itself aims at, out of the budget its line has.
+///
+/// A line the formatter chose stops short of the limit,
+/// so the text on it has room to grow before the next edit has to rewrap it.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub(super) fn comfortable_fill(budget: usize) -> usize {
+    (budget as f64 * COMFORTABLE_FILL_FRACTION) as usize
 }
 
 /// Break a run of tokens into lines that fit the budgets, preferring semantic boundaries.
@@ -296,6 +288,7 @@ fn plan_line_breaks(
     };
     let mut plans = vec![empty_tail; count + 1];
     let mut candidates = Vec::new();
+    let mut ranked_ends = Vec::new();
     // Only the first line of the paragraph has a budget of its own,
     // so the width it aims at and the prefix it carries are the same for every other line.
     let first = LineWidths::new(limit, first_budget, relaid_out, options.strict);
@@ -318,6 +311,7 @@ fn plan_line_breaks(
             table,
             options.allow_word_break,
             &mut candidates,
+            &mut ranked_ends,
         );
         for end in candidates.iter().copied() {
             let plan = plans.get(end);
@@ -372,6 +366,7 @@ fn collect_line_candidates(
     table: BreakTable<'_>,
     allow_word_break: bool,
     candidates: &mut Vec<usize>,
+    ranked_ends: &mut Vec<(usize, Rank)>,
 ) {
     let BreakTable {
         ranks,
@@ -407,25 +402,39 @@ fn collect_line_candidates(
         return;
     }
 
-    let has_semantic_break_in_range = (start + 1..count).any(|end| {
-        rank_at(ranks, end).is_some_and(|rank| rank > Rank::Word && span_width(widths, start, end) <= budget + overflow)
-    });
+    // One pass gathers every usable end and whether a semantic break fits the soft limit,
+    // then a second pass drops word ends that a semantic break made unnecessary.
+    // Word breaks are always kept when the caller asked for them with `--word-break`.
+    // Protected word ranks (inside quotes, brackets, or by a dash) stay out of this list,
+    // so they never stop the scan before a later usable end past the soft limit.
+    // `ranked_ends` is reused across every start of the plan so the DP does not allocate a buffer per start.
+    let soft_limit = budget + overflow;
+    ranked_ends.clear();
+    let mut has_semantic_break_in_range = false;
     for end in start + 1..count {
         let Some(rank) = rank_at(ranks, end) else {
             continue;
         };
-        if rank == Rank::Word
-            && (!word_fallbacks.get(end).copied().unwrap_or_default()
-                || !allow_word_break && has_semantic_break_in_range)
-        {
+        let width = span_width(widths, start, end);
+        if rank > Rank::Word && width <= soft_limit {
+            has_semantic_break_in_range = true;
+        }
+        if rank == Rank::Word && !word_fallbacks.get(end).copied().unwrap_or_default() {
             continue;
         }
-        candidates.push(end);
-        if span_width(widths, start, end) > budget + overflow {
+        ranked_ends.push((end, rank));
+        if width > soft_limit {
             // One boundary past the limit is kept for text that cannot be broken within it,
             // such as a long URL at the start of the line.
             break;
         }
+    }
+    let keep_word_breaks = allow_word_break || !has_semantic_break_in_range;
+    for &(end, rank) in ranked_ends.iter() {
+        if rank == Rank::Word && !keep_word_breaks {
+            continue;
+        }
+        candidates.push(end);
     }
     candidates.push(count);
 }
@@ -441,51 +450,6 @@ fn continues_past(ranks: &[Option<Rank>], end: usize, count: usize) -> bool {
 /// Rank of the boundary before the token at `index`, or `None` when no line may end there.
 fn rank_at(ranks: &[Option<Rank>], index: usize) -> Option<Rank> {
     ranks.get(index).copied().flatten()
-}
-
-/// Clear the break candidates inside every list of single word items that fits on one line.
-///
-/// A list such as "alpha, beta, gamma, and delta" reads as one unit,
-/// so a line may end before it or after it but not between two of its items.
-/// The run has to fit the budget, since a list too long for one line has to break somewhere.
-fn suppress_list_runs(tokens: &[Token<'_>], ranks: &mut [Option<Rank>], widths: &[usize], budget: usize) {
-    let count = tokens.len();
-    let mut start = 0;
-    while start < count {
-        let Some(end) = list_run_end(tokens, start) else {
-            start += 1;
-            continue;
-        };
-        if span_width(widths, start, end) <= budget {
-            for slot in ranks.get_mut(start + 1..end).unwrap_or_default() {
-                *slot = None;
-            }
-        }
-        start = end;
-    }
-}
-
-/// One past the last token of the list that starts at `start`, or `None` when no list starts there.
-///
-/// Every item but the last one carries its own comma,
-/// which is what tells a list of names from a sentence that happens to hold commas:
-/// an item of several words leaves all but its last token without one.
-fn list_run_end(tokens: &[Token<'_>], start: usize) -> Option<usize> {
-    let mut end = start;
-    while tokens.get(end).is_some_and(|token| token.trailing.ends_with(',')) {
-        end += 1;
-    }
-    if end - start + 1 < MIN_LIST_ITEMS {
-        return None;
-    }
-    if tokens
-        .get(end)
-        .is_some_and(|token| contains_word(LIST_CONJUNCTIONS, &token.core))
-    {
-        end += 1;
-    }
-    // The last item closes the list, so a run that reaches the end of the text is not one.
-    (end < tokens.len()).then_some(end + 1)
 }
 
 /// Count colon boundaries before each token index for constant-time range queries.
@@ -729,6 +693,24 @@ mod test_break_choice {
     }
 
     #[test]
+    fn an_empty_token_run_produces_no_lines() {
+        let mut is_first_line = true;
+        let mut violations = Vec::new();
+        let pieces = split_tokens(
+            Vec::new(),
+            Budgets { first: 120, rest: 120 },
+            true,
+            &mut is_first_line,
+            &FormatOptions::with_width(120),
+            1,
+            &mut violations,
+        );
+        assert!(pieces.is_empty());
+        assert!(violations.is_empty());
+        assert!(is_first_line);
+    }
+
+    #[test]
     fn an_introduction_that_ends_in_a_colon_gets_its_own_line() {
         let lines = [concat!(
             "Skip objects without a hierarchyPath: they share the same other fields as a sibling ",
@@ -947,86 +929,6 @@ mod test_break_choice {
         assert!(
             lines[0].chars().count() <= 60,
             "--strict must not let a line run past the width: {lines:?}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod test_list_runs {
-    use super::super::reflow::reflow_paragraph;
-    use super::*;
-    use crate::semantic_line_breaks::test_helpers::*;
-
-    /// End of the list starting at every token index of the text.
-    fn run_ends(text: &str) -> Vec<Option<usize>> {
-        let tokens = tokens(text);
-        (0..tokens.len()).map(|start| list_run_end(&tokens, start)).collect()
-    }
-
-    #[test]
-    fn three_single_word_items_are_a_list() {
-        assert_eq!(run_ends("keeps alpha, beta, gamma together").first(), Some(&None));
-        assert_eq!(run_ends("keeps alpha, beta, gamma together").get(1), Some(&Some(4)));
-    }
-
-    #[test]
-    fn a_conjunction_before_the_last_item_belongs_to_the_list() {
-        let ends = run_ends("targets alpha, beta, gamma, and delta because of it");
-        assert_eq!(ends.get(1), Some(&Some(6)));
-    }
-
-    #[test]
-    fn two_items_are_a_pair_rather_than_a_list() {
-        assert_eq!(run_ends("keeps alpha, beta together").get(1), Some(&None));
-    }
-
-    #[test]
-    fn items_of_several_words_are_not_a_list() {
-        // Only the last token of a multi word item carries the comma,
-        // so no two items ever sit next to each other.
-        let ends = run_ends("skips empty names, ignored group names, runtime ignored names, and the rest");
-        assert!(ends.iter().all(Option::is_none), "{ends:?}");
-    }
-
-    #[test]
-    fn a_list_that_reaches_the_end_of_the_text_is_not_one() {
-        assert!(run_ends("alpha, beta, gamma,").iter().all(Option::is_none));
-    }
-
-    #[test]
-    fn a_list_that_fits_one_line_is_not_split() {
-        let lines = [concat!(
-            "Without an explicit account list, `--upload` targets `alpha`, `beta`, `delta`, `gamma`, ",
-            "`kappa`, `lambda`, and `theta`, because the tool runs one account per environment."
-        )];
-        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
-        let reflowed = outcome.lines.expect("the sentence should wrap");
-        assert_eq!(
-            reflowed.first().map(String::as_str),
-            Some(concat!(
-                "Without an explicit account list, `--upload` targets `alpha`, `beta`, `delta`, `gamma`, ",
-                "`kappa`, `lambda`, and `theta`,"
-            ))
-        );
-    }
-
-    #[test]
-    fn a_list_too_long_for_one_line_still_breaks() {
-        let lines = [concat!(
-            "The tool targets `alpha`, `beta`, `delta`, `gamma`, `kappa`, `lambda`, `sigma`, `omega`, ",
-            "`sigmadelta`, `kappagamma`, `omegabeta`, and `deltalambda`, because one account is used per environment."
-        )];
-        let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
-        let reflowed = outcome.lines.expect("the sentence should wrap");
-        assert!(
-            reflowed
-                .iter()
-                .all(|line| line.chars().count() <= 120 + soft_overflow(120, false)),
-            "a list longer than a line has to break somewhere: {reflowed:?}"
-        );
-        assert!(
-            reflowed.first().is_some_and(|line| line.ends_with("`sigmadelta`,")),
-            "the break should fall between two items of the list: {reflowed:?}"
         );
     }
 }

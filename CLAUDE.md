@@ -111,19 +111,29 @@ Do not duplicate code in benchmark files.
 - `src/dot_rename/` - Algorithmic types and functions for dots (formatting, renaming)
 - `src/dupe_find/` - Algorithmic types and functions for dupefind (normalization, grouping)
 - `src/semantic_line_breaks/` - Algorithmic types and functions for slb:
-    - `types.rs` - Shared enums, structs, and format options
+    - `options.rs` - Rule set and the options controlling checking and formatting
+    - `paragraph.rs` - Hard break markers and the paragraph built from prose lines
+    - `violation.rs` - Violation categories and the records the checker reports
+    - `file_kind.rs` - File kind detection and the comment syntax each kind uses
     - `formatter.rs` - The check and fix pipeline, the public entry points
     - `tokenizer.rs` - Splitting a prose line into words and unbreakable atoms
+    - `token.rs` - Prose token kind and the token built from one line
     - `boundaries.rs` - Sentence and clause boundary ranking, bracket and emphasis nesting
+    - `rank.rs` - Break candidate ranking used to choose where a line breaks
     - `line_breaks.rs` - Break point planning and the cost model
+    - `list_runs.rs` - Suppressing breaks inside single word list runs
     - `rewording.rs` - Segment building, semicolon and dash rewording
     - `reflow.rs` - Paragraph reflow, the entry point the formatter calls per paragraph
-    - `comments.rs` - Comment block, docstring, and trailing comment extraction
+    - `comments.rs` - Comment block and trailing comment extraction
+    - `docstrings.rs` - Python docstring parsing and quote placement
     - `scanner.rs` - String aware line scanner
     - `regex_literals.rs` - Regex literal versus division detection
     - `string_syntax.rs` - Per language string and comment syntax table
     - `markdown.rs` - Markdown aware paragraph splitting
+    - `looks_like_code.rs` - Heuristic that treats a content line as source code
+    - `line_ranges.rs` - Line selection ranges used to scope checking and fixing
     - `project_config.rs` - Line width discovery from project config files
+    - `test_helpers.rs` - Shared builders for the prose unit tests
 - `src/bin/` - Individual CLI tool binaries, each a directory with a `main.rs` unless noted:
     - `dir_move/` → `dirmove` - Move files to matching directories
     - `divider.rs` → `div` - Print divider comments

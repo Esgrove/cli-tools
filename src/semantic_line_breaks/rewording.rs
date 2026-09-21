@@ -130,7 +130,7 @@ pub(super) fn build_segments<'text>(
 /// The width they have to fit is the comfortable one the formatter lays its own lines out to,
 /// not the limit, so an item is only joined when the line it becomes has room left in it.
 /// A hard break in the middle of an item is the author asking for the lines, so such an item is left alone.
-pub(super) fn list_item_fits_on_one_line(paragraph: &Paragraph, options: &FormatOptions) -> bool {
+fn list_item_fits_on_one_line(paragraph: &Paragraph, options: &FormatOptions) -> bool {
     if !paragraph.list_item || !options.rules.mid_clause_break || paragraph.lines.len() < 2 {
         return false;
     }
