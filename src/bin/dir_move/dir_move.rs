@@ -22,6 +22,7 @@ use cli_tools::{
 };
 
 use cli_tools::dir_move::mover;
+use cli_tools::dir_move::prefix_index::PrefixIndex;
 use cli_tools::dir_move::types::{
     DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, PromptResult, UnpackInfo,
     ValidCandidate,
@@ -1867,12 +1868,14 @@ impl DirMove {
         // Each file is processed independently, producing a list of valid candidates.
         // Results are then merged sequentially into the shared HashMap.
         let first_pass_bar = Self::create_progress_bar(file_count, "Collecting prefixes");
+        let prefix_index = PrefixIndex::new(files_with_names);
         let first_pass_results: Vec<Vec<ValidCandidate>> = files_with_names
             .par_iter()
             .map(|file_info| {
-                let prefix_candidates = utils::find_prefix_candidates(
+                let prefix_candidates = utils::find_prefix_candidates_indexed(
                     &file_info.filtered_name,
                     files_with_names,
+                    &prefix_index,
                     min_group_size,
                     min_prefix_chars,
                 );
@@ -1904,8 +1907,9 @@ impl DirMove {
 
                     // Verify this file itself has the prefix parts contiguous in its original name.
                     // This prevents adding files where filtering made non-adjacent parts appear adjacent.
-                    if !utils::parts_are_contiguous_with_combined(
+                    if !utils::parts_are_contiguous_lowered(
                         &file_info.original_parts,
+                        &file_info.original_parts_lower,
                         &candidate_parts,
                         &candidate_combined,
                     ) {
@@ -1989,8 +1993,9 @@ impl DirMove {
                     // Check if the file matches this group via precomputed prefix matching
                     // (which includes starts_with logic with word boundary enforcement)
                     if utils::prefix_matches_normalized_precomputed(file_info, group_key)
-                        && utils::parts_are_contiguous_with_combined(
+                        && utils::parts_are_contiguous_lowered(
                             &file_info.original_parts,
+                            &file_info.original_parts_lower,
                             &[group_key.as_str()],
                             group_combined,
                         )

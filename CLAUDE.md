@@ -117,7 +117,7 @@ Do not duplicate code in benchmark files.
 - `src/scan_cache.rs` - Cache for directory scan results
 - `src/simd.rs` - SIMD byte scanning kernels on `fearless_simd` with a scalar mode for comparison
 - `src/video_info.rs` - Video metadata from ffprobe
-- `src/dir_move/` - Algorithmic types and functions for dirmove (prefix grouping, matching)
+- `src/dir_move/` - Algorithmic types and functions for dirmove (prefix grouping, matching, the sorted prefix index)
 - `src/dot_rename/` - Algorithmic types and functions for dots (formatting, renaming)
 - `src/dupe_find/` - Algorithmic types and functions for dupefind (normalization, grouping)
 - `src/semantic_line_breaks/` - Algorithmic types and functions for slb:

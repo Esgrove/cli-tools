@@ -69,7 +69,7 @@ impl StringSyntax {
 }
 
 /// First byte of the text, or a slash for empty text.
-const fn first_byte_or_slash(text: &str) -> u8 {
+pub(super) const fn first_byte_or_slash(text: &str) -> u8 {
     match text.as_bytes().first() {
         Some(byte) => *byte,
         None => b'/',

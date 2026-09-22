@@ -32,10 +32,12 @@ The candidates, from a read of the code:
 | Area | Code | Idea | Status |
 | --- | --- | --- | --- |
 | slb scanner | `scan_line_buffered` in `src/semantic_line_breaks/scanner.rs` | Skip the character by character scan for a code line without any byte that can start a comment, string, heredoc, or regex | Kept, 5 to 19 percent faster scans on top of the shortcut itself |
+| slb scanner | `scan_characters` in `src/semantic_line_breaks/scanner.rs` | On lines that do need a scan, jump straight to the next byte that can change the scanner state | Kept, 15 to 22 percent faster C, Python, and trailing comment scans |
 | slb tokenizer | `chunk_end` in `src/semantic_line_breaks/tokenizer.rs` | Find the next whitespace or em dash lead byte with SIMD, confirm it with `char::is_whitespace` | Kept, 21 to 27 percent faster tokenizing |
 | dupefind | `collapse_repeated_separators` in `src/lib.rs` | Skip the regex when ASCII text has no two adjacent separators | Kept, the shortcut is the gain and SIMD adds little on file names |
 | slb widths | `text_width` in `src/semantic_line_breaks/token.rs` and `chars().count()` in reflow | SIMD character count | Not applied, the kernel loses to std below about 1 KB |
 | dirmove | `count_prefix_chars`, `get_all_n_part_sequences` in `src/dir_move/utils.rs` | SIMD character count and dot positions | Reverted, short file names got up to twice as slow |
+| dirmove | `find_prefix_candidates` and `parts_are_contiguous_with_combined` | Not SIMD: a sorted prefix index and precomputed lowercase parts | Kept, 15 times faster on 500 files, see below |
 | File hashing | `src/file_hash.rs` | None, BLAKE3 already uses SIMD | Skipped |
 | Regex heavy code | dates, resolutions, dot rename formatting | None, the regex crate already uses SIMD prefilters | Skipped |
 
@@ -179,6 +181,64 @@ and Zen 4 executes 512-bit operations as two 256-bit halves.
 There is no reason to cap the level, so `auto` stays the default,
 and `CLI_TOOLS_SIMD=avx2` remains available for machines where AVX-512 lowers the clock.
 
+### Scanner skip-ahead
+
+The line shortcut only helps lines without any trigger byte.
+On the lines that remain, the scanner used to call its state machine on every character,
+although most characters can only move the cursor forward by one.
+The skip-ahead asks `find_byte_of` for the next byte that can change the current state,
+for example a quote or backslash inside a string or the first byte of the closing marker inside a block comment,
+and jumps the cursor there with a binary search over the character offsets.
+The repository wide test compares it against the plain character loop on every line.
+
+Measured back to back against the previous commit, so machine drift does not enter the numbers.
+
+| Benchmark | Before | Skip-ahead | Change |
+| --- | ---: | ---: | ---: |
+| `scan/split_c_regions` | 486.0 µs | 377.2 µs | −22.4% |
+| `scan/split_python_regions` | 595.1 µs | 475.3 µs | −20.1% |
+| `scan/fix_trailing_comments` | 178.9 µs | 152.0 µs | −15.0% |
+| `scan/split_source_regions` (Rust) | 502.5 µs | 488.1 µs | −2.9% |
+| `scan/split_shell_regions` | 285.2 µs | 281.4 µs | −1.3% |
+| `format/large_rust_file` | 1.322 ms | 1.304 ms | −1.4% |
+| `check/large_rust_file` | 1.281 ms | 1.263 ms | −1.4% |
+| `tokenize_line/long_sentence`, untouched control | 1.455 µs | 1.469 µs | +1.0% |
+
+## The dirmove prefix search
+
+This part is an algorithm change rather than SIMD, found while looking at where dirmove spends its time.
+`collect_all_prefix_groups` calls `find_prefix_candidates` once per file,
+and each call checked every candidate prefix of that file against every file in the directory,
+so the first pass grew with the square of the file count.
+For every file that matched, `parts_are_contiguous_with_combined` then lowercased all its parts
+and built concatenated strings for every start position, which allocated in the innermost loop.
+
+Two changes remove that work without changing any result:
+
+1. `PrefixIndex` in `src/dir_move/prefix_index.rs` sorts the lowercased single, two part, and three part combinations
+   of all files once.
+   All combinations that start with a candidate prefix form one contiguous range, found with a binary search,
+   so each candidate only visits the files that can match it.
+   The binary builds the index once per grouping pass and shares it between the parallel workers.
+2. `FileInfo` now keeps `original_parts_lower`,
+   and `parts_are_contiguous_lowered` skips every start position whose lowercased parts cannot spell out the prefix,
+   so strings are only built for the rare positions that might match.
+
+Tests compare the index with a full scan of `prefix_matches_normalized`,
+and the new contiguity check with the old allocating code,
+including characters such as `İ` whose lowercase form has a different byte length.
+
+| Benchmark | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| First pass over 500 files, `find_prefix_candidates/scaled_500` | 62.2 ms | 4.18 ms | 15 times faster |
+| First pass over 40 files, `find_prefix_candidates/all_files/large_set` | 265 µs | 109 µs | −59% |
+| First pass over 16 files, `find_prefix_candidates/all_files/medium_set` | 69.7 µs | 36.2 µs | −48% |
+| `parts_are_contiguous/no_match` | 1.64 µs | 19.4 ns | 85 times faster |
+| `parts_are_contiguous/extended_starts_with` | 38.7 ns | 8.9 ns | −77% |
+
+The one-shot `find_prefix_candidates` still exists for tests and single lookups,
+but it builds an index per call, so callers checking many files should use `find_prefix_candidates_indexed`.
+
 ## Running the benchmarks on Apple Silicon
 
 ```shell
@@ -209,3 +269,8 @@ What to look for on NEON:
 - Run `./simd-bench.sh` on an M1 Pro and an M4 Pro and add the tables here.
 - Decide per call site from both machines, reverting the ones that do not clearly win on either.
 - If the scanner shortcut wins in scalar form as well, prefer whichever is simpler for the same speed.
+- The dirmove second pass still checks every file against every group key,
+  which the prefix index could also answer per group.
+- Remaining SIMD candidates with smaller expected gains:
+  the many `contains` passes in `looks_like_code`,
+  and the backtick and bracket matching loops in the tokenizer.
