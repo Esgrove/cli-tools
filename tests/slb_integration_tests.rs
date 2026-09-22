@@ -159,6 +159,16 @@ fn makefile_fixture() {
 }
 
 #[test]
+fn cmake_comments_fixture() {
+    assert_fixture("cmake_comments.in.cmake", "cmake_comments.out.cmake");
+}
+
+#[test]
+fn cmake_lists_fixture() {
+    assert_fixture("cmake_lists.in.cmake", "cmake_lists.out.cmake");
+}
+
+#[test]
 fn doc_tags_fixture() {
     assert_fixture("doc_tags.in.java", "doc_tags.out.java");
 }

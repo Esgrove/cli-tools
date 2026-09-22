@@ -171,6 +171,43 @@ fn print_mode_shows_a_diff_without_writing_the_file() {
 }
 
 #[test]
+fn cmake_lists_txt_is_formatted_by_file_name() {
+    let directory = temporary_directory();
+    let path = write_file(
+        &directory,
+        "CMakeLists.txt",
+        "# The C++ standard is pinned so every host builds the same dialect. Extensions stay off until a second compiler is tried.\nproject(demo)\n",
+    );
+
+    let output = run(&[&argument(&path), "-w", "40", "--print"]);
+
+    assert_eq!(exit_code(&output), 1);
+    let text = stdout(&output);
+    assert!(text.contains("CMakeLists.txt"), "{text}");
+    assert!(text.contains("+ # The C++ standard is pinned"), "{text}");
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("file should be readable")
+            .contains("Extensions stay off until a second compiler is tried."),
+        "print mode must not change the file"
+    );
+}
+
+#[test]
+fn stdin_type_cmake_formats_hash_comments() {
+    let output = run_with_stdin(
+        &["--stdin", "--type", "cmake", "-w", "40"],
+        "set(FOO \"value # not a comment\")\n# The C++ standard is pinned so every host builds the same dialect. Extensions stay off.\n",
+    );
+
+    assert_eq!(
+        stdout(&output),
+        "set(FOO \"value # not a comment\")\n# The C++ standard is pinned\n# so every host builds the same dialect.\n# Extensions stay off.\n"
+    );
+    assert_eq!(exit_code(&output), 0);
+}
+
+#[test]
 fn stdin_mode_writes_the_formatted_text_to_stdout() {
     let output = run_with_stdin(
         &["--stdin", "--type", "markdown", "-w", "40"],

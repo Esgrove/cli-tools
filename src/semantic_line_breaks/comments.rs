@@ -1174,6 +1174,7 @@ mod test_trailing_other_languages {
         for kind in [
             FileKind::Dockerfile,
             FileKind::Makefile,
+            FileKind::CMake,
             FileKind::Ruby,
             FileKind::Markdown,
         ] {

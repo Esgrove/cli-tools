@@ -117,6 +117,7 @@ pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
         },
         FileKind::Dockerfile
         | FileKind::Makefile
+        | FileKind::CMake
         | FileKind::Ruby
         | FileKind::Sql
         | FileKind::Lua

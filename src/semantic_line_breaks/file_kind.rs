@@ -29,6 +29,9 @@ pub enum FileKind {
     Dockerfile,
     /// Makefiles with `#` comments.
     Makefile,
+    /// `CMake` scripts with `#` comments.
+    #[value(name = "cmake")]
+    CMake,
     /// Ruby source with `#` comments.
     Ruby,
     /// SQL files with `--` comments.
@@ -71,6 +74,7 @@ impl FileKind {
             "Makefile" | "makefile" | "GNUmakefile" => return Some(Self::Makefile),
             "Gemfile" | "Rakefile" => return Some(Self::Ruby),
             ".bashrc" | ".zshrc" | ".zshenv" | ".zprofile" | ".profile" | ".bash_profile" => return Some(Self::Shell),
+            _ if file_name.eq_ignore_ascii_case("CMakeLists.txt") => return Some(Self::CMake),
             _ => {}
         }
         let extension = path.extension().and_then(|ext| ext.to_str())?.to_ascii_lowercase();
@@ -92,6 +96,7 @@ impl FileKind {
             "yml" | "yaml" => Self::Yaml,
             "dockerfile" => Self::Dockerfile,
             "mk" => Self::Makefile,
+            "cmake" => Self::CMake,
             "rb" => Self::Ruby,
             "sql" => Self::Sql,
             "lua" => Self::Lua,
@@ -125,11 +130,13 @@ impl FileKind {
                 block: None,
                 docstrings: true,
             },
-            Self::Shell | Self::Toml | Self::Yaml | Self::Dockerfile | Self::Makefile | Self::Ruby => CommentStyle {
-                line_markers: &["#"],
-                block: None,
-                docstrings: false,
-            },
+            Self::Shell | Self::Toml | Self::Yaml | Self::Dockerfile | Self::Makefile | Self::CMake | Self::Ruby => {
+                CommentStyle {
+                    line_markers: &["#"],
+                    block: None,
+                    docstrings: false,
+                }
+            }
             Self::Sql | Self::Lua => CommentStyle {
                 line_markers: &["--"],
                 block: None,
@@ -171,6 +178,11 @@ mod test_file_kind {
         assert_eq!(FileKind::from_path(Path::new("x.tsx")), Some(FileKind::JavaScript));
         assert_eq!(FileKind::from_path(Path::new("Dockerfile")), Some(FileKind::Dockerfile));
         assert_eq!(FileKind::from_path(Path::new("Makefile")), Some(FileKind::Makefile));
+        assert_eq!(FileKind::from_path(Path::new("CMakeLists.txt")), Some(FileKind::CMake));
+        assert_eq!(
+            FileKind::from_path(Path::new("modules/helpers.cmake")),
+            Some(FileKind::CMake)
+        );
         assert_eq!(FileKind::from_path(Path::new("README.md")), Some(FileKind::Markdown));
         assert_eq!(FileKind::from_path(Path::new("archive.zip")), None);
         assert_eq!(FileKind::from_path(Path::new("LICENSE")), None);
@@ -190,6 +202,7 @@ mod test_file_kind {
         assert!(FileKind::Rust.supports_trailing_comment_check());
         assert!(FileKind::Yaml.supports_trailing_comment_check());
         assert!(!FileKind::Dockerfile.supports_trailing_comment_check());
+        assert!(!FileKind::CMake.supports_trailing_comment_check());
         assert!(!FileKind::Markdown.supports_trailing_comment_check());
         assert!(!FileKind::Lua.supports_trailing_comment_check());
     }
@@ -224,6 +237,7 @@ mod test_file_kind_extensions {
             ("yml", FileKind::Yaml),
             ("dockerfile", FileKind::Dockerfile),
             ("mk", FileKind::Makefile),
+            ("cmake", FileKind::CMake),
             ("rb", FileKind::Ruby),
             ("sql", FileKind::Sql),
             ("lua", FileKind::Lua),
@@ -249,6 +263,8 @@ mod test_file_kind_extensions {
             ("Makefile", FileKind::Makefile),
             ("makefile", FileKind::Makefile),
             ("GNUmakefile", FileKind::Makefile),
+            ("CMakeLists.txt", FileKind::CMake),
+            ("cmakelists.txt", FileKind::CMake),
             ("Gemfile", FileKind::Ruby),
             ("Rakefile", FileKind::Ruby),
             (".bashrc", FileKind::Shell),
@@ -281,6 +297,7 @@ mod test_file_kind_extensions {
             FileKind::Yaml,
             FileKind::Dockerfile,
             FileKind::Makefile,
+            FileKind::CMake,
             FileKind::Ruby,
             FileKind::Sql,
             FileKind::Lua,

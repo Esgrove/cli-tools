@@ -112,10 +112,11 @@ fn matches_extensions(path: &Path, config: &Config) -> bool {
         .file_name()
         .map(|name| name.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    config
-        .extensions
-        .iter()
-        .any(|allowed| *allowed == extension || *allowed == file_name)
+    config.extensions.iter().any(|allowed| {
+        *allowed == extension
+            || *allowed == file_name
+            || (*allowed == "cmake" && file_name.eq_ignore_ascii_case("CMakeLists.txt"))
+    })
 }
 
 #[cfg(test)]
@@ -201,6 +202,14 @@ mod test_file_filters {
         assert!(matches_extensions(Path::new("Dockerfile"), &config));
         assert!(!matches_extensions(Path::new("README.md"), &config));
         assert!(matches_extensions(Path::new("x.md"), &config_with(vec![], vec![])));
+        assert!(matches_extensions(
+            Path::new("CMakeLists.txt"),
+            &config_with(vec![], vec!["cmake"])
+        ));
+        assert!(matches_extensions(
+            Path::new("modules/helpers.cmake"),
+            &config_with(vec![], vec!["cmake"])
+        ));
     }
 }
 
@@ -216,11 +225,16 @@ mod test_collect_files {
         write(&directory, "README.md", "Text.\n");
         write(&directory, "data.bin", "binary\n");
         write(&directory, "nested/deep/main.rs", "// comment\n");
+        write(&directory, "CMakeLists.txt", "# comment\n");
+        write(&directory, "cmake/helpers.cmake", "# comment\n");
 
         let files = collect_files(&[directory.path().to_path_buf()], &config_with(vec![], vec![]))
             .expect("collecting should succeed");
 
-        assert_eq!(collected_names(&files), vec!["README.md", "lib.rs", "main.rs"]);
+        assert_eq!(
+            collected_names(&files),
+            vec!["CMakeLists.txt", "README.md", "helpers.cmake", "lib.rs", "main.rs"]
+        );
     }
 
     #[test]
