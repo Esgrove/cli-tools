@@ -123,6 +123,23 @@ pub(super) fn scan_line_buffered(
     if let Some(result) = line_level_state(line, &mut state) {
         return result;
     }
+    if state == ScanState::Normal && !crate::simd::contains_byte_of(line.as_bytes(), &syntax.trigger_bytes()) {
+        return ScanResult {
+            state: normal_line_end_state(line, syntax),
+            comment_start: None,
+            uncertain: false,
+        };
+    }
+    scan_characters(line, state, syntax, characters)
+}
+
+/// Scan the line character by character, starting in a state the line level checks left in place.
+fn scan_characters(
+    line: &str,
+    mut state: ScanState,
+    syntax: &StringSyntax,
+    characters: &mut Vec<(usize, char)>,
+) -> ScanResult {
     characters.clear();
     characters.extend(line.char_indices());
     let chars = characters.as_slice();
@@ -147,14 +164,23 @@ pub(super) fn scan_line_buffered(
     if state == ScanState::Normal {
         if let Some(terminator) = cursor.pending_heredoc {
             state = ScanState::InHeredoc(terminator);
-        } else if syntax.block_scalars && RE_BLOCK_SCALAR.is_match(line) {
-            state = ScanState::InBlockScalar(leading_whitespace(line).chars().count());
+        } else {
+            state = normal_line_end_state(line, syntax);
         }
     }
     ScanResult {
         state,
         comment_start: None,
         uncertain: cursor.uncertain,
+    }
+}
+
+/// State after a line that ends in code, which opens a YAML block scalar when the line introduces one.
+fn normal_line_end_state(line: &str, syntax: &StringSyntax) -> ScanState {
+    if syntax.block_scalars && RE_BLOCK_SCALAR.is_match(line) {
+        ScanState::InBlockScalar(leading_whitespace(line).chars().count())
+    } else {
+        ScanState::Normal
     }
 }
 
@@ -558,5 +584,98 @@ mod test_scanner_edges {
         let regions = split_source_regions(&lines, FileKind::Python);
         assert_tiles(&regions, 4);
         assert!(regions.iter().all(|region| matches!(region, Region::Verbatim { .. })));
+    }
+}
+
+#[cfg(test)]
+mod test_trigger_prefilter {
+    use std::path::Path;
+
+    use super::super::file_kind::FileKind;
+    use super::super::string_syntax::string_syntax;
+    use super::*;
+
+    /// Scan one line without skipping lines that hold no trigger byte.
+    fn scan_line_unfiltered(
+        line: &str,
+        state: ScanState,
+        syntax: &StringSyntax,
+        characters: &mut Vec<(usize, char)>,
+    ) -> ScanResult {
+        let mut state = state;
+        if let Some(result) = line_level_state(line, &mut state) {
+            return result;
+        }
+        scan_characters(line, state, syntax, characters)
+    }
+
+    /// Assert that both scans agree on every line of the text, carrying the state between lines.
+    fn assert_same_scan(text: &str, kind: FileKind, label: &str) {
+        let Some(syntax) = string_syntax(kind) else {
+            return;
+        };
+        let mut characters = Vec::new();
+        let mut filtered_state = ScanState::Normal;
+        let mut unfiltered_state = ScanState::Normal;
+        for (index, line) in text.lines().enumerate() {
+            let filtered = scan_line_buffered(line, filtered_state, &syntax, &mut characters);
+            let unfiltered = scan_line_unfiltered(line, unfiltered_state, &syntax, &mut characters);
+            assert_eq!(filtered, unfiltered, "{label}:{} {line:?}", index + 1);
+            filtered_state = filtered.state;
+            unfiltered_state = unfiltered.state;
+        }
+    }
+
+    #[test]
+    fn skipping_lines_without_trigger_bytes_changes_no_repository_scan() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut scanned = 0;
+        for directory in ["src", "benches", "tests", ".github", "."] {
+            let depth = if directory == "." { 1 } else { usize::MAX };
+            for entry in walkdir::WalkDir::new(root.join(directory))
+                .max_depth(depth)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+            {
+                let path = entry.path();
+                let Some(kind) = FileKind::from_path(path) else {
+                    continue;
+                };
+                let Ok(text) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                assert_same_scan(&text, kind, &path.display().to_string());
+                scanned += 1;
+            }
+        }
+        assert!(scanned > 100, "only {scanned} files were scanned");
+    }
+
+    #[test]
+    fn skipped_lines_still_open_block_scalars() {
+        let text = "key: |\n  let value = 1\n  # not a comment\nnext: value # comment\n";
+        assert_same_scan(text, FileKind::Yaml, "block scalar");
+        let syntax = string_syntax(FileKind::Yaml).expect("YAML should have a string syntax");
+        let result = scan_line("key: >-", ScanState::Normal, &syntax);
+        assert_eq!(result.state, ScanState::InBlockScalar(0));
+    }
+
+    #[test]
+    fn lines_with_only_plain_code_agree_for_every_kind() {
+        let text = "let value = compute(input) + 1;\nvalue := other * 2 <- here\ncat <<EOF\nplain text\nEOF\n\
+                    x = `echo` # tail\nfn run<'a>(value: &'a str) {} // note\n/* open\nstill open\n*/ done\n";
+        for kind in [
+            FileKind::Rust,
+            FileKind::CLike,
+            FileKind::JavaScript,
+            FileKind::Go,
+            FileKind::Python,
+            FileKind::Shell,
+            FileKind::Toml,
+            FileKind::Yaml,
+        ] {
+            assert_same_scan(text, kind, &format!("{kind:?}"));
+        }
     }
 }

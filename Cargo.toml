@@ -24,6 +24,8 @@ difference = "2.0.0"
 dirs = "7.0.0"
 dunce = "1.0.5"
 encoding_rs = "0.8.41"
+fearless_simd = "1.0.0"
+fearless_simd_macros = "0.1.0"
 futures = "0.3.34"
 git2 = { version = "0.21.0", features = ["ssh", "https"] }
 ignore = "0.4.33"
@@ -140,6 +142,10 @@ harness = false
 
 [[bench]]
 name = "semantic_line_breaks"
+harness = false
+
+[[bench]]
+name = "simd"
 harness = false
 
 [profile.dev]
