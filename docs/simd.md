@@ -183,6 +183,48 @@ and Zen 4 executes 512-bit operations as two 256-bit halves.
 There is no reason to cap the level, so `auto` stays the default,
 and `CLI_TOOLS_SIMD=avx2` remains available for machines where AVX-512 lowers the clock.
 
+## Results on the M4 Pro
+
+macOS on an Apple M4 Pro, `target-cpu=native`, `./simd-bench.sh` with full Criterion runs.
+`auto` selects the 16-byte NEON implementation.
+The table compares the scalar and auto modes back to back in the same session.
+
+| Benchmark | scalar | auto (NEON) | auto vs scalar |
+| --- | ---: | ---: | ---: |
+| `tokenize_line/long_sentence` | 2.12 µs | 1.62 µs | −23.4% |
+| `tokenize_line/punctuated_line` | 1.40 µs | 1.07 µs | −23.8% |
+| `tokenize_line/unicode_line` | 1.54 µs | 1.12 µs | −27.2% |
+| `format/rust_source` | 12.92 µs | 12.49 µs | −3.4% |
+| `format/large_rust_file` | 1.30 ms | 1.15 ms | −10.9% |
+| `format/large_prose_file` | 2.81 ms | 2.68 ms | −4.6% |
+| `format/large_markdown_file` | 1.45 ms | 1.39 ms | −4.3% |
+| `format/many_small_files` | 1.21 ms | 1.14 ms | −6.1% |
+| `check/large_rust_file` | 1.30 ms | 1.11 ms | −14.7% |
+| `check/large_prose_file` | 2.81 ms | 2.56 ms | −9.1% |
+| `check/large_markdown_file` | 1.39 ms | 1.35 ms | −2.5% |
+| `reflow_paragraph/clauses_to_lines` | 9.22 µs | 8.86 µs | −3.9% |
+| `reword_semicolons/many_semicolons` | 204.00 µs | 199.89 µs | −2.0% |
+| `reword_semicolons/many_semicolons_with_a_stray_bracket` | 206.46 µs | 199.67 µs | −3.3% |
+| `scan/fix_trailing_comments` | 227.77 µs | 156.88 µs | −31.1% |
+| `scan/split_source_regions` (Rust) | 509.47 µs | 469.64 µs | −7.8% |
+| `scan/split_shell_regions` | 270.59 µs | 253.52 µs | −6.3% |
+| `scan/split_c_regions` | 418.23 µs | 340.07 µs | −18.7% |
+| `scan/split_python_regions` | 490.96 µs | 407.85 µs | −16.9% |
+| `dupe_find/normalize_stem_batch_16` | 4.51 µs | 4.45 µs | −1.4% |
+
+NEON keeps the scanner and tokenizer kernels on a second architecture.
+The largest gains occur where the scan reaches a long non-triggering run.
+The duplicate-name batch remains within noise, which confirms that the separator shortcut,
+rather than the SIMD kernel, is the important optimization in that path.
+
+The microbenchmarks have the same crossover as the Ryzen run for the byte-search kernels.
+`contains_byte_of` and `find_byte_of` lose for 4 and 8 byte inputs,
+then improve by 32 to 65 percent at 16 bytes and above.
+`has_adjacent_bytes_of` improves at every measured length,
+reaching about 91 percent for inputs of 16 bytes and above.
+Character counting remains unsuitable for current token widths:
+the SIMD path loses on short ASCII text and is only marginally faster for larger mixed text.
+
 ### Scanner skip-ahead
 
 The line shortcut only helps lines without any trigger byte.
@@ -268,7 +310,7 @@ What to look for on NEON:
 
 ## Next steps
 
-- Run `./simd-bench.sh` on an M1 Pro and an M4 Pro and add the tables here.
+- Run `./simd-bench.sh` on an M1 Pro and add its table here.
 - Decide per call site from both machines, reverting the ones that do not clearly win on either.
 - If the scanner shortcut wins in scalar form as well, prefer whichever is simpler for the same speed.
 - The dirmove second pass still checks every file against every group key,
