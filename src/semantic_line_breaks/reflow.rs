@@ -144,7 +144,8 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     // Planning with the overflow instead would throw the whole fix away over a line a few characters too wide,
     // where a boundary a little earlier reads just as well and fits.
     // Rewording rewrites the sentence rather than rewrapping it, so it keeps the overflow any other text has.
-    budgets.hard_cap = !holds_reworded_fix(&violations) && paragraph_width(paragraph, options) <= options.max_width;
+    let old_max = original_line_widths(paragraph, options).max().unwrap_or_default();
+    budgets.hard_cap = !holds_reworded_fix(&violations) && old_max <= options.max_width;
 
     let keep_on_one_line = keeps_list_item_on_one_line(paragraph, &segments, budgets.first, options);
     let mut output: Vec<(OutputContent, HardBreak)> = Vec::with_capacity(paragraph.lines.len());
@@ -186,7 +187,7 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     violations.extend(list_item_violation(paragraph, options, output.len(), reported));
 
     let reworded = holds_reworded_fix(&violations);
-    if changed && let Some(refusal) = reflow_refusal(&output, paragraph, options, hard_limit, reworded) {
+    if changed && let Some(refusal) = reflow_refusal(&output, paragraph, options, hard_limit, old_max, reworded) {
         changed = false;
         keep_original_lines(&mut violations, refusal);
     }
@@ -327,30 +328,21 @@ fn output_differs(output: &[(OutputContent, HardBreak)], paragraph: &Paragraph) 
 /// A paragraph whose lines all fit the limit is only rewrapped for how it reads,
 /// so it also has to keep fitting and to keep filling its lines from the top.
 /// Rewording is exempt from the width rule, since it rewrites the sentence rather than rewrapping it.
+/// `old_max` is the width of the widest line the paragraph came in with.
 fn reflow_refusal(
     output: &[(OutputContent, HardBreak)],
     paragraph: &Paragraph,
     options: &FormatOptions,
     hard_limit: usize,
+    old_max: usize,
     reworded: bool,
 ) -> Option<Refusal> {
-    let line_width = |index: usize, width: usize, hard_break: HardBreak| {
-        prefix_width(paragraph.prefix_for(index), options.tab_width) + width + hard_break.marker().len()
-    };
     let new_widths = || {
-        output
-            .iter()
-            .enumerate()
-            .map(|(index, (content, hard_break))| line_width(index, content.width(paragraph), *hard_break))
-    };
-    let old_widths = || {
-        paragraph.lines.iter().enumerate().map(|(index, line)| {
-            let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
-            line_width(index, line.chars().count(), hard_break)
+        output.iter().enumerate().map(|(index, (content, hard_break))| {
+            rendered_width(paragraph, options, index, content.width(paragraph), *hard_break)
         })
     };
     let new_max = new_widths().max().unwrap_or_default();
-    let old_max = paragraph_width(paragraph, options);
     if new_max > hard_limit && new_max > old_max {
         return Some(Refusal::Longer);
     }
@@ -375,7 +367,7 @@ fn reflow_refusal(
         return None;
     }
     let new_widths: Vec<usize> = new_widths().collect();
-    let old_widths: Vec<usize> = old_widths().collect();
+    let old_widths: Vec<usize> = original_line_widths(paragraph, options).collect();
     (descent(&new_widths) > descent(&old_widths) + BALANCE_MARGIN).then_some(Refusal::LessBalanced)
 }
 
@@ -392,20 +384,23 @@ fn descent(widths: &[usize]) -> usize {
         .sum()
 }
 
-/// Width of the widest line of the paragraph as it stands, prefix and hard break marker included.
-fn paragraph_width(paragraph: &Paragraph, options: &FormatOptions) -> usize {
-    paragraph
-        .lines
-        .iter()
-        .enumerate()
-        .map(|(index, line)| {
-            let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
-            prefix_width(paragraph.prefix_for(index), options.tab_width)
-                + line.chars().count()
-                + hard_break.marker().len()
-        })
-        .max()
-        .unwrap_or_default()
+/// Widths of the lines of the paragraph as it stands, measured the way `rendered_width` measures them.
+fn original_line_widths(paragraph: &Paragraph, options: &FormatOptions) -> impl Iterator<Item = usize> {
+    paragraph.lines.iter().enumerate().map(move |(index, line)| {
+        let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
+        rendered_width(paragraph, options, index, line.chars().count(), hard_break)
+    })
+}
+
+/// Width a line of the paragraph takes on the page, with its prefix and hard break marker included.
+fn rendered_width(
+    paragraph: &Paragraph,
+    options: &FormatOptions,
+    index: usize,
+    width: usize,
+    hard_break: HardBreak,
+) -> usize {
+    prefix_width(paragraph.prefix_for(index), options.tab_width) + width + hard_break.marker().len()
 }
 
 /// Width of a prefix in characters, counting tabs as `tab_width`.
@@ -792,6 +787,26 @@ mod test_reflow_safety {
         );
         let reflowed = outcome.lines.expect("the semicolon should be rewritten");
         assert!(reflowed.iter().any(|line| line.starts_with("Then run")), "{reflowed:?}");
+    }
+
+    #[test]
+    fn a_reworded_paragraph_that_fits_is_not_capped_at_the_limit() {
+        // The new sentence runs three characters past the limit, inside the soft overflow.
+        // A rewrap of the same paragraph would have to break at the comma to stay inside the limit.
+        let outcome = reflow(
+            &[
+                "Keep it; the checks run in order, and each one",
+                "reads its own output file.",
+            ],
+            62,
+        );
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "Keep it.".to_string(),
+                "The checks run in order, and each one reads its own output file.".to_string(),
+            ])
+        );
     }
 
     #[test]

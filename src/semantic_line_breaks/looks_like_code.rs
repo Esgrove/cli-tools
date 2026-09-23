@@ -34,10 +34,7 @@ pub fn looks_like_code(line: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-    // A line that opens with the bracket it closes is a parenthetical aside,
-    // which is what a reflowed sentence puts on a line of its own, not a call the code makes.
-    let aside = text.starts_with('(');
-    if text.ends_with(['{', '}']) || (!aside && (text.ends_with(");") || text.ends_with("),"))) {
+    if text.ends_with(['{', '}']) || ((text.ends_with(");") || text.ends_with("),")) && !is_parenthetical_aside(text)) {
         return true;
     }
     let has_code_characters = crate::simd::contains_byte_of(text.as_bytes(), b"=({") || text.contains("::");
@@ -63,6 +60,30 @@ pub fn looks_like_code(line: &str) -> bool {
         return true;
     }
     text.contains('(') && RE_CALL_LINE.is_match(text)
+}
+
+/// Whether the line is one bracketed aside, opened by its first character and closed by the bracket that ends it.
+///
+/// A reflowed sentence puts such an aside on a line of its own,
+/// so its closing bracket and the punctuation after it do not mark a call the code makes.
+fn is_parenthetical_aside(text: &str) -> bool {
+    let Some(body) = text
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix([';', ',']))
+        .and_then(|inner| inner.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let mut depth = 0_usize;
+    for byte in body.bytes() {
+        match byte {
+            b'(' => depth += 1,
+            b')' if depth == 0 => return false,
+            b')' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 #[cfg(test)]
@@ -104,8 +125,11 @@ mod test_looks_like_code {
         assert!(!looks_like_code(
             "(the first backend, the editor preview, older engines),"
         ));
+        assert!(!looks_like_code("(the editor preview (and its tests)),"));
         assert!(looks_like_code("(a + b);"));
         assert!(looks_like_code("foo(bar),"));
+        assert!(looks_like_code("(a) foo(bar),"));
+        assert!(looks_like_code("(void)close(handle),"));
         assert!(!looks_like_code("If the file exists, skip it."));
         assert!(!looks_like_code(""));
         assert!(!looks_like_code("   "));

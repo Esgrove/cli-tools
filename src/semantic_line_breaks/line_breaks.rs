@@ -491,12 +491,9 @@ fn cumulative_semantic_counts(ranks: &[Option<Rank>]) -> Vec<usize> {
 ///
 /// Cumulative widths are sorted, so a binary search bounds the boundaries to count over.
 fn semantic_break_fits(counts: &[usize], widths: &[usize], start: usize, count: usize, budget: usize) -> bool {
-    let reachable = start + 1..reachable_boundary_range(widths, start, budget).end.min(count);
-    let first = counts.get(reachable.start).copied().unwrap_or_default();
-    let last = counts
-        .get(reachable.end.max(reachable.start))
-        .copied()
-        .unwrap_or_default();
+    let end = reachable_boundary_range(widths, start, budget).end.min(count);
+    let first = counts.get(start + 1).copied().unwrap_or_default();
+    let last = counts.get(end).copied().unwrap_or_default();
     last > first
 }
 
@@ -1079,6 +1076,44 @@ mod test_overflow_is_earned {
                         overflow_is_earned(start, count, budget, rank, &ranks, &widths),
                         brute_force(start, budget, rank),
                         "start={start}, budget={budget}, rank={rank:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_semantic_break_fits {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn binary_search_matches_the_linear_scan() {
+        for text in [
+            "",
+            "one two three four five six seven eight",
+            "First clause, then a second one and a third, because it helps. Another sentence follows here.",
+            "説明: a longer clause with `code: inside` and (a label: value), then more: text.",
+        ] {
+            let tokens = tokens(text);
+            let count = tokens.len();
+            let widths = cumulative_widths(&tokens);
+            let mut ranks = vec![None; count + 1];
+            for boundary in find_boundaries(&tokens, &FormatOptions::default()) {
+                ranks[boundary.before] = Some(boundary.rank);
+            }
+            let semantic_counts = cumulative_semantic_counts(&ranks);
+            for budget in 0..=widths.last().copied().unwrap_or_default() + 1 {
+                for start in 0..count {
+                    let expected = (start + 1..count).any(|end| {
+                        rank_at(&ranks, end).is_some_and(|rank| rank > Rank::Word)
+                            && span_width(&widths, start, end) <= budget
+                    });
+                    assert_eq!(
+                        semantic_break_fits(&semantic_counts, &widths, start, count, budget),
+                        expected,
+                        "{text:?}, start={start}, budget={budget}"
                     );
                 }
             }
