@@ -12,7 +12,7 @@ use regex::Regex;
 use super::regex_literals::{
     comment_starts_at, division_can_start, find_regex_end, regex_can_start, regex_end_overlaps_comment, uncertain_regex,
 };
-use super::string_syntax::StringSyntax;
+use super::string_syntax::{StringSyntax, first_byte_or_slash};
 use crate::leading_whitespace;
 
 /// Matches a shell heredoc start and captures the terminator word.
@@ -123,11 +123,38 @@ pub(super) fn scan_line_buffered(
     if let Some(result) = line_level_state(line, &mut state) {
         return result;
     }
+    if state == ScanState::Normal && !crate::simd::contains_byte_of(line.as_bytes(), &syntax.trigger_bytes()) {
+        return ScanResult {
+            state: normal_line_end_state(line, syntax),
+            comment_start: None,
+            uncertain: false,
+        };
+    }
+    scan_characters(line, state, syntax, characters, true)
+}
+
+/// Scan the line character by character, starting in a state the line level checks left in place.
+///
+/// With `skip_ahead`, the cursor jumps over characters that cannot change the state,
+/// found with a SIMD search for the bytes that can.
+fn scan_characters(
+    line: &str,
+    mut state: ScanState,
+    syntax: &StringSyntax,
+    characters: &mut Vec<(usize, char)>,
+    skip_ahead: bool,
+) -> ScanResult {
     characters.clear();
     characters.extend(line.char_indices());
     let chars = characters.as_slice();
     let mut cursor = Cursor::default();
     while cursor.index < chars.len() {
+        if skip_ahead {
+            cursor.index = next_significant_index(line, chars, cursor.index, &state, syntax);
+            if cursor.index >= chars.len() {
+                break;
+            }
+        }
         match state {
             ScanState::Normal => match scan_normal(line, chars, &mut cursor, syntax) {
                 NormalStep::Continue(next_state) => state = next_state,
@@ -147,8 +174,8 @@ pub(super) fn scan_line_buffered(
     if state == ScanState::Normal {
         if let Some(terminator) = cursor.pending_heredoc {
             state = ScanState::InHeredoc(terminator);
-        } else if syntax.block_scalars && RE_BLOCK_SCALAR.is_match(line) {
-            state = ScanState::InBlockScalar(leading_whitespace(line).chars().count());
+        } else {
+            state = normal_line_end_state(line, syntax);
         }
     }
     ScanResult {
@@ -156,6 +183,82 @@ pub(super) fn scan_line_buffered(
         comment_start: None,
         uncertain: cursor.uncertain,
     }
+}
+
+/// State after a line that ends in code, which opens a YAML block scalar when the line introduces one.
+fn normal_line_end_state(line: &str, syntax: &StringSyntax) -> ScanState {
+    if syntax.block_scalars && RE_BLOCK_SCALAR.is_match(line) {
+        ScanState::InBlockScalar(leading_whitespace(line).chars().count())
+    } else {
+        ScanState::Normal
+    }
+}
+
+/// Index of the first character at or after `index` that can change the state or needs a closer look.
+///
+/// Every character before it only advances the cursor by one in the given state.
+/// Returns `chars.len()` when no such character remains.
+fn next_significant_index(
+    line: &str,
+    chars: &[(usize, char)],
+    index: usize,
+    state: &ScanState,
+    syntax: &StringSyntax,
+) -> usize {
+    let Some((set, length)) = significant_bytes(state, syntax) else {
+        return index;
+    };
+    let Some(&(start, _)) = chars.get(index) else {
+        return index;
+    };
+    let rest = line.as_bytes().get(start..).unwrap_or_default();
+    // The significant bytes are ASCII, so a match sits on a character boundary.
+    crate::simd::find_byte_of(rest, set.get(..length).unwrap_or_default()).map_or(chars.len(), |offset| {
+        let target = start + offset;
+        index
+            + chars
+                .get(index..)
+                .unwrap_or_default()
+                .partition_point(|&(byte, _)| byte < target)
+    })
+}
+
+/// Bytes that can change the given state, padded into a fixed array with the used length,
+/// or `None` when every character needs a look.
+fn significant_bytes(state: &ScanState, syntax: &StringSyntax) -> Option<([u8; 8], usize)> {
+    match state {
+        ScanState::Normal => {
+            let [marker, block, double, single, backtick, heredoc, slash] = syntax.trigger_bytes();
+            let raw = if syntax.rust_raw_strings { b'r' } else { slash };
+            Some(([marker, block, double, single, backtick, heredoc, slash, raw], 8))
+        }
+        ScanState::InBlockComment(_) => syntax.block_comment.map(|(open, close)| {
+            let close = first_byte_or_slash(close);
+            let open = if syntax.nested_block_comments {
+                first_byte_or_slash(open)
+            } else {
+                close
+            };
+            padded([close, open])
+        }),
+        ScanState::InString(quote) | ScanState::InTripleQuote(quote) => u8::try_from(*quote)
+            .ok()
+            .filter(u8::is_ascii)
+            .map(|quote| padded([quote, b'\\'])),
+        ScanState::InRawString(_) => Some(padded(*b"\"")),
+        ScanState::InTemplate => Some(padded(*b"\\`")),
+        ScanState::InBacktickRaw => Some(padded(*b"`")),
+        ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) | ScanState::Uncertain => None,
+    }
+}
+
+/// The bytes copied into an eight byte array, with how many of them are used.
+fn padded<const LENGTH: usize>(bytes: [u8; LENGTH]) -> ([u8; 8], usize) {
+    let mut padded = [0u8; 8];
+    for (slot, byte) in padded.iter_mut().zip(bytes) {
+        *slot = byte;
+    }
+    (padded, LENGTH.min(8))
 }
 
 /// Whether the remaining line at the character index starts with `needle`.
@@ -558,5 +661,98 @@ mod test_scanner_edges {
         let regions = split_source_regions(&lines, FileKind::Python);
         assert_tiles(&regions, 4);
         assert!(regions.iter().all(|region| matches!(region, Region::Verbatim { .. })));
+    }
+}
+
+#[cfg(test)]
+mod test_trigger_prefilter {
+    use std::path::Path;
+
+    use super::super::file_kind::FileKind;
+    use super::super::string_syntax::string_syntax;
+    use super::*;
+
+    /// Scan one line without skipping lines that hold no trigger byte, stepping over every character.
+    fn scan_line_unfiltered(
+        line: &str,
+        state: ScanState,
+        syntax: &StringSyntax,
+        characters: &mut Vec<(usize, char)>,
+    ) -> ScanResult {
+        let mut state = state;
+        if let Some(result) = line_level_state(line, &mut state) {
+            return result;
+        }
+        scan_characters(line, state, syntax, characters, false)
+    }
+
+    /// Assert that both scans agree on every line of the text, carrying the state between lines.
+    fn assert_same_scan(text: &str, kind: FileKind, label: &str) {
+        let Some(syntax) = string_syntax(kind) else {
+            return;
+        };
+        let mut characters = Vec::new();
+        let mut filtered_state = ScanState::Normal;
+        let mut unfiltered_state = ScanState::Normal;
+        for (index, line) in text.lines().enumerate() {
+            let filtered = scan_line_buffered(line, filtered_state, &syntax, &mut characters);
+            let unfiltered = scan_line_unfiltered(line, unfiltered_state, &syntax, &mut characters);
+            assert_eq!(filtered, unfiltered, "{label}:{} {line:?}", index + 1);
+            filtered_state = filtered.state;
+            unfiltered_state = unfiltered.state;
+        }
+    }
+
+    #[test]
+    fn skipping_lines_without_trigger_bytes_changes_no_repository_scan() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut scanned = 0;
+        for directory in ["src", "benches", "tests", ".github", "."] {
+            let depth = if directory == "." { 1 } else { usize::MAX };
+            for entry in walkdir::WalkDir::new(root.join(directory))
+                .max_depth(depth)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+            {
+                let path = entry.path();
+                let Some(kind) = FileKind::from_path(path) else {
+                    continue;
+                };
+                let Ok(text) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                assert_same_scan(&text, kind, &path.display().to_string());
+                scanned += 1;
+            }
+        }
+        assert!(scanned > 100, "only {scanned} files were scanned");
+    }
+
+    #[test]
+    fn skipped_lines_still_open_block_scalars() {
+        let text = "key: |\n  let value = 1\n  # not a comment\nnext: value # comment\n";
+        assert_same_scan(text, FileKind::Yaml, "block scalar");
+        let syntax = string_syntax(FileKind::Yaml).expect("YAML should have a string syntax");
+        let result = scan_line("key: >-", ScanState::Normal, &syntax);
+        assert_eq!(result.state, ScanState::InBlockScalar(0));
+    }
+
+    #[test]
+    fn lines_with_only_plain_code_agree_for_every_kind() {
+        let text = "let value = compute(input) + 1;\nvalue := other * 2 <- here\ncat <<EOF\nplain text\nEOF\n\
+                    x = `echo` # tail\nfn run<'a>(value: &'a str) {} // note\n/* open\nstill open\n*/ done\n";
+        for kind in [
+            FileKind::Rust,
+            FileKind::CLike,
+            FileKind::JavaScript,
+            FileKind::Go,
+            FileKind::Python,
+            FileKind::Shell,
+            FileKind::Toml,
+            FileKind::Yaml,
+        ] {
+            assert_same_scan(text, kind, &format!("{kind:?}"));
+        }
     }
 }

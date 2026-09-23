@@ -22,6 +22,7 @@ use cli_tools::{
 };
 
 use cli_tools::dir_move::mover;
+use cli_tools::dir_move::prefix_index::PrefixIndex;
 use cli_tools::dir_move::types::{
     DirectoryInfo, FileInfo, MergePair, MoveInfo, PrefixGroup, PrefixGroupBuilder, PromptResult, UnpackInfo,
     ValidCandidate,
@@ -183,7 +184,8 @@ impl Default for DirMove {
 impl DirMove {
     /// Run the configured operations in the standard `dirmove` order.
     ///
-    /// Existing maintenance steps run first, then whole-directory merge offers are made before normal file-to-directory matching.
+    /// Existing maintenance steps run first, then whole-directory merge offers are made
+    /// before normal file-to-directory matching.
     /// Create mode runs last and uses the first output root for newly-created directories.
     pub fn run(&self) -> anyhow::Result<()> {
         if self.config.show_db {
@@ -740,7 +742,8 @@ impl DirMove {
                     info.file_moves.extend(nested_info.file_moves);
                     info.directory_moves.extend(nested_info.directory_moves);
                 } else if self.contains_unpack_directory(&path) {
-                    // Non-matching directory contains nested unpack dirs, recurse into it with this directory as the new parent.
+                    // Non-matching directory contains nested unpack dirs,
+                    // recurse into it with this directory as the new parent.
                     let nested_info = self.collect_unpack_info(&path, &target);
                     info.file_moves.extend(nested_info.file_moves);
                     info.directory_moves.extend(nested_info.directory_moves);
@@ -1867,12 +1870,14 @@ impl DirMove {
         // Each file is processed independently, producing a list of valid candidates.
         // Results are then merged sequentially into the shared HashMap.
         let first_pass_bar = Self::create_progress_bar(file_count, "Collecting prefixes");
+        let prefix_index = PrefixIndex::new(files_with_names);
         let first_pass_results: Vec<Vec<ValidCandidate>> = files_with_names
             .par_iter()
             .map(|file_info| {
-                let prefix_candidates = utils::find_prefix_candidates(
+                let prefix_candidates = utils::find_prefix_candidates_indexed(
                     &file_info.filtered_name,
                     files_with_names,
+                    &prefix_index,
                     min_group_size,
                     min_prefix_chars,
                 );
@@ -1904,8 +1909,9 @@ impl DirMove {
 
                     // Verify this file itself has the prefix parts contiguous in its original name.
                     // This prevents adding files where filtering made non-adjacent parts appear adjacent.
-                    if !utils::parts_are_contiguous_with_combined(
+                    if !utils::parts_are_contiguous_lowered(
                         &file_info.original_parts,
+                        &file_info.original_parts_lower,
                         &candidate_parts,
                         &candidate_combined,
                     ) {
@@ -1955,42 +1961,34 @@ impl DirMove {
         }
         first_pass_bar.finish_and_clear();
 
-        // Second pass: for each file, check if it should be added to existing groups
-        // where the file's first parts START WITH the group's prefix.
-        // This handles cases like JosephExampleTV matching JosephExample group.
-        // Parallelized: each file independently checks all group keys, results merged after.
-        let group_keys_with_combined: Vec<(String, String)> = prefix_groups
-            .keys()
-            .map(|key| {
+        // Second pass: use the index to find files whose first parts start with each group prefix.
+        // This handles cases like JosephExampleTV matching JosephExample group
+        // without checking every group per file.
+        let group_keys_with_combined: Vec<(String, String, HashSet<PathBuf>)> = prefix_groups
+            .iter()
+            .map(|(key, builder)| {
                 let combined = key.to_lowercase().replace('.', "");
-                (key.clone(), combined)
+                (key.clone(), combined, builder.files.iter().cloned().collect())
             })
             .collect();
-        let existing_files: HashMap<&str, HashSet<PathBuf>> = prefix_groups
-            .iter()
-            .map(|(key, builder)| (key.as_str(), builder.files.iter().cloned().collect()))
-            .collect();
 
-        let second_pass_bar = Self::create_progress_bar(file_count, "Matching files to groups");
-        let second_pass_results: Vec<Vec<(String, PathBuf)>> = files_with_names
+        let second_pass_bar =
+            Self::create_progress_bar(group_keys_with_combined.len() as u64, "Matching files to groups");
+        let second_pass_results: Vec<Vec<(String, PathBuf)>> = group_keys_with_combined
             .par_iter()
-            .map(|file_info| {
-                let file_path = file_info.path_buf();
+            .map(|(group_key, group_combined, existing_files)| {
                 let mut matches: Vec<(String, PathBuf)> = Vec::new();
-
-                for (group_key, group_combined) in &group_keys_with_combined {
-                    // Skip if file is already in this group
-                    if let Some(files) = existing_files.get(group_key.as_str())
-                        && files.contains(&file_path)
-                    {
+                let mut matching_indices = Vec::new();
+                prefix_index.matching_files(group_key, &mut matching_indices);
+                for index in matching_indices {
+                    let Some(file_info) = files_with_names.get(index) else {
                         continue;
-                    }
-
-                    // Check if the file matches this group via precomputed prefix matching
-                    // (which includes starts_with logic with word boundary enforcement)
-                    if utils::prefix_matches_normalized_precomputed(file_info, group_key)
-                        && utils::parts_are_contiguous_with_combined(
+                    };
+                    let file_path = file_info.path_buf();
+                    if !existing_files.contains(&file_path)
+                        && utils::parts_are_contiguous_lowered(
                             &file_info.original_parts,
+                            &file_info.original_parts_lower,
                             &[group_key.as_str()],
                             group_combined,
                         )

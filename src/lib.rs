@@ -14,6 +14,7 @@ pub mod file_hash;
 pub mod resolution;
 pub mod scan_cache;
 pub mod semantic_line_breaks;
+pub mod simd;
 pub mod utils;
 pub mod video_info;
 
@@ -210,6 +211,12 @@ pub fn colorize_bool(value: bool) -> ColoredString {
 /// ```
 #[must_use]
 pub fn collapse_repeated_separators(text: &str) -> String {
+    const SEPARATORS: &[u8] = b".-_ \t\n\x0b\x0c\r";
+    let trim = |character: char| matches!(character, '.' | '-' | '_') || character.is_whitespace();
+    // Unicode whitespace also counts as a separator, so only ASCII text can skip the regex.
+    if text.is_ascii() && !simd::has_adjacent_bytes_of(text.as_bytes(), SEPARATORS) {
+        return text.trim_matches(trim).to_string();
+    }
     let collapsed = RE_REPEATED_SEPARATORS.replace_all(text, |captures: &regex::Captures<'_>| {
         captures[0]
             .chars()
@@ -217,9 +224,7 @@ pub fn collapse_repeated_separators(text: &str) -> String {
             .map_or_else(String::new, |character| character.to_string())
     });
 
-    collapsed
-        .trim_matches(|character: char| matches!(character, '.' | '-' | '_') || character.is_whitespace())
-        .to_string()
+    collapsed.trim_matches(trim).to_string()
 }
 
 /// Format bytes as human-readable size.
@@ -510,7 +515,8 @@ pub fn is_network_path(path: &Path) -> bool {
             // null terminator
             root.push(0);
 
-            // SAFETY: GetDriveTypeW is a safe Windows API call that only reads the null-terminated string to determine drive type
+            // SAFETY: GetDriveTypeW is a safe Windows API call
+            // that only reads the null-terminated string to determine drive type
             #[allow(unsafe_code)]
             let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
             return drive_type == DRIVE_REMOTE;

@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
+use super::prefix_index::PrefixIndex;
 use super::types::{FileInfo, FilteredParts, PrefixCandidate};
 use crate::RE_RESOLUTION;
 
@@ -82,6 +83,9 @@ pub fn filter_numeric_resolution_and_glue_parts(filename: &str) -> String {
 /// allowing common group names that appear in the middle of filenames to be detected.
 ///
 /// The file extension (last part after the final dot) is excluded from candidate generation.
+///
+/// Builds a [`PrefixIndex`] of `all_files` for the call,
+/// so use [`find_prefix_candidates_indexed`] with a shared index when calling it for many files.
 #[must_use]
 pub fn find_prefix_candidates<'a>(
     file_name: &'a str,
@@ -89,8 +93,38 @@ pub fn find_prefix_candidates<'a>(
     min_group_size: usize,
     min_prefix_chars: usize,
 ) -> Vec<PrefixCandidate<'a>> {
+    let index = PrefixIndex::new(all_files);
+    find_prefix_candidates_indexed(file_name, all_files, &index, min_group_size, min_prefix_chars)
+}
+
+/// Find prefix candidates like [`find_prefix_candidates`], looking matching files up in an index of `all_files`.
+///
+/// The index must have been built from the same `all_files` slice.
+#[must_use]
+pub fn find_prefix_candidates_indexed<'a>(
+    file_name: &'a str,
+    all_files: &[FileInfo<'_>],
+    index: &PrefixIndex<'_>,
+    min_group_size: usize,
+    min_prefix_chars: usize,
+) -> Vec<PrefixCandidate<'a>> {
     let mut candidates: Vec<PrefixCandidate<'a>> = Vec::new();
     let mut seen_normalized: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut matches: Vec<usize> = Vec::new();
+    let contiguous_count = |matches: &[usize], prefix_parts: &[&str], prefix_combined: &str| {
+        matches
+            .iter()
+            .filter_map(|&file_index| all_files.get(file_index))
+            .filter(|file| {
+                parts_are_contiguous_lowered(
+                    &file.original_parts,
+                    &file.original_parts_lower,
+                    prefix_parts,
+                    prefix_combined,
+                )
+            })
+            .count()
+    };
 
     // Get the filename without the extension to avoid matching file extensions as group names
     let name_without_extension = file_name.rsplit_once('.').map_or(file_name, |(name, _ext)| name);
@@ -111,13 +145,8 @@ pub fn find_prefix_candidates<'a>(
 
             let prefix_parts: Vec<&str> = three_part.split('.').collect();
             let prefix_combined = prefix_parts.join("").to_lowercase();
-            let match_count = all_files
-                .iter()
-                .filter(|f| {
-                    prefix_matches_normalized_precomputed(f, &three_part_normalized)
-                        && parts_are_contiguous_with_combined(&f.original_parts, &prefix_parts, &prefix_combined)
-                })
-                .count();
+            index.matching_files(&three_part_normalized, &mut matches);
+            let match_count = contiguous_count(&matches, &prefix_parts, &prefix_combined);
             if match_count >= min_group_size {
                 candidates.push(PrefixCandidate::new(
                     Cow::Borrowed(three_part),
@@ -145,13 +174,8 @@ pub fn find_prefix_candidates<'a>(
 
             let prefix_parts: Vec<&str> = two_part.split('.').collect();
             let prefix_combined = prefix_parts.join("").to_lowercase();
-            let match_count = all_files
-                .iter()
-                .filter(|f| {
-                    prefix_matches_normalized_precomputed(f, &two_part_normalized)
-                        && parts_are_contiguous_with_combined(&f.original_parts, &prefix_parts, &prefix_combined)
-                })
-                .count();
+            index.matching_files(&two_part_normalized, &mut matches);
+            let match_count = contiguous_count(&matches, &prefix_parts, &prefix_combined);
             if match_count >= min_group_size {
                 candidates.push(PrefixCandidate::new(Cow::Borrowed(two_part), match_count, 2, position));
             }
@@ -171,10 +195,8 @@ pub fn find_prefix_candidates<'a>(
             }
             seen_normalized.insert(single_part_normalized.clone());
 
-            let match_count = all_files
-                .iter()
-                .filter(|f| prefix_matches_normalized_precomputed(f, &single_part_normalized))
-                .count();
+            index.matching_files(&single_part_normalized, &mut matches);
+            let match_count = matches.len();
             if match_count >= min_group_size {
                 candidates.push(PrefixCandidate::new(
                     Cow::Borrowed(single_part),
@@ -206,7 +228,8 @@ pub fn prefix_matches_normalized_precomputed(file_info: &FileInfo<'_>, target_no
     file_info.filtered_parts.prefix_matches_normalized(target_normalized)
 }
 
-/// Inner implementation of contiguity checking that takes a pre-computed `prefix_combined` (the joined, lowercased prefix parts).
+/// Inner implementation of contiguity checking that takes a pre-computed `prefix_combined`
+/// (the joined, lowercased prefix parts).
 ///
 /// Call this directly
 /// when the same `prefix_parts` are checked against many files to avoid recomputing the `join + lowercase` on every call.
@@ -216,17 +239,30 @@ pub fn parts_are_contiguous_with_combined(
     prefix_parts: &[&str],
     prefix_combined: &str,
 ) -> bool {
+    if prefix_parts.is_empty() || parts_match_a_window(original_parts, prefix_parts) {
+        return true;
+    }
+    let original_parts_lower: Vec<String> = original_parts.iter().map(|part| part.to_lowercase()).collect();
+    parts_are_contiguous_lowered(original_parts, &original_parts_lower, prefix_parts, prefix_combined)
+}
+
+/// Contiguity check of [`parts_are_contiguous_with_combined`] with the original parts already lowercased.
+///
+/// `original_parts_lower` must hold `original_parts` lowercased, in the same order,
+/// as [`FileInfo::original_parts_lower`] does.
+#[must_use]
+pub fn parts_are_contiguous_lowered(
+    original_parts: &[String],
+    original_parts_lower: &[String],
+    prefix_parts: &[&str],
+    prefix_combined: &str,
+) -> bool {
     if prefix_parts.is_empty() {
         return true;
     }
 
     // Check if the prefix parts match contiguous original parts exactly
-    if original_parts.windows(prefix_parts.len()).any(|window| {
-        window
-            .iter()
-            .zip(prefix_parts)
-            .all(|(original_part, prefix_part)| original_part.eq_ignore_ascii_case(prefix_part))
-    }) {
+    if parts_match_a_window(original_parts, prefix_parts) {
         return true;
     }
 
@@ -235,9 +271,8 @@ pub fn parts_are_contiguous_with_combined(
     // Also matches if the original part STARTS WITH the prefix at a word boundary (extended form)
     // e.g., prefix ["Joseph", "Example"] matches original part "JosephExampleTV"
     // but NOT "JosephExamples" (no word boundary after "Example")
-    for original_part in original_parts {
-        let original_lower = original_part.to_lowercase();
-        if original_lower == prefix_combined
+    for (original_part, original_lower) in original_parts.iter().zip(original_parts_lower) {
+        if *original_lower == prefix_combined
             || (original_lower.starts_with(prefix_combined)
                 && FilteredParts::has_word_boundary_at(original_part, prefix_combined.len()))
         {
@@ -249,11 +284,17 @@ pub fn parts_are_contiguous_with_combined(
     // e.g., prefix ["PhotoLab"] (single part) matches original ["Photo", "Lab"] (two parts)
     // Also matches if the combined parts START WITH the prefix at a word boundary
     for start_idx in 0..original_parts.len() {
+        if !lowered_run_can_start_with(
+            original_parts_lower.get(start_idx..).unwrap_or_default(),
+            prefix_combined,
+        ) {
+            continue;
+        }
         let mut combined = String::new();
         let mut combined_lower = String::new();
-        for part in original_parts.iter().skip(start_idx) {
+        for (part, part_lower) in original_parts.iter().zip(original_parts_lower).skip(start_idx) {
             combined.push_str(part);
-            combined_lower.push_str(&part.to_lowercase());
+            combined_lower.push_str(part_lower);
             if combined_lower == prefix_combined
                 || (combined_lower.starts_with(prefix_combined)
                     && FilteredParts::has_word_boundary_at(&combined, prefix_combined.len()))
@@ -267,6 +308,34 @@ pub fn parts_are_contiguous_with_combined(
         }
     }
 
+    false
+}
+
+/// Whether the prefix parts equal a run of contiguous original parts, ignoring ASCII case.
+fn parts_match_a_window(original_parts: &[String], prefix_parts: &[&str]) -> bool {
+    original_parts.windows(prefix_parts.len()).any(|window| {
+        window
+            .iter()
+            .zip(prefix_parts)
+            .all(|(original_part, prefix_part)| original_part.eq_ignore_ascii_case(prefix_part))
+    })
+}
+
+/// Whether the concatenation of the lowercased parts, once as long as `prefix`, starts with it.
+///
+/// Only such a run can equal or start with the prefix at any length,
+/// so a start position failing this cannot match and needs no concatenated strings.
+fn lowered_run_can_start_with(parts_lower: &[String], prefix: &str) -> bool {
+    let mut remaining = prefix;
+    for part in parts_lower {
+        if remaining.len() <= part.len() {
+            return part.starts_with(remaining);
+        }
+        match remaining.strip_prefix(part.as_str()) {
+            Some(rest) => remaining = rest,
+            None => return false,
+        }
+    }
     false
 }
 
@@ -2431,5 +2500,101 @@ mod test_parts_are_contiguous_precomputed {
             parts_are_contiguous_in_original(name, &["B", "C", "D"]),
             parts_are_contiguous_in_original_precomputed(&parts, &["B", "C", "D"]),
         );
+    }
+}
+
+#[cfg(test)]
+mod test_contiguity_equivalence {
+    use super::*;
+
+    /// The contiguity check before lowercased parts were precomputed, kept as the reference.
+    fn reference(original_parts: &[String], prefix_parts: &[&str], prefix_combined: &str) -> bool {
+        if prefix_parts.is_empty() {
+            return true;
+        }
+        if original_parts.windows(prefix_parts.len()).any(|window| {
+            window
+                .iter()
+                .zip(prefix_parts)
+                .all(|(original_part, prefix_part)| original_part.eq_ignore_ascii_case(prefix_part))
+        }) {
+            return true;
+        }
+        for original_part in original_parts {
+            let original_lower = original_part.to_lowercase();
+            if original_lower == prefix_combined
+                || (original_lower.starts_with(prefix_combined)
+                    && FilteredParts::has_word_boundary_at(original_part, prefix_combined.len()))
+            {
+                return true;
+            }
+        }
+        for start_idx in 0..original_parts.len() {
+            let mut combined = String::new();
+            let mut combined_lower = String::new();
+            for part in original_parts.iter().skip(start_idx) {
+                combined.push_str(part);
+                combined_lower.push_str(&part.to_lowercase());
+                if combined_lower == prefix_combined
+                    || (combined_lower.starts_with(prefix_combined)
+                        && FilteredParts::has_word_boundary_at(&combined, prefix_combined.len()))
+                {
+                    return true;
+                }
+                if combined.len() > prefix_combined.len() + 20 {
+                    break;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn agrees_with_the_allocating_reference() {
+        let names = [
+            "Photo.Lab.Image.One.jpg",
+            "PhotoLab.Image.Two.jpg",
+            "PhotoLabTV.Show.mp4",
+            "Photo.Labs.Extra.jpg",
+            "Jane.Doe.S01E01.720p.mp4",
+            "JaneDoe2024.Special.mp4",
+            "İstanbul.Trip.İmage.jpg",
+            "Ärtist.Nämé.Song.mp3",
+            "A..B...C.mp4",
+            "Some.Very.Long.Part.Name.That.Goes.On.And.On.Forever.mp4",
+        ];
+        let prefixes: [&[&str]; 14] = [
+            &["Photo", "Lab"],
+            &["PhotoLab"],
+            &["Photo"],
+            &["Lab", "Image"],
+            &["Jane", "Doe"],
+            &["JaneDoe"],
+            &["janedoe2024"],
+            &["İstanbul"],
+            &["i̇stanbul", "Trip"],
+            &["Ärtist", "Nämé"],
+            &["A", "B"],
+            &[""],
+            &["SomeVeryLongPartNameThat"],
+            &["Missing", "Prefix"],
+        ];
+        for name in names {
+            let original_parts: Vec<String> = name.split('.').map(String::from).collect();
+            let original_parts_lower: Vec<String> = original_parts.iter().map(|part| part.to_lowercase()).collect();
+            for prefix_parts in prefixes {
+                let prefix_combined = prefix_parts.join("").to_lowercase();
+                assert_eq!(
+                    parts_are_contiguous_lowered(
+                        &original_parts,
+                        &original_parts_lower,
+                        prefix_parts,
+                        &prefix_combined
+                    ),
+                    reference(&original_parts, prefix_parts, &prefix_combined),
+                    "{name} with {prefix_parts:?}"
+                );
+            }
+        }
     }
 }

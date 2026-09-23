@@ -16,6 +16,9 @@ use super::token::{Token, TokenKind, is_closer, is_opener};
 /// The em dash, which the dash rewrite reads as a clause separator.
 const EM_DASH: char = '\u{2014}';
 
+/// ASCII whitespace and the lead bytes of every other whitespace character and of the em dash.
+const CHUNK_END_CANDIDATES: &[u8] = b" \t\n\x0b\x0c\r\xc2\xe1\xe2\xe3";
+
 /// Matches a URL such as `https://example.com/path` or `www.example.com`.
 static RE_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:[a-z][a-z0-9+.-]*://\S+|www\.\S+)$").expect("Invalid URL regex"));
@@ -139,10 +142,19 @@ fn demote_command_separators(tokens: &mut [Token<'_>]) {
 /// so a dash written against a word becomes a token of its own.
 fn chunk_end(text: &str, start: usize, split_dashes: bool) -> usize {
     let rest = text.get(start..).unwrap_or_default();
-    for (offset, character) in rest.char_indices() {
-        if character.is_whitespace() || split_dashes && character == EM_DASH {
-            return start + offset;
+    let mut offset = 0;
+    while let Some(found) = rest
+        .as_bytes()
+        .get(offset..)
+        .and_then(|tail| crate::simd::find_byte_of(tail, CHUNK_END_CANDIDATES))
+    {
+        let position = offset + found;
+        // Candidates are ASCII or lead bytes, so the position is always a character boundary.
+        let character = rest.get(position..).and_then(|tail| tail.chars().next());
+        if character.is_some_and(|character| character.is_whitespace() || split_dashes && character == EM_DASH) {
+            return start + position;
         }
+        offset = position + 1;
     }
     text.len()
 }
@@ -265,15 +277,14 @@ fn backtick_span_end(text: &str, start: usize) -> Option<usize> {
     let run = backtick_run(bytes, start);
     let mut index = start + run;
     while index < bytes.len() {
-        if bytes.get(index) == Some(&b'`') {
-            let closing = backtick_run(bytes, index);
-            if closing == run {
-                return Some(index + closing);
-            }
-            index += closing;
-        } else {
-            index += 1;
+        let rest = bytes.get(index..)?;
+        let offset = crate::simd::find_byte_of(rest, b"`")?;
+        index += offset;
+        let closing = backtick_run(bytes, index);
+        if closing == run {
+            return Some(index + closing);
         }
+        index += closing;
     }
     None
 }
@@ -493,5 +504,41 @@ mod test_tokenizer {
         assert_eq!(tokens_width(&umlauts), 4);
         assert_eq!(tokens_width(&tokens("ab cd")), 5);
         assert_eq!(prefix_width("\t// ", 4), 7);
+    }
+}
+
+#[cfg(test)]
+mod test_chunk_end {
+    use super::*;
+
+    /// The character by character scan `chunk_end` must agree with.
+    fn chunk_end_by_characters(text: &str, start: usize, split_dashes: bool) -> usize {
+        let rest = text.get(start..).unwrap_or_default();
+        rest.char_indices()
+            .find(|(_, character)| character.is_whitespace() || split_dashes && *character == EM_DASH)
+            .map_or(text.len(), |(offset, _)| start + offset)
+    }
+
+    #[test]
+    fn agrees_with_the_character_scan_on_every_start() {
+        let lines = [
+            "plain words separated by spaces",
+            "tabs\tand\u{a0}no-break\u{2009}thin\u{3000}ideographic\u{1680}ogham\u{85}next line",
+            "dash—joined words – en dash “quoted” ’apostrophe’ … ellipsis €uro ‘single’",
+            "a_very_long_identifier_without_any_whitespace_that_runs_past_one_vector_of_bytes_and_more",
+            "",
+            "trailing space ",
+        ];
+        for line in lines {
+            for (start, _) in line.char_indices() {
+                for split_dashes in [false, true] {
+                    assert_eq!(
+                        chunk_end(line, start, split_dashes),
+                        chunk_end_by_characters(line, start, split_dashes),
+                        "{line:?} from {start} split {split_dashes}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -40,6 +40,8 @@ pub struct FileInfo<'a> {
     pub filtered_name: Cow<'a, str>,
     /// Pre-computed: `original_name` split by `'.'` (owned, for thread safety).
     pub original_parts: Vec<String>,
+    /// Pre-computed: `original_parts` lowercased, in the same order.
+    pub original_parts_lower: Vec<String>,
     /// Pre-computed filtered name parts and their combinations for efficient prefix matching.
     pub filtered_parts: FilteredParts,
 }
@@ -158,6 +160,7 @@ impl FileInfo<'_> {
     /// Pre-computes split and lowercased parts for efficient matching in hot loops.
     pub fn new(path: PathBuf, original_name: String, filtered_name: String) -> Self {
         let original_parts: Vec<String> = original_name.split('.').map(String::from).collect();
+        let original_parts_lower: Vec<String> = original_parts.iter().map(|part| part.to_lowercase()).collect();
         let filtered_parts = FilteredParts::new(&filtered_name);
 
         Self {
@@ -165,6 +168,7 @@ impl FileInfo<'_> {
             original_name: Cow::Owned(original_name),
             filtered_name: Cow::Owned(filtered_name),
             original_parts,
+            original_parts_lower,
             filtered_parts,
         }
     }

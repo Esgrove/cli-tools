@@ -10,9 +10,10 @@ use std::path::PathBuf;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use cli_tools::dir_move::{
-    FileInfo, FilteredParts, PrefixGroupBuilder, count_prefix_chars, filter_numeric_resolution_and_glue_parts,
-    find_prefix_candidates, get_all_n_part_sequences, is_unwanted_directory, normalize_name,
-    parts_are_contiguous_with_combined, prefix_matches_normalized_precomputed,
+    FileInfo, FilteredParts, PrefixGroupBuilder, PrefixIndex, count_prefix_chars,
+    filter_numeric_resolution_and_glue_parts, find_prefix_candidates, find_prefix_candidates_indexed,
+    get_all_n_part_sequences, is_unwanted_directory, normalize_name, parts_are_contiguous_lowered,
+    prefix_matches_normalized_precomputed,
 };
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,30 @@ fn make_filtered_files(names: &[&str]) -> Vec<FileInfo<'static>> {
             FileInfo::new(PathBuf::from(*name), (*name).to_string(), filtered)
         })
         .collect()
+}
+
+/// Lowercase every part, as `FileInfo::new` does for `original_parts_lower`.
+fn lowercase_parts(parts: &[String]) -> Vec<String> {
+    parts.iter().map(|part| part.to_lowercase()).collect()
+}
+
+/// A directory of 500 files: 50 series of 8 episodes and 100 unrelated files.
+fn scaled_file_names() -> Vec<String> {
+    const WORDS: &[&str] = &[
+        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Theta", "Kappa", "Lambda", "Sigma",
+    ];
+    let mut names = Vec::new();
+    for series in 0..50 {
+        let first = WORDS[series % WORDS.len()];
+        let second = WORDS[(series / WORDS.len() + series) % WORDS.len()];
+        for episode in 1..=8 {
+            names.push(format!("{first}.{second}{series}.S01E{episode:02}.1080p.x265.mkv"));
+        }
+    }
+    for index in 0..100 {
+        names.push(format!("Unrelated.Clip{index}.{}.mp4", 2000 + index));
+    }
+    names
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +332,7 @@ fn bench_has_word_boundary_at(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// parts_are_contiguous_with_combined
+// parts_are_contiguous_lowered
 // ---------------------------------------------------------------------------
 
 fn bench_parts_are_contiguous(c: &mut Criterion) {
@@ -321,14 +346,16 @@ fn bench_parts_are_contiguous(c: &mut Criterion) {
         "x264".into(),
         "mp4".into(),
     ];
+    let original_parts_lower = lowercase_parts(&original_parts);
 
     // Exact contiguous match at start
     let prefix_exact: Vec<&str> = vec!["Jane", "Doe"];
     let combined_exact = "janedoe".to_string();
     group.bench_function("exact_match_start", |b| {
         b.iter(|| {
-            parts_are_contiguous_with_combined(
+            parts_are_contiguous_lowered(
                 black_box(&original_parts),
+                black_box(&original_parts_lower),
                 black_box(&prefix_exact),
                 black_box(&combined_exact),
             )
@@ -340,8 +367,9 @@ fn bench_parts_are_contiguous(c: &mut Criterion) {
     let combined_mid = "s01e01720p".to_string();
     group.bench_function("exact_match_middle", |b| {
         b.iter(|| {
-            parts_are_contiguous_with_combined(
+            parts_are_contiguous_lowered(
                 black_box(&original_parts),
+                black_box(&original_parts_lower),
                 black_box(&prefix_mid),
                 black_box(&combined_mid),
             )
@@ -350,12 +378,14 @@ fn bench_parts_are_contiguous(c: &mut Criterion) {
 
     // Concatenated form match
     let concat_original: Vec<String> = vec!["JaneDoe".into(), "Episode".into(), "01".into()];
+    let concat_original_lower = lowercase_parts(&concat_original);
     let prefix_split: Vec<&str> = vec!["Jane", "Doe"];
     let combined_split = "janedoe".to_string();
     group.bench_function("concatenated_form", |b| {
         b.iter(|| {
-            parts_are_contiguous_with_combined(
+            parts_are_contiguous_lowered(
                 black_box(&concat_original),
+                black_box(&concat_original_lower),
                 black_box(&prefix_split),
                 black_box(&combined_split),
             )
@@ -367,8 +397,9 @@ fn bench_parts_are_contiguous(c: &mut Criterion) {
     let combined_none = "nonexistentprefix".to_string();
     group.bench_function("no_match", |b| {
         b.iter(|| {
-            parts_are_contiguous_with_combined(
+            parts_are_contiguous_lowered(
                 black_box(&original_parts),
+                black_box(&original_parts_lower),
                 black_box(&prefix_none),
                 black_box(&combined_none),
             )
@@ -377,12 +408,14 @@ fn bench_parts_are_contiguous(c: &mut Criterion) {
 
     // Extended starts-with match
     let extended_original: Vec<String> = vec!["JaneDoeTV".into(), "Episode".into(), "01".into()];
+    let extended_original_lower = lowercase_parts(&extended_original);
     let prefix_extended: Vec<&str> = vec!["Jane", "Doe"];
     let combined_extended = "janedoe".to_string();
     group.bench_function("extended_starts_with", |b| {
         b.iter(|| {
-            parts_are_contiguous_with_combined(
+            parts_are_contiguous_lowered(
                 black_box(&extended_original),
+                black_box(&extended_original_lower),
                 black_box(&prefix_extended),
                 black_box(&combined_extended),
             )
@@ -391,12 +424,14 @@ fn bench_parts_are_contiguous(c: &mut Criterion) {
 
     // Long original parts list
     let long_original: Vec<String> = (0..20).map(|i| format!("Part{i}")).collect();
+    let long_original_lower = lowercase_parts(&long_original);
     let prefix_end: Vec<&str> = vec!["Part18", "Part19"];
     let combined_end = "part18part19".to_string();
     group.bench_function("long_list_match_at_end", |b| {
         b.iter(|| {
-            parts_are_contiguous_with_combined(
+            parts_are_contiguous_lowered(
                 black_box(&long_original),
+                black_box(&long_original_lower),
                 black_box(&prefix_end),
                 black_box(&combined_end),
             )
@@ -441,13 +476,15 @@ fn bench_prefix_matches_normalized_precomputed(c: &mut Criterion) {
 
 fn bench_find_prefix_candidates_small(c: &mut Criterion) {
     let files = make_filtered_files(SMALL_FILE_SET);
+    let index = PrefixIndex::new(&files);
 
     let mut group = c.benchmark_group("dir_move/find_prefix_candidates/small");
     group.bench_function("first_file", |b| {
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 black_box(&files[0].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(2),
                 black_box(5),
             )
@@ -458,6 +495,7 @@ fn bench_find_prefix_candidates_small(c: &mut Criterion) {
 
 fn bench_find_prefix_candidates_medium(c: &mut Criterion) {
     let files = make_filtered_files(MEDIUM_FILE_SET);
+    let prefix_index = PrefixIndex::new(&files);
 
     let mut group = c.benchmark_group("dir_move/find_prefix_candidates/medium");
 
@@ -469,9 +507,10 @@ fn bench_find_prefix_candidates_medium(c: &mut Criterion) {
         let label_short = if label.len() > 30 { &label[..30] } else { label.as_ref() };
         group.bench_with_input(BenchmarkId::from_parameter(label_short), &index, |b, &index| {
             b.iter(|| {
-                find_prefix_candidates(
+                find_prefix_candidates_indexed(
                     black_box(&files[index].filtered_name),
                     black_box(&files),
+                    &prefix_index,
                     black_box(2),
                     black_box(5),
                 )
@@ -484,14 +523,16 @@ fn bench_find_prefix_candidates_medium(c: &mut Criterion) {
 
 fn bench_find_prefix_candidates_large(c: &mut Criterion) {
     let files = make_filtered_files(LARGE_FILE_SET);
+    let index = PrefixIndex::new(&files);
 
     let mut group = c.benchmark_group("dir_move/find_prefix_candidates/large");
 
     group.bench_function("large_group_file", |b| {
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 black_box(&files[0].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(2),
                 black_box(5),
             )
@@ -501,9 +542,10 @@ fn bench_find_prefix_candidates_large(c: &mut Criterion) {
     group.bench_function("standalone_file", |b| {
         // "Standalone.Movie.2024.1080p.BluRay.mp4": index 29
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 black_box(&files[29].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(2),
                 black_box(5),
             )
@@ -512,9 +554,10 @@ fn bench_find_prefix_candidates_large(c: &mut Criterion) {
 
     group.bench_function("min_group_size_1", |b| {
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 black_box(&files[0].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(1),
                 black_box(5),
             )
@@ -523,9 +566,10 @@ fn bench_find_prefix_candidates_large(c: &mut Criterion) {
 
     group.bench_function("min_prefix_chars_3", |b| {
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 black_box(&files[0].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(2),
                 black_box(3),
             )
@@ -542,10 +586,12 @@ fn bench_find_prefix_candidates_all_files(c: &mut Criterion) {
     let small_files = make_filtered_files(SMALL_FILE_SET);
     group.bench_function("small_set", |b| {
         b.iter(|| {
+            let small_index = PrefixIndex::new(&small_files);
             for file in &small_files {
-                let _ = find_prefix_candidates(
+                let _ = find_prefix_candidates_indexed(
                     black_box(&file.filtered_name),
                     black_box(&small_files),
+                    &small_index,
                     black_box(2),
                     black_box(5),
                 );
@@ -556,10 +602,12 @@ fn bench_find_prefix_candidates_all_files(c: &mut Criterion) {
     let medium_files = make_filtered_files(MEDIUM_FILE_SET);
     group.bench_function("medium_set", |b| {
         b.iter(|| {
+            let medium_index = PrefixIndex::new(&medium_files);
             for file in &medium_files {
-                let _ = find_prefix_candidates(
+                let _ = find_prefix_candidates_indexed(
                     black_box(&file.filtered_name),
                     black_box(&medium_files),
+                    &medium_index,
                     black_box(2),
                     black_box(5),
                 );
@@ -570,10 +618,12 @@ fn bench_find_prefix_candidates_all_files(c: &mut Criterion) {
     let large_files = make_filtered_files(LARGE_FILE_SET);
     group.bench_function("large_set", |b| {
         b.iter(|| {
+            let large_index = PrefixIndex::new(&large_files);
             for file in &large_files {
-                let _ = find_prefix_candidates(
+                let _ = find_prefix_candidates_indexed(
                     black_box(&file.filtered_name),
                     black_box(&large_files),
+                    &large_index,
                     black_box(2),
                     black_box(5),
                 );
@@ -590,16 +640,18 @@ fn bench_find_prefix_candidates_all_files(c: &mut Criterion) {
 
 fn bench_mixed_conventions(c: &mut Criterion) {
     let files = make_filtered_files(MIXED_CONVENTION_FILES);
+    let index = PrefixIndex::new(&files);
 
     let mut group = c.benchmark_group("dir_move/mixed_conventions");
 
     // Concatenated form
     group.bench_function("concatenated_file", |b| {
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 // JaneDoe...
                 black_box(&files[0].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(2),
                 black_box(5),
             )
@@ -609,10 +661,11 @@ fn bench_mixed_conventions(c: &mut Criterion) {
     // Dotted form
     group.bench_function("dotted_file", |b| {
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 // Jane.Doe...
                 black_box(&files[1].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(2),
                 black_box(5),
             )
@@ -622,10 +675,11 @@ fn bench_mixed_conventions(c: &mut Criterion) {
     // Lowercase form
     group.bench_function("lowercase_file", |b| {
         b.iter(|| {
-            find_prefix_candidates(
+            find_prefix_candidates_indexed(
                 // janedoe...
                 black_box(&files[2].filtered_name),
                 black_box(&files),
+                &index,
                 black_box(2),
                 black_box(5),
             )
@@ -812,6 +866,32 @@ fn bench_is_unwanted_directory(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the first pass of `collect_all_prefix_groups` over a 500 file directory.
+fn bench_find_prefix_candidates_scaled(criterion: &mut Criterion) {
+    let names = scaled_file_names();
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let files = make_filtered_files(&name_refs);
+
+    let mut group = criterion.benchmark_group("dir_move/find_prefix_candidates/scaled_500");
+    group.sample_size(20);
+    group.bench_function("index_per_call", |bencher| {
+        bencher.iter(|| {
+            for file in &files {
+                let _ = find_prefix_candidates(black_box(&file.filtered_name), black_box(&files), 2, 5);
+            }
+        });
+    });
+    group.bench_function("shared_index", |bencher| {
+        bencher.iter(|| {
+            let index = PrefixIndex::new(&files);
+            for file in &files {
+                let _ = find_prefix_candidates_indexed(black_box(&file.filtered_name), black_box(&files), &index, 2, 5);
+            }
+        });
+    });
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // Criterion groups
 // ---------------------------------------------------------------------------
@@ -831,6 +911,7 @@ criterion_group!(
     bench_find_prefix_candidates_medium,
     bench_find_prefix_candidates_large,
     bench_find_prefix_candidates_all_files,
+    bench_find_prefix_candidates_scaled,
     bench_mixed_conventions,
     bench_file_info_construction,
     bench_prefix_group_builder,

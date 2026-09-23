@@ -42,6 +42,40 @@ pub struct StringSyntax {
     pub(super) block_scalars: bool,
 }
 
+impl StringSyntax {
+    /// Bytes that can start a comment, string, heredoc, or regex literal in code.
+    ///
+    /// A line in code without any of them is code to its end, so the scanner can skip it.
+    /// Bytes a language does not use are replaced with a slash, which is always part of the set.
+    pub(super) const fn trigger_bytes(&self) -> [u8; 7] {
+        let block_open = match self.block_comment {
+            Some((open, _)) => first_byte_or_slash(open),
+            None => b'/',
+        };
+        [
+            first_byte_or_slash(self.line_marker),
+            block_open,
+            b'"',
+            b'\'',
+            if matches!(self.backtick, Backtick::None) {
+                b'/'
+            } else {
+                b'`'
+            },
+            if self.heredoc { b'<' } else { b'/' },
+            b'/',
+        ]
+    }
+}
+
+/// First byte of the text, or a slash for empty text.
+pub(super) const fn first_byte_or_slash(text: &str) -> u8 {
+    match text.as_bytes().first() {
+        Some(byte) => *byte,
+        None => b'/',
+    }
+}
+
 /// String syntax for languages the trailing comment scanner supports.
 pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
     let base = StringSyntax {
