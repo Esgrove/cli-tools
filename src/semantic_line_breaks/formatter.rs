@@ -560,6 +560,37 @@ mod test_format {
     }
 
     #[test]
+    fn a_javascript_comment_block_is_rewrapped_instead_of_left_alone() {
+        // Pulling the bracketed aside onto the first line would leave it two characters past the limit.
+        // That is inside the overflow the width tolerates but outside the cap a plain rewrap has to keep,
+        // so planning against the overflow would throw the whole fix away.
+        // The break before the bracket reads as well and fits, so the block is reflowed.
+        let text = concat!(
+            "      // Only the fallback path reads that flag (the null backend, the editor preview,\n",
+            "      // older engines), and there it really is required.\n",
+            "      // Capture through the new sandbox does not need it, so this is no longer\n",
+            "      // the answer to a blank preview in general.\n",
+            "      status.textContent = \"no frame (the fallback path needs --someflagname)\";\n",
+        );
+        let expected = concat!(
+            "      // Only the fallback path reads that flag\n",
+            "      // (the null backend, the editor preview, older engines),\n",
+            "      // and there it really is required.\n",
+            "      // Capture through the new sandbox does not need it,\n",
+            "      // so this is no longer the answer to a blank preview in general.\n",
+            "      status.textContent = \"no frame (the fallback path needs --someflagname)\";\n",
+        );
+        let options = FormatOptions::with_width(100);
+        let result = format(text, FileKind::JavaScript, &options);
+        assert_eq!(result.fixed_text.as_deref(), Some(expected));
+        assert!(result.violations.iter().all(|violation| violation.fixable));
+        assert_eq!(
+            format(expected, FileKind::JavaScript, &options),
+            FormatResult::default()
+        );
+    }
+
+    #[test]
     fn formatting_is_idempotent_on_fixed_output() {
         let text = "//! Module docs that were hard wrapped at eighty\n//! columns by an editor; which is exactly the kind\n//! of text the formatter repairs — always.\n\nfn main() {\n    let width = 80; // default\n}\n";
         let options = FormatOptions::default();

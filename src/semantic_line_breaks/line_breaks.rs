@@ -87,6 +87,11 @@ pub(super) struct Budgets {
     pub first: usize,
     /// Width every line after the first one has.
     pub rest: usize,
+    /// Whether the budget is a cap the lines have to stay inside rather than the soft target it usually is.
+    ///
+    /// A rewrap of a paragraph that already fits is thrown away when it puts a line past the limit,
+    /// so such a run has to be planned against the budget itself.
+    pub hard_cap: bool,
 }
 
 /// Widths a line of the run is measured against, worked out once from its budget.
@@ -176,17 +181,20 @@ pub(super) fn split_tokens<'text>(
     if tokens.is_empty() {
         return Vec::new();
     }
-    let budget = if *is_first_line { budgets.first } else { budgets.rest };
-    let rest_budget = budgets.rest;
+    // The run may start in the middle of the paragraph, where the first line already carries the rest prefix.
+    let run = Budgets {
+        first: if *is_first_line { budgets.first } else { budgets.rest },
+        ..budgets
+    };
     *is_first_line = false;
     let has_forced_break = tokens.iter().any(|token| token.force_break_after);
     if !has_forced_break
-        && tokens_width(&tokens) <= LineWidths::new(options.max_width, budget, relaid_out, options.strict).target
+        && tokens_width(&tokens) <= LineWidths::new(options.max_width, run.first, relaid_out, options.strict).target
     {
         return vec![tokens];
     }
 
-    let breaks = plan_line_breaks(&tokens, budget, rest_budget, relaid_out, options);
+    let breaks = plan_line_breaks(&tokens, run, relaid_out, options);
     let mut pieces: Vec<Vec<Token>> = Vec::with_capacity(breaks.len() + 1);
     let mut rest = tokens;
     let mut line_start = 0;
@@ -198,7 +206,7 @@ pub(super) fn split_tokens<'text>(
     pieces.push(rest);
 
     for (index, piece) in pieces.iter().enumerate() {
-        let budget = if index == 0 { budget } else { rest_budget };
+        let budget = if index == 0 { run.first } else { run.rest };
         if tokens_width(piece) > budget + soft_overflow(options.max_width, options.strict) {
             let reason = if piece.len() > 1 {
                 "no clause boundary fits within the line limit"
@@ -253,13 +261,7 @@ pub(super) fn over_long_line_violations(
 /// The whole run is planned at once so that the lines come out balanced.
 /// Of the break sets that use equally good boundaries the most even one wins,
 /// so a long sentence becomes two medium length lines instead of one full line and a short remainder.
-fn plan_line_breaks(
-    tokens: &[Token<'_>],
-    first_budget: usize,
-    rest_budget: usize,
-    relaid_out: bool,
-    options: &FormatOptions,
-) -> Vec<usize> {
+fn plan_line_breaks(tokens: &[Token<'_>], budgets: Budgets, relaid_out: bool, options: &FormatOptions) -> Vec<usize> {
     let count = tokens.len();
     let widths = cumulative_widths(tokens);
     let mut ranks = vec![None; count + 1];
@@ -272,8 +274,13 @@ fn plan_line_breaks(
             *slot = boundary.word_fallback;
         }
     }
-    suppress_list_runs(tokens, &mut ranks, &widths, first_budget.max(rest_budget));
+    suppress_list_runs(tokens, &mut ranks, &widths, budgets.first.max(budgets.rest));
     let colon_counts = cumulative_colon_counts(&ranks);
+    let semantic_counts = if budgets.hard_cap {
+        cumulative_semantic_counts(&ranks)
+    } else {
+        Vec::new()
+    };
     let table = BreakTable {
         ranks: &ranks,
         widths: &widths,
@@ -291,10 +298,14 @@ fn plan_line_breaks(
     let mut ranked_ends = Vec::new();
     // Only the first line of the paragraph has a budget of its own,
     // so the width it aims at and the prefix it carries are the same for every other line.
-    let first = LineWidths::new(limit, first_budget, relaid_out, options.strict);
-    let rest = LineWidths::new(limit, rest_budget, relaid_out, options.strict);
+    let first = LineWidths::new(limit, budgets.first, relaid_out, options.strict);
+    let rest = LineWidths::new(limit, budgets.rest, relaid_out, options.strict);
     for start in (0..count).rev() {
         let line_widths @ LineWidths { budget, prefix, .. } = if start == 0 { first } else { rest };
+        // The cap only binds where a semantic boundary can honour it.
+        // A line that could only stay inside the budget by breaking at a word reads worse than one that runs over,
+        // so it keeps the overflow tolerance every other line has.
+        let capped = budgets.hard_cap && semantic_break_fits(&semantic_counts, &widths, start, count, budget);
         let mut best = LinePlan {
             cost: usize::MAX,
             line_end: count,
@@ -326,7 +337,7 @@ fn plan_line_breaks(
                 ),
                 _ => 0,
             };
-            let cost = line_cost(tokens, start, end, line_widths, &ranks, &widths)
+            let cost = line_cost(tokens, start, end, line_widths, capped, &ranks, &widths)
                 .saturating_add(skipped_colon_cost(&colon_counts, &colon_range, end))
                 .saturating_add(imbalance)
                 .saturating_add(tail);
@@ -464,6 +475,31 @@ fn cumulative_colon_counts(ranks: &[Option<Rank>]) -> Vec<usize> {
     counts
 }
 
+/// Count boundaries stronger than a word break before each token index for constant-time range queries.
+fn cumulative_semantic_counts(ranks: &[Option<Rank>]) -> Vec<usize> {
+    let mut counts = Vec::with_capacity(ranks.len() + 1);
+    let mut total = 0;
+    counts.push(total);
+    for rank in ranks {
+        total += usize::from(rank.is_some_and(|rank| rank > Rank::Word));
+        counts.push(total);
+    }
+    counts
+}
+
+/// Whether a boundary stronger than a word break could end the line that starts at `start` inside its budget.
+///
+/// Cumulative widths are sorted, so a binary search bounds the boundaries to count over.
+fn semantic_break_fits(counts: &[usize], widths: &[usize], start: usize, count: usize, budget: usize) -> bool {
+    let reachable = start + 1..reachable_boundary_range(widths, start, budget).end.min(count);
+    let first = counts.get(reachable.start).copied().unwrap_or_default();
+    let last = counts
+        .get(reachable.end.max(reachable.start))
+        .copied()
+        .unwrap_or_default();
+    last > first
+}
+
 /// Find the boundary range that fills at least half the line without exceeding its budget.
 ///
 /// Cumulative widths are sorted, so two binary searches suffice for each line start.
@@ -484,11 +520,15 @@ fn skipped_colon_cost(counts: &[usize], reachable: &Range<usize>, end: usize) ->
 }
 
 /// Cost of a line that covers the tokens `start..end` of the run.
+///
+/// `capped` marks a line that has to stay inside its budget,
+/// which takes away the overflow tolerance the width limit otherwise allows.
 fn line_cost(
     tokens: &[Token<'_>],
     start: usize,
     end: usize,
     line_widths: LineWidths,
+    capped: bool,
     ranks: &[Option<Rank>],
     widths: &[usize],
 ) -> usize {
@@ -514,7 +554,8 @@ fn line_cost(
         if !overflow_is_earned(start, count, budget, rank, ranks, widths) {
             cost = cost.saturating_add(WEAK_OVERFLOW_COST);
         }
-        let excess = width.saturating_sub(budget + overflow);
+        let tolerance = if capped { 0 } else { overflow };
+        let excess = width.saturating_sub(budget + tolerance);
         cost = cost.saturating_add(excess.saturating_mul(TOO_LONG_COST));
     }
     cost
@@ -678,7 +719,11 @@ mod test_break_choice {
         let mut violations = Vec::new();
         let pieces = split_tokens(
             tokens,
-            Budgets { first: 120, rest: 120 },
+            Budgets {
+                first: 120,
+                rest: 120,
+                hard_cap: false,
+            },
             true,
             &mut is_first_line,
             &FormatOptions::with_width(120),
@@ -698,7 +743,11 @@ mod test_break_choice {
         let mut violations = Vec::new();
         let pieces = split_tokens(
             Vec::new(),
-            Budgets { first: 120, rest: 120 },
+            Budgets {
+                first: 120,
+                rest: 120,
+                hard_cap: false,
+            },
             true,
             &mut is_first_line,
             &FormatOptions::with_width(120),

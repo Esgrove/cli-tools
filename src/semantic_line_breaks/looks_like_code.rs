@@ -34,7 +34,10 @@ pub fn looks_like_code(line: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-    if text.ends_with(['{', '}']) || text.ends_with(");") || text.ends_with("),") {
+    // A line that opens with the bracket it closes is a parenthetical aside,
+    // which is what a reflowed sentence puts on a line of its own, not a call the code makes.
+    let aside = text.starts_with('(');
+    if text.ends_with(['{', '}']) || (!aside && (text.ends_with(");") || text.ends_with("),"))) {
         return true;
     }
     let has_code_characters = crate::simd::contains_byte_of(text.as_bytes(), b"=({") || text.contains("::");
@@ -98,6 +101,11 @@ mod test_looks_like_code {
         assert!(!looks_like_code("Use the \"y\" option, or \"n\" to skip."));
         assert!(!looks_like_code("Values like a, b, and c."));
         assert!(!looks_like_code("Run `let x = 1;` first."));
+        assert!(!looks_like_code(
+            "(the first backend, the editor preview, older engines),"
+        ));
+        assert!(looks_like_code("(a + b);"));
+        assert!(looks_like_code("foo(bar),"));
         assert!(!looks_like_code("If the file exists, skip it."));
         assert!(!looks_like_code(""));
         assert!(!looks_like_code("   "));

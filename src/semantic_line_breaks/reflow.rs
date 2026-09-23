@@ -105,13 +105,14 @@ impl OutputContent<'_> {
 #[must_use]
 pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_fix: bool) -> ReflowOutcome {
     let line_offset = paragraph.start_line + 1;
-    let budgets = Budgets {
+    let mut budgets = Budgets {
         first: options
             .max_width
             .saturating_sub(prefix_width(&paragraph.first_prefix, options.tab_width)),
         rest: options
             .max_width
             .saturating_sub(prefix_width(&paragraph.rest_prefix, options.tab_width)),
+        hard_cap: false,
     };
     let hard_limit = options.max_width + soft_overflow(options.max_width, options.strict);
 
@@ -137,6 +138,13 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     let (mut segments, mut violations) = build_segments(paragraph, line_tokens, options);
     reword_segments(&mut segments, options, line_offset, &mut violations);
     merge_changed_sentences(&mut segments, options);
+
+    // A rewrap of a paragraph that already fits is refused when it puts a line past the limit,
+    // so the limit is a cap rather than a target while the break points of such a paragraph are chosen.
+    // Planning with the overflow instead would throw the whole fix away over a line a few characters too wide,
+    // where a boundary a little earlier reads just as well and fits.
+    // Rewording rewrites the sentence rather than rewrapping it, so it keeps the overflow any other text has.
+    budgets.hard_cap = !holds_reworded_fix(&violations) && paragraph_width(paragraph, options) <= options.max_width;
 
     let keep_on_one_line = keeps_list_item_on_one_line(paragraph, &segments, budgets.first, options);
     let mut output: Vec<(OutputContent, HardBreak)> = Vec::with_capacity(paragraph.lines.len());
@@ -342,7 +350,7 @@ fn reflow_refusal(
         })
     };
     let new_max = new_widths().max().unwrap_or_default();
-    let old_max = old_widths().max().unwrap_or_default();
+    let old_max = paragraph_width(paragraph, options);
     if new_max > hard_limit && new_max > old_max {
         return Some(Refusal::Longer);
     }
@@ -382,6 +390,22 @@ fn descent(widths: &[usize]) -> usize {
         .zip(widths.iter().skip(1))
         .map(|(current, next)| next.saturating_sub(*current))
         .sum()
+}
+
+/// Width of the widest line of the paragraph as it stands, prefix and hard break marker included.
+fn paragraph_width(paragraph: &Paragraph, options: &FormatOptions) -> usize {
+    paragraph
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
+            prefix_width(paragraph.prefix_for(index), options.tab_width)
+                + line.chars().count()
+                + hard_break.marker().len()
+        })
+        .max()
+        .unwrap_or_default()
 }
 
 /// Width of a prefix in characters, counting tabs as `tab_width`.
