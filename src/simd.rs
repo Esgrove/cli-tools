@@ -350,18 +350,21 @@ fn bits_where(bytes: &[u8], matches: impl Fn(u8) -> bool) -> u64 {
 }
 
 /// Every SIMD level this machine supports, so the tests cover each vector width.
-#[cfg(test)]
+#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
 fn test_levels() -> Vec<Level> {
     let mut levels = vec![Level::new()];
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        let level = Level::new();
-        levels.extend(level.as_sse2().map(Level::Sse2));
-        levels.extend(level.as_sse4_2().map(Level::Sse4_2));
-        levels.extend(level.as_avx2().map(Level::Avx2));
-        levels.extend(level.as_avx512().map(Level::Avx512));
-    }
+    let level = Level::new();
+    levels.extend(level.as_sse2().map(Level::Sse2));
+    levels.extend(level.as_sse4_2().map(Level::Sse4_2));
+    levels.extend(level.as_avx2().map(Level::Avx2));
+    levels.extend(level.as_avx512().map(Level::Avx512));
     levels
+}
+
+/// Every SIMD level this machine supports, so the tests cover each vector width.
+#[cfg(all(test, not(any(target_arch = "x86", target_arch = "x86_64"))))]
+fn test_levels() -> Vec<Level> {
+    vec![Level::new()]
 }
 
 /// Deterministic mixed ASCII and multibyte strings of every length up to about 200 bytes.

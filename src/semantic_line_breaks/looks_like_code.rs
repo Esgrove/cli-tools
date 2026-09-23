@@ -37,7 +37,7 @@ pub fn looks_like_code(line: &str) -> bool {
     if text.ends_with(['{', '}']) || text.ends_with(");") || text.ends_with("),") {
         return true;
     }
-    let has_code_characters = text.contains(['=', '(', '{']) || text.contains("::");
+    let has_code_characters = crate::simd::contains_byte_of(text.as_bytes(), b"=({") || text.contains("::");
     if text.ends_with(';') && has_code_characters {
         return true;
     }

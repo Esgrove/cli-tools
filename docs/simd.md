@@ -34,6 +34,7 @@ The candidates, from a read of the code:
 | slb scanner | `scan_line_buffered` in `src/semantic_line_breaks/scanner.rs` | Skip the character by character scan for a code line without any byte that can start a comment, string, heredoc, or regex | Kept, 5 to 19 percent faster scans on top of the shortcut itself |
 | slb scanner | `scan_characters` in `src/semantic_line_breaks/scanner.rs` | On lines that do need a scan, jump straight to the next byte that can change the scanner state | Kept, 15 to 22 percent faster C, Python, and trailing comment scans |
 | slb tokenizer | `chunk_end` in `src/semantic_line_breaks/tokenizer.rs` | Find the next whitespace or em dash lead byte with SIMD, confirm it with `char::is_whitespace` | Kept, 21 to 27 percent faster tokenizing |
+| slb Markdown heuristic | `looks_like_code` in `src/semantic_line_breaks/looks_like_code.rs` | Search once for any of the code marker bytes rather than checking the three characters separately | Kept, 7 percent faster Markdown formatting and checking on the M4 Pro |
 | dupefind | `collapse_repeated_separators` in `src/lib.rs` | Skip the regex when ASCII text has no two adjacent separators | Kept, the shortcut is the gain and SIMD adds little on file names |
 | slb widths | `text_width` in `src/semantic_line_breaks/token.rs` and `chars().count()` in reflow | SIMD character count | Not applied, the kernel loses to std below about 1 KB |
 | dirmove | `count_prefix_chars`, `get_all_n_part_sequences` in `src/dir_move/utils.rs` | SIMD character count and dot positions | Reverted, short file names got up to twice as slow |
@@ -197,11 +198,11 @@ The table compares the scalar and auto modes back to back in the same session.
 | `format/rust_source` | 12.92 µs | 12.49 µs | −3.4% |
 | `format/large_rust_file` | 1.30 ms | 1.15 ms | −10.9% |
 | `format/large_prose_file` | 2.81 ms | 2.68 ms | −4.6% |
-| `format/large_markdown_file` | 1.45 ms | 1.39 ms | −4.3% |
+| `format/large_markdown_file` | 1.462 ms | 1.365 ms | −6.6% |
 | `format/many_small_files` | 1.21 ms | 1.14 ms | −6.1% |
 | `check/large_rust_file` | 1.30 ms | 1.11 ms | −14.7% |
 | `check/large_prose_file` | 2.81 ms | 2.56 ms | −9.1% |
-| `check/large_markdown_file` | 1.39 ms | 1.35 ms | −2.5% |
+| `check/large_markdown_file` | 1.419 ms | 1.319 ms | −7.1% |
 | `reflow_paragraph/clauses_to_lines` | 9.22 µs | 8.86 µs | −3.9% |
 | `reword_semicolons/many_semicolons` | 204.00 µs | 199.89 µs | −2.0% |
 | `reword_semicolons/many_semicolons_with_a_stray_bracket` | 206.46 µs | 199.67 µs | −3.3% |
@@ -214,6 +215,7 @@ The table compares the scalar and auto modes back to back in the same session.
 
 NEON keeps the scanner and tokenizer kernels on a second architecture.
 The largest gains occur where the scan reaches a long non-triggering run.
+The Markdown code heuristic also benefits from replacing its separate code-marker checks with one byte-set search.
 The duplicate-name batch remains within noise, which confirms that the separator shortcut,
 rather than the SIMD kernel, is the important optimization in that path.
 
@@ -310,11 +312,9 @@ What to look for on NEON:
 
 ## Next steps
 
-- Run `./simd-bench.sh` on an M1 Pro and add its table here.
-- Decide per call site from both machines, reverting the ones that do not clearly win on either.
+- Keep the SIMD call sites that clearly improve the M4 Pro workloads.
 - If the scanner shortcut wins in scalar form as well, prefer whichever is simpler for the same speed.
 - The dirmove second pass still checks every file against every group key,
   which the prefix index could also answer per group.
 - Remaining SIMD candidates with smaller expected gains:
-  the many `contains` passes in `looks_like_code`,
-  and the backtick and bracket matching loops in the tokenizer.
+  the backtick and bracket matching loops in the tokenizer.
