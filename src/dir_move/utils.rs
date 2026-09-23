@@ -227,7 +227,8 @@ pub fn prefix_matches_normalized_precomputed(file_info: &FileInfo<'_>, target_no
     file_info.filtered_parts.prefix_matches_normalized(target_normalized)
 }
 
-/// Inner implementation of contiguity checking that takes a pre-computed `prefix_combined` (the joined, lowercased prefix parts).
+/// Inner implementation of contiguity checking that takes a pre-computed `prefix_combined`
+/// (the joined, lowercased prefix parts).
 ///
 /// Call this directly
 /// when the same `prefix_parts` are checked against many files to avoid recomputing the `join + lowercase` on every call.

@@ -85,16 +85,18 @@ so their gain over the code before the experiment is measured separately, agains
 
 - Each kernel is tested against a scalar reference on every SIMD level the machine supports,
   on every prefix up to about 200 bytes of mixed ASCII and multibyte text, crossing the 16, 32, and 64 byte blocks.
-- The scanner shortcut has a test that scans every source, test fixture, and config file in the repository
-  with and without the shortcut and requires identical results on every line.
+- The scanner shortcut has a test that scans every source, test fixture,
+  and config file in the repository with and without the shortcut
+  and requires identical results on every line.
 - `chunk_end` is tested against the old character loop on every start position of lines
   with every Unicode whitespace kind, em and en dashes, curly quotes, and long words.
 
 ## Process
 
 1. Saved Criterion baselines of the existing benchmarks before any change.
-2. Added the kernels and `benches/simd.rs`, which runs each kernel against the scalar code it would replace
-   at 4 bytes to 64 KB, to find the input length where SIMD starts to pay.
+2. Added the kernels and `benches/simd.rs`,
+   which runs each kernel against the scalar code it would replace at 4 bytes to 64 KB,
+   to find the input length where SIMD starts to pay.
 3. Applied the candidates one area at a time and compared against the baseline.
 4. Added the `CLI_TOOLS_SIMD` switch and `simd-bench.sh`,
    because comparing against a baseline from an earlier session turned out to be unreliable:
@@ -215,8 +217,8 @@ and built concatenated strings for every start position, which allocated in the 
 
 Two changes remove that work without changing any result:
 
-1. `PrefixIndex` in `src/dir_move/prefix_index.rs` sorts the lowercased single, two part, and three part combinations
-   of all files once.
+1. `PrefixIndex` in `src/dir_move/prefix_index.rs` sorts the lowercased single,
+   two part, and three part combinations of all files once.
    All combinations that start with a candidate prefix form one contiguous range, found with a binary search,
    so each candidate only visits the files that can match it.
    The binary builds the index once per grouping pass and shares it between the parallel workers.

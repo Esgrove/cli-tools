@@ -488,7 +488,7 @@ Options:
 
 Check and format prose in code comments, docstrings, and Markdown with semantic line breaks.
 Lines are broken at sentence and clause boundaries within a soft 120 character limit,
-which may be exceeded by up to 10 characters when that gives a better break than stopping short;
+which may be exceeded by up to 10 characters when that gives a better break than stopping short.
 `--strict` turns the limit into a hard cap that is never exceeded.
 A sentence that does not fit on one line is spread evenly over the lines it needs.
 In long sentences, a colon after an introduction of three words or more takes its own line

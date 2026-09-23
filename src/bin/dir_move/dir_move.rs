@@ -184,7 +184,8 @@ impl Default for DirMove {
 impl DirMove {
     /// Run the configured operations in the standard `dirmove` order.
     ///
-    /// Existing maintenance steps run first, then whole-directory merge offers are made before normal file-to-directory matching.
+    /// Existing maintenance steps run first, then whole-directory merge offers are made
+    /// before normal file-to-directory matching.
     /// Create mode runs last and uses the first output root for newly-created directories.
     pub fn run(&self) -> anyhow::Result<()> {
         if self.config.show_db {
@@ -741,7 +742,8 @@ impl DirMove {
                     info.file_moves.extend(nested_info.file_moves);
                     info.directory_moves.extend(nested_info.directory_moves);
                 } else if self.contains_unpack_directory(&path) {
-                    // Non-matching directory contains nested unpack dirs, recurse into it with this directory as the new parent.
+                    // Non-matching directory contains nested unpack dirs,
+                    // recurse into it with this directory as the new parent.
                     let nested_info = self.collect_unpack_info(&path, &target);
                     info.file_moves.extend(nested_info.file_moves);
                     info.directory_moves.extend(nested_info.directory_moves);

@@ -18,8 +18,8 @@ pub use super::looks_like_code::looks_like_code;
 
 /// A place a paragraph was kept verbatim by a heuristic rather than by Markdown structure.
 ///
-/// The paragraphs behind a fenced code block, a heading, a table, or a real list marker
-/// are meant to stay untouched, and skipping them is not worth a word.
+/// The paragraphs behind a fenced code block, a heading, a table,
+/// or a real list marker are meant to stay untouched, and skipping them is not worth a word.
 /// A paragraph skipped because a line merely looks like code, has aligned columns,
 /// or uses box drawing characters is different: the heuristic can be wrong,
 /// and a paragraph skipped this way produces no violation at all, so nothing else says it happened.
