@@ -20,7 +20,7 @@ struct IndexEntry<'a> {
     /// The same combination in its original casing, used for the word boundary check.
     original: &'a str,
     /// Index of the file in the slice the index was built from.
-    file: usize,
+    file_index: usize,
 }
 
 impl<'a> PrefixIndex<'a> {
@@ -28,7 +28,7 @@ impl<'a> PrefixIndex<'a> {
     #[must_use]
     pub fn new(files: &'a [FileInfo<'_>]) -> Self {
         let mut entries = Vec::new();
-        for (file, info) in files.iter().enumerate() {
+        for (file_index, info) in files.iter().enumerate() {
             let parts = &info.filtered_parts;
             let combinations = parts
                 .parts_lower
@@ -36,7 +36,11 @@ impl<'a> PrefixIndex<'a> {
                 .zip(&parts.parts_original)
                 .chain(parts.two_parts_lower.iter().zip(&parts.two_parts_original))
                 .chain(parts.three_parts_lower.iter().zip(&parts.three_parts_original));
-            entries.extend(combinations.map(|(lower, original)| IndexEntry { lower, original, file }));
+            entries.extend(combinations.map(|(lower, original)| IndexEntry {
+                lower,
+                original,
+                file_index,
+            }));
         }
         entries.sort_unstable_by(|first, second| first.lower.cmp(second.lower));
         Self { entries }
@@ -61,7 +65,7 @@ impl<'a> PrefixIndex<'a> {
             .take_while(|entry| entry.lower.starts_with(target));
         for entry in candidates {
             if entry.lower.len() == target.len() || FilteredParts::has_word_boundary_at(entry.original, target.len()) {
-                matches.push(entry.file);
+                matches.push(entry.file_index);
             }
         }
         matches.sort_unstable();
@@ -76,6 +80,7 @@ mod test_prefix_index {
     use super::*;
     use crate::dir_move::filter_numeric_resolution_and_glue_parts;
 
+    /// Build the file infos the way `dirmove` does, filtering each name first.
     fn files(names: &[&str]) -> Vec<FileInfo<'static>> {
         names
             .iter()

@@ -113,8 +113,9 @@ fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -
     let mut violations = Vec::new();
     // The line splitting passes turn one line into two, so every line below the split moves down.
     let mut replacements: Vec<Option<(String, String)>> = vec![None; source.len()];
-    // The trailing comment pass, the docstring quote pass, and the region split
-    // all need the same scan of the same lines, so it is taken once here and handed to each of them.
+    // The trailing comment pass, the docstring quote pass,
+    // and the region split all need the same scan of the same lines,
+    // so it is taken once here and handed to each of them.
     let scan = (kind != FileKind::Markdown).then(|| comments::scan_lines(&texts, kind));
     if let Some(scan) = &scan {
         if kind.supports_trailing_comment_check() && options.rules.trailing_comment {

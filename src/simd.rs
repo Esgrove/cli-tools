@@ -349,48 +349,55 @@ fn bits_where(bytes: &[u8], matches: impl Fn(u8) -> bool) -> u64 {
         .fold(0, |bits, (index, &byte)| bits | u64::from(matches(byte)) << index)
 }
 
-/// Every SIMD level this machine supports, so the tests cover each vector width.
-#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
-fn test_levels() -> Vec<Level> {
-    let mut levels = vec![Level::new()];
-    let level = Level::new();
-    levels.extend(level.as_sse2().map(Level::Sse2));
-    levels.extend(level.as_sse4_2().map(Level::Sse4_2));
-    levels.extend(level.as_avx2().map(Level::Avx2));
-    levels.extend(level.as_avx512().map(Level::Avx512));
-    levels
-}
-
-/// Every SIMD level this machine supports, so the tests cover each vector width.
-#[cfg(all(test, not(any(target_arch = "x86", target_arch = "x86_64"))))]
-fn test_levels() -> Vec<Level> {
-    vec![Level::new()]
-}
-
-/// Deterministic mixed ASCII and multibyte strings of every length up to about 200 bytes.
+/// Shared SIMD level and input builders for the kernel tests.
 #[cfg(test)]
-fn test_inputs() -> Vec<String> {
-    const FRAGMENTS: &[&str] = &[
-        "a", "Z", " ", ".", "..", "-", "_", "\t", "é", "€", "—", "😀", "\u{a0}", "\u{3000}", "x265", "fn", "\"", "'",
-    ];
-    let mut inputs = vec![String::new()];
-    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
-    for _ in 0..40 {
-        let mut text = String::new();
-        while text.len() < 200 {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            let index = (state >> 33) as usize % FRAGMENTS.len();
-            text.push_str(FRAGMENTS.get(index).copied().unwrap_or_default());
-            inputs.push(text.clone());
-        }
+mod test_helpers {
+    use fearless_simd::Level;
+
+    /// Every SIMD level this machine supports, so the tests cover each vector width.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    pub(super) fn test_levels() -> Vec<Level> {
+        let mut levels = vec![Level::new()];
+        let level = Level::new();
+        levels.extend(level.as_sse2().map(Level::Sse2));
+        levels.extend(level.as_sse4_2().map(Level::Sse4_2));
+        levels.extend(level.as_avx2().map(Level::Avx2));
+        levels.extend(level.as_avx512().map(Level::Avx512));
+        levels
     }
-    inputs
+
+    /// Every SIMD level this machine supports, so the tests cover each vector width.
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    pub(super) fn test_levels() -> Vec<Level> {
+        vec![Level::new()]
+    }
+
+    /// Deterministic mixed ASCII and multibyte strings of every length up to about 200 bytes.
+    pub(super) fn test_inputs() -> Vec<String> {
+        const FRAGMENTS: &[&str] = &[
+            "a", "Z", " ", ".", "..", "-", "_", "\t", "é", "€", "—", "😀", "\u{a0}", "\u{3000}", "x265", "fn", "\"",
+            "'",
+        ];
+        let mut inputs = vec![String::new()];
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..40 {
+            let mut text = String::new();
+            while text.len() < 200 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let index = (state >> 33) as usize % FRAGMENTS.len();
+                text.push_str(FRAGMENTS.get(index).copied().unwrap_or_default());
+                inputs.push(text.clone());
+            }
+        }
+        inputs
+    }
 }
 
 #[cfg(test)]
 mod test_count_chars {
+    use super::test_helpers::*;
     use super::*;
 
     #[test]
@@ -424,6 +431,7 @@ mod test_count_chars {
 
 #[cfg(test)]
 mod test_find_byte_of {
+    use super::test_helpers::*;
     use super::*;
 
     #[test]
@@ -459,6 +467,7 @@ mod test_find_byte_of {
 
 #[cfg(test)]
 mod test_adjacent_bytes {
+    use super::test_helpers::*;
     use super::*;
 
     #[test]
@@ -488,6 +497,7 @@ mod test_adjacent_bytes {
 
 #[cfg(test)]
 mod test_byte_positions {
+    use super::test_helpers::*;
     use super::*;
 
     #[test]

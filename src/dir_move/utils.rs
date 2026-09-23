@@ -83,6 +83,7 @@ pub fn filter_numeric_resolution_and_glue_parts(filename: &str) -> String {
 /// allowing common group names that appear in the middle of filenames to be detected.
 ///
 /// The file extension (last part after the final dot) is excluded from candidate generation.
+///
 /// Builds a [`PrefixIndex`] of `all_files` for the call,
 /// so use [`find_prefix_candidates_indexed`] with a shared index when calling it for many files.
 #[must_use]
@@ -113,7 +114,7 @@ pub fn find_prefix_candidates_indexed<'a>(
     let contiguous_count = |matches: &[usize], prefix_parts: &[&str], prefix_combined: &str| {
         matches
             .iter()
-            .filter_map(|&file| all_files.get(file))
+            .filter_map(|&file_index| all_files.get(file_index))
             .filter(|file| {
                 parts_are_contiguous_lowered(
                     &file.original_parts,

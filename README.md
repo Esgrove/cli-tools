@@ -254,9 +254,9 @@ Options:
 
 ### Filter Options
 
-The filter options
-(`-b`/`--bitrate`, `-B`/`--max-bitrate`, `-u`/`--min-duration`, `-U`/`--max-duration`, `-R`/`--min-resolution`, `-t`/`--extension`, `-c`/`--count`)
-work for both normal scanning mode and database mode (`-D`/`--from-db`, `-S`/`--show-db`).
+The filter options like
+(`--bitrate`, `--max-bitrate`, `--min-duration`, `--extension`, `--count`)
+work for both normal scanning mode and database mode (`--from-db`, `--show-db`).
 
 ### Database Commands
 
@@ -570,16 +570,16 @@ which changes a handful of lines and wants a diff of the same size.
 A value is either lines and ranges for a single file,
 or a location in the form the violation report prints.
 
-| Value | Selects |
-| --- | --- |
-| `14` | line 14 |
-| `10-25` | lines 10 to 25 |
-| `10-25,40` | lines 10 to 25 and line 40 |
-| `src/main.rs:14` | line 14 of that file |
-| `src/main.rs:14-20` | lines 14 to 20 of that file |
-| `src/main.rs:14:33` | line 14 of that file, the column is ignored |
-| `src/main.rs:14,20` | lines 14 and 20 of that file |
-| `src/a.rs:5,src/b.rs:9` | line 5 of one file and line 9 of another |
+| Value                   | Selects                                     |
+| ----------------------- | ------------------------------------------- |
+| `14`                    | line 14                                     |
+| `10-25`                 | lines 10 to 25                              |
+| `10-25,40`              | lines 10 to 25 and line 40                  |
+| `src/main.rs:14`        | line 14 of that file                        |
+| `src/main.rs:14-20`     | lines 14 to 20 of that file                 |
+| `src/main.rs:14:33`     | line 14 of that file, the column is ignored |
+| `src/main.rs:14,20`     | lines 14 and 20 of that file                |
+| `src/a.rs:5,src/b.rs:9` | line 5 of one file and line 9 of another    |
 
 Commas separate the parts of a value,
 and a part without a path belongs to the file the part before it named,

@@ -1962,7 +1962,8 @@ impl DirMove {
         first_pass_bar.finish_and_clear();
 
         // Second pass: use the index to find files whose first parts start with each group prefix.
-        // This handles cases like JosephExampleTV matching JosephExample group without checking every group per file.
+        // This handles cases like JosephExampleTV matching JosephExample group
+        // without checking every group per file.
         let group_keys_with_combined: Vec<(String, String, HashSet<PathBuf>)> = prefix_groups
             .iter()
             .map(|(key, builder)| {

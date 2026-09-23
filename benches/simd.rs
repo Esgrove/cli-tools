@@ -61,6 +61,7 @@ fn byte_table(set: &[u8]) -> [bool; 256] {
     table
 }
 
+/// Benchmark SIMD character counting against `chars().count()` and the width logic `Token::width` uses.
 fn bench_count_chars(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("simd/count_chars");
     for &length in LENGTHS {
@@ -88,6 +89,7 @@ fn bench_count_chars(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark searching for a scanner trigger byte against a slice search and a lookup table.
 fn bench_find_byte_of(criterion: &mut Criterion) {
     let table = byte_table(TRIGGERS);
     let mut group = criterion.benchmark_group("simd/contains_trigger");
@@ -111,8 +113,10 @@ fn bench_find_byte_of(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark finding the next whitespace candidate against the character loop the tokenizer used before.
 fn bench_find_whitespace(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("simd/find_whitespace");
+    // The same candidate set as `CHUNK_END_CANDIDATES` in the private slb tokenizer module.
     let whitespace = b" \t\n\x0b\x0c\r\xc2\xe1\xe2\xe3";
     for &length in LENGTHS {
         let word = "x".repeat(length);
@@ -132,6 +136,7 @@ fn bench_find_whitespace(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark detecting two adjacent separators against a scalar `windows(2)` scan.
 fn bench_adjacent_separators(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("simd/adjacent_separators");
     for &length in LENGTHS {
@@ -151,6 +156,7 @@ fn bench_adjacent_separators(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark collecting every dot position against a scalar `enumerate` and `filter_map`.
 fn bench_byte_positions(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("simd/dot_positions");
     for &length in LENGTHS {
@@ -172,6 +178,7 @@ fn bench_byte_positions(criterion: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the fixed dispatch cost on empty input, and print the selected mode.
 fn bench_dispatch(criterion: &mut Criterion) {
     eprintln!("{MODE_VARIABLE}: {:?}", mode());
     let mut group = criterion.benchmark_group("simd/dispatch");

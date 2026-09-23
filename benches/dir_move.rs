@@ -866,27 +866,23 @@ fn bench_is_unwanted_directory(c: &mut Criterion) {
     group.finish();
 }
 
-// ---------------------------------------------------------------------------
-// Criterion groups
-// ---------------------------------------------------------------------------
-
 /// Benchmark the first pass of `collect_all_prefix_groups` over a 500 file directory.
-fn bench_find_prefix_candidates_scaled(c: &mut Criterion) {
+fn bench_find_prefix_candidates_scaled(criterion: &mut Criterion) {
     let names = scaled_file_names();
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let files = make_filtered_files(&name_refs);
 
-    let mut group = c.benchmark_group("dir_move/find_prefix_candidates/scaled_500");
+    let mut group = criterion.benchmark_group("dir_move/find_prefix_candidates/scaled_500");
     group.sample_size(20);
-    group.bench_function("index_per_call", |b| {
-        b.iter(|| {
+    group.bench_function("index_per_call", |bencher| {
+        bencher.iter(|| {
             for file in &files {
                 let _ = find_prefix_candidates(black_box(&file.filtered_name), black_box(&files), 2, 5);
             }
         });
     });
-    group.bench_function("shared_index", |b| {
-        b.iter(|| {
+    group.bench_function("shared_index", |bencher| {
+        bencher.iter(|| {
             let index = PrefixIndex::new(&files);
             for file in &files {
                 let _ = find_prefix_candidates_indexed(black_box(&file.filtered_name), black_box(&files), &index, 2, 5);
@@ -895,6 +891,10 @@ fn bench_find_prefix_candidates_scaled(c: &mut Criterion) {
     });
     group.finish();
 }
+
+// ---------------------------------------------------------------------------
+// Criterion groups
+// ---------------------------------------------------------------------------
 
 criterion_group!(
     benches,
