@@ -5,10 +5,6 @@
 //! so counting and searching become bit operations.
 //! Input shorter than a 128-bit vector is classified byte by byte, because loading a vector costs more there.
 //! The last block of longer input overlaps the one before it, so no kernel needs a scalar tail loop.
-//!
-//! The `CLI_TOOLS_SIMD` environment variable overrides the choice for benchmarking.
-//! "scalar" runs plain loops instead of the kernels,
-//! and "sse2", "sse4.2", "avx2", or "avx512" caps the SIMD level on x86.
 
 use std::ops::ControlFlow;
 use std::sync::LazyLock;
@@ -16,20 +12,8 @@ use std::sync::LazyLock;
 use fearless_simd::{Level, Simd, dispatch, prelude::*, u8x16};
 use fearless_simd_macros::simd;
 
-/// Environment variable that selects the implementation, read once per process.
-pub const MODE_VARIABLE: &str = "CLI_TOOLS_SIMD";
-
-/// Implementation the public functions run, chosen once from [`MODE_VARIABLE`].
-static MODE: LazyLock<Mode> = LazyLock::new(|| Mode::from_setting(std::env::var(MODE_VARIABLE).ok().as_deref()));
-
-/// Which implementation the public functions run.
-#[derive(Debug, Clone, Copy)]
-pub enum Mode {
-    /// SIMD kernels at the given level.
-    Simd(Level),
-    /// Plain scalar loops, the reference the kernels are measured against.
-    Scalar,
-}
+/// SIMD level the public functions run, detected once per process.
+static LEVEL: LazyLock<Level> = LazyLock::new(Level::new);
 
 /// A class of bytes the kernels test both as whole vectors of any width and as single bytes.
 trait ByteClass {
@@ -48,27 +32,6 @@ struct AnyOf<'a>(&'a [u8]);
 
 /// One exact byte.
 struct Exactly(u8);
-
-impl Mode {
-    /// Mode for a setting value, falling back to the detected level for unknown or unsupported values.
-    fn from_setting(setting: Option<&str>) -> Self {
-        let detected = Level::new();
-        let setting = setting.map(str::to_ascii_lowercase);
-        let capped = match setting.as_deref() {
-            Some("scalar") => return Self::Scalar,
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Some("sse2") => detected.as_sse2().map(Level::Sse2),
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Some("sse4.2") => detected.as_sse4_2().map(Level::Sse4_2),
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Some("avx2") => detected.as_avx2().map(Level::Avx2),
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Some("avx512") => detected.as_avx512().map(Level::Avx512),
-            _ => None,
-        };
-        Self::Simd(capped.unwrap_or(detected))
-    }
-}
 
 impl ByteClass for ContinuationOr {
     #[allow(
@@ -130,21 +93,18 @@ impl ByteClass for Exactly {
     }
 }
 
-/// The implementation the public functions run in this process.
+/// The SIMD level the public functions run in this process.
 #[must_use]
-pub fn mode() -> Mode {
-    *MODE
+pub fn level() -> Level {
+    *LEVEL
 }
 
 /// Number of UTF-8 characters in the text, the same as `text.chars().count()`.
 #[must_use]
 pub fn count_chars(text: &str) -> usize {
     let bytes = text.as_bytes();
-    match mode() {
-        // A continuation byte is its own extra byte, so it adds nothing to the continuation count.
-        Mode::Simd(level) => bytes.len() - dispatch!(level, simd => count_continuation_or_byte(simd, bytes, 0x80)),
-        Mode::Scalar => text.chars().count(),
-    }
+    // A continuation byte is its own extra byte, so it adds nothing to the continuation count.
+    bytes.len() - dispatch!(level(), simd => count_continuation_or_byte(simd, bytes, 0x80))
 }
 
 /// Number of UTF-8 characters in the text that are not the given ASCII byte.
@@ -152,22 +112,13 @@ pub fn count_chars(text: &str) -> usize {
 pub fn count_chars_excluding(text: &str, excluded: u8) -> usize {
     debug_assert!(excluded.is_ascii(), "the excluded byte must be ASCII");
     let bytes = text.as_bytes();
-    match mode() {
-        Mode::Simd(level) => bytes.len() - dispatch!(level, simd => count_continuation_or_byte(simd, bytes, excluded)),
-        Mode::Scalar => text
-            .chars()
-            .filter(|character| *character != char::from(excluded))
-            .count(),
-    }
+    bytes.len() - dispatch!(level(), simd => count_continuation_or_byte(simd, bytes, excluded))
 }
 
 /// Byte index of the first byte that is one of the bytes in the set.
 #[must_use]
 pub fn find_byte_of(bytes: &[u8], set: &[u8]) -> Option<usize> {
-    match mode() {
-        Mode::Simd(level) => dispatch!(level, simd => find_first_of(simd, bytes, set)),
-        Mode::Scalar => bytes.iter().position(|byte| set.contains(byte)),
-    }
+    dispatch!(level(), simd => find_first_of(simd, bytes, set))
 }
 
 /// Whether any byte is one of the bytes in the set.
@@ -179,27 +130,15 @@ pub fn contains_byte_of(bytes: &[u8], set: &[u8]) -> bool {
 /// Whether two bytes from the set stand next to each other anywhere in the input.
 #[must_use]
 pub fn has_adjacent_bytes_of(bytes: &[u8], set: &[u8]) -> bool {
-    match mode() {
-        Mode::Simd(level) => dispatch!(level, simd => adjacent_of(simd, bytes, set)),
-        Mode::Scalar => bytes.windows(2).any(|pair| pair.iter().all(|byte| set.contains(byte))),
-    }
+    dispatch!(level(), simd => adjacent_of(simd, bytes, set))
 }
 
 /// Byte indices of every occurrence of the byte.
 #[must_use]
 pub fn byte_positions(bytes: &[u8], needle: u8) -> Vec<usize> {
-    match mode() {
-        Mode::Simd(level) => {
-            let mut positions = Vec::new();
-            dispatch!(level, simd => push_positions(simd, bytes, needle, &mut positions));
-            positions
-        }
-        Mode::Scalar => bytes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &byte)| (byte == needle).then_some(index))
-            .collect(),
-    }
+    let mut positions = Vec::new();
+    dispatch!(level(), simd => push_positions(simd, bytes, needle, &mut positions));
+    positions
 }
 
 /// Count UTF-8 continuation bytes together with occurrences of `extra`.
@@ -521,37 +460,5 @@ mod test_byte_positions {
     fn public_function_returns_positions() {
         assert_eq!(byte_positions(b"A.B.C", b'.'), vec![1, 3]);
         assert!(byte_positions(b"", b'.').is_empty());
-    }
-}
-
-#[cfg(test)]
-mod test_mode {
-    use super::*;
-
-    #[test]
-    fn scalar_setting_selects_scalar_loops() {
-        assert!(matches!(Mode::from_setting(Some("scalar")), Mode::Scalar));
-        assert!(matches!(Mode::from_setting(Some("SCALAR")), Mode::Scalar));
-    }
-
-    #[test]
-    fn missing_or_unknown_setting_uses_the_detected_level() {
-        assert!(matches!(Mode::from_setting(None), Mode::Simd(_)));
-        assert!(matches!(Mode::from_setting(Some("fastest")), Mode::Simd(_)));
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[test]
-    fn level_setting_caps_the_level_when_supported() {
-        let Mode::Simd(level) = Mode::from_setting(Some("sse2")) else {
-            panic!("sse2 should select a SIMD level");
-        };
-        assert!(matches!(level, Level::Sse2(_)));
-        if Level::new().as_avx2().is_some() {
-            let Mode::Simd(level) = Mode::from_setting(Some("avx2")) else {
-                panic!("avx2 should select a SIMD level");
-            };
-            assert!(matches!(level, Level::Avx2(_)));
-        }
     }
 }

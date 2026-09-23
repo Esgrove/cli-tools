@@ -95,9 +95,8 @@ The core algorithmic functions benchmarked for `dir_move` and `dupe_find` are ex
 
 ### SIMD benchmarks
 
-`src/simd.rs` reads the `CLI_TOOLS_SIMD` environment variable once per process.
-"scalar" runs plain loops, "avx2" and the other x86 level names cap the SIMD level, and anything else auto detects.
-`./simd-bench.sh` runs the affected benchmarks once per mode and writes a comparison table to `target/`.
+`src/simd.rs` detects the best SIMD level once per process.
+`./simd-bench.sh` runs the benchmarks that go through the kernels and writes a summary table to `target/`.
 See `docs/simd.md` for the evaluation and its results.
 
 ### Adding new benchmarks
@@ -115,7 +114,7 @@ Do not duplicate code in benchmark files.
 - `src/file_hash.rs` - File hashing
 - `src/resolution.rs` - Video resolution parsing and labelling
 - `src/scan_cache.rs` - Cache for directory scan results
-- `src/simd.rs` - SIMD byte scanning kernels on `fearless_simd` with a scalar mode for comparison
+- `src/simd.rs` - SIMD byte scanning kernels on `fearless_simd`
 - `src/video_info.rs` - Video metadata from ffprobe
 - `src/dir_move/` - Algorithmic types and functions for dirmove (prefix grouping, matching, the sorted prefix index)
 - `src/dot_rename/` - Algorithmic types and functions for dots (formatting, renaming)

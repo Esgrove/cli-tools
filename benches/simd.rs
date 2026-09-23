@@ -7,9 +7,7 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use cli_tools::simd::{
-    MODE_VARIABLE, byte_positions, contains_byte_of, count_chars, find_byte_of, has_adjacent_bytes_of, mode,
-};
+use cli_tools::simd::{byte_positions, contains_byte_of, count_chars, find_byte_of, has_adjacent_bytes_of, level};
 
 /// Input lengths in bytes, from a short token to a large file.
 const LENGTHS: &[usize] = &[4, 8, 16, 32, 64, 128, 1024, 65_536];
@@ -178,9 +176,9 @@ fn bench_byte_positions(criterion: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark the fixed dispatch cost on empty input, and print the selected mode.
+/// Benchmark the fixed dispatch cost on empty input, and print the detected SIMD level.
 fn bench_dispatch(criterion: &mut Criterion) {
-    eprintln!("{MODE_VARIABLE}: {:?}", mode());
+    eprintln!("SIMD level: {:?}", level());
     let mut group = criterion.benchmark_group("simd/dispatch");
     group.bench_function("count_chars_empty", |bencher| {
         bencher.iter(|| count_chars(black_box("")));

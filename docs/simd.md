@@ -19,8 +19,8 @@ and keep only changes that clearly win on the machines the tools run on.
 The local build uses `target-cpu=native` from `.cargo/config.toml`,
 so the scalar code is already auto vectorized by LLVM with every feature of the build machine.
 The comparisons below are against that, not against a baseline x86-64 build.
-Capping the level with `CLI_TOOLS_SIMD=avx2` limits the vector width the kernels use,
-but LLVM may still pick AVX-512 encodings for the surrounding code.
+Capping the level with `CLI_TOOLS_SIMD=avx2` limited the vector width the kernels used,
+but LLVM may still have picked AVX-512 encodings for the surrounding code.
 
 ## Where SIMD could help
 
@@ -53,7 +53,7 @@ The candidates, from a read of the code:
 - `byte_positions` lists every position of one byte.
 
 Each kernel is a `#[simd]` function generic over `fearless_simd::Simd`,
-called through `dispatch!` with the level chosen once per process.
+called through `dispatch!` with the level detected once per process.
 The kernels share one block walker, and a `ByteClass` trait describes the bytes each kernel looks for:
 
 1. Input shorter than 16 bytes is classified byte by byte into a bitmask,
@@ -71,7 +71,7 @@ which must inline into the `#[simd]` caller to inherit its target features.
 
 ### Choosing the implementation at runtime
 
-`CLI_TOOLS_SIMD` selects the implementation, read once per process:
+During the evaluation, `CLI_TOOLS_SIMD` selected the implementation, read once per process:
 
 | Value                              | Effect                                                                                      |
 | ---------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -79,9 +79,12 @@ which must inline into the `#[simd]` caller to inherit its target features.
 | `scalar`                           | Plain byte loops in the same call sites, so the difference to `auto` is the SIMD part alone |
 | `avx2`, `sse4.2`, `sse2`, `avx512` | Cap the level on x86, ignored elsewhere                                                     |
 
-The same binary then runs every variant, so Criterion baselines compare like with like.
+The same binary then ran every variant, so Criterion baselines compared like with like.
 The scanner shortcut and the separator check skip work in either mode,
 so their gain over the code before the experiment is measured separately, against the first baseline.
+
+The switch was removed once the kernels were merged.
+The kernels now always run at the detected level.
 
 ### Correctness
 
@@ -182,8 +185,7 @@ On the 7950X the two are within noise of each other on every pipeline benchmark.
 The lines and tokens here rarely fill a 64-byte vector,
 so most of the work runs on the 128-bit and 256-bit paths either way,
 and Zen 4 executes 512-bit operations as two 256-bit halves.
-There is no reason to cap the level, so `auto` stays the default,
-and `CLI_TOOLS_SIMD=avx2` remains available for machines where AVX-512 lowers the clock.
+There is no reason to cap the level, so the kernels always use the detected level.
 
 ### Scanner skip-ahead
 
@@ -300,12 +302,15 @@ but it builds an index per call, so callers checking many files should use `find
 ```
 
 The script runs the slb and dupefind benchmarks that go through `src/simd.rs`,
-once per mode, `scalar`, `auto`, and `avx2` on x86 and `scalar` and `auto` elsewhere,
-saving each as the Criterion baseline `mode-<mode>`.
-It then runs the kernel microbenchmarks and writes a table to `target/simd-bench-<os>-<arch>.md`.
+saving them as the Criterion baseline `pipeline`.
+It then runs the kernel microbenchmarks as the baseline `kernels`
+and writes a table of both to `target/simd-bench-<os>-<arch>.md`.
 Add `--quick` for a noisier run that takes a few minutes,
 and `--summary-only` to rebuild the table from saved baselines.
-The table has the same layout as the ones above, so machines can be compared directly.
+
+The tables above were produced by an earlier version of the script,
+which also ran every `CLI_TOOLS_SIMD` mode back to back.
+That comparison is no longer possible, since the scalar mode and the level cap were removed after the merge.
 
 ## Conclusions
 
@@ -322,7 +327,7 @@ The experiment is complete, and `fearless_simd` stays in the project for the byt
   because the dispatch cost on short strings exceeds the benefit.
   `count_chars` and `count_chars_excluding` remain in `src/simd.rs` with their tests and benchmarks,
   so the decision can be revisited for longer inputs.
-- AVX-512 and AVX2 perform the same on the 7950X, so `auto` stays the default.
+- AVX-512 and AVX2 perform the same on the 7950X, so the detected level is always used.
 - The largest single improvement is not SIMD.
   The dirmove prefix index makes grouping 500 files 15 times faster,
   and both grouping passes now avoid their previous all pairs scans.
