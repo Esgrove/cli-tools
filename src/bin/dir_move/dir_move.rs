@@ -1961,40 +1961,30 @@ impl DirMove {
         }
         first_pass_bar.finish_and_clear();
 
-        // Second pass: for each file, check if it should be added to existing groups
-        // where the file's first parts START WITH the group's prefix.
-        // This handles cases like JosephExampleTV matching JosephExample group.
-        // Parallelized: each file independently checks all group keys, results merged after.
-        let group_keys_with_combined: Vec<(String, String)> = prefix_groups
-            .keys()
-            .map(|key| {
+        // Second pass: use the index to find files whose first parts start with each group prefix.
+        // This handles cases like JosephExampleTV matching JosephExample group without checking every group per file.
+        let group_keys_with_combined: Vec<(String, String, HashSet<PathBuf>)> = prefix_groups
+            .iter()
+            .map(|(key, builder)| {
                 let combined = key.to_lowercase().replace('.', "");
-                (key.clone(), combined)
+                (key.clone(), combined, builder.files.iter().cloned().collect())
             })
             .collect();
-        let existing_files: HashMap<&str, HashSet<PathBuf>> = prefix_groups
-            .iter()
-            .map(|(key, builder)| (key.as_str(), builder.files.iter().cloned().collect()))
-            .collect();
 
-        let second_pass_bar = Self::create_progress_bar(file_count, "Matching files to groups");
-        let second_pass_results: Vec<Vec<(String, PathBuf)>> = files_with_names
+        let second_pass_bar =
+            Self::create_progress_bar(group_keys_with_combined.len() as u64, "Matching files to groups");
+        let second_pass_results: Vec<Vec<(String, PathBuf)>> = group_keys_with_combined
             .par_iter()
-            .map(|file_info| {
-                let file_path = file_info.path_buf();
+            .map(|(group_key, group_combined, existing_files)| {
                 let mut matches: Vec<(String, PathBuf)> = Vec::new();
-
-                for (group_key, group_combined) in &group_keys_with_combined {
-                    // Skip if file is already in this group
-                    if let Some(files) = existing_files.get(group_key.as_str())
-                        && files.contains(&file_path)
-                    {
+                let mut matching_indices = Vec::new();
+                prefix_index.matching_files(group_key, &mut matching_indices);
+                for index in matching_indices {
+                    let Some(file_info) = files_with_names.get(index) else {
                         continue;
-                    }
-
-                    // Check if the file matches this group via precomputed prefix matching
-                    // (which includes starts_with logic with word boundary enforcement)
-                    if utils::prefix_matches_normalized_precomputed(file_info, group_key)
+                    };
+                    let file_path = file_info.path_buf();
+                    if !existing_files.contains(&file_path)
                         && utils::parts_are_contiguous_lowered(
                             &file_info.original_parts,
                             &file_info.original_parts_lower,

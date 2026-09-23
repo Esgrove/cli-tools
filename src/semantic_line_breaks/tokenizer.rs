@@ -277,15 +277,14 @@ fn backtick_span_end(text: &str, start: usize) -> Option<usize> {
     let run = backtick_run(bytes, start);
     let mut index = start + run;
     while index < bytes.len() {
-        if bytes.get(index) == Some(&b'`') {
-            let closing = backtick_run(bytes, index);
-            if closing == run {
-                return Some(index + closing);
-            }
-            index += closing;
-        } else {
-            index += 1;
+        let rest = bytes.get(index..)?;
+        let offset = crate::simd::find_byte_of(rest, b"`")?;
+        index += offset;
+        let closing = backtick_run(bytes, index);
+        if closing == run {
+            return Some(index + closing);
         }
+        index += closing;
     }
     None
 }

@@ -34,6 +34,7 @@ The candidates, from a read of the code:
 | slb scanner | `scan_line_buffered` in `src/semantic_line_breaks/scanner.rs` | Skip the character by character scan for a code line without any byte that can start a comment, string, heredoc, or regex | Kept, 5 to 19 percent faster scans on top of the shortcut itself |
 | slb scanner | `scan_characters` in `src/semantic_line_breaks/scanner.rs` | On lines that do need a scan, jump straight to the next byte that can change the scanner state | Kept, 15 to 22 percent faster C, Python, and trailing comment scans |
 | slb tokenizer | `chunk_end` in `src/semantic_line_breaks/tokenizer.rs` | Find the next whitespace or em dash lead byte with SIMD, confirm it with `char::is_whitespace` | Kept, 21 to 27 percent faster tokenizing |
+| slb tokenizer | `backtick_span_end` in `src/semantic_line_breaks/tokenizer.rs` | Jump between backtick runs while finding a matching code span delimiter | Kept, 4 percent faster punctuated tokenizing on the M4 Pro |
 | slb Markdown heuristic | `looks_like_code` in `src/semantic_line_breaks/looks_like_code.rs` | Search once for any of the code marker bytes rather than checking the three characters separately | Kept, 7 percent faster Markdown formatting and checking on the M4 Pro |
 | dupefind | `collapse_repeated_separators` in `src/lib.rs` | Skip the regex when ASCII text has no two adjacent separators | Kept, the shortcut is the gain and SIMD adds little on file names |
 | slb widths | `text_width` in `src/semantic_line_breaks/token.rs` and `chars().count()` in reflow | SIMD character count | Not applied, the kernel loses to std below about 1 KB |
@@ -266,6 +267,8 @@ Two changes remove that work without changing any result:
    All combinations that start with a candidate prefix form one contiguous range, found with a binary search,
    so each candidate only visits the files that can match it.
    The binary builds the index once per grouping pass and shares it between the parallel workers.
+   The second pass queries the same index for every group key,
+   instead of checking every file against every group.
 2. `FileInfo` now keeps `original_parts_lower`,
    and `parts_are_contiguous_lowered` skips every start position whose lowercased parts cannot spell out the prefix,
    so strings are only built for the rare positions that might match.
@@ -310,11 +313,9 @@ What to look for on NEON:
 - The dirmove experiment was reverted because of the call overhead on short file names,
   which does not depend on the vector width, so it is unlikely to change on Apple Silicon.
 
-## Next steps
+## Conclusions
 
-- Keep the SIMD call sites that clearly improve the M4 Pro workloads.
-- If the scanner shortcut wins in scalar form as well, prefer whichever is simpler for the same speed.
-- The dirmove second pass still checks every file against every group key,
-  which the prefix index could also answer per group.
-- Remaining SIMD candidates with smaller expected gains:
-  the backtick and bracket matching loops in the tokenizer.
+The byte-search SIMD kernels improve scanner and tokenizer workloads on both measured architectures.
+The M4 Pro also confirms that the Markdown heuristic benefits from the NEON implementation.
+Character counting and short filename scans remain scalar because their dispatch cost exceeds their benefit.
+The dirmove second pass uses the prefix index, so grouping avoids both of its previous all-pairs scans.
