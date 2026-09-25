@@ -351,3 +351,19 @@ mod test_openers_and_closers {
         assert!(!is_closer('a'));
     }
 }
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_opener_and_closer_appears_in_a_fixture() {
+        let openers = ['(', '[', '{', '"', '\'', '“', '‘', '«'];
+        let closers = [')', ']', '}', '"', '\'', '”', '’', '»', '`', '*', '_'];
+        assert!(openers.iter().all(|character| is_opener(*character)));
+        assert!(closers.iter().all(|character| is_closer(*character)));
+        assert_fixtures_contain_characters(&openers, "opener");
+        assert_fixtures_contain_characters(&closers, "closer");
+    }
+}

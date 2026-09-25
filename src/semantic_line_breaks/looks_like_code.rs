@@ -14,12 +14,41 @@ static RE_CODE_SPAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]*`").e
 static RE_CALL_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[\w.:]+\(.*\)\s*[;:,]?$").expect("Invalid call regex"));
 
+/// Keywords and symbols that mark a line starting with them as code when the line also looks like code otherwise.
+const CODE_KEYWORDS: &[&str] = &[
+    "let",
+    "fn",
+    "use",
+    "impl",
+    "pub",
+    "mod",
+    "struct",
+    "enum",
+    "import",
+    "from",
+    "def",
+    "class",
+    "const",
+    "static",
+    "return",
+    "println!",
+    "eprintln!",
+    "assert!",
+    "assert_eq!",
+    "dbg!",
+    "print",
+    "self.",
+    "$ ",
+    "#[",
+    "#!",
+    "//",
+    "#",
+];
+
 /// Matches a line that starts with a code keyword.
 static RE_CODE_KEYWORD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^(?:let|fn|use|impl|pub|mod|struct|enum|import|from|def|class|const|static|return|println!|eprintln!|assert(?:_eq)?!|dbg!|print|self\.|\$ |#\[|#!|//|#)\b",
-    )
-    .expect("Invalid keyword regex")
+    let alternatives: Vec<String> = CODE_KEYWORDS.iter().map(|keyword| regex::escape(keyword)).collect();
+    Regex::new(&format!(r"^(?:{})\b", alternatives.join("|"))).expect("Invalid keyword regex")
 });
 
 /// Matches a long command line flag such as `--env`, which marks the line as a command.
@@ -133,5 +162,16 @@ mod test_looks_like_code {
         assert!(!looks_like_code("If the file exists, skip it."));
         assert!(!looks_like_code(""));
         assert!(!looks_like_code("   "));
+    }
+}
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_code_keyword_starts_a_line_of_a_fixture() {
+        assert_fixture_lines_start_with(CODE_KEYWORDS, "CODE_KEYWORDS");
     }
 }

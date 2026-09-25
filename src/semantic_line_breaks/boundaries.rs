@@ -361,10 +361,10 @@ pub(super) fn collect_quote_events(token: &Token<'_>, position: usize, events: &
     if is_delimited(token.kind) {
         return;
     }
-    if token.leading.contains(['"', '\'', '“', '‘']) {
+    if token.leading.contains(['"', '\'', '“', '‘', '«']) {
         events.push(SpanEvent { position, opens: true });
     }
-    if token.trailing.contains(['"', '\'', '”', '’']) {
+    if token.trailing.contains(['"', '\'', '”', '’', '»']) {
         events.push(SpanEvent { position, opens: false });
     }
 }
@@ -538,7 +538,7 @@ fn starts_sentence(token: &Token<'_>) -> bool {
     token.first_char().is_some_and(|first| {
         first.is_uppercase()
             || first.is_ascii_digit()
-            || matches!(first, '"' | '“' | '\'' | '‘' | '(' | '[' | '*' | '_')
+            || matches!(first, '"' | '“' | '\'' | '‘' | '«' | '(' | '[' | '*' | '_')
     })
 }
 
@@ -946,6 +946,11 @@ mod test_quotes {
         assert_eq!(rank_before("x y \"a, b or c\" z", 4), Some(Rank::Word));
         assert_eq!(rank_before("x y \"a, b or c\" z", 2), Some(Rank::ClauseTier4));
         assert_eq!(rank_before("x y \"a, b or c\" z", 6), Some(Rank::ClauseTier4));
+        for (open, close) in [('“', '”'), ('‘', '’'), ('«', '»')] {
+            let text = format!("x y {open}a, b or c{close} z");
+            assert_eq!(rank_before(&text, 3), Some(Rank::Word), "{text}");
+            assert_eq!(rank_before(&text, 4), Some(Rank::Word), "{text}");
+        }
     }
 
     #[test]
@@ -1106,5 +1111,49 @@ mod test_mid_clause_break {
             HardBreak::Spaces,
             &FormatOptions::default()
         ));
+    }
+}
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_clause_word_starts_a_line_of_a_fixture() {
+        assert_fixture_lines_start_with(CLAUSE_TIER_1, "CLAUSE_TIER_1");
+        assert_fixture_lines_start_with(CLAUSE_TIER_2, "CLAUSE_TIER_2");
+        assert_fixture_lines_start_with(CLAUSE_TIER_3, "CLAUSE_TIER_3");
+        assert_fixture_lines_start_with(CLAUSE_TIER_4, "CLAUSE_TIER_4");
+        let pairs: Vec<String> = CLAUSE_PAIRS
+            .iter()
+            .map(|(first, rest)| format!("{first} {rest}"))
+            .collect();
+        let pairs: Vec<&str> = pairs.iter().map(String::as_str).collect();
+        assert_fixture_lines_start_with(&pairs, "CLAUSE_PAIRS");
+    }
+
+    #[test]
+    fn every_dangling_word_ends_a_line_of_a_fixture() {
+        assert_fixture_lines_end_with(DANGLING_WORDS, "DANGLING_WORDS");
+    }
+
+    #[test]
+    fn every_phrase_conjunction_appears_in_a_fixture() {
+        assert_fixtures_contain(PHRASE_CONJUNCTIONS, "PHRASE_CONJUNCTIONS");
+    }
+
+    #[test]
+    fn every_quote_and_emphasis_marker_appears_in_a_fixture() {
+        let quotes = ['"', '\'', '“', '‘', '«', '”', '’', '»'];
+        let emphasis = ['*', '_', '~'];
+        assert!(emphasis.iter().all(|marker| is_emphasis_marker(*marker)));
+        assert_fixtures_contain_characters(&quotes, "quote");
+        assert_fixtures_contain_characters(&emphasis, "emphasis marker");
+    }
+
+    #[test]
+    fn both_ellipsis_forms_appear_in_a_fixture() {
+        assert_fixtures_contain(&["...", "…"], "ellipsis");
     }
 }

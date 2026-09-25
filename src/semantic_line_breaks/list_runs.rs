@@ -148,3 +148,19 @@ mod test_list_runs {
         );
     }
 }
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_list_conjunction_closes_a_list_in_a_fixture() {
+        let closings: Vec<String> = LIST_CONJUNCTIONS
+            .iter()
+            .map(|conjunction| format!(", {conjunction} "))
+            .collect();
+        let closings: Vec<&str> = closings.iter().map(String::as_str).collect();
+        assert_fixtures_contain(&closings, "LIST_CONJUNCTIONS");
+    }
+}

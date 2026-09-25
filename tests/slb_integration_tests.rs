@@ -214,11 +214,56 @@ fn manual_reflow_python_fixture() {
 }
 
 #[test]
+fn clause_words_fixture() {
+    assert_fixture("clause_words.in.md", "clause_words.out.md");
+}
+
+#[test]
+fn dangling_words_fixture() {
+    assert_fixture("dangling_words.in.md", "dangling_words.out.md");
+}
+
+#[test]
+fn conjunctions_fixture() {
+    assert_fixture("conjunctions.in.md", "conjunctions.out.md");
+}
+
+#[test]
+fn abbreviations_fixture() {
+    assert_fixture("abbreviations.in.md", "abbreviations.out.md");
+}
+
+#[test]
+fn dashes_and_semicolons_fixture() {
+    assert_fixture("dashes_and_semicolons.in.md", "dashes_and_semicolons.out.md");
+}
+
+#[test]
+fn brackets_and_quotes_fixture() {
+    assert_fixture("brackets_and_quotes.in.md", "brackets_and_quotes.out.md");
+}
+
+#[test]
+fn inline_html_fixture() {
+    assert_fixture("inline_html.in.md", "inline_html.out.md");
+}
+
+#[test]
+fn code_like_lines_fixture() {
+    assert_fixture("code_like_lines.in.md", "code_like_lines.out.md");
+}
+
+#[test]
+fn directive_comments_fixture() {
+    assert_fixture("directive_comments.in.ts", "directive_comments.out.ts");
+}
+
+#[test]
 fn every_fixture_pair_formats_to_its_expected_output() {
     let mut pairs = fixture_pairs();
     pairs.sort();
     assert!(
-        pairs.len() >= 27,
+        pairs.len() >= 39,
         "expected every fixture pair to be found, got {pairs:?}"
     );
     for (input, output) in pairs {

@@ -1276,3 +1276,16 @@ mod test_skip_notices {
         assert!(notices.is_empty());
     }
 }
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_inline_html_tag_opens_a_paragraph_line_in_a_fixture() {
+        let openings: Vec<String> = INLINE_HTML_TAGS.iter().map(|tag| format!("<{tag}")).collect();
+        let openings: Vec<&str> = openings.iter().map(String::as_str).collect();
+        assert_fixture_lines_start_with(&openings, "INLINE_HTML_TAGS");
+    }
+}

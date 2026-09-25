@@ -285,3 +285,29 @@ mod test_format_options {
         );
     }
 }
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_default_abbreviation_appears_in_a_fixture() {
+        assert_fixtures_contain(DEFAULT_ABBREVIATIONS, "DEFAULT_ABBREVIATIONS");
+    }
+
+    #[test]
+    fn every_default_directive_prefix_appears_in_a_fixture() {
+        assert_fixtures_contain(DEFAULT_DIRECTIVE_PREFIXES, "DEFAULT_DIRECTIVE_PREFIXES");
+    }
+
+    #[test]
+    fn every_word_that_stays_lowercase_follows_a_dash_in_a_fixture() {
+        let after_dash: Vec<String> = DEFAULT_PRESERVE_LOWERCASE
+            .iter()
+            .map(|word| format!("— {word}"))
+            .collect();
+        let after_dash: Vec<&str> = after_dash.iter().map(String::as_str).collect();
+        assert_fixtures_contain(&after_dash, "DEFAULT_PRESERVE_LOWERCASE");
+    }
+}

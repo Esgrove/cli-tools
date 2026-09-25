@@ -314,13 +314,7 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
         .enumerate()
         .find(|(offset, token)| sentence_start + offset != index && token.kind == TokenKind::Dash)
         .map(|(offset, _)| sentence_start + offset);
-    // A single word after the dash trails the sentence as an afterthought,
-    // and a sentence of its own would read as a fragment.
-    let trails_sentence = index + 2 >= sentence_end;
-    // A clause word after the dash joins what follows to the clause before it,
-    // so "a semicolon, and a dash" continues the sentence instead of starting a new one.
-    let joins_clause = clause_rank(tokens, index + 1, options).is_some();
-    if inside_brackets || trails_sentence || joins_clause {
+    if inside_brackets {
         return DashRewrite {
             punctuation: Some(','),
             capitalized_core: None,
@@ -328,6 +322,8 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
             unfixable: None,
         };
     }
+    // Both dashes of a pair are decided from the span between them,
+    // so a clause word after the opening dash cannot turn it into a comma while its partner stays.
     if let Some(partner) = partner_dash {
         let (span_start, span_end) = if partner > index {
             (index + 1, partner)
@@ -349,6 +345,20 @@ fn dash_rewrite(tokens: &[Token<'_>], index: usize, depths: &[usize], options: &
                 ),
             };
         }
+        return DashRewrite {
+            punctuation: Some(','),
+            capitalized_core: None,
+            starts_new_sentence: false,
+            unfixable: None,
+        };
+    }
+    // A single word after the dash trails the sentence as an afterthought,
+    // and a sentence of its own would read as a fragment.
+    let trails_sentence = index + 2 >= sentence_end;
+    // A clause word after the dash joins what follows to the clause before it,
+    // so "a semicolon, and a dash" continues the sentence instead of starting a new one.
+    let joins_clause = clause_rank(tokens, index + 1, options).is_some();
+    if trails_sentence || joins_clause {
         return DashRewrite {
             punctuation: Some(','),
             capitalized_core: None,
@@ -510,8 +520,8 @@ fn semicolon_refusal(
 
 /// Whether the token is wrapped in quotes, which makes it a name rather than a word of the sentence.
 fn is_quoted(token: &Token<'_>) -> bool {
-    token.leading.contains(['"', '\'', '\u{201c}', '\u{2018}'])
-        && token.trailing.contains(['"', '\'', '\u{201d}', '\u{2019}'])
+    token.leading.contains(['"', '\'', '\u{201c}', '\u{2018}', '«'])
+        && token.trailing.contains(['"', '\'', '\u{201d}', '\u{2019}', '»'])
 }
 
 /// Whether a token is code-like enough that rewording it would be wrong.
@@ -707,6 +717,18 @@ mod test_rewording {
                 "the form stays clean.".to_string(),
                 "Save is disabled until an edit".to_string()
             ])
+        );
+    }
+
+    #[test]
+    fn both_dashes_of_a_pair_that_opens_with_a_clause_word_are_decided_together() {
+        let clause = reflow(&["The cache — which is rebuilt every night — stays small."], 120);
+        assert_eq!(clause.lines, None);
+        assert!(clause.violations.iter().all(|violation| !violation.fixable));
+        let phrase = reflow(&["The cache — and the index with it — stays small."], 120);
+        assert_eq!(
+            phrase.lines,
+            Some(vec!["The cache, and the index with it, stays small.".to_string()])
         );
     }
 
@@ -929,5 +951,21 @@ mod test_sentence_merge {
             ]),
             "only the wrapped sentence should be joined"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_finite_verb_marker_appears_in_a_fixture() {
+        assert_fixtures_contain(FINITE_VERB_MARKERS, "FINITE_VERB_MARKERS");
+    }
+
+    #[test]
+    fn every_dash_form_appears_in_a_fixture() {
+        assert_fixtures_contain(&[" — ", " – ", " -- "], "dash");
     }
 }

@@ -542,3 +542,16 @@ mod test_chunk_end {
         }
     }
 }
+
+#[cfg(test)]
+mod test_fixture_coverage {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn every_trailing_punctuation_character_appears_in_a_fixture() {
+        let punctuation = ['.', ',', ';', ':', '!', '?', '…', '—', '–'];
+        assert!(punctuation.iter().all(|character| is_trailing_closer(*character)));
+        assert_fixtures_contain_characters(&punctuation, "trailing punctuation");
+    }
+}

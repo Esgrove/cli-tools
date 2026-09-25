@@ -966,3 +966,75 @@ mod test_unchanged_lines {
         assert!(outcome.violations.is_empty());
     }
 }
+
+#[cfg(test)]
+mod test_weak_clause_breaks {
+    use super::*;
+    use crate::semantic_line_breaks::test_helpers::*;
+
+    #[test]
+    fn a_bare_relative_pronoun_moves_to_an_earlier_comma() {
+        let outcome = reflow_paragraph(
+            &paragraph(
+                &[
+                    "Build the image with the cache from the previous build, so only the layers",
+                    "that changed are rebuilt.",
+                ],
+                "                // ",
+            ),
+            &FormatOptions::with_width(120),
+            true,
+        );
+        assert_eq!(
+            outcome.lines,
+            Some(vec![
+                "Build the image with the cache from the previous build,".to_string(),
+                "so only the layers that changed are rebuilt.".to_string(),
+            ])
+        );
+        assert_eq!(summary(&outcome), vec![(ViolationKind::MidClauseBreak, true)]);
+    }
+
+    #[test]
+    fn a_bare_relative_pronoun_without_an_earlier_comma_is_kept() {
+        for lines in [
+            ["The docs say", "that the value is ignored on Windows."],
+            ["The tool writes a report file", "which the CI job uploads afterwards."],
+            [
+                "The request marks the archive entry",
+                "as a favourite of the signed in reader.",
+            ],
+        ] {
+            let outcome = reflow(&lines, 120);
+            assert_eq!(outcome.lines, None, "{lines:?}");
+            assert!(outcome.violations.is_empty(), "{lines:?}: {:?}", outcome.violations);
+        }
+    }
+
+    #[test]
+    fn a_connector_that_starts_with_as_is_kept() {
+        for second in [
+            "as well as the license files.",
+            "as long as the lock file is unchanged.",
+            "as soon as one of the tests fails.",
+            "as if it had always had the new name.",
+            "as though nothing had changed.",
+        ] {
+            let lines = ["The cache is reused, even by every later build", second];
+            let outcome = reflow(&lines, 120);
+            assert_eq!(outcome.lines, None, "{second}");
+            assert!(outcome.violations.is_empty(), "{second}: {:?}", outcome.violations);
+        }
+    }
+
+    #[test]
+    fn a_comma_that_would_leave_the_lines_lopsided_does_not_take_the_break() {
+        let lines = [
+            "First, the formatter reads every paragraph of the file and plans the break points of each long sentence",
+            "that runs past the configured width limit.",
+        ];
+        let outcome = reflow(&lines, 120);
+        assert_eq!(outcome.lines, None);
+        assert!(outcome.violations.is_empty(), "{:?}", outcome.violations);
+    }
+}
