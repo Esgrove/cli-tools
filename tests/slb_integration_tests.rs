@@ -259,11 +259,16 @@ fn directive_comments_fixture() {
 }
 
 #[test]
+fn code_like_comments_fixture() {
+    assert_fixture("code_like_comments.in.py", "code_like_comments.out.py");
+}
+
+#[test]
 fn every_fixture_pair_formats_to_its_expected_output() {
     let mut pairs = fixture_pairs();
     pairs.sort();
     assert!(
-        pairs.len() >= 39,
+        pairs.len() >= 40,
         "expected every fixture pair to be found, got {pairs:?}"
     );
     for (input, output) in pairs {
