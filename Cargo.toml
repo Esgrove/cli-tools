@@ -1,6 +1,6 @@
 [package]
 name = "cli-tools"
-version = "10.8.0"
+version = "10.9.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
 description = "A collection of CLI utilities"
@@ -23,7 +23,7 @@ ctrlc = "3.5.2"
 difference = "2.0.0"
 dirs = "7.0.0"
 dunce = "1.0.5"
-encoding_rs = "0.8.41"
+encoding_rs = "0.8.42"
 fearless_simd = "1.0.0"
 fearless_simd_macros = "0.1.0"
 futures = "0.3.34"

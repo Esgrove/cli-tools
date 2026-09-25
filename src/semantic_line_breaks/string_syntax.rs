@@ -115,6 +115,11 @@ pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
             backtick: Backtick::RawString,
             ..base
         },
+        FileKind::Groovy => StringSyntax {
+            single_quote: SingleQuote::String,
+            triple_quotes: true,
+            ..base
+        },
         FileKind::Python => StringSyntax {
             line_marker: "#",
             block_comment: None,

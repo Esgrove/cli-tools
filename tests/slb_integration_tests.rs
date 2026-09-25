@@ -169,6 +169,11 @@ fn cmake_lists_fixture() {
 }
 
 #[test]
+fn jenkins_pipeline_fixture() {
+    assert_fixture("jenkins_pipeline.in.jenkinsfile", "jenkins_pipeline.out.jenkinsfile");
+}
+
+#[test]
 fn doc_tags_fixture() {
     assert_fixture("doc_tags.in.java", "doc_tags.out.java");
 }

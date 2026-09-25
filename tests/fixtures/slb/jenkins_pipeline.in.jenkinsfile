@@ -1,0 +1,63 @@
+#!/usr/bin/env groovy
+// Declarative pipeline for the release builds. The agent label pins the builds to the Linux pool, because the macOS agents do not have Docker installed.
+
+/**
+ * Returns the image tag for the current build. Release branches get the version from the branch name,
+ * every other branch gets the short commit hash so that
+ * two builds of the same branch never overwrite each other's image.
+ */
+def imageTag() {
+    if (env.BRANCH_NAME ==~ /release\/.*/) { // release branches
+        return env.BRANCH_NAME.replaceFirst(/^release\//, '')
+    }
+    return sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+}
+
+pipeline {
+    agent { label 'linux && docker' }
+
+    options {
+        // Keep the logs of the last thirty builds. Older builds are removed to save disk space on the controller.
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 45, unit: 'MINUTES') // the integration tests are slow
+    }
+
+    environment {
+        REGISTRY = 'registry.example.com/team'
+        IMAGE_TAG = "${imageTag()}"
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                // Build the image with the cache from the previous build, so only the layers
+                // that changed are rebuilt.
+                sh '''
+                    # The cache image may be missing on a fresh agent, which is fine because docker pull only warns about it and the build carries on.
+                    docker pull "$REGISTRY/app:latest" || true
+                    // not a comment, just a line inside the shell script
+                    docker build --cache-from "$REGISTRY/app:latest" -t "$REGISTRY/app:$IMAGE_TAG" .
+                '''
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh "docker run --rm ${env.REGISTRY}/app:${env.IMAGE_TAG} cargo test // not a comment either"
+                /*
+                 * The test reports are archived even when the tests fail. Jenkins marks the build unstable instead of failed when junit finds failures.
+                 */
+                junit 'target/reports/*.xml'
+            }
+        }
+
+        stage('Publish') {
+            when { branch 'release/*' }
+            steps {
+                sh """
+                    docker push "${env.REGISTRY}/app:${env.IMAGE_TAG}" # pushes the versioned tag
+                """
+            }
+        }
+    }
+}

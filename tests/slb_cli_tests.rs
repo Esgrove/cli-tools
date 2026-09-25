@@ -194,6 +194,43 @@ fn cmake_lists_txt_is_formatted_by_file_name() {
 }
 
 #[test]
+fn a_jenkinsfile_is_formatted_by_file_name() {
+    let directory = temporary_directory();
+    let path = write_file(
+        &directory,
+        "Jenkinsfile",
+        "// The agent label pins the builds to the Linux pool. The macOS agents have no Docker.\npipeline {}\n",
+    );
+
+    let output = run(&[&argument(&path), "-w", "40", "--print"]);
+
+    assert_eq!(exit_code(&output), 1);
+    let text = stdout(&output);
+    assert!(text.contains("Jenkinsfile"), "{text}");
+    assert!(text.contains("+ // The agent label pins the"), "{text}");
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("file should be readable")
+            .contains("Linux pool. The macOS agents have no Docker."),
+        "print mode must not change the file"
+    );
+}
+
+#[test]
+fn stdin_type_groovy_leaves_comment_markers_inside_strings_alone() {
+    let output = run_with_stdin(
+        &["--stdin", "--type", "groovy", "-w", "40"],
+        "sh '''\n  // not a comment, part of the shell script\n'''\n// The C++ standard is pinned so every host builds the same dialect. Extensions stay off.\n",
+    );
+
+    assert_eq!(
+        stdout(&output),
+        "sh '''\n  // not a comment, part of the shell script\n'''\n// The C++ standard is pinned\n// so every host builds the same dialect.\n// Extensions stay off.\n"
+    );
+    assert_eq!(exit_code(&output), 0);
+}
+
+#[test]
 fn stdin_type_cmake_formats_hash_comments() {
     let output = run_with_stdin(
         &["--stdin", "--type", "cmake", "-w", "40"],

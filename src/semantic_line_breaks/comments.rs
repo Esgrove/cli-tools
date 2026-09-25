@@ -1170,6 +1170,41 @@ mod test_trailing_other_languages {
     }
 
     #[test]
+    fn groovy_single_quoted_strings_are_strings_rather_than_characters() {
+        assert_eq!(
+            replacement("sh 'curl -s http://example.com // not'  // c", FileKind::Groovy),
+            Some(pair("// c", "sh 'curl -s http://example.com // not'"))
+        );
+        assert_eq!(
+            replacement("echo \"Build ${env.BUILD_ID} // not\" // c", FileKind::Groovy),
+            Some(pair("// c", "echo \"Build ${env.BUILD_ID} // not\""))
+        );
+    }
+
+    #[test]
+    fn groovy_triple_quoted_strings_hide_markers_across_lines() {
+        for quote in ["'''", "\"\"\""] {
+            let first = format!("sh {quote}");
+            let last = format!("{quote} // c");
+            let lines = [
+                first.as_str(),
+                "  // not a comment",
+                "  curl http://x # nor this",
+                last.as_str(),
+            ];
+            assert_eq!(replaced_indices(&lines, FileKind::Groovy), vec![3], "{quote}");
+        }
+    }
+
+    #[test]
+    fn groovy_slashy_regex_hides_slashes() {
+        assert_eq!(
+            replacement("if (branch ==~ /release\\/.*/) { // c", FileKind::Groovy),
+            Some(pair("// c", "if (branch ==~ /release\\/.*/) {"))
+        );
+    }
+
+    #[test]
     fn unsupported_kinds_produce_no_replacements() {
         for kind in [
             FileKind::Dockerfile,
@@ -1232,5 +1267,27 @@ mod test_strings_are_not_comments {
             })
             .collect();
         assert_eq!(paragraph_starts, vec![4]);
+    }
+
+    #[test]
+    fn comment_lines_inside_a_jenkins_shell_step_are_verbatim() {
+        let lines = [
+            "#!/usr/bin/env groovy",
+            "// Build the image.",
+            "sh '''",
+            "  // not a comment",
+            "  # a shell comment, still part of the string",
+            "'''",
+            "// Deploy after the build.",
+        ];
+        let regions = split_source_regions(&lines, FileKind::Groovy);
+        let paragraph_starts: Vec<usize> = regions
+            .iter()
+            .filter_map(|region| match region {
+                Region::Paragraph(paragraph) => Some(paragraph.start_line),
+                Region::Verbatim { .. } => None,
+            })
+            .collect();
+        assert_eq!(paragraph_starts, vec![1, 6]);
     }
 }

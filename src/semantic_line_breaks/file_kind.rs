@@ -17,6 +17,9 @@ pub enum FileKind {
     JavaScript,
     /// Go source with backtick raw strings.
     Go,
+    /// Groovy source, including Jenkins pipelines and Gradle build scripts,
+    /// with `//` and `/* */` comments and single quoted and triple quoted strings.
+    Groovy,
     /// Python source with `#` comments and docstrings.
     Python,
     /// Shell scripts with `#` comments.
@@ -66,6 +69,9 @@ pub(super) struct CommentStyle {
 
 impl FileKind {
     /// Detect the file kind from the file extension or well known file name.
+    ///
+    /// A Jenkins pipeline named like `Jenkinsfile.release` has no extension to go by,
+    /// so its name is only consulted when the extension is not one of the known ones.
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Self> {
         let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
@@ -77,8 +83,10 @@ impl FileKind {
             _ if file_name.eq_ignore_ascii_case("CMakeLists.txt") => return Some(Self::CMake),
             _ => {}
         }
-        let extension = path.extension().and_then(|ext| ext.to_str())?.to_ascii_lowercase();
-        Self::from_extension(&extension)
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(Self::from_extension)
+            .or_else(|| has_jenkinsfile_name(file_name).then_some(Self::Groovy))
     }
 
     /// Detect the file kind from a file extension without the leading dot.
@@ -90,6 +98,7 @@ impl FileKind {
             | "scala" | "dart" | "m" | "mm" => Self::CLike,
             "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => Self::JavaScript,
             "go" => Self::Go,
+            "groovy" | "gvy" | "gradle" | "jenkinsfile" => Self::Groovy,
             "py" | "pyi" => Self::Python,
             "sh" | "bash" | "zsh" | "fish" => Self::Shell,
             "toml" => Self::Toml,
@@ -104,6 +113,17 @@ impl FileKind {
             _ => return None,
         };
         Some(kind)
+    }
+
+    /// Whether the path is a Jenkins pipeline,
+    /// such as `Jenkinsfile`, `Jenkinsfile.release`, or `deploy.jenkinsfile`.
+    #[must_use]
+    pub fn is_jenkinsfile(path: &Path) -> bool {
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let jenkinsfile_extension = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jenkinsfile"));
+        jenkinsfile_extension || (has_jenkinsfile_name(file_name) && Self::from_path(path) == Some(Self::Groovy))
     }
 
     /// Comment syntax of this file kind.
@@ -122,6 +142,11 @@ impl FileKind {
             },
             Self::CLike | Self::JavaScript | Self::Go => CommentStyle {
                 line_markers: &["///", "//"],
+                block: Some(C_BLOCK),
+                docstrings: false,
+            },
+            Self::Groovy => CommentStyle {
+                line_markers: &["//"],
                 block: Some(C_BLOCK),
                 docstrings: false,
             },
@@ -159,12 +184,21 @@ impl FileKind {
                 | Self::CLike
                 | Self::JavaScript
                 | Self::Go
+                | Self::Groovy
                 | Self::Python
                 | Self::Shell
                 | Self::Toml
                 | Self::Yaml
         )
     }
+}
+
+/// Whether the part of the file name before its first dot is `Jenkinsfile`, ignoring case.
+fn has_jenkinsfile_name(file_name: &str) -> bool {
+    file_name
+        .split('.')
+        .next()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("Jenkinsfile"))
 }
 
 #[cfg(test)]
@@ -202,6 +236,7 @@ mod test_file_kind {
         assert!(FileKind::Rust.supports_trailing_comment_check());
         assert!(FileKind::Yaml.supports_trailing_comment_check());
         assert!(!FileKind::Dockerfile.supports_trailing_comment_check());
+        assert!(FileKind::Groovy.supports_trailing_comment_check());
         assert!(!FileKind::CMake.supports_trailing_comment_check());
         assert!(!FileKind::Markdown.supports_trailing_comment_check());
         assert!(!FileKind::Lua.supports_trailing_comment_check());
@@ -227,6 +262,10 @@ mod test_file_kind_extensions {
             ("ts", FileKind::JavaScript),
             ("mjs", FileKind::JavaScript),
             ("go", FileKind::Go),
+            ("groovy", FileKind::Groovy),
+            ("gvy", FileKind::Groovy),
+            ("gradle", FileKind::Groovy),
+            ("jenkinsfile", FileKind::Groovy),
             ("py", FileKind::Python),
             ("pyi", FileKind::Python),
             ("sh", FileKind::Shell),
@@ -267,6 +306,11 @@ mod test_file_kind_extensions {
             ("cmakelists.txt", FileKind::CMake),
             ("Gemfile", FileKind::Ruby),
             ("Rakefile", FileKind::Ruby),
+            ("Jenkinsfile", FileKind::Groovy),
+            ("jenkinsfile", FileKind::Groovy),
+            ("Jenkinsfile.release", FileKind::Groovy),
+            ("Jenkinsfile.groovy", FileKind::Groovy),
+            ("deploy.Jenkinsfile", FileKind::Groovy),
             (".bashrc", FileKind::Shell),
             (".zshrc", FileKind::Shell),
             (".zshenv", FileKind::Shell),
@@ -285,12 +329,39 @@ mod test_file_kind_extensions {
     }
 
     #[test]
+    fn a_known_extension_wins_over_a_jenkinsfile_name() {
+        assert_eq!(
+            FileKind::from_path(Path::new("Jenkinsfile.md")),
+            Some(FileKind::Markdown)
+        );
+        assert_eq!(FileKind::from_path(Path::new("Jenkinsfile.sh")), Some(FileKind::Shell));
+        assert_eq!(FileKind::from_path(Path::new("MyJenkinsfile")), None);
+    }
+
+    #[test]
+    fn jenkins_pipelines_are_told_apart_from_other_groovy_files() {
+        for name in [
+            "Jenkinsfile",
+            "ci/jenkinsfile",
+            "Jenkinsfile.release",
+            "Jenkinsfile.groovy",
+            "deploy.jenkinsfile",
+        ] {
+            assert!(FileKind::is_jenkinsfile(Path::new(name)), "{name}");
+        }
+        for name in ["build.gradle", "vars/deploy.groovy", "Jenkinsfile.md", "MyJenkinsfile"] {
+            assert!(!FileKind::is_jenkinsfile(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
     fn comment_styles_cover_every_kind() {
         let kinds = [
             FileKind::Rust,
             FileKind::CLike,
             FileKind::JavaScript,
             FileKind::Go,
+            FileKind::Groovy,
             FileKind::Python,
             FileKind::Shell,
             FileKind::Toml,
@@ -315,6 +386,8 @@ mod test_file_kind_extensions {
         assert_eq!(FileKind::Sql.comment_style().line_markers, &["--"]);
         assert_eq!(FileKind::Lua.comment_style().line_markers, &["--"]);
         assert_eq!(FileKind::Go.comment_style().line_markers, &["///", "//"]);
+        assert_eq!(FileKind::Groovy.comment_style().line_markers, &["//"]);
+        assert!(FileKind::Groovy.comment_style().block.is_some());
         assert!(FileKind::CLike.comment_style().block.is_some());
         assert!(FileKind::Yaml.comment_style().block.is_none());
     }

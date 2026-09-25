@@ -116,6 +116,7 @@ fn matches_extensions(path: &Path, config: &Config) -> bool {
         *allowed == extension
             || *allowed == file_name
             || (*allowed == "cmake" && file_name.eq_ignore_ascii_case("CMakeLists.txt"))
+            || (matches!(allowed.as_str(), "groovy" | "jenkinsfile") && FileKind::is_jenkinsfile(path))
     })
 }
 
@@ -211,6 +212,26 @@ mod test_file_filters {
             &config_with(vec![], vec!["cmake"])
         ));
     }
+
+    #[test]
+    fn a_groovy_or_jenkinsfile_filter_accepts_every_jenkins_pipeline_name() {
+        for filter in ["groovy", "jenkinsfile"] {
+            let config = config_with(vec![], vec![filter]);
+            for name in ["Jenkinsfile", "ci/Jenkinsfile.release", "deploy.jenkinsfile"] {
+                assert!(matches_extensions(Path::new(name), &config), "{filter} {name}");
+            }
+            assert!(!matches_extensions(Path::new("Jenkinsfile.md"), &config), "{filter}");
+            assert!(!matches_extensions(Path::new("build.gradle"), &config), "{filter}");
+        }
+        assert!(matches_extensions(
+            Path::new("vars/deploy.groovy"),
+            &config_with(vec![], vec!["groovy"])
+        ));
+        assert!(!matches_extensions(
+            Path::new("vars/deploy.groovy"),
+            &config_with(vec![], vec!["jenkinsfile"])
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -227,13 +248,21 @@ mod test_collect_files {
         write(&directory, "nested/deep/main.rs", "// comment\n");
         write(&directory, "CMakeLists.txt", "# comment\n");
         write(&directory, "cmake/helpers.cmake", "# comment\n");
+        write(&directory, "Jenkinsfile", "// comment\n");
 
         let files = collect_files(&[directory.path().to_path_buf()], &config_with(vec![], vec![]))
             .expect("collecting should succeed");
 
         assert_eq!(
             collected_names(&files),
-            vec!["CMakeLists.txt", "README.md", "helpers.cmake", "lib.rs", "main.rs"]
+            vec![
+                "CMakeLists.txt",
+                "Jenkinsfile",
+                "README.md",
+                "helpers.cmake",
+                "lib.rs",
+                "main.rs"
+            ]
         );
     }
 

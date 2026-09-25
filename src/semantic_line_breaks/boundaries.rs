@@ -68,6 +68,10 @@ const CLAUSE_PAIRS: &[(&str, &str)] = &[
     ("for", "example"),
     ("such", "as"),
     ("as", "well as"),
+    ("as", "long as"),
+    ("as", "soon as"),
+    ("as", "if"),
+    ("as", "though"),
     ("in", "order to"),
 ];
 
@@ -174,10 +178,16 @@ pub fn clause_rank(tokens: &[Token<'_>], index: usize, options: &FormatOptions) 
         return None;
     }
     let word = token.core.as_ref();
-    if let Some(next) = tokens.get(index + 1)
-        && CLAUSE_PAIRS
-            .iter()
-            .any(|(first, second)| first.eq_ignore_ascii_case(word) && second.eq_ignore_ascii_case(&next.core))
+    let pair_follows = |rest: &str| {
+        rest.split(' ').enumerate().all(|(offset, part)| {
+            tokens
+                .get(index + 1 + offset)
+                .is_some_and(|next| part.eq_ignore_ascii_case(&next.core))
+        })
+    };
+    if CLAUSE_PAIRS
+        .iter()
+        .any(|(first, rest)| first.eq_ignore_ascii_case(word) && pair_follows(rest))
     {
         return Some(Rank::ClauseTier3);
     }
@@ -211,8 +221,15 @@ pub fn is_mid_clause_break(
     if last.trailing.contains([')', ']', '"', '\'']) || first.leading.contains(['(', '[', '"', '\'']) {
         return false;
     }
-    if clause_rank(line_b, 0, options).is_some() {
-        return false;
+    if let Some(rank) = clause_rank(line_b, 0, options) {
+        // A relative pronoun or "as" with no comma before it may continue the phrase in front of it,
+        // as in "the layers that changed".
+        // Such a break only gives way to a comma or a sentence end earlier on the line,
+        // and the reflow then keeps whichever of the two reads better.
+        let weak = rank == Rank::ClauseTier4 && contains_word(CLAUSE_TIER_4, &first.core);
+        if !weak || !has_punctuated_boundary(line_a, options) {
+            return false;
+        }
     }
     if first.text().ends_with(':') || starts_markdown_structure(first) {
         return false;
@@ -223,6 +240,21 @@ pub fn is_mid_clause_break(
         return false;
     }
     true
+}
+
+/// Whether a line could break after a comma, a colon, or a sentence end somewhere within it.
+///
+/// Punctuation inside brackets, quotes, or emphasis does not count,
+/// since a break there is only a last resort.
+fn has_punctuated_boundary(tokens: &[Token<'_>], options: &FormatOptions) -> bool {
+    find_boundaries(tokens, options).iter().any(|boundary| {
+        boundary.rank > Rank::Word
+            && boundary
+                .before
+                .checked_sub(1)
+                .and_then(|index| tokens.get(index))
+                .is_some_and(|token| token.ends_clause_punctuation() || token.ends_sentence_punctuation())
+    })
 }
 
 /// Group nesting depth before each token, counting only the groups that are closed later.
@@ -624,6 +656,20 @@ mod test_boundaries {
     }
 
     #[test]
+    fn a_connector_of_several_words_is_matched_word_by_word() {
+        assert_eq!(
+            rank_before("keep the input as well as the output", 3),
+            Some(Rank::ClauseTier3)
+        );
+        assert_eq!(
+            rank_before("sort the list in order to search it", 3),
+            Some(Rank::ClauseTier3)
+        );
+        assert_eq!(rank_before("sort the list in order", 3), Some(Rank::Word));
+        assert_eq!(rank_before("the same as well", 2), Some(Rank::ClauseTier4));
+    }
+
+    #[test]
     fn emphasis_spans_hold_together() {
         assert_eq!(rank_before("read the **bold text here** now", 3), Some(Rank::Word));
         assert_eq!(rank_before("read the _two words_ now", 3), Some(Rank::Word));
@@ -990,6 +1036,56 @@ mod test_mid_clause_break {
         assert!(!mid("the values (see below)", "are sorted"));
         assert!(!mid("the values are sorted", "(see below)"));
         assert!(!mid("the header is read:", "size in bytes"));
+        assert!(!mid("the input is kept", "as well as the output"));
+        assert!(!mid("the layers changed,", "which is why they rebuild"));
+    }
+
+    #[test]
+    fn a_bare_relative_pronoun_gives_way_to_a_comma_earlier_on_the_line() {
+        assert!(mid(
+            "with the cache from the previous build, so only the layers",
+            "that changed are rebuilt"
+        ));
+        assert!(!mid("the one file, not the backup,", "which holds the settings"));
+        assert!(mid("the one file, not the backup", "which holds the settings"));
+        assert!(mid("It is read once. The output uses the same name", "as the input"));
+    }
+
+    #[test]
+    fn a_bare_relative_pronoun_without_an_earlier_comma_starts_a_clause() {
+        assert!(!mid("so only the layers", "that changed are rebuilt"));
+        assert!(!mid("the docs say", "that the value is ignored on Windows"));
+        assert!(!mid("which marks an archive entry", "as a favourite of the reader"));
+        assert!(!mid("the values (a, b) of the layers", "that changed"));
+    }
+
+    #[test]
+    fn a_subordinating_connector_starting_with_as_starts_a_clause() {
+        for line_b in [
+            "as long as the lock file is unchanged",
+            "as soon as one of the tests fails",
+            "as if nothing had happened",
+            "as though it were new",
+        ] {
+            assert!(
+                !mid("the cache is reused, even by every later build", line_b),
+                "{line_b}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_clause_starter_still_starts_a_clause() {
+        let options = FormatOptions {
+            clause_starters: vec!["whereupon".to_string()],
+            ..FormatOptions::default()
+        };
+        assert!(!is_mid_clause_break(
+            &tokens("the build finished"),
+            &tokens("whereupon the tests ran"),
+            HardBreak::None,
+            &options
+        ));
     }
 
     #[test]

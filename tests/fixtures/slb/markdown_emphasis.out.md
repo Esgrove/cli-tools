@@ -17,11 +17,11 @@ so that at least one break has to happen somewhere in the sentence.
 An asterisk used as multiplication in a * b stays breakable,
 and so does a stray _underscore in the middle of the prose, because neither marker is ever closed.
 
-Words with snake_case_names and a leading _private field do not open an emphasis span, even in a line of prose
-that is long enough to need a break.
+Words with snake_case_names and a leading _private field do not open an emphasis span,
+even in a line of prose that is long enough to need a break.
 
-Inline `code with * and _ inside` is one atom, and a [link with **bold** text](https://example.com/docs) is one
-as well, so neither of them can be broken apart.
+Inline `code with * and _ inside` is one atom, and a [link with **bold** text](https://example.com/docs) is one as well,
+so neither of them can be broken apart.
 
 Strikethrough ~~text that is struck out~~ in a sentence long enough
 that the formatter has to pick a break point somewhere along the line.

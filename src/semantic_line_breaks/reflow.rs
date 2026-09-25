@@ -183,6 +183,11 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     }
 
     let mut changed = output_differs(&output, paragraph);
+    // Joining and re-breaking the text gave back the lines the paragraph already has,
+    // so a break that looked like it fell mid-clause is the best one the text allows.
+    if !changed {
+        violations.retain(|violation| violation.kind != ViolationKind::MidClauseBreak);
+    }
     let reported = !violations.is_empty();
     violations.extend(list_item_violation(paragraph, options, output.len(), reported));
 
@@ -195,12 +200,7 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     if options.rules.line_too_long {
         violations.extend(over_long_line_violations(paragraph, options, hard_limit, changed));
     }
-    violations.sort_by_key(|violation| (violation.line, violation.kind));
-    violations.dedup_by(|second, first| {
-        first.line == second.line
-            && first.kind == ViolationKind::LineTooLong
-            && second.kind == ViolationKind::LineTooLong
-    });
+    sort_violations(&mut violations);
 
     let lines = (changed && produce_fix).then(|| {
         output
@@ -217,6 +217,16 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
         changed,
         violations,
     }
+}
+
+/// Sort the violations by line and kind, keeping a single report of each over long line.
+fn sort_violations(violations: &mut Vec<Violation>) {
+    violations.sort_by_key(|violation| (violation.line, violation.kind));
+    violations.dedup_by(|second, first| {
+        first.line == second.line
+            && first.kind == ViolationKind::LineTooLong
+            && second.kind == ViolationKind::LineTooLong
+    });
 }
 
 /// Whether a rule rewrote the sentence rather than only rewrapping it.
