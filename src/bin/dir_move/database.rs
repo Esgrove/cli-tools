@@ -203,7 +203,7 @@ impl std::fmt::Display for DirectoryEntry {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_database {
     use super::*;
 
     #[test]

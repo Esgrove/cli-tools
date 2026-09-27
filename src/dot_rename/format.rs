@@ -681,7 +681,7 @@ mod collapse_consecutive_dots_tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_dot_format {
     use std::sync::LazyLock;
 
     use regex::Regex;

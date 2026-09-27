@@ -181,7 +181,7 @@ fn directories_to_rename(path: PathBuf, recurse: bool) -> Result<Vec<RenameItem>
 }
 
 #[cfg(test)]
-mod tests {
+mod test_rename_discovery {
     use super::*;
     use std::fs::{self, File};
     use tempfile::TempDir;

@@ -1049,7 +1049,7 @@ fn group_paths_by_drive(paths: &[PathBuf]) -> Vec<(String, Vec<PathBuf>)> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_database {
     use super::*;
 
     fn create_test_video_info() -> VideoInfo {

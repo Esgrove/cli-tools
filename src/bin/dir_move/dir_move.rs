@@ -9851,634 +9851,638 @@ mod test_varied_prefix_grouping {
             "Prefix.Target should have 3 files (no stripping)"
         );
     }
-
-    /// Tests for the `min_prefix_chars` configuration option.
-    /// This option sets the minimum character count for single-word prefixes to be considered valid group names.
-    /// Default is 5 to avoid false matches with short names like "alex", "name", etc.
-    #[cfg(test)]
-    mod test_min_prefix_chars {
-        use super::test_helpers::*;
-        use super::*;
-
-        // ===== Unit tests for find_prefix_candidates =====
-
-        #[test]
-        fn short_prefix_excluded_with_default_min_chars() {
-            // "Alex" has 4 chars, should be excluded with min_prefix_chars=5
-            let files = make_test_files(&["Alex.Video.001.mp4", "Alex.Video.002.mp4", "Alex.Video.003.mp4"]);
-            let candidates = utils::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 5);
-
-            // "Alex" (4 chars) should be excluded, but "Video" (5 chars) is found with position-agnostic matching
-            assert!(
-                !candidates.iter().any(|c| c.prefix == "Alex"),
-                "Single-part prefix 'Alex' (4 chars) should be excluded with min_prefix_chars=5"
-            );
-            assert!(
-                candidates.iter().any(|c| c.prefix == "Video"),
-                "Single-part prefix 'Video' (5 chars) should be included with position-agnostic matching"
-            );
-            assert!(
-                candidates.iter().any(|c| c.part_count == 2 && c.prefix == "Alex.Video"),
-                "Two-part prefix 'Alex.Video' should still be found"
-            );
-        }
-
-        #[test]
-        fn short_prefix_included_with_low_min_chars() {
-            // "Alex" has 4 chars, should be included with min_prefix_chars=4
-            let files = make_test_files(&["Alex.Video.001.mp4", "Alex.Video.002.mp4", "Alex.Video.003.mp4"]);
-            let candidates = utils::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 4);
-
-            // Should find single-part prefix "Alex"
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
-            assert!(
-                single_part.is_some(),
-                "Single-part prefix 'Alex' should be included with min_prefix_chars=4"
-            );
-            assert_eq!(single_part.unwrap().prefix, "Alex");
-        }
-
-        #[test]
-        fn exact_threshold_includes_prefix() {
-            // "Names" has exactly 5 chars, should be included with min_prefix_chars=5
-            let files = make_test_files(&["Names.List.001.txt", "Names.List.002.txt", "Names.List.003.txt"]);
-            let candidates = utils::find_prefix_candidates("Names.List.001.txt", &files, 2, 5);
-
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
-            assert!(
-                single_part.is_some(),
-                "Single-part prefix 'Names' (5 chars) should be included"
-            );
-            assert_eq!(single_part.unwrap().prefix, "Names");
-        }
-
-        #[test]
-        fn long_prefix_always_included() {
-            // "Alexander" has 9 chars, should always be included
-            let files = make_test_files(&[
-                "Alexander.Movie.001.mp4",
-                "Alexander.Movie.002.mp4",
-                "Alexander.Movie.003.mp4",
-            ]);
-            let candidates = utils::find_prefix_candidates("Alexander.Movie.001.mp4", &files, 2, 5);
-
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
-            assert!(
-                single_part.is_some(),
-                "Single-part prefix 'Alexander' (9 chars) should be included"
-            );
-            assert_eq!(single_part.unwrap().prefix, "Alexander");
-        }
-
-        #[test]
-        fn two_part_prefix_affected_by_min_chars() {
-            // Two-part prefixes ARE affected by min_prefix_chars (counts chars excluding dots)
-            let files = make_test_files(&["AB.CD.File.001.mp4", "AB.CD.File.002.mp4", "AB.CD.File.003.mp4"]);
-            // With high min_prefix_chars=10, "AB.CD" (4 chars) should be excluded
-            let candidates = utils::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 10);
-
-            let two_part = candidates.iter().find(|c| c.part_count == 2);
-            assert!(
-                two_part.is_none(),
-                "Two-part prefix 'AB.CD' (4 chars) should be excluded with min_prefix_chars=10"
-            );
-
-            // Single-part "AB" (2 chars) should also be excluded
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
-            assert!(
-                single_part.is_none(),
-                "Single-part prefix 'AB' should be excluded with min_prefix_chars=10"
-            );
-
-            // But with lower threshold, it should be included
-            let candidates = utils::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 4);
-            let two_part = candidates.iter().find(|c| c.part_count == 2);
-            assert!(
-                two_part.is_some(),
-                "Two-part prefix 'AB.CD' (4 chars) should be included with min_prefix_chars=4"
-            );
-        }
-
-        #[test]
-        fn unicode_chars_counted_correctly() {
-            // Unicode characters should be counted as single chars, not bytes "日本語" has 3 chars but 9 bytes in UTF-8
-            let files = make_test_files(&["日本語.Video.001.mp4", "日本語.Video.002.mp4", "日本語.Video.003.mp4"]);
-
-            // With min_prefix_chars=3, "日本語" (3 chars) should be included
-            let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 3);
-            let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
-            assert!(
-                unicode_prefix.is_some(),
-                "Unicode prefix '日本語' (3 chars) should be included with min=3"
-            );
-
-            // With min_prefix_chars=4, "日本語" (3 chars) should be excluded
-            // but "Video" (5 chars) is still found with position-agnostic matching
-            let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 4);
-            let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
-            assert!(
-                unicode_prefix.is_none(),
-                "Unicode prefix '日本語' (3 chars) should be excluded with min=4"
-            );
-            // Video (5 chars) is still found
-            let video_prefix = candidates.iter().find(|c| c.prefix == "Video");
-            assert!(video_prefix.is_some(), "Video (5 chars) should be included with min=4");
-        }
-
-        #[test]
-        fn min_chars_zero_allows_all() {
-            // With min_prefix_chars=0, even single-char prefixes should work
-            let files = make_test_files(&["A.Video.001.mp4", "A.Video.002.mp4", "A.Video.003.mp4"]);
-            let candidates = utils::find_prefix_candidates("A.Video.001.mp4", &files, 2, 0);
-
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
-            assert!(
-                single_part.is_some(),
-                "Single-char prefix 'A' should be included with min_prefix_chars=0"
-            );
-        }
-
-        #[test]
-        fn min_chars_one_allows_single_char() {
-            // With min_prefix_chars=1, single-char prefixes should work
-            let files = make_test_files(&["X.Files.S01E01.mp4", "X.Files.S01E02.mp4", "X.Files.S01E03.mp4"]);
-            let candidates = utils::find_prefix_candidates("X.Files.S01E01.mp4", &files, 2, 1);
-
-            let single_part = candidates.iter().find(|c| c.part_count == 1);
-            assert!(
-                single_part.is_some(),
-                "Single-char prefix 'X' should be included with min_prefix_chars=1"
-            );
-        }
-
-        // ===== Integration tests with collect_all_prefix_groups =====
-
-        #[test]
-        fn short_names_not_grouped_with_default_config() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Short prefix "Alex" (4 chars) - should not form single-word group
-            std::fs::write(root.join("Alex.Scene.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Alex.Scene.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Alex.Scene.003.mp4"), "").unwrap();
-
-            // Long prefix "Alexander" (9 chars) - should form group
-            std::fs::write(root.join("Alexander.Movie.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Alexander.Movie.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Alexander.Movie.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // "Alex" alone should NOT be a group (4 chars < 5)
-            assert!(
-                !groups.contains_key("Alex"),
-                "Short prefix 'Alex' should not form a single-word group"
-            );
-
-            // But "Alex.Scene" should still be a valid 2-part group
-            assert!(
-                groups.contains_key("Alex.Scene") || groups.contains_key("AlexScene"),
-                "Two-part prefix 'Alex.Scene' should still form a group"
-            );
-
-            // "Alexander" should be a valid group (9 chars >= 5)
-            assert!(
-                groups.contains_key("Alexander"),
-                "Long prefix 'Alexander' should form a group"
-            );
-        }
-
-        #[test]
-        fn common_short_words_excluded() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Common short words that could cause false groupings
-            std::fs::write(root.join("Name.File.001.txt"), "").unwrap();
-            std::fs::write(root.join("Name.File.002.txt"), "").unwrap();
-            std::fs::write(root.join("Name.File.003.txt"), "").unwrap();
-
-            std::fs::write(root.join("Data.Report.001.csv"), "").unwrap();
-            std::fs::write(root.join("Data.Report.002.csv"), "").unwrap();
-            std::fs::write(root.join("Data.Report.003.csv"), "").unwrap();
-
-            std::fs::write(root.join("Test.Case.001.rs"), "").unwrap();
-            std::fs::write(root.join("Test.Case.002.rs"), "").unwrap();
-            std::fs::write(root.join("Test.Case.003.rs"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // "Name" (4 chars), "Data" (4 chars), "Test" (4 chars) should NOT be groups
-            assert!(!groups.contains_key("Name"), "Short word 'Name' should not form group");
-            assert!(!groups.contains_key("Data"), "Short word 'Data' should not form group");
-            assert!(!groups.contains_key("Test"), "Short word 'Test' should not form group");
-
-            // But two-part prefixes should work
-            assert!(
-                groups.contains_key("Name.File") || groups.contains_key("NameFile"),
-                "Two-part 'Name.File' should form group"
-            );
-        }
-
-        #[test]
-        fn config_override_allows_short_prefixes() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Short prefix files
-            std::fs::write(root.join("ABC.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("ABC.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("ABC.Video.003.mp4"), "").unwrap();
-
-            // With min_prefix_chars=3, "ABC" should be allowed
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 3));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            assert!(
-                groups.contains_key("ABC"),
-                "Short prefix 'ABC' should form group with min_prefix_chars=3"
-            );
-        }
-
-        #[test]
-        fn high_threshold_excludes_most_single_words() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Various length prefixes
-            std::fs::write(root.join("Short.File.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Short.File.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Short.File.003.mp4"), "").unwrap();
-
-            std::fs::write(root.join("Medium.Content.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Medium.Content.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Medium.Content.003.mp4"), "").unwrap();
-
-            std::fs::write(root.join("VeryLongPrefix.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("VeryLongPrefix.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("VeryLongPrefix.Video.003.mp4"), "").unwrap();
-
-            // With min_prefix_chars=10, only "VeryLongPrefix" (14 chars) qualifies
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 10));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // "Short" (5 chars) and "Medium" (6 chars) should NOT be single-word groups
-            assert!(!groups.contains_key("Short"), "'Short' should be excluded with min=10");
-            assert!(
-                !groups.contains_key("Medium"),
-                "'Medium' should be excluded with min=10"
-            );
-
-            // "VeryLongPrefix" (14 chars) should be a group
-            assert!(
-                groups.contains_key("VeryLongPrefix"),
-                "'VeryLongPrefix' should form group with min=10"
-            );
-        }
-
-        #[test]
-        fn mixed_lengths_correct_grouping() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // 4-char prefix
-            std::fs::write(root.join("Film.Classic.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Film.Classic.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Film.Classic.003.mp4"), "").unwrap();
-
-            // 5-char prefix (exactly at threshold)
-            std::fs::write(root.join("Movie.Action.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Movie.Action.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Movie.Action.003.mp4"), "").unwrap();
-
-            // 6-char prefix (above threshold)
-            std::fs::write(root.join("Series.Drama.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Series.Drama.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Series.Drama.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // "Film" (4 chars) should NOT be a single-word group
-            assert!(!groups.contains_key("Film"), "'Film' (4 chars) should be excluded");
-
-            // "Movie" (5 chars) SHOULD be a single-word group
-            assert!(groups.contains_key("Movie"), "'Movie' (5 chars) should be included");
-
-            // "Series" (6 chars) SHOULD be a single-word group
-            assert!(groups.contains_key("Series"), "'Series' (6 chars) should be included");
-        }
-
-        #[test]
-        fn emoji_prefix_counted_as_chars() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Emoji prefix - each emoji is typically 1-2 chars
-            std::fs::write(root.join("🎬🎥.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("🎬🎥.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("🎬🎥.Video.003.mp4"), "").unwrap();
-
-            // With min=2, emoji prefix should work
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 2));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // Should find the emoji prefix group
-            let has_emoji_group = groups.keys().any(|k| k.contains('🎬'));
-            assert!(
-                has_emoji_group,
-                "Emoji prefix should form group with appropriate min_chars"
-            );
-        }
-
-        // ===== Tests for dotted prefixes with min_prefix_chars =====
-
-        #[test]
-        fn dotted_prefix_char_count_excludes_dots() {
-            // "A.B" has 2 chars (excluding dot), should be excluded with min=5
-            let files = make_test_files(&["A.B.File.001.mp4", "A.B.File.002.mp4", "A.B.File.003.mp4"]);
-            let candidates = utils::find_prefix_candidates("A.B.File.001.mp4", &files, 2, 5);
-
-            // Should NOT find "A.B" (2 chars) as a valid prefix
-            let two_part = candidates.iter().find(|c| c.prefix == "A.B");
-            assert!(
-                two_part.is_none(),
-                "Two-part prefix 'A.B' (2 chars) should be excluded with min=5"
-            );
-        }
-
-        #[test]
-        fn dotted_prefix_included_when_chars_meet_threshold() {
-            // "Ab.Cd" has 4 chars (excluding dot), should be included with min=4
-            let files = make_test_files(&["Ab.Cd.File.001.mp4", "Ab.Cd.File.002.mp4", "Ab.Cd.File.003.mp4"]);
-            let candidates = utils::find_prefix_candidates("Ab.Cd.File.001.mp4", &files, 2, 4);
-
-            let two_part = candidates.iter().find(|c| c.prefix == "Ab.Cd");
-            assert!(
-                two_part.is_some(),
-                "Two-part prefix 'Ab.Cd' (4 chars) should be included with min=4"
-            );
-        }
-
-        #[test]
-        fn three_part_dotted_prefix_char_count() {
-            // "A.B.C" has 3 chars (excluding dots), should be excluded with min=5
-            let files = make_test_files(&["A.B.C.File.001.mp4", "A.B.C.File.002.mp4", "A.B.C.File.003.mp4"]);
-            let candidates = utils::find_prefix_candidates("A.B.C.File.001.mp4", &files, 2, 5);
-
-            let three_part = candidates.iter().find(|c| c.prefix == "A.B.C");
-            assert!(
-                three_part.is_none(),
-                "Three-part prefix 'A.B.C' (3 chars) should be excluded with min=5"
-            );
-        }
-
-        #[test]
-        fn three_part_dotted_prefix_included_when_long_enough() {
-            // "Alpha.Beta.Gamma" has 14 chars (excluding dots)
-            let files = make_test_files(&[
-                "Alpha.Beta.Gamma.File.001.mp4",
-                "Alpha.Beta.Gamma.File.002.mp4",
-                "Alpha.Beta.Gamma.File.003.mp4",
-            ]);
-            let candidates = utils::find_prefix_candidates("Alpha.Beta.Gamma.File.001.mp4", &files, 2, 10);
-
-            let three_part = candidates.iter().find(|c| c.prefix == "Alpha.Beta.Gamma");
-            assert!(
-                three_part.is_some(),
-                "Three-part prefix 'Alpha.Beta.Gamma' (14 chars) should be included with min=10"
-            );
-        }
-
-        #[test]
-        fn count_prefix_chars_helper_works_correctly() {
-            assert_eq!(utils::count_prefix_chars("A"), 1);
-            assert_eq!(utils::count_prefix_chars("AB"), 2);
-            assert_eq!(utils::count_prefix_chars("A.B"), 2);
-            assert_eq!(utils::count_prefix_chars("A.B.C"), 3);
-            assert_eq!(utils::count_prefix_chars("Alpha.Beta"), 9);
-            assert_eq!(utils::count_prefix_chars("Alpha.Beta.Gamma"), 14);
-            assert_eq!(utils::count_prefix_chars("..."), 0);
-            assert_eq!(utils::count_prefix_chars("A...B"), 2);
-            // Unicode
-            assert_eq!(utils::count_prefix_chars("日本語"), 3);
-            assert_eq!(utils::count_prefix_chars("日.本.語"), 3);
-        }
-
-        #[test]
-        fn integration_dotted_short_prefix_excluded() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // "AB.CD" has 4 chars - should be excluded with min=5
-            std::fs::write(root.join("AB.CD.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("AB.CD.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("AB.CD.Video.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // "AB.CD" (4 chars) and "AB" (2 chars) should NOT be groups
-            assert!(!groups.contains_key("AB.CD"), "'AB.CD' (4 chars) should be excluded");
-            assert!(!groups.contains_key("ABCD"), "'ABCD' (4 chars) should be excluded");
-            assert!(!groups.contains_key("AB"), "'AB' (2 chars) should be excluded");
-        }
-
-        #[test]
-        fn integration_dotted_long_prefix_included() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // "Alpha.Beta" has 9 chars - should be included with min=5
-            std::fs::write(root.join("Alpha.Beta.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Alpha.Beta.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Alpha.Beta.Video.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // Should find Alpha.Beta or AlphaBeta group
-            let has_alpha_beta = groups.contains_key("Alpha.Beta") || groups.contains_key("AlphaBeta");
-            assert!(has_alpha_beta, "'Alpha.Beta' (9 chars) should form a group");
-        }
-
-        #[test]
-        fn mixed_dotted_and_single_word_with_threshold() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Short dotted: "X.Y" (2 chars) - excluded
-            std::fs::write(root.join("X.Y.Content.001.mp4"), "").unwrap();
-            std::fs::write(root.join("X.Y.Content.002.mp4"), "").unwrap();
-            std::fs::write(root.join("X.Y.Content.003.mp4"), "").unwrap();
-
-            // Short single: "Test" (4 chars) - excluded
-            std::fs::write(root.join("Test.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Test.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Test.Video.003.mp4"), "").unwrap();
-
-            // Long dotted: "Long.Name" (8 chars) - included
-            std::fs::write(root.join("Long.Name.File.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Long.Name.File.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Long.Name.File.003.mp4"), "").unwrap();
-
-            // Long single: "Studio" (6 chars) - included
-            std::fs::write(root.join("Studio.Movie.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Studio.Movie.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Studio.Movie.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // Short ones excluded
-            assert!(!groups.contains_key("X.Y"), "'X.Y' (2 chars) should be excluded");
-            assert!(!groups.contains_key("XY"), "'XY' (2 chars) should be excluded");
-            assert!(!groups.contains_key("X"), "'X' (1 char) should be excluded");
-            assert!(!groups.contains_key("Test"), "'Test' (4 chars) should be excluded");
-
-            // Long ones included
-            let has_long_name = groups.contains_key("Long.Name") || groups.contains_key("LongName");
-            assert!(has_long_name, "'Long.Name' (8 chars) should be included");
-            assert!(groups.contains_key("Studio"), "'Studio' (6 chars) should be included");
-        }
-
-        #[test]
-        fn threshold_zero_allows_all_dotted_prefixes() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Short dotted prefix - "X.Y" has 2 chars, but with "Content" it becomes more
-            std::fs::write(root.join("X.Y.Content.001.mp4"), "").unwrap();
-            std::fs::write(root.join("X.Y.Content.002.mp4"), "").unwrap();
-            std::fs::write(root.join("X.Y.Content.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 0));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // With min=0, even short prefixes like "X" (1 char) should form a group
-            let has_short_prefix = groups.keys().any(|k| k.starts_with('X'));
-            assert!(
-                has_short_prefix,
-                "With min=0, short prefixes should be allowed. Groups: {:?}",
-                groups.keys().collect::<Vec<_>>()
-            );
-        }
-
-        #[test]
-        fn threshold_exact_boundary_dotted() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // "Ab.Cde" has exactly 5 chars - should be included with min=5
-            std::fs::write(root.join("Ab.Cde.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Ab.Cde.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Ab.Cde.Video.003.mp4"), "").unwrap();
-
-            // "Ab.Cd" has 4 chars - should be excluded with min=5
-            std::fs::write(root.join("Ab.Cd.Other.001.mp4"), "").unwrap();
-            std::fs::write(root.join("Ab.Cd.Other.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Ab.Cd.Other.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // Exactly 5 chars should be included
-            let has_ab_cde = groups.contains_key("Ab.Cde") || groups.contains_key("AbCde");
-            assert!(has_ab_cde, "'Ab.Cde' (5 chars) should be included at exact threshold");
-
-            // 4 chars should be excluded
-            assert!(
-                !groups.contains_key("Ab.Cd") && !groups.contains_key("AbCd"),
-                "'Ab.Cd' (4 chars) should be excluded"
-            );
-        }
-
-        #[test]
-        fn high_threshold_excludes_all_short_dotted() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // Various dotted prefixes all below threshold of 15
-            std::fs::write(root.join("One.Two.File.001.mp4"), "").unwrap(); // 6 chars
-            std::fs::write(root.join("One.Two.File.002.mp4"), "").unwrap();
-            std::fs::write(root.join("One.Two.File.003.mp4"), "").unwrap();
-
-            std::fs::write(root.join("Alpha.Beta.Video.001.mp4"), "").unwrap(); // 9 chars
-            std::fs::write(root.join("Alpha.Beta.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Alpha.Beta.Video.003.mp4"), "").unwrap();
-
-            std::fs::write(root.join("Super.Long.Prefix.Content.001.mp4"), "").unwrap(); // 15 chars
-            std::fs::write(root.join("Super.Long.Prefix.Content.002.mp4"), "").unwrap();
-            std::fs::write(root.join("Super.Long.Prefix.Content.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 15));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // Short ones excluded
-            assert!(
-                !groups.contains_key("One.Two") && !groups.contains_key("OneTwo"),
-                "'One.Two' (6 chars) should be excluded with min=15"
-            );
-            assert!(
-                !groups.contains_key("Alpha.Beta") && !groups.contains_key("AlphaBeta"),
-                "'Alpha.Beta' (9 chars) should be excluded with min=15"
-            );
-
-            // Exactly 15 chars should be included
-            let has_super_long = groups.contains_key("Super.Long.Prefix") || groups.contains_key("SuperLongPrefix");
-            assert!(
-                has_super_long,
-                "'Super.Long.Prefix' (15 chars) should be included at threshold"
-            );
-        }
-
-        #[test]
-        fn unicode_dotted_prefix_counted_correctly() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().to_path_buf();
-
-            // "日.本" has 2 chars (excluding dot) - should be excluded with min=3
-            std::fs::write(root.join("日.本.Video.001.mp4"), "").unwrap();
-            std::fs::write(root.join("日.本.Video.002.mp4"), "").unwrap();
-            std::fs::write(root.join("日.本.Video.003.mp4"), "").unwrap();
-
-            // "日本語.映画" has 5 chars - should be included with min=3
-            std::fs::write(root.join("日本語.映画.Content.001.mp4"), "").unwrap();
-            std::fs::write(root.join("日本語.映画.Content.002.mp4"), "").unwrap();
-            std::fs::write(root.join("日本語.映画.Content.003.mp4"), "").unwrap();
-
-            let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 3));
-            let files_with_names = dirmove.collect_files_with_names().unwrap();
-            let groups = dirmove.collect_all_prefix_groups(&files_with_names);
-
-            // "日.本" (2 chars) should be excluded
-            assert!(
-                !groups.contains_key("日.本") && !groups.contains_key("日本") && !groups.contains_key("日"),
-                "'日.本' (2 chars) should be excluded with min=3"
-            );
-
-            // "日本語.映画" (5 chars) should be included
-            let has_japanese = groups.keys().any(|k| k.contains("日本語"));
-            assert!(has_japanese, "'日本語.映画' (5 chars) should be included with min=3");
-        }
+}
+
+/// Tests for the `min_prefix_chars` configuration option.
+/// This option sets the minimum character count for single-word prefixes to be considered valid group names.
+/// Default is 5 to avoid false matches with short names like "alex", "name", etc.
+#[cfg(test)]
+mod test_min_prefix_chars {
+    use super::test_helpers::*;
+    use super::*;
+
+    // ===== Unit tests for find_prefix_candidates =====
+
+    #[test]
+    fn short_prefix_excluded_with_default_min_chars() {
+        // "Alex" has 4 chars, should be excluded with min_prefix_chars=5
+        let files = make_test_files(&["Alex.Video.001.mp4", "Alex.Video.002.mp4", "Alex.Video.003.mp4"]);
+        let candidates = utils::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 5);
+
+        // "Alex" (4 chars) should be excluded, but "Video" (5 chars) is found with position-agnostic matching
+        assert!(
+            !candidates.iter().any(|c| c.prefix == "Alex"),
+            "Single-part prefix 'Alex' (4 chars) should be excluded with min_prefix_chars=5"
+        );
+        assert!(
+            candidates.iter().any(|c| c.prefix == "Video"),
+            "Single-part prefix 'Video' (5 chars) should be included with position-agnostic matching"
+        );
+        assert!(
+            candidates.iter().any(|c| c.part_count == 2 && c.prefix == "Alex.Video"),
+            "Two-part prefix 'Alex.Video' should still be found"
+        );
     }
 
-    // ===== Tests for broader grouping behavior (starts_with) =====
+    #[test]
+    fn short_prefix_included_with_low_min_chars() {
+        // "Alex" has 4 chars, should be included with min_prefix_chars=4
+        let files = make_test_files(&["Alex.Video.001.mp4", "Alex.Video.002.mp4", "Alex.Video.003.mp4"]);
+        let candidates = utils::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 4);
+
+        // Should find single-part prefix "Alex"
+        let single_part = candidates.iter().find(|c| c.part_count == 1);
+        assert!(
+            single_part.is_some(),
+            "Single-part prefix 'Alex' should be included with min_prefix_chars=4"
+        );
+        assert_eq!(single_part.unwrap().prefix, "Alex");
+    }
+
+    #[test]
+    fn exact_threshold_includes_prefix() {
+        // "Names" has exactly 5 chars, should be included with min_prefix_chars=5
+        let files = make_test_files(&["Names.List.001.txt", "Names.List.002.txt", "Names.List.003.txt"]);
+        let candidates = utils::find_prefix_candidates("Names.List.001.txt", &files, 2, 5);
+
+        let single_part = candidates.iter().find(|c| c.part_count == 1);
+        assert!(
+            single_part.is_some(),
+            "Single-part prefix 'Names' (5 chars) should be included"
+        );
+        assert_eq!(single_part.unwrap().prefix, "Names");
+    }
+
+    #[test]
+    fn long_prefix_always_included() {
+        // "Alexander" has 9 chars, should always be included
+        let files = make_test_files(&[
+            "Alexander.Movie.001.mp4",
+            "Alexander.Movie.002.mp4",
+            "Alexander.Movie.003.mp4",
+        ]);
+        let candidates = utils::find_prefix_candidates("Alexander.Movie.001.mp4", &files, 2, 5);
+
+        let single_part = candidates.iter().find(|c| c.part_count == 1);
+        assert!(
+            single_part.is_some(),
+            "Single-part prefix 'Alexander' (9 chars) should be included"
+        );
+        assert_eq!(single_part.unwrap().prefix, "Alexander");
+    }
+
+    #[test]
+    fn two_part_prefix_affected_by_min_chars() {
+        // Two-part prefixes ARE affected by min_prefix_chars (counts chars excluding dots)
+        let files = make_test_files(&["AB.CD.File.001.mp4", "AB.CD.File.002.mp4", "AB.CD.File.003.mp4"]);
+        // With high min_prefix_chars=10, "AB.CD" (4 chars) should be excluded
+        let candidates = utils::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 10);
+
+        let two_part = candidates.iter().find(|c| c.part_count == 2);
+        assert!(
+            two_part.is_none(),
+            "Two-part prefix 'AB.CD' (4 chars) should be excluded with min_prefix_chars=10"
+        );
+
+        // Single-part "AB" (2 chars) should also be excluded
+        let single_part = candidates.iter().find(|c| c.part_count == 1);
+        assert!(
+            single_part.is_none(),
+            "Single-part prefix 'AB' should be excluded with min_prefix_chars=10"
+        );
+
+        // But with lower threshold, it should be included
+        let candidates = utils::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 4);
+        let two_part = candidates.iter().find(|c| c.part_count == 2);
+        assert!(
+            two_part.is_some(),
+            "Two-part prefix 'AB.CD' (4 chars) should be included with min_prefix_chars=4"
+        );
+    }
+
+    #[test]
+    fn unicode_chars_counted_correctly() {
+        // Unicode characters should be counted as single chars, not bytes "日本語" has 3 chars but 9 bytes in UTF-8
+        let files = make_test_files(&["日本語.Video.001.mp4", "日本語.Video.002.mp4", "日本語.Video.003.mp4"]);
+
+        // With min_prefix_chars=3, "日本語" (3 chars) should be included
+        let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 3);
+        let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
+        assert!(
+            unicode_prefix.is_some(),
+            "Unicode prefix '日本語' (3 chars) should be included with min=3"
+        );
+
+        // With min_prefix_chars=4, "日本語" (3 chars) should be excluded
+        // but "Video" (5 chars) is still found with position-agnostic matching
+        let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 4);
+        let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
+        assert!(
+            unicode_prefix.is_none(),
+            "Unicode prefix '日本語' (3 chars) should be excluded with min=4"
+        );
+        // Video (5 chars) is still found
+        let video_prefix = candidates.iter().find(|c| c.prefix == "Video");
+        assert!(video_prefix.is_some(), "Video (5 chars) should be included with min=4");
+    }
+
+    #[test]
+    fn min_chars_zero_allows_all() {
+        // With min_prefix_chars=0, even single-char prefixes should work
+        let files = make_test_files(&["A.Video.001.mp4", "A.Video.002.mp4", "A.Video.003.mp4"]);
+        let candidates = utils::find_prefix_candidates("A.Video.001.mp4", &files, 2, 0);
+
+        let single_part = candidates.iter().find(|c| c.part_count == 1);
+        assert!(
+            single_part.is_some(),
+            "Single-char prefix 'A' should be included with min_prefix_chars=0"
+        );
+    }
+
+    #[test]
+    fn min_chars_one_allows_single_char() {
+        // With min_prefix_chars=1, single-char prefixes should work
+        let files = make_test_files(&["X.Files.S01E01.mp4", "X.Files.S01E02.mp4", "X.Files.S01E03.mp4"]);
+        let candidates = utils::find_prefix_candidates("X.Files.S01E01.mp4", &files, 2, 1);
+
+        let single_part = candidates.iter().find(|c| c.part_count == 1);
+        assert!(
+            single_part.is_some(),
+            "Single-char prefix 'X' should be included with min_prefix_chars=1"
+        );
+    }
+
+    // ===== Integration tests with collect_all_prefix_groups =====
+
+    #[test]
+    fn short_names_not_grouped_with_default_config() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Short prefix "Alex" (4 chars) - should not form single-word group
+        std::fs::write(root.join("Alex.Scene.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Alex.Scene.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Alex.Scene.003.mp4"), "").unwrap();
+
+        // Long prefix "Alexander" (9 chars) - should form group
+        std::fs::write(root.join("Alexander.Movie.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Alexander.Movie.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Alexander.Movie.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Alex" alone should NOT be a group (4 chars < 5)
+        assert!(
+            !groups.contains_key("Alex"),
+            "Short prefix 'Alex' should not form a single-word group"
+        );
+
+        // But "Alex.Scene" should still be a valid 2-part group
+        assert!(
+            groups.contains_key("Alex.Scene") || groups.contains_key("AlexScene"),
+            "Two-part prefix 'Alex.Scene' should still form a group"
+        );
+
+        // "Alexander" should be a valid group (9 chars >= 5)
+        assert!(
+            groups.contains_key("Alexander"),
+            "Long prefix 'Alexander' should form a group"
+        );
+    }
+
+    #[test]
+    fn common_short_words_excluded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Common short words that could cause false groupings
+        std::fs::write(root.join("Name.File.001.txt"), "").unwrap();
+        std::fs::write(root.join("Name.File.002.txt"), "").unwrap();
+        std::fs::write(root.join("Name.File.003.txt"), "").unwrap();
+
+        std::fs::write(root.join("Data.Report.001.csv"), "").unwrap();
+        std::fs::write(root.join("Data.Report.002.csv"), "").unwrap();
+        std::fs::write(root.join("Data.Report.003.csv"), "").unwrap();
+
+        std::fs::write(root.join("Test.Case.001.rs"), "").unwrap();
+        std::fs::write(root.join("Test.Case.002.rs"), "").unwrap();
+        std::fs::write(root.join("Test.Case.003.rs"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Name" (4 chars), "Data" (4 chars), "Test" (4 chars) should NOT be groups
+        assert!(!groups.contains_key("Name"), "Short word 'Name' should not form group");
+        assert!(!groups.contains_key("Data"), "Short word 'Data' should not form group");
+        assert!(!groups.contains_key("Test"), "Short word 'Test' should not form group");
+
+        // But two-part prefixes should work
+        assert!(
+            groups.contains_key("Name.File") || groups.contains_key("NameFile"),
+            "Two-part 'Name.File' should form group"
+        );
+    }
+
+    #[test]
+    fn config_override_allows_short_prefixes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Short prefix files
+        std::fs::write(root.join("ABC.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("ABC.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("ABC.Video.003.mp4"), "").unwrap();
+
+        // With min_prefix_chars=3, "ABC" should be allowed
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        assert!(
+            groups.contains_key("ABC"),
+            "Short prefix 'ABC' should form group with min_prefix_chars=3"
+        );
+    }
+
+    #[test]
+    fn high_threshold_excludes_most_single_words() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Various length prefixes
+        std::fs::write(root.join("Short.File.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Short.File.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Short.File.003.mp4"), "").unwrap();
+
+        std::fs::write(root.join("Medium.Content.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Medium.Content.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Medium.Content.003.mp4"), "").unwrap();
+
+        std::fs::write(root.join("VeryLongPrefix.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("VeryLongPrefix.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("VeryLongPrefix.Video.003.mp4"), "").unwrap();
+
+        // With min_prefix_chars=10, only "VeryLongPrefix" (14 chars) qualifies
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 10));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Short" (5 chars) and "Medium" (6 chars) should NOT be single-word groups
+        assert!(!groups.contains_key("Short"), "'Short' should be excluded with min=10");
+        assert!(
+            !groups.contains_key("Medium"),
+            "'Medium' should be excluded with min=10"
+        );
+
+        // "VeryLongPrefix" (14 chars) should be a group
+        assert!(
+            groups.contains_key("VeryLongPrefix"),
+            "'VeryLongPrefix' should form group with min=10"
+        );
+    }
+
+    #[test]
+    fn mixed_lengths_correct_grouping() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // 4-char prefix
+        std::fs::write(root.join("Film.Classic.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Film.Classic.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Film.Classic.003.mp4"), "").unwrap();
+
+        // 5-char prefix (exactly at threshold)
+        std::fs::write(root.join("Movie.Action.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Movie.Action.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Movie.Action.003.mp4"), "").unwrap();
+
+        // 6-char prefix (above threshold)
+        std::fs::write(root.join("Series.Drama.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Series.Drama.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Series.Drama.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "Film" (4 chars) should NOT be a single-word group
+        assert!(!groups.contains_key("Film"), "'Film' (4 chars) should be excluded");
+
+        // "Movie" (5 chars) SHOULD be a single-word group
+        assert!(groups.contains_key("Movie"), "'Movie' (5 chars) should be included");
+
+        // "Series" (6 chars) SHOULD be a single-word group
+        assert!(groups.contains_key("Series"), "'Series' (6 chars) should be included");
+    }
+
+    #[test]
+    fn emoji_prefix_counted_as_chars() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Emoji prefix - each emoji is typically 1-2 chars
+        std::fs::write(root.join("🎬🎥.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("🎬🎥.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("🎬🎥.Video.003.mp4"), "").unwrap();
+
+        // With min=2, emoji prefix should work
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 2));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find the emoji prefix group
+        let has_emoji_group = groups.keys().any(|k| k.contains('🎬'));
+        assert!(
+            has_emoji_group,
+            "Emoji prefix should form group with appropriate min_chars"
+        );
+    }
+
+    // ===== Tests for dotted prefixes with min_prefix_chars =====
+
+    #[test]
+    fn dotted_prefix_char_count_excludes_dots() {
+        // "A.B" has 2 chars (excluding dot), should be excluded with min=5
+        let files = make_test_files(&["A.B.File.001.mp4", "A.B.File.002.mp4", "A.B.File.003.mp4"]);
+        let candidates = utils::find_prefix_candidates("A.B.File.001.mp4", &files, 2, 5);
+
+        // Should NOT find "A.B" (2 chars) as a valid prefix
+        let two_part = candidates.iter().find(|c| c.prefix == "A.B");
+        assert!(
+            two_part.is_none(),
+            "Two-part prefix 'A.B' (2 chars) should be excluded with min=5"
+        );
+    }
+
+    #[test]
+    fn dotted_prefix_included_when_chars_meet_threshold() {
+        // "Ab.Cd" has 4 chars (excluding dot), should be included with min=4
+        let files = make_test_files(&["Ab.Cd.File.001.mp4", "Ab.Cd.File.002.mp4", "Ab.Cd.File.003.mp4"]);
+        let candidates = utils::find_prefix_candidates("Ab.Cd.File.001.mp4", &files, 2, 4);
+
+        let two_part = candidates.iter().find(|c| c.prefix == "Ab.Cd");
+        assert!(
+            two_part.is_some(),
+            "Two-part prefix 'Ab.Cd' (4 chars) should be included with min=4"
+        );
+    }
+
+    #[test]
+    fn three_part_dotted_prefix_char_count() {
+        // "A.B.C" has 3 chars (excluding dots), should be excluded with min=5
+        let files = make_test_files(&["A.B.C.File.001.mp4", "A.B.C.File.002.mp4", "A.B.C.File.003.mp4"]);
+        let candidates = utils::find_prefix_candidates("A.B.C.File.001.mp4", &files, 2, 5);
+
+        let three_part = candidates.iter().find(|c| c.prefix == "A.B.C");
+        assert!(
+            three_part.is_none(),
+            "Three-part prefix 'A.B.C' (3 chars) should be excluded with min=5"
+        );
+    }
+
+    #[test]
+    fn three_part_dotted_prefix_included_when_long_enough() {
+        // "Alpha.Beta.Gamma" has 14 chars (excluding dots)
+        let files = make_test_files(&[
+            "Alpha.Beta.Gamma.File.001.mp4",
+            "Alpha.Beta.Gamma.File.002.mp4",
+            "Alpha.Beta.Gamma.File.003.mp4",
+        ]);
+        let candidates = utils::find_prefix_candidates("Alpha.Beta.Gamma.File.001.mp4", &files, 2, 10);
+
+        let three_part = candidates.iter().find(|c| c.prefix == "Alpha.Beta.Gamma");
+        assert!(
+            three_part.is_some(),
+            "Three-part prefix 'Alpha.Beta.Gamma' (14 chars) should be included with min=10"
+        );
+    }
+
+    #[test]
+    fn count_prefix_chars_helper_works_correctly() {
+        assert_eq!(utils::count_prefix_chars("A"), 1);
+        assert_eq!(utils::count_prefix_chars("AB"), 2);
+        assert_eq!(utils::count_prefix_chars("A.B"), 2);
+        assert_eq!(utils::count_prefix_chars("A.B.C"), 3);
+        assert_eq!(utils::count_prefix_chars("Alpha.Beta"), 9);
+        assert_eq!(utils::count_prefix_chars("Alpha.Beta.Gamma"), 14);
+        assert_eq!(utils::count_prefix_chars("..."), 0);
+        assert_eq!(utils::count_prefix_chars("A...B"), 2);
+        // Unicode
+        assert_eq!(utils::count_prefix_chars("日本語"), 3);
+        assert_eq!(utils::count_prefix_chars("日.本.語"), 3);
+    }
+
+    #[test]
+    fn integration_dotted_short_prefix_excluded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // "AB.CD" has 4 chars - should be excluded with min=5
+        std::fs::write(root.join("AB.CD.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("AB.CD.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("AB.CD.Video.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "AB.CD" (4 chars) and "AB" (2 chars) should NOT be groups
+        assert!(!groups.contains_key("AB.CD"), "'AB.CD' (4 chars) should be excluded");
+        assert!(!groups.contains_key("ABCD"), "'ABCD' (4 chars) should be excluded");
+        assert!(!groups.contains_key("AB"), "'AB' (2 chars) should be excluded");
+    }
+
+    #[test]
+    fn integration_dotted_long_prefix_included() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // "Alpha.Beta" has 9 chars - should be included with min=5
+        std::fs::write(root.join("Alpha.Beta.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Beta.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Beta.Video.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Should find Alpha.Beta or AlphaBeta group
+        let has_alpha_beta = groups.contains_key("Alpha.Beta") || groups.contains_key("AlphaBeta");
+        assert!(has_alpha_beta, "'Alpha.Beta' (9 chars) should form a group");
+    }
+
+    #[test]
+    fn mixed_dotted_and_single_word_with_threshold() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Short dotted: "X.Y" (2 chars) - excluded
+        std::fs::write(root.join("X.Y.Content.001.mp4"), "").unwrap();
+        std::fs::write(root.join("X.Y.Content.002.mp4"), "").unwrap();
+        std::fs::write(root.join("X.Y.Content.003.mp4"), "").unwrap();
+
+        // Short single: "Test" (4 chars) - excluded
+        std::fs::write(root.join("Test.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Test.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Test.Video.003.mp4"), "").unwrap();
+
+        // Long dotted: "Long.Name" (8 chars) - included
+        std::fs::write(root.join("Long.Name.File.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Long.Name.File.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Long.Name.File.003.mp4"), "").unwrap();
+
+        // Long single: "Studio" (6 chars) - included
+        std::fs::write(root.join("Studio.Movie.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Movie.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Studio.Movie.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Short ones excluded
+        assert!(!groups.contains_key("X.Y"), "'X.Y' (2 chars) should be excluded");
+        assert!(!groups.contains_key("XY"), "'XY' (2 chars) should be excluded");
+        assert!(!groups.contains_key("X"), "'X' (1 char) should be excluded");
+        assert!(!groups.contains_key("Test"), "'Test' (4 chars) should be excluded");
+
+        // Long ones included
+        let has_long_name = groups.contains_key("Long.Name") || groups.contains_key("LongName");
+        assert!(has_long_name, "'Long.Name' (8 chars) should be included");
+        assert!(groups.contains_key("Studio"), "'Studio' (6 chars) should be included");
+    }
+
+    #[test]
+    fn threshold_zero_allows_all_dotted_prefixes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Short dotted prefix - "X.Y" has 2 chars, but with "Content" it becomes more
+        std::fs::write(root.join("X.Y.Content.001.mp4"), "").unwrap();
+        std::fs::write(root.join("X.Y.Content.002.mp4"), "").unwrap();
+        std::fs::write(root.join("X.Y.Content.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 0));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // With min=0, even short prefixes like "X" (1 char) should form a group
+        let has_short_prefix = groups.keys().any(|k| k.starts_with('X'));
+        assert!(
+            has_short_prefix,
+            "With min=0, short prefixes should be allowed. Groups: {:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn threshold_exact_boundary_dotted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // "Ab.Cde" has exactly 5 chars - should be included with min=5
+        std::fs::write(root.join("Ab.Cde.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Ab.Cde.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Ab.Cde.Video.003.mp4"), "").unwrap();
+
+        // "Ab.Cd" has 4 chars - should be excluded with min=5
+        std::fs::write(root.join("Ab.Cd.Other.001.mp4"), "").unwrap();
+        std::fs::write(root.join("Ab.Cd.Other.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Ab.Cd.Other.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Exactly 5 chars should be included
+        let has_ab_cde = groups.contains_key("Ab.Cde") || groups.contains_key("AbCde");
+        assert!(has_ab_cde, "'Ab.Cde' (5 chars) should be included at exact threshold");
+
+        // 4 chars should be excluded
+        assert!(
+            !groups.contains_key("Ab.Cd") && !groups.contains_key("AbCd"),
+            "'Ab.Cd' (4 chars) should be excluded"
+        );
+    }
+
+    #[test]
+    fn high_threshold_excludes_all_short_dotted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Various dotted prefixes all below threshold of 15
+        std::fs::write(root.join("One.Two.File.001.mp4"), "").unwrap(); // 6 chars
+        std::fs::write(root.join("One.Two.File.002.mp4"), "").unwrap();
+        std::fs::write(root.join("One.Two.File.003.mp4"), "").unwrap();
+
+        std::fs::write(root.join("Alpha.Beta.Video.001.mp4"), "").unwrap(); // 9 chars
+        std::fs::write(root.join("Alpha.Beta.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Alpha.Beta.Video.003.mp4"), "").unwrap();
+
+        std::fs::write(root.join("Super.Long.Prefix.Content.001.mp4"), "").unwrap(); // 15 chars
+        std::fs::write(root.join("Super.Long.Prefix.Content.002.mp4"), "").unwrap();
+        std::fs::write(root.join("Super.Long.Prefix.Content.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 15));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // Short ones excluded
+        assert!(
+            !groups.contains_key("One.Two") && !groups.contains_key("OneTwo"),
+            "'One.Two' (6 chars) should be excluded with min=15"
+        );
+        assert!(
+            !groups.contains_key("Alpha.Beta") && !groups.contains_key("AlphaBeta"),
+            "'Alpha.Beta' (9 chars) should be excluded with min=15"
+        );
+
+        // Exactly 15 chars should be included
+        let has_super_long = groups.contains_key("Super.Long.Prefix") || groups.contains_key("SuperLongPrefix");
+        assert!(
+            has_super_long,
+            "'Super.Long.Prefix' (15 chars) should be included at threshold"
+        );
+    }
+
+    #[test]
+    fn unicode_dotted_prefix_counted_correctly() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // "日.本" has 2 chars (excluding dot) - should be excluded with min=3
+        std::fs::write(root.join("日.本.Video.001.mp4"), "").unwrap();
+        std::fs::write(root.join("日.本.Video.002.mp4"), "").unwrap();
+        std::fs::write(root.join("日.本.Video.003.mp4"), "").unwrap();
+
+        // "日本語.映画" has 5 chars - should be included with min=3
+        std::fs::write(root.join("日本語.映画.Content.001.mp4"), "").unwrap();
+        std::fs::write(root.join("日本語.映画.Content.002.mp4"), "").unwrap();
+        std::fs::write(root.join("日本語.映画.Content.003.mp4"), "").unwrap();
+
+        let dirmove = DirMove::new(root, Config::test_with_group_size_and_min_chars(3, 3));
+        let files_with_names = dirmove.collect_files_with_names().unwrap();
+        let groups = dirmove.collect_all_prefix_groups(&files_with_names);
+
+        // "日.本" (2 chars) should be excluded
+        assert!(
+            !groups.contains_key("日.本") && !groups.contains_key("日本") && !groups.contains_key("日"),
+            "'日.本' (2 chars) should be excluded with min=3"
+        );
+
+        // "日本語.映画" (5 chars) should be included
+        let has_japanese = groups.keys().any(|k| k.contains("日本語"));
+        assert!(has_japanese, "'日本語.映画' (5 chars) should be included with min=3");
+    }
+}
+
+/// Tests for broader grouping behavior, where a group prefix is the start of longer names.
+#[cfg(test)]
+mod test_broader_prefix_grouping {
+    use super::*;
 
     #[test]
     fn broader_group_includes_extended_names() {
