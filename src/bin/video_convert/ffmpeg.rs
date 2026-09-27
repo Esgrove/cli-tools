@@ -229,14 +229,19 @@ pub fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSe
         );
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
+    Ok(parse_stream_languages(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Parse `index,language` lines from ffprobe into unique language tags, using "und" for untagged streams.
+fn parse_stream_languages(stdout: &str) -> BTreeSet<String> {
+    stdout
         .lines()
         .map(|line| {
             let language = line.trim().split_once(',').map_or("", |(_, language)| language.trim());
             if language.is_empty() { "und" } else { language }
         })
         .map(ToOwned::to_owned)
-        .collect())
+        .collect()
 }
 
 /// Return whether applying movie-mode stream maps would remove any internal tracks.
@@ -312,10 +317,12 @@ fn probe_stream_count(input: &Path, stream_type: &str) -> Result<usize> {
         anyhow::bail!("ffprobe failed while counting {stream_type} streams: {}", stderr.trim());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count())
+    Ok(count_stream_lines(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Count the non-empty stream index lines in ffprobe output.
+fn count_stream_lines(stdout: &str) -> usize {
+    stdout.lines().filter(|line| !line.trim().is_empty()).count()
 }
 
 /// Return whether movie-mode stream maps would remove any internal audio or subtitle tracks.
@@ -394,6 +401,39 @@ mod test_helpers {
     /// Return whether adjacent command arguments contain an option and value pair.
     pub fn has_arg_pair(args: &[String], option: &str, value: &str) -> bool {
         args.windows(2).any(|pair| pair[0] == option && pair[1] == value)
+    }
+}
+
+#[cfg(test)]
+mod test_ffprobe_output_parsing {
+    use super::*;
+
+    #[test]
+    fn collects_unique_languages_and_marks_untagged_streams() {
+        let languages = parse_stream_languages("1,eng\n2,fin\n3,eng\n4,\n5\n");
+
+        assert_eq!(
+            languages,
+            BTreeSet::from(["eng".to_string(), "fin".to_string(), "und".to_string()])
+        );
+    }
+
+    #[test]
+    fn trims_whitespace_around_language_tags() {
+        let languages = parse_stream_languages("  1, jpn  \r\n");
+
+        assert_eq!(languages, BTreeSet::from(["jpn".to_string()]));
+    }
+
+    #[test]
+    fn no_streams_gives_no_languages() {
+        assert!(parse_stream_languages("").is_empty());
+    }
+
+    #[test]
+    fn counts_only_non_empty_stream_lines() {
+        assert_eq!(count_stream_lines("1\n2\n\n  \n3\n"), 3);
+        assert_eq!(count_stream_lines(""), 0);
     }
 }
 
