@@ -27,7 +27,7 @@ use crate::ffmpeg::{
 };
 use crate::helpers::{
     backup_output_path, duration_difference_ratio, format_duplicate_duration_match, has_enough_disk_space,
-    path_without_extension, paths_refer_to_same_file, temporary_output_path,
+    path_without_extension, paths_refer_to_same_file, remove_partial_output, temporary_output_path,
 };
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
@@ -446,7 +446,9 @@ impl VideoConvert {
             // Check if file still exists
             if !file.file.path.exists() {
                 print_yellow!("File no longer exists: {}", file.file.path.display());
-                let _ = database.remove_pending_file(&file.file.path);
+                if let Err(error) = database.remove_pending_file(&file.file.path) {
+                    print_error!("{error:#}");
+                }
                 continue;
             }
 
@@ -468,8 +470,9 @@ impl VideoConvert {
                 }
                 ProcessResult::Converted { .. } | ProcessResult::Remuxed {} | ProcessResult::SubtitlesMuxed {} => {
                     *processed_count += 1;
-                    // Remove from database after successful processing
-                    let _ = database.remove_pending_file(&file.file.path);
+                    if let Err(error) = database.remove_pending_file(&file.file.path) {
+                        print_error!("{error:#}");
+                    }
                 }
             }
 
@@ -736,7 +739,7 @@ impl VideoConvert {
 
         // Remove failed output file if it exists
         if output.exists() {
-            let _ = std::fs::remove_file(output);
+            remove_partial_output(output);
         }
 
         let mut cmd = build_remux_command(input, output, true, codec);
@@ -751,7 +754,7 @@ impl VideoConvert {
         };
 
         if !status.success() {
-            let _ = std::fs::remove_file(output);
+            remove_partial_output(output);
             let error = format!(
                 "ffmpeg remux with AAC transcode failed with status: {}",
                 status.code().unwrap_or(-1)
@@ -827,7 +830,7 @@ impl VideoConvert {
         };
 
         if !status.success() {
-            let _ = std::fs::remove_file(&command_output);
+            remove_partial_output(&command_output);
             let error = format!(
                 "ffmpeg subtitle mux failed with status: {}",
                 status.code().unwrap_or(-1)
@@ -935,7 +938,7 @@ impl VideoConvert {
 
         if !status.success() {
             // Clean up failed output file
-            let _ = std::fs::remove_file(output);
+            remove_partial_output(output);
 
             // Retry without CUDA filters (fallback for format compatibility issues)
             print_error!("CUDA filter failed, retrying with CPU-based filtering...");
@@ -958,7 +961,7 @@ impl VideoConvert {
             };
 
             if !status.success() {
-                let _ = std::fs::remove_file(output);
+                remove_partial_output(output);
                 let error = format!("ffmpeg failed with status: {}", status.code().unwrap_or(-1));
                 self.log_failure(input, "convert", file_index, &error);
                 return ProcessResult::Failed { error };
@@ -969,7 +972,7 @@ impl VideoConvert {
         let output_info = match probe_video_info(output) {
             Ok(info) => info,
             Err(e) => {
-                let _ = std::fs::remove_file(output);
+                remove_partial_output(output);
                 let error = format!("Failed to get output info: {e}");
                 self.log_failure(input, "convert", file_index, &error);
                 return ProcessResult::Failed { error };
@@ -985,7 +988,7 @@ impl VideoConvert {
                 cli_tools::format_size(info.size_bytes),
                 new_quality_level
             );
-            let _ = std::fs::remove_file(output);
+            remove_partial_output(output);
 
             conversion_options = conversion_options.with_quality_level(new_quality_level);
             ffmpeg_command = match build_conversion_command(&conversion_options) {
@@ -1006,7 +1009,7 @@ impl VideoConvert {
             };
 
             if !status.success() {
-                let _ = std::fs::remove_file(output);
+                remove_partial_output(output);
                 let error = format!(
                     "ffmpeg reconversion failed with status: {}",
                     status.code().unwrap_or(-1)
@@ -1018,7 +1021,7 @@ impl VideoConvert {
             match probe_video_info(output) {
                 Ok(info) => info,
                 Err(e) => {
-                    let _ = std::fs::remove_file(output);
+                    remove_partial_output(output);
                     let error = format!("Failed to get reconverted video info: {e}");
                     self.log_failure(input, "convert", file_index, &error);
                     return ProcessResult::Failed { error };

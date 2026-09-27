@@ -103,6 +103,58 @@ pub fn format_duplicate_duration_match(source_duration: f64, target_duration: f6
     }
 }
 
+/// Remove a partial output left by a failed ffmpeg run.
+///
+/// A missing file is fine, since ffmpeg may fail before creating it.
+/// Any other failure is reported, because a leftover output would later be taken for a finished conversion.
+pub fn remove_partial_output(output: &Path) {
+    if let Err(error) = std::fs::remove_file(output)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        print_error!(
+            "Failed to remove partial output {}: {error}",
+            cli_tools::path_to_string_relative(output)
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_remove_partial_output {
+    use super::*;
+
+    #[test]
+    fn removes_existing_output() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let output = directory.path().join("partial.mp4");
+        std::fs::write(&output, b"partial").expect("Failed to create partial output");
+
+        remove_partial_output(&output);
+
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn missing_output_is_ignored() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let output = directory.path().join("never-created.mp4");
+
+        remove_partial_output(&output);
+
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn directory_in_place_of_output_is_left_alone() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let output = directory.path().join("output.mp4");
+        std::fs::create_dir(&output).expect("Failed to create directory");
+
+        remove_partial_output(&output);
+
+        assert!(output.is_dir());
+    }
+}
+
 #[cfg(test)]
 mod test_path_without_extension {
     use super::*;

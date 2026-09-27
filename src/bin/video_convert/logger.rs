@@ -4,12 +4,14 @@
 
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use jiff::Zoned;
+
+use cli_tools::print_yellow;
 
 use crate::config::Config;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
@@ -20,6 +22,8 @@ use crate::types::VideoInfo;
 /// Outputs to ~/logs/cli-tools/video_convert_<timestamp>.log
 pub struct FileLogger {
     writer: BufWriter<File>,
+    /// Set after the first failed write, so the warning is printed only once.
+    write_failed: bool,
 }
 
 impl FileLogger {
@@ -46,6 +50,7 @@ impl FileLogger {
 
         Ok(Self {
             writer: BufWriter::new(file),
+            write_failed: false,
         })
     }
 
@@ -55,44 +60,41 @@ impl FileLogger {
 
     /// Log when starting the program
     pub(crate) fn log_init(&mut self, config: &Config) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] INIT \"{}\"",
-            Self::timestamp(),
-            config.path.display()
-        );
-        let _ = writeln!(self.writer, "  min_bitrate: {}", config.min_bitrate);
-        let _ = writeln!(self.writer, "  convert_all: {}", config.convert_all);
-        let _ = writeln!(self.writer, "  convert_other: {}", config.convert_other);
-        if !config.include.is_empty() {
-            let _ = writeln!(self.writer, "  include: {:?}", config.include);
-        }
-        if !config.exclude.is_empty() {
-            let _ = writeln!(self.writer, "  exclude: {:?}", config.exclude);
-        }
-        let _ = writeln!(self.writer, "  extensions: {:?}", config.extensions);
-        let _ = writeln!(self.writer, "  recurse: {}", config.recurse);
-        let _ = writeln!(self.writer, "  movie_mode: {}", config.movie_mode);
-        let _ = writeln!(self.writer, "  delete: {}", config.delete);
-        let _ = writeln!(self.writer, "  overwrite: {}", config.overwrite);
-        let _ = writeln!(self.writer, "  dryrun: {}", config.dryrun);
-        if let Some(count) = config.count {
-            let _ = writeln!(self.writer, "  count: {count}");
-        }
-        let _ = writeln!(self.writer, "  verbose: {}", config.verbose);
-        let _ = self.writer.flush();
+        self.write_entry(|writer| {
+            writeln!(writer, "[{}] INIT \"{}\"", Self::timestamp(), config.path.display())?;
+            writeln!(writer, "  min_bitrate: {}", config.min_bitrate)?;
+            writeln!(writer, "  convert_all: {}", config.convert_all)?;
+            writeln!(writer, "  convert_other: {}", config.convert_other)?;
+            if !config.include.is_empty() {
+                writeln!(writer, "  include: {:?}", config.include)?;
+            }
+            if !config.exclude.is_empty() {
+                writeln!(writer, "  exclude: {:?}", config.exclude)?;
+            }
+            writeln!(writer, "  extensions: {:?}", config.extensions)?;
+            writeln!(writer, "  recurse: {}", config.recurse)?;
+            writeln!(writer, "  movie_mode: {}", config.movie_mode)?;
+            writeln!(writer, "  delete: {}", config.delete)?;
+            writeln!(writer, "  overwrite: {}", config.overwrite)?;
+            writeln!(writer, "  dryrun: {}", config.dryrun)?;
+            if let Some(count) = config.count {
+                writeln!(writer, "  count: {count}")?;
+            }
+            writeln!(writer, "  verbose: {}", config.verbose)
+        });
     }
 
     /// Log file gathering results
     pub(crate) fn log_gathered_files(&mut self, file_count: usize, duration: Duration) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] GATHER FILES | {} files found in {}",
-            Self::timestamp(),
-            file_count,
-            cli_tools::format_duration(duration)
-        );
-        let _ = self.writer.flush();
+        self.write_entry(|writer| {
+            writeln!(
+                writer,
+                "[{}] GATHER FILES | {} files found in {}",
+                Self::timestamp(),
+                file_count,
+                cli_tools::format_duration(duration)
+            )
+        });
     }
 
     /// Log when starting a conversion or remux operation
@@ -104,21 +106,22 @@ impl FileLogger {
         info: &VideoInfo,
         quality_level: Option<u8>,
     ) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps {:.0} FPS{}",
-            Self::timestamp(),
-            operation.to_uppercase(),
-            file_index,
-            file_path.display(),
-            info.codec,
-            info.width,
-            info.height,
-            info.bitrate_kbps as f64 / 1000.0,
-            info.frames_per_second,
-            quality_level.map_or_else(String::new, |q| format!(" | Level: {q}"))
-        );
-        let _ = self.writer.flush();
+        self.write_entry(|writer| {
+            writeln!(
+                writer,
+                "[{}] START   {} {} - \"{}\" | {} {}x{} {:.2} Mbps {:.0} FPS{}",
+                Self::timestamp(),
+                operation.to_uppercase(),
+                file_index,
+                file_path.display(),
+                info.codec,
+                info.width,
+                info.height,
+                info.bitrate_kbps as f64 / 1000.0,
+                info.frames_per_second,
+                quality_level.map_or_else(String::new, |q| format!(" | Level: {q}"))
+            )
+        });
     }
 
     /// Log when a conversion or remux finishes successfully
@@ -130,113 +133,126 @@ impl FileLogger {
         duration: Duration,
         stats: Option<&ConversionStats>,
     ) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] SUCCESS {} {} - \"{}\" | Time: {}{}",
-            Self::timestamp(),
-            operation.to_uppercase(),
-            file_index,
-            file_path.display(),
-            cli_tools::format_duration(duration),
-            stats.map_or(String::new(), |s| format!(" | {s}"))
-        );
-        let _ = self.writer.flush();
+        self.write_entry(|writer| {
+            writeln!(
+                writer,
+                "[{}] SUCCESS {} {} - \"{}\" | Time: {}{}",
+                Self::timestamp(),
+                operation.to_uppercase(),
+                file_index,
+                file_path.display(),
+                cli_tools::format_duration(duration),
+                stats.map_or(String::new(), |s| format!(" | {s}"))
+            )
+        });
     }
 
     /// Log when a conversion or remux fails
     pub(crate) fn log_failure(&mut self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] ERROR   {} {} - \"{}\" | {}",
-            Self::timestamp(),
-            operation.to_uppercase(),
-            file_index,
-            file_path.display(),
-            error
-        );
-        let _ = self.writer.flush();
+        self.write_entry(|writer| {
+            writeln!(
+                writer,
+                "[{}] ERROR   {} {} - \"{}\" | {}",
+                Self::timestamp(),
+                operation.to_uppercase(),
+                file_index,
+                file_path.display(),
+                error
+            )
+        });
     }
 
     /// Log analysis phase statistics
     pub(crate) fn log_analysis_stats(&mut self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] ANALYSE FILES | {} files in {}",
-            Self::timestamp(),
-            total_files,
-            cli_tools::format_duration(duration)
-        );
-        let _ = writeln!(self.writer, "  Files to convert:      {}", stats.to_convert);
-        let _ = writeln!(self.writer, "  Files to remux:        {}", stats.to_remux);
-        let _ = writeln!(self.writer, "  Files to subtitle mux: {}", stats.to_subtitle_mux);
-        let _ = writeln!(self.writer, "  Files to rename:       {}", stats.to_rename);
-        let _ = writeln!(self.writer, "  Files skipped:         {}", stats.total_skipped());
-        if stats.total_skipped() > 0 {
-            let _ = writeln!(self.writer, "    - Already converted: {}", stats.skipped_converted);
-            let _ = writeln!(self.writer, "    - Below bitrate:     {}", stats.skipped_bitrate_low);
-            let _ = writeln!(self.writer, "    - Above bitrate:     {}", stats.skipped_bitrate_high);
-            let _ = writeln!(self.writer, "    - Below duration:    {}", stats.skipped_duration_short);
-            let _ = writeln!(self.writer, "    - Above duration:    {}", stats.skipped_duration_long);
-            let _ = writeln!(self.writer, "    - Output exists:     {}", stats.skipped_duplicate);
-        }
-        if stats.analysis_failed > 0 {
-            let _ = writeln!(self.writer, "  Analysis failed:       {}", stats.analysis_failed);
-        }
-        let _ = self.writer.flush();
+        self.write_entry(|writer| {
+            writeln!(
+                writer,
+                "[{}] ANALYSE FILES | {} files in {}",
+                Self::timestamp(),
+                total_files,
+                cli_tools::format_duration(duration)
+            )?;
+            writeln!(writer, "  Files to convert:      {}", stats.to_convert)?;
+            writeln!(writer, "  Files to remux:        {}", stats.to_remux)?;
+            writeln!(writer, "  Files to subtitle mux: {}", stats.to_subtitle_mux)?;
+            writeln!(writer, "  Files to rename:       {}", stats.to_rename)?;
+            writeln!(writer, "  Files skipped:         {}", stats.total_skipped())?;
+            if stats.total_skipped() > 0 {
+                writeln!(writer, "    - Already converted: {}", stats.skipped_converted)?;
+                writeln!(writer, "    - Below bitrate:     {}", stats.skipped_bitrate_low)?;
+                writeln!(writer, "    - Above bitrate:     {}", stats.skipped_bitrate_high)?;
+                writeln!(writer, "    - Below duration:    {}", stats.skipped_duration_short)?;
+                writeln!(writer, "    - Above duration:    {}", stats.skipped_duration_long)?;
+                writeln!(writer, "    - Output exists:     {}", stats.skipped_duplicate)?;
+            }
+            if stats.analysis_failed > 0 {
+                writeln!(writer, "  Analysis failed:       {}", stats.analysis_failed)?;
+            }
+            Ok(())
+        });
     }
 
     /// Log rename operation statistics
     pub(crate) fn log_renames(&mut self, renamed_count: usize, total_count: usize, duration: Duration) {
-        let _ = writeln!(
-            self.writer,
-            "[{}] RENAMES COMPLETE | {}/{} files renamed in {}",
-            Self::timestamp(),
-            renamed_count,
-            total_count,
-            cli_tools::format_duration(duration)
-        );
-        let _ = self.writer.flush();
+        self.write_entry(|writer| {
+            writeln!(
+                writer,
+                "[{}] RENAMES COMPLETE | {}/{} files renamed in {}",
+                Self::timestamp(),
+                renamed_count,
+                total_count,
+                cli_tools::format_duration(duration)
+            )
+        });
     }
 
     /// Log final statistics
     pub(crate) fn log_stats(&mut self, stats: &RunStats) {
-        let _ = writeln!(self.writer, "[{}] STATISTICS", Self::timestamp());
-        let _ = writeln!(self.writer, "  Files converted: {}", stats.files_converted);
-        let _ = writeln!(self.writer, "  Files remuxed:        {}", stats.files_remuxed);
-        let _ = writeln!(self.writer, "  Files subtitle muxed: {}", stats.files_subtitle_muxed);
-        let _ = writeln!(self.writer, "  Files failed:         {}", stats.files_failed);
+        self.write_entry(|writer| {
+            writeln!(writer, "[{}] STATISTICS", Self::timestamp())?;
+            writeln!(writer, "  Files converted: {}", stats.files_converted)?;
+            writeln!(writer, "  Files remuxed:        {}", stats.files_remuxed)?;
+            writeln!(writer, "  Files subtitle muxed: {}", stats.files_subtitle_muxed)?;
+            writeln!(writer, "  Files failed:         {}", stats.files_failed)?;
 
-        if stats.files_converted > 0 {
-            let _ = writeln!(
-                self.writer,
-                "  Total original size:  {}",
-                cli_tools::format_size(stats.total_original_size)
-            );
-            let _ = writeln!(
-                self.writer,
-                "  Total converted size: {}",
-                cli_tools::format_size(stats.total_converted_size)
-            );
+            if stats.files_converted > 0 {
+                writeln!(
+                    writer,
+                    "  Total original size:  {}",
+                    cli_tools::format_size(stats.total_original_size)
+                )?;
+                writeln!(
+                    writer,
+                    "  Total converted size: {}",
+                    cli_tools::format_size(stats.total_converted_size)
+                )?;
 
-            let saved = stats.space_saved();
-            if saved >= 0 {
-                let _ = writeln!(self.writer, "  Space saved: {}", cli_tools::format_size(saved as u64));
-            } else {
-                let _ = writeln!(
-                    self.writer,
-                    "  Space increased: {}",
-                    cli_tools::format_size((-saved) as u64)
-                );
+                let saved = stats.space_saved();
+                if saved >= 0 {
+                    writeln!(writer, "  Space saved: {}", cli_tools::format_size(saved as u64))?;
+                } else {
+                    writeln!(writer, "  Space increased: {}", cli_tools::format_size((-saved) as u64))?;
+                }
             }
-        }
 
-        let _ = writeln!(
-            self.writer,
-            "  Total time: {}",
-            cli_tools::format_duration(stats.total_duration)
-        );
-        let _ = writeln!(self.writer, "[{}] END", Self::timestamp());
-        let _ = self.writer.flush();
+            writeln!(
+                writer,
+                "  Total time: {}",
+                cli_tools::format_duration(stats.total_duration)
+            )?;
+            writeln!(writer, "[{}] END", Self::timestamp())
+        });
+    }
+
+    /// Write one log entry and flush it, warning once if the log file cannot be written.
+    fn write_entry(&mut self, write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>) {
+        let result = write(&mut self.writer).and_then(|()| self.writer.flush());
+        if let Err(error) = result
+            && !self.write_failed
+        {
+            self.write_failed = true;
+            print_yellow!("Failed to write to the log file: {error}");
+        }
     }
 }
 
@@ -250,7 +266,13 @@ mod test_file_logger {
     fn create_logger() -> (NamedTempFile, FileLogger) {
         let log_file = NamedTempFile::new().expect("Failed to create temporary log file");
         let writer = BufWriter::new(log_file.reopen().expect("Failed to reopen temporary log file"));
-        (log_file, FileLogger { writer })
+        (
+            log_file,
+            FileLogger {
+                writer,
+                write_failed: false,
+            },
+        )
     }
 
     fn read_log(log_file: &NamedTempFile, logger: FileLogger) -> String {
@@ -410,5 +432,31 @@ mod test_file_logger {
         assert!(contents.contains("Space saved: 1.00 MB"));
         assert!(contents.contains("Space increased: 512.00 KB"));
         assert_eq!(contents.matches(" END").count(), 3);
+    }
+
+    #[test]
+    fn write_failure_is_remembered_and_logging_continues() {
+        let log_file = NamedTempFile::new().expect("Failed to create temporary log file");
+        let read_only = File::open(log_file.path()).expect("Failed to open temporary log file read-only");
+        let mut logger = FileLogger {
+            writer: BufWriter::new(read_only),
+            write_failed: false,
+        };
+
+        logger.log_gathered_files(1, Duration::ZERO);
+        assert!(logger.write_failed);
+
+        logger.log_renames(1, 1, Duration::ZERO);
+        assert!(logger.write_failed);
+    }
+
+    #[test]
+    fn successful_writes_leave_failure_flag_unset() {
+        let (log_file, mut logger) = create_logger();
+
+        logger.log_gathered_files(1, Duration::ZERO);
+
+        assert!(!logger.write_failed);
+        assert!(read_log(&log_file, logger).contains("GATHER FILES"));
     }
 }
