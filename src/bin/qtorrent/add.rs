@@ -968,3 +968,199 @@ mod test_check_existing_torrent {
         assert_eq!(result.map(|item| &item.name), Some(&"Target Torrent".to_string()));
     }
 }
+
+#[cfg(test)]
+mod test_add_workflow {
+    use clap::Parser;
+    use serde_bytes::ByteBuf;
+    use tempfile::TempDir;
+
+    use crate::config::QtorrentConfig;
+    use crate::qbittorrent::test_server::{Route, route, serve};
+    use crate::torrent::{Info, Torrent};
+
+    use super::*;
+
+    /// Directory holding one single-file torrent and an empty `downloaded` directory beside it.
+    struct TorrentDirectory {
+        _temp_directory: TempDir,
+        root: PathBuf,
+        torrent_path: PathBuf,
+    }
+
+    impl TorrentDirectory {
+        fn new() -> Self {
+            let temp_directory = TempDir::new().expect("should create temp directory");
+            let root = temp_directory.path().join("torrents");
+            std::fs::create_dir_all(root.join(utils::DOWNLOADED_DIRECTORY_NAME))
+                .expect("should create downloaded directory");
+            let mut torrent = Torrent::default();
+            torrent.announce = Some("http://tracker.example.com/announce".to_string());
+            torrent.info = Info {
+                name: Some("Example.Video.mp4".to_string()),
+                length: Some(1_000_000),
+                piece_length: 262_144,
+                pieces: ByteBuf::from(vec![0_u8; 20]),
+                ..Info::default()
+            };
+            let torrent_path = root.join("Example.Video.torrent");
+            std::fs::write(
+                &torrent_path,
+                serde_bencode::to_bytes(&torrent).expect("should serialize torrent"),
+            )
+            .expect("should write torrent file");
+            Self {
+                _temp_directory: temp_directory,
+                root,
+                torrent_path,
+            }
+        }
+
+        fn moved_torrent_path(&self) -> PathBuf {
+            self.root
+                .join(utils::DOWNLOADED_DIRECTORY_NAME)
+                .join("Example.Video.torrent")
+        }
+
+        fn info_hash(&self) -> String {
+            parse_torrent(&self.torrent_path, &qtorrent(&["qtorrent"]).config)
+                .expect("should parse torrent")
+                .info_hash
+        }
+    }
+
+    fn qtorrent(arguments: &[&str]) -> QTorrent {
+        let args = QtorrentArgs::try_parse_from(arguments).expect("arguments should parse");
+        QTorrent {
+            config: Config::from_args_with_user_config(args, QtorrentConfig::default()),
+            dot_rename: None,
+        }
+    }
+
+    /// `QTorrent` for the directory, connecting to the given local port with credentials and `--yes`.
+    fn connected_qtorrent(directory: &TorrentDirectory, port: u16, extra: &[&str]) -> QTorrent {
+        let root = directory.root.to_string_lossy().into_owned();
+        let port = port.to_string();
+        let mut arguments = vec![
+            "qtorrent",
+            root.as_str(),
+            "-H",
+            "127.0.0.1",
+            "-P",
+            port.as_str(),
+            "-u",
+            "user",
+            "-w",
+            "password",
+            "--yes",
+            "--verbose",
+        ];
+        arguments.extend_from_slice(extra);
+        qtorrent(&arguments)
+    }
+
+    fn session_routes(torrent_list: String) -> Vec<Route> {
+        vec![
+            route("/api/v2/auth/login", 200, "Ok."),
+            route("/api/v2/auth/logout", 200, ""),
+            route("/api/v2/app/version", 200, "v5.0.0"),
+            route("/api/v2/app/webapiVersion", 200, "2.11.2"),
+            route("/api/v2/torrents/info", 200, torrent_list),
+            route("/api/v2/torrents/add", 200, "Ok."),
+        ]
+    }
+
+    fn torrent_list_with(info_hash: &str) -> String {
+        format!(
+            r#"[{{"hash":"{info_hash}","name":"Existing Name","added_on":1,"completion_on":-1,"progress":0.0,"ratio":0.0,"save_path":"/downloads","size":1000000,"tags":""}}]"#
+        )
+    }
+
+    #[tokio::test]
+    async fn adds_a_new_torrent_and_moves_the_file_to_downloaded() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let port = serve(session_routes("[]".to_string())).await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert!(!directory.torrent_path.exists());
+        assert!(directory.moved_torrent_path().is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_torrent_is_not_added_again_but_the_file_is_moved() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let mut routes = session_routes(torrent_list_with(&directory.info_hash()));
+        routes.retain(|route| !route.path().starts_with("/api/v2/torrents/add"));
+        let port = serve(routes).await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert!(directory.moved_torrent_path().is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_add_keeps_the_torrent_file_in_place() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let mut routes = session_routes("[]".to_string());
+        routes.retain(|route| !route.path().starts_with("/api/v2/torrents/add"));
+        routes.push(route("/api/v2/torrents/add", 415, ""));
+        let port = serve(routes).await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        assert!(!directory.moved_torrent_path().exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dryrun_with_connection_reports_existing_torrents_without_changes() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let port = serve(session_routes(torrent_list_with(&directory.info_hash()))).await;
+
+        connected_qtorrent(&directory, port, &["--dryrun"]).run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn offline_and_unreachable_dryruns_still_print_the_summary() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let root = directory.root.to_string_lossy().into_owned();
+        let unused_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("should bind a local port");
+            listener.local_addr().expect("should have a local address").port()
+        };
+
+        qtorrent(&["qtorrent", &root, "--offline", "--verbose"]).run().await?;
+        qtorrent(&["qtorrent", &root, "--dryrun"]).run().await?;
+        connected_qtorrent(&directory, unused_port, &["--dryrun"]).run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adding_without_credentials_or_torrents_fails() {
+        let directory = TorrentDirectory::new();
+        let root = directory.root.to_string_lossy().into_owned();
+        let empty = TempDir::new().expect("should create temp directory");
+        let empty_root = empty.path().to_string_lossy().into_owned();
+
+        let credentials_error = qtorrent(&["qtorrent", &root, "--yes"])
+            .run()
+            .await
+            .expect_err("should fail");
+        let empty_error = qtorrent(&["qtorrent", &empty_root, "--yes"])
+            .run()
+            .await
+            .expect_err("should fail");
+
+        assert!(credentials_error.to_string().contains("credentials not configured"));
+        assert!(empty_error.to_string().contains("No torrent files found"));
+    }
+}

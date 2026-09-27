@@ -673,28 +673,39 @@ mod test_client_without_network {
     }
 }
 
+/// A local HTTP server with canned replies, standing in for the qBittorrent `WebUI` in tests.
 #[cfg(test)]
-mod test_client_with_local_server {
+pub mod test_server {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::*;
-
     /// A canned reply for every request whose path starts with the given prefix.
-    struct Route {
+    pub struct Route {
         path: &'static str,
         status: u16,
-        body: &'static str,
+        body: String,
     }
 
-    const fn route(path: &'static str, status: u16, body: &'static str) -> Route {
-        Route { path, status, body }
+    /// Build a route replying with the given status and body.
+    pub fn route(path: &'static str, status: u16, body: impl Into<String>) -> Route {
+        Route {
+            path,
+            status,
+            body: body.into(),
+        }
     }
 
-    /// Serve the routes on a local port for the rest of the test and return a client pointed at it.
+    impl Route {
+        /// The path prefix this route answers.
+        pub const fn path(&self) -> &'static str {
+            self.path
+        }
+    }
+
+    /// Serve the routes on a local port for the rest of the test and return the port.
     ///
-    /// Paths without a route get a 404 reply.
-    async fn client_for(routes: Vec<Route>) -> QBittorrentClient {
+    /// Routes are tried in order, and paths without a route get a 404 reply.
+    pub async fn serve(routes: Vec<Route>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("should bind a local port");
@@ -706,7 +717,7 @@ mod test_client_with_local_server {
                 let (status, body) = routes
                     .iter()
                     .find(|route| path.starts_with(route.path))
-                    .map_or((404, ""), |route| (route.status, route.body));
+                    .map_or((404, ""), |route| (route.status, route.body.as_str()));
                 let response = format!(
                     "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -715,7 +726,7 @@ mod test_client_with_local_server {
                 stream.shutdown().await.ok();
             }
         });
-        QBittorrentClient::new("127.0.0.1", port)
+        port
     }
 
     /// Read one full HTTP request, headers and body, so the connection closes cleanly.
@@ -741,6 +752,17 @@ mod test_client_with_local_server {
             }
         }
         String::from_utf8_lossy(&buffer).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod test_client_with_local_server {
+    use super::test_server::{Route, route, serve};
+    use super::*;
+
+    /// Client pointed at a local server with the given routes.
+    async fn client_for(routes: Vec<Route>) -> QBittorrentClient {
+        QBittorrentClient::new("127.0.0.1", serve(routes).await)
     }
 
     /// Client that skips the login request, for testing one endpoint at a time.
@@ -865,12 +887,7 @@ mod test_client_with_local_server {
             (404, "hash not found"),
             (500, "HTTP 500"),
         ] {
-            let client = authenticated_client_for(vec![Route {
-                path: "/api/v2/torrents/filePrio",
-                status,
-                body: "",
-            }])
-            .await;
+            let client = authenticated_client_for(vec![route("/api/v2/torrents/filePrio", status, "")]).await;
 
             let error = client
                 .set_file_priorities("abc", &[0, 2], 0)
@@ -891,16 +908,8 @@ mod test_client_with_local_server {
             (500, "HTTP 500"),
         ] {
             let client = authenticated_client_for(vec![
-                Route {
-                    path: "/api/v2/torrents/renameFile",
-                    status,
-                    body: "",
-                },
-                Route {
-                    path: "/api/v2/torrents/renameFolder",
-                    status,
-                    body: "",
-                },
+                route("/api/v2/torrents/renameFile", status, ""),
+                route("/api/v2/torrents/renameFolder", status, ""),
             ])
             .await;
 
@@ -923,12 +932,7 @@ mod test_client_with_local_server {
             (403, "session expired"),
             (500, "HTTP 500"),
         ] {
-            let client = authenticated_client_for(vec![Route {
-                path: "/api/v2/torrents/rename",
-                status,
-                body: "",
-            }])
-            .await;
+            let client = authenticated_client_for(vec![route("/api/v2/torrents/rename", status, "")]).await;
 
             let error = client.set_torrent_name("abc", "name").await.expect_err("should fail");
 

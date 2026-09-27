@@ -239,7 +239,7 @@ impl Config {
 
     /// Create config by merging CLI arguments with a pre-loaded user config.
     #[allow(clippy::too_many_lines)]
-    fn from_args_with_user_config(args: QtorrentArgs, user_config: QtorrentConfig) -> Self {
+    pub(crate) fn from_args_with_user_config(args: QtorrentArgs, user_config: QtorrentConfig) -> Self {
         // Get credentials from args or config, with args taking priority
         let host = args
             .host
