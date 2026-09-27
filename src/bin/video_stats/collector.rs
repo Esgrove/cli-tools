@@ -82,20 +82,7 @@ impl StatsCollector {
         }
 
         if self.verbose {
-            // Sort by duration descending, then by resolution (pixel count) descending
-            probed_files.sort_by(|a, b| {
-                let duration_cmp = b
-                    .info
-                    .duration
-                    .unwrap_or(0.0)
-                    .total_cmp(&a.info.duration.unwrap_or(0.0));
-
-                duration_cmp.then_with(|| {
-                    let pixels_b = b.info.resolution.map_or(0, |r| r.pixel_count());
-                    let pixels_a = a.info.resolution.map_or(0, |r| r.pixel_count());
-                    pixels_b.cmp(&pixels_a)
-                })
-            });
+            sort_for_listing(&mut probed_files);
 
             println!();
             for probed in &probed_files {
@@ -201,6 +188,25 @@ impl StatsCollector {
                 .any(|video_ext| video_ext.eq_ignore_ascii_case(ext))
         })
     }
+}
+
+/// Sort probed files by duration and then by pixel count, longest and largest first.
+///
+/// Files without a duration or resolution sort as zero.
+fn sort_for_listing(probed_files: &mut [ProbedFile]) {
+    probed_files.sort_by(|a, b| {
+        let duration_cmp = b
+            .info
+            .duration
+            .unwrap_or(0.0)
+            .total_cmp(&a.info.duration.unwrap_or(0.0));
+
+        duration_cmp.then_with(|| {
+            let pixels_b = b.info.resolution.map_or(0, |r| r.pixel_count());
+            let pixels_a = a.info.resolution.map_or(0, |r| r.pixel_count());
+            pixels_b.cmp(&pixels_a)
+        })
+    });
 }
 
 /// Probe video files concurrently using semaphore-limited async tasks.
@@ -369,5 +375,99 @@ mod test_stats_collector_new {
         assert_eq!(collector.root, root);
         assert!(collector.recurse);
         assert!(collector.verbose);
+    }
+}
+
+#[cfg(test)]
+mod test_sort_for_listing {
+    use cli_tools::Resolution;
+
+    use super::*;
+
+    fn probed(name: &str, duration: Option<f64>, resolution: Option<Resolution>) -> ProbedFile {
+        ProbedFile {
+            name: name.to_string(),
+            info: VideoInfo {
+                duration,
+                resolution,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn longest_first_then_largest_resolution_first() {
+        let mut files = vec![
+            probed("short", Some(60.0), Some(Resolution::new(3840, 2160))),
+            probed("long_small", Some(600.0), Some(Resolution::new(1280, 720))),
+            probed("long_large", Some(600.0), Some(Resolution::new(1920, 1080))),
+            probed("unknown", None, None),
+        ];
+
+        sort_for_listing(&mut files);
+
+        let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+        assert_eq!(names, vec!["long_large", "long_small", "short", "unknown"]);
+    }
+
+    #[test]
+    fn missing_resolution_sorts_after_known_resolution_at_same_duration() {
+        let mut files = vec![
+            probed("no_resolution", Some(30.0), None),
+            probed("with_resolution", Some(30.0), Some(Resolution::new(640, 480))),
+        ];
+
+        sort_for_listing(&mut files);
+
+        assert_eq!(files[0].name, "with_resolution");
+    }
+}
+
+#[cfg(test)]
+mod test_run {
+    use super::*;
+
+    #[test]
+    fn verbose_run_over_files_that_are_not_real_videos_completes() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let root = temp_directory.path().join("videos");
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("first.mp4"), b"not a video")?;
+        std::fs::write(root.join("second.mkv"), b"not a video either")?;
+
+        StatsCollector::new(Config {
+            root,
+            recurse: false,
+            verbose: true,
+        })
+        .run()
+    }
+
+    #[test]
+    fn quiet_run_over_a_single_file_completes() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let video = temp_directory.path().join("clip.mp4");
+        std::fs::write(&video, b"not a video")?;
+
+        StatsCollector::new(Config {
+            root: video,
+            recurse: false,
+            verbose: false,
+        })
+        .run()
+    }
+
+    #[tokio::test]
+    async fn probing_returns_one_result_or_error_per_file() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let first = temp_directory.path().join("first.mp4");
+        let second = temp_directory.path().join("second.mp4");
+        std::fs::write(&first, b"not a video")?;
+        std::fs::write(&second, b"not a video")?;
+
+        let (probed_files, error_count) = probe_files_async(vec![first, second], temp_directory.path()).await;
+
+        assert_eq!(probed_files.len() + error_count, 2);
+        Ok(())
     }
 }
