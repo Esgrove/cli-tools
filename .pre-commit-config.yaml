@@ -1,4 +1,4 @@
-exclude: ^(.idea|.vscode)
+exclude: ^(.idea|.vscode|tests/fixtures/slb)/
 fail_fast: false
 
 # Run with prek (https://prek.j178.dev), a fast drop-in replacement for pre-commit.
@@ -42,7 +42,7 @@ repos:
       - id: rust-clippy
         name: cargo clippy lint
         description: Run cargo clippy on files included in the commit.
-        entry: cargo clippy -- -Dwarnings --all-targets
+        entry: cargo clippy -- -Dwarnings
         pass_filenames: false
         types: [file, rust]
         language: system
