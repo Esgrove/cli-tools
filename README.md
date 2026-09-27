@@ -464,6 +464,8 @@ Options:
   -M, --min-image-size <KB>  Minimum image file size in KB
   -r, --recurse              Recurse into subdirectories when searching for torrent files
   -x, --skip-existing        Skip rename prompts for existing torrents
+  -n, --include <INCLUDE>    Include only torrent files whose name matches the given glob pattern
+  -X, --exclude <EXCLUDE>    Exclude torrent files whose name matches the given glob pattern
   -v, --verbose              Print verbose output
   -h, --help                 Print help (see more with '--help')
   -V, --version              Print version

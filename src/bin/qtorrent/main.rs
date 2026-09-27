@@ -117,6 +117,14 @@ pub struct QtorrentArgs {
     #[arg(short = 'x', long)]
     pub skip_existing: bool,
 
+    /// Include only torrent files whose name matches the given glob pattern
+    #[arg(short = 'n', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
+    pub include: Vec<String>,
+
+    /// Exclude torrent files whose name matches the given glob pattern
+    #[arg(short = 'X', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
+    pub exclude: Vec<String>,
+
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     pub verbose: bool,

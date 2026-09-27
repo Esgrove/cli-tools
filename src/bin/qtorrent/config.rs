@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use regex::Regex;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -170,6 +171,10 @@ pub struct Config {
     pub recurse: bool,
     /// Input paths from command line arguments.
     pub input_paths: Vec<PathBuf>,
+    /// Torrent file name patterns to include, any match selects the file.
+    pub include_patterns: Vec<Regex>,
+    /// Torrent file name patterns to exclude.
+    pub exclude_patterns: Vec<Regex>,
     /// File filter configuration for skipping files by extension, directory, or size.
     pub file_filter: FileFilter,
     /// Substrings to remove from torrent filename when generating suggested name.
@@ -267,6 +272,8 @@ impl Config {
 
         // Resolve input paths
         let input_paths = args.path;
+        let include_patterns = compile_name_patterns(&args.include);
+        let exclude_patterns = compile_name_patterns(&args.exclude);
 
         // File filtering options - merge CLI args with config, CLI takes priority
         let skip_extensions: Vec<String> = if args.skip_extensions.is_empty() {
@@ -351,6 +358,8 @@ impl Config {
             skip_existing,
             recurse,
             input_paths,
+            include_patterns,
+            exclude_patterns,
             file_filter,
             remove_from_name,
             use_dots_formatting,
@@ -436,6 +445,7 @@ impl Config {
             }
         }
 
+        torrent_paths.retain(|path| self.matches_name_filters(path));
         torrent_paths.sort_unstable();
         torrent_paths.dedup();
 
@@ -475,11 +485,38 @@ impl Config {
         Ok(())
     }
 
+    /// Check whether the file name passes the include and exclude patterns.
+    fn matches_name_filters(&self, path: &Path) -> bool {
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let included = self.include_patterns.is_empty()
+            || self.include_patterns.iter().any(|pattern| pattern.is_match(&file_name));
+        included && !self.exclude_patterns.iter().any(|pattern| pattern.is_match(&file_name))
+    }
+
     /// Check if the given path is a `.torrent` file.
     fn is_torrent_file(path: &Path) -> bool {
         path.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
     }
+}
+
+/// Compile case-insensitive file name globs.
+/// A pattern without glob characters matches as a substring.
+fn compile_name_patterns(patterns: &[String]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| {
+            let lowercase = pattern.to_lowercase();
+            if lowercase.contains(['*', '?', '[', '{']) {
+                cli_tools::glob_to_regex(&lowercase)
+            } else {
+                cli_tools::glob_to_regex(&format!("*{lowercase}*"))
+            }
+        })
+        .collect()
 }
 
 fn mb_to_bytes(mb: f64) -> Option<u64> {
@@ -1061,6 +1098,8 @@ mod test_resolve_tags {
             skip_existing: false,
             recurse: false,
             input_paths: Vec::new(),
+            include_patterns: Vec::new(),
+            exclude_patterns: Vec::new(),
             file_filter: FileFilter::default(),
             remove_from_name: Vec::new(),
             use_dots_formatting: false,
@@ -1069,6 +1108,18 @@ mod test_resolve_tags {
             tag_overwrite_prefixes,
             tag_overwrite_paths: Vec::new(),
         }
+    }
+
+    #[test]
+    fn name_filters_are_additive_globs() {
+        let mut config = make_config(None, Vec::new());
+        config.include_patterns = compile_name_patterns(&["show.*".to_string(), "Movie".to_string()]);
+        config.exclude_patterns = compile_name_patterns(&["*sample*".to_string()]);
+
+        assert!(config.matches_name_filters(Path::new("dir/Show.S01.torrent")));
+        assert!(config.matches_name_filters(Path::new("The.Movie.2024.torrent")));
+        assert!(!config.matches_name_filters(Path::new("Other.torrent")));
+        assert!(!config.matches_name_filters(Path::new("Show.Sample.torrent")));
     }
 
     /// Helper to create a minimal `Config` with given tags, prefix rules, and path rules.
