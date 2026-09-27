@@ -136,7 +136,11 @@ impl Config {
     /// # Errors
     /// Returns an error if the path cannot be resolved or the config file cannot be read or parsed.
     pub fn try_from_args(args: &Args) -> Result<Self> {
-        let user_config = ResolutionConfig::get_user_config()?;
+        Self::from_args_and_user_config(args, &ResolutionConfig::get_user_config()?)
+    }
+
+    /// Combine the CLI arguments with an already loaded user config.
+    fn from_args_and_user_config(args: &Args, user_config: &ResolutionConfig) -> Result<Self> {
         let path = cli_tools::resolve_input_path(args.path.as_deref())?;
 
         // Handle delete limit: CLI can specify --delete with optional value
@@ -221,5 +225,112 @@ verbose = true
         let config = ResolutionConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.verbose);
         assert!(!config.debug);
+    }
+}
+
+#[cfg(test)]
+mod test_config_from_args {
+    use clap::Parser;
+
+    use super::*;
+
+    /// Parse CLI arguments for a temporary directory followed by the given extra arguments.
+    fn parse_args(directory: &tempfile::TempDir, extra: &[&str]) -> Args {
+        let path = directory.path().to_str().expect("temporary path should be UTF-8");
+        let arguments = ["vres", path].into_iter().chain(extra.iter().copied());
+        Args::try_parse_from(arguments).expect("arguments should parse")
+    }
+
+    #[test]
+    fn defaults_disable_every_option() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+
+        let config = Config::from_args_and_user_config(&parse_args(&directory, &[]), &ResolutionConfig::default())?;
+
+        assert_eq!(config.path, dunce::canonicalize(directory.path())?);
+        assert!(config.delete_limit.is_none());
+        assert!(!config.debug);
+        assert!(!config.dryrun);
+        assert!(!config.overwrite);
+        assert!(!config.recurse);
+        assert!(!config.verbose);
+        Ok(())
+    }
+
+    #[test]
+    fn user_config_enables_flags_not_given_on_command_line() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        let user_config = ResolutionConfig {
+            debug: true,
+            delete_limit: Some(720),
+            dryrun: true,
+            overwrite: true,
+            recurse: true,
+            verbose: true,
+        };
+
+        let config = Config::from_args_and_user_config(&parse_args(&directory, &[]), &user_config)?;
+
+        assert!(config.debug);
+        assert!(config.dryrun);
+        assert!(config.overwrite);
+        assert!(config.recurse);
+        assert!(config.verbose);
+        assert!(config.delete_limit.is_none(), "the limit only applies with --delete");
+        Ok(())
+    }
+
+    #[test]
+    fn command_line_flags_apply_without_user_config() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        let args = parse_args(&directory, &["--debug", "--print", "--force", "--recurse", "--verbose"]);
+
+        let config = Config::from_args_and_user_config(&args, &ResolutionConfig::default())?;
+
+        assert!(config.debug);
+        assert!(config.dryrun);
+        assert!(config.overwrite);
+        assert!(config.recurse);
+        assert!(config.verbose);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_without_value_uses_default_limit() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+
+        let config =
+            Config::from_args_and_user_config(&parse_args(&directory, &["--delete"]), &ResolutionConfig::default())?;
+
+        assert_eq!(config.delete_limit, Some(DEFAULT_DELETE_LIMIT));
+        Ok(())
+    }
+
+    #[test]
+    fn delete_without_value_uses_user_config_limit() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        let user_config = ResolutionConfig {
+            delete_limit: Some(720),
+            ..ResolutionConfig::default()
+        };
+
+        let config = Config::from_args_and_user_config(&parse_args(&directory, &["--delete"]), &user_config)?;
+
+        assert_eq!(config.delete_limit, Some(720));
+        Ok(())
+    }
+
+    #[test]
+    fn delete_value_on_command_line_overrides_user_config() -> Result<()> {
+        let directory = tempfile::TempDir::new()?;
+        let user_config = ResolutionConfig {
+            delete_limit: Some(720),
+            ..ResolutionConfig::default()
+        };
+
+        let config = Config::from_args_and_user_config(&parse_args(&directory, &["--delete", "360"]), &user_config)?;
+
+        assert_eq!(config.delete_limit, Some(360));
+        Ok(())
     }
 }

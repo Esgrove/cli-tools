@@ -2,6 +2,8 @@
 //!
 //! Parses rename and deletion options, builds configuration, and runs asynchronous processing.
 
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
 mod cli;
 mod config;
 mod resolution;

@@ -63,29 +63,39 @@ fn main() -> anyhow::Result<()> {
             env!("CARGO_BIN_NAME"),
         );
     }
-    if args.text.is_empty() {
-        println!("{}", format_centered_divider("", args.length, args.character));
-    } else if args.text.len() > 1 && args.align {
-        let longest: usize = args
-            .text
+    for line in divider_lines(&args.text, args.length, args.character, args.align) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Build the divider lines for the given texts.
+///
+/// No texts gives one plain divider.
+/// With `align` and more than one text, the texts start at the same column, otherwise each one is centered.
+fn divider_lines(texts: &[String], length: usize, character: char, align: bool) -> Vec<String> {
+    if texts.is_empty() {
+        return vec![format_centered_divider("", length, character)];
+    }
+
+    if texts.len() > 1 && align {
+        let longest: usize = texts
             .iter()
-            .map(|s| s.trim().chars().count())
+            .map(|text| text.trim().chars().count())
             .max()
             .unwrap_or_default();
 
-        let aligned_length: usize = args.length.saturating_sub(longest + 2) / 2;
-        for text in &args.text {
-            println!(
-                "{}",
-                format_aligned_divider(text, args.length, args.character, aligned_length)
-            );
-        }
-    } else {
-        for text in &args.text {
-            println!("{}", format_centered_divider(text, args.length, args.character));
-        }
+        let aligned_length: usize = length.saturating_sub(longest + 2) / 2;
+        return texts
+            .iter()
+            .map(|text| format_aligned_divider(text, length, character, aligned_length))
+            .collect();
     }
-    Ok(())
+
+    texts
+        .iter()
+        .map(|text| format_centered_divider(text, length, character))
+        .collect()
 }
 
 fn format_centered_divider(text: &str, count: usize, character: char) -> String {
@@ -204,5 +214,52 @@ mod div_tests {
         assert_eq!(result, "######### ANOTHER ###########");
         let result = format_aligned_divider("text", 29, '#', 9);
         assert_eq!(result, "######### TEXT ##############");
+    }
+}
+
+#[cfg(test)]
+mod test_divider_lines {
+    use super::*;
+
+    fn texts(values: &[&str]) -> Vec<String> {
+        values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn no_texts_gives_one_plain_divider() {
+        assert_eq!(divider_lines(&[], 10, '%', false), vec!["%".repeat(10)]);
+        assert_eq!(divider_lines(&[], 6, '-', true), vec!["-".repeat(6)]);
+    }
+
+    #[test]
+    fn each_text_is_centered_without_align() {
+        let lines = divider_lines(&texts(&["one", "three"]), 13, '#', false);
+
+        assert_eq!(lines, vec!["#### ONE ####", "### THREE ###"]);
+    }
+
+    #[test]
+    fn aligned_texts_start_at_the_same_column() {
+        let lines = divider_lines(&texts(&["one", "three"]), 13, '#', true);
+
+        assert_eq!(lines, vec!["### ONE #####", "### THREE ###"]);
+    }
+
+    #[test]
+    fn align_with_a_single_text_centers_it() {
+        let lines = divider_lines(&texts(&["one"]), 13, '#', true);
+
+        assert_eq!(lines, vec!["#### ONE ####"]);
+    }
+
+    #[test]
+    fn parses_texts_and_options_from_the_command_line() {
+        let args = Args::try_parse_from(["div", "-l", "20", "-c", "=", "-a", "first", "second"])
+            .expect("arguments should parse");
+
+        assert_eq!(args.text, texts(&["first", "second"]));
+        assert_eq!(args.length, 20);
+        assert_eq!(args.character, '=');
+        assert!(args.align);
     }
 }
