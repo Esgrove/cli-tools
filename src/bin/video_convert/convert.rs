@@ -980,3 +980,322 @@ impl VideoConvert {
         Ok(())
     }
 }
+
+/// Builders shared by the converter tests in this module and its submodules.
+#[cfg(test)]
+mod test_helpers {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    use tempfile::NamedTempFile;
+
+    use super::VideoConvert;
+    use crate::config::Config;
+    use crate::logger::FileLogger;
+    use crate::types::{ProcessableFile, VideoFile, VideoInfo};
+
+    /// Converter with the given config, logging to a temporary file kept alive by the returned handle.
+    pub fn converter(config: Config) -> (NamedTempFile, VideoConvert) {
+        let (log_file, logger) = FileLogger::temporary();
+        (
+            log_file,
+            VideoConvert {
+                config,
+                logger: RefCell::new(logger),
+            },
+        )
+    }
+
+    /// Video info for a small 1080p file with the given codec.
+    pub fn video_info(codec: &str) -> VideoInfo {
+        VideoInfo {
+            codec: codec.to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_024,
+            duration: 60.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    /// Processable file for the path, with its output path resolved for normal mode.
+    pub fn processable(path: &Path, codec: &str) -> ProcessableFile {
+        ProcessableFile::for_mode(VideoFile::new(path, 1_024), video_info(codec), Vec::new(), false)
+    }
+}
+
+#[cfg(test)]
+mod test_process_files_with_db_cleanup {
+    use std::path::PathBuf;
+
+    use super::test_helpers::{converter, processable, video_info};
+    use super::*;
+
+    /// Files written into the directory, each also stored as a pending database entry.
+    fn pending_files(directory: &Path, database: &Database, names: &[&str]) -> Vec<ProcessableFile> {
+        names
+            .iter()
+            .map(|name| {
+                let path = directory.join(name);
+                std::fs::write(&path, b"video").expect("Failed to write video file");
+                database
+                    .upsert_pending_file(&path, "mkv", &video_info("h264"), PendingAction::Convert)
+                    .expect("Failed to insert pending file");
+                processable(&path, "h264")
+            })
+            .collect()
+    }
+
+    fn pending_paths(database: &Database) -> Vec<PathBuf> {
+        database
+            .get_pending_files(&crate::database::PendingFileFilter::default())
+            .expect("Failed to query pending files")
+            .into_iter()
+            .map(|file| file.full_path)
+            .collect()
+    }
+
+    fn succeed(_converter: &VideoConvert, _file: &ProcessableFile, _index: &str) -> ProcessResult {
+        ProcessResult::converted(1_024, 8_000, 512, 4_000)
+    }
+
+    fn fail(_converter: &VideoConvert, _file: &ProcessableFile, _index: &str) -> ProcessResult {
+        ProcessResult::Failed {
+            error: "ffmpeg failed".to_string(),
+        }
+    }
+
+    #[test]
+    fn successful_files_are_counted_and_removed_from_the_database() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let files = pending_files(directory.path(), &database, &["first.mkv", "second.mkv"]);
+        let (_log, converter) = converter(Config::default());
+        let mut processed_count = 0;
+
+        let (stats, outcome) = converter.process_files_with_db_cleanup(
+            files,
+            &AtomicBool::new(false),
+            &mut processed_count,
+            2,
+            &database,
+            succeed,
+        );
+
+        assert_eq!(outcome, ProcessingOutcome::Completed);
+        assert_eq!(processed_count, 2);
+        assert_eq!(stats.files_converted, 2);
+        assert!(pending_paths(&database).is_empty());
+    }
+
+    #[test]
+    fn failed_files_stay_in_the_database() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let files = pending_files(directory.path(), &database, &["broken.mkv"]);
+        let (_log, converter) = converter(Config::default());
+        let mut processed_count = 0;
+
+        let (stats, outcome) = converter.process_files_with_db_cleanup(
+            files,
+            &AtomicBool::new(false),
+            &mut processed_count,
+            1,
+            &database,
+            fail,
+        );
+
+        assert_eq!(outcome, ProcessingOutcome::Completed);
+        assert_eq!(processed_count, 0);
+        assert_eq!(stats.files_failed, 1);
+        assert_eq!(pending_paths(&database), vec![directory.path().join("broken.mkv")]);
+    }
+
+    #[test]
+    fn missing_files_are_dropped_from_the_database_without_processing() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let files = pending_files(directory.path(), &database, &["gone.mkv"]);
+        std::fs::remove_file(directory.path().join("gone.mkv")).expect("Failed to remove video file");
+        let (_log, converter) = converter(Config::default());
+        let mut processed_count = 0;
+
+        let (stats, _) = converter.process_files_with_db_cleanup(
+            files,
+            &AtomicBool::new(false),
+            &mut processed_count,
+            1,
+            &database,
+            succeed,
+        );
+
+        assert_eq!(processed_count, 0);
+        assert_eq!(stats.files_converted, 0);
+        assert!(pending_paths(&database).is_empty());
+    }
+
+    #[test]
+    fn processing_stops_at_the_file_limit() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let files = pending_files(directory.path(), &database, &["first.mkv", "second.mkv", "third.mkv"]);
+        let (_log, converter) = converter(Config::default());
+        let mut processed_count = 0;
+
+        let (stats, outcome) = converter.process_files_with_db_cleanup(
+            files,
+            &AtomicBool::new(false),
+            &mut processed_count,
+            2,
+            &database,
+            succeed,
+        );
+
+        assert_eq!(outcome, ProcessingOutcome::Completed);
+        assert_eq!(stats.files_converted, 2);
+        assert_eq!(pending_paths(&database).len(), 1);
+    }
+
+    #[test]
+    fn abort_flag_stops_before_the_next_file() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let files = pending_files(directory.path(), &database, &["first.mkv"]);
+        let (_log, converter) = converter(Config::default());
+        let mut processed_count = 0;
+
+        let (stats, outcome) = converter.process_files_with_db_cleanup(
+            files,
+            &AtomicBool::new(true),
+            &mut processed_count,
+            1,
+            &database,
+            succeed,
+        );
+
+        assert_eq!(outcome, ProcessingOutcome::Aborted);
+        assert_eq!(stats.files_converted, 0);
+        assert_eq!(pending_paths(&database).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod test_gather_and_rename {
+    use super::test_helpers::{converter, processable};
+    use super::*;
+
+    fn config_for(path: &Path, recurse: bool) -> Config {
+        Config {
+            path: path.to_path_buf(),
+            recurse,
+            extensions: vec!["mkv".to_string(), "mp4".to_string()],
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn gathers_matching_extensions_and_respects_recursion() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let root = directory.path().join("videos");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("Failed to create nested directory");
+        std::fs::write(root.join("top.mkv"), b"video").expect("Failed to write video file");
+        std::fs::write(root.join("notes.txt"), b"notes").expect("Failed to write text file");
+        std::fs::write(nested.join("deep.mp4"), b"video").expect("Failed to write nested video file");
+
+        let (_log, shallow) = converter(config_for(&root, false));
+        let (_log_recursive, recursive) = converter(config_for(&root, true));
+
+        let shallow_names: Vec<String> = shallow
+            .gather_files_to_process()
+            .expect("Failed to gather files")
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+        let recursive_count = recursive
+            .gather_files_to_process()
+            .expect("Failed to gather files")
+            .len();
+
+        assert_eq!(shallow_names, vec!["top"]);
+        assert_eq!(recursive_count, 2);
+    }
+
+    #[test]
+    fn a_single_file_path_is_gathered_when_it_matches() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let video = directory.path().join("clip.mkv");
+        let text = directory.path().join("clip.txt");
+        std::fs::write(&video, b"video").expect("Failed to write video file");
+        std::fs::write(&text, b"notes").expect("Failed to write text file");
+
+        let (_log, video_converter) = converter(config_for(&video, false));
+        let (_log_text, text_converter) = converter(config_for(&text, false));
+
+        assert_eq!(
+            video_converter
+                .gather_files_to_process()
+                .expect("Failed to gather files")
+                .len(),
+            1
+        );
+        assert!(
+            text_converter
+                .gather_files_to_process()
+                .expect("Failed to gather files")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_missing_path_is_an_error() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let (_log, converter) = converter(config_for(&directory.path().join("missing"), false));
+
+        assert!(converter.gather_files_to_process().is_err());
+    }
+
+    #[test]
+    fn renames_move_files_to_their_output_names() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let path = directory.path().join("Movie.mp4");
+        std::fs::write(&path, b"video").expect("Failed to write video file");
+        let file = processable(&path, "hevc");
+        let output = file.output_path.clone();
+        let (_log, converter) = converter(Config::default());
+
+        let renamed = converter.process_renames(&[file]);
+
+        assert_eq!(renamed, 1);
+        assert!(!path.exists());
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn dryrun_renames_count_without_moving_files() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let path = directory.path().join("Movie.mp4");
+        std::fs::write(&path, b"video").expect("Failed to write video file");
+        let (_log, converter) = converter(Config {
+            dryrun: true,
+            ..Config::default()
+        });
+
+        let renamed = converter.process_renames(&[processable(&path, "hevc")]);
+
+        assert_eq!(renamed, 1);
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn a_failed_rename_is_not_counted() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let missing = directory.path().join("Missing.mp4");
+        let (_log, converter) = converter(Config::default());
+
+        assert_eq!(converter.process_renames(&[processable(&missing, "hevc")]), 0);
+    }
+}

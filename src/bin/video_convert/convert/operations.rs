@@ -415,3 +415,48 @@ impl VideoConvert {
         }
     }
 }
+
+#[cfg(test)]
+mod test_dryrun_operations {
+    use super::super::test_helpers::{converter, processable};
+    use super::*;
+    use crate::config::Config;
+
+    fn dryrun_config() -> Config {
+        Config {
+            dryrun: true,
+            verbose: true,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn dryrun_remux_reports_success_without_touching_files() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let path = directory.path().join("Movie.mkv");
+        std::fs::write(&path, b"video").expect("Failed to write video file");
+        let file = processable(&path, "hevc");
+        let (_log, converter) = converter(dryrun_config());
+
+        let result = converter.remux_to_mp4(&file, "[1/1]");
+
+        assert!(matches!(result, ProcessResult::Remuxed {}));
+        assert!(path.is_file());
+        assert!(!file.output_path.exists());
+    }
+
+    #[test]
+    fn dryrun_conversion_reports_the_original_size_without_touching_files() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let path = directory.path().join("Movie.avi");
+        std::fs::write(&path, b"video").expect("Failed to write video file");
+        let file = processable(&path, "h264");
+        let (_log, converter) = converter(dryrun_config());
+
+        let result = converter.convert_to_hevc(&file, "[1/1]");
+
+        assert!(matches!(result, ProcessResult::Converted { .. }));
+        assert!(path.is_file());
+        assert!(!file.output_path.exists());
+    }
+}

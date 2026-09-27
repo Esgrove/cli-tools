@@ -54,6 +54,20 @@ impl FileLogger {
         })
     }
 
+    /// Logger writing to a temporary file, which lives as long as the returned handle.
+    #[cfg(test)]
+    pub(crate) fn temporary() -> (tempfile::NamedTempFile, Self) {
+        let log_file = tempfile::NamedTempFile::new().expect("Failed to create temporary log file");
+        let writer = BufWriter::new(log_file.reopen().expect("Failed to reopen temporary log file"));
+        (
+            log_file,
+            Self {
+                writer,
+                write_failed: false,
+            },
+        )
+    }
+
     fn timestamp() -> String {
         Zoned::now().strftime("%Y-%m-%d %H:%M:%S").to_string()
     }
@@ -264,15 +278,7 @@ mod test_file_logger {
     use tempfile::NamedTempFile;
 
     fn create_logger() -> (NamedTempFile, FileLogger) {
-        let log_file = NamedTempFile::new().expect("Failed to create temporary log file");
-        let writer = BufWriter::new(log_file.reopen().expect("Failed to reopen temporary log file"));
-        (
-            log_file,
-            FileLogger {
-                writer,
-                write_failed: false,
-            },
-        )
+        FileLogger::temporary()
     }
 
     fn read_log(log_file: &NamedTempFile, logger: FileLogger) -> String {
