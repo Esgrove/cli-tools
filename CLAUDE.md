@@ -150,7 +150,7 @@ Do not duplicate code in benchmark files.
     - `dupe_find/` → `dupefind` - Find duplicate files
     - `flip_date/` → `flipdate` - Flip dates in filenames
     - `qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming, show torrent stats
-    - `rx_rename.rs` → `rxrename` - Rename files with a regular expression
+    - `rx_rename.rs` → `rxrename` - Remove a trailing "_1" from file names
     - `semantic_line_breaks/` → `slb` - Check and format prose with semantic line breaks
     - `thumbnail/` → `thumbs` - Create video thumbnail sheets
     - `version_tag.rs` → `vtag` - Create git version tags for a project (Rust, C++, Python)

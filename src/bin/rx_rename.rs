@@ -12,7 +12,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use walkdir::WalkDir;
 
-use cli_tools::{print_error, print_magenta_bold, resolve_input_path, should_skip_entry, trash_or_delete};
+use cli_tools::{count_label, print_error, print_magenta_bold, resolve_input_path, should_skip_entry, trash_or_delete};
 
 /// Action to take when a conflicting unsuffixed file already exists.
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +32,22 @@ enum Outcome {
     RenamedAndRemoved,
     /// File was skipped (e.g. unsuffixed path exists but is not a regular file).
     Skipped,
+}
+
+/// Subcommands for `rx_rename`.
+#[derive(Subcommand)]
+enum RxRenameCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
 }
 
 #[derive(Parser)]
@@ -62,20 +78,15 @@ struct Args {
     verbose: bool,
 }
 
-/// Subcommands for `rx_rename`.
-#[derive(Subcommand)]
-enum RxRenameCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+/// Counts of the files handled in one run.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RenameSummary {
+    /// Files renamed, or that would be renamed in a dry run.
+    renamed: usize,
+    /// Conflicting unsuffixed files removed.
+    removed: usize,
+    /// Files that could not be processed.
+    failed: usize,
 }
 
 fn main() -> Result<()> {
@@ -101,32 +112,35 @@ fn main() -> Result<()> {
     } else {
         ConflictAction::Delete
     };
-    rename_files(&root, args.dryrun, action);
+    let summary = rename_files(&root, args.dryrun, action);
+    if summary.failed > 0 {
+        anyhow::bail!("Failed to process {}", count_label(summary.failed, "file", "files"));
+    }
     Ok(())
 }
 
 /// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
 ///
 /// When a matching unsuffixed file already exists, it is deleted (or trashed) before renaming.
-/// Errors for individual files are printed and skipped without aborting.
+/// Errors for individual files are printed and counted without aborting.
 /// Prints a summary of renamed and removed file counts when finished.
-fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) {
+fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSummary {
     let files = find_files_with_rx_duplicate_suffix(root);
     let total = files.len();
     let width = total.to_string().len();
 
-    let mut rename_count: usize = 0;
-    let mut removed_count: usize = 0;
+    let mut summary = RenameSummary::default();
 
     for (i, file) in files.iter().enumerate() {
         match process_file(root, file, i + 1, total, width, dryrun, action) {
             Ok(Outcome::RenamedAndRemoved) => {
-                rename_count += 1;
-                removed_count += 1;
+                summary.renamed += 1;
+                summary.removed += 1;
             }
-            Ok(Outcome::Renamed) => rename_count += 1,
+            Ok(Outcome::Renamed) => summary.renamed += 1,
             Ok(Outcome::Skipped) => {}
             Err(e) => {
+                summary.failed += 1;
                 print_error!("{}: {e}", file.display());
             }
         }
@@ -140,8 +154,9 @@ fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) {
         (false, ConflictAction::Trash) => "trashed",
     };
 
-    println!("\n{rename_count} files {rename_action}");
-    println!("{removed_count} files {removed_action}");
+    println!("\n{} files {rename_action}", summary.renamed);
+    println!("{} files {removed_action}", summary.removed);
+    summary
 }
 
 /// Find all files under `root` whose stem ends with `_1`, sorted by path.
@@ -282,6 +297,71 @@ mod test_find_files_with_rx_duplicate_suffix {
         let files = find_files_with_rx_duplicate_suffix(&scan_root);
 
         assert_eq!(files, vec![alpha, beta]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_rename_files {
+    use super::*;
+
+    #[test]
+    fn summary_counts_renamed_and_removed_files() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let root = &temp_directory.path().join("videos");
+        std::fs::create_dir(root)?;
+        std::fs::write(root.join("alpha_1.mp4"), b"new alpha")?;
+        std::fs::write(root.join("beta_1.mp4"), b"new beta")?;
+        std::fs::write(root.join("beta.mp4"), b"old beta")?;
+        std::fs::write(root.join("gamma_1.mp4"), b"new gamma")?;
+        std::fs::create_dir(root.join("gamma.mp4"))?;
+
+        let summary = rename_files(root, false, ConflictAction::Delete);
+
+        assert_eq!(
+            summary,
+            RenameSummary {
+                renamed: 2,
+                removed: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(std::fs::read(root.join("alpha.mp4"))?, b"new alpha");
+        assert_eq!(std::fs::read(root.join("beta.mp4"))?, b"new beta");
+        assert!(root.join("gamma_1.mp4").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn dryrun_summary_counts_without_changes() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let root = &temp_directory.path().join("videos");
+        std::fs::create_dir(root)?;
+        std::fs::write(root.join("alpha_1.mp4"), b"new alpha")?;
+        std::fs::write(root.join("alpha.mp4"), b"old alpha")?;
+
+        let summary = rename_files(root, true, ConflictAction::Trash);
+
+        assert_eq!(
+            summary,
+            RenameSummary {
+                renamed: 1,
+                removed: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(std::fs::read(root.join("alpha.mp4"))?, b"old alpha");
+        assert!(root.join("alpha_1.mp4").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn empty_directory_has_empty_summary() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+
+        let summary = rename_files(temp_directory.path(), false, ConflictAction::Delete);
+
+        assert_eq!(summary, RenameSummary::default());
         Ok(())
     }
 }

@@ -496,6 +496,33 @@ Options:
   -h, --help             Print help (see more with '--help')
 ```
 
+## Rxrename
+
+Recursively remove a trailing `_1` from file names, for example `clip_1.mp4` becomes `clip.mp4`.
+When the unsuffixed file already exists, it is deleted before the rename,
+or moved to the trash with `--trash`.
+Files that cannot be processed are reported, and the run exits with an error at the end.
+
+```console
+Recursively remove a trailing '_1' from filenames
+
+Usage: rxrename [OPTIONS] [ROOT] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [ROOT]  Root directory to scan. Defaults to current directory
+
+Options:
+  -d, --dryrun   Only print what would be done without making changes
+  -t, --trash    Move conflicting files to system trash instead of permanently deleting them
+  -v, --verbose  Print verbose output
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
 ## Slb
 
 Check and format prose in code comments, docstrings, and Markdown with semantic line breaks.
