@@ -10,7 +10,7 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
 
-use crate::VideoStatsArgs;
+use crate::config::Config;
 
 /// Supported video file extensions.
 const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v"];
@@ -37,18 +37,14 @@ pub struct StatsCollector {
 }
 
 impl StatsCollector {
-    /// Create a new stats collector from command line arguments.
-    ///
-    /// # Errors
-    /// Returns an error if the input path cannot be resolved.
-    pub fn new(args: &VideoStatsArgs) -> Result<Self> {
-        let input_path = cli_tools::resolve_input_path(args.path.as_deref())?;
-
-        Ok(Self {
-            root: input_path,
-            recurse: args.recurse,
-            verbose: args.verbose,
-        })
+    /// Create a new stats collector from the combined config.
+    #[must_use]
+    pub fn new(config: Config) -> Self {
+        Self {
+            root: config.root,
+            recurse: config.recurse,
+            verbose: config.verbose,
+        }
     }
 
     /// Run the stats collection process.
@@ -359,26 +355,19 @@ mod test_video_file_discovery {
 
 #[cfg(test)]
 mod test_stats_collector_new {
-    use clap::Parser;
-
     use super::*;
 
     #[test]
-    fn resolves_path_and_copies_flags() -> anyhow::Result<()> {
-        let temp_directory = tempfile::TempDir::new()?;
-        let path = temp_directory
-            .path()
-            .to_str()
-            .expect("temporary path should be UTF-8")
-            .to_string();
-        let args = VideoStatsArgs::try_parse_from(["vstats", &path, "--recurse", "--verbose"])
-            .expect("arguments should parse");
+    fn copies_config_values() {
+        let root = PathBuf::from("videos");
+        let collector = StatsCollector::new(Config {
+            root: root.clone(),
+            recurse: true,
+            verbose: true,
+        });
 
-        let collector = StatsCollector::new(&args)?;
-
-        assert_eq!(collector.root, dunce::canonicalize(temp_directory.path())?);
+        assert_eq!(collector.root, root);
         assert!(collector.recurse);
         assert!(collector.verbose);
-        Ok(())
     }
 }

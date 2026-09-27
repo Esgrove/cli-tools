@@ -1,10 +1,12 @@
 //! Video statistics command-line entrypoint.
 //!
-//! Parses input paths and display options, then delegates collection to `StatsCollector`.
+//! Parses input paths and display options, combines them with the user config,
+//! then delegates collection to `StatsCollector`.
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 mod collector;
+mod config;
 
 use std::path::PathBuf;
 
@@ -13,6 +15,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
 use crate::collector::StatsCollector;
+use crate::config::Config;
 
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Collect and print video file statistics")]
@@ -60,7 +63,7 @@ fn main() -> Result<()> {
             env!("CARGO_BIN_NAME"),
         )
     } else {
-        StatsCollector::new(&args)?.run()
+        StatsCollector::new(Config::from_args(&args)?).run()
     }
 }
 
