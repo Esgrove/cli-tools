@@ -242,52 +242,17 @@ impl ThumbnailCreator {
         Self::print_missing_video_info_warnings(&video_info, filename, progress_prefix);
         self.print_verbose_video_info(&video_info);
 
-        // Determine layout based on aspect ratio (default to landscape if dimensions unknown)
-        let is_landscape = video_info.resolution.is_none_or(|r| r.is_landscape());
-        let (cols, rows, padding) = if is_landscape {
-            (
-                self.config.cols_landscape,
-                self.config.rows_landscape,
-                self.config.padding_landscape,
-            )
-        } else {
-            (
-                self.config.cols_portrait,
-                self.config.rows_portrait,
-                self.config.padding_portrait,
-            )
-        };
-
-        let num_shots = cols * rows;
-        let interval = match video_info.duration {
-            Some(duration) if duration > 0.0 => duration / f64::from(num_shots),
-            _ => 1.0,
-        };
+        let params = self.thumbnail_params(filename, &video_info);
 
         if self.config.verbose {
-            println!("  interval: {interval:.2}s");
+            println!("  interval: {:.2}s", params.interval);
         }
-
-        // Calculate font size based on aspect ratio
-        let font_size = self.calculate_font_size(&video_info);
-
-        // Build metadata text
-        let metadata_text = Self::build_metadata_text(filename, &video_info);
 
         // Create output directory
         if !self.config.dryrun {
             std::fs::create_dir_all(&screens_dir)?;
         }
 
-        // Build ffmpeg command
-        let params = ThumbnailParams {
-            interval,
-            cols,
-            rows,
-            padding,
-            font_size,
-            metadata_text,
-        };
         let mut command = self.build_ffmpeg_command(video_path, &output_path, &params);
 
         if self.config.dryrun {
@@ -312,6 +277,42 @@ impl ThumbnailCreator {
     /// Format a progress prefix with current index aligned to the total digit width.
     fn format_progress_prefix(index: usize, total: usize, width: usize) -> String {
         format!("[{index:>width$} / {total}]")
+    }
+
+    /// Choose the grid, frame interval, font size, and header text for one video.
+    ///
+    /// The landscape grid is used when the resolution is unknown,
+    /// and a one second interval when the duration is unknown or zero.
+    fn thumbnail_params(&self, filename: &str, video_info: &VideoInfo) -> ThumbnailParams {
+        let is_landscape = video_info.resolution.is_none_or(|r| r.is_landscape());
+        let (cols, rows, padding) = if is_landscape {
+            (
+                self.config.cols_landscape,
+                self.config.rows_landscape,
+                self.config.padding_landscape,
+            )
+        } else {
+            (
+                self.config.cols_portrait,
+                self.config.rows_portrait,
+                self.config.padding_portrait,
+            )
+        };
+
+        let num_shots = cols * rows;
+        let interval = match video_info.duration {
+            Some(duration) if duration > 0.0 => duration / f64::from(num_shots),
+            _ => 1.0,
+        };
+
+        ThumbnailParams {
+            interval,
+            cols,
+            rows,
+            padding,
+            font_size: self.calculate_font_size(video_info),
+            metadata_text: Self::build_metadata_text(filename, video_info),
+        }
     }
 
     /// Print warnings for video metadata that could not be detected.
@@ -599,6 +600,142 @@ mod test_thumbnail_helpers {
         assert!(arguments.contains(&"2".to_string()));
         assert!(arguments.iter().any(|argument| argument.contains("tile=3x4")));
         assert!(arguments.iter().any(|argument| argument.contains(r"video\: sample")));
+    }
+
+    #[test]
+    fn landscape_video_uses_landscape_grid_and_spreads_frames_over_duration() {
+        let creator = creator(PathBuf::new(), config());
+        let info = VideoInfo {
+            resolution: Some(Resolution::new(1920, 1080)),
+            duration: Some(120.0),
+            ..Default::default()
+        };
+
+        let params = creator.thumbnail_params("video.mp4", &info);
+
+        assert_eq!((params.cols, params.rows, params.padding), (3, 4, 8));
+        assert!((params.interval - 10.0).abs() < f64::EPSILON);
+        assert_eq!(params.font_size, 20);
+        assert!(params.metadata_text.ends_with("video.mp4"));
+    }
+
+    #[test]
+    fn portrait_video_uses_portrait_grid() {
+        let creator = creator(PathBuf::new(), config());
+        let info = VideoInfo {
+            resolution: Some(Resolution::new(720, 1280)),
+            duration: Some(60.0),
+            ..Default::default()
+        };
+
+        let params = creator.thumbnail_params("clip.mp4", &info);
+
+        assert_eq!((params.cols, params.rows, params.padding), (4, 3, 16));
+        assert!((params.interval - 5.0).abs() < f64::EPSILON);
+        assert_eq!(params.font_size, 36);
+    }
+
+    #[test]
+    fn unknown_resolution_and_duration_fall_back_to_landscape_and_one_second() {
+        let creator = creator(PathBuf::new(), config());
+
+        let unknown = creator.thumbnail_params("clip.mp4", &VideoInfo::default());
+        let zero_duration = creator.thumbnail_params(
+            "clip.mp4",
+            &VideoInfo {
+                duration: Some(0.0),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!((unknown.cols, unknown.rows), (3, 4));
+        assert!((unknown.interval - 1.0).abs() < f64::EPSILON);
+        assert!((zero_duration.interval - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn prints_video_info_with_and_without_details() {
+        let quiet = creator(PathBuf::new(), config());
+        let verbose = creator(
+            PathBuf::new(),
+            Config {
+                verbose: true,
+                ..config()
+            },
+        );
+        let full = VideoInfo {
+            size_bytes: Some(1_000),
+            resolution: Some(Resolution::new(1920, 1080)),
+            duration: Some(90.0),
+            codec: Some("hevc".to_string()),
+            bitrate_kbps: Some(5_000),
+        };
+
+        ThumbnailCreator::print_missing_video_info_warnings(&VideoInfo::default(), "clip.mp4", "[1 / 1]");
+        ThumbnailCreator::print_missing_video_info_warnings(&full, "clip.mp4", "[1 / 1]");
+        quiet.print_verbose_video_info(&full);
+        verbose.print_verbose_video_info(&full);
+        verbose.print_verbose_video_info(&VideoInfo::default());
+    }
+}
+
+#[cfg(test)]
+mod test_thumbnail_run {
+    use super::*;
+
+    fn creator(root: PathBuf) -> ThumbnailCreator {
+        ThumbnailCreator {
+            config: Config {
+                cols_landscape: 3,
+                cols_portrait: 4,
+                dryrun: true,
+                font_size: 20,
+                overwrite: false,
+                padding_landscape: 8,
+                padding_portrait: 16,
+                quality: 2,
+                recurse: false,
+                rows_landscape: 4,
+                rows_portrait: 3,
+                scale_width: 480,
+                verbose: true,
+            },
+            root,
+            escaped_font: "font.ttf".to_string(),
+            quality_str: "2".to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_directory_finishes_without_work() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+
+        creator(temp_directory.path().to_path_buf()).run()
+    }
+
+    #[test]
+    fn existing_thumbnails_are_skipped_for_every_video() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let root = temp_directory.path().join("videos");
+        let screens = root.join(SCREENS_DIR_NAME);
+        std::fs::create_dir_all(&screens)?;
+        for stem in ["first", "second"] {
+            std::fs::write(root.join(format!("{stem}.mp4")), b"not a real video")?;
+            std::fs::write(screens.join(format!("{stem}.jpg")), b"existing")?;
+        }
+
+        creator(root).run()?;
+
+        assert_eq!(std::fs::read(screens.join("first.jpg"))?, b"existing");
+        assert_eq!(std::fs::read(screens.join("second.jpg"))?, b"existing");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_root_is_an_error() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+
+        assert!(creator(temp_directory.path().join("missing")).run().is_err());
     }
 }
 
