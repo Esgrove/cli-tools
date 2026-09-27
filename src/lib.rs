@@ -585,9 +585,10 @@ pub const fn available_disk_space(_path: &Path) -> Option<u64> {
 
 /// Check if entry should be skipped (hidden or system directory).
 /// Combines `is_hidden` and `is_system_directory` checks.
+/// The walk root itself is never skipped, since the user asked for it explicitly.
 #[must_use]
 pub fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
-    is_hidden(entry) || is_system_directory(entry)
+    entry.depth() > 0 && (is_hidden(entry) || is_system_directory(entry))
 }
 
 /// Check if a path should be skipped (hidden or system directory).
@@ -1297,6 +1298,25 @@ mod system_directory_tests {
                 assert!(!should_skip_entry(&entry));
             }
         }
+    }
+
+    #[test]
+    fn should_skip_entry_keeps_hidden_walk_root() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let hidden_root = dir.path().join(".hidden_root");
+        let hidden_child = hidden_root.join(".hidden_child");
+        std::fs::create_dir_all(&hidden_child).expect("Failed to create hidden directories");
+        File::create(hidden_root.join("visible.txt")).expect("Failed to create file");
+
+        let visited: Vec<PathBuf> = WalkDir::new(&hidden_root)
+            .into_iter()
+            .filter_entry(|entry| !should_skip_entry(entry))
+            .map(|entry| entry.expect("Failed to read entry").into_path())
+            .collect();
+
+        assert!(visited.contains(&hidden_root));
+        assert!(visited.contains(&hidden_root.join("visible.txt")));
+        assert!(!visited.contains(&hidden_child));
     }
 
     #[test]
