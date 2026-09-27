@@ -54,8 +54,7 @@ pub struct PendingFile {
     /// When the entry was added to the database.
     #[allow(dead_code)]
     pub created_time: i64,
-    /// File's modification time (for detecting changes).
-    #[allow(dead_code)]
+    /// File's modification time when scanned, used to detect later changes.
     pub modified_time: Option<i64>,
 }
 
@@ -313,11 +312,7 @@ impl Database {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs() as i64);
 
-        let modified_time = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64);
+        let modified_time = file_modified_time(path);
 
         self.connection
             .execute(
@@ -383,11 +378,7 @@ impl Database {
 
         for (path, extension, info, action) in entries {
             let path_str = path.to_string_lossy();
-            let modified_time = std::fs::metadata(path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64);
+            let modified_time = file_modified_time(path);
 
             transaction
                 .execute(
@@ -603,6 +594,28 @@ impl Database {
                 transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![file.id])?;
                 removed_count += 1;
             }
+        }
+
+        transaction.commit()?;
+        Ok(removed_count)
+    }
+
+    /// Remove all pending files that were modified on disk after they were scanned.
+    ///
+    /// Their stored metadata no longer describes the file, so they need a rescan.
+    /// Returns the number of files removed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn remove_changed_files(&mut self) -> Result<usize> {
+        let files = self.get_pending_files(&PendingFileFilter::default())?;
+        let mut removed_count = 0;
+
+        let transaction = self.connection.transaction()?;
+
+        for file in files.iter().filter(|file| file.is_changed_on_disk()) {
+            transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![file.id])?;
+            removed_count += 1;
         }
 
         transaction.commit()?;
@@ -985,6 +998,15 @@ impl PendingFile {
             warning: None,
         }
     }
+
+    /// Whether the file on disk has a different modification time than when it was scanned.
+    ///
+    /// Entries without a stored time, or files whose time cannot be read, count as unchanged.
+    pub fn is_changed_on_disk(&self) -> bool {
+        self.modified_time
+            .zip(file_modified_time(&self.full_path))
+            .is_some_and(|(stored, current)| stored != current)
+    }
 }
 
 impl std::fmt::Display for DatabaseStats {
@@ -996,6 +1018,15 @@ impl std::fmt::Display for DatabaseStats {
         writeln!(f, "  To subtitle mux: {}", self.subtitle_mux_count)?;
         write!(f, "  Total size:     {}", cli_tools::format_size(self.total_size))
     }
+}
+
+/// File modification time in whole seconds since the Unix epoch, or `None` if it cannot be read.
+fn file_modified_time(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
 }
 
 impl std::fmt::Display for ExtensionStats {
@@ -2757,6 +2788,74 @@ mod test_pending_file_lookup_and_removal {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].full_path, existing_path);
         assert!(remaining[0].modified_time.is_some());
+    }
+
+    /// Move the file modification time one hour into the past.
+    fn backdate_modified_time(path: &Path) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("Failed to open test file");
+        let modified = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .expect("Failed to read modification time");
+        file.set_modified(modified - std::time::Duration::from_secs(3600))
+            .expect("Failed to set modification time");
+    }
+
+    #[test]
+    fn remove_changed_files_drops_entries_modified_after_scan() {
+        let temporary_directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let unchanged_path = temporary_directory.path().join("unchanged.mkv");
+        let changed_path = temporary_directory.path().join("changed.mkv");
+        std::fs::write(&unchanged_path, b"video").expect("Failed to create unchanged test file");
+        std::fs::write(&changed_path, b"video").expect("Failed to create changed test file");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = video_info();
+        database
+            .upsert_pending_file(&unchanged_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert unchanged path");
+        database
+            .upsert_pending_file(&changed_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert changed path");
+
+        backdate_modified_time(&changed_path);
+
+        assert_eq!(
+            database.remove_changed_files().expect("Failed to remove changed files"),
+            1
+        );
+        let remaining = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to query remaining files");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].full_path, unchanged_path);
+    }
+
+    #[test]
+    fn entries_without_stored_or_readable_time_count_as_unchanged() {
+        let temporary_directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let existing_path = temporary_directory.path().join("existing.mkv");
+        std::fs::write(&existing_path, b"video").expect("Failed to create test file");
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        database
+            .upsert_pending_file(&existing_path, "mkv", &video_info(), PendingAction::Remux)
+            .expect("Failed to insert pending file");
+        let mut pending = database
+            .get_pending_file(&existing_path)
+            .expect("Failed to query pending file")
+            .expect("Expected pending file");
+
+        assert!(!pending.is_changed_on_disk());
+
+        pending.modified_time = None;
+        backdate_modified_time(&existing_path);
+        assert!(!pending.is_changed_on_disk());
+
+        pending.modified_time = Some(0);
+        pending.full_path = temporary_directory.path().join("missing.mkv");
+        assert!(!pending.is_changed_on_disk());
     }
 }
 

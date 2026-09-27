@@ -495,6 +495,18 @@ impl VideoConvert {
             println!("{}", format!("Removed {removed} missing files from database").yellow());
         }
 
+        let changed = database.remove_changed_files()?;
+        if changed > 0 {
+            println!(
+                "{}",
+                format!(
+                    "Removed {} from database, scan again to process them",
+                    cli_tools::count_label(changed, "file changed since the scan", "files changed since the scan")
+                )
+                .yellow()
+            );
+        }
+
         // Build filter from config
         let filter = self.config.db_filter.clone();
 

@@ -270,6 +270,9 @@ The filter options like
 (`--bitrate`, `--max-bitrate`, `--min-duration`, `--extension`, `--count`)
 work for both normal scanning mode and database mode (`--from-db`, `--show-db`).
 
+With `--from-db`, pending files that were deleted or modified since the scan are dropped from the database,
+so a changed file is only processed again after a new scan.
+
 ### Database Commands
 
 ```shell
