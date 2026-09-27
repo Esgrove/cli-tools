@@ -672,3 +672,332 @@ mod test_client_without_network {
         assert!(list_error.to_string().contains("Not authenticated"));
     }
 }
+
+#[cfg(test)]
+mod test_client_with_local_server {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    /// A canned reply for every request whose path starts with the given prefix.
+    struct Route {
+        path: &'static str,
+        status: u16,
+        body: &'static str,
+    }
+
+    const fn route(path: &'static str, status: u16, body: &'static str) -> Route {
+        Route { path, status, body }
+    }
+
+    /// Serve the routes on a local port for the rest of the test and return a client pointed at it.
+    ///
+    /// Paths without a route get a 404 reply.
+    async fn client_for(routes: Vec<Route>) -> QBittorrentClient {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("should bind a local port");
+        let port = listener.local_addr().expect("should have a local address").port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let request = read_request(&mut stream).await;
+                let path = request.split_whitespace().nth(1).unwrap_or_default();
+                let (status, body) = routes
+                    .iter()
+                    .find(|route| path.starts_with(route.path))
+                    .map_or((404, ""), |route| (route.status, route.body));
+                let response = format!(
+                    "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.ok();
+                stream.shutdown().await.ok();
+            }
+        });
+        QBittorrentClient::new("127.0.0.1", port)
+    }
+
+    /// Read one full HTTP request, headers and body, so the connection closes cleanly.
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(chunk.get(..read).unwrap_or_default());
+            if let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(buffer.get(..header_end).unwrap_or_default()).to_lowercase();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if buffer.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&buffer).into_owned()
+    }
+
+    /// Client that skips the login request, for testing one endpoint at a time.
+    async fn authenticated_client_for(routes: Vec<Route>) -> QBittorrentClient {
+        let mut client = client_for(routes).await;
+        client.authenticated = true;
+        client
+    }
+
+    const TORRENT_LIST: &str = r#"[
+        {"hash":"ABC","name":"First","added_on":1,"completion_on":-1,"progress":0.5,"ratio":0.0,"save_path":"/a","size":10,"tags":""},
+        {"hash":"def","name":"Second","added_on":2,"completion_on":3,"progress":1.0,"ratio":1.5,"save_path":"/b","size":20,"tags":"tag"}
+    ]"#;
+
+    const TORRENT_FILES: &str =
+        r#"[{"index":0,"name":"Folder/one.mkv","priority":1},{"index":1,"name":"Folder/two.nfo","priority":0}]"#;
+
+    #[tokio::test]
+    async fn successful_session_covers_every_endpoint() -> anyhow::Result<()> {
+        let mut client = client_for(vec![
+            route("/api/v2/auth/login", 200, "Ok."),
+            route("/api/v2/auth/logout", 200, ""),
+            route("/api/v2/app/version", 200, "v5.0.0"),
+            route("/api/v2/app/webapiVersion", 200, "2.11.2"),
+            route("/api/v2/torrents/add", 200, "Ok."),
+            route("/api/v2/torrents/info", 200, TORRENT_LIST),
+            route("/api/v2/torrents/files", 200, TORRENT_FILES),
+            route("/api/v2/torrents/filePrio", 200, ""),
+            route("/api/v2/torrents/renameFile", 200, ""),
+            route("/api/v2/torrents/renameFolder", 200, ""),
+            route("/api/v2/torrents/rename", 200, ""),
+        ])
+        .await;
+
+        client.login("user", "password").await?;
+        assert!(client.authenticated);
+        assert_eq!(client.get_app_version().await?, "v5.0.0");
+        assert_eq!(client.get_api_version().await?, "2.11.2");
+
+        client
+            .add_torrent(AddTorrentParams {
+                torrent_path: "downloads/example.torrent".to_string(),
+                torrent_bytes: b"d4:infod4:name7:exampleee".to_vec(),
+                save_path: Some("/downloads".to_string()),
+                category: Some("movies".to_string()),
+                tags: Some("new".to_string()),
+                rename: Some("Example".to_string()),
+                skip_checking: true,
+                paused: true,
+                content_layout: Some("Original".to_string()),
+            })
+            .await?;
+
+        let torrents = client.get_torrent_list().await?;
+        assert_eq!(torrents.len(), 2);
+        assert_eq!(torrents["abc"].name, "First");
+        assert!(!torrents["abc"].is_completed());
+        assert!(torrents["def"].is_completed());
+
+        let files = client.get_torrent_files("abc").await?;
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[1].name, "Folder/two.nfo");
+        assert_eq!(files[1].priority, 0);
+
+        client.set_file_priorities("abc", &[1], 0).await?;
+        client.set_file_priorities("abc", &[], 0).await?;
+        client.rename_file("abc", "Folder/one.mkv", "Folder/One.mkv").await?;
+        client.rename_folder("abc", "Folder", "New Folder").await?;
+        client.set_torrent_name("abc", "New Name").await?;
+
+        client.logout().await?;
+        assert!(!client.authenticated);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_reports_wrong_credentials_and_unexpected_replies() {
+        let mut rejected = client_for(vec![route("/api/v2/auth/login", 200, "Fails.")]).await;
+        let mut forbidden = client_for(vec![route("/api/v2/auth/login", 403, "")]).await;
+        let mut broken = client_for(vec![route("/api/v2/auth/login", 500, "boom")]).await;
+
+        let rejected_error = rejected.login("user", "wrong").await.expect_err("should fail");
+        let forbidden_error = forbidden.login("user", "wrong").await.expect_err("should fail");
+        let broken_error = broken.login("user", "password").await.expect_err("should fail");
+
+        assert!(rejected_error.to_string().contains("Invalid username or password"));
+        assert!(forbidden_error.to_string().contains("Invalid username or password"));
+        assert!(broken_error.to_string().contains("HTTP 500"), "{broken_error}");
+        assert!(!rejected.authenticated);
+    }
+
+    #[tokio::test]
+    async fn add_torrent_maps_error_statuses() {
+        let invalid = authenticated_client_for(vec![route("/api/v2/torrents/add", 415, "")]).await;
+        let expired = authenticated_client_for(vec![route("/api/v2/torrents/add", 403, "")]).await;
+        let other = authenticated_client_for(vec![route("/api/v2/torrents/add", 500, "broken")]).await;
+
+        let invalid_error = invalid
+            .add_torrent(AddTorrentParams::default())
+            .await
+            .expect_err("should fail");
+        let expired_error = expired
+            .add_torrent(AddTorrentParams::default())
+            .await
+            .expect_err("should fail");
+        let other_error = other
+            .add_torrent(AddTorrentParams::default())
+            .await
+            .expect_err("should fail");
+
+        assert!(invalid_error.to_string().contains("not valid"));
+        assert!(expired_error.to_string().contains("session expired"));
+        assert!(other_error.to_string().contains("HTTP 500"), "{other_error}");
+    }
+
+    #[tokio::test]
+    async fn file_priorities_map_error_statuses() {
+        for (status, expected) in [
+            (400, "Invalid priority"),
+            (409, "metadata has not yet been downloaded"),
+            (403, "session expired"),
+            (404, "hash not found"),
+            (500, "HTTP 500"),
+        ] {
+            let client = authenticated_client_for(vec![Route {
+                path: "/api/v2/torrents/filePrio",
+                status,
+                body: "",
+            }])
+            .await;
+
+            let error = client
+                .set_file_priorities("abc", &[0, 2], 0)
+                .await
+                .expect_err("should fail");
+
+            assert!(error.to_string().contains(expected), "{status}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn renames_map_error_statuses() {
+        for (status, expected) in [
+            (400, "Missing or invalid parameters"),
+            (409, "already in use"),
+            (403, "session expired"),
+            (404, "hash not found"),
+            (500, "HTTP 500"),
+        ] {
+            let client = authenticated_client_for(vec![
+                Route {
+                    path: "/api/v2/torrents/renameFile",
+                    status,
+                    body: "",
+                },
+                Route {
+                    path: "/api/v2/torrents/renameFolder",
+                    status,
+                    body: "",
+                },
+            ])
+            .await;
+
+            let file_error = client.rename_file("abc", "old", "new").await.expect_err("should fail");
+            let folder_error = client
+                .rename_folder("abc", "old", "new")
+                .await
+                .expect_err("should fail");
+
+            assert!(file_error.to_string().contains(expected), "{status}: {file_error}");
+            assert!(folder_error.to_string().contains(expected), "{status}: {folder_error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn torrent_name_maps_error_statuses() {
+        for (status, expected) in [
+            (404, "hash not found"),
+            (409, "name is empty"),
+            (403, "session expired"),
+            (500, "HTTP 500"),
+        ] {
+            let client = authenticated_client_for(vec![Route {
+                path: "/api/v2/torrents/rename",
+                status,
+                body: "",
+            }])
+            .await;
+
+            let error = client.set_torrent_name("abc", "name").await.expect_err("should fail");
+
+            assert!(error.to_string().contains(expected), "{status}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn torrent_files_and_list_map_error_statuses_and_bad_json() {
+        let missing = authenticated_client_for(vec![route("/api/v2/torrents/files", 404, "")]).await;
+        let expired = authenticated_client_for(vec![
+            route("/api/v2/torrents/files", 403, ""),
+            route("/api/v2/torrents/info", 403, ""),
+        ])
+        .await;
+        let broken = authenticated_client_for(vec![
+            route("/api/v2/torrents/files", 500, "broken"),
+            route("/api/v2/torrents/info", 200, "not json"),
+        ])
+        .await;
+        let unauthenticated = client_for(Vec::new()).await;
+
+        assert!(
+            missing
+                .get_torrent_files("abc")
+                .await
+                .expect_err("should fail")
+                .to_string()
+                .contains("hash not found")
+        );
+        assert!(
+            expired
+                .get_torrent_files("abc")
+                .await
+                .expect_err("should fail")
+                .to_string()
+                .contains("session expired")
+        );
+        assert!(
+            expired
+                .get_torrent_list()
+                .await
+                .expect_err("should fail")
+                .to_string()
+                .contains("session expired")
+        );
+        assert!(
+            broken
+                .get_torrent_files("abc")
+                .await
+                .expect_err("should fail")
+                .to_string()
+                .contains("HTTP 500")
+        );
+        assert!(
+            broken
+                .get_torrent_list()
+                .await
+                .expect_err("should fail")
+                .to_string()
+                .contains("JSON")
+        );
+        assert!(
+            unauthenticated
+                .get_torrent_files("abc")
+                .await
+                .expect_err("should fail")
+                .to_string()
+                .contains("Not authenticated")
+        );
+    }
+}
