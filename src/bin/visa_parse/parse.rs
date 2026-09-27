@@ -17,7 +17,7 @@ use colored::Colorize;
 use encoding_rs::Encoding;
 use jiff::{Zoned, civil::Date};
 use regex::Regex;
-use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, RowNum, Workbook};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use walkdir::WalkDir;
 
@@ -92,9 +92,8 @@ static REPLACE_START: [&str; 11] = [
     "STOCKMANN",
 ];
 
-// TODO: move to user config
-// Non-DJ items
-static FILTER_PREFIXES: [&str; 82] = [
+// Non-DJ items left out of the DJ sheet unless the user config sets its own list.
+pub static DEFAULT_FILTER_PREFIXES: [&str; 82] = [
     "1BAR",
     "45 SPECIAL",
     "ALEPA",
@@ -282,7 +281,7 @@ pub fn visa_parse(config: &Config) -> Result<()> {
 
     if !config.print {
         write_to_csv(&items, &config.output_path)?;
-        write_to_excel(&items, &totals, &config.output_path)?;
+        write_to_excel(&items, &totals, &config.filter_prefixes, &config.output_path)?;
     }
 
     Ok(())
@@ -621,7 +620,12 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
 }
 
 /// Save parsed data to an Excel file.
-fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Path) -> Result<()> {
+fn write_to_excel(
+    items: &[VisaItem],
+    totals: &[(String, f64)],
+    filter_prefixes: &[String],
+    output_path: &Path,
+) -> Result<()> {
     let output_file = if output_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -650,16 +654,10 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     let dj_sheet = workbook.add_worksheet().set_name("DJ")?;
     let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
     dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
-    let mut row: RowNum = 1;
-    for item in items {
-        // Filter out common non-DJ items
-        if FILTER_PREFIXES.iter().any(|&prefix| item.name.starts_with(prefix)) {
-            continue;
-        }
+    for (row, item) in (1_u32..).zip(dj_items(items, filter_prefixes)) {
         dj_sheet.write_string(row, 0, item.finnish_date())?;
         dj_sheet.write_string(row, 1, item.name.clone())?;
         dj_sheet.write_string_with_format(row, 2, item.finnish_sum(), &sum_format)?;
-        row += 1;
     }
     dj_sheet.autofit();
 
@@ -679,6 +677,15 @@ fn write_to_excel(items: &[VisaItem], totals: &[(String, f64)], output_path: &Pa
     }
     workbook.save(output_file)?;
     Ok(())
+}
+
+/// Items whose name does not start with any of the filter prefixes.
+fn dj_items<'a>(items: &'a [VisaItem], filter_prefixes: &'a [String]) -> impl Iterator<Item = &'a VisaItem> {
+    items.iter().filter(|item| {
+        !filter_prefixes
+            .iter()
+            .any(|prefix| item.name.starts_with(prefix.as_str()))
+    })
 }
 
 #[cfg(test)]
@@ -1779,19 +1786,51 @@ mod test_clean_whitespaces_comprehensive {
 mod test_filter_prefixes {
     use super::*;
 
+    fn item(name: &str) -> VisaItem {
+        VisaItem {
+            date: Date::new(2024, 3, 1).expect("valid date"),
+            name: name.to_string(),
+            sum: 10.0,
+        }
+    }
+
     #[test]
     fn filter_prefixes_contains_common_items() {
-        assert!(FILTER_PREFIXES.contains(&"WOLT"));
-        assert!(FILTER_PREFIXES.contains(&"ALEPA"));
-        assert!(FILTER_PREFIXES.contains(&"K-MARKET"));
-        assert!(FILTER_PREFIXES.contains(&"STOCKMANN"));
-        assert!(FILTER_PREFIXES.contains(&"EPASSI"));
+        assert!(DEFAULT_FILTER_PREFIXES.contains(&"WOLT"));
+        assert!(DEFAULT_FILTER_PREFIXES.contains(&"ALEPA"));
+        assert!(DEFAULT_FILTER_PREFIXES.contains(&"K-MARKET"));
+        assert!(DEFAULT_FILTER_PREFIXES.contains(&"STOCKMANN"));
+        assert!(DEFAULT_FILTER_PREFIXES.contains(&"EPASSI"));
     }
 
     #[test]
     fn filter_prefixes_is_not_empty() {
-        assert!(!FILTER_PREFIXES.is_empty());
-        assert!(FILTER_PREFIXES.len() > 50);
+        assert!(!DEFAULT_FILTER_PREFIXES.is_empty());
+        assert!(DEFAULT_FILTER_PREFIXES.len() > 50);
+    }
+
+    #[test]
+    fn dj_items_leaves_out_names_starting_with_a_prefix() {
+        let items = [item("WOLT HELSINKI"), item("BEATPORT"), item("K-MARKET KALLIO")];
+        let prefixes = ["WOLT".to_string(), "K-MARKET".to_string()];
+
+        let names: Vec<&str> = dj_items(&items, &prefixes).map(|item| item.name.as_str()).collect();
+
+        assert_eq!(names, vec!["BEATPORT"]);
+    }
+
+    #[test]
+    fn dj_items_keeps_everything_without_prefixes() {
+        let items = [item("WOLT"), item("BEATPORT")];
+
+        assert_eq!(dj_items(&items, &[]).count(), 2);
+    }
+
+    #[test]
+    fn dj_items_matches_only_at_the_start_of_the_name() {
+        let items = [item("PAYPAL WOLT")];
+
+        assert_eq!(dj_items(&items, &["WOLT".to_string()]).count(), 1);
     }
 }
 
@@ -2049,7 +2088,7 @@ mod test_write_to_excel {
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let totals = calculate_totals_for_each_name(&items());
 
-        write_to_excel(&items(), &totals, directory.path()).expect("the workbook should be written");
+        write_to_excel(&items(), &totals, &[], directory.path()).expect("the workbook should be written");
 
         let output = directory.path().join("VISA.xlsx");
         let size = std::fs::metadata(&output).expect("the workbook should exist").len();
@@ -2062,7 +2101,7 @@ mod test_write_to_excel {
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let output = directory.path().join("purchases.xlsx");
 
-        write_to_excel(&items(), &[], &output).expect("the workbook should be written");
+        write_to_excel(&items(), &[], &[], &output).expect("the workbook should be written");
 
         assert!(output.exists(), "the given file name should be used");
         assert!(!directory.path().join("VISA.xlsx").exists());
@@ -2072,7 +2111,7 @@ mod test_write_to_excel {
     fn no_items_is_an_error_because_the_sheet_needs_a_first_date() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
 
-        let error = write_to_excel(&[], &[], directory.path()).expect_err("an empty workbook should fail");
+        let error = write_to_excel(&[], &[], &[], directory.path()).expect_err("an empty workbook should fail");
 
         assert!(error.to_string().contains("without items"));
     }
@@ -2090,6 +2129,7 @@ mod test_visa_parse {
             print,
             number: 3,
             verbose: false,
+            filter_prefixes: Vec::new(),
         }
     }
 
@@ -2135,6 +2175,7 @@ mod test_visa_parse {
             print: true,
             number: 3,
             verbose: false,
+            filter_prefixes: Vec::new(),
         };
 
         let error = visa_parse(&config).expect_err("an empty directory should fail");

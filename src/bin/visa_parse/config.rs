@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
 use crate::VisaParseArgs;
+use crate::parse::DEFAULT_FILTER_PREFIXES;
 
 /// Default number of totals to display in verbose output.
 pub const DEFAULT_NUM_TOTALS: usize = 20;
@@ -25,6 +26,9 @@ pub struct VisaParseConfig {
     /// Print verbose output.
     #[serde(default)]
     pub verbose: bool,
+    /// Name prefixes left out of the DJ sheet, replacing the built-in list when set.
+    #[serde(default)]
+    pub filter_prefixes: Option<Vec<String>>,
 }
 
 /// Wrapper needed for parsing the config file section.
@@ -77,6 +81,8 @@ pub struct Config {
     pub number: usize,
     /// Print verbose output.
     pub verbose: bool,
+    /// Uppercase name prefixes left out of the DJ sheet.
+    pub filter_prefixes: Vec<String>,
 }
 
 impl Config {
@@ -105,12 +111,19 @@ impl Config {
         // Number: CLI value takes priority, then config, then default
         let number = args.number.or(user_config.number).unwrap_or(DEFAULT_NUM_TOTALS);
 
+        // Item names are uppercase, so the prefixes are too
+        let filter_prefixes = user_config.filter_prefixes.as_ref().map_or_else(
+            || DEFAULT_FILTER_PREFIXES.iter().map(ToString::to_string).collect(),
+            |prefixes| prefixes.iter().map(|prefix| prefix.to_uppercase()).collect(),
+        );
+
         Ok(Self {
             input_path,
             output_path,
             print,
             number,
             verbose,
+            filter_prefixes,
         })
     }
 }
@@ -169,6 +182,19 @@ number = 15
     }
 
     #[test]
+    fn from_toml_str_parses_filter_prefixes() {
+        let toml = r#"
+[visaparse]
+filter_prefixes = ["WOLT", "ALKO"]
+"#;
+        let config = VisaParseConfig::from_toml_str(toml).expect("should parse config");
+        assert_eq!(
+            config.filter_prefixes,
+            Some(vec!["WOLT".to_string(), "ALKO".to_string()])
+        );
+    }
+
+    #[test]
     fn from_toml_str_invalid_toml_returns_error() {
         let toml = "this is not valid toml {{{";
         let result = VisaParseConfig::from_toml_str(toml);
@@ -218,7 +244,12 @@ mod test_config_from_args_and_config {
 
     /// Helper to create a user config with specified values.
     fn make_user_config(number: Option<usize>, print: bool, verbose: bool) -> VisaParseConfig {
-        VisaParseConfig { number, print, verbose }
+        VisaParseConfig {
+            number,
+            print,
+            verbose,
+            filter_prefixes: None,
+        }
     }
 
     #[test]
@@ -336,6 +367,42 @@ mod test_config_from_args_and_config {
         assert_eq!(config.number, DEFAULT_NUM_TOTALS);
         assert!(!config.print);
         assert!(!config.verbose);
+    }
+
+    #[test]
+    fn default_filter_prefixes_are_used_without_user_list() {
+        let args = make_args(Some(PathBuf::from(".")), None, false, None, false);
+
+        let config = Config::from_args_and_config(&args, &VisaParseConfig::default()).expect("should create config");
+
+        assert_eq!(config.filter_prefixes.len(), DEFAULT_FILTER_PREFIXES.len());
+        assert!(config.filter_prefixes.iter().any(|prefix| prefix == "WOLT"));
+    }
+
+    #[test]
+    fn user_filter_prefixes_replace_defaults_in_uppercase() {
+        let args = make_args(Some(PathBuf::from(".")), None, false, None, false);
+        let user_config = VisaParseConfig {
+            filter_prefixes: Some(vec!["wolt".to_string(), "Bar ".to_string()]),
+            ..VisaParseConfig::default()
+        };
+
+        let config = Config::from_args_and_config(&args, &user_config).expect("should create config");
+
+        assert_eq!(config.filter_prefixes, vec!["WOLT", "BAR "]);
+    }
+
+    #[test]
+    fn empty_user_filter_prefixes_disable_filtering() {
+        let args = make_args(Some(PathBuf::from(".")), None, false, None, false);
+        let user_config = VisaParseConfig {
+            filter_prefixes: Some(Vec::new()),
+            ..VisaParseConfig::default()
+        };
+
+        let config = Config::from_args_and_config(&args, &user_config).expect("should create config");
+
+        assert!(config.filter_prefixes.is_empty());
     }
 
     #[test]
