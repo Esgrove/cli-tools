@@ -1409,7 +1409,6 @@ mod test_excluded_file_priorities {
         TorrentFileItem {
             index,
             name: format!("file-{index}.bin"),
-            size: 1024,
             priority,
         }
     }

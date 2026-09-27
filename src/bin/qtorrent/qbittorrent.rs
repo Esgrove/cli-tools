@@ -70,15 +70,12 @@ pub struct TorrentListItem {
 }
 
 /// File info from the qBittorrent API `/torrents/files` endpoint.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct TorrentFileItem {
     /// File index.
     pub index: usize,
     /// File name (including relative path within the torrent).
     pub name: String,
-    /// File size in bytes.
-    pub size: i64,
     /// File priority (0 = do not download, 1 = normal, 6 = high, 7 = max).
     pub priority: u8,
 }
@@ -113,13 +110,6 @@ impl QBittorrentClient {
             base_url,
             authenticated: false,
         }
-    }
-
-    /// Check if the client is authenticated.
-    #[allow(dead_code)]
-    #[must_use]
-    pub const fn is_authenticated(&self) -> bool {
-        self.authenticated
     }
 
     /// Authenticate with the qBittorrent `WebUI`.
@@ -286,29 +276,6 @@ impl QBittorrentClient {
 
         let version = response.text().await.context("Failed to read app version")?;
         Ok(version)
-    }
-
-    /// Get the default save path from qBittorrent preferences.
-    ///
-    /// # Errors
-    /// Returns an error if the request fails or if not authenticated.
-    #[allow(dead_code)]
-    pub async fn get_default_save_path(&self) -> Result<String> {
-        if !self.authenticated {
-            bail!("Not authenticated. Call login() first.");
-        }
-
-        let url = self.build_url("app/defaultSavePath");
-
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to get default save path")?;
-
-        let path = response.text().await.context("Failed to read default save path")?;
-        Ok(path)
     }
 
     /// Set file priorities for a torrent.
@@ -668,7 +635,7 @@ mod test_client_without_network {
     #[test]
     fn constructs_expected_base_url_and_api_urls() {
         let client = QBittorrentClient::new("localhost", 8080);
-        assert!(!client.is_authenticated());
+        assert!(!client.authenticated);
         assert_eq!(client.base_url, "http://localhost:8080");
         assert_eq!(
             client.build_url("auth/login"),
@@ -680,7 +647,7 @@ mod test_client_without_network {
     async fn logout_is_noop_when_unauthenticated() -> anyhow::Result<()> {
         let mut client = QBittorrentClient::new("localhost", 8080);
         client.logout().await?;
-        assert!(!client.is_authenticated());
+        assert!(!client.authenticated);
         Ok(())
     }
 
@@ -691,10 +658,6 @@ mod test_client_without_network {
             .add_torrent(AddTorrentParams::default())
             .await
             .expect_err("adding without login should fail");
-        let path_error = client
-            .get_default_save_path()
-            .await
-            .expect_err("reading path without login should fail");
         let priority_error = client
             .set_file_priorities("hash", &[0], 1)
             .await
@@ -705,7 +668,6 @@ mod test_client_without_network {
             .expect_err("listing without login should fail");
 
         assert!(add_error.to_string().contains("Not authenticated"));
-        assert!(path_error.to_string().contains("Not authenticated"));
         assert!(priority_error.to_string().contains("Not authenticated"));
         assert!(list_error.to_string().contains("Not authenticated"));
     }

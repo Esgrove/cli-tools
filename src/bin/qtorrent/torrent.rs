@@ -283,7 +283,7 @@ impl FileFilter {
     }
 
     /// Check if a file should be excluded. Returns the reason if excluded.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn should_exclude(&self, file: &FileInfo<'_>) -> Option<String> {
         self.should_exclude_with_image_count(file, usize::MAX)
