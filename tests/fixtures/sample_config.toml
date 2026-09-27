@@ -88,6 +88,14 @@ exclude = ["skip1", "skip2"]
 extensions = ["mp4", "mkv", "avi"]
 sort = "bitrate"
 
+[video_convert.bitrate_tiers]
+720p = 4000
+720p_high_fps = 6000
+1080p = 8000
+1080p_high_fps = 12000
+1440p = 16000
+1440p_high_fps = 24000
+
 [resolution]
 debug = false
 delete_limit = 500

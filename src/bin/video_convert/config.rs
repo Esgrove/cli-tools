@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::DatabaseMode;
 use crate::SortOrder;
 use crate::VideoConvertArgs;
+use crate::bitrate_limit::{BitrateTiersConfig, MinimumBitrate};
 use crate::database::PendingFileFilter;
 
 /// Audio languages preserved by movie mode.
@@ -47,6 +48,8 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     bitrate: Option<u64>,
     #[serde(default)]
+    bitrate_tiers: BitrateTiersConfig,
+    #[serde(default)]
     max_bitrate: Option<u64>,
     #[serde(default)]
     min_duration: Option<f64>,
@@ -81,7 +84,6 @@ pub struct VideoConvertConfig {
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug, Default)]
 pub struct Config {
-    pub(crate) bitrate_limit: u64,
     pub(crate) convert_all: bool,
     pub(crate) convert_other: bool,
     pub(crate) count: Option<usize>,
@@ -96,6 +98,7 @@ pub struct Config {
     pub(crate) include: Vec<String>,
     pub(crate) max_bitrate: Option<u64>,
     pub(crate) max_duration: Option<f64>,
+    pub(crate) min_bitrate: MinimumBitrate,
     pub(crate) min_duration: Option<f64>,
     pub(crate) min_resolution: Option<u32>,
     pub(crate) movie_mode: bool,
@@ -175,8 +178,10 @@ impl Config {
         };
 
         // Merge filter values. CLI args take priority when they are optional.
-        // The configured bitrate overrides the CLI value because Clap always supplies a default.
-        let bitrate_limit = user_config.bitrate.unwrap_or(args.bitrate);
+        let min_bitrate = args.bitrate.or(user_config.bitrate).map_or_else(
+            || MinimumBitrate::Tiered(user_config.bitrate_tiers.resolve()),
+            MinimumBitrate::Fixed,
+        );
         let max_bitrate = args.max_bitrate.or(user_config.max_bitrate);
         let min_duration = args.min_duration.or(user_config.min_duration);
         let max_duration = args.max_duration.or(user_config.max_duration);
@@ -195,7 +200,7 @@ impl Config {
         let db_filter = PendingFileFilter {
             action: None,
             extensions: extensions.clone(),
-            min_bitrate: Some(bitrate_limit),
+            min_bitrate: Some(min_bitrate),
             max_bitrate,
             min_duration,
             max_duration,
@@ -204,7 +209,6 @@ impl Config {
         };
 
         Ok(Self {
-            bitrate_limit,
             convert_all,
             convert_other,
             count,
@@ -219,6 +223,7 @@ impl Config {
             include,
             max_bitrate,
             max_duration,
+            min_bitrate,
             min_duration,
             min_resolution,
             movie_mode: args.movie,
@@ -465,7 +470,7 @@ mod config_default_resolution_tests {
         let config = resolve_config(&[], VideoConvertConfig::default());
         let expected_path = cli_tools::resolve_input_path(None).expect("current directory should resolve");
 
-        assert_eq!(config.bitrate_limit, 8000);
+        assert_eq!(config.min_bitrate, MinimumBitrate::default());
         assert!(!config.convert_all);
         assert!(!config.convert_other);
         assert_eq!(config.count, None);
@@ -492,7 +497,7 @@ mod config_default_resolution_tests {
 
         assert!(config.db_filter.action.is_none());
         assert_eq!(config.db_filter.extensions, config.extensions);
-        assert_eq!(config.db_filter.min_bitrate, Some(config.bitrate_limit));
+        assert_eq!(config.db_filter.min_bitrate, Some(config.min_bitrate));
         assert_eq!(config.db_filter.max_bitrate, config.max_bitrate);
         assert_eq!(config.db_filter.min_duration, config.min_duration);
         assert_eq!(config.db_filter.max_duration, config.max_duration);
@@ -569,7 +574,7 @@ mod config_cli_resolution_tests {
             VideoConvertConfig::default(),
         );
 
-        assert_eq!(config.bitrate_limit, 9000);
+        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(9000));
         assert_eq!(config.max_bitrate, Some(50000));
         assert_eq!(config.min_duration, Some(60.0));
         assert_eq!(config.max_duration, Some(7200.0));
@@ -592,7 +597,7 @@ mod config_cli_resolution_tests {
         assert_eq!(config.database_mode, Some(DatabaseMode::Process));
 
         assert_eq!(config.db_filter.extensions, config.extensions);
-        assert_eq!(config.db_filter.min_bitrate, Some(9000));
+        assert_eq!(config.db_filter.min_bitrate, Some(MinimumBitrate::Fixed(9000)));
         assert_eq!(config.db_filter.max_bitrate, Some(50000));
         assert_eq!(config.db_filter.min_duration, Some(60.0));
         assert_eq!(config.db_filter.max_duration, Some(7200.0));
@@ -646,7 +651,7 @@ mod config_cli_resolution_tests {
             user_config,
         );
 
-        assert_eq!(config.bitrate_limit, 7000);
+        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(7000));
         assert_eq!(config.count, Some(4));
         assert_eq!(config.display_limit, None);
         assert_eq!(config.exclude, ["CliExclude", "Shared", "ConfigExclude"]);
@@ -686,10 +691,11 @@ mod config_user_resolution_tests {
             recurse: true,
             sort: Some(SortOrder::ResolutionAsc),
             verbose: true,
+            ..VideoConvertConfig::default()
         };
         let config = resolve_config(&[], user_config);
 
-        assert_eq!(config.bitrate_limit, 6500);
+        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(6500));
         assert!(config.convert_all);
         assert!(config.convert_other);
         assert_eq!(config.count, Some(3));
@@ -707,6 +713,59 @@ mod config_user_resolution_tests {
         assert!(config.recurse);
         assert_eq!(config.sort, SortOrder::ResolutionAsc);
         assert!(config.verbose);
+    }
+}
+
+#[cfg(test)]
+mod config_minimum_bitrate_resolution_tests {
+    use super::config_test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn cli_bitrate_overrides_user_bitrate() {
+        let user_config = VideoConvertConfig {
+            bitrate: Some(7000),
+            ..VideoConvertConfig::default()
+        };
+        let config = resolve_config(&["--bitrate", "5000"], user_config);
+
+        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(5000));
+    }
+
+    #[test]
+    fn user_bitrate_overrides_tiers() {
+        let user_config = VideoConvertConfig::from_toml_str(
+            r#"
+[video_convert]
+bitrate = 7000
+
+[video_convert.bitrate_tiers]
+"720p" = 3000
+"#,
+        )
+        .expect("bitrate settings should parse");
+        let config = resolve_config(&[], user_config);
+
+        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(7000));
+    }
+
+    #[test]
+    fn user_tiers_override_default_tiers() {
+        let user_config = VideoConvertConfig::from_toml_str(
+            r#"
+[video_convert.bitrate_tiers]
+"720p" = 3000
+1440p_high_fps = 30000
+"#,
+        )
+        .expect("bitrate tiers should parse");
+        let config = resolve_config(&[], user_config);
+
+        assert_eq!(config.min_bitrate.threshold(1280, 720, 25.0), 3000);
+        assert_eq!(config.min_bitrate.threshold(1280, 720, 60.0), 6000);
+        assert_eq!(config.min_bitrate.threshold(1920, 1080, 24.0), 8000);
+        assert_eq!(config.min_bitrate.threshold(3840, 2160, 60.0), 30000);
+        assert_eq!(config.db_filter.min_bitrate, Some(config.min_bitrate));
     }
 }
 

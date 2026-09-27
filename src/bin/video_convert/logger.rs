@@ -61,7 +61,7 @@ impl FileLogger {
             Self::timestamp(),
             config.path.display()
         );
-        let _ = writeln!(self.writer, "  bitrate_limit: {}", config.bitrate_limit);
+        let _ = writeln!(self.writer, "  min_bitrate: {}", config.min_bitrate);
         let _ = writeln!(self.writer, "  convert_all: {}", config.convert_all);
         let _ = writeln!(self.writer, "  convert_other: {}", config.convert_other);
         if !config.include.is_empty() {
@@ -243,6 +243,7 @@ impl FileLogger {
 #[cfg(test)]
 mod test_file_logger {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
@@ -275,7 +276,6 @@ mod test_file_logger {
     fn logs_complete_initial_configuration() {
         let (log_file, mut logger) = create_logger();
         let config = Config {
-            bitrate_limit: 6_000,
             convert_all: true,
             convert_other: true,
             count: Some(12),
@@ -284,6 +284,7 @@ mod test_file_logger {
             exclude: vec!["sample".to_string()],
             extensions: vec!["mp4".to_string(), "mkv".to_string()],
             include: vec!["movie".to_string()],
+            min_bitrate: MinimumBitrate::Fixed(6_000),
             movie_mode: true,
             overwrite: true,
             path: PathBuf::from("videos"),
@@ -296,7 +297,7 @@ mod test_file_logger {
         let contents = read_log(&log_file, logger);
 
         assert!(contents.contains("INIT \"videos\""));
-        assert!(contents.contains("bitrate_limit: 6000"));
+        assert!(contents.contains("min_bitrate: 6000 kbps"));
         assert!(contents.contains("convert_all: true"));
         assert!(contents.contains("convert_other: true"));
         assert!(contents.contains("include: [\"movie\"]"));

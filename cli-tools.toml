@@ -202,7 +202,8 @@ replace = [
 # Recurse into subdirectories
 # recurse = false
 
-# Skip files with bitrate lower than this threshold (kbps)
+# Skip files with bitrate lower than this threshold (kbps).
+# Setting this uses one limit for all files instead of the bitrate_tiers defaults.
 # bitrate = 8000
 
 # Maximum bitrate in kbps (files above this are skipped)
@@ -235,6 +236,16 @@ replace = [
 # - "impact" (potential savings: bitrate / fps * duration, highest first)
 # - "name" (alphabetical)
 # sort = "bitrate"
+
+# Minimum bitrate (kbps) by resolution tier, used when bitrate is not set.
+# Keys ending in _high_fps apply above 30 fps. Missing keys use the defaults shown.
+# [video_convert.bitrate_tiers]
+# 720p = 4000
+# 720p_high_fps = 6000
+# 1080p = 8000
+# 1080p_high_fps = 12000
+# 1440p = 16000
+# 1440p_high_fps = 24000
 
 [thumbnail]
 # Print commands without running them

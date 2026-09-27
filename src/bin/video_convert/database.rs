@@ -13,6 +13,7 @@ use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::SortOrder;
+use crate::bitrate_limit::MinimumBitrate;
 use crate::types::VideoInfo;
 
 /// Default database filename.
@@ -102,8 +103,8 @@ pub struct PendingFileFilter {
     pub action: Option<PendingAction>,
     /// Filter by file extensions.
     pub extensions: Vec<String>,
-    /// Minimum bitrate in kbps.
-    pub min_bitrate: Option<u64>,
+    /// Minimum bitrate.
+    pub min_bitrate: Option<MinimumBitrate>,
     /// Maximum bitrate in kbps.
     pub max_bitrate: Option<u64>,
     /// Minimum duration in seconds.
@@ -457,11 +458,10 @@ impl Database {
 
         // Bitrate limits only apply to conversions, not remuxes
         if let Some(min_bitrate) = filter.min_bitrate {
-            params_vec.push(Box::new(min_bitrate as i64));
+            let threshold = min_bitrate.sql_threshold(&mut params_vec);
             conditions.push(format!(
-                "(action != '{}' OR bitrate_kbps >= ?{})",
+                "(action != '{}' OR bitrate_kbps >= {threshold})",
                 PendingAction::Convert.as_str(),
-                params_vec.len()
             ));
         }
 
@@ -1247,7 +1247,7 @@ mod tests {
 
         let high_bitrate = database
             .get_pending_files(&PendingFileFilter {
-                min_bitrate: Some(10000),
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
                 ..Default::default()
             })
             .expect("Failed to get files");
@@ -1541,7 +1541,7 @@ mod tests {
             .get_pending_files(&PendingFileFilter {
                 action: Some(PendingAction::Convert),
                 extensions: vec!["mp4".to_string()],
-                min_bitrate: Some(10000),
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
                 ..Default::default()
             })
             .expect("Failed to get files");
@@ -1551,7 +1551,7 @@ mod tests {
         // Filter: any file with high bitrate
         let filtered = database
             .get_pending_files(&PendingFileFilter {
-                min_bitrate: Some(10000),
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
                 ..Default::default()
             })
             .expect("Failed to get files");
@@ -1815,7 +1815,7 @@ mod tests {
         // Should exclude the low bitrate convert file but keep the low bitrate remux file
         let filtered = database
             .get_pending_files(&PendingFileFilter {
-                min_bitrate: Some(10000),
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
                 ..Default::default()
             })
             .expect("Failed to get files");
@@ -2377,6 +2377,99 @@ mod tests {
             .expect("Failed to remove missing");
 
         assert_eq!(removed, 0);
+    }
+}
+
+#[cfg(test)]
+mod test_tiered_bitrate_filter {
+    use super::*;
+
+    fn video_info(width: u32, height: u32, frames_per_second: f64, bitrate_kbps: u64) -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width,
+            height,
+            frames_per_second,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn sql_filter_matches_rust_thresholds() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let min_bitrate = MinimumBitrate::default();
+        let dimensions = [
+            (640, 480),
+            (1280, 720),
+            (720, 1280),
+            (1600, 900),
+            (1602, 901),
+            (1440, 1080),
+            (1920, 800),
+            (1920, 1080),
+            (2240, 1260),
+            (2242, 1261),
+            (2560, 1440),
+            (3840, 2160),
+        ];
+        let frame_rates = [23.976, 30.0, 50.0, 59.94];
+        let bitrates = [3500, 5000, 7000, 9000, 13000, 20000, 30000];
+
+        let mut expected = Vec::new();
+        for (width, height) in dimensions {
+            for frames_per_second in frame_rates {
+                for bitrate in bitrates {
+                    let path = PathBuf::from(format!("/test/{width}x{height}_{frames_per_second}_{bitrate}.mp4"));
+                    let info = video_info(width, height, frames_per_second, bitrate);
+                    database
+                        .upsert_pending_file(&path, "mp4", &info, PendingAction::Convert)
+                        .expect("Failed to insert");
+                    if bitrate >= min_bitrate.threshold(width, height, frames_per_second) {
+                        expected.push(path);
+                    }
+                }
+            }
+        }
+
+        let mut filtered: Vec<PathBuf> = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(min_bitrate),
+                ..Default::default()
+            })
+            .expect("Failed to get files")
+            .into_iter()
+            .map(|file| file.full_path)
+            .collect();
+        filtered.sort();
+        expected.sort();
+
+        assert_eq!(filtered, expected);
+    }
+
+    #[test]
+    fn tiered_filter_does_not_apply_to_remux() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/remux.mkv"),
+                "mkv",
+                &video_info(3840, 2160, 60.0, 1000),
+                PendingAction::Remux,
+            )
+            .expect("Failed to insert");
+
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(MinimumBitrate::default()),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+
+        assert_eq!(filtered.len(), 1);
     }
 }
 

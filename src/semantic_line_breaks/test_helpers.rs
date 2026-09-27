@@ -2,8 +2,8 @@
 //!
 //! Holds the builders the prose tests use to tokenize a line, build a paragraph, and reflow it,
 //! so the modules split out of the prose engine can share them.
-//! Also reads the integration fixtures, so every module that hardcodes words or characters
-//! can check that each of them is exercised by at least one fixture.
+//! Also reads the integration fixtures, so every module that hardcodes words
+//! or characters can check that each of them is exercised by at least one fixture.
 
 use std::fs;
 use std::path::{Path, PathBuf};

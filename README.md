@@ -222,7 +222,7 @@ Arguments:
 
 Options:
   -a, --all                          Convert all known video file types
-  -b, --bitrate <BITRATE>            Skip files with bitrate lower than LIMIT kbps [default: 8000]
+  -b, --bitrate <BITRATE>            Minimum bitrate in kbps, overrides resolution based defaults
   -c, --count <COUNT>                Limit the number of files to convert
   -d, --delete                       Delete input files immediately instead of moving to trash
   -p, --print                        Print commands without running them
@@ -253,6 +253,18 @@ Options:
 ```
 
 ### Filter Options
+
+Without `--bitrate`, the minimum bitrate depends on the resolution and framerate of each file:
+
+| Resolution      | Up to 30 fps | Above 30 fps |
+|-----------------|--------------|--------------|
+| 720p and below  | 4000 kbps    | 6000 kbps    |
+| 1080p           | 8000 kbps    | 12000 kbps   |
+| 1440p and above | 16000 kbps   | 24000 kbps   |
+
+Portrait and non 16:9 videos use the tier of the 16:9 frame they fit in.
+The tier values can be changed in the `[video_convert.bitrate_tiers]` config table.
+An explicit `--bitrate` or config `bitrate` uses one limit for all files instead.
 
 The filter options like
 (`--bitrate`, `--max-bitrate`, `--min-duration`, `--extension`, `--count`)

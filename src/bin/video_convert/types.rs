@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use colored::Colorize;
 use regex::Regex;
 
+use crate::bitrate_limit::MinimumBitrate;
 use crate::classification::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265};
 use crate::cli::SortOrder;
 use crate::config::{Config, TARGET_EXTENSION};
@@ -39,8 +40,8 @@ pub struct VideoInfo {
 /// Filter options for video file analysis.
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisFilter {
-    /// Minimum bitrate threshold in kbps.
-    pub(crate) min_bitrate: u64,
+    /// Minimum bitrate threshold.
+    pub(crate) min_bitrate: MinimumBitrate,
     /// Maximum bitrate threshold in kbps.
     pub(crate) max_bitrate: Option<u64>,
     /// Minimum duration threshold in seconds.
@@ -197,7 +198,7 @@ impl From<&Config> for AnalysisFilter {
     /// Create analysis filters from the resolved runtime configuration.
     fn from(config: &Config) -> Self {
         Self {
-            min_bitrate: config.bitrate_limit,
+            min_bitrate: config.min_bitrate,
             max_bitrate: config.max_bitrate,
             min_duration: config.min_duration,
             max_duration: config.max_duration,
@@ -1393,7 +1394,7 @@ mod analysis_filter_tests {
     #[test]
     fn filter_debug_format() {
         let filter = AnalysisFilter {
-            min_bitrate: 8000,
+            min_bitrate: MinimumBitrate::Fixed(8000),
             max_bitrate: Some(50000),
             min_duration: Some(60.0),
             max_duration: Some(7200.0),

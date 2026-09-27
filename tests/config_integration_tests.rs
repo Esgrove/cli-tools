@@ -97,6 +97,20 @@ fn video_convert_section_has_expected_structure() {
     assert!(video_convert.get("min_duration").is_some());
     assert!(video_convert.get("max_duration").is_some());
     assert!(video_convert.get("sort").is_some());
+
+    let bitrate_tiers = video_convert
+        .get("bitrate_tiers")
+        .expect("should have bitrate_tiers table");
+    for key in [
+        "720p",
+        "720p_high_fps",
+        "1080p",
+        "1080p_high_fps",
+        "1440p",
+        "1440p_high_fps",
+    ] {
+        assert!(bitrate_tiers.get(key).is_some(), "bitrate_tiers should have {key}");
+    }
 }
 
 #[test]

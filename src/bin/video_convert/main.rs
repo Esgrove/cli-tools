@@ -2,6 +2,7 @@
 //!
 //! Defines CLI arguments and subcommands, initializes logging, and dispatches conversion or completion generation.
 
+mod bitrate_limit;
 pub(crate) mod classification;
 mod cli;
 mod config;
@@ -36,9 +37,9 @@ pub(crate) struct VideoConvertArgs {
     #[arg(short = 'a', long)]
     all: bool,
 
-    /// Skip files with bitrate lower than LIMIT kbps
-    #[arg(short = 'b', long, name = "BITRATE", default_value_t = 8000)]
-    bitrate: u64,
+    /// Minimum bitrate in kbps, overrides resolution based defaults
+    #[arg(short = 'b', long, name = "BITRATE")]
+    bitrate: Option<u64>,
 
     /// Limit the number of files to convert
     #[arg(short = 'c', long)]
@@ -201,7 +202,7 @@ mod test_video_convert_args_parsing {
 
         assert!(args.command.is_none());
         assert!(args.path.is_none());
-        assert_eq!(args.bitrate, 8000);
+        assert!(args.bitrate.is_none());
         assert!(args.count.is_none());
         assert!(args.include.is_empty());
         assert!(args.exclude.is_empty());
@@ -247,7 +248,7 @@ mod test_video_convert_args_parsing {
         .expect("Failed to parse filtering arguments");
 
         assert_eq!(args.path, Some(PathBuf::from("movies")));
-        assert_eq!(args.bitrate, 9000);
+        assert_eq!(args.bitrate, Some(9000));
         assert_eq!(args.count, Some(4));
         assert_eq!(args.include, ["Director", "Extended"]);
         assert_eq!(args.exclude, ["Sample"]);

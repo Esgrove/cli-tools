@@ -155,10 +155,13 @@ impl<'a> ClassificationRequest<'a> {
     fn conversion_skip_reason(&self) -> Option<SkipReason> {
         let info = self.info;
         let filter = self.filter;
-        if info.bitrate_kbps < filter.min_bitrate {
+        let min_bitrate = filter
+            .min_bitrate
+            .threshold(info.width, info.height, info.frames_per_second);
+        if info.bitrate_kbps < min_bitrate {
             return Some(SkipReason::BitrateBelowThreshold {
                 bitrate: info.bitrate_kbps,
-                threshold: filter.min_bitrate,
+                threshold: min_bitrate,
             });
         }
         if let Some(threshold) = filter.max_bitrate
@@ -359,11 +362,12 @@ mod classification_test_helpers {
 #[cfg(test)]
 mod test_classify_already_converted {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
 
     fn default_filter() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -460,11 +464,12 @@ mod test_classify_already_converted {
 #[cfg(test)]
 mod test_classify_needs_rename {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
 
     fn default_filter() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -525,11 +530,12 @@ mod test_classify_needs_rename {
 #[cfg(test)]
 mod test_classify_needs_conversion {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
 
     fn default_filter() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -665,11 +671,12 @@ mod test_classify_needs_conversion {
 #[cfg(test)]
 mod test_classify_needs_remux {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, VideoFile, VideoInfo};
 
     fn default_filter() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -907,6 +914,7 @@ mod test_classify_needs_remux {
 #[cfg(test)]
 mod test_classify_bitrate_filtering {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
 
     fn h264_info_with_bitrate(bitrate_kbps: u64) -> VideoInfo {
@@ -928,7 +936,7 @@ mod test_classify_bitrate_filtering {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let info = h264_info_with_bitrate(5000);
         let filter = AnalysisFilter {
-            min_bitrate: 8000,
+            min_bitrate: MinimumBitrate::Fixed(8000),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -958,7 +966,7 @@ mod test_classify_bitrate_filtering {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let info = h264_info_with_bitrate(60000);
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: Some(50000),
             min_duration: None,
             max_duration: None,
@@ -988,7 +996,7 @@ mod test_classify_bitrate_filtering {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let info = h264_info_with_bitrate(8000);
         let filter = AnalysisFilter {
-            min_bitrate: 8000,
+            min_bitrate: MinimumBitrate::Fixed(8000),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1009,7 +1017,7 @@ mod test_classify_bitrate_filtering {
         let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
         let info = h264_info_with_bitrate(50000);
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: Some(50000),
             min_duration: None,
             max_duration: None,
@@ -1041,7 +1049,7 @@ mod test_classify_bitrate_filtering {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 8000,
+            min_bitrate: MinimumBitrate::Fixed(8000),
             max_bitrate: Some(50000),
             min_duration: None,
             max_duration: None,
@@ -1056,11 +1064,70 @@ mod test_classify_bitrate_filtering {
             "Expected NeedsRemux (bitrate filter should not apply to remux), got: {result:?}"
         );
     }
+
+    #[test]
+    fn tiered_limit_converts_720p_file_below_1080p_limit() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            width: 1280,
+            height: 720,
+            ..h264_info_with_bitrate(5000)
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: MinimumBitrate::default(),
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = classification_test_helpers::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(result, AnalysisResult::NeedsConversion(..)),
+            "Expected NeedsConversion for 720p above its tier limit, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tiered_limit_skips_high_frame_rate_1080p_file() {
+        let file = VideoFile::new(Path::new("/videos/movie.mkv"), 0);
+        let info = VideoInfo {
+            frames_per_second: 59.94,
+            ..h264_info_with_bitrate(10000)
+        };
+        let filter = AnalysisFilter {
+            min_bitrate: MinimumBitrate::default(),
+            max_bitrate: None,
+            min_duration: None,
+            max_duration: None,
+            min_resolution: None,
+            overwrite: false,
+        };
+
+        let result = classification_test_helpers::classify_video_file(file, &filter, &info);
+
+        assert!(
+            matches!(
+                result,
+                AnalysisResult::Skip {
+                    reason: SkipReason::BitrateBelowThreshold {
+                        bitrate: 10000,
+                        threshold: 12000
+                    },
+                    ..
+                }
+            ),
+            "Expected BitrateBelowThreshold with high framerate tier limit, got: {result:?}"
+        );
+    }
 }
 
 #[cfg(test)]
 mod test_classify_duration_filtering {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
 
     fn h264_info_with_duration(duration: f64) -> VideoInfo {
@@ -1082,7 +1149,7 @@ mod test_classify_duration_filtering {
         let file = VideoFile::new(Path::new("/videos/clip.mkv"), 0);
         let info = h264_info_with_duration(30.0);
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: Some(60.0),
             max_duration: None,
@@ -1109,7 +1176,7 @@ mod test_classify_duration_filtering {
         let file = VideoFile::new(Path::new("/videos/long.mkv"), 0);
         let info = h264_info_with_duration(14400.0);
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: Some(7200.0),
@@ -1146,7 +1213,7 @@ mod test_classify_duration_filtering {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: Some(60.0),
             max_duration: Some(7200.0),
@@ -1166,6 +1233,7 @@ mod test_classify_duration_filtering {
 #[cfg(test)]
 mod test_classify_resolution_filtering {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
 
     #[test]
@@ -1183,7 +1251,7 @@ mod test_classify_resolution_filtering {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1224,7 +1292,7 @@ mod test_classify_resolution_filtering {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1256,7 +1324,7 @@ mod test_classify_resolution_filtering {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1293,7 +1361,7 @@ mod test_classify_resolution_filtering {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1313,11 +1381,12 @@ mod test_classify_resolution_filtering {
 #[cfg(test)]
 mod test_classify_output_exists {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
 
     fn filter_no_overwrite() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1328,7 +1397,7 @@ mod test_classify_output_exists {
 
     fn filter_with_overwrite() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1507,6 +1576,7 @@ mod test_classify_output_exists {
 #[cfg(test)]
 mod test_classify_combined_filters {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
     use crate::types::{AnalysisFilter, AnalysisResult, SkipReason, VideoFile, VideoInfo};
 
     #[test]
@@ -1525,7 +1595,7 @@ mod test_classify_combined_filters {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 8000,
+            min_bitrate: MinimumBitrate::Fixed(8000),
             max_bitrate: None,
             min_duration: Some(60.0),
             max_duration: None,
@@ -1562,7 +1632,7 @@ mod test_classify_combined_filters {
             warning: None,
         };
         let filter = AnalysisFilter {
-            min_bitrate: 8000,
+            min_bitrate: MinimumBitrate::Fixed(8000),
             max_bitrate: Some(50000),
             min_duration: Some(60.0),
             max_duration: Some(7200.0),
@@ -1582,10 +1652,11 @@ mod test_classify_combined_filters {
 #[cfg(test)]
 mod test_classification_short_circuits {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
 
     fn default_filter() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
@@ -1635,7 +1706,7 @@ mod test_classification_short_circuits {
         let file = VideoFile::new(Path::new("/videos/movie.x265.mkv"), 0);
         let info = h264_info();
         let filter = AnalysisFilter {
-            min_bitrate: 20_000,
+            min_bitrate: MinimumBitrate::Fixed(20_000),
             ..default_filter()
         };
 
@@ -1651,10 +1722,11 @@ mod test_classification_short_circuits {
 #[cfg(test)]
 mod test_classification_with_subtitles {
     use super::*;
+    use crate::bitrate_limit::MinimumBitrate;
 
     fn default_filter() -> AnalysisFilter {
         AnalysisFilter {
-            min_bitrate: 0,
+            min_bitrate: MinimumBitrate::Fixed(0),
             max_bitrate: None,
             min_duration: None,
             max_duration: None,
