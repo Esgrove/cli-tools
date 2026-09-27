@@ -500,3 +500,95 @@ mod test_new {
         assert!(error.to_string().contains("default"), "{error}");
     }
 }
+
+#[cfg(test)]
+mod test_run {
+    use std::fs;
+
+    use regex::Regex;
+
+    use super::*;
+
+    /// Dryrun finder over a recursive scan, so no test opens the interactive view or moves files.
+    fn dryrun_finder(root: PathBuf) -> DupeFind {
+        DupeFind {
+            roots: vec![root],
+            config: Config {
+                debug: true,
+                dryrun: true,
+                extensions: vec!["mp4".to_string()],
+                hash_compare: false,
+                ignore_matches: Vec::new(),
+                move_files: false,
+                patterns: vec![Regex::new(r"ID\d+").expect("valid regex")],
+                prefix_ignores: vec!["Studio".to_string()],
+                recurse: true,
+                verbose: true,
+            },
+        }
+    }
+
+    /// Scan root with the same file name in two subdirectories, which always forms a duplicate group.
+    fn root_with_duplicate(directory: &tempfile::TempDir) -> PathBuf {
+        let root = directory.path().join("videos");
+        for subdirectory in ["first", "second"] {
+            let path = root.join(subdirectory);
+            fs::create_dir_all(&path).expect("should create subdirectory");
+            fs::write(path.join("Movie.Name.mp4"), b"video").expect("should write video file");
+        }
+        root
+    }
+
+    #[test]
+    fn reports_duplicates_without_changing_files() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let root = root_with_duplicate(&directory);
+
+        dryrun_finder(root.clone()).run().expect("a dryrun should succeed");
+
+        assert!(root.join("first").join("Movie.Name.mp4").is_file());
+        assert!(root.join("second").join("Movie.Name.mp4").is_file());
+    }
+
+    #[test]
+    fn dryrun_move_leaves_files_in_place() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let root = root_with_duplicate(&directory);
+        let mut finder = dryrun_finder(root.clone());
+        finder.config.move_files = true;
+
+        finder.run().expect("a dryrun should succeed");
+
+        assert!(!root.join("Duplicates").exists());
+    }
+
+    #[test]
+    fn ignored_groups_are_dropped() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let root = root_with_duplicate(&directory);
+        let mut finder = dryrun_finder(root);
+        finder.config.ignore_matches = vec!["movie".to_string()];
+
+        finder.run().expect("ignoring every group should still succeed");
+    }
+
+    #[test]
+    fn distinct_files_find_no_duplicates() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let root = directory.path().join("videos");
+        fs::create_dir(&root).expect("should create scan root");
+        fs::write(root.join("First.Movie.mp4"), b"video").expect("should write video file");
+        fs::write(root.join("Second.Film.mp4"), b"video").expect("should write video file");
+
+        dryrun_finder(root).run().expect("no duplicates should succeed");
+    }
+
+    #[test]
+    fn empty_root_finds_no_duplicates() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+
+        dryrun_finder(directory.path().to_path_buf())
+            .run()
+            .expect("an empty directory should succeed");
+    }
+}

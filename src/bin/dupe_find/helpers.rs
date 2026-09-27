@@ -35,12 +35,7 @@ pub const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg}
 /// so that files already analysed by `vconvert` or a previous `dupefind` run are not probed again.
 /// Newly probed results are written back to the cache.
 pub fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf, VideoInfo> {
-    let all_files: Vec<PathBuf> = groups
-        .iter()
-        .flat_map(|group| group.files.iter().map(|file| file.path.clone()))
-        .collect();
-
-    if all_files.is_empty() {
+    if groups.iter().all(|group| group.files.is_empty()) {
         return HashMap::new();
     }
 
@@ -51,6 +46,23 @@ pub fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf
             None
         }
     };
+
+    collect_metadata_for_groups_with_cache(groups, scan_cache)
+}
+
+/// Collect metadata for the grouped files, reading and updating the supplied cache when available.
+fn collect_metadata_for_groups_with_cache(
+    groups: &[DuplicateGroup],
+    scan_cache: Option<ScanCache>,
+) -> HashMap<PathBuf, VideoInfo> {
+    let all_files: Vec<PathBuf> = groups
+        .iter()
+        .flat_map(|group| group.files.iter().map(|file| file.path.clone()))
+        .collect();
+
+    if all_files.is_empty() {
+        return HashMap::new();
+    }
 
     let cached_entries = scan_cache
         .as_ref()
@@ -418,5 +430,119 @@ mod test_hash_matches {
         let matches = find_hash_matches_with_cache(&files, false, Some(&mut cache));
 
         assert_eq!(matches, vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn disabled_hash_comparison_finds_nothing() {
+        let files = vec![DupeFileInfo::new(PathBuf::from("missing.mp4"), "mp4".to_string())];
+
+        assert!(find_hash_matches(&files, false, true).is_empty());
+    }
+
+    #[test]
+    fn verbose_hashing_without_cache_still_groups_identical_files() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let first_path = temp_directory.path().join("first.mp4");
+        let second_path = temp_directory.path().join("second.mp4");
+        fs::write(&first_path, b"same bytes").expect("should write first file");
+        fs::write(&second_path, b"same bytes").expect("should write second file");
+        let files = vec![
+            DupeFileInfo::new(first_path, "mp4".to_string()),
+            DupeFileInfo::new(second_path, "mp4".to_string()),
+        ];
+
+        assert_eq!(find_hash_matches_with_cache(&files, true, None), vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn missing_files_are_reported_and_skipped() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let files = vec![
+            DupeFileInfo::new(temp_directory.path().join("missing.mp4"), "mp4".to_string()),
+            DupeFileInfo::new(temp_directory.path().join("also-missing.mp4"), "mp4".to_string()),
+        ];
+
+        assert!(find_hash_matches_with_cache(&files, true, None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_collect_metadata {
+    use std::fs;
+
+    use cli_tools::video_info::Resolution;
+
+    use super::*;
+
+    fn cached_info(size_bytes: u64) -> VideoInfo {
+        VideoInfo {
+            size_bytes: Some(size_bytes),
+            duration: Some(90.0),
+            resolution: Some(Resolution::new(1920, 1080)),
+            codec: Some("hevc".to_string()),
+            bitrate_kbps: Some(4_000),
+        }
+    }
+
+    #[test]
+    fn no_groups_collect_nothing() {
+        assert!(collect_metadata_for_groups(&[]).is_empty());
+        assert!(collect_metadata_for_groups_with_cache(&[], None).is_empty());
+    }
+
+    #[test]
+    fn cached_entries_matching_the_file_size_are_used_without_probing() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let first_path = temp_directory.path().join("first.mp4");
+        let second_path = temp_directory.path().join("second.mp4");
+        fs::write(&first_path, b"first video").expect("should write first file");
+        fs::write(&second_path, b"second video").expect("should write second file");
+        let first_info = cached_info(11);
+        let second_info = cached_info(12);
+        let mut cache =
+            ScanCache::open_at(&temp_directory.path().join("scan-cache.db")).expect("should open scan cache");
+        cache
+            .batch_upsert(&[(&first_path, &first_info), (&second_path, &second_info)])
+            .expect("should write cache entries");
+        let group = DuplicateGroup::new(
+            "video".to_string(),
+            vec![
+                DupeFileInfo::new(first_path.clone(), "mp4".to_string()),
+                DupeFileInfo::new(second_path.clone(), "mp4".to_string()),
+            ],
+        );
+
+        let metadata = collect_metadata_for_groups_with_cache(&[group], Some(cache));
+
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[&first_path].codec.as_deref(), Some("hevc"));
+        assert_eq!(metadata[&second_path].size_bytes, Some(12));
+    }
+
+    #[test]
+    fn cached_entry_with_a_different_size_is_not_used() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let path = temp_directory.path().join("not-a-video.mp4");
+        fs::write(&path, b"not a video").expect("should write file");
+        let stale_info = cached_info(1);
+        let mut cache =
+            ScanCache::open_at(&temp_directory.path().join("scan-cache.db")).expect("should open scan cache");
+        cache
+            .batch_upsert(&[(&path, &stale_info)])
+            .expect("should write stale cache entry");
+        let group = DuplicateGroup::new(
+            "video".to_string(),
+            vec![DupeFileInfo::new(path.clone(), "mp4".to_string())],
+        );
+
+        let metadata = collect_metadata_for_groups_with_cache(&[group], Some(cache));
+
+        // Without ffprobe the file is left out, with it the file is probed again
+        assert!(
+            metadata
+                .get(&path)
+                .is_none_or(|info| info.codec.as_deref() != Some("hevc") && info.size_bytes == Some(11)),
+            "a size mismatch should not use the cached entry"
+        );
     }
 }
