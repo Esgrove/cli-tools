@@ -470,6 +470,7 @@ impl VideoInfo {
         let mut width: Option<u32> = None;
         let mut height: Option<u32> = None;
         let mut frames_per_second: Option<f64> = None;
+        let mut average_frames_per_second: Option<f64> = None;
         let mut bit_depth: Option<u8> = None;
 
         // Parse key=value pairs from output
@@ -536,20 +537,21 @@ impl VideoInfo {
                             bit_depth = Self::bit_depth_from_pixel_format(value);
                         }
                     }
-                    "r_frame_rate" => {
-                        // Parse fractional framerate like "30/1" or "30000/1001".
-                        // Only accept the first valid value within a reasonable range,
-                        // as ffprobe may output multiple streams
-                        // where later entries can have bogus values like 0/1 or 90000/1 (timebase).
-                        if frames_per_second.is_none()
-                            && let Some((num, den)) = value.split_once('/')
-                            && let (Ok(n), Ok(d)) = (num.parse::<f64>(), den.parse::<f64>())
-                            && d > 0.0
-                            && n > 0.0
+                    "r_frame_rate" | "avg_frame_rate" => {
+                        let candidate = if key == "r_frame_rate" {
+                            &mut frames_per_second
+                        } else {
+                            &mut average_frames_per_second
+                        };
+                        if candidate.is_none()
+                            && let Some((numerator, denominator)) = value.split_once('/')
+                            && let (Ok(numerator), Ok(denominator)) =
+                                (numerator.parse::<f64>(), denominator.parse::<f64>())
+                            && denominator > 0.0
                         {
-                            let fps = n / d;
+                            let fps = numerator / denominator;
                             if (1.0..=240.0).contains(&fps) {
-                                frames_per_second = Some(fps);
+                                *candidate = Some(fps);
                             }
                         }
                     }
@@ -574,7 +576,7 @@ impl VideoInfo {
         let Some(height) = height else {
             anyhow::bail!("failed to detect video height");
         };
-        let Some(frames_per_second) = frames_per_second else {
+        let Some(frames_per_second) = frames_per_second.or(average_frames_per_second) else {
             anyhow::bail!("failed to detect framerate");
         };
 
@@ -1199,6 +1201,32 @@ mod video_info_tests {
         let result = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("framerate"));
+    }
+
+    #[test]
+    fn from_ffprobe_output_falls_back_to_average_framerate_for_timebase() {
+        let output = "codec_name=h264\n\
+                      bit_rate=2380277\n\
+                      duration=2618.119\n\
+                      width=1280\n\
+                      height=720\n\
+                      r_frame_rate=16000/1\n\
+                      avg_frame_rate=75113000/2618119\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4")).unwrap();
+        assert!((info.frames_per_second - 28.69).abs() < 0.01);
+    }
+
+    #[test]
+    fn from_ffprobe_output_prefers_r_framerate_over_average() {
+        let output = "codec_name=h264\n\
+                      bit_rate=2380277\n\
+                      duration=120.5\n\
+                      width=1280\n\
+                      height=720\n\
+                      avg_frame_rate=25/1\n\
+                      r_frame_rate=30/1\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("test.mp4")).unwrap();
+        assert!((info.frames_per_second - 30.0).abs() < 0.01);
     }
 
     #[test]

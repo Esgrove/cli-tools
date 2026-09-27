@@ -187,7 +187,7 @@ pub fn probe_video_info(path: &Path) -> Result<VideoInfo> {
             "-select_streams",
             "V:0",
             "-show_entries",
-            "stream=codec_name,bit_rate,width,height,r_frame_rate,pix_fmt,bits_per_raw_sample:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
+            "stream=codec_name,bit_rate,width,height,r_frame_rate,avg_frame_rate,pix_fmt,bits_per_raw_sample:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
             "-output_format",
             "default=nokey=0:noprint_wrappers=1",
         ])
