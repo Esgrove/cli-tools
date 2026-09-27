@@ -1,3 +1,5 @@
+//! Benchmarks for date parsing and reordering in file names.
+
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

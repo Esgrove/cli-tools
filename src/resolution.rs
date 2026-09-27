@@ -1,3 +1,8 @@
+//! Video resolution parsing and labelling.
+//!
+//! Defines the `Resolution` type, matches it against known resolutions with a small tolerance,
+//! and produces labels such as "1080p" for file names.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;

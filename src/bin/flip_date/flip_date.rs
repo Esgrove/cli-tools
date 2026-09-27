@@ -1,3 +1,7 @@
+//! File and directory renaming for flipdate.
+//!
+//! Finds dates in file or directory names and renames them to the `yyyy.mm.dd` format.
+
 use std::fs;
 use std::path::PathBuf;
 

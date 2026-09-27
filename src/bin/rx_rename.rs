@@ -1,3 +1,8 @@
+//! The `rxrename` binary.
+//!
+//! Recursively removes a trailing "_1" suffix from file names,
+//! deleting or trashing an existing unsuffixed file that would conflict.
+
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 use std::path::{Path, PathBuf};

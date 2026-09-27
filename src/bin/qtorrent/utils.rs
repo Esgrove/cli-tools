@@ -1,3 +1,8 @@
+//! Helpers for qtorrent.
+//!
+//! Torrent name formatting, media extension detection, and moving added torrent files
+//! into the downloaded directory.
+
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 

@@ -1,3 +1,8 @@
+//! Finvoice XML parsing for visaparse.
+//!
+//! Reads credit card statement files, extracts the transactions,
+//! filters out unwanted merchants, and writes the collected data.
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsStr;

@@ -1,3 +1,5 @@
+//! Benchmarks for resolution labelling and matching.
+
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

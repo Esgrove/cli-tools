@@ -1,3 +1,8 @@
+//! Date parsing and formatting for file names.
+//!
+//! Holds the date regexes, the `Date` type, and the helpers that find dates in names
+//! and reorder them into the `yyyy.mm.dd` format.
+
 use std::{borrow::Cow, sync::LazyLock};
 
 use colored::Colorize;

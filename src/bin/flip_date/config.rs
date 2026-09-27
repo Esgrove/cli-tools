@@ -1,3 +1,7 @@
+//! Configuration for flipdate.
+//!
+//! Combines the CLI arguments with the `[flip_date]` section of the user config file.
+
 use std::fs;
 
 use anyhow::Context;

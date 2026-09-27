@@ -1,3 +1,7 @@
+//! The `div` binary.
+//!
+//! Prints a divider comment line with optional centered or aligned text.
+
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 

@@ -1,3 +1,8 @@
+//! The vres run loop.
+//!
+//! Gathers video files, probes their resolution with ffprobe in parallel,
+//! and renames or deletes them based on the result.
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};

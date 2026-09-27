@@ -1,3 +1,8 @@
+//! Dot formatting of file names.
+//!
+//! Implements `DotFormat`, the pipeline that normalizes separators, brackets, dates,
+//! and capitalization into the dot separated naming style.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;

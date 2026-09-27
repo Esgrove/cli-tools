@@ -1,3 +1,7 @@
+//! Resolution based file naming for vres.
+//!
+//! Parses ffprobe output into a resolution and builds the new file name with the resolution label.
+
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
