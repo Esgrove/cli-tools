@@ -1391,6 +1391,9 @@ impl DirMove {
                 }
 
                 let normalized_name = utils::normalize_name(directory_name);
+                if self.should_skip_destination_directory(directory_name, &normalized_name) {
+                    return None;
+                }
                 let stripped_name = self.strip_ignored_prefixes(directory_name);
                 let (stripped_spaced_name, stripped_normalized_name) = if stripped_name.as_ref() == directory_name {
                     (None, None)
@@ -2523,10 +2526,6 @@ impl DirMove {
 
     /// Filter ignored destination directories from a complete candidate list.
     fn filter_ignored_destination_directories(&self, directories: Vec<DirectoryInfo>) -> Vec<DirectoryInfo> {
-        if self.config.ignored_group_names.is_empty() {
-            return directories;
-        }
-
         directories
             .into_iter()
             .filter(|directory_info| {
@@ -2546,11 +2545,10 @@ impl DirMove {
     /// `directory_name_normalized` must be precomputed by the caller to avoid repeated normalization
     /// while filtering the full destination directory list.
     fn should_skip_destination_directory(&self, directory_name: &str, directory_name_normalized: &str) -> bool {
-        if self.config.ignored_group_names.is_empty() {
-            return false;
-        }
-
-        if self.ignored_group_name_matches_normalized(directory_name_normalized) {
+        if directory_name_normalized.chars().count() < 4
+            || directory_name_normalized.chars().all(char::is_numeric)
+            || self.ignored_group_name_matches_normalized(directory_name_normalized)
+        {
             return true;
         }
 
@@ -2560,7 +2558,9 @@ impl DirMove {
         }
 
         let stripped_name_normalized = utils::normalize_name(stripped_name.as_ref());
-        self.ignored_group_name_matches_normalized(&stripped_name_normalized)
+        stripped_name_normalized.chars().count() < 4
+            || stripped_name_normalized.chars().all(char::is_numeric)
+            || self.ignored_group_name_matches_normalized(&stripped_name_normalized)
     }
 
     /// Check whether a normalized name matches a configured ignored group name.
@@ -5800,6 +5800,41 @@ mod test_prefix_ignores {
 mod test_directory_matching {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn numeric_and_short_directory_names_are_not_offered() {
+        let dirmove = make_test_dirmove(Vec::new());
+        let dirs = make_test_dirs(&[
+            "2024", "12345", "0", "A", "AB", "ABC", "A B C", "Show", "A1BC", "A B C D", "ÄÖÜ",
+        ]);
+        let files = make_file_paths(&["2024.12345.0.A.AB.ABC.Show.A1BC.ABCD.ÄÖÜ.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 3);
+        for index in [7, 8, 9] {
+            assert_eq!(result.get(&index).expect("valid directory should match").len(), 1);
+        }
+        let filtered = dirmove.filter_ignored_destination_directories(dirs);
+        assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn numeric_and_short_prefix_stripped_directory_names_are_not_offered() {
+        let dirmove = make_test_dirmove_with_ignores(Vec::new(), vec!["dl"]);
+        let dirs = make_test_dirs(&["DL 2024", "DL 0", "DL A", "DL ABC", "DL Show"]);
+        let files = make_file_paths(&["2024.0.A.ABC.Show.mp4"]);
+
+        let result = dirmove.match_files_to_directories(&files, &dirs);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get(&4).expect("four-character stripped name should match").len(),
+            1
+        );
+        let filtered = dirmove.filter_ignored_destination_directories(dirs);
+        assert_eq!(filtered.len(), 1);
+    }
 
     #[test]
     fn basic_match() {
