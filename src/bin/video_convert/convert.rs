@@ -7,7 +7,7 @@ mod operations;
 mod subtitles;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,7 +114,7 @@ impl VideoConvert {
             return Ok(());
         }
         let subtitle_matches = if self.config.movie_mode {
-            let subtitle_files = self.gather_subtitle_files_to_process();
+            let subtitle_files = Self::gather_subtitle_files_for_video_files(&candidate_files);
             Self::match_subtitle_files(&candidate_files, subtitle_files, self.config.verbose)
         } else {
             HashMap::new()
@@ -259,33 +259,35 @@ impl VideoConvert {
     /// Gather video files based on the config settings.
     fn gather_files_to_process(&self) -> Result<Vec<VideoFile>> {
         let start = Instant::now();
-        let path = &self.config.path;
-
-        if path.is_file() {
-            let file = VideoFile::new_with_metadata(path);
-            return if should_include_file(&self.config, &file) {
-                Ok(vec![file])
-            } else {
-                Ok(vec![])
-            };
-        }
-
-        // Path must be a directory
-        if !path.is_dir() {
-            anyhow::bail!("Input path '{}' does not exist or is not accessible", path.display());
-        }
-
         let max_depth = if self.config.recurse { usize::MAX } else { 1 };
+        let mut files = Vec::new();
+        let mut seen_paths = HashSet::new();
 
-        let mut files: Vec<VideoFile> = WalkDir::new(path)
-            .max_depth(max_depth)
-            .into_iter()
-            .filter_entry(|entry| !cli_tools::should_skip_entry(entry))
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .map(VideoFile::from)
-            .filter(|file| should_include_file(&self.config, file))
-            .collect();
+        for path in &self.config.paths {
+            if path.is_file() {
+                let file = VideoFile::new_with_metadata(path);
+                if should_include_file(&self.config, &file) && seen_paths.insert(file.path.clone()) {
+                    files.push(file);
+                }
+                continue;
+            }
+
+            if !path.is_dir() {
+                anyhow::bail!("Input path '{}' does not exist or is not accessible", path.display());
+            }
+
+            files.extend(
+                WalkDir::new(path)
+                    .max_depth(max_depth)
+                    .into_iter()
+                    .filter_entry(|entry| !cli_tools::should_skip_entry(entry))
+                    .filter_map(std::result::Result::ok)
+                    .filter(|entry| entry.file_type().is_file())
+                    .map(VideoFile::from)
+                    .filter(|file| should_include_file(&self.config, file))
+                    .filter(|file| seen_paths.insert(file.path.clone())),
+            );
+        }
 
         files.sort_unstable();
 
@@ -1189,7 +1191,7 @@ mod test_gather_and_rename {
 
     fn config_for(path: &Path, recurse: bool) -> Config {
         Config {
-            path: path.to_path_buf(),
+            paths: vec![path.to_path_buf()],
             recurse,
             extensions: vec!["mkv".to_string(), "mp4".to_string()],
             ..Config::default()
@@ -1222,6 +1224,86 @@ mod test_gather_and_rename {
 
         assert_eq!(shallow_names, vec!["top"]);
         assert_eq!(recursive_count, 2);
+    }
+
+    #[test]
+    fn gathers_multiple_files_and_directories_without_duplicates() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let first_root = directory.path().join("first");
+        let second_root = directory.path().join("second");
+        let nested_root = first_root.join("nested");
+        std::fs::create_dir_all(&nested_root).expect("Failed to create nested directory");
+        std::fs::create_dir(&second_root).expect("Failed to create second directory");
+        let first_video = first_root.join("first.mkv");
+        let second_video = second_root.join("second.mp4");
+        let nested_video = nested_root.join("nested.mkv");
+        let standalone_video = directory.path().join("standalone.mp4");
+        let ignored_file = directory.path().join("notes.txt");
+        for path in [
+            &first_video,
+            &second_video,
+            &nested_video,
+            &standalone_video,
+            &ignored_file,
+        ] {
+            std::fs::write(path, b"fixture").expect("Failed to write fixture");
+        }
+        let first_subtitle = first_root.join("first.srt");
+        let standalone_subtitle = directory.path().join("standalone.srt");
+        for path in [&first_subtitle, &standalone_subtitle] {
+            std::fs::write(path, b"subtitle").expect("Failed to write subtitle fixture");
+        }
+
+        let mut config = config_for(&first_root, true);
+        config.paths.extend([
+            second_root,
+            standalone_video.clone(),
+            first_video.clone(),
+            nested_root,
+            ignored_file,
+            first_root,
+        ]);
+        let (_log, converter) = converter(config);
+        let files = converter.gather_files_to_process().expect("Failed to gather files");
+        let paths: HashSet<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
+
+        assert_eq!(files.len(), 4);
+        assert_eq!(
+            paths,
+            HashSet::from([first_video, second_video, nested_video, standalone_video])
+        );
+        let subtitles = VideoConvert::gather_subtitle_files_for_video_files(&files);
+        assert_eq!(subtitles.len(), 2);
+        assert_eq!(
+            subtitles.into_iter().map(|file| file.path).collect::<HashSet<_>>(),
+            HashSet::from([first_subtitle, standalone_subtitle])
+        );
+    }
+
+    #[test]
+    fn multiple_directories_respect_recursion_and_filters() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let roots = [directory.path().join("first"), directory.path().join("second")];
+        for root in &roots {
+            let nested = root.join("nested");
+            std::fs::create_dir_all(&nested).expect("Failed to create nested directory");
+            for path in [
+                root.join("keep.mkv"),
+                root.join("skip.mp4"),
+                nested.join("keep.deep.mkv"),
+            ] {
+                std::fs::write(path, b"video").expect("Failed to write video fixture");
+            }
+        }
+        let mut config = config_for(&roots[0], false);
+        config.paths.push(roots[1].clone());
+        config.include = vec!["keep".to_string()];
+        let (_log, converter) = converter(config);
+
+        let files = converter.gather_files_to_process().expect("Failed to gather files");
+
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|file| file.name == "keep"));
     }
 
     #[test]

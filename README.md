@@ -207,18 +207,21 @@ Options:
 
 Convert video files to HEVC (H.265) format using ffmpeg and NVENC.
 Tracks files needing conversion in a local SQLite database for efficient processing.
+Accepts multiple file and directory paths in one run, for example `vconvert clip.mkv movies series -r`.
+Overlapping inputs are processed only once.
+Without paths, scans the current directory.
 
 ```console
 Convert video files to HEVC (H.265) format using ffmpeg and NVENC
 
-Usage: vconvert [OPTIONS] [PATH] [COMMAND]
+Usage: vconvert [OPTIONS] [PATH]... [COMMAND]
 
 Commands:
   completion  Generate shell completion script
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
-  [PATH]  Optional input directory or file
+  [PATH]...  Input files or directories, defaults to the current directory
 
 Options:
   -a, --all                          Convert all known video file types

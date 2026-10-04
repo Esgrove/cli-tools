@@ -103,7 +103,7 @@ pub struct Config {
     pub(crate) min_resolution: Option<u32>,
     pub(crate) movie_mode: bool,
     pub(crate) overwrite: bool,
-    pub(crate) path: PathBuf,
+    pub(crate) paths: Vec<PathBuf>,
     pub(crate) recurse: bool,
     pub(crate) skip_convert: bool,
     pub(crate) skip_remux: bool,
@@ -160,7 +160,17 @@ impl Config {
         let include: Vec<String> = args.include.into_iter().chain(user_config.include).unique().collect();
         let exclude: Vec<String> = args.exclude.into_iter().chain(user_config.exclude).unique().collect();
 
-        let path = cli_tools::resolve_input_path(args.path.as_deref())?;
+        let paths = if args.paths.is_empty() {
+            vec![cli_tools::resolve_input_path(None)?]
+        } else {
+            args.paths
+                .iter()
+                .map(|path| cli_tools::resolve_input_path(Some(path)))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .unique()
+                .collect()
+        };
 
         let convert_all = args.all || user_config.convert_all_types;
         let convert_other = args.other || user_config.convert_other_types;
@@ -228,7 +238,7 @@ impl Config {
             min_resolution,
             movie_mode: args.movie,
             overwrite: args.force || user_config.overwrite,
-            path,
+            paths,
             recurse: args.recurse || user_config.recurse,
             skip_convert: args.skip_convert,
             skip_remux: args.skip_remux,
@@ -488,7 +498,7 @@ mod config_default_resolution_tests {
         assert_eq!(config.min_resolution, None);
         assert!(!config.movie_mode);
         assert!(!config.overwrite);
-        assert_eq!(config.path, expected_path);
+        assert_eq!(config.paths, vec![expected_path]);
         assert!(!config.recurse);
         assert!(!config.skip_convert);
         assert!(!config.skip_remux);
@@ -503,6 +513,28 @@ mod config_default_resolution_tests {
         assert_eq!(config.db_filter.max_duration, config.max_duration);
         assert_eq!(config.db_filter.limit, config.count);
         assert_eq!(config.db_filter.sort, Some(config.sort));
+    }
+
+    #[test]
+    fn resolves_multiple_paths_and_removes_duplicate_roots() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let video = directory.path().join("clip.mkv");
+        std::fs::write(&video, b"video").expect("Failed to write video fixture");
+        let root_text = directory.path().to_string_lossy();
+        let video_text = video.to_string_lossy();
+
+        let config = resolve_config(
+            &[root_text.as_ref(), video_text.as_ref(), root_text.as_ref()],
+            VideoConvertConfig::default(),
+        );
+
+        assert_eq!(
+            config.paths,
+            vec![
+                cli_tools::resolve_input_path(Some(directory.path())).expect("Failed to resolve directory"),
+                cli_tools::resolve_input_path(Some(&video)).expect("Failed to resolve video"),
+            ]
+        );
     }
 
     #[test]

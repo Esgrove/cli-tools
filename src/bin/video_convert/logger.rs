@@ -75,7 +75,11 @@ impl FileLogger {
     /// Log when starting the program
     pub(crate) fn log_init(&mut self, config: &Config) {
         self.write_entry(|writer| {
-            writeln!(writer, "[{}] INIT \"{}\"", Self::timestamp(), config.path.display())?;
+            write!(writer, "[{}] INIT", Self::timestamp())?;
+            for path in &config.paths {
+                write!(writer, " \"{}\"", path.display())?;
+            }
+            writeln!(writer)?;
             writeln!(writer, "  min_bitrate: {}", config.min_bitrate)?;
             writeln!(writer, "  convert_all: {}", config.convert_all)?;
             writeln!(writer, "  convert_other: {}", config.convert_other)?;
@@ -315,7 +319,7 @@ mod test_file_logger {
             min_bitrate: MinimumBitrate::Fixed(6_000),
             movie_mode: true,
             overwrite: true,
-            path: PathBuf::from("videos"),
+            paths: vec![PathBuf::from("videos")],
             recurse: true,
             verbose: true,
             ..Default::default()

@@ -15,24 +15,6 @@ use crate::helpers::path_without_extension;
 use crate::types::{SubtitleFile, VideoFile, movie_subtitle_match_score};
 
 impl VideoConvert {
-    /// Gather supported external subtitle sidecars for movie-mode matching.
-    pub(super) fn gather_subtitle_files_to_process(&self) -> Vec<SubtitleFile> {
-        let path = &self.config.path;
-        if path.is_file() {
-            let Some(parent) = path.parent() else {
-                return Vec::new();
-            };
-            return Self::gather_subtitle_files_from_root(parent, 1);
-        }
-
-        if !path.is_dir() {
-            return Vec::new();
-        }
-
-        let max_depth = if self.config.recurse { usize::MAX } else { 1 };
-        Self::gather_subtitle_files_from_root(path, max_depth)
-    }
-
     /// Gather subtitle sidecars from the directories containing the given video files.
     pub(super) fn gather_subtitle_files_for_video_files(video_files: &[VideoFile]) -> Vec<SubtitleFile> {
         let mut subtitle_files = Vec::new();

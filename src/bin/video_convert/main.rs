@@ -29,9 +29,9 @@ pub(crate) struct VideoConvertArgs {
     #[command(subcommand)]
     command: Option<VideoConvertCommand>,
 
-    /// Optional input directory or file
-    #[arg(value_hint = clap::ValueHint::AnyPath)]
-    path: Option<PathBuf>,
+    /// Input files or directories, defaults to the current directory
+    #[arg(value_hint = clap::ValueHint::AnyPath, value_name = "PATH")]
+    paths: Vec<PathBuf>,
 
     /// Convert all known video file types
     #[arg(short = 'a', long)]
@@ -201,7 +201,7 @@ mod test_video_convert_args_parsing {
         let args = VideoConvertArgs::try_parse_from(["vconvert"]).expect("Failed to parse default arguments");
 
         assert!(args.command.is_none());
-        assert!(args.path.is_none());
+        assert_eq!(args.paths, [] as [std::path::PathBuf; 0]);
         assert!(args.bitrate.is_none());
         assert!(args.count.is_none());
         assert_eq!(args.include, [] as [String; 0]);
@@ -247,7 +247,7 @@ mod test_video_convert_args_parsing {
         ])
         .expect("Failed to parse filtering arguments");
 
-        assert_eq!(args.path, Some(PathBuf::from("movies")));
+        assert_eq!(args.paths, vec![PathBuf::from("movies")]);
         assert_eq!(args.bitrate, Some(9000));
         assert_eq!(args.count, Some(4));
         assert_eq!(args.include, ["Director", "Extended"]);
@@ -261,6 +261,36 @@ mod test_video_convert_args_parsing {
         assert!(args.recurse);
         assert!(args.movie);
         assert!(args.verbose);
+    }
+
+    #[test]
+    fn parses_multiple_paths_with_interspersed_options() {
+        let args =
+            VideoConvertArgs::try_parse_from(["vconvert", "movies", "clip.mkv", "--recurse", "series", "--print"])
+                .expect("Failed to parse multiple paths");
+
+        assert_eq!(
+            args.paths,
+            vec![
+                PathBuf::from("movies"),
+                PathBuf::from("clip.mkv"),
+                PathBuf::from("series")
+            ]
+        );
+        assert!(args.recurse);
+        assert!(args.print);
+    }
+
+    #[test]
+    fn completion_remains_available_with_multiple_path_arguments() {
+        let args = VideoConvertArgs::try_parse_from(["vconvert", "completion", "bash"])
+            .expect("Failed to parse completion command");
+
+        assert!(matches!(
+            args.command,
+            Some(VideoConvertCommand::Completion { shell: Shell::Bash, .. })
+        ));
+        assert_eq!(args.paths, [] as [std::path::PathBuf; 0]);
     }
 
     #[test]
