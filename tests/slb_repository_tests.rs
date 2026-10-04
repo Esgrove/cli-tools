@@ -162,19 +162,24 @@ fn the_line_ending_style_of_a_source_file_is_preserved() {
     for file in source_files() {
         let text = std::fs::read_to_string(&file).expect("source file should be readable");
         let kind = FileKind::from_path(&file).expect("source file should have a known kind");
-        let Some(fixed) = format(&text, kind, &options).fixed_text else {
-            continue;
-        };
-        assert!(
-            !fixed.contains('\r'),
-            "{} gained a carriage return, but the source uses line feeds",
-            file.display()
-        );
-        assert_eq!(
-            text.ends_with('\n'),
-            fixed.ends_with('\n'),
-            "the final newline of {} changed",
-            file.display()
-        );
+        let line_feed_text = text.replace("\r\n", "\n");
+        for line_ending in ["\n", "\r\n"] {
+            let text = line_feed_text.replace('\n', line_ending);
+            let Some(fixed) = format(&text, kind, &options).fixed_text else {
+                continue;
+            };
+            let without_line_endings = fixed.replace(line_ending, "");
+            assert!(
+                !without_line_endings.contains(['\r', '\n']),
+                "{} changed line ending style from {line_ending:?}",
+                file.display()
+            );
+            assert_eq!(
+                text.ends_with('\n'),
+                fixed.ends_with('\n'),
+                "the final newline of {} changed with {line_ending:?} endings",
+                file.display()
+            );
+        }
     }
 }
