@@ -328,13 +328,13 @@ mod cli_args_tests {
     #[test]
     fn empty_by_default() {
         let args = QtorrentArgs::try_parse_from(["test"]).expect("should parse");
-        assert!(args.path.is_empty());
+        assert_eq!(args.path, [] as [PathBuf; 0]);
         assert!(args.host.is_none());
         assert!(args.port.is_none());
         assert!(args.username.is_none());
         assert!(args.password.is_none());
-        assert!(args.skip_extensions.is_empty());
-        assert!(args.skip_directories.is_empty());
+        assert_eq!(args.skip_extensions, [] as [String; 0]);
+        assert_eq!(args.skip_directories, [] as [String; 0]);
         assert!(args.min_file_size_mb.is_none());
         assert!(!args.include_images);
         assert!(args.min_image_size_kb.is_none());
@@ -539,7 +539,7 @@ mod config_from_args_tests {
         let args = QtorrentArgs::try_parse_from(["test"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         // Should have host and port (from CLI, config, or defaults)
-        assert!(!config.host.is_empty());
+        assert_ne!(config.host, "");
         assert!(config.port > 0);
     }
 

@@ -621,10 +621,10 @@ mod test_filtered_parts_new {
         let parts = FilteredParts::new("standalone");
         assert_eq!(parts.parts_original, ["standalone"]);
         assert_eq!(parts.parts_lower, ["standalone"]);
-        assert!(parts.two_parts_lower.is_empty());
-        assert!(parts.three_parts_lower.is_empty());
-        assert!(parts.two_parts_original.is_empty());
-        assert!(parts.three_parts_original.is_empty());
+        assert_eq!(parts.two_parts_lower, [] as [String; 0]);
+        assert_eq!(parts.three_parts_lower, [] as [String; 0]);
+        assert_eq!(parts.two_parts_original, [] as [String; 0]);
+        assert_eq!(parts.three_parts_original, [] as [String; 0]);
     }
 
     #[test]
@@ -632,8 +632,8 @@ mod test_filtered_parts_new {
         let parts = FilteredParts::new("Photo.Lab");
         assert_eq!(parts.two_parts_lower, ["photolab"]);
         assert_eq!(parts.two_parts_original, ["PhotoLab"]);
-        assert!(parts.three_parts_lower.is_empty());
-        assert!(parts.three_parts_original.is_empty());
+        assert_eq!(parts.three_parts_lower, [] as [String; 0]);
+        assert_eq!(parts.three_parts_original, [] as [String; 0]);
     }
 
     #[test]
@@ -657,8 +657,8 @@ mod test_filtered_parts_new {
         let parts = FilteredParts::new("");
         assert_eq!(parts.parts_original, [""]);
         assert_eq!(parts.parts_lower, [""]);
-        assert!(parts.two_parts_lower.is_empty());
-        assert!(parts.three_parts_lower.is_empty());
+        assert_eq!(parts.two_parts_lower, [] as [String; 0]);
+        assert_eq!(parts.three_parts_lower, [] as [String; 0]);
     }
 
     #[test]

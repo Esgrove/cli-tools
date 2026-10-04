@@ -1141,7 +1141,7 @@ mod test_torrent_parsing_from_file {
 
         assert!(torrent.announce_list.is_some());
         let announce_list = torrent.announce_list.as_ref().unwrap();
-        assert!(!announce_list.is_empty());
+        assert_ne!(announce_list.as_slice(), [] as [Vec<String>; 0]);
     }
 
     #[test]
@@ -1427,7 +1427,7 @@ mod test_parse_torrent {
     fn stores_raw_bytes() {
         let config = default_config();
         let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
-        assert!(!info.bytes.is_empty());
+        assert_ne!(info.bytes, [] as [u8; 0]);
     }
 
     #[test]
@@ -1449,7 +1449,7 @@ mod test_parse_torrent {
     fn no_excluded_indices_without_filter() {
         let config = default_config();
         let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
-        assert!(info.excluded_indices.is_empty());
+        assert_eq!(info.excluded_indices, [] as [usize; 0]);
     }
 
     #[test]
@@ -1643,7 +1643,7 @@ mod test_parse_torrent_all_files_excluded {
 
         let info = parse_torrent(&torrent_path, &config).expect("should parse");
         assert!(!info.all_files_excluded());
-        assert!(info.excluded_indices.is_empty());
+        assert_eq!(info.excluded_indices, [] as [usize; 0]);
         assert_eq!(info.included_size, 1000);
     }
 }

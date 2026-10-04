@@ -402,7 +402,7 @@ mod test_config_from_args_and_config {
 
         let config = Config::from_args_and_config(&args, &user_config).expect("should create config");
 
-        assert!(config.filter_prefixes.is_empty());
+        assert_eq!(config.filter_prefixes, [] as [String; 0]);
     }
 
     #[test]

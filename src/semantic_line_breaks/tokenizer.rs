@@ -391,7 +391,7 @@ mod test_tokenizer {
     #[test]
     fn the_width_of_no_tokens_is_zero() {
         assert_eq!(tokens_width(&[]), 0);
-        assert!(join_tokens(&[]).is_empty());
+        assert_eq!(join_tokens(&[]), "");
     }
 
     #[test]

@@ -478,7 +478,7 @@ mod test_reflow {
     fn leaves_sentence_boundaries_alone() {
         let outcome = reflow(&["First one is here.", "Second one is here."], 120);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -510,7 +510,7 @@ mod test_reflow {
             true,
         );
         assert_eq!(again.lines, None);
-        assert!(again.violations.is_empty());
+        assert_eq!(again.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod test_reflow {
         // 77 plus its 5% overflow reaches the 80 character width of the text above.
         let outcome = reflow(&[text], 77);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -600,7 +600,7 @@ mod test_reflow {
             true,
         );
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod test_list_items {
         let item = list_item(&["A first sentence here.", "A second one."], "- ");
         let outcome = reflow_paragraph(&item, &FormatOptions::with_width(40), true);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -695,7 +695,7 @@ mod test_list_items {
     fn a_paragraph_that_is_no_list_item_keeps_one_sentence_per_line() {
         let outcome = reflow(&["`slb` checks prose in comments.", "It also formats Markdown."], 120);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -710,7 +710,7 @@ mod test_list_items {
         let item = list_item(&["`slb` checks prose in comments.", "It also formats Markdown."], "- ");
         let outcome = reflow_paragraph(&item, &options, true);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -719,7 +719,7 @@ mod test_list_items {
         item.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
         let outcome = reflow_paragraph(&item, &FormatOptions::with_width(120), true);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 }
 
@@ -848,7 +848,7 @@ mod test_reflow_safety {
             true,
         );
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -913,7 +913,7 @@ mod test_command_text {
 
         let outcome = reflow(&["Run the migrations first: pnpm run migrate -- --env dev"], 120);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -963,7 +963,7 @@ mod test_unchanged_lines {
         ];
         let outcome = reflow_paragraph(&paragraph(&lines, ""), &options, true);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 }
 

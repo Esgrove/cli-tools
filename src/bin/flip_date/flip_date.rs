@@ -233,7 +233,7 @@ mod test_rename_discovery {
         let extensions = vec!["mp3".to_string(), "mp4".to_string()];
         let (files, _root) = files_to_rename(&dir_path.to_path_buf(), &extensions, false).unwrap();
 
-        assert!(files.is_empty());
+        assert_eq!(files, [] as [PathBuf; 0]);
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod test_rename_discovery {
         let extensions = vec!["mp3".to_string()];
         let (files, _root) = files_to_rename(&dir_path.to_path_buf(), &extensions, false).unwrap();
 
-        assert!(files.is_empty());
+        assert_eq!(files, [] as [PathBuf; 0]);
     }
 
     #[test]

@@ -145,6 +145,6 @@ mod test_prefix_index {
         let index = PrefixIndex::new(&[]);
         let mut matches = vec![1, 2];
         index.matching_files("anything", &mut matches);
-        assert!(matches.is_empty());
+        assert_eq!(matches, [] as [usize; 0]);
     }
 }

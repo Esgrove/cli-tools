@@ -391,7 +391,7 @@ mod test_collect_files {
 
         let files = collect_files(&[path], &config_with(vec![], vec![])).expect("collecting should succeed");
 
-        assert!(files.is_empty());
+        assert_eq!(files, [] as [(PathBuf, FileKind); 0]);
     }
 
     #[test]

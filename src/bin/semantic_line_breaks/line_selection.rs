@@ -331,14 +331,14 @@ mod test_line_selection {
     fn no_specs_select_nothing() {
         let selection = LineSelection::parse(&[]).expect("an empty selection should parse");
         assert!(selection.is_empty());
-        assert!(selection.paths().is_empty());
+        assert_eq!(selection.paths(), [] as [PathBuf; 0]);
         assert!(selection.bare().is_empty());
     }
 
     #[test]
     fn plain_ranges_are_collected_without_a_path() {
         let selection = LineSelection::parse(&specs(&["10-25", "40"])).expect("the selection should parse");
-        assert!(selection.paths().is_empty());
+        assert_eq!(selection.paths(), [] as [PathBuf; 0]);
         assert!(selection.bare().contains_line(10));
         assert!(selection.bare().contains_line(40));
         assert!(!selection.bare().contains_line(30));

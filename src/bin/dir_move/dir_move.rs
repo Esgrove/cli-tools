@@ -3024,7 +3024,7 @@ mod test_custom_mappings {
             &mut consumed_files,
         )?;
 
-        assert!(remaining.is_empty());
+        assert_eq!(remaining, [] as [PathBuf; 0]);
         assert!(consumed_files.contains(&file_path));
         assert_exists(&file_path);
         assert_not_exists(&root.join("Custom Dir").join(file_name));
@@ -3105,7 +3105,7 @@ mod test_custom_mappings {
         let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         // File should be matched despite case difference
-        assert!(remaining.is_empty());
+        assert_eq!(remaining, [] as [PathBuf; 0]);
         Ok(())
     }
 
@@ -3126,7 +3126,7 @@ mod test_custom_mappings {
         let mut moved_files = HashSet::new();
         let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
-        assert!(remaining.is_empty());
+        assert_eq!(remaining, [] as [PathBuf; 0]);
         Ok(())
     }
 
@@ -3168,7 +3168,7 @@ mod test_custom_mappings {
         let remaining = dirmove.process_custom_mapping_matches(&files, &directories, &mut moved_files)?;
 
         // File should be matched to first mapping
-        assert!(remaining.is_empty());
+        assert_eq!(remaining, [] as [PathBuf; 0]);
         Ok(())
     }
 

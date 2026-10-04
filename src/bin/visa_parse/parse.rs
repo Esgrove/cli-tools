@@ -1056,7 +1056,7 @@ mod test_read_xml_file {
         let path = Path::new("tests/fixtures/nonexistent.xml");
         let (lines, _year) = read_xml_file(path);
 
-        assert!(lines.is_empty());
+        assert_eq!(lines, [] as [String; 0]);
     }
 }
 
@@ -1133,7 +1133,7 @@ mod test_extract_items {
 
         let items = extract_items(&lines, year).expect("should handle empty");
 
-        assert!(items.is_empty());
+        assert_eq!(items, [] as [VisaItem; 0]);
     }
 }
 
@@ -1202,7 +1202,7 @@ mod test_calculate_totals {
     fn handles_empty_input() {
         let items: Vec<VisaItem> = vec![];
         let totals = calculate_totals_for_each_name(&items);
-        assert!(totals.is_empty());
+        assert_eq!(totals, [] as [(String, f64); 0]);
     }
 
     #[test]
@@ -1313,7 +1313,7 @@ mod test_get_xml_files {
     fn returns_empty_for_nonexistent_directory() {
         let files = get_xml_files(Path::new("tests/nonexistent"));
 
-        assert!(files.is_empty());
+        assert_eq!(files, [] as [PathBuf; 0]);
     }
 
     #[test]
@@ -1805,7 +1805,7 @@ mod test_filter_prefixes {
 
     #[test]
     fn filter_prefixes_is_not_empty() {
-        assert!(!DEFAULT_FILTER_PREFIXES.is_empty());
+        assert_ne!(DEFAULT_FILTER_PREFIXES.as_slice(), [] as [&str; 0]);
         assert!(DEFAULT_FILTER_PREFIXES.len() > 50);
     }
 
@@ -1993,7 +1993,7 @@ mod test_parse_files {
 
         let items = parse_files(directory.path(), vec![empty], false).expect("an empty file should parse");
 
-        assert!(items.is_empty());
+        assert_eq!(items, [] as [VisaItem; 0]);
     }
 }
 

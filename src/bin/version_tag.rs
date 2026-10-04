@@ -714,7 +714,7 @@ mod test_version_tag {
         version_tag(&directory.path().to_path_buf(), false, true, false, false, false)
             .expect("a dryrun should succeed");
 
-        assert!(tag_names(&repository).is_empty());
+        assert_eq!(tag_names(&repository), [] as [String; 0]);
     }
 
     #[test]
@@ -772,7 +772,7 @@ mod test_version_tag {
         version_tag(&directory.path().to_path_buf(), true, true, true, true, false)
             .expect("a combined dryrun push should succeed");
 
-        assert!(tag_names(&repository).is_empty());
+        assert_eq!(tag_names(&repository), [] as [String; 0]);
     }
 }
 
@@ -804,7 +804,7 @@ mod test_tag_helpers {
 
         create_version_tag(&repository, "v1.2.3", "1.2.3", head.id(), true).expect("a dryrun should succeed");
 
-        assert!(tag_names(&repository).is_empty());
+        assert_eq!(tag_names(&repository), [] as [String; 0]);
     }
 
     #[test]

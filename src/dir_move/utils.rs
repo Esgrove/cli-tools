@@ -1225,7 +1225,7 @@ mod test_prefix_candidates {
         // Original test: LongName only appears in one file, no group formed
         let files = make_test_files(&["LongName.v1.mp4", "Other.v2.mp4"]);
         let candidates = find_prefix_candidates("LongName.v1.mp4", &files, 2, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
     }
 
     #[test]
@@ -1320,7 +1320,7 @@ mod test_prefix_candidates {
     fn no_matches_below_threshold() {
         let files = make_test_files(&["ABC.random.mp4", "XYZ.other.mp4"]);
         let candidates = find_prefix_candidates("ABC.random.mp4", &files, 2, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
     }
 
     #[test]
@@ -1342,14 +1342,14 @@ mod test_prefix_candidates {
     fn empty_file_list() {
         let files: Vec<FileInfo<'_>> = Vec::new();
         let candidates = find_prefix_candidates("Some.Name.mp4", &files, 2, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
     }
 
     #[test]
     fn file_not_in_list() {
         let files = make_test_files(&["Other.Name.mp4", "Different.File.mp4"]);
         let candidates = find_prefix_candidates("Some.Name.mp4", &files, 2, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
     }
 
     #[test]
@@ -1414,7 +1414,7 @@ mod test_prefix_candidates {
         ]);
         let candidates = find_prefix_candidates("PhotoLab.Image.Two.jpg", &files, 2, 1);
         // All files should match - PhotoLab = Photo.Lab = Photolab
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         // The 1-part prefix "PhotoLab" should match all 4 files
         let photolab = candidates.iter().find(|c| c.prefix.to_lowercase() == "photolab");
         assert!(photolab.is_some());
@@ -1429,7 +1429,7 @@ mod test_prefix_candidates {
         ]);
         let candidates = find_prefix_candidates("StudioTV.Second.Episode.mp4", &files, 2, 1);
         // All files should match on the single-part prefix (StudioTV = Studio.TV = Studiotv)
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         let studiotv = candidates.iter().find(|c| c.prefix.to_lowercase() == "studiotv");
         assert!(studiotv.is_some());
         assert_eq!(studiotv.unwrap().match_count, 4);
@@ -1444,7 +1444,7 @@ mod test_prefix_candidates {
             "Sunsethd.Image.Three.jpg",
         ]);
         let candidates = find_prefix_candidates("SunSetHD.Image.Two.jpg", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         // The 1-part prefix "SunSetHD" should match all 3 files
         let sunsethd = candidates.iter().find(|c| c.prefix.to_lowercase() == "sunsethd");
         assert!(sunsethd.is_some());
@@ -1457,7 +1457,7 @@ mod test_prefix_candidates {
             "Showtv.Third.Episode.mp4",
         ]);
         let candidates = find_prefix_candidates("ShowTV.Second.Episode.mp4", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         let showtv = candidates.iter().find(|c| c.prefix.to_lowercase() == "showtv");
         assert!(showtv.is_some());
         assert_eq!(showtv.unwrap().match_count, 3);
@@ -1531,11 +1531,11 @@ mod test_prefix_candidates {
         // With min_group_size=3, only prefixes with 3+ files qualify
         // "Vacation.Photos" has 2 files < 3, so excluded
         let candidates = find_prefix_candidates("Vacation.Photos.Image1.jpg", &files, 3, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
 
         // With min_group_size=2, "Vacation.Photos" qualifies
         let candidates = find_prefix_candidates("Vacation.Photos.Image1.jpg", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         assert!(
             candidates
                 .iter()
@@ -1552,12 +1552,12 @@ mod test_prefix_candidates {
         ]);
         // With min_group_size=3, prefixes with exactly 3 files qualify
         let candidates = find_prefix_candidates("Beach.Summer.Photo1.jpg", &files, 3, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         assert!(candidates.iter().any(|c| c.match_count == 3));
 
         // min_group_size=4, "Beach.Summer" with 3 files < 4, so excluded
         let candidates = find_prefix_candidates("Beach.Summer.Photo1.jpg", &files, 4, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
     }
 
     #[test]
@@ -1570,7 +1570,7 @@ mod test_prefix_candidates {
             "myAlbum.Photo.Five.jpg",
         ]);
         let candidates = find_prefix_candidates("MyAlbum.Photo.One.jpg", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         // All 5 should be grouped together regardless of case
         let myalbum = candidates.iter().find(|c| c.prefix.to_lowercase() == "myalbum");
         assert!(myalbum.is_some());
@@ -1588,7 +1588,7 @@ mod test_prefix_candidates {
             "MY.ALBUM.Photo.Five.jpg",
         ]);
         let candidates = find_prefix_candidates("MyAlbum.Photo.One.jpg", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         // All 5 should be grouped together regardless of case
         let myalbum = candidates.iter().find(|c| c.prefix.to_lowercase() == "myalbum");
         assert!(myalbum.is_some());
@@ -1606,7 +1606,7 @@ mod test_prefix_candidates {
             "Photo.LAB.Image5.jpg",
         ]);
         let candidates = find_prefix_candidates("PhotoLab.Image2.jpg", &files, 3, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         // All 5 should be grouped together
         let photolab = candidates.iter().find(|c| c.prefix.to_lowercase() == "photolab");
         assert!(photolab.is_some());
@@ -1622,7 +1622,7 @@ mod test_prefix_candidates {
             "SUN.SET.HD.Image4.jpg",
         ]);
         let candidates = find_prefix_candidates("SunSetHD.Image2.jpg", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         let sunsethd = candidates.iter().find(|c| c.prefix.to_lowercase() == "sunsethd");
         assert!(sunsethd.is_some());
         assert_eq!(sunsethd.unwrap().match_count, 4);
@@ -1656,7 +1656,7 @@ mod test_prefix_candidates {
         let files = make_test_files(&["Unique.Name.File.jpg", "Other.File.jpg"]);
         // With min_group_size=1, all prefixes with at least 1 match qualify
         let candidates = find_prefix_candidates("Unique.Name.File.jpg", &files, 1, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         assert!(candidates.iter().any(|c| c.prefix == "Unique.Name.File"));
         assert!(candidates.iter().any(|c| c.prefix == "Unique.Name"));
         assert!(candidates.iter().any(|c| c.prefix == "Unique"));
@@ -1675,7 +1675,7 @@ mod test_prefix_candidates {
         ]);
         // min_group_size=10, all prefixes with 5 files < 10, so none qualify
         let candidates = find_prefix_candidates("Gallery.Photos.Img1.jpg", &files, 10, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
 
         // min_group_size=5, prefixes with exactly 5 files qualify
         let candidates = find_prefix_candidates("Gallery.Photos.Img1.jpg", &files, 5, 1);
@@ -1697,7 +1697,7 @@ mod test_prefix_candidates {
             "Wedding.Photos.IMG004.jpg",
         ]);
         let candidates = find_prefix_candidates("Wedding.Photos.IMG001.jpg", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         // Should find 2-part prefix with all 4 files
         let two_part = candidates.iter().find(|c| c.prefix == "Wedding.Photos");
         assert!(two_part.is_some());
@@ -1708,7 +1708,7 @@ mod test_prefix_candidates {
     fn identical_single_word_prefix_grouped() {
         let files = make_test_files(&["Concert.Image1.jpg", "Concert.Image2.jpg", "Concert.Image3.jpg"]);
         let candidates = find_prefix_candidates("Concert.Image1.jpg", &files, 2, 1);
-        assert!(!candidates.is_empty());
+        assert_ne!(candidates, [] as [PrefixCandidate<'_>; 0]);
         let one_part = candidates.iter().find(|c| c.prefix == "Concert");
         assert!(one_part.is_some());
         assert_eq!(one_part.unwrap().match_count, 3);
@@ -2031,7 +2031,7 @@ mod test_prefix_candidates {
         let files = make_test_files(&["Show.Name.v1.mp4", "Show.Name.v2.mp4"]);
         // With min_group_size=5, "Show.Name" has 2 files < 5, so excluded
         let candidates = find_prefix_candidates("Show.Name.v1.mp4", &files, 5, 1);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
 
         // With min_group_size=2, "Show.Name" qualifies
         // With position-agnostic matching, "Name" is also found
@@ -2073,13 +2073,13 @@ mod test_get_all_n_part_sequences {
     #[test]
     fn too_few_parts() {
         let result = get_all_n_part_sequences("A.B", 3);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [&str; 0]);
     }
 
     #[test]
     fn zero_parts_returns_empty() {
         let result = get_all_n_part_sequences("A.B.C", 0);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [&str; 0]);
     }
 
     #[test]
@@ -2091,7 +2091,7 @@ mod test_get_all_n_part_sequences {
     #[test]
     fn no_dots_multi_part_returns_empty() {
         let result = get_all_n_part_sequences("SingleWord", 2);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [&str; 0]);
     }
 
     #[test]

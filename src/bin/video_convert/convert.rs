@@ -1088,7 +1088,7 @@ mod test_process_files_with_db_cleanup {
         assert_eq!(outcome, ProcessingOutcome::Completed);
         assert_eq!(processed_count, 2);
         assert_eq!(stats.files_converted, 2);
-        assert!(pending_paths(&database).is_empty());
+        assert_eq!(pending_paths(&database), [] as [PathBuf; 0]);
     }
 
     #[test]
@@ -1134,7 +1134,7 @@ mod test_process_files_with_db_cleanup {
 
         assert_eq!(processed_count, 0);
         assert_eq!(stats.files_converted, 0);
-        assert!(pending_paths(&database).is_empty());
+        assert_eq!(pending_paths(&database), [] as [PathBuf; 0]);
     }
 
     #[test]
@@ -1242,11 +1242,11 @@ mod test_gather_and_rename {
                 .len(),
             1
         );
-        assert!(
+        assert_eq!(
             text_converter
                 .gather_files_to_process()
-                .expect("Failed to gather files")
-                .is_empty()
+                .expect("Failed to gather files"),
+            [] as [VideoFile; 0]
         );
     }
 

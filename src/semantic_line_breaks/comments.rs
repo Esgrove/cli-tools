@@ -944,7 +944,7 @@ mod test_trailing_rust {
         assert_eq!(replacement("x(); // noqa", FileKind::Rust), None);
         assert_eq!(replacement("x(); // rustfmt::skip", FileKind::Rust), None);
         let (_, violations) = fix(&["x(); // clippy::foo"], FileKind::Rust);
-        assert!(violations.is_empty());
+        assert_eq!(violations, [] as [Violation; 0]);
     }
 
     #[test]

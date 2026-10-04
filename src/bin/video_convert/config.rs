@@ -406,9 +406,9 @@ verbose = true
         assert!(config.count.is_none());
         assert!(config.display_limit.is_none());
         assert!(config.sort.is_none());
-        assert!(config.include.is_empty());
-        assert!(config.exclude.is_empty());
-        assert!(config.extensions.is_empty());
+        assert_eq!(config.include, [] as [String; 0]);
+        assert_eq!(config.exclude, [] as [String; 0]);
+        assert_eq!(config.extensions, [] as [String; 0]);
     }
 }
 
@@ -434,7 +434,7 @@ mod config_lowercase_vec_tests {
     fn handles_empty_slice() {
         let input: [&str; 0] = [];
         let result = Config::lowercase_vec(&input);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [String; 0]);
     }
 
     #[test]
@@ -479,9 +479,9 @@ mod config_default_resolution_tests {
         assert!(!config.delete_duplicates);
         assert_eq!(config.display_limit, Some(DEFAULT_DISPLAY_LIMIT));
         assert!(!config.dryrun);
-        assert!(config.exclude.is_empty());
+        assert_eq!(config.exclude, [] as [String; 0]);
         assert_eq!(config.extensions, DEFAULT_EXTENSIONS);
-        assert!(config.include.is_empty());
+        assert_eq!(config.include, [] as [String; 0]);
         assert_eq!(config.max_bitrate, None);
         assert_eq!(config.max_duration, None);
         assert_eq!(config.min_duration, None);

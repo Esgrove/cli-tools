@@ -204,9 +204,9 @@ mod test_video_convert_args_parsing {
         assert!(args.path.is_none());
         assert!(args.bitrate.is_none());
         assert!(args.count.is_none());
-        assert!(args.include.is_empty());
-        assert!(args.exclude.is_empty());
-        assert!(args.extension.is_empty());
+        assert_eq!(args.include, [] as [String; 0]);
+        assert_eq!(args.exclude, [] as [String; 0]);
+        assert_eq!(args.extension, [] as [String; 0]);
         assert!(args.sort.is_none());
         assert!(!args.verbose);
         assert_eq!(args.database_mode(), None);

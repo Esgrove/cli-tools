@@ -260,7 +260,7 @@ mod test_relative_paths {
         let path = Path::new("/");
         let result = get_relative_path_or_filename(path, root);
         // Should return the full path display when no filename
-        assert!(!result.is_empty());
+        assert_ne!(result, "");
     }
 
     #[test]
@@ -341,7 +341,7 @@ mod test_text_helpers {
     #[test]
     fn strings_from_owns_every_value_in_order() {
         assert_eq!(strings_from(&["rs", "md"]), vec!["rs".to_string(), "md".to_string()]);
-        assert!(strings_from(&[]).is_empty());
+        assert_eq!(strings_from(&[]), [] as [String; 0]);
     }
 }
 

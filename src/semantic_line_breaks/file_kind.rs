@@ -228,7 +228,7 @@ mod test_file_kind {
         assert_eq!(style.line_markers, &["//!", "///", "//"]);
         assert!(style.block.is_some());
         assert!(FileKind::Python.comment_style().docstrings);
-        assert!(FileKind::Markdown.comment_style().line_markers.is_empty());
+        assert_eq!(FileKind::Markdown.comment_style().line_markers, [] as [&str; 0]);
     }
 
     #[test]

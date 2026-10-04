@@ -399,7 +399,7 @@ mod test_hash_matches {
             .get(second_path.to_string_lossy().as_ref())
             .expect("expected refreshed second file hash");
 
-        assert!(matches.is_empty());
+        assert_eq!(matches, [] as [Vec<usize>; 0]);
         assert_eq!(refreshed.blake3_hash, blake3::hash(b"different!").to_string());
         assert_eq!(refreshed.modified_time_ns, current_fingerprint.modified_time_ns);
     }
@@ -436,7 +436,7 @@ mod test_hash_matches {
     fn disabled_hash_comparison_finds_nothing() {
         let files = vec![DupeFileInfo::new(PathBuf::from("missing.mp4"), "mp4".to_string())];
 
-        assert!(find_hash_matches(&files, false, true).is_empty());
+        assert_eq!(find_hash_matches(&files, false, true), [] as [Vec<usize>; 0]);
     }
 
     #[test]
@@ -462,7 +462,7 @@ mod test_hash_matches {
             DupeFileInfo::new(temp_directory.path().join("also-missing.mp4"), "mp4".to_string()),
         ];
 
-        assert!(find_hash_matches_with_cache(&files, true, None).is_empty());
+        assert_eq!(find_hash_matches_with_cache(&files, true, None), [] as [Vec<usize>; 0]);
     }
 }
 

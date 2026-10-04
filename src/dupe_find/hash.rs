@@ -263,13 +263,16 @@ mod test_group_hash_matches {
             indexed_hash(2, 10, "different"),
         ];
 
-        assert!(group_hash_matches(&values).is_empty());
+        assert_eq!(group_hash_matches(&values), [] as [Vec<usize>; 0]);
     }
 
     #[test]
     fn omits_empty_and_singleton_groups() {
-        assert!(group_hash_matches(&[]).is_empty());
-        assert!(group_hash_matches(&[indexed_hash(0, 10, "only")]).is_empty());
+        assert_eq!(group_hash_matches(&[]), [] as [Vec<usize>; 0]);
+        assert_eq!(
+            group_hash_matches(&[indexed_hash(0, 10, "only")]),
+            [] as [Vec<usize>; 0]
+        );
     }
 
     #[test]

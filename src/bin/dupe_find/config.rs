@@ -172,12 +172,12 @@ mod dupe_config_tests {
         assert!(!config.move_files);
         assert!(!config.recurse);
         assert!(!config.verbose);
-        assert!(config.extensions.is_empty());
-        assert!(config.ignore_matches.is_empty());
-        assert!(config.patterns.is_empty());
-        assert!(config.prefix_ignores.is_empty());
-        assert!(config.paths.is_empty());
-        assert!(config.default_paths.is_empty());
+        assert_eq!(config.extensions, [] as [String; 0]);
+        assert_eq!(config.ignore_matches, [] as [String; 0]);
+        assert_eq!(config.patterns, [] as [String; 0]);
+        assert_eq!(config.prefix_ignores, [] as [String; 0]);
+        assert_eq!(config.paths, [] as [PathBuf; 0]);
+        assert_eq!(config.default_paths, [] as [PathBuf; 0]);
     }
 
     #[test]

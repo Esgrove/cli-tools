@@ -565,8 +565,8 @@ mod test_move_files {
 
         assert_eq!(report.moved_count(), 2);
         assert_eq!(report.moved_files, files);
-        assert!(report.skipped_files.is_empty());
-        assert!(report.failed_files.is_empty());
+        assert_eq!(report.skipped_files, [] as [PathBuf; 0]);
+        assert_eq!(report.failed_files, [] as [PathBuf; 0]);
         assert!(!input.join("one.txt").exists());
         assert!(!input.join("two.txt").exists());
         assert_eq!(fs::read_to_string(output.join("one.txt"))?, "one");
@@ -588,9 +588,9 @@ mod test_move_files {
         let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
 
         assert_eq!(report.moved_count(), 0);
-        assert!(report.moved_files.is_empty());
+        assert_eq!(report.moved_files, [] as [PathBuf; 0]);
         assert_eq!(report.skipped_files, vec![source]);
-        assert!(report.failed_files.is_empty());
+        assert_eq!(report.failed_files, [] as [PathBuf; 0]);
         assert_eq!(fs::read_to_string(input.join("one.txt"))?, "new");
         assert_eq!(fs::read_to_string(output.join("one.txt"))?, "old");
         Ok(())
@@ -653,7 +653,7 @@ mod test_move_files {
 
         let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
 
-        assert!(report.moved_files.is_empty());
+        assert_eq!(report.moved_files, [] as [PathBuf; 0]);
         assert_eq!(report.failed_files, vec![source]);
         Ok(())
     }

@@ -807,7 +807,7 @@ mod test_boundaries {
 #[cfg(test)]
 mod test_brackets {
     use super::super::reflow::reflow_paragraph;
-    use super::super::violation::ViolationKind;
+    use super::super::violation::{Violation, ViolationKind};
     use super::*;
     use crate::semantic_line_breaks::test_helpers::*;
 
@@ -905,7 +905,7 @@ mod test_brackets {
         paragraph.hard_breaks = vec![HardBreak::Spaces, HardBreak::None];
         let outcome = reflow_paragraph(&paragraph, &FormatOptions::with_width(120), true);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]

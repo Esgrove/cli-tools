@@ -341,7 +341,7 @@ mod test_regex_literals {
             scan_line(lines[0], ScanState::Normal, &syntax).state,
             ScanState::InBlockScalar(0)
         );
-        assert!(replaced_indices(&lines, FileKind::Yaml).is_empty());
+        assert_eq!(replaced_indices(&lines, FileKind::Yaml), [] as [usize; 0]);
     }
 
     #[test]
@@ -659,7 +659,10 @@ mod test_regex_literals {
             "// inside the block",
             "*/ const next = 1; // c",
         ];
-        assert!(replaced_indices(&with_comment_above, FileKind::JavaScript).is_empty());
+        assert_eq!(
+            replaced_indices(&with_comment_above, FileKind::JavaScript),
+            [] as [usize; 0]
+        );
     }
 
     #[test]
@@ -722,7 +725,7 @@ mod test_regex_literals {
                 lines_inside_strings(&lines, FileKind::JavaScript),
                 vec![false, true, true, true]
             );
-            assert!(replaced_indices(&lines, FileKind::JavaScript).is_empty());
+            assert_eq!(replaced_indices(&lines, FileKind::JavaScript), [] as [usize; 0]);
         }
     }
 }

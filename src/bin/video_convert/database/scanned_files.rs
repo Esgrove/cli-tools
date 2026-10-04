@@ -374,7 +374,7 @@ mod test_group_paths_by_drive {
     fn groups_empty_input() {
         let paths: Vec<PathBuf> = vec![];
         let groups = group_paths_by_drive(&paths);
-        assert!(groups.is_empty());
+        assert_eq!(groups, [] as [(String, Vec<PathBuf>); 0]);
     }
 
     #[test]

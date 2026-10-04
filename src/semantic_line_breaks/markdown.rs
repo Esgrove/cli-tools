@@ -1255,25 +1255,25 @@ mod test_skip_notices {
     #[test]
     fn the_ignore_marker_produces_no_skip_notice() {
         let (_, notices) = split_paragraphs_with_notices(&["This is prose. slb-ignore"], "", 0, false);
-        assert!(notices.is_empty());
+        assert_eq!(notices, [] as [SkipNotice; 0]);
     }
 
     #[test]
     fn a_fenced_code_block_produces_no_skip_notice() {
         let (_, notices) = split_paragraphs_with_notices(&["```", "let x = 1;", "```"], "", 0, false);
-        assert!(notices.is_empty());
+        assert_eq!(notices, [] as [SkipNotice; 0]);
     }
 
     #[test]
     fn a_heading_produces_no_skip_notice() {
         let (_, notices) = split_paragraphs_with_notices(&["# Title"], "", 0, false);
-        assert!(notices.is_empty());
+        assert_eq!(notices, [] as [SkipNotice; 0]);
     }
 
     #[test]
     fn a_real_list_marker_produces_no_skip_notice() {
         let (_, notices) = split_paragraphs_with_notices(&["- one", "- two"], "", 0, false);
-        assert!(notices.is_empty());
+        assert_eq!(notices, [] as [SkipNotice; 0]);
     }
 }
 

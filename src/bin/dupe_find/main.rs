@@ -169,10 +169,10 @@ mod cli_args_tests {
     #[test]
     fn empty_by_default() {
         let args = Args::try_parse_from(["test"]).expect("should parse");
-        assert!(args.paths.is_empty());
-        assert!(args.pattern.is_empty());
-        assert!(args.extension.is_empty());
-        assert!(args.prefix_ignore.is_empty());
+        assert_eq!(args.paths, [] as [PathBuf; 0]);
+        assert_eq!(args.pattern, [] as [String; 0]);
+        assert_eq!(args.extension, [] as [String; 0]);
+        assert_eq!(args.prefix_ignore, [] as [String; 0]);
         assert!(!args.hash_compare);
         assert!(!args.move_files);
         assert!(!args.print);
@@ -272,7 +272,7 @@ mod config_from_args_tests {
         let args = Args::try_parse_from(["test"]).expect("should parse");
         let config = Config::from_args(args).expect("should create config");
         // Should have extensions (from CLI, config, or defaults)
-        assert!(!config.extensions.is_empty());
+        assert_ne!(config.extensions, [] as [String; 0]);
     }
 
     #[test]

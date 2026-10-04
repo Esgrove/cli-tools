@@ -386,7 +386,7 @@ mod test_split_and_assemble {
         assert_eq!((lines[0].text, lines[0].eol), ("a", "\r\n"));
         assert_eq!((lines[1].text, lines[1].eol), ("b", "\n"));
         assert_eq!((lines[2].text, lines[2].eol), ("c", ""));
-        assert!(split_lines("").is_empty());
+        assert_eq!(split_lines(""), [] as [SourceLine<'_>; 0]);
         assert_eq!(split_lines("\n").len(), 1);
     }
 
@@ -486,7 +486,7 @@ mod test_format {
         // The fixed text is stable, the moved comment is not merged into anything.
         let second = format("// 6 chars\nlet x = 1;\n", FileKind::Rust, &all_rules());
         assert_eq!(second.fixed_text, None);
-        assert!(second.violations.is_empty());
+        assert_eq!(second.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -494,7 +494,7 @@ mod test_format {
         let text = "let x = 1; // one\n";
         let result = format(text, FileKind::Rust, &FormatOptions::default());
         assert_eq!(result.fixed_text, None);
-        assert!(result.violations.is_empty());
+        assert_eq!(result.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -527,7 +527,7 @@ mod test_format {
         let text = "def f():\n    \"\"\"Parse the header of the file.\"\"\"\n    return 1\n";
         let result = format(text, FileKind::Python, &FormatOptions::default());
         assert_eq!(result.fixed_text, None);
-        assert!(result.violations.is_empty());
+        assert_eq!(result.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -645,7 +645,7 @@ mod test_format {
         let options = FormatOptions::default();
         for kind in [FileKind::JavaScript, FileKind::CLike, FileKind::Rust, FileKind::Go] {
             assert_eq!(format(text, kind, &options), FormatResult::default(), "{kind:?}");
-            assert!(check(text, kind, &options).violations.is_empty());
+            assert_eq!(check(text, kind, &options).violations, [] as [Violation; 0]);
         }
     }
 
@@ -839,7 +839,10 @@ mod test_format {
                 )
             );
             assert_eq!(format(&text, FileKind::JavaScript, &options), FormatResult::default());
-            assert!(check(&text, FileKind::JavaScript, &options).violations.is_empty());
+            assert_eq!(
+                check(&text, FileKind::JavaScript, &options).violations,
+                [] as [Violation; 0]
+            );
         }
     }
 }
@@ -933,7 +936,7 @@ fn third() {}
     fn a_selection_matching_no_block_changes_nothing() {
         let result = format(THREE_BLOCKS, FileKind::Rust, &options("2-3"));
         assert_eq!(result.fixed_text, None);
-        assert!(result.violations.is_empty());
+        assert_eq!(result.violations, [] as [Violation; 0]);
     }
 
     #[test]

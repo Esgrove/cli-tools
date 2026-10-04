@@ -693,9 +693,9 @@ mod config_tests {
         assert!(!config.overwrite);
         assert!(!config.recurse);
         assert!(!config.verbose);
-        assert!(config.include.is_empty());
-        assert!(config.exclude.is_empty());
-        assert!(config.ignored_group_names.is_empty());
+        assert_eq!(config.include, [] as [String; 0]);
+        assert_eq!(config.exclude, [] as [String; 0]);
+        assert_eq!(config.ignored_group_names, [] as [String; 0]);
     }
 
     #[test]
@@ -817,7 +817,7 @@ custom_mappings = [["something", "Custom Dir"], ["other", "Another Dir"]]
     fn from_toml_str_default_custom_mappings_is_empty() {
         let toml = "";
         let config = DirMoveConfig::from_toml_str(toml).expect("should parse empty config");
-        assert!(config.custom_mappings.is_empty());
+        assert_eq!(config.custom_mappings, [] as [[String; 2]; 0]);
     }
 
     #[test]
@@ -1098,12 +1098,12 @@ mod cli_args_tests {
     #[test]
     fn empty_arrays_by_default() {
         let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
-        assert!(args.include.is_empty());
-        assert!(args.exclude.is_empty());
-        assert!(args.prefix_ignore.is_empty());
-        assert!(args.prefix_override.is_empty());
-        assert!(args.ignored_group_name.is_empty());
-        assert!(args.unpack_directory.is_empty());
+        assert_eq!(args.include, [] as [String; 0]);
+        assert_eq!(args.exclude, [] as [String; 0]);
+        assert_eq!(args.prefix_ignore, [] as [String; 0]);
+        assert_eq!(args.prefix_override, [] as [String; 0]);
+        assert_eq!(args.ignored_group_name, [] as [String; 0]);
+        assert_eq!(args.unpack_directory, [] as [String; 0]);
     }
 
     #[test]
@@ -1196,6 +1196,6 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "invalid_no_colon"]).expect("should parse");
         let config = Config::from_args_default_config(args);
         // Invalid format should be skipped
-        assert!(config.custom_mappings.is_empty());
+        assert_eq!(config.custom_mappings, [] as [CustomMapping; 0]);
     }
 }

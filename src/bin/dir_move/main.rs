@@ -145,8 +145,8 @@ mod test_args {
     fn parses_defaults() {
         let args = DirMoveArgs::try_parse_from(["dirmove"]).expect("default arguments should parse");
         assert!(args.command.is_none());
-        assert!(args.path.is_empty());
-        assert!(args.output.is_empty());
+        assert_eq!(args.path, [] as [PathBuf; 0]);
+        assert_eq!(args.output, [] as [PathBuf; 0]);
         assert!(!args.auto);
         assert!(!args.create);
         assert!(!args.debug);

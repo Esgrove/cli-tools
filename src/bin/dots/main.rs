@@ -250,11 +250,11 @@ mod test_dots_cli_parsing {
         assert!(!cli.random);
         assert!(!cli.year);
         assert!(!cli.verbose);
-        assert!(cli.include.is_empty());
-        assert!(cli.exclude.is_empty());
-        assert!(cli.substitute.is_empty());
-        assert!(cli.remove.is_empty());
-        assert!(cli.regex.is_empty());
+        assert_eq!(cli.include, [] as [String; 0]);
+        assert_eq!(cli.exclude, [] as [String; 0]);
+        assert_eq!(cli.substitute, [] as [String; 0]);
+        assert_eq!(cli.remove, [] as [String; 0]);
+        assert_eq!(cli.regex, [] as [String; 0]);
     }
 
     #[test]

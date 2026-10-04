@@ -206,7 +206,7 @@ verbose = true
         assert!(!config.swap_year);
         assert!(!config.verbose);
         assert!(!config.year_first);
-        assert!(config.file_extensions.is_empty());
+        assert_eq!(config.file_extensions, [] as [String; 0]);
     }
 }
 

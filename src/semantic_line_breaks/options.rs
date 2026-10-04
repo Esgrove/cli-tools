@@ -249,7 +249,7 @@ mod test_format_options {
         assert_eq!(options.abbreviations, defaults.abbreviations);
         assert_eq!(options.directive_prefixes, defaults.directive_prefixes);
         assert_eq!(options.preserve_lowercase, defaults.preserve_lowercase);
-        assert!(options.clause_starters.is_empty());
+        assert_eq!(options.clause_starters, [] as [String; 0]);
         assert!(!options.join_sentences);
         assert!(!options.allow_word_break);
         assert_eq!(defaults.max_width, DEFAULT_MAX_WIDTH);

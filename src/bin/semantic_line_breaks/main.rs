@@ -157,16 +157,17 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod test_args {
     use super::*;
+    use cli_tools::semantic_line_breaks::ViolationKind;
 
     #[test]
     fn parses_defaults() {
         let args = Args::try_parse_from(["slb"]).expect("default arguments should parse");
         assert!(args.command.is_none());
-        assert!(args.paths.is_empty());
+        assert_eq!(args.paths, [] as [PathBuf; 0]);
         assert!(!args.fix);
         assert!(!args.print);
         assert!(args.width.is_none());
-        assert!(args.rules.is_empty());
+        assert_eq!(args.rules, [] as [ViolationKind; 0]);
         assert!(args.kind.is_none());
         assert!(!args.stdin);
     }

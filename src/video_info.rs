@@ -491,10 +491,10 @@ mod test_video_stats {
     fn new_creates_empty_stats() {
         let stats = VideoStats::new();
         assert!(stats.resolutions.is_empty());
-        assert!(stats.durations.is_empty());
+        assert_eq!(stats.durations, [] as [f64; 0]);
         assert!(stats.codecs.is_empty());
-        assert!(stats.bitrates_kbps.is_empty());
-        assert!(stats.file_sizes.is_empty());
+        assert_eq!(stats.bitrates_kbps, [] as [u64; 0]);
+        assert_eq!(stats.file_sizes, [] as [u64; 0]);
     }
 
     #[test]
@@ -530,10 +530,10 @@ mod test_video_stats {
         stats.add(&info);
 
         assert!(stats.resolutions.is_empty());
-        assert!(stats.durations.is_empty());
+        assert_eq!(stats.durations, [] as [f64; 0]);
         assert!(stats.codecs.is_empty());
-        assert!(stats.bitrates_kbps.is_empty());
-        assert!(stats.file_sizes.is_empty());
+        assert_eq!(stats.bitrates_kbps, [] as [u64; 0]);
+        assert_eq!(stats.file_sizes, [] as [u64; 0]);
     }
 
     #[test]
@@ -874,13 +874,13 @@ mod test_summary_lines {
     fn a_single_file_produces_no_summary() {
         let stats = stats(&[info(1920, 1080, 60.0, "h264", 4000, 1_000_000)]);
 
-        assert!(stats.summary_lines(false).is_empty());
+        assert_eq!(stats.summary_lines(false), [] as [String; 0]);
     }
 
     #[test]
     fn no_files_produce_no_summary() {
-        assert!(VideoStats::new().summary_lines(false).is_empty());
-        assert!(VideoStats::default().summary_lines(true).is_empty());
+        assert_eq!(VideoStats::new().summary_lines(false), [] as [String; 0]);
+        assert_eq!(VideoStats::default().summary_lines(true), [] as [String; 0]);
     }
 
     #[test]

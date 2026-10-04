@@ -602,7 +602,7 @@ fn a_missing_path_is_an_error_with_exit_code_two() {
     let output = run(&[&argument(&directory.path().join("missing.rs"))]);
 
     assert_eq!(exit_code(&output), 2);
-    assert!(!stderr(&output).is_empty());
+    assert_ne!(stderr(&output), "");
 }
 
 #[test]

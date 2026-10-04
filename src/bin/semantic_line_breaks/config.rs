@@ -266,7 +266,7 @@ mod test_slb_config {
     fn from_toml_str_parses_empty_config() {
         let config = SlbConfig::from_toml_str("").expect("empty config should parse");
         assert!(config.width.is_none());
-        assert!(config.rules.is_empty());
+        assert_eq!(config.rules, [] as [String; 0]);
         assert!(!config.join_sentences);
         assert!(config.use_project_config.is_none());
     }
@@ -394,12 +394,12 @@ mod test_config_merge {
         assert_eq!(config.rules, RuleSet::DEFAULT);
         assert!(!config.rules.trailing_comment);
         assert_eq!(config.exclude, cli_tools::strings_from(DEFAULT_EXCLUDES));
-        assert!(config.extensions.is_empty());
+        assert_eq!(config.extensions, [] as [String; 0]);
         assert!(config.width.is_none());
         assert!(config.project_width);
         assert!(!config.join_sentences);
         assert!(!config.allow_word_break);
-        assert!(config.clause_starters.is_empty());
+        assert_eq!(config.clause_starters, [] as [String; 0]);
         assert_eq!(config.abbreviations, cli_tools::strings_from(DEFAULT_ABBREVIATIONS));
     }
 

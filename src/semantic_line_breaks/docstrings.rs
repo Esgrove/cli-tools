@@ -330,7 +330,7 @@ mod test_docstring_quotes {
     fn quotes_already_on_their_own_lines_are_left_alone() {
         let (fixed, violations) = fix(&["    \"\"\"", "    Body text.", "    \"\"\""]);
         assert_eq!(fixed, vec!["    \"\"\"", "    Body text.", "    \"\"\""]);
-        assert!(violations.is_empty());
+        assert_eq!(violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -343,7 +343,7 @@ mod test_docstring_quotes {
         ];
         let (fixed, violations) = fix(&lines);
         assert_eq!(fixed, lines.iter().map(ToString::to_string).collect::<Vec<_>>());
-        assert!(violations.is_empty());
+        assert_eq!(violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -361,7 +361,7 @@ mod test_docstring_quotes {
         let scan = scan_lines(&lines, FileKind::Python);
         let (replacements, violations) = fix_docstring_quotes(&lines, FileKind::Python, &options, &scan);
         assert!(replacements.iter().all(Option::is_none));
-        assert!(violations.is_empty());
+        assert_eq!(violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -370,7 +370,7 @@ mod test_docstring_quotes {
         let scan = scan_lines(&lines, FileKind::Rust);
         let (replacements, violations) = fix_docstring_quotes(&lines, FileKind::Rust, &FormatOptions::default(), &scan);
         assert!(replacements.iter().all(Option::is_none));
-        assert!(violations.is_empty());
+        assert_eq!(violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -380,7 +380,7 @@ mod test_docstring_quotes {
             fixed,
             vec!["    \"\"\"Return the label", "    of the given value.\"\"\""]
         );
-        assert!(violations.is_empty());
+        assert_eq!(violations, [] as [Violation; 0]);
     }
 
     #[test]

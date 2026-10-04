@@ -343,8 +343,8 @@ mod dots_config_tests {
     fn from_toml_str_parses_empty_config() {
         let toml = "";
         let config = DotsConfig::from_toml_str(toml).unwrap();
-        assert!(config.replace.is_empty());
-        assert!(config.include.is_empty());
+        assert_eq!(config.replace, [] as [(String, String); 0]);
+        assert_eq!(config.include, [] as [String; 0]);
         assert!(!config.debug);
     }
 
@@ -483,7 +483,7 @@ mod parse_substitutes_tests {
     fn skips_empty_pattern() {
         let input = vec![String::new(), "replacement".to_string()];
         let result = DotsConfig::parse_substitutes(&input);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [(String, String); 0]);
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod parse_substitutes_tests {
     fn handles_empty_input() {
         let input: Vec<String> = vec![];
         let result = DotsConfig::parse_substitutes(&input);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [(String, String); 0]);
     }
 }
 

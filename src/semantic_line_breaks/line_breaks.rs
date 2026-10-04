@@ -731,7 +731,7 @@ mod test_break_choice {
             pieces.iter().map(|piece| join_tokens(piece)).collect::<Vec<_>>(),
             ["First sentence.", "Second sentence."]
         );
-        assert!(violations.is_empty());
+        assert_eq!(violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -751,8 +751,8 @@ mod test_break_choice {
             1,
             &mut violations,
         );
-        assert!(pieces.is_empty());
-        assert!(violations.is_empty());
+        assert_eq!(pieces, [] as [Vec<Token<'_>>; 0]);
+        assert_eq!(violations, [] as [Violation; 0]);
         assert!(is_first_line);
     }
 
@@ -932,7 +932,7 @@ mod test_break_choice {
         )];
         let outcome = reflow_paragraph(&paragraph(&lines, ""), &FormatOptions::with_width(120), true);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]

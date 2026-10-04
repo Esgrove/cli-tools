@@ -459,6 +459,6 @@ mod test_byte_positions {
     #[test]
     fn public_function_returns_positions() {
         assert_eq!(byte_positions(b"A.B.C", b'.'), vec![1, 3]);
-        assert!(byte_positions(b"", b'.').is_empty());
+        assert_eq!(byte_positions(b"", b'.'), [] as [usize; 0]);
     }
 }

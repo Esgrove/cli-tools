@@ -676,7 +676,7 @@ mod test_tui_state {
 
         state.stop_editing();
         assert!(!state.editing);
-        assert!(state.edit_buffer.is_empty());
+        assert_eq!(state.edit_buffer, "");
         assert_eq!(state.cursor_pos, 0);
     }
 }
@@ -809,7 +809,7 @@ mod test_format_file_detail_lines {
 
         let lines = format_file_detail_lines(&info, 0, 0, &HashMap::new());
 
-        assert!(!lines.is_empty());
+        assert_ne!(lines, [] as [Line<'_>; 0]);
     }
 }
 

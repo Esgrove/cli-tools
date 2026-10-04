@@ -777,6 +777,6 @@ mod test_external_subtitle_maps {
 
         add_external_subtitle_maps(&mut command, &[], 1);
 
-        assert!(command_args(&command).is_empty());
+        assert_eq!(command_args(&command), [] as [String; 0]);
     }
 }

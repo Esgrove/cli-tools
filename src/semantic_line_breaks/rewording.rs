@@ -660,7 +660,7 @@ mod test_rewording {
     fn semicolon_inside_code_span_is_ignored() {
         let outcome = reflow(&["run `a; b` now"], 120);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -880,7 +880,7 @@ mod test_rewording {
         };
         let outcome = reflow_paragraph(&paragraph(&["a; b — c"], ""), &options, true);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]

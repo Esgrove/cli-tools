@@ -884,7 +884,7 @@ mod test_gather_video_files {
             .await
             .expect("gathering should succeed");
 
-        assert!(files.is_empty());
+        assert_eq!(files, [] as [PathBuf; 0]);
     }
 }
 
@@ -949,7 +949,7 @@ mod test_delete_low_resolution_files {
     fn an_empty_list_stays_empty() {
         let remaining = delete_low_resolution_files(Vec::new(), 720, &config(false));
 
-        assert!(remaining.is_empty());
+        assert_eq!(remaining, [] as [FFProbeResult; 0]);
     }
 
     #[test]
