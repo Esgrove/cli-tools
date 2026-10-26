@@ -683,7 +683,7 @@ With `--stdin` only plain ranges are accepted, since the text has no path.
 ## Vtag
 
 ```console
-Create git version tags for a project (Rust, C++, Python)
+Create git version tags for a project (CMake, Python, Rust)
 
 Usage: vtag [OPTIONS] [PATH] [COMMAND]
 
@@ -692,16 +692,17 @@ Commands:
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
-  [PATH]  Optional git repository path. Defaults to current directory
+  [PATH]  Optional project directory in a git repository, such as a subdirectory. Defaults to current directory
 
 Options:
-  -d, --dryrun   Only print information without creating or pushing tags
-  -p, --push     Push tags to remote
-  -n, --new      Only push new tags that did not exist locally
-  -s, --single   Use a single push to push all tags
-  -v, --verbose  Print verbose output
-  -h, --help     Print help
-  -V, --version  Print version
+  -d, --dryrun               Only print information without creating or pushing tags
+  -p, --push                 Push tags to remote
+  -n, --new                  Only push new tags that did not exist locally
+  -s, --single               Use a single push to push all tags
+  -v, --verbose              Print verbose output
+  -t, --tag-prefix <PREFIX>  Prefix for the tag names, for example "rust-" for tags like rust-v1.2.3 [default: ""]
+  -h, --help                 Print help
+  -V, --version              Print version
 ```
 
 ## Development

@@ -31,7 +31,7 @@ struct Args {
     #[command(subcommand)]
     command: Option<VersionTagCommand>,
 
-    /// Optional git repository path. Defaults to current directory.
+    /// Optional project directory in a git repository, such as a subdirectory. Defaults to current directory.
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     path: Option<PathBuf>,
 
@@ -54,6 +54,10 @@ struct Args {
     /// Print verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Prefix for the tag names, for example "rust-" for tags like rust-v1.2.3
+    #[arg(short = 't', long, value_name = "PREFIX", default_value = "")]
+    tag_prefix: String,
 }
 
 /// Subcommands for vtag.
@@ -114,12 +118,26 @@ fn main() -> Result<()> {
     }
     let repo_path = cli_tools::resolve_input_path(args.path.as_deref())?;
     if !repo_path.is_dir() {
-        anyhow::bail!("Input path needs to be a git repository directory")
+        anyhow::bail!("Input path needs to be a directory in a git repository")
     }
-    version_tag(&repo_path, args.push, args.dryrun, args.verbose, args.single, args.new)
+    version_tag(
+        &repo_path,
+        args.push,
+        args.dryrun,
+        args.verbose,
+        args.single,
+        args.new,
+        &args.tag_prefix,
+    )
 }
 
 /// Create version tags for each unique package version from the project's git history.
+///
+/// The project may live in a subdirectory of the repository, such as `rust/` in a repository with several projects.
+/// Its manifest is then read from that subdirectory in each commit,
+/// and commits made before the manifest first appeared there use the manifest at the repository root,
+/// so the history of a project that was moved into a subdirectory is still tagged.
+/// Tag names are the version with a `v` and the given prefix in front, for example `rust-v1.2.3`.
 fn version_tag(
     repo_path: &PathBuf,
     push: bool,
@@ -127,6 +145,7 @@ fn version_tag(
     verbose: bool,
     combined_push: bool,
     new_tags_only: bool,
+    tag_prefix: &str,
 ) -> Result<()> {
     let project_type = detect_project_type(repo_path)?;
     let manifest_filename = project_type.manifest_filename();
@@ -143,19 +162,25 @@ fn version_tag(
     }
 
     let repo = Repository::discover(repo_path)?;
+    let manifest_path = manifest_path_in_repository(&repo, repo_path, manifest_filename)?;
     let mut reverse_walk = repo.revwalk()?;
     reverse_walk.push_head()?;
     reverse_walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
 
     let mut current_tag = String::new();
     let mut tags_to_push = Vec::new();
+    let mut seen_project_manifest = false;
 
     // Walk through each commit that modified the manifest file
     for oid in reverse_walk {
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
         let tree = commit.tree()?;
-        if let Some(entry) = tree.get_name(manifest_filename)
+        let entry = find_manifest_entry(&tree, &manifest_path, !seen_project_manifest);
+        if let Some((_, from_project_path)) = &entry {
+            seen_project_manifest |= *from_project_path;
+        }
+        if let Some((entry, _)) = entry
             && let Ok(blob) = entry
                 .to_object(&repo)
                 .and_then(|obj| obj.into_blob().map_err(|_| git2::Error::from_str("Not a blob")))
@@ -180,7 +205,7 @@ fn version_tag(
             current_tag.clone_from(&version_number);
             println!("{}", version_number.bold());
 
-            let version_tag = format!("v{version_number}");
+            let version_tag = format!("{tag_prefix}v{version_number}");
             let tag_exists = tag_name_exists(&repo, &version_tag)?;
             if tag_exists {
                 println!("{}", format!("Tag {version_tag} already exists, skipping...").yellow());
@@ -325,6 +350,48 @@ fn detect_project_type(path: &Path) -> Result<ProjectType> {
     }
 }
 
+/// Return the manifest path relative to the repository root, the form used to look it up in commit trees.
+///
+/// Both paths are canonicalized first, so symlinked temporary directories and relative input paths resolve the same.
+fn manifest_path_in_repository(repo: &Repository, project_path: &Path, manifest_filename: &str) -> Result<PathBuf> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("Repository has no working directory"))?;
+    let workdir = dunce::canonicalize(workdir)?;
+    let project = dunce::canonicalize(project_path)?;
+    let relative = project.strip_prefix(&workdir).map_err(|_| {
+        anyhow::anyhow!(
+            "Project path {} is outside the repository {}",
+            project.display(),
+            workdir.display()
+        )
+    })?;
+    Ok(relative.join(manifest_filename))
+}
+
+/// Find the manifest in a commit tree.
+///
+/// Returns the entry and whether it was found at the project path.
+/// When the project lives in a subdirectory and its manifest is missing from the commit,
+/// the manifest at the repository root is used instead if `allow_root_fallback` is set.
+fn find_manifest_entry(
+    tree: &git2::Tree<'_>,
+    manifest_path: &Path,
+    allow_root_fallback: bool,
+) -> Option<(git2::TreeEntry<'static>, bool)> {
+    if let Ok(entry) = tree.get_path(manifest_path) {
+        return Some((entry, true));
+    }
+    let file_name = manifest_path.file_name()?;
+    let in_subdirectory = manifest_path
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if !allow_root_fallback || !in_subdirectory {
+        return None;
+    }
+    tree.get_path(Path::new(file_name)).ok().map(|entry| (entry, false))
+}
+
 /// Parse the version string from the given file content based on the project type.
 fn parse_version(content: &str, project_type: ProjectType) -> Option<String> {
     match project_type {
@@ -335,10 +402,13 @@ fn parse_version(content: &str, project_type: ProjectType) -> Option<String> {
 }
 
 /// Parse version from Cargo.toml content.
+///
+/// Reads `[package].version`, or `[workspace.package].version` for a virtual workspace manifest.
 fn parse_cargo_toml_version(content: &str) -> Option<String> {
     let toml_value: toml::Value = toml::from_str(content).ok()?;
     toml_value
-        .get("package")?
+        .get("package")
+        .or_else(|| toml_value.get("workspace")?.get("package"))?
         .get("version")?
         .as_str()
         .map(ToString::to_string)
@@ -367,12 +437,11 @@ fn parse_pyproject_toml_version(content: &str) -> Option<String> {
 
 /// Check if the tag already exists locally.
 fn tag_name_exists(repo: &Repository, tag_name: &str) -> Result<bool> {
-    for tag in repo.tag_names(Some("v*"))?.iter().flatten() {
-        if tag == Some(tag_name) {
-            return Ok(true);
-        }
+    match repo.find_reference(&format!("refs/tags/{tag_name}")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
-    Ok(false)
 }
 
 /// Get the project name from the manifest file.
@@ -480,6 +549,12 @@ mod test_version_parsing {
             parse_version("[package]\nversion = \"1.2.3\"", ProjectType::Rust),
             Some("1.2.3".to_string())
         );
+    }
+
+    #[test]
+    fn parses_cargo_workspace_package_version() {
+        let content = "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.3.0\"";
+        assert_eq!(parse_cargo_toml_version(content), Some("0.3.0".to_string()));
     }
 
     #[test]
@@ -669,6 +744,49 @@ mod version_tag_test_helpers {
         (directory, repository)
     }
 
+    /// Empty repository with a signature in its config.
+    pub fn empty_repository() -> (TempDir, Repository) {
+        let directory = TempDir::new().expect("temporary directory");
+        let repository = Repository::init(directory.path()).expect("the repository should initialize");
+        {
+            let mut config = repository.config().expect("the config should be readable");
+            config.set_str("user.name", "Test").expect("name should be set");
+            config
+                .set_str("user.email", "test@example.com")
+                .expect("email should be set");
+        }
+        (directory, repository)
+    }
+
+    /// Commits file changes on top of `HEAD`: `Some(content)` writes a file and `None` removes it.
+    pub fn commit_changes(repository: &Repository, root: &Path, changes: &[(&str, Option<&str>)]) {
+        let mut index = repository.index().expect("the index should be readable");
+        for (relative, content) in changes {
+            let path = root.join(relative);
+            if let Some(content) = content {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("the directory should be created");
+                }
+                std::fs::write(&path, content).expect("the file should be written");
+                index.add_path(Path::new(relative)).expect("the file should be staged");
+            } else {
+                std::fs::remove_file(&path).expect("the file should be removed");
+                index
+                    .remove_path(Path::new(relative))
+                    .expect("the removal should be staged");
+            }
+        }
+        index.write().expect("the index should be written");
+        let tree_id = index.write_tree().expect("the tree should be written");
+        let tree = repository.find_tree(tree_id).expect("the tree should be found");
+        let signature = git2::Signature::now("Test", "test@example.com").expect("signature should be created");
+        let parent = repository.head().ok().and_then(|head| head.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "change", &tree, &parents)
+            .expect("the commit should be created");
+    }
+
     /// Tag names in the repository, sorted.
     pub fn tag_names(repository: &Repository) -> Vec<String> {
         let mut names: Vec<String> = repository
@@ -693,7 +811,8 @@ mod test_version_tag {
     fn a_tag_is_created_for_every_version_change() {
         let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0", "1.0.0"]);
 
-        version_tag(&directory.path().to_path_buf(), false, false, true, false, false).expect("tagging should succeed");
+        version_tag(&directory.path().to_path_buf(), false, false, true, false, false, "")
+            .expect("tagging should succeed");
 
         assert_eq!(tag_names(&repository), vec!["v0.1.0", "v0.2.0", "v1.0.0"]);
     }
@@ -702,7 +821,8 @@ mod test_version_tag {
     fn a_version_that_did_not_change_is_tagged_once() {
         let (directory, repository) = repository_with_versions(&["0.1.0", "0.1.0", "0.2.0"]);
 
-        version_tag(&directory.path().to_path_buf(), false, false, true, false, false).expect("tagging should succeed");
+        version_tag(&directory.path().to_path_buf(), false, false, true, false, false, "")
+            .expect("tagging should succeed");
 
         assert_eq!(tag_names(&repository), vec!["v0.1.0", "v0.2.0"]);
     }
@@ -711,7 +831,7 @@ mod test_version_tag {
     fn a_dryrun_creates_no_tags() {
         let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0"]);
 
-        version_tag(&directory.path().to_path_buf(), false, true, false, false, false)
+        version_tag(&directory.path().to_path_buf(), false, true, false, false, false, "")
             .expect("a dryrun should succeed");
 
         assert_eq!(tag_names(&repository), [] as [String; 0]);
@@ -722,8 +842,8 @@ mod test_version_tag {
         let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0"]);
         let path = directory.path().to_path_buf();
 
-        version_tag(&path, false, false, false, false, false).expect("tagging should succeed");
-        version_tag(&path, false, false, true, false, false).expect("a second run should succeed");
+        version_tag(&path, false, false, false, false, false, "").expect("tagging should succeed");
+        version_tag(&path, false, false, true, false, false, "").expect("a second run should succeed");
 
         assert_eq!(tag_names(&repository), vec!["v0.1.0", "v0.2.0"]);
     }
@@ -747,7 +867,7 @@ mod test_version_tag {
             .commit(Some("HEAD"), &signature, &signature, "broken", &tree, &[&head])
             .expect("commit");
 
-        version_tag(&directory.path().to_path_buf(), false, false, true, false, false)
+        version_tag(&directory.path().to_path_buf(), false, false, true, false, false, "")
             .expect("an unparseable manifest should be skipped");
 
         assert_eq!(tag_names(&repository), vec!["v0.1.0"]);
@@ -757,7 +877,7 @@ mod test_version_tag {
     fn a_directory_without_a_manifest_is_an_error() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
 
-        let error = version_tag(&directory.path().to_path_buf(), false, true, false, false, false)
+        let error = version_tag(&directory.path().to_path_buf(), false, true, false, false, false, "")
             .expect_err("a directory without a manifest should fail");
 
         assert!(error.to_string().contains("No supported project manifest"), "{error}");
@@ -767,12 +887,125 @@ mod test_version_tag {
     fn pushing_in_a_dryrun_needs_no_remote() {
         let (directory, repository) = repository_with_versions(&["0.1.0", "0.2.0"]);
 
-        version_tag(&directory.path().to_path_buf(), true, true, true, false, false)
+        version_tag(&directory.path().to_path_buf(), true, true, true, false, false, "")
             .expect("a dryrun push should succeed");
-        version_tag(&directory.path().to_path_buf(), true, true, true, true, false)
+        version_tag(&directory.path().to_path_buf(), true, true, true, true, false, "")
             .expect("a combined dryrun push should succeed");
 
         assert_eq!(tag_names(&repository), [] as [String; 0]);
+    }
+}
+
+#[cfg(test)]
+mod test_subdirectory_projects {
+    use super::version_tag_test_helpers::*;
+    use super::*;
+
+    /// Cargo workspace manifest with the version in `[workspace.package]`.
+    fn workspace_manifest(version: &str) -> String {
+        format!("[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"{version}\"\n")
+    }
+
+    #[test]
+    fn tags_a_workspace_in_a_subdirectory_with_a_prefix() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        commit_changes(
+            &repository,
+            root,
+            &[("CMakeLists.txt", Some("project(App VERSION 1.0.0)"))],
+        );
+        commit_changes(
+            &repository,
+            root,
+            &[("rust/Cargo.toml", Some(&workspace_manifest("0.1.0")))],
+        );
+        commit_changes(
+            &repository,
+            root,
+            &[("CMakeLists.txt", Some("project(App VERSION 1.1.0)"))],
+        );
+        commit_changes(
+            &repository,
+            root,
+            &[("rust/Cargo.toml", Some(&workspace_manifest("0.2.0")))],
+        );
+
+        version_tag(&root.join("rust"), false, false, true, false, false, "rust-").expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["rust-v0.1.0", "rust-v0.2.0"]);
+    }
+
+    #[test]
+    fn falls_back_to_the_root_manifest_before_the_project_moved() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        commit_changes(
+            &repository,
+            root,
+            &[("CMakeLists.txt", Some("project(App VERSION 1.0.0)"))],
+        );
+        commit_changes(
+            &repository,
+            root,
+            &[("CMakeLists.txt", Some("project(App VERSION 1.1.0)"))],
+        );
+        commit_changes(
+            &repository,
+            root,
+            &[
+                ("CMakeLists.txt", None),
+                ("cpp/CMakeLists.txt", Some("project(App VERSION 1.1.0)")),
+            ],
+        );
+        commit_changes(
+            &repository,
+            root,
+            &[("cpp/CMakeLists.txt", Some("project(App VERSION 1.2.0)"))],
+        );
+
+        version_tag(&root.join("cpp"), false, false, true, false, false, "").expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0", "v1.2.0"]);
+    }
+
+    #[test]
+    fn a_root_manifest_after_the_move_is_ignored() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        commit_changes(
+            &repository,
+            root,
+            &[("rust/Cargo.toml", Some(&workspace_manifest("0.1.0")))],
+        );
+        commit_changes(&repository, root, &[("Cargo.toml", Some(&workspace_manifest("9.0.0")))]);
+
+        version_tag(&root.join("rust"), false, false, true, false, false, "").expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["v0.1.0"]);
+    }
+
+    #[test]
+    fn prefixed_tags_do_not_collide_with_plain_tags() {
+        let (directory, repository) = repository_with_versions(&["0.1.0"]);
+        let path = directory.path().to_path_buf();
+        version_tag(&path, false, false, false, false, false, "").expect("tagging should succeed");
+
+        version_tag(&path, false, false, false, false, false, "rust-").expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["rust-v0.1.0", "v0.1.0"]);
+    }
+
+    #[test]
+    fn manifest_path_is_relative_to_the_repository_root() {
+        let (directory, repository) = empty_repository();
+        std::fs::create_dir_all(directory.path().join("rust")).expect("directory");
+        let relative = manifest_path_in_repository(&repository, &directory.path().join("rust"), "Cargo.toml")
+            .expect("path inside the repository");
+        assert_eq!(relative, Path::new("rust").join("Cargo.toml"));
+        let at_root =
+            manifest_path_in_repository(&repository, directory.path(), "Cargo.toml").expect("repository root");
+        assert_eq!(at_root, Path::new("Cargo.toml"));
     }
 }
 
