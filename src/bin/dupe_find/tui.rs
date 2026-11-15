@@ -715,8 +715,7 @@ mod tui_test_helpers {
     pub fn file(path: &str) -> DupeFileInfo {
         let extension = std::path::Path::new(path)
             .extension()
-            .map(|value| value.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
+            .map_or_default(|value| value.to_string_lossy().to_lowercase());
         DupeFileInfo::new(PathBuf::from(path), extension)
     }
 

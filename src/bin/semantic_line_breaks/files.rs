@@ -106,12 +106,10 @@ fn matches_extensions(path: &Path, config: &Config) -> bool {
     }
     let extension = path
         .extension()
-        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
+        .map_or_default(|extension| extension.to_string_lossy().to_ascii_lowercase());
     let file_name = path
         .file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
+        .map_or_default(|name| name.to_string_lossy().to_ascii_lowercase());
     config.extensions.iter().any(|allowed| {
         *allowed == extension
             || *allowed == file_name

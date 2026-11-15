@@ -101,12 +101,10 @@ fn editorconfig_width(directory: &Path, file: &Path) -> (Option<WidthSource>, bo
     let relative = file
         .strip_prefix(directory)
         .ok()
-        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
+        .map_or_default(|relative| relative.to_string_lossy().replace('\\', "/"));
     let file_name = file
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .map_or_default(|name| name.to_string_lossy().into_owned());
 
     let mut is_root = false;
     let mut current_matches = false;

@@ -129,8 +129,7 @@ impl DotRename {
                 .formatted_filepath(&self.root)
                 .ok()
                 .filter(|new_path| Self::path_changed(&self.root, new_path))
-                .map(|new_path| vec![(self.root.clone(), new_path)])
-                .unwrap_or_default());
+                .map_or_default(|new_path| vec![(self.root.clone(), new_path)]));
         }
 
         if self.config.verbose {

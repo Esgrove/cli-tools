@@ -489,8 +489,7 @@ impl Config {
     fn matches_name_filters(&self, path: &Path) -> bool {
         let file_name = path
             .file_name()
-            .map(|name| name.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
+            .map_or_default(|name| name.to_string_lossy().to_lowercase());
         let included = self.include_patterns.is_empty()
             || self.include_patterns.iter().any(|pattern| pattern.is_match(&file_name));
         included && !self.exclude_patterns.iter().any(|pattern| pattern.is_match(&file_name))

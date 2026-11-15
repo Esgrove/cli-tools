@@ -236,10 +236,7 @@ pub fn is_mid_clause_break(
     }
     let last_is_dangling = last.kind == TokenKind::Word && contains_word(DANGLING_WORDS, &last.core);
     let first_is_uppercase = first.core.chars().next().is_some_and(char::is_uppercase);
-    if first_is_uppercase && !last_is_dangling && clause_rank(line_a, line_a.len() - 1, options).is_none() {
-        return false;
-    }
-    true
+    !(first_is_uppercase && !last_is_dangling && clause_rank(line_a, line_a.len() - 1, options).is_none())
 }
 
 /// Whether a line could break after a comma, a colon, or a sentence end somewhere within it.

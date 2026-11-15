@@ -289,16 +289,12 @@ impl DirMove {
 
         // Skip if any part matches an ignored_group_part
         let parts: Vec<&str> = name.split([' ', '.']).collect();
-        if parts.iter().any(|part| {
+        !parts.iter().any(|part| {
             self.config
                 .ignored_group_parts
                 .iter()
                 .any(|ignored| part.eq_ignore_ascii_case(ignored))
-        }) {
-            return false;
-        }
-
-        true
+        })
     }
 
     /// Add a directory name to the database (increments use count if exists).
@@ -997,7 +993,7 @@ impl DirMove {
                 if source_name == target_directory.name
                     && !cli_tools::paths_refer_to_same_file(&source_directory, &target_directory.path)
                 {
-                    matches.entry(dir_idx).or_default().push(source_directory.clone());
+                    matches.entry(dir_idx).or_default().push(source_directory);
                     break;
                 }
             }
@@ -1996,7 +1992,7 @@ impl DirMove {
                             group_combined,
                         )
                     {
-                        matches.push((group_key.clone(), file_path.clone()));
+                        matches.push((group_key.clone(), file_path));
                     }
                 }
                 second_pass_bar.inc(1);

@@ -491,7 +491,7 @@ impl Database {
             format!("WHERE {}", conditions.join(" AND "))
         };
 
-        let limit_clause = filter.limit.map(|limit| format!("LIMIT {limit}")).unwrap_or_default();
+        let limit_clause = filter.limit.map_or_default(|limit| format!("LIMIT {limit}"));
 
         let order_clause = filter.sort.map_or_else(
             || "ORDER BY action, size_bytes DESC".to_string(),

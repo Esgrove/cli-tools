@@ -427,8 +427,7 @@ fn reword_semicolons(
         // so scanning the brackets and quotes once keeps the pass linear in the number of tokens.
         let depths = segments
             .get(segment_index)
-            .map(|segment| bracket_and_quote_depths(&segment.tokens))
-            .unwrap_or_default();
+            .map_or_default(|segment| bracket_and_quote_depths(&segment.tokens));
         for token_index in 0..token_count {
             let Some(segment) = segments.get(segment_index) else {
                 continue;
