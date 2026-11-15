@@ -523,12 +523,7 @@ impl QTorrent {
 
         // Apply dots formatting if enabled
         if let Some(dot_rename) = self.dot_formatter() {
-            // Effective multi-file torrents become directories, so use directory naming (spaces instead of dots)
-            if info.effective_is_multi_file {
-                name = dot_rename.format_directory_name(&name);
-            } else {
-                name = utils::format_single_file_name(&dot_rename, &name);
-            }
+            name = utils::format_torrent_name(&dot_rename, &name, info.effective_is_multi_file);
         }
 
         name
@@ -540,11 +535,7 @@ impl QTorrent {
         if self.config.format_custom_name
             && let Some(dot_rename) = self.dot_formatter()
         {
-            return if is_multi_file {
-                dot_rename.format_directory_name(&name)
-            } else {
-                utils::format_single_file_name(&dot_rename, &name)
-            };
+            return utils::format_torrent_name(&dot_rename, &name, is_multi_file);
         }
         name
     }
@@ -555,13 +546,7 @@ impl QTorrent {
 
         let name = self.dot_formatter().map_or_else(
             || internal_name.to_string(),
-            |dot_rename| {
-                if info.effective_is_multi_file {
-                    dot_rename.format_directory_name(internal_name)
-                } else {
-                    utils::format_single_file_name(&dot_rename, internal_name)
-                }
-            },
+            |dot_rename| utils::format_torrent_name(&dot_rename, internal_name, info.effective_is_multi_file),
         );
 
         Some(name)
@@ -1035,6 +1020,46 @@ mod test_add_workflow {
             config: Config::from_args_with_user_config(args, QtorrentConfig::default()),
             dot_rename: None,
         }
+    }
+
+    #[test]
+    fn removes_part_suffix_only_when_torrent_name_formatting_is_enabled() {
+        let directory = TorrentDirectory::new();
+        let mut application = qtorrent(&["qtorrent"]);
+        let mut info = parse_torrent(&directory.torrent_path, &application.config).expect("should parse torrent");
+        info.path = directory.root.join("Example Video Part 1.torrent");
+        info.torrent.info.name = Some("Example Video Part 1.mp4".to_string());
+
+        assert_eq!(application.clean_suggested_name(&info), "Example Video Part 1.mp4");
+        assert_eq!(
+            application.clean_internal_name(&info).as_deref(),
+            Some("Example Video Part 1.mp4")
+        );
+
+        application.dot_rename = Some(DotRenameConfig::default());
+        assert_eq!(application.clean_suggested_name(&info), "Example.Video.mp4");
+        assert_eq!(
+            application.clean_internal_name(&info).as_deref(),
+            Some("Example.Video.mp4")
+        );
+        assert_eq!(
+            application.format_custom_name("Example Video Part 1.mp4", false),
+            "Example Video Part 1.mp4"
+        );
+        application.config.format_custom_name = true;
+        assert_eq!(
+            application.format_custom_name("Example Video Part 1.mp4", false),
+            "Example.Video.mp4"
+        );
+
+        info.effective_is_multi_file = true;
+        info.torrent.info.name = Some("Example Video Part 1".to_string());
+        assert_eq!(application.clean_suggested_name(&info), "Example Video");
+        assert_eq!(application.clean_internal_name(&info).as_deref(), Some("Example Video"));
+        assert_eq!(
+            application.format_custom_name("Example Video Part 1", true),
+            "Example Video"
+        );
     }
 
     /// `QTorrent` for the directory, connecting to the given local port with credentials and `--yes`.

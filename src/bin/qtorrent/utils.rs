@@ -5,9 +5,11 @@
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use cli_tools::dot_rename::DotFormat;
+use regex::Regex;
 
 use crate::torrent::Torrent;
 
@@ -20,6 +22,10 @@ const KNOWN_EXTENSIONS: &[&str] = &[
     "wma", "m4a", "opus", "alac", "rar", "zip", "7z", "tar", "gz", "bz2", "xz", "srt", "sub", "jpg", "jpeg", "png",
     "gif", "bmp", "webp", "tiff", "tif", "pdf", "epub", "mobi",
 ];
+
+static RE_TRAILING_PART: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[\s._-]+)part[\s._-]+[0-9]\b$").expect("Failed to compile trailing torrent part regex")
+});
 
 /// Information about a torrent file to be added.
 pub struct TorrentInfo {
@@ -196,6 +202,24 @@ pub fn insert_date_before_extension(name: &str, date: &str) -> String {
             format!("{stem}.{date}.{}", ext.to_string_lossy())
         },
     )
+}
+
+/// Format a torrent name, removing a trailing single-digit part suffix before dot formatting.
+///
+/// Preserve media extensions for single-file torrents and use directory formatting for multi-file torrents.
+pub fn format_torrent_name(dot_rename: &DotFormat, name: &str, is_multi_file: bool) -> String {
+    let (stem, extension_suffix) = if is_multi_file {
+        (name, "")
+    } else {
+        extract_file_extension(name).map_or((name, ""), |extension| name.split_at(name.len() - extension.len() - 1))
+    };
+    let cleaned_stem = RE_TRAILING_PART.replace(stem, "");
+
+    if is_multi_file {
+        dot_rename.format_directory_name(&cleaned_stem)
+    } else {
+        format_single_file_name(dot_rename, &format!("{cleaned_stem}{extension_suffix}"))
+    }
 }
 
 /// Format a single file name, stripping extension before formatting and restoring it after.
@@ -891,9 +915,97 @@ mod test_skipped_directory_summary {
 }
 
 #[cfg(test)]
+mod test_format_torrent_name {
+    use super::*;
+    use cli_tools::dot_rename::DotRenameConfig;
+
+    #[test]
+    fn removes_trailing_single_digit_parts() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+
+        for suffix in ["Part 0", "Part 1", "Part 9", "part.2", "PART-3", "Part_4"] {
+            assert_eq!(
+                format_torrent_name(&formatter, &format!("Some Name {suffix}"), true),
+                "Some Name",
+                "{suffix}"
+            );
+            assert_eq!(
+                format_torrent_name(&formatter, &format!("Some Name {suffix}.MKV"), false),
+                "Some.Name.MKV",
+                "{suffix}"
+            );
+            assert_eq!(
+                format_torrent_name(&formatter, &format!("Some Name {suffix}"), false),
+                "Some.Name",
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_nonmatching_parts_and_digit_boundaries() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+
+        for name in [
+            "Some Name Part 12",
+            "Some Name Part 1a",
+            "Some Name Part a1",
+            "Some Name Part 1_extra",
+            "Some Name Counterpart 1",
+            "Some Name Part 1 More",
+        ] {
+            assert_eq!(
+                format_torrent_name(&formatter, name, true),
+                formatter.format_directory_name(name),
+                "{name}"
+            );
+            let filename = format!("{name}.mp4");
+            assert_eq!(
+                format_torrent_name(&formatter, &filename, false),
+                format_single_file_name(&formatter, &filename),
+                "{filename}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_embedded_part_words_and_multi_digit_numbers() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+
+        for (name, directory, file_stem) in [
+            ("somethingpart 2020", "Somethingpart 2020", "Somethingpart.2020"),
+            ("somethingpart 1", "Somethingpart 1", "Somethingpart.1"),
+            ("something part 2020", "Something Part 2020", "Something.Part.2020"),
+            ("something part 20", "Something Part 20", "Something.Part.20"),
+        ] {
+            assert_eq!(format_torrent_name(&formatter, name, true), directory, "{name}");
+            assert_eq!(format_torrent_name(&formatter, name, false), file_stem, "{name}");
+            assert_eq!(
+                format_torrent_name(&formatter, &format!("{name}.mp4"), false),
+                format!("{file_stem}.mp4"),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod test_format_single_file_name {
     use super::*;
     use cli_tools::dot_rename::DotRenameConfig;
+
+    #[test]
+    fn preserves_part_numbers_in_individual_torrent_files() {
+        let config = DotRenameConfig::default();
+        let dot_format = DotFormat::new(&config);
+        assert_eq!(
+            format_single_file_name(&dot_format, "Some Name Part 1.mp4"),
+            "Some.Name.Part.1.mp4"
+        );
+    }
 
     #[test]
     fn formats_name_with_extension() {
