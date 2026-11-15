@@ -130,10 +130,16 @@ impl QBittorrentClient {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
-        if status == StatusCode::OK && body == "Ok." {
+        if status == StatusCode::NO_CONTENT || (status == StatusCode::OK && body == "Ok.") {
             self.authenticated = true;
             Ok(())
-        } else if status == StatusCode::FORBIDDEN || body == "Fails." {
+        } else if status == StatusCode::FORBIDDEN {
+            bail!(
+                "Authentication failed: HTTP {status}. The client IP may be banned after too many failed login attempts"
+            )
+        } else if status == StatusCode::UNAUTHORIZED {
+            bail!("Authentication failed: HTTP {status}. Check credentials and WebUI host or origin validation")
+        } else if body == "Fails." {
             bail!("Authentication failed: Invalid username or password")
         } else {
             bail!("Authentication failed: HTTP {status} - {body}")
@@ -839,17 +845,34 @@ mod test_client_with_local_server {
     }
 
     #[tokio::test]
+    async fn login_accepts_no_content_and_allows_api_requests() -> anyhow::Result<()> {
+        let mut client = client_for(vec![
+            route("/api/v2/auth/login", 204, ""),
+            route("/api/v2/torrents/info", 200, TORRENT_LIST),
+        ])
+        .await;
+
+        client.login("user", "password").await?;
+        assert!(client.authenticated);
+        assert_eq!(client.get_torrent_list().await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn login_reports_wrong_credentials_and_unexpected_replies() {
         let mut rejected = client_for(vec![route("/api/v2/auth/login", 200, "Fails.")]).await;
+        let mut unauthorized = client_for(vec![route("/api/v2/auth/login", 401, "")]).await;
         let mut forbidden = client_for(vec![route("/api/v2/auth/login", 403, "")]).await;
         let mut broken = client_for(vec![route("/api/v2/auth/login", 500, "boom")]).await;
 
         let rejected_error = rejected.login("user", "wrong").await.expect_err("should fail");
+        let unauthorized_error = unauthorized.login("user", "wrong").await.expect_err("should fail");
         let forbidden_error = forbidden.login("user", "wrong").await.expect_err("should fail");
         let broken_error = broken.login("user", "password").await.expect_err("should fail");
 
         assert!(rejected_error.to_string().contains("Invalid username or password"));
-        assert!(forbidden_error.to_string().contains("Invalid username or password"));
+        assert!(unauthorized_error.to_string().contains("HTTP 401"));
+        assert!(forbidden_error.to_string().contains("HTTP 403"));
         assert!(broken_error.to_string().contains("HTTP 500"), "{broken_error}");
         assert!(!rejected.authenticated);
     }
