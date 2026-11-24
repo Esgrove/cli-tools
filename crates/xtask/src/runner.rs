@@ -49,16 +49,8 @@ pub fn run(
     variables: BTreeMap<String, Vec<String>>,
 ) -> Result<bool> {
     let env = EnvSnapshot::from_process();
-    let condition_context = ConditionContext {
-        flags: &options.flags,
-        conditions: task_file.parsed_conditions()?,
-        dry_run: options.dry_run,
-        is_ci: env.is_ci(),
-    };
     let root = &location.root;
-    let all_tasks = build_tasks(task_file, &condition_context, root, builtins)?;
-    let selected_scopes = resolve_scope(task_file, options.scope.as_deref())?;
-    let tasks = filter_tasks(all_tasks, selected_scopes.as_ref(), &options.task_ids)?;
+    let tasks = plan(task_file, location, options, builtins, env.is_ci())?;
 
     if options.list_tasks {
         print_task_list(&tasks);
@@ -89,6 +81,30 @@ pub fn run(
     let summary = run_schedule(tasks, &context, options.jobs, options.fail_fast, scope_label)?;
     reporter.finish_and_print_summary(&summary, root, options.dry_run);
     Ok(summary.is_success())
+}
+
+/// The tasks a run would execute, in task file order, after applying conditions, the scope, and task IDs.
+///
+/// # Errors
+///
+/// Returns an error if conditions cannot be evaluated, a task ID or scope is unknown,
+/// or a task depends on a task that is not enabled.
+pub fn plan(
+    task_file: &TaskFile,
+    location: &TaskFileLocation,
+    options: &RunOptions,
+    builtins: &BTreeMap<String, Arc<dyn Builtin>>,
+    is_ci: bool,
+) -> Result<Vec<TaskSpec>> {
+    let condition_context = ConditionContext {
+        flags: &options.flags,
+        conditions: task_file.parsed_conditions()?,
+        dry_run: options.dry_run,
+        is_ci,
+    };
+    let all_tasks = build_tasks(task_file, &condition_context, &location.root, builtins)?;
+    let selected_scopes = resolve_scope(task_file, options.scope.as_deref())?;
+    filter_tasks(all_tasks, selected_scopes.as_ref(), &options.task_ids)
 }
 
 impl ConditionContext<'_> {

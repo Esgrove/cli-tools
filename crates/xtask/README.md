@@ -185,6 +185,9 @@ Builtins also run during `--dryrun` so they can export placeholder values.
 `TaskContext` gives access to the project flags (`context.flag("coverage")`), `--fail-fast`,
 shared variables, notes, and `run_logged` for running commands with live output and logging.
 
+`Runner::resolve_task_ids` returns the tasks a command line would run without running them,
+so a project's tests can check which tasks its flags enable.
+
 Setting `runner` in `[settings]` to the command that starts
 that binary lets the generic `xtask` binary hand the run over to it,
 so plain `xtask` works in the project as well.

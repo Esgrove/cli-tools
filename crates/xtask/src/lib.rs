@@ -181,6 +181,30 @@ impl Runner {
         let success = runner::run(&task_file, &location, &options, &self.builtins, variables)?;
         Ok(if success { ExitCode::SUCCESS } else { ExitCode::FAILURE })
     }
+
+    /// IDs of the tasks a run with the given arguments would execute, in task file order, without running them.
+    ///
+    /// Useful in a project's own tests to check which tasks its flags enable.
+    /// Variable providers are not evaluated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task file is missing or invalid, the arguments do not parse,
+    /// or the tasks cannot be resolved.
+    pub fn resolve_task_ids(&self, argv: &[OsString]) -> Result<Vec<String>> {
+        let current_dir = std::env::current_dir().context("Failed to read the current directory")?;
+        let location = match find_config_argument(argv) {
+            Some(path) => TaskFileLocation::from_path(&path, &current_dir)?,
+            None => find_task_file(&current_dir)
+                .with_context(|| format!("No {TASK_FILE_NAME} found in {}", current_dir.display()))?,
+        };
+        let task_file = TaskFile::load(&location.path)?;
+        task_file.validate(&self.builtins.keys().cloned().collect())?;
+        let parsed = parse_args(argv.iter().cloned(), Some(&task_file), Some(&location))?;
+        let options = parsed.into_options(&task_file, &UserConfig::default(), runner::current_os())?;
+        let tasks = runner::plan(&task_file, &location, &options, &self.builtins, false)?;
+        Ok(tasks.into_iter().map(|task| task.id).collect())
+    }
 }
 
 /// Print or install the shell completion script, including the project flags when a task file was found.
@@ -263,5 +287,8 @@ mod test_runner_api {
         let code = runner.run_with_args(&argv).expect("run should start");
         assert_eq!(code, ExitCode::SUCCESS);
         assert!(BUILTIN_RAN.load(Ordering::SeqCst));
+
+        let ids = runner.resolve_task_ids(&argv).expect("tasks should resolve");
+        assert_eq!(ids, ["prepare", "check"]);
     }
 }
