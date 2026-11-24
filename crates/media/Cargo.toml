@@ -1,0 +1,40 @@
+[package]
+name = "cli-tools-media"
+description = "Video resolution parsing, video metadata, file hashing, and the scan cache shared by the media tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+cli-tools-common = { workspace = true }
+colored = { workspace = true }
+dirs = { workspace = true }
+regex = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+
+[features]
+scan-cache = ["dep:rusqlite"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[test]]
+name = "scan_cache_integration_tests"
+required-features = ["scan-cache"]
+
+[[bench]]
+name = "resolution"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+[package]
+name = "cli-tools-vtag"
+description = "Create git version tags for a project (Rust, C++, Python)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "vtag"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+cli-tools-common = { workspace = true }
+colored = { workspace = true }
+dunce = { workspace = true }
+git2 = { workspace = true }
+regex = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,41 @@
+[package]
+name = "cli-tools-slb"
+description = "Check and format prose with semantic line breaks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "slb"
+path = "src/bin/slb/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+cli-tools-common = { workspace = true }
+colored = { workspace = true }
+ignore = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "semantic_line_breaks"
+harness = false
+
+[lints]
+workspace = true

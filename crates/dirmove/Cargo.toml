@@ -1,0 +1,46 @@
+[package]
+name = "cli-tools-dirmove"
+description = "Move files to matching directories"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "dirmove"
+path = "src/bin/dirmove/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+cli-tools-common = { workspace = true }
+cli-tools-media = { workspace = true }
+colored = { workspace = true }
+dirs = { workspace = true }
+indicatif = { workspace = true }
+itertools = { workspace = true }
+rayon = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "dir_move"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,40 @@
+[package]
+name = "cli-tools-qtorrent"
+description = "Add torrents to qBittorrent with automatic file renaming, show torrent stats"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "qtorrent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+cli-tools-common = { workspace = true }
+cli-tools-dots = { workspace = true }
+colored = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_bencode = { workspace = true }
+serde_bytes = { workspace = true }
+serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
+sha1 = { workspace = true }
+toml = { workspace = true }
+trash = { workspace = true }
+walkdir = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

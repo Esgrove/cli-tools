@@ -1,0 +1,44 @@
+[package]
+name = "cli-tools-dots"
+description = "Rename files to use dot formatting"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "dots"
+path = "src/bin/dots/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+cli-tools-common = { workspace = true }
+colored = { workspace = true }
+indicatif = { workspace = true }
+itertools = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+titlecase = { workspace = true }
+toml = { workspace = true }
+unicode-segmentation = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "format"
+harness = false
+
+[lints]
+workspace = true

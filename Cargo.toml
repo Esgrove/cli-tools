@@ -1,17 +1,20 @@
-[package]
-name = "cli-tools"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "11.2.0"
 edition = "2024"
 authors = ["Esgrove <esgrove@outlook.com>"]
-description = "A collection of CLI utilities"
 license = "MIT"
-readme = "README.md"
 repository = "https://github.com/Esgrove/cli-tools"
-keywords = ["cli", "rename"]
-categories = ["command-line-utilities"]
 rust-version = "1.100"
 
-[dependencies]
+[workspace.dependencies]
+cli-tools-common = { path = "crates/common" }
+cli-tools-dots = { path = "crates/dots" }
+cli-tools-media = { path = "crates/media" }
+
 anyhow = "1.0.104"
 blake3 = { version = "1.8.7", features = ["mmap", "rayon"] }
 jiff = "0.2.45"
@@ -29,7 +32,7 @@ fearless_simd_macros = "0.1.0"
 futures = "0.3.34"
 git2 = { version = "0.21.0", features = ["ssh", "https"] }
 ignore = "0.4.34"
-indicatif = { version = "0.18.6", features = ["tokio", "futures", "rayon"] }
+indicatif = "0.18.6"
 itertools = "0.15.0"
 num_cpus = "1.17.0"
 ratatui = "0.30.2"
@@ -46,107 +49,15 @@ serde_path_to_error = "0.1.20"
 sha1 = "0.11.0"
 tempfile = "3.27.0"
 titlecase = "3.6.0"
-tokio = { version = "1.54.1", features = ["full"] }
+tokio = "1.54.1"
 toml = "1.2.1"
 toml_edit = "0.25.19"
 trash = "5.3.0"
 unicode-normalization = "0.1.26"
 unicode-segmentation = "1.13.3"
 walkdir = "2.5.0"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
-
-[dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-
-[[bin]]
-name = "div"
-path = "src/bin/divider.rs"
-
-[[bin]]
-name = "dirmove"
-path = "src/bin/dir_move/main.rs"
-
-[[bin]]
-name = "dots"
-path = "src/bin/dots/main.rs"
-
-[[bin]]
-name = "dupefind"
-path = "src/bin/dupe_find/main.rs"
-
-[[bin]]
-name = "flipdate"
-path = "src/bin/flip_date/main.rs"
-
-[[bin]]
-name = "thumbs"
-path = "src/bin/thumbnail/main.rs"
-
-[[bin]]
-name = "vres"
-path = "src/bin/video_resolution/main.rs"
-
-[[bin]]
-name = "vconvert"
-path = "src/bin/video_convert/main.rs"
-
-[[bin]]
-name = "visaparse"
-path = "src/bin/visa_parse/main.rs"
-
-[[bin]]
-name = "vtag"
-path = "src/bin/version_tag.rs"
-
-[[bin]]
-name = "vstats"
-path = "src/bin/video_stats/main.rs"
-
-[[bin]]
-name = "qtorrent"
-path = "src/bin/qtorrent/main.rs"
-
-[[bin]]
-name = "rxrename"
-path = "src/bin/rx_rename.rs"
-
-[[bin]]
-name = "slb"
-path = "src/bin/semantic_line_breaks/main.rs"
-
-[[bench]]
-name = "date"
-harness = false
-
-[[bench]]
-name = "format"
-harness = false
-
-[[bench]]
-name = "resolution"
-harness = false
-
-[[bench]]
-name = "lib"
-harness = false
-
-[[bench]]
-name = "dir_move"
-harness = false
-
-[[bench]]
-name = "dupe_find"
-harness = false
-
-[[bench]]
-name = "semantic_line_breaks"
-harness = false
-
-[[bench]]
-name = "simd"
-harness = false
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [profile.dev]
 incremental = true
@@ -162,10 +73,10 @@ codegen-units = 1
 inherits = "release"
 debug = true
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 # https://rust-lang.github.io/rust-clippy/master/index.html
 fn_params_excessive_bools = "allow"
 struct_excessive_bools = "allow"

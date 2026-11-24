@@ -1,0 +1,273 @@
+//! Terminal reporting for `slb`.
+//!
+//! Holds the counters collected while processing files
+//! and formats violations, diffs, and the final summary line for the terminal.
+//! The message building is kept separate from the printing so it can be tested.
+
+use colored::{ColoredString, Colorize};
+
+use cli_tools_slb::{SkipNotice, Violation};
+
+use crate::config::Config;
+
+/// Counters collected over all processed files.
+#[derive(Debug, Default)]
+pub struct Summary {
+    /// Number of files processed.
+    pub files: usize,
+    /// Number of files with at least one violation.
+    pub files_with_violations: usize,
+    /// Total number of violations found.
+    pub violations: usize,
+    /// Number of violations fix mode can repair.
+    pub fixable: usize,
+    /// Number of files rewritten in fix mode.
+    pub files_fixed: usize,
+    /// Number of violations remaining after fixing.
+    pub remaining: usize,
+    /// Number of paragraphs a heuristic kept verbatim, across every processed file.
+    pub skipped: usize,
+}
+
+impl Summary {
+    /// Fold the counters of one processed file into the summary.
+    pub const fn add(
+        &mut self,
+        processed: bool,
+        violations: usize,
+        fixable: usize,
+        written: bool,
+        remaining: usize,
+        skipped: usize,
+    ) {
+        if !processed {
+            return;
+        }
+        self.files += 1;
+        self.skipped += skipped;
+        if violations == 0 {
+            return;
+        }
+        self.files_with_violations += 1;
+        self.violations += violations;
+        self.fixable += fixable;
+        if written {
+            self.files_fixed += 1;
+        }
+        self.remaining += remaining;
+    }
+}
+
+/// Format one violation for the terminal.
+pub fn format_violation(path: &str, violation: &Violation, after_fix: bool) -> String {
+    let kind = violation.kind.to_string();
+    let kind = if violation.fixable && !after_fix {
+        kind.red()
+    } else {
+        kind.yellow()
+    };
+    let location = violation.column.map_or_else(
+        || format!("{path}:{}", violation.line),
+        |column| format!("{path}:{}:{column}", violation.line),
+    );
+    format!("{}: {kind}: {}", location.cyan(), violation.message)
+}
+
+/// Format one skip notice for the terminal, dimmed since it is not a violation.
+pub fn format_skip_notice(path: &str, notice: &SkipNotice) -> String {
+    format!("{}: {}", format!("{path}:{}", notice.line + 1).cyan(), notice.message)
+        .dimmed()
+        .to_string()
+}
+
+/// Print the final summary line.
+pub fn print_summary(summary: &Summary, config: &Config) {
+    println!("{}", summary_message(summary, config));
+}
+
+/// The final summary line for the processed files.
+fn summary_message(summary: &Summary, config: &Config) -> ColoredString {
+    let files = cli_tools_common::count_label(summary.files, "file", "files");
+    let skipped_note = skipped_note(summary);
+    if config.fix {
+        let message = format!(
+            "Checked {files}, fixed {}, {} remaining{skipped_note}",
+            cli_tools_common::count_label(summary.files_fixed, "file", "files"),
+            cli_tools_common::count_label(summary.remaining, "violation", "violations")
+        );
+        if summary.remaining > 0 {
+            message.yellow()
+        } else {
+            message.green()
+        }
+    } else if summary.violations == 0 {
+        format!("Checked {files}, no violations{skipped_note}").green()
+    } else {
+        format!(
+            "Checked {files}, found {} in {} ({} fixable){skipped_note}",
+            cli_tools_common::count_label(summary.violations, "violation", "violations"),
+            cli_tools_common::count_label(summary.files_with_violations, "file", "files"),
+            summary.fixable
+        )
+        .yellow()
+    }
+}
+
+/// Trailing note naming the paragraphs a heuristic kept verbatim, empty when there were none.
+fn skipped_note(summary: &Summary) -> String {
+    if summary.skipped == 0 {
+        String::new()
+    } else {
+        format!(
+            ", {} kept as is",
+            cli_tools_common::count_label(summary.skipped, "paragraph", "paragraphs")
+        )
+    }
+}
+
+#[cfg(test)]
+mod test_violation_messages {
+    use cli_tools_slb::ViolationKind;
+
+    use super::*;
+
+    fn violation(kind: ViolationKind, column: Option<usize>, fixable: bool) -> Violation {
+        Violation {
+            line: 7,
+            column,
+            kind,
+            message: "line is 130 characters, limit is 120".into(),
+            fixable,
+        }
+    }
+
+    /// Message without the terminal color codes.
+    ///
+    /// Colors are on when the terminal supports them,
+    /// which otherwise splits the text with escape sequences.
+    fn plain(message: &str) -> String {
+        let mut result = String::with_capacity(message.len());
+        let mut characters = message.chars();
+        while let Some(character) = characters.next() {
+            if character != '\u{1b}' {
+                result.push(character);
+                continue;
+            }
+            for escape in characters.by_ref() {
+                if escape == 'm' {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn includes_the_column_only_when_known() {
+        let without_column = format_violation("src/lib.rs", &violation(ViolationKind::LineTooLong, None, true), false);
+        assert_eq!(
+            plain(&without_column),
+            "src/lib.rs:7: too-long: line is 130 characters, limit is 120"
+        );
+
+        let with_column = format_violation(
+            "src/lib.rs",
+            &violation(ViolationKind::TrailingComment, Some(42), true),
+            false,
+        );
+        assert_eq!(
+            plain(&with_column),
+            "src/lib.rs:7:42: trailing: line is 130 characters, limit is 120"
+        );
+    }
+
+    #[test]
+    fn the_color_codes_wrap_the_location_and_the_rule_name() {
+        let message = format_violation("a.rs", &violation(ViolationKind::LineTooLong, None, true), false);
+        assert_eq!(
+            plain(&message),
+            "a.rs:7: too-long: line is 130 characters, limit is 120"
+        );
+        assert!(
+            message.contains("a.rs:7"),
+            "the location should not be split by escape codes: {message:?}"
+        );
+    }
+
+    #[test]
+    fn includes_the_rule_name_and_message() {
+        let message = format_violation("a.md", &violation(ViolationKind::MidClauseBreak, None, true), false);
+        assert!(message.contains("mid-clause"));
+        assert!(message.contains("line is 130 characters, limit is 120"));
+    }
+
+    #[test]
+    fn unfixable_and_after_fix_violations_are_formatted() {
+        let fixable_before_fix = format_violation("a.rs", &violation(ViolationKind::Semicolon, None, true), false);
+        let fixable_after_fix = format_violation("a.rs", &violation(ViolationKind::Semicolon, None, true), true);
+        let unfixable = format_violation("a.rs", &violation(ViolationKind::Semicolon, None, false), false);
+        for message in [&fixable_before_fix, &fixable_after_fix, &unfixable] {
+            assert!(message.contains("semicolon"));
+            assert!(message.contains("a.rs:7"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_summary_message {
+    use clap::Parser;
+
+    use super::*;
+    use crate::Args;
+
+    fn config(arguments: &[&str]) -> Config {
+        let args = Args::try_parse_from(arguments).expect("arguments should parse");
+        Config::from_args(&args).expect("config should build")
+    }
+
+    #[test]
+    fn check_mode_reports_no_violations() {
+        let summary = Summary {
+            files: 1,
+            ..Summary::default()
+        };
+        let message = summary_message(&summary, &config(&["slb"])).to_string();
+        assert!(message.contains("Checked 1 file, no violations"));
+    }
+
+    #[test]
+    fn check_mode_counts_violations_files_and_fixable() {
+        let summary = Summary {
+            files: 3,
+            files_with_violations: 2,
+            violations: 5,
+            fixable: 4,
+            ..Summary::default()
+        };
+        let message = summary_message(&summary, &config(&["slb"])).to_string();
+        assert!(message.contains("Checked 3 files, found 5 violations in 2 files (4 fixable)"));
+    }
+
+    #[test]
+    fn fix_mode_reports_fixed_files_and_remaining_violations() {
+        let summary = Summary {
+            files: 2,
+            files_fixed: 1,
+            remaining: 1,
+            ..Summary::default()
+        };
+        let message = summary_message(&summary, &config(&["slb", "--fix"])).to_string();
+        assert!(message.contains("Checked 2 files, fixed 1 file, 1 violation remaining"));
+    }
+
+    #[test]
+    fn fix_mode_with_nothing_remaining_is_reported_as_done() {
+        let summary = Summary {
+            files: 1,
+            files_fixed: 1,
+            ..Summary::default()
+        };
+        let message = summary_message(&summary, &config(&["slb", "--fix"])).to_string();
+        assert!(message.contains("Checked 1 file, fixed 1 file, 0 violation remaining"));
+    }
+}

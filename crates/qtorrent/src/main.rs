@@ -1,0 +1,675 @@
+//! qtorrent - Add torrents to qBittorrent with automatic file renaming.
+//!
+//! This CLI tool parses `.torrent` files and adds them to qBittorrent via the `WebUI` API,
+//! automatically renaming the output file based on the torrent filename.
+//! The `info` subcommand connects to qBittorrent and displays statistics about existing torrents,
+//! including counts, sizes, and completion status.
+
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
+
+mod add;
+mod config;
+mod info;
+mod qbittorrent;
+mod stats;
+mod torrent;
+mod utils;
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
+
+use crate::add::QTorrent;
+
+/// Add torrents to qBittorrent with automatic file renaming.
+///
+/// Parses `.torrent` files and adds them to qBittorrent,
+/// automatically setting the output filename or folder name based on the torrent filename.
+/// For multi-file torrents,
+/// offers to rename the root folder and supports filtering files by extension, name, or minimum size.
+#[derive(Parser)]
+#[command(
+    author,
+    version,
+    name = env!("CARGO_BIN_NAME"),
+    about = "Add torrents to qBittorrent with automatic file renaming"
+)]
+#[allow(clippy::doc_markdown)]
+pub struct QtorrentArgs {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Optional input paths with torrent files or directories
+    #[arg(value_hint = clap::ValueHint::AnyPath)]
+    pub path: Vec<PathBuf>,
+
+    /// qBittorrent WebUI host
+    #[arg(short = 'H', long, name = "HOST", global = true)]
+    pub host: Option<String>,
+
+    /// qBittorrent WebUI port
+    #[arg(short = 'P', long, name = "PORT", global = true)]
+    pub port: Option<u16>,
+
+    /// qBittorrent WebUI username
+    #[arg(short = 'u', long, name = "USER", global = true)]
+    pub username: Option<String>,
+
+    /// qBittorrent WebUI password
+    #[arg(short = 'w', long, name = "PASS", global = true)]
+    pub password: Option<String>,
+
+    /// Save path for downloaded files
+    #[arg(short = 's', long, name = "PATH")]
+    save_path: Option<String>,
+
+    /// Category for the torrent
+    #[arg(short = 'c', long, name = "CATEGORY")]
+    category: Option<String>,
+
+    /// Tags for the torrent (comma-separated)
+    #[arg(short = 't', long, name = "TAGS")]
+    tags: Option<String>,
+
+    /// Add torrent in paused state
+    #[arg(short = 'a', long)]
+    paused: bool,
+
+    /// Print what would be done without actually adding torrents
+    #[arg(short = 'p', long)]
+    pub dryrun: bool,
+
+    /// Offline mode: skip qBittorrent connection entirely (implies dryrun)
+    #[arg(short = 'o', long)]
+    pub offline: bool,
+
+    /// Skip confirmation prompts
+    #[arg(short = 'y', long)]
+    yes: bool,
+
+    /// File extensions to skip (e.g., nfo, txt)
+    #[arg(short = 'e', long = "skip-ext", name = "EXT", value_delimiter = ',')]
+    skip_extensions: Vec<String>,
+
+    /// Directory names to skip (case-insensitive full name match)
+    #[arg(short = 'k', long = "skip-dir", name = "NAME", value_delimiter = ',')]
+    skip_directories: Vec<String>,
+
+    /// Minimum file size in MB (files smaller than this will be skipped)
+    #[arg(short = 'm', long = "min-size", name = "MB")]
+    min_file_size_mb: Option<f64>,
+
+    /// Include image files (.jpg, .jpeg, .png)
+    #[arg(short = 'i', long)]
+    include_images: bool,
+
+    /// Minimum image file size in KB
+    #[arg(short = 'M', long = "min-image-size", name = "KB")]
+    min_image_size_kb: Option<f64>,
+
+    /// Recurse into subdirectories when searching for torrent files
+    #[arg(short = 'r', long)]
+    pub recurse: bool,
+
+    /// Skip rename prompts for existing torrents
+    #[arg(short = 'x', long)]
+    pub skip_existing: bool,
+
+    /// Include only torrent files whose name matches the given glob pattern
+    #[arg(short = 'n', long, num_args = 1, action = clap::ArgAction::Append, name = "INCLUDE")]
+    pub include: Vec<String>,
+
+    /// Exclude torrent files whose name matches the given glob pattern
+    #[arg(short = 'X', long, num_args = 1, action = clap::ArgAction::Append, name = "EXCLUDE")]
+    pub exclude: Vec<String>,
+
+    /// Print verbose output
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
+}
+
+/// Subcommands for qtorrent.
+#[derive(Subcommand)]
+enum Command {
+    /// Show info and statistics for existing torrents in qBittorrent
+    #[command(name = "info")]
+    Info {
+        /// Sort torrents
+        #[arg(short = 's', long, value_enum, default_value_t = SortOrder::Name)]
+        sort: SortOrder,
+
+        /// Print one line per torrent
+        #[arg(short = 'l', long)]
+        list: bool,
+    },
+
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
+/// Sort order for the info subcommand torrent listing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum SortOrder {
+    /// Sort alphabetically by torrent name
+    #[default]
+    Name,
+    /// Sort by total size (largest first)
+    Size,
+    /// Sort by save path
+    Path,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut args = QtorrentArgs::parse();
+    let command = args.command.take();
+
+    match command {
+        Some(Command::Completion { shell, install }) => cli_tools_common::generate_shell_completion(
+            shell,
+            QtorrentArgs::command(),
+            install,
+            args.verbose,
+            env!("CARGO_BIN_NAME"),
+        ),
+        Some(Command::Info { sort, list }) => info::run(args, sort, list).await,
+        None => QTorrent::new(args)?.run().await,
+    }
+}
+
+#[cfg(test)]
+mod cli_args_tests {
+    use super::*;
+
+    #[test]
+    fn the_command_definition_is_valid() {
+        QtorrentArgs::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_multiple_paths() {
+        let args =
+            QtorrentArgs::try_parse_from(["test", "/path/one.torrent", "/path/two.torrent"]).expect("should parse");
+        assert_eq!(args.path.len(), 2);
+    }
+
+    #[test]
+    fn parses_host_and_port() {
+        let args = QtorrentArgs::try_parse_from(["test", "-H", "192.168.1.100", "-P", "9090"]).expect("should parse");
+        assert_eq!(args.host, Some("192.168.1.100".to_string()));
+        assert_eq!(args.port, Some(9090));
+    }
+
+    #[test]
+    fn parses_credentials() {
+        let args = QtorrentArgs::try_parse_from(["test", "-u", "admin", "-w", "secret"]).expect("should parse");
+        assert_eq!(args.username, Some("admin".to_string()));
+        assert_eq!(args.password, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn parses_save_path_and_category() {
+        let args = QtorrentArgs::try_parse_from(["test", "-s", "/downloads", "-c", "movies"]).expect("should parse");
+        assert_eq!(args.save_path, Some("/downloads".to_string()));
+        assert_eq!(args.category, Some("movies".to_string()));
+    }
+
+    #[test]
+    fn parses_tags() {
+        let args = QtorrentArgs::try_parse_from(["test", "-t", "hd,new,important"]).expect("should parse");
+        assert_eq!(args.tags, Some("hd,new,important".to_string()));
+    }
+
+    #[test]
+    fn parses_comma_delimited_skip_extensions() {
+        let args = QtorrentArgs::try_parse_from(["test", "-e", "nfo,txt,jpg"]).expect("should parse");
+        assert_eq!(args.skip_extensions, vec!["nfo", "txt", "jpg"]);
+    }
+
+    #[test]
+    fn parses_comma_delimited_skip_directories() {
+        let args = QtorrentArgs::try_parse_from(["test", "-k", "sample,subs,screens"]).expect("should parse");
+        assert_eq!(args.skip_directories, vec!["sample", "subs", "screens"]);
+    }
+
+    #[test]
+    fn parses_min_file_size() {
+        let args = QtorrentArgs::try_parse_from(["test", "-m", "50.5"]).expect("should parse");
+        assert_eq!(args.min_file_size_mb, Some(50.5));
+    }
+
+    #[test]
+    fn parses_include_images() {
+        let args = QtorrentArgs::try_parse_from(["test", "--include-images"]).expect("should parse");
+        assert!(args.include_images);
+    }
+
+    #[test]
+    fn parses_include_images_short_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "-i"]).expect("should parse");
+        assert!(args.include_images);
+    }
+
+    #[test]
+    fn parses_min_image_size() {
+        let args = QtorrentArgs::try_parse_from(["test", "--min-image-size", "3.5"]).expect("should parse");
+        assert_eq!(args.min_image_size_kb, Some(3.5));
+    }
+
+    #[test]
+    fn parses_min_image_size_short_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "-M", "3.5"]).expect("should parse");
+        assert_eq!(args.min_image_size_kb, Some(3.5));
+    }
+
+    #[test]
+    fn parses_combined_boolean_flags() {
+        let args = QtorrentArgs::try_parse_from(["test", "-apyrxvo"]).expect("should parse");
+        assert!(args.paused);
+        assert!(args.dryrun);
+        assert!(args.yes);
+        assert!(args.recurse);
+        assert!(args.skip_existing);
+        assert!(args.verbose);
+        assert!(args.offline);
+    }
+
+    #[test]
+    fn parses_long_form_flags() {
+        let args = QtorrentArgs::try_parse_from([
+            "test",
+            "--paused",
+            "--dryrun",
+            "--yes",
+            "--recurse",
+            "--skip-existing",
+            "--verbose",
+            "--offline",
+        ])
+        .expect("should parse");
+        assert!(args.paused);
+        assert!(args.dryrun);
+        assert!(args.yes);
+        assert!(args.recurse);
+        assert!(args.skip_existing);
+        assert!(args.verbose);
+        assert!(args.offline);
+    }
+
+    #[test]
+    fn parses_long_form_skip_ext() {
+        let args = QtorrentArgs::try_parse_from(["test", "--skip-ext", "nfo,txt"]).expect("should parse");
+        assert_eq!(args.skip_extensions, vec!["nfo", "txt"]);
+    }
+
+    #[test]
+    fn parses_long_form_skip_dir() {
+        let args = QtorrentArgs::try_parse_from(["test", "--skip-dir", "sample,subs"]).expect("should parse");
+        assert_eq!(args.skip_directories, vec!["sample", "subs"]);
+    }
+
+    #[test]
+    fn parses_long_form_min_size() {
+        let args = QtorrentArgs::try_parse_from(["test", "--min-size", "100"]).expect("should parse");
+        assert_eq!(args.min_file_size_mb, Some(100.0));
+    }
+
+    #[test]
+    fn empty_by_default() {
+        let args = QtorrentArgs::try_parse_from(["test"]).expect("should parse");
+        assert_eq!(args.path, [] as [PathBuf; 0]);
+        assert!(args.host.is_none());
+        assert!(args.port.is_none());
+        assert!(args.username.is_none());
+        assert!(args.password.is_none());
+        assert_eq!(args.skip_extensions, [] as [String; 0]);
+        assert_eq!(args.skip_directories, [] as [String; 0]);
+        assert!(args.min_file_size_mb.is_none());
+        assert!(!args.include_images);
+        assert!(args.min_image_size_kb.is_none());
+        assert!(!args.paused);
+        assert!(!args.dryrun);
+        assert!(!args.offline);
+        assert!(args.command.is_none(), "command should be None by default");
+    }
+
+    #[test]
+    fn parses_offline_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "--offline"]).expect("should parse");
+        assert!(args.offline);
+    }
+
+    #[test]
+    fn parses_offline_short_flag() {
+        let args = QtorrentArgs::try_parse_from(["test", "-o"]).expect("should parse");
+        assert!(args.offline);
+    }
+
+    #[test]
+    fn parses_complex_combination() {
+        let args = QtorrentArgs::try_parse_from([
+            "test",
+            "/path/to/torrent.torrent",
+            "-H",
+            "192.168.1.100",
+            "-P",
+            "8080",
+            "-u",
+            "admin",
+            "-w",
+            "pass",
+            "-s",
+            "/downloads",
+            "-c",
+            "movies",
+            "-t",
+            "hd,new",
+            "-e",
+            "nfo,txt",
+            "-k",
+            "sample",
+            "-m",
+            "50",
+            "--include-images",
+            "--min-image-size",
+            "2",
+            "-a",
+            "-r",
+            "-v",
+        ])
+        .expect("should parse");
+
+        assert_eq!(args.path.len(), 1);
+        assert_eq!(args.host, Some("192.168.1.100".to_string()));
+        assert_eq!(args.port, Some(8080));
+        assert_eq!(args.username, Some("admin".to_string()));
+        assert_eq!(args.password, Some("pass".to_string()));
+        assert_eq!(args.save_path, Some("/downloads".to_string()));
+        assert_eq!(args.category, Some("movies".to_string()));
+        assert_eq!(args.tags, Some("hd,new".to_string()));
+        assert_eq!(args.skip_extensions, vec!["nfo", "txt"]);
+        assert_eq!(args.skip_directories, vec!["sample"]);
+        assert_eq!(args.min_file_size_mb, Some(50.0));
+        assert!(args.include_images);
+        assert_eq!(args.min_image_size_kb, Some(2.0));
+        assert!(args.paused);
+        assert!(args.recurse);
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn rejects_invalid_port() {
+        let result = QtorrentArgs::try_parse_from(["test", "-P", "not_a_number"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_min_size() {
+        let result = QtorrentArgs::try_parse_from(["test", "-m", "not_a_number"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_info_subcommand() {
+        let args = QtorrentArgs::try_parse_from(["test", "info"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info { .. })));
+    }
+
+    #[test]
+    fn parses_info_with_global_verbose() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-v"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info { .. })));
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn parses_info_with_global_connection_args() {
+        let args =
+            QtorrentArgs::try_parse_from(["test", "info", "-H", "192.168.1.1", "-P", "9090"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info { .. })));
+        assert_eq!(args.host, Some("192.168.1.1".to_string()));
+        assert_eq!(args.port, Some(9090));
+    }
+
+    #[test]
+    fn parses_info_sort_by_size() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-s", "size"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Size);
+                assert!(!list);
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn parses_info_sort_by_path() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "--sort", "path"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, .. }) => {
+                assert_eq!(sort, SortOrder::Path);
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn parses_info_list_mode() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-l"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Name);
+                assert!(list);
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn parses_info_list_with_sort_and_verbose() {
+        let args = QtorrentArgs::try_parse_from(["test", "info", "-l", "-s", "size", "-v"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Size);
+                assert!(list);
+            }
+            _ => panic!("Expected Info command"),
+        }
+        assert!(args.verbose);
+    }
+
+    #[test]
+    fn info_defaults_to_name_sort_no_list() {
+        let args = QtorrentArgs::try_parse_from(["test", "info"]).expect("should parse");
+        match args.command {
+            Some(Command::Info { sort, list }) => {
+                assert_eq!(sort, SortOrder::Name);
+                assert!(!list);
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+
+    #[test]
+    fn parses_completion_subcommand() {
+        let args = QtorrentArgs::try_parse_from(["test", "completion", "bash"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Completion { .. })));
+    }
+
+    #[test]
+    fn parses_completion_with_install() {
+        let args = QtorrentArgs::try_parse_from(["test", "completion", "bash", "-I"]).expect("should parse");
+        match args.command {
+            Some(Command::Completion { shell, install }) => {
+                assert_eq!(shell, Shell::Bash);
+                assert!(install);
+            }
+            _ => panic!("Expected Completion command"),
+        }
+    }
+
+    #[test]
+    fn global_args_before_subcommand() {
+        let args = QtorrentArgs::try_parse_from(["test", "-v", "-H", "myhost", "info"]).expect("should parse");
+        assert!(matches!(args.command, Some(Command::Info { .. })));
+        assert!(args.verbose);
+        assert_eq!(args.host, Some("myhost".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod config_from_args_tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn config_has_host_and_port() {
+        let args = QtorrentArgs::try_parse_from(["test"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        // Should have host and port (from CLI, config, or defaults)
+        assert_ne!(config.host, "");
+        assert!(config.port > 0);
+    }
+
+    #[test]
+    fn config_cli_overrides_host_and_port() {
+        let args = QtorrentArgs::try_parse_from(["test", "-H", "192.168.1.1", "-P", "9000"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        // CLI values should take priority
+        assert_eq!(config.host, "192.168.1.1");
+        assert_eq!(config.port, 9000);
+    }
+
+    #[test]
+    fn config_includes_cli_skip_extensions_normalized() {
+        let args = QtorrentArgs::try_parse_from(["test", "-e", ".NFO,.TXT"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        // CLI extensions should be included as lowercase without leading dots
+        assert!(config.file_filter.skip_extensions.contains(&"nfo".to_string()));
+        assert!(config.file_filter.skip_extensions.contains(&"txt".to_string()));
+    }
+
+    #[test]
+    fn config_includes_cli_skip_directories_normalized() {
+        let args = QtorrentArgs::try_parse_from(["test", "-k", "SAMPLE,Subs"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        // CLI directory names should be included as lowercase
+        assert!(config.file_filter.skip_directories.contains(&"sample".to_string()));
+        assert!(config.file_filter.skip_directories.contains(&"subs".to_string()));
+    }
+
+    #[test]
+    fn config_cli_min_size_converts_to_bytes() {
+        let args = QtorrentArgs::try_parse_from(["test", "-m", "10"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        // CLI 10 MB = 10 * 1024 * 1024 bytes should take priority
+        assert_eq!(config.file_filter.min_size_bytes, Some(10 * 1024 * 1024));
+    }
+
+    #[test]
+    fn config_cli_includes_images() {
+        let args = QtorrentArgs::try_parse_from(["test", "--include-images"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.file_filter.include_images);
+    }
+
+    #[test]
+    fn config_cli_image_min_size_converts_to_bytes() {
+        let args =
+            QtorrentArgs::try_parse_from(["test", "--include-images", "--min-image-size", "2"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert_eq!(config.file_filter.min_image_size_bytes, Some(2 * 1024));
+    }
+
+    #[test]
+    fn config_zero_sizes_disable_size_filters() {
+        let args =
+            QtorrentArgs::try_parse_from(["test", "--include-images", "--min-size", "0", "--min-image-size", "0"])
+                .expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.file_filter.include_images);
+        assert!(config.file_filter.min_size_bytes.is_none());
+        assert!(config.file_filter.min_image_size_bytes.is_none());
+    }
+
+    #[test]
+    fn config_has_credentials_when_cli_sets_them() {
+        let args = QtorrentArgs::try_parse_from(["test", "-u", "user", "-w", "pass"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.has_credentials());
+        assert_eq!(config.username, "user");
+        assert_eq!(config.password, "pass");
+    }
+
+    #[test]
+    fn config_cli_extensions_enable_file_filters() {
+        let args = QtorrentArgs::try_parse_from(["test", "-e", "nfo"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(!config.file_filter.is_empty());
+        assert!(config.file_filter.skip_extensions.contains(&"nfo".to_string()));
+    }
+
+    #[test]
+    fn config_cli_directories_enable_file_filters() {
+        let args = QtorrentArgs::try_parse_from(["test", "-k", "sample"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(!config.file_filter.is_empty());
+        assert!(config.file_filter.skip_directories.contains(&"sample".to_string()));
+    }
+
+    #[test]
+    fn config_cli_min_size_enables_file_filters() {
+        let args = QtorrentArgs::try_parse_from(["test", "-m", "50"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(!config.file_filter.is_empty());
+        assert!(config.file_filter.min_size_bytes.is_some());
+    }
+
+    #[test]
+    fn config_cli_boolean_flags_enable_options() {
+        let args = QtorrentArgs::try_parse_from(["test", "-a", "-p", "-y", "-r", "-x", "-v"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.paused);
+        assert!(config.dryrun);
+        assert!(config.yes);
+        assert!(config.recurse);
+        assert!(config.skip_existing);
+        assert!(config.verbose);
+    }
+
+    #[test]
+    fn config_offline_implies_dryrun() {
+        let args = QtorrentArgs::try_parse_from(["test", "--offline"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.offline);
+        assert!(config.dryrun, "offline should imply dryrun");
+    }
+
+    #[test]
+    fn config_offline_short_flag_implies_dryrun() {
+        let args = QtorrentArgs::try_parse_from(["test", "-o"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.offline);
+        assert!(config.dryrun, "offline should imply dryrun");
+    }
+
+    #[test]
+    fn config_dryrun_without_offline() {
+        let args = QtorrentArgs::try_parse_from(["test", "--dryrun"]).expect("should parse");
+        let config = Config::from_args(args).expect("config should parse");
+        assert!(config.dryrun);
+        assert!(!config.offline, "dryrun should not imply offline");
+    }
+}

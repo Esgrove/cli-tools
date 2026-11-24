@@ -1,0 +1,2579 @@
+//! `SQLite` database operations for video convert.
+//!
+//! Stores pending files that need conversion, remuxing, or subtitle processing.
+//! The scanned file cache lives in the `scanned_files` submodule.
+
+#![allow(clippy::cast_possible_wrap)]
+
+mod scanned_files;
+
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use anyhow::{Context, Result};
+use rusqlite::{Connection, OptionalExtension, params};
+
+use crate::SortOrder;
+use crate::bitrate_limit::MinimumBitrate;
+use crate::types::VideoInfo;
+
+/// Default database filename.
+const DATABASE_FILENAME: &str = "vconvert.db";
+
+/// Database wrapper for pending file operations.
+pub struct Database {
+    connection: Connection,
+}
+
+/// A pending file entry from the database.
+#[derive(Debug, Clone)]
+pub struct PendingFile {
+    /// Database row ID.
+    pub id: i64,
+    /// Full path to the video file.
+    pub full_path: PathBuf,
+    /// File extension (e.g., "mp4", "mkv").
+    pub extension: String,
+    /// Video codec name (e.g., "hevc", "h264").
+    pub codec: String,
+    /// Video bitrate in kbps.
+    pub bitrate_kbps: u64,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Duration in seconds.
+    pub duration: f64,
+    /// Video width in pixels.
+    pub width: u32,
+    /// Video height in pixels.
+    pub height: u32,
+    /// Framerate in frames per second.
+    pub frames_per_second: f64,
+    /// Video bit depth per color channel.
+    pub bit_depth: u8,
+    /// Action to perform: "convert" or "remux".
+    pub action: PendingAction,
+    /// When the entry was added to the database.
+    #[allow(dead_code)]
+    pub created_time: i64,
+    /// File's modification time when scanned, used to detect later changes.
+    pub modified_time: Option<i64>,
+}
+
+/// Action type for a pending file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingAction {
+    /// File needs full conversion to HEVC.
+    Convert,
+    /// File is already HEVC but needs remuxing to MP4 container.
+    Remux,
+    /// File needs external subtitle sidecars muxed into the movie container.
+    SubtitleMux,
+}
+
+/// Statistics about the database contents.
+#[derive(Debug, Default, Clone)]
+pub struct DatabaseStats {
+    /// Total number of pending files.
+    pub total_files: u64,
+    /// Number of files needing conversion.
+    pub convert_count: u64,
+    /// Number of files needing remux.
+    pub remux_count: u64,
+    /// Number of files needing external subtitle muxing.
+    pub subtitle_mux_count: u64,
+    /// Total size of all pending files in bytes.
+    pub total_size: u64,
+}
+
+/// Statistics about file extensions in the database.
+#[derive(Debug, Clone)]
+pub struct ExtensionStats {
+    /// File extension.
+    pub extension: String,
+    /// Number of files with this extension.
+    pub count: u64,
+    /// Total size of files with this extension.
+    pub total_size: u64,
+}
+
+/// Filter options for querying pending files.
+#[derive(Debug, Default, Clone)]
+pub struct PendingFileFilter {
+    /// Filter by action type.
+    pub action: Option<PendingAction>,
+    /// Filter by file extensions.
+    pub extensions: Vec<String>,
+    /// Minimum bitrate.
+    pub min_bitrate: Option<MinimumBitrate>,
+    /// Maximum bitrate in kbps.
+    pub max_bitrate: Option<u64>,
+    /// Minimum duration in seconds.
+    pub min_duration: Option<f64>,
+    /// Maximum duration in seconds.
+    pub max_duration: Option<f64>,
+    /// Limit number of results.
+    pub limit: Option<usize>,
+    /// Sort order for results.
+    pub sort: Option<SortOrder>,
+}
+
+impl PendingAction {
+    /// Convert action to string for database storage.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Convert => "convert",
+            Self::Remux => "remux",
+            Self::SubtitleMux => "subtitle_mux",
+        }
+    }
+
+    /// Parse action from string.
+    fn from_str(value: &str) -> Self {
+        match value {
+            "remux" => Self::Remux,
+            "subtitle_mux" => Self::SubtitleMux,
+            // Default to Convert for unknown values
+            _ => Self::Convert,
+        }
+    }
+}
+
+impl std::fmt::Display for PendingAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl Database {
+    /// Get the database path.
+    ///
+    /// Uses the platform-specific local data directory:
+    /// - Windows: `%LOCALAPPDATA%\cli-tools\vconvert.db`
+    /// - macOS: `~/Library/Application Support/cli-tools/vconvert.db`
+    /// - Linux: `~/.local/share/cli-tools/vconvert.db`
+    fn database_path() -> PathBuf {
+        let data_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("cli-tools");
+        data_dir.join(DATABASE_FILENAME)
+    }
+
+    /// Get the database path for display purposes.
+    pub fn path() -> PathBuf {
+        Self::database_path()
+    }
+
+    /// Open or create the database at the default path.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened or initialized.
+    pub fn open_default() -> Result<Self> {
+        let path = Self::database_path();
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
+        }
+
+        let connection =
+            Connection::open(&path).with_context(|| format!("Failed to open database: {}", path.display()))?;
+
+        // Set busy timeout for concurrent access (5 seconds)
+        // WAL mode allows concurrent reads, but writes need to wait for each other
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("Failed to set busy timeout")?;
+
+        let database = Self { connection };
+        database.initialize()?;
+
+        Ok(database)
+    }
+
+    /// Open an in-memory database for testing.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be created.
+    #[cfg(test)]
+    pub(crate) fn open_in_memory() -> Result<Self> {
+        let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
+
+        let database = Self { connection };
+        database.initialize()?;
+
+        Ok(database)
+    }
+
+    /// Initialize the database schema.
+    fn initialize(&self) -> Result<()> {
+        self.connection
+            .execute_batch(
+                r"
+                -- Pending video files to process
+                CREATE TABLE IF NOT EXISTS pending_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    extension TEXT NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 0,
+                    action TEXT NOT NULL,
+                    created_time INTEGER NOT NULL,
+                    modified_time INTEGER
+                );
+
+                -- Indexes for fast querying
+                CREATE INDEX IF NOT EXISTS idx_pending_action ON pending_files(action);
+                CREATE INDEX IF NOT EXISTS idx_pending_extension ON pending_files(extension);
+                CREATE INDEX IF NOT EXISTS idx_pending_bitrate ON pending_files(bitrate_kbps);
+                CREATE INDEX IF NOT EXISTS idx_pending_duration ON pending_files(duration);
+
+                -- Cache of all files that have been scanned with ffprobe.
+                -- Stores results for both pending and skipped files so ffprobe is not
+                -- re-run on unchanged files (identified by path + size_bytes).
+                CREATE TABLE IF NOT EXISTS scanned_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 0,
+                    scanned_time INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
+
+                -- Remove entries with invalid fps
+                -- (written by older versions that accepted 0 or timebase values).
+                DELETE FROM scanned_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
+                DELETE FROM pending_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
+
+                -- Performance optimizations
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA cache_size = -8000;
+                ",
+            )
+            .context("Failed to initialize database schema")?;
+
+        self.add_column_if_missing("pending_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("scanned_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.connection
+            .execute("DELETE FROM scanned_files WHERE bit_depth < 8", [])
+            .context("Failed to remove stale scan cache entries without bit depth")?;
+
+        Ok(())
+    }
+
+    fn add_column_if_missing(&self, table_name: &str, column_name: &str, column_definition: &str) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("PRAGMA table_info({table_name})"))
+            .with_context(|| format!("Failed to inspect table schema: {table_name}"))?;
+        let column_exists = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|name| name == column_name);
+
+        if !column_exists {
+            self.connection
+                .execute(
+                    &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
+                    [],
+                )
+                .with_context(|| format!("Failed to add {column_name} column to {table_name}"))?;
+        }
+        Ok(())
+    }
+
+    /// Insert or update a pending file entry.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    #[cfg(test)]
+    pub fn upsert_pending_file(
+        &self,
+        path: &Path,
+        extension: &str,
+        info: &VideoInfo,
+        action: PendingAction,
+    ) -> Result<i64> {
+        let path_str = path.to_string_lossy();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as i64);
+
+        let modified_time = file_modified_time(path);
+
+        self.connection
+            .execute(
+                r"
+                INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                ON CONFLICT(full_path) DO UPDATE SET
+                    extension = excluded.extension,
+                    codec = excluded.codec,
+                    bitrate_kbps = excluded.bitrate_kbps,
+                    size_bytes = excluded.size_bytes,
+                    duration = excluded.duration,
+                    width = excluded.width,
+                    height = excluded.height,
+                    frames_per_second = excluded.frames_per_second,
+                    bit_depth = excluded.bit_depth,
+                    action = excluded.action,
+                    modified_time = excluded.modified_time
+                ",
+                params![
+                    path_str,
+                    extension.to_lowercase(),
+                    info.codec,
+                    info.bitrate_kbps as i64,
+                    info.size_bytes as i64,
+                    info.duration,
+                    info.width,
+                    info.height,
+                    info.frames_per_second,
+                    i64::from(info.bit_depth),
+                    action.as_str(),
+                    now,
+                    modified_time,
+                ],
+            )
+            .context("Failed to insert pending file")?;
+
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Insert or update multiple pending files in a single transaction.
+    ///
+    /// Wrapping all writes in one transaction reduces disk syncs from O(N) to O(1).
+    ///
+    /// Returns the number of entries successfully written.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be started or committed.
+    pub fn batch_upsert_pending_files(
+        &mut self,
+        entries: &[(&Path, &str, &VideoInfo, PendingAction)],
+    ) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as i64);
+
+        let transaction = self.connection.transaction()?;
+        let mut count = 0;
+
+        for (path, extension, info, action) in entries {
+            let path_str = path.to_string_lossy();
+            let modified_time = file_modified_time(path);
+
+            transaction
+                .execute(
+                    r"
+                    INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    ON CONFLICT(full_path) DO UPDATE SET
+                        extension = excluded.extension,
+                        codec = excluded.codec,
+                        bitrate_kbps = excluded.bitrate_kbps,
+                        size_bytes = excluded.size_bytes,
+                        duration = excluded.duration,
+                        width = excluded.width,
+                        height = excluded.height,
+                        frames_per_second = excluded.frames_per_second,
+                        bit_depth = excluded.bit_depth,
+                        action = excluded.action,
+                        modified_time = excluded.modified_time
+                    ",
+                    params![
+                        path_str,
+                        extension.to_lowercase(),
+                        info.codec,
+                        info.bitrate_kbps as i64,
+                        info.size_bytes as i64,
+                        info.duration,
+                        info.width,
+                        info.height,
+                        info.frames_per_second,
+                        i64::from(info.bit_depth),
+                        action.as_str(),
+                        now,
+                        modified_time,
+                    ],
+                )
+                .context("Failed to insert pending file")?;
+            count += 1;
+        }
+
+        transaction.commit()?;
+        Ok(count)
+    }
+
+    /// Get pending files with optional filtering.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn get_pending_files(&self, filter: &PendingFileFilter) -> Result<Vec<PendingFile>> {
+        let mut conditions = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(action) = filter.action {
+            params_vec.push(Box::new(action.as_str().to_string()));
+            conditions.push(format!("action = ?{}", params_vec.len()));
+        }
+
+        if !filter.extensions.is_empty() {
+            let placeholders: Vec<String> = filter
+                .extensions
+                .iter()
+                .map(|ext| {
+                    params_vec.push(Box::new(ext.to_lowercase()));
+                    format!("?{}", params_vec.len())
+                })
+                .collect();
+            conditions.push(format!("extension IN ({})", placeholders.join(", ")));
+        }
+
+        // Bitrate limits only apply to conversions, not remuxes
+        if let Some(min_bitrate) = filter.min_bitrate {
+            let threshold = min_bitrate.sql_threshold(&mut params_vec);
+            conditions.push(format!(
+                "(action != '{}' OR bitrate_kbps >= {threshold})",
+                PendingAction::Convert.as_str(),
+            ));
+        }
+
+        if let Some(max_bitrate) = filter.max_bitrate {
+            params_vec.push(Box::new(max_bitrate as i64));
+            conditions.push(format!(
+                "(action != '{}' OR bitrate_kbps <= ?{})",
+                PendingAction::Convert.as_str(),
+                params_vec.len()
+            ));
+        }
+
+        // Duration limits only apply to conversions, not remuxes
+        if let Some(min_duration) = filter.min_duration {
+            params_vec.push(Box::new(min_duration));
+            conditions.push(format!(
+                "(action != '{}' OR duration >= ?{})",
+                PendingAction::Convert.as_str(),
+                params_vec.len()
+            ));
+        }
+
+        if let Some(max_duration) = filter.max_duration {
+            params_vec.push(Box::new(max_duration));
+            conditions.push(format!(
+                "(action != '{}' OR duration <= ?{})",
+                PendingAction::Convert.as_str(),
+                params_vec.len()
+            ));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let limit_clause = filter.limit.map_or_default(|limit| format!("LIMIT {limit}"));
+
+        let order_clause = filter.sort.map_or_else(
+            || "ORDER BY action, size_bytes DESC".to_string(),
+            |sort| format!("ORDER BY {}", sort.sql_order_clause()),
+        );
+
+        let sql = format!(
+            r"
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time
+            FROM pending_files
+            {where_clause}
+            {order_clause}
+            {limit_clause}
+            "
+        );
+
+        let mut statement = self.connection.prepare(&sql)?;
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(std::convert::AsRef::as_ref).collect();
+
+        let rows = statement.query_map(params_refs.as_slice(), row_to_pending_file)?;
+
+        let files = rows
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to query pending files")?;
+
+        Ok(files)
+    }
+
+    /// Get a single pending file by path.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Part of public API for future use"))]
+    pub fn get_pending_file(&self, path: &Path) -> Result<Option<PendingFile>> {
+        let path_str = path.to_string_lossy();
+
+        let mut statement = self.connection.prepare(
+            r"
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time
+            FROM pending_files
+            WHERE full_path = ?1
+            ",
+        )?;
+
+        let file = statement
+            .query_row(params![path_str], row_to_pending_file)
+            .optional()
+            .context("Failed to query pending file")?;
+
+        Ok(file)
+    }
+
+    /// Remove a pending file by path.
+    ///
+    /// Returns `true` if a file was removed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn remove_pending_file(&self, path: &Path) -> Result<bool> {
+        let path_str = path.to_string_lossy();
+
+        let rows_affected = self
+            .connection
+            .execute("DELETE FROM pending_files WHERE full_path = ?1", params![path_str])
+            .context("Failed to remove pending file")?;
+
+        Ok(rows_affected > 0)
+    }
+
+    /// Remove a pending file by ID.
+    ///
+    /// Returns `true` if a file was removed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Part of public API for future use"))]
+    pub fn remove_pending_file_by_id(&self, id: i64) -> Result<bool> {
+        let rows_affected = self
+            .connection
+            .execute("DELETE FROM pending_files WHERE id = ?1", params![id])
+            .context("Failed to remove pending file")?;
+
+        Ok(rows_affected > 0)
+    }
+
+    /// Remove all pending files that no longer exist on disk.
+    ///
+    /// Returns the number of files removed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn remove_missing_files(&mut self) -> Result<usize> {
+        let files = self.get_pending_files(&PendingFileFilter::default())?;
+        let mut removed_count = 0;
+
+        let transaction = self.connection.transaction()?;
+
+        for file in files {
+            if !file.full_path.exists() {
+                transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![file.id])?;
+                removed_count += 1;
+            }
+        }
+
+        transaction.commit()?;
+        Ok(removed_count)
+    }
+
+    /// Remove all pending files that were modified on disk after they were scanned.
+    ///
+    /// Their stored metadata no longer describes the file, so they need a rescan.
+    /// Returns the number of files removed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn remove_changed_files(&mut self) -> Result<usize> {
+        let files = self.get_pending_files(&PendingFileFilter::default())?;
+        let mut removed_count = 0;
+
+        let transaction = self.connection.transaction()?;
+
+        for file in files.iter().filter(|file| file.is_changed_on_disk()) {
+            transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![file.id])?;
+            removed_count += 1;
+        }
+
+        transaction.commit()?;
+        Ok(removed_count)
+    }
+
+    /// Clear all pending files from the database.
+    ///
+    /// Returns the number of files removed.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn clear(&self) -> Result<usize> {
+        let rows_affected = self
+            .connection
+            .execute("DELETE FROM pending_files", [])
+            .context("Failed to clear pending files")?;
+
+        Ok(rows_affected)
+    }
+
+    /// Get statistics about the database contents.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn get_stats(&self) -> Result<DatabaseStats> {
+        let mut stats = DatabaseStats::default();
+
+        // Get total count and size
+        let mut statement = self
+            .connection
+            .prepare("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM pending_files")?;
+        let (total_files, total_size): (i64, i64) = statement.query_row([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        stats.total_files = total_files as u64;
+        stats.total_size = total_size as u64;
+
+        // Get counts by action
+        let mut statement = self
+            .connection
+            .prepare("SELECT action, COUNT(*) FROM pending_files GROUP BY action")?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+
+        for row in rows {
+            let (action, count) = row?;
+            match action.as_str() {
+                "convert" => stats.convert_count = count as u64,
+                "remux" => stats.remux_count = count as u64,
+                "subtitle_mux" => stats.subtitle_mux_count = count as u64,
+                _ => {}
+            }
+        }
+
+        Ok(stats)
+    }
+
+    /// Get statistics grouped by file extension.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn get_extension_stats(&self) -> Result<Vec<ExtensionStats>> {
+        let mut statement = self.connection.prepare(
+            r"
+            SELECT extension, COUNT(*), COALESCE(SUM(size_bytes), 0)
+            FROM pending_files
+            GROUP BY extension
+            ORDER BY COUNT(*) DESC
+            ",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(ExtensionStats {
+                extension: row.get(0)?,
+                count: row.get::<_, i64>(1)? as u64,
+                total_size: row.get::<_, i64>(2)? as u64,
+            })
+        })?;
+
+        let stats = rows
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to query extension stats")?;
+
+        Ok(stats)
+    }
+
+    /// Get list of unique extensions in the database.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    #[cfg(test)]
+    pub fn get_extensions(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT extension FROM pending_files ORDER BY extension")?;
+
+        let rows = statement.query_map([], |row| row.get(0))?;
+
+        let extensions = rows
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to query extensions")?;
+
+        Ok(extensions)
+    }
+}
+
+/// Convert a database row to a `PendingFile`.
+fn row_to_pending_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingFile> {
+    Ok(PendingFile {
+        id: row.get(0)?,
+        full_path: PathBuf::from(row.get::<_, String>(1)?),
+        extension: row.get(2)?,
+        codec: row.get(3)?,
+        bitrate_kbps: row.get::<_, i64>(4)? as u64,
+        size_bytes: row.get::<_, i64>(5)? as u64,
+        duration: row.get(6)?,
+        width: row.get::<_, i64>(7)? as u32,
+        height: row.get::<_, i64>(8)? as u32,
+        frames_per_second: row.get(9)?,
+        bit_depth: row.get::<_, i64>(10)? as u8,
+        action: PendingAction::from_str(&row.get::<_, String>(11)?),
+        created_time: row.get(12)?,
+        modified_time: row.get(13)?,
+    })
+}
+
+impl PendingFile {
+    /// Convert to `VideoInfo` for processing.
+    pub fn to_video_info(&self) -> VideoInfo {
+        VideoInfo {
+            codec: self.codec.clone(),
+            bitrate_kbps: self.bitrate_kbps,
+            size_bytes: self.size_bytes,
+            duration: self.duration,
+            width: self.width,
+            height: self.height,
+            frames_per_second: self.frames_per_second,
+            bit_depth: self.bit_depth.max(8),
+            warning: None,
+        }
+    }
+
+    /// Whether the file on disk has a different modification time than when it was scanned.
+    ///
+    /// Entries without a stored time, or files whose time cannot be read, count as unchanged.
+    pub fn is_changed_on_disk(&self) -> bool {
+        self.modified_time
+            .zip(file_modified_time(&self.full_path))
+            .is_some_and(|(stored, current)| stored != current)
+    }
+}
+
+impl std::fmt::Display for DatabaseStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Database Statistics:")?;
+        writeln!(f, "  Total files:    {}", self.total_files)?;
+        writeln!(f, "  To convert:     {}", self.convert_count)?;
+        writeln!(f, "  To remux:       {}", self.remux_count)?;
+        writeln!(f, "  To subtitle mux: {}", self.subtitle_mux_count)?;
+        write!(
+            f,
+            "  Total size:     {}",
+            cli_tools_common::format_size(self.total_size)
+        )
+    }
+}
+
+/// File modification time in whole seconds since the Unix epoch, or `None` if it cannot be read.
+fn file_modified_time(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+}
+
+impl std::fmt::Display for ExtensionStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            ".{:<3} {:>4} files  {}",
+            self.extension,
+            self.count,
+            cli_tools_common::format_size(self.total_size)
+        )
+    }
+}
+
+#[cfg(test)]
+mod test_database {
+    use super::*;
+
+    fn create_test_video_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn test_open_in_memory() {
+        let database = Database::open_in_memory();
+        assert!(database.is_ok());
+    }
+
+    #[test]
+    fn test_insert_and_get_pending_file() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/test/video.mp4");
+
+        let result = database.upsert_pending_file(&path, "mp4", &info, PendingAction::Convert);
+        assert!(result.is_ok());
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].full_path, path);
+        assert_eq!(files[0].extension, "mp4");
+        assert_eq!(files[0].codec, "h264");
+        assert_eq!(files[0].action, PendingAction::Convert);
+    }
+
+    #[test]
+    fn test_upsert_updates_existing() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let path = PathBuf::from("/test/video.mp4");
+
+        let info1 = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(&path, "mp4", &info1, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let info2 = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(&path, "mp4", &info2, PendingAction::Remux)
+            .expect("Failed to update");
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].codec, "hevc");
+        assert_eq!(files[0].action, PendingAction::Remux);
+    }
+
+    #[test]
+    fn test_filter_by_action() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_pending_file(&PathBuf::from("/test/a.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/b.mkv"), "mkv", &info, PendingAction::Remux)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/c.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let convert_files = database
+            .get_pending_files(&PendingFileFilter {
+                action: Some(PendingAction::Convert),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(convert_files.len(), 2);
+
+        let remux_files = database
+            .get_pending_files(&PendingFileFilter {
+                action: Some(PendingAction::Remux),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(remux_files.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_by_extension() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_pending_file(&PathBuf::from("/test/a.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/b.mkv"), "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/c.avi"), "avi", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let mp4_files = database
+            .get_pending_files(&PendingFileFilter {
+                extensions: vec!["mp4".to_string()],
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(mp4_files.len(), 1);
+
+        let mp4_mkv_files = database
+            .get_pending_files(&PendingFileFilter {
+                extensions: vec!["mp4".to_string(), "mkv".to_string()],
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(mp4_mkv_files.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_by_bitrate() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_low = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 2000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_high = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 2_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/low.mp4"),
+                "mp4",
+                &info_low,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/high.mp4"),
+                "mp4",
+                &info_high,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        let high_bitrate = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(high_bitrate.len(), 1);
+        assert_eq!(high_bitrate[0].bitrate_kbps, 15000);
+
+        let low_bitrate = database
+            .get_pending_files(&PendingFileFilter {
+                max_bitrate: Some(5000),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(low_bitrate.len(), 1);
+        assert_eq!(low_bitrate[0].bitrate_kbps, 2000);
+    }
+
+    #[test]
+    fn test_filter_by_duration() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_short = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 500_000_000,
+            duration: 600.0, // 10 minutes
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_long = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 2_000_000_000,
+            duration: 7200.0, // 2 hours
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/short.mp4"),
+                "mp4",
+                &info_short,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/long.mp4"),
+                "mp4",
+                &info_long,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        let long_videos = database
+            .get_pending_files(&PendingFileFilter {
+                min_duration: Some(3600.0),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(long_videos.len(), 1);
+        cli_tools_common::assert_f64_eq(long_videos[0].duration, 7200.0);
+    }
+
+    #[test]
+    fn test_remove_pending_file() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/test/video.mp4");
+
+        database
+            .upsert_pending_file(&path, "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let removed = database.remove_pending_file(&path).expect("Failed to remove");
+        assert!(removed);
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get files");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_clear_database() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_pending_file(&PathBuf::from("/test/a.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/b.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let cleared = database.clear().expect("Failed to clear");
+        assert_eq!(cleared, 2);
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get files");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_get_stats() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_pending_file(&PathBuf::from("/test/a.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/b.mkv"), "mkv", &info, PendingAction::Remux)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/c.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let stats = database.get_stats().expect("Failed to get stats");
+        assert_eq!(stats.total_files, 3);
+        assert_eq!(stats.convert_count, 2);
+        assert_eq!(stats.remux_count, 1);
+        assert_eq!(stats.total_size, 3_000_000_000);
+    }
+
+    #[test]
+    fn test_get_extension_stats() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_pending_file(&PathBuf::from("/test/a.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/b.mkv"), "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/c.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let ext_stats = database.get_extension_stats().expect("Failed to get extension stats");
+        assert_eq!(ext_stats.len(), 2);
+
+        let mp4_stats = ext_stats.iter().find(|s| s.extension == "mp4").expect("mp4 not found");
+        assert_eq!(mp4_stats.count, 2);
+
+        let mkv_stats = ext_stats.iter().find(|s| s.extension == "mkv").expect("mkv not found");
+        assert_eq!(mkv_stats.count, 1);
+    }
+
+    #[test]
+    fn test_get_extensions() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_pending_file(&PathBuf::from("/test/a.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/b.mkv"), "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/c.avi"), "avi", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        let extensions = database.get_extensions().expect("Failed to get extensions");
+        assert_eq!(extensions.len(), 3);
+        assert!(extensions.contains(&"avi".to_string()));
+        assert!(extensions.contains(&"mkv".to_string()));
+        assert!(extensions.contains(&"mp4".to_string()));
+    }
+
+    #[test]
+    fn test_pending_action_display() {
+        assert_eq!(PendingAction::Convert.to_string(), "convert");
+        assert_eq!(PendingAction::Remux.to_string(), "remux");
+        assert_eq!(PendingAction::SubtitleMux.to_string(), "subtitle_mux");
+    }
+
+    #[test]
+    fn test_pending_action_from_str() {
+        assert_eq!(PendingAction::from_str("convert"), PendingAction::Convert);
+        assert_eq!(PendingAction::from_str("remux"), PendingAction::Remux);
+        assert_eq!(PendingAction::from_str("subtitle_mux"), PendingAction::SubtitleMux);
+        assert_eq!(PendingAction::from_str("unknown"), PendingAction::Convert);
+    }
+
+    #[test]
+    fn test_to_video_info() {
+        let pending = PendingFile {
+            id: 1,
+            full_path: PathBuf::from("/test/video.mp4"),
+            extension: "mp4".to_string(),
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 10,
+            action: PendingAction::Convert,
+            created_time: 0,
+            modified_time: None,
+        };
+
+        let info = pending.to_video_info();
+        assert_eq!(info.codec, "h264");
+        assert_eq!(info.bitrate_kbps, 8000);
+        assert_eq!(info.size_bytes, 1_000_000_000);
+        cli_tools_common::assert_f64_eq(info.duration, 3600.0);
+        assert_eq!(info.width, 1920);
+        assert_eq!(info.height, 1080);
+        cli_tools_common::assert_f64_eq(info.frames_per_second, 24.0);
+        assert_eq!(info.bit_depth, 10);
+    }
+
+    #[test]
+    fn test_filter_with_limit() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        for i in 0..10 {
+            database
+                .upsert_pending_file(
+                    &PathBuf::from(format!("/test/video{i}.mp4")),
+                    "mp4",
+                    &info,
+                    PendingAction::Convert,
+                )
+                .expect("Failed to insert");
+        }
+
+        let limited = database
+            .get_pending_files(&PendingFileFilter {
+                limit: Some(5),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(limited.len(), 5);
+    }
+
+    #[test]
+    fn test_combined_filters() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_low = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 5000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_high = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 2_000_000_000,
+            duration: 7200.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(&PathBuf::from("/test/a.mp4"), "mp4", &info_low, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/b.mkv"), "mkv", &info_high, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/c.mp4"), "mp4", &info_high, PendingAction::Remux)
+            .expect("Failed to insert");
+
+        // Filter: mp4 files with high bitrate that need conversion
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                action: Some(PendingAction::Convert),
+                extensions: vec!["mp4".to_string()],
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        // a.mp4 has low bitrate, c.mp4 is remux
+        assert_eq!(filtered.len(), 0);
+
+        // Filter: any file with high bitrate
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_sort_by_bitrate() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_low = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 2000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_mid = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_high = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 2_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/low.mp4"),
+                "mp4",
+                &info_low,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/mid.mp4"),
+                "mp4",
+                &info_mid,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/high.mp4"),
+                "mp4",
+                &info_high,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Sort by bitrate descending (highest first)
+        let sorted_desc = database
+            .get_pending_files(&PendingFileFilter {
+                sort: Some(SortOrder::Bitrate),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(sorted_desc.len(), 3);
+        assert_eq!(sorted_desc[0].bitrate_kbps, 15000);
+        assert_eq!(sorted_desc[1].bitrate_kbps, 8000);
+        assert_eq!(sorted_desc[2].bitrate_kbps, 2000);
+    }
+
+    #[test]
+    fn test_sort_by_name() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/charlie.mp4"),
+                "mp4",
+                &info,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/alpha.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(&PathBuf::from("/test/bravo.mp4"), "mp4", &info, PendingAction::Convert)
+            .expect("Failed to insert");
+
+        // Sort by name ascending (alphabetical)
+        let sorted = database
+            .get_pending_files(&PendingFileFilter {
+                sort: Some(SortOrder::Name),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(sorted.len(), 3);
+        assert!(sorted[0].full_path.to_string_lossy().contains("alpha"));
+        assert!(sorted[1].full_path.to_string_lossy().contains("bravo"));
+        assert!(sorted[2].full_path.to_string_lossy().contains("charlie"));
+    }
+
+    #[test]
+    fn test_sort_by_impact() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        // Low impact: low bitrate, short duration, high fps
+        // Impact = (2000 / 60) * 600 = 20,000
+        let info_low = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 2000,
+            size_bytes: 150_000_000,
+            duration: 600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 60.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        // Medium impact: medium bitrate, medium duration, normal fps
+        // Impact = (8000 / 30) * 1800 = 480,000
+        let info_mid = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_800_000_000,
+            duration: 1800.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 30.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        // High impact: high bitrate, long duration, low fps
+        // Impact = (15000 / 24) * 7200 = 4,500,000
+        let info_high = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 13_500_000_000,
+            duration: 7200.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/low_impact.mp4"),
+                "mp4",
+                &info_low,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/mid_impact.mp4"),
+                "mp4",
+                &info_mid,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/high_impact.mp4"),
+                "mp4",
+                &info_high,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Sort by impact descending (highest potential savings first)
+        let sorted = database
+            .get_pending_files(&PendingFileFilter {
+                sort: Some(SortOrder::Impact),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(sorted.len(), 3);
+        assert!(sorted[0].full_path.to_string_lossy().contains("high_impact"));
+        assert!(sorted[1].full_path.to_string_lossy().contains("mid_impact"));
+        assert!(sorted[2].full_path.to_string_lossy().contains("low_impact"));
+    }
+
+    #[test]
+    fn test_bitrate_filter_does_not_exclude_remux_files() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_low = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 2000,
+            size_bytes: 500_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_high = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 15000,
+            size_bytes: 2_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        // Low bitrate remux file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/remux_low.mkv"),
+                "mkv",
+                &info_low,
+                PendingAction::Remux,
+            )
+            .expect("Failed to insert");
+
+        // Low bitrate convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_low.mp4"),
+                "mp4",
+                &info_low,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // High bitrate convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_high.mp4"),
+                "mp4",
+                &info_high,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Filter with min_bitrate above the low bitrate value
+        // Should exclude the low bitrate convert file but keep the low bitrate remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(MinimumBitrate::Fixed(10000)),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_low"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_high"))
+        );
+
+        // Filter with max_bitrate below the high bitrate value
+        // Should exclude the high bitrate convert file but keep the low bitrate remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                max_bitrate: Some(5000),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 2);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_low"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_low"))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_duration_filter_does_not_exclude_remux_files() {
+        let database = Database::open_in_memory().expect("Failed to open database");
+
+        let info_short = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 500_000_000,
+            duration: 30.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_long = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 2_000_000_000,
+            duration: 7200.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let info_mid = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        // Short duration remux file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/remux_short.mkv"),
+                "mkv",
+                &info_short,
+                PendingAction::Remux,
+            )
+            .expect("Failed to insert");
+
+        // Short duration convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_short.mp4"),
+                "mp4",
+                &info_short,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Mid duration convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_mid.mp4"),
+                "mp4",
+                &info_mid,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Long duration convert file
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/convert_long.mp4"),
+                "mp4",
+                &info_long,
+                PendingAction::Convert,
+            )
+            .expect("Failed to insert");
+
+        // Filter with min_duration above the short duration
+        // Should exclude the short convert file but keep the short remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                min_duration: Some(60.0),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 3);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_short"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_mid"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_long"))
+        );
+
+        // Filter with max_duration below the long duration
+        // Should exclude the long convert file but keep the short remux file
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                max_duration: Some(5000.0),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+        assert_eq!(filtered.len(), 3);
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("remux_short"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_short"))
+        );
+        assert!(
+            filtered
+                .iter()
+                .any(|f| f.full_path.to_string_lossy().contains("convert_mid"))
+        );
+    }
+
+    #[test]
+    fn test_upsert_and_find_scanned_file() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/videos/test.mkv");
+
+        database
+            .upsert_scanned_file(&path, &info)
+            .expect("Failed to upsert scanned file");
+
+        let found = database
+            .find_scanned_file(&path, info.size_bytes)
+            .expect("Failed to query scanned file");
+
+        let found = found.expect("Expected a cached result");
+        assert_eq!(found.codec, info.codec);
+        assert_eq!(found.bitrate_kbps, info.bitrate_kbps);
+        assert_eq!(found.size_bytes, info.size_bytes);
+        cli_tools_common::assert_f64_eq(found.duration, info.duration);
+        assert_eq!(found.width, info.width);
+        assert_eq!(found.height, info.height);
+        cli_tools_common::assert_f64_eq(found.frames_per_second, info.frames_per_second);
+        assert!(found.warning.is_none());
+    }
+
+    #[test]
+    fn test_find_scanned_file_returns_none_for_unknown_path() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let result = database
+            .find_scanned_file(&PathBuf::from("/videos/unknown.mkv"), 1_000_000)
+            .expect("Failed to query scanned file");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_scanned_file_returns_none_when_size_differs() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/videos/test.mkv");
+
+        database
+            .upsert_scanned_file(&path, &info)
+            .expect("Failed to upsert scanned file");
+
+        // Query with a different size. Should not match.
+        let result = database
+            .find_scanned_file(&path, info.size_bytes + 1)
+            .expect("Failed to query scanned file");
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_upsert_scanned_file_updates_existing_entry() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let path = PathBuf::from("/videos/test.mkv");
+
+        let original = create_test_video_info();
+        database
+            .upsert_scanned_file(&path, &original)
+            .expect("Failed to upsert original scanned file");
+
+        // Upsert an updated entry with a different codec and size.
+        let updated = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            bit_depth: 8,
+            warning: None,
+        };
+        database
+            .upsert_scanned_file(&path, &updated)
+            .expect("Failed to upsert updated scanned file");
+
+        let found = database
+            .find_scanned_file(&path, updated.size_bytes)
+            .expect("Failed to query scanned file")
+            .expect("Expected a cached result after update");
+
+        assert_eq!(found.codec, "hevc");
+        assert_eq!(found.bitrate_kbps, 4000);
+        assert_eq!(found.size_bytes, 500_000_000);
+
+        // The original size no longer matches.
+        let stale = database
+            .find_scanned_file(&path, original.size_bytes)
+            .expect("Failed to query scanned file");
+        assert!(stale.is_none());
+    }
+
+    #[test]
+    fn test_get_all_scanned_files_returns_all_entries() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let info_a = create_test_video_info();
+        let path_a = PathBuf::from("/videos/a.mkv");
+        database
+            .upsert_scanned_file(&path_a, &info_a)
+            .expect("Failed to upsert scanned file");
+
+        let info_b = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            bit_depth: 8,
+            warning: None,
+        };
+        let path_b = PathBuf::from("/videos/b.mp4");
+        database
+            .upsert_scanned_file(&path_b, &info_b)
+            .expect("Failed to upsert scanned file");
+
+        let all = database
+            .get_all_scanned_files()
+            .expect("Failed to get all scanned files");
+
+        assert_eq!(all.len(), 2);
+
+        let found_a = all.get("/videos/a.mkv").expect("Expected entry for a.mkv");
+        assert_eq!(found_a.codec, info_a.codec);
+        assert_eq!(found_a.size_bytes, info_a.size_bytes);
+        cli_tools_common::assert_f64_eq(found_a.frames_per_second, info_a.frames_per_second);
+
+        let found_b = all.get("/videos/b.mp4").expect("Expected entry for b.mp4");
+        assert_eq!(found_b.codec, "hevc");
+        assert_eq!(found_b.size_bytes, 500_000_000);
+        cli_tools_common::assert_f64_eq(found_b.frames_per_second, 30.0);
+    }
+
+    #[test]
+    fn test_get_all_scanned_files_returns_empty_map_when_no_entries() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let all = database
+            .get_all_scanned_files()
+            .expect("Failed to get all scanned files");
+
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn test_batch_upsert_scanned_files_writes_all_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let info_a = create_test_video_info();
+        let path_a = PathBuf::from("/videos/a.mkv");
+
+        let info_b = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            bit_depth: 8,
+            warning: None,
+        };
+        let path_b = PathBuf::from("/videos/b.mp4");
+
+        let entries: Vec<(&Path, &VideoInfo)> = vec![(path_a.as_path(), &info_a), (path_b.as_path(), &info_b)];
+
+        let count = database
+            .batch_upsert_scanned_files(&entries)
+            .expect("Failed to batch upsert scanned files");
+
+        assert_eq!(count, 2);
+
+        let all = database
+            .get_all_scanned_files()
+            .expect("Failed to get all scanned files");
+
+        assert_eq!(all.len(), 2);
+
+        let found_a = all.get("/videos/a.mkv").expect("Expected entry for a.mkv");
+        assert_eq!(found_a.codec, info_a.codec);
+        assert_eq!(found_a.size_bytes, info_a.size_bytes);
+
+        let found_b = all.get("/videos/b.mp4").expect("Expected entry for b.mp4");
+        assert_eq!(found_b.codec, "hevc");
+        assert_eq!(found_b.size_bytes, 500_000_000);
+    }
+
+    #[test]
+    fn test_batch_upsert_scanned_files_returns_zero_for_empty_input() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let count = database
+            .batch_upsert_scanned_files(&[])
+            .expect("Failed to batch upsert scanned files");
+
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_batch_upsert_scanned_files_updates_existing_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let original = create_test_video_info();
+        let path = PathBuf::from("/videos/test.mkv");
+
+        database
+            .upsert_scanned_file(&path, &original)
+            .expect("Failed to upsert original");
+
+        let updated = VideoInfo {
+            codec: "hevc".to_string(),
+            bitrate_kbps: 4000,
+            size_bytes: 500_000_000,
+            duration: 1800.0,
+            width: 1280,
+            height: 720,
+            frames_per_second: 30.0,
+            bit_depth: 8,
+            warning: None,
+        };
+
+        let entries: Vec<(&Path, &VideoInfo)> = vec![(path.as_path(), &updated)];
+
+        let count = database
+            .batch_upsert_scanned_files(&entries)
+            .expect("Failed to batch upsert");
+
+        assert_eq!(count, 1);
+
+        let found = database
+            .find_scanned_file(&path, updated.size_bytes)
+            .expect("Failed to query scanned file")
+            .expect("Expected a cached result after batch update");
+
+        assert_eq!(found.codec, "hevc");
+        assert_eq!(found.bitrate_kbps, 4000);
+        assert_eq!(found.size_bytes, 500_000_000);
+    }
+
+    #[test]
+    fn test_batch_upsert_pending_files_writes_all_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        let path_a = PathBuf::from("/test/a.mp4");
+        let path_b = PathBuf::from("/test/b.mkv");
+
+        let entries: Vec<(&Path, &str, &VideoInfo, PendingAction)> = vec![
+            (path_a.as_path(), "mp4", &info, PendingAction::Convert),
+            (path_b.as_path(), "mkv", &info, PendingAction::Remux),
+        ];
+
+        let count = database
+            .batch_upsert_pending_files(&entries)
+            .expect("Failed to batch upsert pending files");
+
+        assert_eq!(count, 2);
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get pending files");
+
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|f| f.full_path.to_string_lossy().contains("a.mp4")));
+        assert!(files.iter().any(|f| f.full_path.to_string_lossy().contains("b.mkv")));
+    }
+
+    #[test]
+    fn test_batch_upsert_pending_files_returns_zero_for_empty_input() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let count = database
+            .batch_upsert_pending_files(&[])
+            .expect("Failed to batch upsert pending files");
+
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_batch_upsert_pending_files_updates_existing_entries() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+        let path = PathBuf::from("/test/video.mp4");
+
+        database
+            .upsert_pending_file(&path, "mp4", &info, PendingAction::Convert)
+            .expect("Failed to upsert original");
+
+        // Batch update changing action to Remux
+        let entries: Vec<(&Path, &str, &VideoInfo, PendingAction)> =
+            vec![(path.as_path(), "mp4", &info, PendingAction::Remux)];
+
+        let count = database
+            .batch_upsert_pending_files(&entries)
+            .expect("Failed to batch upsert");
+
+        assert_eq!(count, 1);
+
+        let files = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to get pending files");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].action, PendingAction::Remux);
+    }
+
+    #[test]
+    fn test_scanned_file_count_empty() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_scanned_file_count_after_inserts() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        database
+            .upsert_scanned_file(&PathBuf::from("/videos/a.mkv"), &info)
+            .expect("Failed to upsert");
+        database
+            .upsert_scanned_file(&PathBuf::from("/videos/b.mkv"), &info)
+            .expect("Failed to upsert");
+
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_remove_missing_scanned_files_removes_nonexistent() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        // Insert paths that definitely do not exist on disk.
+        database
+            .upsert_scanned_file(&PathBuf::from("/nonexistent/aaa.mkv"), &info)
+            .expect("Failed to upsert");
+        database
+            .upsert_scanned_file(&PathBuf::from("/nonexistent/bbb.mkv"), &info)
+            .expect("Failed to upsert");
+
+        let removed = database
+            .remove_missing_scanned_files()
+            .expect("Failed to remove missing");
+
+        assert_eq!(removed, 2);
+
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_remove_missing_scanned_files_keeps_existing() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = create_test_video_info();
+
+        // Use a path that actually exists (the database module source file itself).
+        let existing_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/database.rs");
+        assert!(existing_path.exists(), "Test prerequisite: source file must exist");
+
+        database
+            .upsert_scanned_file(&existing_path, &info)
+            .expect("Failed to upsert existing");
+        database
+            .upsert_scanned_file(&PathBuf::from("/nonexistent/gone.mkv"), &info)
+            .expect("Failed to upsert missing");
+
+        let removed = database
+            .remove_missing_scanned_files()
+            .expect("Failed to remove missing");
+
+        assert_eq!(removed, 1);
+
+        let count = database.scanned_file_count().expect("Failed to get count");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_remove_missing_scanned_files_returns_zero_when_empty() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+
+        let removed = database
+            .remove_missing_scanned_files()
+            .expect("Failed to remove missing");
+
+        assert_eq!(removed, 0);
+    }
+}
+
+#[cfg(test)]
+mod test_tiered_bitrate_filter {
+    use super::*;
+
+    fn video_info(width: u32, height: u32, frames_per_second: f64, bitrate_kbps: u64) -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width,
+            height,
+            frames_per_second,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn sql_filter_matches_rust_thresholds() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let min_bitrate = MinimumBitrate::default();
+        let dimensions = [
+            (640, 480),
+            (1280, 720),
+            (720, 1280),
+            (1600, 900),
+            (1602, 901),
+            (1440, 1080),
+            (1920, 800),
+            (1920, 1080),
+            (2240, 1260),
+            (2242, 1261),
+            (2560, 1440),
+            (3840, 2160),
+        ];
+        let frame_rates = [23.976, 30.0, 50.0, 59.94];
+        let bitrates = [3500, 5000, 7000, 9000, 13000, 20000, 30000];
+
+        let mut expected = Vec::new();
+        for (width, height) in dimensions {
+            for frames_per_second in frame_rates {
+                for bitrate in bitrates {
+                    let path = PathBuf::from(format!("/test/{width}x{height}_{frames_per_second}_{bitrate}.mp4"));
+                    let info = video_info(width, height, frames_per_second, bitrate);
+                    database
+                        .upsert_pending_file(&path, "mp4", &info, PendingAction::Convert)
+                        .expect("Failed to insert");
+                    if bitrate >= min_bitrate.threshold(width, height, frames_per_second) {
+                        expected.push(path);
+                    }
+                }
+            }
+        }
+
+        let mut filtered: Vec<PathBuf> = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(min_bitrate),
+                ..Default::default()
+            })
+            .expect("Failed to get files")
+            .into_iter()
+            .map(|file| file.full_path)
+            .collect();
+        filtered.sort();
+        expected.sort();
+
+        assert_eq!(filtered, expected);
+    }
+
+    #[test]
+    fn tiered_filter_does_not_apply_to_remux() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        database
+            .upsert_pending_file(
+                &PathBuf::from("/test/remux.mkv"),
+                "mkv",
+                &video_info(3840, 2160, 60.0, 1000),
+                PendingAction::Remux,
+            )
+            .expect("Failed to insert");
+
+        let filtered = database
+            .get_pending_files(&PendingFileFilter {
+                min_bitrate: Some(MinimumBitrate::default()),
+                ..Default::default()
+            })
+            .expect("Failed to get files");
+
+        assert_eq!(filtered.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod test_schema_updates {
+    use super::*;
+
+    #[test]
+    fn add_column_if_missing_adds_column_only_once() {
+        let database = Database {
+            connection: Connection::open_in_memory().expect("Failed to open in-memory database"),
+        };
+        database
+            .connection
+            .execute("CREATE TABLE legacy_files (id INTEGER PRIMARY KEY)", [])
+            .expect("Failed to create legacy table");
+
+        database
+            .add_column_if_missing("legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
+            .expect("Failed to add missing column");
+        database
+            .add_column_if_missing("legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
+            .expect("Existing column should be left unchanged");
+
+        let mut statement = database
+            .connection
+            .prepare("PRAGMA table_info(legacy_files)")
+            .expect("Failed to inspect legacy table");
+        let bit_depth_columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("Failed to query legacy columns")
+            .filter_map(std::result::Result::ok)
+            .filter(|name| name == "bit_depth")
+            .count();
+
+        assert_eq!(bit_depth_columns, 1);
+    }
+
+    #[test]
+    fn initialize_removes_entries_with_invalid_frame_rates() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let invalid_info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_000,
+            duration: 60.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 0.5,
+            bit_depth: 8,
+            warning: None,
+        };
+        let pending_path = PathBuf::from("invalid-pending.mkv");
+        let scanned_path = PathBuf::from("invalid-scanned.mkv");
+        database
+            .upsert_pending_file(&pending_path, "mkv", &invalid_info, PendingAction::Convert)
+            .expect("Failed to insert invalid pending entry");
+        database
+            .upsert_scanned_file(&scanned_path, &invalid_info)
+            .expect("Failed to insert invalid scanned entry");
+
+        database.initialize().expect("Failed to reinitialize database");
+
+        assert!(
+            database
+                .get_pending_files(&PendingFileFilter::default())
+                .expect("Failed to query pending entries")
+                .is_empty()
+        );
+        assert_eq!(
+            database.scanned_file_count().expect("Failed to count scanned entries"),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_pending_file_lookup_and_removal {
+    use super::*;
+
+    fn video_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_048_576,
+            duration: 90.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 10,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn gets_pending_file_by_path_and_returns_none_for_unknown_path() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let path = PathBuf::from("known-video.mkv");
+        database
+            .upsert_pending_file(&path, "MKV", &video_info(), PendingAction::SubtitleMux)
+            .expect("Failed to insert pending file");
+
+        let pending = database
+            .get_pending_file(&path)
+            .expect("Failed to query pending file")
+            .expect("Expected pending file");
+
+        assert_eq!(pending.full_path, path);
+        assert_eq!(pending.extension, "mkv");
+        assert_eq!(pending.bit_depth, 10);
+        assert_eq!(pending.action, PendingAction::SubtitleMux);
+        assert!(
+            database
+                .get_pending_file(Path::new("unknown-video.mkv"))
+                .expect("Failed to query unknown path")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn removes_pending_file_by_id_and_reports_missing_entries() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let path = PathBuf::from("remove-by-id.mkv");
+        database
+            .upsert_pending_file(&path, "mkv", &video_info(), PendingAction::Convert)
+            .expect("Failed to insert pending file");
+        let pending = database
+            .get_pending_file(&path)
+            .expect("Failed to query pending file")
+            .expect("Expected pending file");
+
+        assert!(
+            database
+                .remove_pending_file_by_id(pending.id)
+                .expect("Failed to remove pending file by ID")
+        );
+        assert!(
+            !database
+                .remove_pending_file_by_id(pending.id)
+                .expect("Repeated removal should not fail")
+        );
+        assert!(
+            !database
+                .remove_pending_file(Path::new("unknown-video.mkv"))
+                .expect("Unknown path removal should not fail")
+        );
+    }
+
+    #[test]
+    fn remove_missing_files_keeps_existing_paths() {
+        let temporary_directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let existing_path = temporary_directory.path().join("existing.mkv");
+        let missing_path = temporary_directory.path().join("missing.mkv");
+        std::fs::write(&existing_path, b"video").expect("Failed to create existing test file");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = video_info();
+        database
+            .upsert_pending_file(&existing_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert existing path");
+        database
+            .upsert_pending_file(&missing_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert missing path");
+
+        assert_eq!(
+            database.remove_missing_files().expect("Failed to remove missing files"),
+            1
+        );
+        assert_eq!(
+            database
+                .remove_missing_files()
+                .expect("Failed to recheck pending files"),
+            0
+        );
+
+        let remaining = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to query remaining files");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].full_path, existing_path);
+        assert!(remaining[0].modified_time.is_some());
+    }
+
+    /// Move the file modification time one hour into the past.
+    fn backdate_modified_time(path: &Path) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("Failed to open test file");
+        let modified = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .expect("Failed to read modification time");
+        file.set_modified(modified - std::time::Duration::from_secs(3600))
+            .expect("Failed to set modification time");
+    }
+
+    #[test]
+    fn remove_changed_files_drops_entries_modified_after_scan() {
+        let temporary_directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let unchanged_path = temporary_directory.path().join("unchanged.mkv");
+        let changed_path = temporary_directory.path().join("changed.mkv");
+        std::fs::write(&unchanged_path, b"video").expect("Failed to create unchanged test file");
+        std::fs::write(&changed_path, b"video").expect("Failed to create changed test file");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = video_info();
+        database
+            .upsert_pending_file(&unchanged_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert unchanged path");
+        database
+            .upsert_pending_file(&changed_path, "mkv", &info, PendingAction::Convert)
+            .expect("Failed to insert changed path");
+
+        backdate_modified_time(&changed_path);
+
+        assert_eq!(
+            database.remove_changed_files().expect("Failed to remove changed files"),
+            1
+        );
+        let remaining = database
+            .get_pending_files(&PendingFileFilter::default())
+            .expect("Failed to query remaining files");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].full_path, unchanged_path);
+    }
+
+    #[test]
+    fn entries_without_stored_or_readable_time_count_as_unchanged() {
+        let temporary_directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let existing_path = temporary_directory.path().join("existing.mkv");
+        std::fs::write(&existing_path, b"video").expect("Failed to create test file");
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        database
+            .upsert_pending_file(&existing_path, "mkv", &video_info(), PendingAction::Remux)
+            .expect("Failed to insert pending file");
+        let mut pending = database
+            .get_pending_file(&existing_path)
+            .expect("Failed to query pending file")
+            .expect("Expected pending file");
+
+        assert!(!pending.is_changed_on_disk());
+
+        pending.modified_time = None;
+        backdate_modified_time(&existing_path);
+        assert!(!pending.is_changed_on_disk());
+
+        pending.modified_time = Some(0);
+        pending.full_path = temporary_directory.path().join("missing.mkv");
+        assert!(!pending.is_changed_on_disk());
+    }
+}
+
+#[cfg(test)]
+mod test_database_statistics_display {
+    use super::*;
+
+    fn video_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_048_576,
+            duration: 90.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn statistics_count_subtitle_mux_and_ignore_unknown_actions() {
+        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let info = video_info();
+        for (name, action) in [
+            ("convert.mkv", PendingAction::Convert),
+            ("remux.mkv", PendingAction::Remux),
+            ("subtitles.mkv", PendingAction::SubtitleMux),
+            ("unknown.mkv", PendingAction::Convert),
+        ] {
+            database
+                .upsert_pending_file(Path::new(name), "mkv", &info, action)
+                .expect("Failed to insert pending file");
+        }
+        database
+            .connection
+            .execute(
+                "UPDATE pending_files SET action = 'future_action' WHERE full_path = 'unknown.mkv'",
+                [],
+            )
+            .expect("Failed to set unknown action");
+
+        let stats = database.get_stats().expect("Failed to query database statistics");
+
+        assert_eq!(stats.total_files, 4);
+        assert_eq!(stats.convert_count, 1);
+        assert_eq!(stats.remux_count, 1);
+        assert_eq!(stats.subtitle_mux_count, 1);
+        assert_eq!(stats.total_size, 4_194_304);
+    }
+
+    #[test]
+    fn database_stats_display_includes_all_totals() {
+        let stats = DatabaseStats {
+            total_files: 6,
+            convert_count: 3,
+            remux_count: 2,
+            subtitle_mux_count: 1,
+            total_size: 1_048_576,
+        };
+
+        assert_eq!(
+            stats.to_string(),
+            "Database Statistics:\n  Total files:    6\n  To convert:     3\n  To remux:       2\n  To subtitle mux: 1\n  Total size:     1.00 MB"
+        );
+    }
+
+    #[test]
+    fn extension_stats_display_formats_extension_count_and_size() {
+        let stats = ExtensionStats {
+            extension: "mkv".to_string(),
+            count: 2,
+            total_size: 1_048_576,
+        };
+        let displayed = stats.to_string();
+
+        assert!(displayed.starts_with(".mkv"));
+        assert!(displayed.contains("2 files"));
+        assert!(displayed.ends_with("1.00 MB"));
+    }
+
+    #[test]
+    fn pending_file_video_info_uses_minimum_bit_depth() {
+        let pending = PendingFile {
+            id: 1,
+            full_path: PathBuf::from("legacy.mkv"),
+            extension: "mkv".to_string(),
+            codec: "h264".to_string(),
+            bitrate_kbps: 8_000,
+            size_bytes: 1_048_576,
+            duration: 90.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 0,
+            action: PendingAction::Convert,
+            created_time: 0,
+            modified_time: None,
+        };
+
+        assert_eq!(pending.to_video_info().bit_depth, 8);
+    }
+}

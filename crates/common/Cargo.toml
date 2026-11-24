@@ -1,0 +1,58 @@
+[package]
+name = "cli-tools-common"
+description = "Shared helpers for the cli-tools binaries: path handling, formatting, printing, config, and shell completion"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+colored = { workspace = true }
+difference = { workspace = true }
+dirs = { workspace = true }
+fearless_simd_macros = { workspace = true }
+fearless_simd = { workspace = true }
+dunce = { workspace = true }
+jiff = { workspace = true }
+num_cpus = { workspace = true, optional = true }
+regex = { workspace = true }
+trash = { workspace = true }
+unicode-normalization = { workspace = true }
+walkdir = { workspace = true }
+tokio = { workspace = true, features = ["fs", "sync"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[features]
+async = ["dep:num_cpus", "dep:tokio"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
+toml = { workspace = true }
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "lib"
+harness = false
+
+[[bench]]
+name = "date"
+harness = false
+
+[[bench]]
+name = "simd"
+harness = false
+
+[lints]
+workspace = true

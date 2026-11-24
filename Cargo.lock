@@ -418,36 +418,156 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
-name = "cli-tools"
+name = "cli-tools-common"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "colored",
+ "criterion",
+ "difference",
+ "dirs",
+ "dunce",
+ "fearless_simd",
+ "fearless_simd_macros",
+ "jiff",
+ "num_cpus",
+ "regex",
+ "tempfile",
+ "tokio",
+ "toml",
+ "trash",
+ "unicode-normalization",
+ "walkdir",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "cli-tools-dirmove"
 version = "11.2.0"
 dependencies = [
  "anyhow",
  "blake3",
  "clap",
  "clap_complete",
+ "cli-tools-common",
+ "cli-tools-media",
+ "colored",
+ "criterion",
+ "dirs",
+ "indicatif",
+ "itertools 0.15.0",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "toml",
+ "toml_edit",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-div"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+]
+
+[[package]]
+name = "cli-tools-dots"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "colored",
+ "criterion",
+ "indicatif",
+ "itertools 0.15.0",
+ "rayon",
+ "regex",
+ "serde",
+ "tempfile",
+ "titlecase",
+ "toml",
+ "unicode-segmentation",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-dupefind"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "cli-tools-media",
  "colored",
  "criterion",
  "crossterm",
- "ctrlc",
- "difference",
- "dirs",
- "dunce",
- "encoding_rs",
- "fearless_simd",
- "fearless_simd_macros",
  "futures",
- "git2",
- "ignore",
  "indicatif",
  "itertools 0.15.0",
- "jiff",
- "num_cpus",
  "ratatui",
  "rayon",
  "regex",
- "reqwest",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml",
+ "trash",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-flipdate"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "colored",
+ "serde",
+ "tempfile",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-media"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "cli-tools-common",
+ "colored",
+ "criterion",
+ "dirs",
+ "regex",
  "rusqlite",
- "rust_xlsxwriter",
+ "tempfile",
+]
+
+[[package]]
+name = "cli-tools-qtorrent"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "cli-tools-dots",
+ "colored",
+ "regex",
+ "reqwest",
  "serde",
  "serde_bencode",
  "serde_bytes",
@@ -455,15 +575,159 @@ dependencies = [
  "serde_path_to_error",
  "sha1",
  "tempfile",
- "titlecase",
  "tokio",
  "toml",
- "toml_edit",
  "trash",
- "unicode-normalization",
- "unicode-segmentation",
  "walkdir",
- "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "cli-tools-rxrename"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-slb"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "colored",
+ "criterion",
+ "ignore",
+ "rayon",
+ "regex",
+ "serde",
+ "tempfile",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-thumbs"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "cli-tools-media",
+ "colored",
+ "serde",
+ "tempfile",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-vconvert"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "colored",
+ "ctrlc",
+ "dirs",
+ "indicatif",
+ "itertools 0.15.0",
+ "jiff",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "toml",
+ "trash",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-visaparse"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "colored",
+ "encoding_rs",
+ "jiff",
+ "regex",
+ "rust_xlsxwriter",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-vres"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "cli-tools-dots",
+ "cli-tools-media",
+ "colored",
+ "dunce",
+ "futures",
+ "indicatif",
+ "regex",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-vstats"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "cli-tools-media",
+ "colored",
+ "dunce",
+ "futures",
+ "indicatif",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "cli-tools-vtag"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "colored",
+ "dunce",
+ "git2",
+ "regex",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -1608,10 +1872,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9433806cd6b4ec1aba79c021c7e4c58fb4c3b9977c085062e611ac929998fb0c"
 dependencies = [
  "console",
- "futures-core",
  "portable-atomic",
- "rayon",
- "tokio",
  "unicode-width",
  "unit-prefix",
  "web-time",
