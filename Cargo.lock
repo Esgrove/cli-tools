@@ -419,7 +419,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli-tools-common"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-dirmove"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-div"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-dots"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-dupefind"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-flipdate"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-media"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-qtorrent"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-rxrename"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-slb"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-thumbs"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vconvert"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-visaparse"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vres"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vstats"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-vtag"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "cli-tools-xtask"
-version = "11.2.0"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "clap",
