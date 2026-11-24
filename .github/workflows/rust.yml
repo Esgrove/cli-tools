@@ -8,13 +8,13 @@ on:
       - ".github/workflows/rust.yml"
       - "**.rs"
       - "Cargo.lock"
-      - "Cargo.toml"
+      - "**/Cargo.toml"
   pull_request:
     paths:
       - ".github/workflows/rust.yml"
       - "**.rs"
       - "Cargo.lock"
-      - "Cargo.toml"
+      - "**/Cargo.toml"
 
 # Cancel previous runs for PRs but not pushes to main
 concurrency:
@@ -48,10 +48,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build
+        run: cargo build --workspace
 
       - name: Run tests
-        run: cargo test --no-fail-fast
+        run: cargo test --workspace --no-fail-fast
 
   lint:
     runs-on: ubuntu-latest
@@ -74,4 +74,4 @@ jobs:
       - name: Lint
         # Exit non-zero if there are any warnings
         # https://doc.rust-lang.org/stable/clippy/usage.html
-        run: cargo clippy -- -Dwarnings
+        run: cargo clippy --workspace --all-targets -- -Dwarnings

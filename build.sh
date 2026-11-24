@@ -41,7 +41,7 @@ fi
 cd "$REPO_ROOT"
 
 print_magenta "Building binaries..."
-cargo build --release --bins
+cargo build --release --workspace --bins
 
 executables=$(get_rust_executable_names)
 for executable in $executables; do

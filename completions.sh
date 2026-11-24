@@ -50,14 +50,14 @@ done
 
 cd "$REPO_ROOT"
 
-# Get binary names from Cargo.toml, stripping any .exe suffix
+# Get binary names from the workspace crate manifests, stripping any .exe suffix
 COMPLETION_BINARIES=()
 while IFS= read -r name; do
     COMPLETION_BINARIES+=("${name%.exe}")
 done <<< "$(get_rust_executable_names)"
 
 if [ ${#COMPLETION_BINARIES[@]} -eq 0 ]; then
-    print_error_and_exit "No binaries found in Cargo.toml"
+    print_error_and_exit "No binaries found in the workspace crates"
 fi
 
 # Determine which shells to install completions for based on platform

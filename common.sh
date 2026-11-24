@@ -61,14 +61,19 @@ print_usage_and_exit() {
     exit "${2:-1}"
 }
 
-# Get all Rust executable names from Cargo.toml
+# Get all Rust executable names from the workspace crate manifests
 get_rust_executable_names() {
     local executables
-    executables=$(awk -F'=' '/\[\[bin\]\]/,/name/ {if($1 ~ /name/) print $2}' Cargo.toml | tr -d ' "')
+    executables=$(awk -F'=' '/\[\[bin\]\]/,/name/ {if($1 ~ /name/) print $2}' "$REPO_ROOT"/crates/*/Cargo.toml | tr -d ' "')
     if [ "$BASH_PLATFORM" = "windows" ]; then
         executables=$(echo "$executables" | sed 's/$/.exe/')
     fi
     echo "$executables"
+}
+
+# Get the directories of the workspace crates that define at least one binary
+get_rust_binary_crate_directories() {
+    grep -l '^\[\[bin\]\]' "$REPO_ROOT"/crates/*/Cargo.toml | xargs -n 1 dirname
 }
 
 # if DRYRUN or DRY_RUN has been set, only print commands instead of running them

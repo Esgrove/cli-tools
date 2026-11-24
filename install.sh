@@ -62,11 +62,12 @@ if [ "$FORCE" = true ]; then
     fi
 
     # Touch source files to ensure recompilation
-    touch src/lib.rs
-    find src/bin -name "*.rs" -exec touch {} \;
+    find crates -path "*/src/*" -name "*.rs" -exec touch {} \;
 fi
 
-cargo install --force --locked --path "$REPO_ROOT"
+for crate_directory in $(get_rust_binary_crate_directories); do
+    cargo install --force --locked --path "$crate_directory"
+done
 echo ""
 
 print_green "Installed binaries:"
