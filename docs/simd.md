@@ -29,23 +29,23 @@ Tokens are 3 to 15 bytes, lines 40 to 120 bytes, and file names 20 to 100 bytes.
 That is the hard case for SIMD, since dispatch and vector setup cost a few nanoseconds per call.
 The candidates, from a read of the code:
 
-| Area                   | Code                                                                                | Idea                                                                                                                      | Status                                                                |
-| ---------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| slb scanner            | `scan_line_buffered` in `src/semantic_line_breaks/scanner.rs`                       | Skip the character by character scan for a code line without any byte that can start a comment, string, heredoc, or regex | Kept, 5 to 19 percent faster scans on top of the shortcut itself      |
-| slb scanner            | `scan_characters` in `src/semantic_line_breaks/scanner.rs`                          | On lines that do need a scan, jump straight to the next byte that can change the scanner state                            | Kept, 15 to 22 percent faster C, Python, and trailing comment scans   |
-| slb tokenizer          | `chunk_end` in `src/semantic_line_breaks/tokenizer.rs`                              | Find the next whitespace or em dash lead byte with SIMD, confirm it with `char::is_whitespace`                            | Kept, 21 to 27 percent faster tokenizing                              |
-| slb tokenizer          | `backtick_span_end` in `src/semantic_line_breaks/tokenizer.rs`                      | Jump between backtick runs while finding a matching code span delimiter                                                   | Kept, 4 percent faster punctuated tokenizing on the M4 Pro            |
-| slb Markdown heuristic | `looks_like_code` in `src/semantic_line_breaks/looks_like_code.rs`                  | Search once for any of the code marker bytes rather than checking the three characters separately                         | Kept, 7 percent faster Markdown formatting and checking on the M4 Pro |
-| dupefind               | `collapse_repeated_separators` in `src/lib.rs`                                      | Skip the regex when ASCII text has no two adjacent separators                                                             | Kept, the shortcut is the gain and SIMD adds little on file names     |
-| slb widths             | `text_width` in `src/semantic_line_breaks/token.rs` and `chars().count()` in reflow | SIMD character count                                                                                                      | Not applied, the kernel loses to std below about 1 KB                 |
-| dirmove                | `count_prefix_chars`, `get_all_n_part_sequences` in `src/dir_move/utils.rs`         | SIMD character count and dot positions                                                                                    | Reverted, short file names got up to twice as slow                    |
-| dirmove                | `find_prefix_candidates` and `parts_are_contiguous_with_combined`                   | Not SIMD: a sorted prefix index and precomputed lowercase parts                                                           | Kept, 15 times faster on 500 files, see below                         |
-| File hashing           | `src/file_hash.rs`                                                                  | None, BLAKE3 already uses SIMD                                                                                            | Skipped                                                               |
-| Regex heavy code       | dates, resolutions, dot rename formatting                                           | None, the regex crate already uses SIMD prefilters                                                                        | Skipped                                                               |
+| Area                   | Code                                                                              | Idea                                                                                                                      | Status                                                                |
+| ---------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| slb scanner            | `scan_line_buffered` in `crates/slb/src/scanner.rs`                               | Skip the character by character scan for a code line without any byte that can start a comment, string, heredoc, or regex | Kept, 5 to 19 percent faster scans on top of the shortcut itself      |
+| slb scanner            | `scan_characters` in `crates/slb/src/scanner.rs`                                  | On lines that do need a scan, jump straight to the next byte that can change the scanner state                            | Kept, 15 to 22 percent faster C, Python, and trailing comment scans   |
+| slb tokenizer          | `chunk_end` in `crates/slb/src/tokenizer.rs`                                      | Find the next whitespace or em dash lead byte with SIMD, confirm it with `char::is_whitespace`                            | Kept, 21 to 27 percent faster tokenizing                              |
+| slb tokenizer          | `backtick_span_end` in `crates/slb/src/tokenizer.rs`                              | Jump between backtick runs while finding a matching code span delimiter                                                   | Kept, 4 percent faster punctuated tokenizing on the M4 Pro            |
+| slb Markdown heuristic | `looks_like_code` in `crates/slb/src/looks_like_code.rs`                          | Search once for any of the code marker bytes rather than checking the three characters separately                         | Kept, 7 percent faster Markdown formatting and checking on the M4 Pro |
+| dupefind               | `collapse_repeated_separators` in `crates/common/src/lib.rs`                      | Skip the regex when ASCII text has no two adjacent separators                                                             | Kept, the shortcut is the gain and SIMD adds little on file names     |
+| slb widths             | `text_width` in `crates/slb/src/token.rs` and `chars().count()` in reflow         | SIMD character count                                                                                                      | Not applied, the kernel loses to std below about 1 KB                 |
+| dirmove                | `count_prefix_chars`, `get_all_n_part_sequences` in `crates/dirmove/src/utils.rs` | SIMD character count and dot positions                                                                                    | Reverted, short file names got up to twice as slow                    |
+| dirmove                | `find_prefix_candidates` and `parts_are_contiguous_with_combined`                 | Not SIMD: a sorted prefix index and precomputed lowercase parts                                                           | Kept, 15 times faster on 500 files, see below                         |
+| File hashing           | `crates/media/src/file_hash.rs`                                                   | None, BLAKE3 already uses SIMD                                                                                            | Skipped                                                               |
+| Regex heavy code       | dates, resolutions, dot rename formatting                                         | None, the regex crate already uses SIMD prefilters                                                                        | Skipped                                                               |
 
 ## Implementation
 
-`src/simd.rs` holds all SIMD code, and the rest of the project only calls its safe functions:
+`crates/common/src/simd.rs` holds all SIMD code, and the rest of the project only calls its safe functions:
 
 - `count_chars` and `count_chars_excluding` count UTF-8 characters, optionally skipping one ASCII byte.
 - `find_byte_of` and `contains_byte_of` search for any byte of a small set.
@@ -99,7 +99,7 @@ The kernels now always run at the detected level.
 ## Process
 
 1. Saved Criterion baselines of the existing benchmarks before any change.
-2. Added the kernels and `benches/simd.rs`,
+2. Added the kernels and `crates/common/benches/simd.rs`,
    which runs each kernel against the scalar code it would replace at 4 bytes to 64 KB,
    to find the input length where SIMD starts to pay.
 3. Applied the candidates one area at a time and compared against the baseline.
@@ -269,7 +269,7 @@ and built concatenated strings for every start position, which allocated in the 
 
 Two changes remove that work without changing any result:
 
-1. `PrefixIndex` in `src/dir_move/prefix_index.rs` sorts the lowercased single,
+1. `PrefixIndex` in `crates/dirmove/src/prefix_index.rs` sorts the lowercased single,
    two part, and three part combinations of all files once.
    All combinations that start with a candidate prefix form one contiguous range, found with a binary search,
    so each candidate only visits the files that can match it.
@@ -301,7 +301,7 @@ but it builds an index per call, so callers checking many files should use `find
 ./simd-bench.sh
 ```
 
-The script runs the slb and dupefind benchmarks that go through `src/simd.rs`,
+The script runs the slb and dupefind benchmarks that go through `crates/common/src/simd.rs`,
 saving them as the Criterion baseline `pipeline`.
 It then runs the kernel microbenchmarks as the baseline `kernels`
 and writes a table of both to `target/simd-bench-<os>-<arch>.md`.
@@ -325,7 +325,8 @@ The experiment is complete, and `fearless_simd` stays in the project for the byt
 - Most of the dupefind gain comes from the separator shortcut, which skips the regex in either mode.
 - Character counting and the dirmove file name scans stay scalar,
   because the dispatch cost on short strings exceeds the benefit.
-  `count_chars` and `count_chars_excluding` remain in `src/simd.rs` with their tests and benchmarks,
+  `count_chars` and `count_chars_excluding` remain in `crates/common/src/simd.rs` with their tests
+  and benchmarks,
   so the decision can be revisited for longer inputs.
 - AVX-512 and AVX2 perform the same on the 7950X, so the detected level is always used.
 - The largest single improvement is not SIMD.

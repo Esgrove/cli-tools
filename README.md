@@ -1,12 +1,39 @@
 # cli-tools
 
-Various CLI helper tools in one Rust project.
-Produces separate binaries for each tool.
+Various CLI helper tools in one Rust workspace.
+Each tool is its own crate under [`crates/`](./crates) that produces a separate binary.
+Shared helpers live in the [`cli-tools-common`](./crates/common)
+and [`cli-tools-media`](./crates/media) library crates.
 
 ```shell
 ./build.sh
 ./install.sh
 ```
+
+Install a single tool straight from GitHub by its package name:
+
+```shell
+cargo install --locked --git https://github.com/Esgrove/cli-tools cli-tools-slb
+```
+
+### Using a tool as a library
+
+Tools with reusable logic also expose it as a library,
+so another project can depend on just that crate without building the rest of the workspace:
+
+```toml
+[dependencies]
+cli-tools-slb = { git = "https://github.com/Esgrove/cli-tools" }
+```
+
+| Crate                                     | Binary     | Library contents                                           |
+| ----------------------------------------- | ---------- | ---------------------------------------------------------- |
+| [`cli-tools-common`](./crates/common)     |            | Path, formatting, printing, config, and completion helpers |
+| [`cli-tools-media`](./crates/media)       |            | Resolution parsing, video metadata, hashing, scan cache    |
+| [`cli-tools-dirmove`](./crates/dirmove)   | `dirmove`  | Prefix grouping and directory matching                     |
+| [`cli-tools-dots`](./crates/dots)         | `dots`     | Dot formatting and renaming                                |
+| [`cli-tools-dupefind`](./crates/dupefind) | `dupefind` | Name normalization and duplicate grouping                  |
+| [`cli-tools-slb`](./crates/slb)           | `slb`      | Semantic line break checking and formatting                |
 
 ## Configuration
 
@@ -25,7 +52,7 @@ The install script automatically detects the platform and installs completions f
 - **macOS**: Zsh
 - **Linux**: Zsh and Bash
 
-The binary list is read from `Cargo.toml` automatically to get all binaries.
+The binary list is read from the workspace crate manifests automatically.
 
 ### Install completions
 
@@ -260,7 +287,7 @@ Options:
 Without `--bitrate`, the minimum bitrate depends on the resolution and framerate of each file:
 
 | Resolution      | Up to 30 fps | Above 30 fps |
-|-----------------|--------------|--------------|
+| --------------- | ------------ | ------------ |
 | 720p and below  | 4000 kbps    | 6000 kbps    |
 | 1080p           | 8000 kbps    | 12000 kbps   |
 | 1440p and above | 16000 kbps   | 24000 kbps   |
@@ -720,10 +747,13 @@ This project uses [cargo-nextest](https://nexte.st/) for faster test execution w
 
 ```shell
 # Run tests with nextest
-cargo nextest run
+cargo nextest run --workspace
 
 # Run tests with standard cargo test
-cargo test
+cargo test --workspace
+
+# Run tests for a single crate
+cargo test -p cli-tools-slb
 ```
 
 ### Code Coverage
@@ -732,20 +762,21 @@ Code coverage is generated using [cargo-llvm-cov](https://github.com/taiki-e/car
 
 ```shell
 # Run tests with coverage (text output)
-cargo llvm-cov nextest
+cargo llvm-cov nextest --workspace
 
 # Generate HTML coverage report
-cargo llvm-cov nextest --html
+cargo llvm-cov nextest --workspace --html
 
 # Generate and open HTML report in browser
-cargo llvm-cov nextest --html --open
+cargo llvm-cov nextest --workspace --html --open
 ```
 
 The HTML report is generated in `target/llvm-cov/html/`.
 
 ### Benchmarks
 
-Benchmarks use [Criterion.rs](https://github.com/criterion-rs/criterion.rs) and live in `benches/`.
+Benchmarks use [Criterion.rs](https://github.com/criterion-rs/criterion.rs)
+and live in each crate's `benches/` directory.
 
 ```shell
 # Run all benchmarks

@@ -2,26 +2,29 @@
 
 ## Project Overview
 
-This is a Rust project containing multiple CLI utility tools.
-Each tool is a separate binary defined in `src/bin/`.
-The shared library code lives in `src/lib.rs` and related modules.
+This is a Rust workspace containing multiple CLI utility tools.
+Each tool is its own crate under `crates/` with a package name prefixed by `cli-tools-`.
+Shared helpers live in the `cli-tools-common` and `cli-tools-media` library crates.
+Tools with reusable logic expose it as a library from the same crate,
+so other projects can depend on just that crate and extend it.
 
 ## Build and Test Commands
 
 After making code changes, always run:
 
 ```shell
-cargo clippy --fix --allow-dirty
-cargo clippy --fix --allow-dirty --tests
+cargo clippy --fix --allow-dirty --workspace
+cargo clippy --fix --allow-dirty --workspace --tests
 cargo fmt
-cargo test
+cargo clippy --workspace --all-targets -- -Dwarnings
+cargo test --workspace
 ```
 
 ### Other commands
 
 ```shell
 # Build all binaries
-cargo build
+cargo build --workspace
 
 # Build a specific binary
 cargo build --bin <name>
@@ -33,13 +36,16 @@ cargo run --bin <name> -- [args]
 cargo fmt
 
 # Run tests with standard cargo test (faster)
-cargo test
+cargo test --workspace
+
+# Run tests for a single crate
+cargo test -p cli-tools-<name>
 
 # Run tests with nextest (slower, better output)
-cargo nextest run
+cargo nextest run --workspace
 
 # Run tests with coverage report (text output)
-cargo llvm-cov nextest
+cargo llvm-cov nextest --workspace
 
 # Build with debug symbols for a profiler, since the release profile carries none
 cargo build --profile profiling --bin <name>
@@ -76,50 +82,65 @@ cargo install cargo-llvm-cov
 ## Benchmarks
 
 Benchmarks use [Criterion.rs](https://github.com/criterion-rs/criterion.rs) for statistically rigorous microbenchmarking.
-Benchmark files live in `benches/`.
+Benchmark files live in the `benches/` directory of the crate they measure.
 
-The core algorithmic functions benchmarked for `dir_move` and `dupe_find` are extracted into library modules
-(`src/dir_move/` and `src/dupe_find/`) so that benchmarks can import them directly without duplicating code.
+The core algorithmic functions benchmarked for `dirmove`
+and `dupefind` live in the library part of those crates
+(`crates/dirmove/src/` and `crates/dupefind/src/`)
+so that benchmarks can import them directly without duplicating code.
 
 ### Benchmark structure
 
-- `benches/date.rs` - Date parsing and reordering
-- `benches/dir_move.rs` - Prefix grouping, file matching, contiguity checks
-- `benches/dupe_find.rs` - Stem normalization, duplicate grouping, regex matching
-- `benches/format.rs` - Dot-rename formatting pipeline
-- `benches/lib.rs` - Shared utility functions
-- `benches/resolution.rs` - Resolution labeling and regex matching
-- `benches/semantic_line_breaks.rs` - Prose tokenizing, boundary detection, paragraph reflow,
+- `crates/common/benches/date.rs` - Date parsing and reordering
+- `crates/common/benches/lib.rs` - Shared utility functions
+- `crates/common/benches/simd.rs` - SIMD byte scanning kernels against the scalar code they replace,
+  from token to file length
+- `crates/dirmove/benches/dir_move.rs` - Prefix grouping, file matching, contiguity checks
+- `crates/dupefind/benches/dupe_find.rs` - Stem normalization, duplicate grouping, regex matching
+- `crates/dots/benches/format.rs` - Dot-rename formatting pipeline
+- `crates/media/benches/resolution.rs` - Resolution labeling and regex matching
+- `crates/slb/benches/semantic_line_breaks.rs` - Prose tokenizing, boundary detection, paragraph reflow,
   comment scanning, and whole file checking and formatting
-- `benches/simd.rs` - SIMD byte scanning kernels against the scalar code they replace, from token to file length
 
 ### SIMD benchmarks
 
-`src/simd.rs` detects the best SIMD level once per process.
+`crates/common/src/simd.rs` detects the best SIMD level once per process.
 `./simd-bench.sh` runs the benchmarks that go through the kernels and writes a summary table to `target/`.
 See `docs/simd.md` for the evaluation and its results.
 
 ### Adding new benchmarks
 
 When extracting algorithmic code from a binary for benchmarking,
-move the pure functions and types to a library module under `src/` and have the binary re-export from the library.
+move the pure functions and types to the library part of the tool's crate
+and have the binary import them from there.
 Do not duplicate code in benchmark files.
 
 ## Project Structure
 
-- `src/lib.rs` - Library root: module declarations, re-exports, and the shared helpers not yet split out
-- `src/utils.rs` - Shared path and text helpers (path to display string, relative paths, glob to regex)
-- `src/diff.rs` - Coloured diff rendering (`color_diff` and `show_diff` for renames, `diff_lines` for files)
-- `src/date.rs` - Date parsing and formatting utilities
-- `src/file_hash.rs` - File hashing
-- `src/resolution.rs` - Video resolution parsing and labelling
-- `src/scan_cache.rs` - Cache for directory scan results
-- `src/simd.rs` - SIMD byte scanning kernels on `fearless_simd`
-- `src/video_info.rs` - Video metadata from ffprobe
-- `src/dir_move/` - Algorithmic types and functions for dirmove (prefix grouping, matching, the sorted prefix index)
-- `src/dot_rename/` - Algorithmic types and functions for dots (formatting, renaming)
-- `src/dupe_find/` - Algorithmic types and functions for dupefind (normalization, grouping)
-- `src/semantic_line_breaks/` - Algorithmic types and functions for slb:
+The root `Cargo.toml` is a virtual workspace that holds the shared package metadata,
+dependency versions, lints, and profiles.
+Every crate uses `workspace = true` for these.
+A crate with both a library and a binary keeps the library in `src/lib.rs`
+and the binary in `src/bin/<name>/main.rs`.
+A binary only crate keeps its binary in `src/main.rs`.
+
+- `crates/common/` → `cli-tools-common` - Shared helpers used by every tool:
+    - `lib.rs` - Print macros like `print_error!`, path resolution, formatting, user config path, shell completion
+    - `utils.rs` - Shared path and text helpers (path to display string, relative paths, glob to regex)
+    - `diff.rs` - Coloured diff rendering (`color_diff` and `show_diff` for renames, `diff_lines` for files)
+    - `date.rs` - Date parsing and formatting utilities
+    - `simd.rs` - SIMD byte scanning kernels on `fearless_simd`
+    - The `async` feature adds the tokio based directory entry helpers and the I/O semaphore
+- `crates/media/` → `cli-tools-media` - Media helpers:
+    - `resolution.rs` - Video resolution parsing and labelling
+    - `video_info.rs` - Video metadata from ffprobe
+    - `file_hash.rs` - File hashing
+    - `scan_cache.rs` - `SQLite` cache for directory scan results, behind the `scan-cache` feature
+- `crates/dirmove/` → `dirmove` - Move files to matching directories.
+  The library holds prefix grouping, matching, and the sorted prefix index.
+- `crates/dots/` → `dots` - Rename files to use dot formatting. The library holds formatting and renaming.
+- `crates/dupefind/` → `dupefind` - Find duplicate files. The library holds normalization and grouping.
+- `crates/slb/` → `slb` - Check and format prose with semantic line breaks. The library modules:
     - `options.rs` - Rule set and the options controlling checking and formatting
     - `paragraph.rs` - Hard break markers and the paragraph built from prose lines
     - `violation.rs` - Violation categories and the records the checker reports
@@ -143,21 +164,23 @@ Do not duplicate code in benchmark files.
     - `line_ranges.rs` - Line selection ranges used to scope checking and fixing
     - `project_config.rs` - Line width discovery from project config files
     - `test_helpers.rs` - Shared builders for the prose unit tests
-- `src/bin/` - Individual CLI tool binaries, each a directory with a `main.rs` unless noted:
-    - `dir_move/` → `dirmove` - Move files to matching directories
-    - `divider.rs` → `div` - Print divider comments
-    - `dots/` → `dots` - Rename files to use dot formatting
-    - `dupe_find/` → `dupefind` - Find duplicate files
-    - `flip_date/` → `flipdate` - Flip dates in filenames
-    - `qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming, show torrent stats
-    - `rx_rename.rs` → `rxrename` - Remove a trailing "_1" from file names
-    - `semantic_line_breaks/` → `slb` - Check and format prose with semantic line breaks
-    - `thumbnail/` → `thumbs` - Create video thumbnail sheets
-    - `version_tag.rs` → `vtag` - Create git version tags for a project (Rust, C++, Python)
-    - `video_convert/` → `vconvert` - Video conversion to HEVC/MP4
-    - `video_resolution/` → `vres` - Add video resolution to file names
-    - `video_stats/` → `vstats` - Collect and print video file statistics
-    - `visa_parse/` → `visaparse` - Parse Finvoice XML credit card statements and collect data
+- Binary only crates:
+    - `crates/div/` → `div` - Print divider comments
+    - `crates/flipdate/` → `flipdate` - Flip dates in filenames
+    - `crates/qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming,
+      show torrent stats
+    - `crates/rxrename/` → `rxrename` - Remove a trailing "_1" from file names
+    - `crates/thumbs/` → `thumbs` - Create video thumbnail sheets
+    - `crates/vconvert/` → `vconvert` - Video conversion to HEVC/MP4
+    - `crates/vres/` → `vres` - Add video resolution to file names
+    - `crates/vstats/` → `vstats` - Collect and print video file statistics
+    - `crates/visaparse/` → `visaparse` - Parse Finvoice XML credit card statements and collect data
+    - `crates/vtag/` → `vtag` - Create git version tags for a project (Rust, C++, Python)
+
+Give each crate a short `README.md`.
+Add a new tool as a new crate under `crates/`,
+and only depend on the workspace crates and dependencies it actually uses,
+so a project that pulls in one tool does not build the others.
 
 ## Code organization
 
@@ -176,8 +199,8 @@ Do not duplicate code in benchmark files.
 - Split along the concerns the file has grown into, one file per concern,
   and give each new file its own `//!` documentation naming that concern.
 - Extract helper and unrelated parts instead of growing one file.
-  A helper that is not specific to the tool belongs in a shared library module
-  such as `src/utils.rs` or `src/diff.rs`, never inside a binary under `src/bin/`.
+  A helper that is not specific to the tool belongs in a shared library crate
+  such as `crates/common/src/utils.rs` or `crates/common/src/diff.rs`, never inside a binary.
 - Keep an item's visibility as narrow as it can be.
   A helper that only crosses into a sibling module of the same parent is `pub(super)`, not `pub`.
 
@@ -190,7 +213,8 @@ Do not duplicate code in benchmark files.
 - Use `clap` with derive macros for CLI argument parsing
 - Every CLI argument must provide both a short and a long option
 - Use `colored` crate for terminal output coloring
-- Common helper functions and macros like `print_error!` and `print_warning!` are defined in `src/lib.rs`
+- Common helper functions and macros like `print_error!`
+  and `print_yellow!` are defined in `crates/common/src/lib.rs`
 - Use descriptive variable and function names. No single character variables.
 - Prefer full names over abbreviations. For example: `directories` instead of `dirs`.
 - Create docstrings for structs and functions.
@@ -217,7 +241,7 @@ Do not wrap prose by splitting a sentence at an arbitrary point in the middle.
 - When a split leaves several files sharing test helpers,
   put the helpers in a `#[cfg(test)]` gated module declared from `mod.rs`,
   which is still a root-level `#[cfg(test)]` module.
-  See `src/semantic_line_breaks/test_helpers.rs`.
+  See `crates/slb/src/test_helpers.rs`.
 
 ### Test module structure example
 
