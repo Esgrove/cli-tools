@@ -452,3 +452,19 @@ replace = [
 
 # Print verbose per-file output
 # verbose = false
+
+[xtask]
+# Output style: "auto", "rich", "ci", or "plain"
+# output = "auto"
+
+# When to use ANSI colors: "auto", "always", or "never"
+# color = "auto"
+
+# Maximum number of tasks to run concurrently (default: min(CPUs, 6))
+# jobs = 6
+
+# Live output lines shown per running task in rich mode, 0 for a spinner only
+# tail_lines = 3
+
+# Stop starting new tasks after the first failure
+# fail_fast = false

@@ -164,6 +164,9 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `line_ranges.rs` - Line selection ranges used to scope checking and fixing
     - `project_config.rs` - Line width discovery from project config files
     - `test_helpers.rs` - Shared builders for the prose unit tests
+- `crates/xtask/` → `xtask` - Parallel task runner driven by an `xtask.toml` task file.
+  The library holds the `Runner` builder that projects extend with Rust builtins.
+  See `crates/xtask/README.md` for the module layout.
 - Binary only crates:
     - `crates/div/` → `div` - Print divider comments
     - `crates/flipdate/` → `flipdate` - Flip dates in filenames

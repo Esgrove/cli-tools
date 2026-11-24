@@ -34,6 +34,7 @@ cli-tools-slb = { git = "https://github.com/Esgrove/cli-tools" }
 | [`cli-tools-dots`](./crates/dots)         | `dots`     | Dot formatting and renaming                                |
 | [`cli-tools-dupefind`](./crates/dupefind) | `dupefind` | Name normalization and duplicate grouping                  |
 | [`cli-tools-slb`](./crates/slb)           | `slb`      | Semantic line break checking and formatting                |
+| [`cli-tools-xtask`](./crates/xtask)       | `xtask`    | Parallel task runner with project specific builtins        |
 
 ## Configuration
 
@@ -706,6 +707,45 @@ Plain ranges with more than one file would apply the same line numbers to every 
 so a location is required once the run covers more than a single file.
 Mixing plain ranges with locations in one value leaves it unclear which file the plain ranges belong to.
 With `--stdin` only plain ranges are accepted, since the text has no path.
+
+## Xtask
+
+Run a project's tasks from an `xtask.toml` task file in parallel,
+with dependencies, priorities, exclusive resource locks, live output, and a log per task.
+The task file is found in the current directory or its parents up to the git repository root,
+and declares project specific flags such as `-a, --all` that combine with the generic options below.
+Projects can also use it as a library and add their own Rust builtins.
+See the [crate README](./crates/xtask/README.md) for the task file reference.
+
+```console
+Run a project's tasks from xtask.toml in parallel
+
+Usage: xtask [OPTIONS] [TASK]...
+       xtask <COMMAND>
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [TASK]...  Task IDs to run with their prerequisites, instead of every task enabled by the flags
+
+Options:
+  -j, --jobs <N>         Maximum number of tasks to run concurrently [default: min(CPUs, 6)]
+  -f, --fail-fast        Stop starting new tasks after the first failure
+  -l, --list             List the resolved tasks, dependencies, and resource locks without running them
+  -S, --scope <SCOPE>    Only run tasks tagged with this scope or a scope it includes
+  -C, --config <PATH>    Path to the task file [default: xtask.toml in the current directory or a parent]
+  -O, --output <OUTPUT>  Output style: interactive progress, CI log stream, or plain lines [possible values: auto, rich, ci, plain]
+  -K, --color <COLOR>    When to use ANSI colors [possible values: auto, always, never]
+  -T, --tail-lines <N>   Live output lines shown per running task in rich mode, 0 for a spinner only
+  -d, --dryrun           Print the resolved commands without running them
+  -v, --verbose          Print commands as they run
+  -h, --help             Print help (see more with '--help')
+  -V, --version          Print version
+
+No xtask.toml found in the current directory or its parents.
+```
 
 ## Vtag
 
