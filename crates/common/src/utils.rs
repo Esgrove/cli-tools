@@ -2,11 +2,14 @@
 //!
 //! Holds the conversions from paths to display strings with invalid Unicode handling,
 //! the helpers that shorten a path for printing by making it relative to a root,
-//! and the small text helpers several tools need,
-//! such as reading the leading whitespace of a line and translating a glob into a regular expression.
+//! the small text helpers several tools need,
+//! such as reading the leading whitespace of a line and translating a glob into a regular expression,
+//! and the lookup of executables on `PATH`.
 
 use std::env;
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -174,6 +177,58 @@ pub fn glob_to_regex(glob: &str) -> Option<Regex> {
     }
     pattern.push('$');
     Regex::new(&pattern).ok()
+}
+
+/// Return whether `name` resolves to an executable on `PATH`, or is an executable path itself.
+#[must_use]
+pub fn command_exists(name: &str) -> bool {
+    find_command(name).is_some()
+}
+
+/// Locate an executable by name on `PATH`, or check it directly when the name contains a path separator.
+///
+/// On Windows the `.exe`, `.cmd`, and `.bat` extensions are also tried.
+#[must_use]
+pub fn find_command(name: &str) -> Option<PathBuf> {
+    let candidate = Path::new(name);
+    if candidate.components().count() > 1 {
+        return is_executable_file(candidate).then(|| candidate.to_path_buf());
+    }
+    let path_variable = env::var_os("PATH")?;
+    for directory in env::split_paths(&path_variable) {
+        let full = directory.join(name);
+        if is_executable_file(&full) {
+            return Some(full);
+        }
+        #[cfg(windows)]
+        {
+            for extension in [".exe", ".cmd", ".bat"] {
+                let with_extension = directory.join(format!("{name}{extension}"));
+                if is_executable_file(&with_extension) {
+                    return Some(with_extension);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether the path is a regular file with an executable permission bit on Unix, or any regular file elsewhere.
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -402,5 +457,35 @@ mod test_glob_to_regex {
         let regex = glob_to_regex("a.b").expect("glob should convert");
         assert!(regex.is_match("a.b"));
         assert!(!regex.is_match("axb"));
+    }
+}
+
+#[cfg(test)]
+mod test_find_command {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_shell_on_path() {
+        assert!(command_exists("sh"));
+        assert!(find_command("sh").is_some_and(|path| path.is_absolute()));
+    }
+
+    #[test]
+    fn rejects_missing_command_and_directories() {
+        assert!(!command_exists("cli-tools-definitely-missing-command"));
+        let directory = env::temp_dir();
+        assert!(find_command(&directory.to_string_lossy()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checks_direct_paths_for_the_executable_bit() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        let script = temp.path().join("tool");
+        std::fs::write(&script, "#!/bin/sh\n").expect("should write");
+        assert!(find_command(&script.to_string_lossy()).is_none());
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("should chmod");
+        assert_eq!(find_command(&script.to_string_lossy()), Some(script));
     }
 }

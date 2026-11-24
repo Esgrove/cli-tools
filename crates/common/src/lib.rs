@@ -12,10 +12,10 @@ pub mod utils;
 
 pub use diff::{color_diff, diff_lines, show_diff};
 pub use utils::{
-    get_relative_path_from_current_working_directory, get_relative_path_or_filename, glob_to_regex, leading_whitespace,
-    lowercase_extension, os_str_to_string, path_to_file_extension_string, path_to_file_stem_string,
-    path_to_filename_string, path_to_string, path_to_string_relative, path_to_string_relative_to,
-    starts_with_ignore_case, strings_from,
+    command_exists, find_command, get_relative_path_from_current_working_directory, get_relative_path_or_filename,
+    glob_to_regex, leading_whitespace, lowercase_extension, os_str_to_string, path_to_file_extension_string,
+    path_to_file_stem_string, path_to_filename_string, path_to_string, path_to_string_relative,
+    path_to_string_relative_to, starts_with_ignore_case, strings_from,
 };
 
 use std::env;
