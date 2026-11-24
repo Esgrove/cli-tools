@@ -1,0 +1,182 @@
+//! End to end tests that run the `xtask` binary against task files in temporary git repositories.
+//!
+//! They cover task file discovery from nested directories, project flags,
+//! variables and notes exported between tasks, and the end of run output.
+
+use std::path::Path;
+use std::process::{Command, Output};
+
+use tempfile::TempDir;
+
+const TASK_FILE: &str = r#"
+[settings]
+rerun_prefix = "./run.sh"
+
+[flags.all]
+short = "a"
+help = "Run every check"
+
+[[tasks]]
+id = "prepare"
+label = "Prepare"
+priority = 1
+command = ["sh", "-c", "echo DEVICE=dev-42 >> \"$XTASK_ENV\"; echo 'Report: out/index.html' >> \"$XTASK_NOTES\""]
+
+[[tasks]]
+id = "use-device"
+label = "Use device"
+deps = ["prepare"]
+command = ["sh", "-c", "test \"$0\" = dev-42", "${DEVICE}"]
+
+[[tasks]]
+id = "failing"
+label = "Failing check"
+when = "all"
+command = ["sh", "-c", "echo boom >&2; exit 3"]
+
+[[tasks]]
+id = "after-failing"
+label = "After failing"
+when = "all"
+deps = ["failing"]
+command = ["true"]
+"#;
+
+/// Temporary git repository with the task file at its root and a nested working directory.
+fn repository() -> TempDir {
+    let temp = tempfile::tempdir().expect("should create temp dir");
+    std::fs::create_dir(temp.path().join(".git")).expect("should create .git");
+    std::fs::write(temp.path().join("xtask.toml"), TASK_FILE).expect("should write task file");
+    std::fs::create_dir_all(temp.path().join("nested").join("dir")).expect("should create nested dirs");
+    temp
+}
+
+fn run_xtask(directory: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["--output", "plain", "--color", "never"])
+        .args(args)
+        .current_dir(directory)
+        .env_remove("CI")
+        .env_remove("GITHUB_ACTIONS")
+        .env("HOME", directory)
+        .output()
+        .expect("xtask should start")
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn runs_tasks_found_from_a_nested_directory() {
+    let repository = repository();
+    let output = run_xtask(&repository.path().join("nested").join("dir"), &[]);
+    let text = stdout(&output);
+    assert!(
+        output.status.success(),
+        "{text}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(text.contains("PASS  prepare"));
+    assert!(
+        text.contains("PASS  use-device"),
+        "the exported variable reaches the dependent task"
+    );
+    assert!(!text.contains("failing"), "tasks behind a flag do not run without it");
+}
+
+#[test]
+fn ends_with_failure_recap_and_result_lines_without_a_summary_table() {
+    let repository = repository();
+    let output = run_xtask(repository.path(), &["-a"]);
+    let text = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{text}");
+
+    let failures = text.find("=== FAILURES ===").expect("failure recap should be printed");
+    let result = text
+        .find("Result: 2 passed, 1 failed, 1 blocked, 0 skipped")
+        .expect("result line");
+    assert!(failures < result, "the recap comes before the result line");
+    assert!(text.contains("Re-run: ./run.sh --all failing"));
+    assert!(!text.contains("Summary"));
+    assert_eq!(text.matches("PASS  prepare").count(), 1, "passed tasks are listed once");
+
+    let tail: Vec<&str> = text.lines().rev().take(3).collect();
+    assert_eq!(tail[0], "Note:   Report: out/index.html");
+    assert!(tail[1].starts_with("Logs:   target/xtask-logs/"));
+    assert!(tail[2].starts_with("Result: "));
+}
+
+#[test]
+fn runs_selected_task_ids_with_prerequisites() {
+    let repository = repository();
+    let output = run_xtask(repository.path(), &["-l", "use-device"]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("Resolved tasks (2):"));
+    assert!(text.contains("prepare"));
+
+    let unknown = run_xtask(repository.path(), &["missing-task"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("Unknown task ID 'missing-task'"));
+}
+
+#[test]
+fn does_not_search_past_the_repository_root() {
+    let outer = tempfile::tempdir().expect("should create temp dir");
+    std::fs::write(outer.path().join("xtask.toml"), TASK_FILE).expect("should write task file");
+    let inner = outer.path().join("inner");
+    std::fs::create_dir_all(inner.join(".git")).expect("should create inner repository");
+
+    let output = run_xtask(&inner, &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("No xtask.toml found"));
+
+    let explicit = run_xtask(&inner, &["--config", "../xtask.toml", "--list"]);
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+}
+
+#[test]
+fn help_lists_project_flags_and_the_task_file() {
+    let repository = repository();
+    let output = run_xtask(repository.path(), &["--help"]);
+    let text = stdout(&output);
+    assert!(output.status.success());
+    assert!(text.contains("Project flags:"));
+    assert!(text.contains("-a, --all"));
+    assert!(text.contains("Task file: "));
+}
+
+#[test]
+fn rejects_builtins_without_a_project_runner() {
+    let repository = repository();
+    std::fs::write(
+        repository.path().join("xtask.toml"),
+        "[[tasks]]\nid = \"setup\"\nlabel = \"Setup\"\nbuiltin = \"prepare-device\"\n",
+    )
+    .expect("should write task file");
+    let output = run_xtask(repository.path(), &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("needs the project's own runner"));
+}
+
+#[cfg(unix)]
+#[test]
+fn hands_the_run_over_to_the_project_runner() {
+    let repository = repository();
+    std::fs::write(
+        repository.path().join("xtask.toml"),
+        "[settings]\nrunner = [\"sh\", \"-c\", \"echo delegated $XTASK_DELEGATED \\\"$*\\\"; exit 7\", \"runner\"]\n",
+    )
+    .expect("should write task file");
+    let output = run_xtask(repository.path(), &["-a", "fmt"]);
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(
+        stdout(&output).trim(),
+        "delegated 1 --output plain --color never -a fmt"
+    );
+}

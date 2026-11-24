@@ -731,6 +731,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cli-tools-xtask"
+version = "11.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "console",
+ "dunce",
+ "indicatif",
+ "jiff",
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"

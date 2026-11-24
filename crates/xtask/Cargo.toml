@@ -1,0 +1,35 @@
+[package]
+name = "cli-tools-xtask"
+description = "Parallel task runner driven by an xtask.toml task file, usable as a library with project specific builtins"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xtask"
+path = "src/bin/xtask/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["string"] }
+clap_complete = { workspace = true }
+cli-tools-common = { workspace = true }
+console = { workspace = true }
+dunce = { workspace = true }
+indicatif = { workspace = true }
+jiff = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
