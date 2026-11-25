@@ -1,0 +1,1 @@
+../../commands/all-checks.md
