@@ -8,6 +8,19 @@
 /*.xlsx
 
 # Binaries
+/dirmove
+/div
 /dots
-/visaparse
+/dupefind
 /flipdate
+/qtorrent
+/rsbump
+/rxrename
+/slb
+/thumbs
+/vconvert
+/visaparse
+/vres
+/vstats
+/vtag
+/xtask
