@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::DotRenameConfig;
@@ -41,14 +43,14 @@ static RE_LEADING_DIGITS: std::sync::LazyLock<Regex> =
 
 static RE_WRITTEN_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>\d{1,2})\.(?P<year>\d{4})\b",
+        r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>[0-9]{1,2})\.(?P<year>[0-9]{4})\b",
     )
         .expect("Failed to compile MDY written date regex")
 });
 
 static RE_WRITTEN_DATE_DMY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(?P<day>\d{1,2})\.(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<year>\d{4})\b",
+        r"(?i)\b(?P<day>[0-9]{1,2})\.(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<year>[0-9]{4})\b",
     )
         .expect("Failed to compile DMY written date regex")
 });
@@ -156,8 +158,10 @@ impl DotFormat<'_> {
             Self::remove_random_identifiers(&mut new_name);
         }
 
-        Self::apply_titlecase(&mut new_name);
+        // Written dates become digits before titlecasing,
+        // so the casing of a word does not depend on a month name that is about to disappear.
         Self::convert_written_date_format(&mut new_name);
+        Self::apply_titlecase(&mut new_name);
 
         if let Some(date_flipped_name) = if self.config.rename_directories {
             Date::reorder_directory_date(&new_name)
@@ -165,6 +169,8 @@ impl DotFormat<'_> {
             Date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
         } {
             new_name = date_flipped_name;
+            // Reordering can complete a written date such as "Jan.25.2021", so convert those once more.
+            Self::convert_written_date_format(&mut new_name);
         }
 
         if let Some(ref prefix) = self.config.prefix {
@@ -237,8 +243,10 @@ impl DotFormat<'_> {
             Self::remove_random_identifiers(&mut new_name);
         }
 
-        Self::apply_titlecase(&mut new_name);
+        // Written dates become digits before titlecasing,
+        // so the casing of a word does not depend on a month name that is about to disappear.
         Self::convert_written_date_format(&mut new_name);
+        Self::apply_titlecase(&mut new_name);
 
         if let Some(date_flipped_name) = if self.config.rename_directories {
             Date::reorder_directory_date(&new_name)
@@ -246,6 +254,8 @@ impl DotFormat<'_> {
             Date::reorder_filename_date(&new_name, self.config.date_starts_with_year, false, false)
         } {
             new_name = date_flipped_name;
+            // Reordering can complete a written date such as "Jan.25.2021", so convert those once more.
+            Self::convert_written_date_format(&mut new_name);
         }
 
         if !self.config.move_to_start.is_empty() {
@@ -354,34 +364,36 @@ impl DotFormat<'_> {
         }
     }
 
+    /// Move a date that follows one of the configured prefixes to directly after that prefix.
+    ///
+    /// Only dates that start after the prefix are moved,
+    /// so a prefix that already contains a date leaves the name as it is.
     fn move_date_after_prefix(&self, name: &mut String) {
         for prefix in &self.config.move_date_after_prefix {
-            if name.starts_with(prefix) {
-                if let Some(date_match) = RE_CORRECT_DATE_FORMAT.find(name) {
-                    let date = date_match.as_str();
-                    let mut new_name = name.clone();
+            if !name.starts_with(prefix) {
+                continue;
+            }
+            let insert_pos = prefix.len();
+            if let Some(date_match) = RE_CORRECT_DATE_FORMAT.find_at(name, insert_pos) {
+                let date = date_match.as_str().to_string();
+                let mut new_name = name.clone();
 
-                    // Remove the date from its current location
-                    new_name.replace_range(date_match.range(), "");
+                // Remove the date from its current location
+                new_name.replace_range(date_match.range(), "");
+                new_name.insert_str(insert_pos, &format!(".{date}."));
 
-                    let insert_pos = prefix.len();
-                    new_name.insert_str(insert_pos, &format!(".{date}."));
+                *name = new_name;
+            }
+            if let Some(date_match) = RE_YEAR.find_at(name, insert_pos)
+                && let Ok(date) = date_match.as_str().parse::<i32>()
+                && date <= *CURRENT_YEAR
+            {
+                let mut new_name = name.clone();
 
-                    *name = new_name;
-                }
-                if let Some(date_match) = RE_YEAR.find(name) {
-                    let date = date_match.as_str().parse::<i32>().expect("Failed to parse year");
-                    if date <= *CURRENT_YEAR {
-                        let mut new_name = name.clone();
+                new_name.replace_range(date_match.range(), "");
+                new_name.insert_str(insert_pos, &format!(".{date}."));
 
-                        new_name.replace_range(date_match.range(), "");
-
-                        let insert_pos = prefix.len();
-                        new_name.insert_str(insert_pos, &format!(".{date}."));
-
-                        *name = new_name;
-                    }
-                }
+                *name = new_name;
             }
         }
     }
@@ -441,6 +453,11 @@ impl DotFormat<'_> {
         // Temporarily convert dots back to whitespace so titlecase works
         *name = name.replace('.', " ");
         *name = titlecase::titlecase(name);
+        // Case conversion can decompose a letter, for example "İ" into "I" and a combining dot,
+        // so compose it again to keep names in the same normalized form as the input.
+        if !name.is_ascii() {
+            *name = name.nfc().collect();
+        }
         *name = name.replace(' ', ".");
         // Fix encoding capitalization
         *name = name.replace("X265", "x265").replace("X264", "x264");
@@ -458,6 +475,17 @@ impl DotFormat<'_> {
         *name = RE_EXCLAMATION.replace_all(name, ".").into_owned();
         *name = RE_WHITESPACE.replace_all(name, ".").into_owned();
         *name = RE_CONSECUTIVE_DOTS.replace_all(name, ".").into_owned();
+        Self::replace_separated_ampersands(name);
+    }
+
+    /// Replace every ampersand standing alone between dots with "and".
+    ///
+    /// Adjacent ampersands share a dot, so a single pass of `str::replace` would miss every second one.
+    /// Replacing until none is left keeps formatting idempotent.
+    fn replace_separated_ampersands(name: &mut String) {
+        while name.contains(".&.") {
+            *name = name.replace(".&.", ".and.");
+        }
     }
 
     /// Remove consecutive duplicate occurrences of patterns from the name.
@@ -515,17 +543,29 @@ impl DotFormat<'_> {
             .into_owned();
     }
 
-    /// Only retain alphanumeric characters and a few common filename characters
+    /// Only retain alphanumeric characters and a few common filename characters.
+    ///
+    /// Combining marks are kept when they follow an allowed character,
+    /// so a letter written in decomposed form, such as the one case conversion produces for "İ", survives.
     fn remove_special_characters(name: &mut String) {
+        let is_allowed = |c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '\'' || c == '&';
         let cleaned: String = name
             // Split the string into graphemes (for handling emojis and complex characters)
             .graphemes(true)
-            .filter(|g| {
-                g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '\'' || c == '&')
+            .filter(|grapheme| {
+                let mut characters = grapheme.chars();
+                characters.next().is_some_and(is_allowed)
+                    && characters.all(|c| is_allowed(c) || is_combining_mark(c))
             })
             .collect();
 
         *name = cleaned;
+        // Removing a character can leave its neighbouring dots or an ampersand side by side,
+        // so normalize them again before later steps match dates and words.
+        if name.contains("..") {
+            *name = RE_CONSECUTIVE_DOTS.replace_all(name, ".").into_owned();
+        }
+        Self::replace_separated_ampersands(name);
     }
 
     fn remove_random_identifiers(name: &mut String) {
@@ -1279,6 +1319,24 @@ mod written_date_tests {
         DotFormat::convert_written_date_format(&mut input);
         assert_eq!(input, "Something.Feb.2022.06.09");
     }
+
+    #[test]
+    fn non_ascii_digits_are_not_treated_as_a_date() {
+        let mut input = "Jan.\u{663}.2020".to_string();
+        DotFormat::convert_written_date_format(&mut input);
+        assert_eq!(input, "Jan.\u{663}.2020");
+
+        let mut input = "\u{ff13}.March.2020".to_string();
+        DotFormat::convert_written_date_format(&mut input);
+        assert_eq!(input, "\u{ff13}.March.2020");
+    }
+
+    #[test]
+    fn format_name_keeps_non_ascii_digits_in_a_written_date() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+        assert_eq!(formatter.format_name("Jan \u{663} 2020"), "Jan.\u{663}.2020");
+    }
 }
 
 #[cfg(test)]
@@ -1326,6 +1384,35 @@ mod move_date_tests {
             FORMATTER.format_name("something else 2160p 24.05.28"),
             "Something.Else.2160p.2024.05.28"
         );
+    }
+
+    #[test]
+    fn non_ascii_digit_year_is_not_moved() {
+        assert_eq!(
+            FORMATTER.format_name("Test something 20\u{662}\u{663}"),
+            "Test.Something.20\u{662}\u{663}"
+        );
+    }
+
+    #[test]
+    fn prefix_that_contains_the_year_does_not_panic() {
+        let config = DotRenameConfig {
+            move_date_after_prefix: vec!["Show.2021".to_string()],
+            ..Default::default()
+        };
+        let formatter = DotFormat::new(&config);
+        assert_eq!(formatter.format_name("Show 2021"), "Show.2021");
+        assert_eq!(formatter.format_name("Show 2021 Live"), "Show.2021.Live");
+    }
+
+    #[test]
+    fn prefix_that_contains_a_full_date_does_not_panic() {
+        let config = DotRenameConfig {
+            move_date_after_prefix: vec!["Show.2021.05.06".to_string()],
+            ..Default::default()
+        };
+        let formatter = DotFormat::new(&config);
+        assert_eq!(formatter.format_name("Show 2021.05.06"), "Show.2021.05.06");
     }
 }
 
@@ -1468,5 +1555,58 @@ mod normalize_extension_tests {
     #[test]
     fn handles_empty_extension() {
         assert_eq!(normalize_extension(""), "");
+    }
+}
+
+#[cfg(test)]
+mod test_idempotent_formatting {
+    use super::*;
+
+    /// Names that once formatted differently on a second run.
+    const NAMES: &[&str] = &[
+        "&[&",
+        "Tom & & Jerry",
+        "İ[2021",
+        "Movie[&😀[Movie",
+        "Show 30 😀 2021",
+        "Jan[25.05.30[2021Movie",
+        "é&Jan.3.2020[",
+    ];
+
+    #[test]
+    fn formatting_twice_gives_the_same_name() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+        for name in NAMES {
+            let once = formatter.format_name(name);
+            assert_eq!(formatter.format_name(&once), once, "{name:?}");
+            let directory = formatter.format_directory_name(name);
+            assert_eq!(formatter.format_directory_name(&directory), directory, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn adjacent_ampersands_all_become_and() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+        assert_eq!(formatter.format_name("Tom & & Jerry"), "Tom.and.and.Jerry");
+    }
+
+    #[test]
+    fn decomposed_letters_are_kept_and_composed() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+        assert_eq!(formatter.format_name("Cafe\u{301} 2021"), "Café.2021");
+        assert_eq!(formatter.format_name("İstanbul"), "İstanbul");
+    }
+
+    #[test]
+    fn removed_characters_do_not_leave_double_dots_before_a_date() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+        assert_eq!(
+            formatter.format_name("Show 05.30 😀 2021"),
+            formatter.format_name("Show 05.30 2021")
+        );
     }
 }
