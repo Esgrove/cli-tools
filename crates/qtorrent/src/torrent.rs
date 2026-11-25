@@ -501,36 +501,37 @@ pub fn to_hex(bytes: &[u8]) -> String {
 /// # Errors
 /// Returns an error if the info dictionary cannot be found.
 fn extract_info_dict_bytes(buffer: &[u8]) -> Result<&[u8]> {
-    // Torrent files are bencoded. The top level is a dictionary.
-    // We need to find "4:info" key and extract its value bytes.
-
-    // Find "4:info" in the buffer
-    let info_key = b"4:info";
-    let info_pos = find_subsequence(buffer, info_key).context("Could not find 'info' key in torrent file")?;
-
-    // The info dictionary starts right after "4:info"
-    let info_start = info_pos + info_key.len();
-
-    if info_start >= buffer.len() {
-        bail!("Torrent file truncated after 'info' key");
+    // Torrent files are bencoded with a dictionary at the top level.
+    // Its keys are walked one value at a time, so text that looks like an info key inside another value,
+    // such as a comment, is never taken for the real one.
+    if buffer.first() != Some(&b'd') {
+        bail!("Torrent file does not start with a dictionary");
     }
-
-    // Parse the bencode value to find its end
-    let info_data = buffer
-        .get(info_start..)
-        .context("Torrent file truncated after 'info' key")?;
-    let info_len = bencode_value_length(info_data)?;
-    let info_end = info_start
-        .checked_add(info_len)
-        .context("Info dictionary length overflow")?;
-
-    if info_end > buffer.len() {
-        bail!("Info dictionary extends beyond end of file");
+    let mut position = 1;
+    while let Some(&next) = buffer.get(position) {
+        if next == b'e' {
+            break;
+        }
+        let key_data = buffer.get(position..).context("Torrent file truncated")?;
+        let key_length = bencode_value_length(key_data)?;
+        let key = key_data.get(..key_length).context("Torrent file truncated in a key")?;
+        let value_start = position
+            .checked_add(key_length)
+            .context("Torrent key length overflow")?;
+        let value_data = buffer
+            .get(value_start..)
+            .context("Torrent file truncated after a key")?;
+        let value_length = bencode_value_length(value_data)?;
+        if key == b"4:info" {
+            return value_data
+                .get(..value_length)
+                .context("Info dictionary extends beyond end of file");
+        }
+        position = value_start
+            .checked_add(value_length)
+            .context("Torrent value length overflow")?;
     }
-
-    buffer
-        .get(info_start..info_end)
-        .context("Info dictionary extends beyond end of file")
+    bail!("Could not find 'info' key in torrent file")
 }
 
 /// Find the position of a subsequence in a byte slice.
@@ -1365,6 +1366,22 @@ mod test_torrent_struct_methods {
 #[cfg(test)]
 mod test_extract_info_dict_bytes {
     use super::*;
+
+    #[test]
+    fn an_info_key_inside_an_earlier_value_is_not_used() {
+        let info = b"d6:lengthi5e4:name5:a.mkv12:piece lengthi16384ee";
+        let comment = b"see 4:infod4:name3:xyze";
+        let mut torrent = b"d7:comment".to_vec();
+        torrent.extend_from_slice(format!("{}:", comment.len()).as_bytes());
+        torrent.extend_from_slice(comment);
+        torrent.extend_from_slice(b"4:info");
+        torrent.extend_from_slice(info);
+        torrent.push(b'e');
+
+        let result = extract_info_dict_bytes(&torrent).expect("the info dictionary should be found");
+
+        assert_eq!(result, info);
+    }
 
     #[test]
     fn extracts_info_dict_from_valid_torrent() {
