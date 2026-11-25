@@ -1,5 +1,6 @@
 //! Video thumbnail sheet discovery, metadata formatting, and ffmpeg command construction.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -253,7 +254,10 @@ impl ThumbnailCreator {
             std::fs::create_dir_all(&screens_dir)?;
         }
 
-        let mut command = self.build_ffmpeg_command(video_path, &output_path, &params);
+        // The header holds the file name, which can contain any character,
+        // so it is read from a file instead of being quoted into the filter graph.
+        let text_file = Self::write_text_file(&params.metadata_text)?;
+        let mut command = self.build_ffmpeg_command(video_path, &output_path, &params, text_file.path());
 
         if self.config.dryrun {
             println!("[DRYRUN] {command:#?}");
@@ -410,8 +414,16 @@ impl ThumbnailCreator {
     }
 
     /// Build the ffmpeg command for creating a thumbnail.
-    fn build_ffmpeg_command(&self, input_path: &Path, output_path: &Path, params: &ThumbnailParams) -> Command {
-        let escaped_metadata = Self::escape_for_drawtext(&params.metadata_text);
+    ///
+    /// The header text is read from `text_file` with expansion turned off, so it is drawn exactly as written.
+    fn build_ffmpeg_command(
+        &self,
+        input_path: &Path,
+        output_path: &Path,
+        params: &ThumbnailParams,
+        text_file: &Path,
+    ) -> Command {
+        let escaped_text_file = Self::escape_for_drawtext(&text_file.to_string_lossy());
 
         let filter = format!(
             "fps=1/{interval},\
@@ -420,7 +432,7 @@ impl ThumbnailCreator {
             fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5,\
             tile={cols}x{rows}:margin=0:padding={padding},\
             drawtext=fontfile='{font}':\
-            text='{metadata}':x=10:y=10:fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.9:boxborderw=5",
+            textfile='{text_file}':expansion=none:x=10:y=10:fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.9:boxborderw=5",
             interval = params.interval,
             width = self.config.scale_width,
             font = self.escaped_font,
@@ -428,7 +440,7 @@ impl ThumbnailCreator {
             cols = params.cols,
             rows = params.rows,
             padding = params.padding,
-            metadata = escaped_metadata,
+            text_file = escaped_text_file,
         );
 
         let mut command = Command::new("ffmpeg");
@@ -445,6 +457,18 @@ impl ThumbnailCreator {
             .arg(output_path);
 
         command
+    }
+
+    /// Write the header text to a temporary file that is removed when the returned handle is dropped.
+    fn write_text_file(text: &str) -> Result<tempfile::NamedTempFile> {
+        let mut file = tempfile::Builder::new()
+            .prefix("thumbs-header")
+            .suffix(".txt")
+            .tempfile()
+            .context("Failed to create header text file")?;
+        file.write_all(text.as_bytes())
+            .context("Failed to write header text file")?;
+        Ok(file)
     }
 
     /// Escape text for ffmpeg drawtext filter.
@@ -576,6 +600,37 @@ mod test_thumbnail_helpers {
     }
 
     #[test]
+    fn header_text_never_appears_inside_the_filter_graph() {
+        let creator = creator(PathBuf::new(), config());
+        let params = ThumbnailParams {
+            interval: 10.0,
+            cols: 3,
+            rows: 4,
+            padding: 8,
+            font_size: 20,
+            metadata_text: "Don't, Stop [100%]; now.mp4".to_string(),
+        };
+
+        let command = creator.build_ffmpeg_command(
+            Path::new("input.mp4"),
+            Path::new("output.jpg"),
+            &params,
+            Path::new("header.txt"),
+        );
+        let filter = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .skip_while(|argument| argument != "-vf")
+            .nth(1)
+            .expect("the command should have a filter");
+
+        assert!(
+            !filter.contains("Stop"),
+            "the header text is quoted into the filter: {filter}"
+        );
+    }
+
+    #[test]
     fn builds_expected_ffmpeg_command_without_executing_it() {
         let creator = creator(PathBuf::new(), config());
         let params = ThumbnailParams {
@@ -587,7 +642,12 @@ mod test_thumbnail_helpers {
             metadata_text: "video: sample".to_string(),
         };
 
-        let command = creator.build_ffmpeg_command(Path::new("input.mp4"), Path::new("output.jpg"), &params);
+        let command = creator.build_ffmpeg_command(
+            Path::new("input.mp4"),
+            Path::new("output.jpg"),
+            &params,
+            Path::new("header.txt"),
+        );
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
@@ -599,7 +659,11 @@ mod test_thumbnail_helpers {
         assert!(arguments.contains(&"output.jpg".to_string()));
         assert!(arguments.contains(&"2".to_string()));
         assert!(arguments.iter().any(|argument| argument.contains("tile=3x4")));
-        assert!(arguments.iter().any(|argument| argument.contains(r"video\: sample")));
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument.contains("textfile='header.txt'"))
+        );
     }
 
     #[test]
