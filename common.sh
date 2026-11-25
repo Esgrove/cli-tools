@@ -1,8 +1,9 @@
 #!/bin/bash
 set -eo pipefail
 
-# Get absolute path to repo root
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || (cd "$(dirname "${BASH_SOURCE[0]}")" && pwd))
+# Absolute path to the repo root, which is the directory of this file.
+# It is not taken from the current directory, so running a script from inside another git repository still targets this one.
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export REPO_ROOT
 
 # Check platform: BSD (Mac) and GNU (Linux & Git for Windows) coreutils implementations have some differences
