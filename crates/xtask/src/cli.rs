@@ -18,6 +18,9 @@ use crate::config::{TaskFile, TaskFileLocation};
 use crate::process::shell_quote;
 
 /// Generic command line arguments shared by every project.
+/// Built-in short options that take a value, so the rest of a group of short flags after one of them is that value.
+const SHORT_OPTIONS_WITH_VALUES: &[char] = &['j', 'S', 'C', 'O', 'K', 'T'];
+
 #[derive(Debug, Parser)]
 #[command(
     name = "xtask",
@@ -483,6 +486,10 @@ where
 }
 
 /// Find the value of `-C`/`--config` in raw arguments before the full command line can be parsed.
+///
+/// Short flags can be grouped, as in `-dC path` or `-dCpath`.
+/// Within a group, an option that takes a value takes the rest of the group,
+/// or the next argument when it ends the group.
 #[must_use]
 pub fn find_config_argument(argv: &[OsString]) -> Option<PathBuf> {
     let mut arguments = argv.iter().skip(1);
@@ -491,17 +498,34 @@ pub fn find_config_argument(argv: &[OsString]) -> Option<PathBuf> {
         if text == "--" {
             break;
         }
-        if text == "-C" || text == "--config" {
+        if text == "--config" {
             return arguments.next().map(PathBuf::from);
         }
         if let Some(value) = text.strip_prefix("--config=") {
             return Some(PathBuf::from(value));
         }
-        if let Some(value) = text.strip_prefix("-C")
-            && !value.is_empty()
-            && !text.starts_with("--")
-        {
-            return Some(PathBuf::from(value.strip_prefix('=').unwrap_or(value)));
+        let Some(group) = text
+            .strip_prefix('-')
+            .filter(|group| !group.is_empty() && !group.starts_with('-'))
+        else {
+            continue;
+        };
+        for (index, character) in group.char_indices() {
+            if !SHORT_OPTIONS_WITH_VALUES.contains(&character) {
+                continue;
+            }
+            let rest = group.get(index + character.len_utf8()..).unwrap_or_default();
+            if character == 'C' {
+                return if rest.is_empty() {
+                    arguments.next().map(PathBuf::from)
+                } else {
+                    Some(PathBuf::from(rest.strip_prefix('=').unwrap_or(rest)))
+                };
+            }
+            if rest.is_empty() {
+                arguments.next();
+            }
+            break;
         }
     }
     None
@@ -737,6 +761,35 @@ mod test_argument_parsing {
         );
         assert_eq!(find_config_argument(&argv(&["xtask", "--", "-C", "x"])), None);
         assert_eq!(find_config_argument(&argv(&["xtask", "fmt"])), None);
+    }
+
+    #[test]
+    fn short_options_with_values_match_the_command_definition() {
+        let mut with_values: Vec<char> = build_command(None, None)
+            .get_arguments()
+            .filter(|argument| argument.get_action().takes_values())
+            .filter_map(clap::Arg::get_short)
+            .collect();
+        with_values.sort_unstable();
+        let mut listed = SHORT_OPTIONS_WITH_VALUES.to_vec();
+        listed.sort_unstable();
+        assert_eq!(with_values, listed);
+    }
+
+    #[test]
+    fn finds_config_argument_grouped_with_other_short_flags() {
+        let argv = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            find_config_argument(&argv(&["xtask", "-dC", "sub/alt.toml"])),
+            Some(PathBuf::from("sub/alt.toml"))
+        );
+        assert_eq!(
+            find_config_argument(&argv(&["xtask", "-vdCsub/alt.toml"])),
+            Some(PathBuf::from("sub/alt.toml"))
+        );
+        // The value of another option is not a config path, even when it contains a C.
+        assert_eq!(find_config_argument(&argv(&["xtask", "-SC", "fmt"])), None);
+        assert_eq!(find_config_argument(&argv(&["xtask", "-j", "4", "fmt"])), None);
     }
 }
 
