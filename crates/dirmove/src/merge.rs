@@ -57,9 +57,6 @@ pub enum MergeEvent<'a> {
 pub trait MergeObserver: MoveObserver {
     /// One step of the merge happened.
     fn on_merge_event(&mut self, _event: MergeEvent<'_>) {}
-
-    /// The files of one directory were moved into the target directory.
-    fn on_files_moved(&mut self, _report: &mover::MoveReport) {}
 }
 
 impl MergeObserver for () {}
@@ -131,11 +128,10 @@ impl DirectoryMerger {
             }
         }
 
-        // Moved files are reported through `on_files_moved` and are not counted in `moved_count`,
+        // Moved files are reported through `MoveEvent::Finished` and are not counted in `moved_count`,
         // which counts the directories and dry run entries.
         if !file_entries.is_empty() {
             let report = mover::move_files_to_target_dir(target, &file_entries, self.overwrite, observer)?;
-            observer.on_files_moved(&report);
             skipped_files.extend(report.skipped_files.iter().map(|path| path_to_filename_string(path)));
         }
 

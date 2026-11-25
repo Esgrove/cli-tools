@@ -18,7 +18,7 @@ use cli_tools_common::{
 };
 use cli_tools_dirmove::{
     DirectoryInfo, FileInfo, FileMatch, GroupingProgress, GroupingStage, MergeEvent, MergeObserver, MoveEvent,
-    MoveInfo, MoveObserver, MoveReport, Roots, UnpackInfo,
+    MoveInfo, MoveObserver, Roots, UnpackInfo,
 };
 
 /// Prints file moves and directory merges with a byte progress bar.
@@ -125,6 +125,10 @@ impl MoveObserver for ConsoleReporter<'_> {
             MoveEvent::Failed { source, error } => {
                 self.print(|| print_error!("Failed to move {}: {error}", source.display()));
             }
+            MoveEvent::Finished(report) => {
+                self.progress_bar.finish_and_clear();
+                println!("  Moved {}", count_label(report.moved_count(), "file", "files"));
+            }
             _ => {}
         }
     }
@@ -180,11 +184,6 @@ impl MergeObserver for ConsoleReporter<'_> {
             }
             _ => {}
         }
-    }
-
-    fn on_files_moved(&mut self, report: &MoveReport) {
-        self.progress_bar.finish_and_clear();
-        println!("  Moved {} files", report.moved_count());
     }
 }
 

@@ -16,8 +16,8 @@ use cli_tools_common::{
     print_yellow,
 };
 use cli_tools_dirmove::{
-    DirectoryInfo, DirectoryMatcher, DirectoryMerger, EntryMove, FileInfo, FileMatch, MergeObserver, MoveInfo,
-    PrefixGrouper, PromptResult, Roots, Scanner, Unpacker, matcher, merge, mover, scanner, unpack, utils,
+    DirectoryInfo, DirectoryMatcher, DirectoryMerger, EntryMove, FileInfo, FileMatch, MoveInfo, PrefixGrouper,
+    PromptResult, Roots, Scanner, Unpacker, matcher, merge, mover, scanner, unpack, utils,
 };
 #[cfg(test)]
 use cli_tools_dirmove::{GroupingOptions, NameFilter, ScanOptions};
@@ -828,10 +828,7 @@ impl DirMove {
 
     /// Move files to the target directory, creating it if needed.
     fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<mover::MoveReport> {
-        let mut reporter = self.reporter();
-        let report = mover::move_files_to_target_dir(dir_path, files, self.config.overwrite, &mut reporter)?;
-        reporter.on_files_moved(&report);
-        Ok(report)
+        mover::move_files_to_target_dir(dir_path, files, self.config.overwrite, &mut self.reporter())
     }
 }
 

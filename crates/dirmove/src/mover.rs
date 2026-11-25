@@ -66,6 +66,8 @@ pub enum MoveEvent<'a> {
         /// Why the move failed.
         error: &'a anyhow::Error,
     },
+    /// Every file in the batch was handled, with the outcome of each.
+    Finished(&'a MoveReport),
 }
 
 /// Summary of a batch move operation.
@@ -193,6 +195,7 @@ pub fn move_files_to_target_dir(
         }
     }
 
+    observer.on_event(MoveEvent::Finished(&report));
     Ok(report)
 }
 
@@ -422,9 +425,32 @@ mod test_observer {
         pub bytes: u64,
     }
 
+    /// Observer that records the name of each reported event.
+    #[derive(Default)]
+    pub struct EventRecorder {
+        /// Event variant names in the order they were reported.
+        pub events: Vec<String>,
+        /// Moved file count from the `Finished` event.
+        pub finished_moved_count: Option<usize>,
+    }
+
     impl MoveObserver for ByteCounter {
         fn on_progress(&mut self, bytes: u64) {
             self.bytes += bytes;
+        }
+    }
+
+    impl MoveObserver for EventRecorder {
+        fn on_event(&mut self, event: MoveEvent<'_>) {
+            if let MoveEvent::Finished(report) = &event {
+                self.finished_moved_count = Some(report.moved_count());
+            }
+            let debug = format!("{event:?}");
+            let name = debug
+                .split(|character: char| !character.is_alphanumeric())
+                .next()
+                .unwrap_or_default();
+            self.events.push(name.to_string());
         }
     }
 }
@@ -638,7 +664,71 @@ mod test_move_helpers {
 
 #[cfg(test)]
 mod test_move_files {
+    use super::test_observer::EventRecorder;
     use super::*;
+
+    #[test]
+    fn reports_events_in_order_and_finishes_with_the_report() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let input = temp_directory.path().join("input");
+        let output = temp_directory.path().join("output");
+        fs::create_dir(&input)?;
+        fs::write(input.join("one.txt"), "one")?;
+        fs::write(input.join("two.txt"), "two")?;
+        fs::create_dir(&output)?;
+        fs::write(output.join("two.txt"), "old")?;
+
+        let files = vec![input.join("one.txt"), input.join("two.txt")];
+        let mut recorder = EventRecorder::default();
+        let report = move_files_to_target_dir(&output, &files, false, &mut recorder)?;
+
+        assert_eq!(
+            recorder.events,
+            [
+                "Started",
+                "FileStarted",
+                "Moved",
+                "FileStarted",
+                "SkippedExisting",
+                "Finished"
+            ]
+        );
+        assert_eq!(recorder.finished_moved_count, Some(report.moved_count()));
+        assert_eq!(report.moved_count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn reports_created_directory_before_starting() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let source = temp_directory.path().join("source.txt");
+        fs::write(&source, "contents")?;
+
+        let mut recorder = EventRecorder::default();
+        move_files_to_target_dir(
+            &temp_directory.path().join("created"),
+            std::slice::from_ref(&source),
+            false,
+            &mut recorder,
+        )?;
+
+        assert_eq!(
+            recorder.events,
+            ["CreatedDirectory", "Started", "FileStarted", "Moved", "Finished"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reports_finished_for_an_empty_batch() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let mut recorder = EventRecorder::default();
+        let report = move_files_to_target_dir(temp_directory.path(), &[], false, &mut recorder)?;
+
+        assert_eq!(recorder.events, ["Started", "Finished"]);
+        assert_eq!(report.moved_count(), 0);
+        Ok(())
+    }
 
     #[test]
     fn move_files_to_target_dir_moves_files() -> anyhow::Result<()> {
