@@ -877,7 +877,7 @@ impl DirMove {
 
         // Rename is preferred. If it fails (e.g. cross-device), fall back to copy+remove.
         if std::fs::rename(source, target).is_err() {
-            std::fs::copy(source, target)?;
+            cli_tools_common::copy_file_with_times(source, target)?;
             std::fs::remove_file(source)?;
         }
 

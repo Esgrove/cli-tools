@@ -265,6 +265,12 @@ fn copy_file_inner(
 
     destination_file.flush()?;
 
+    // A moved file keeps its modification time and permissions, as a rename on the same device would.
+    let source_metadata = source_file.metadata()?;
+    destination_file.set_modified(source_metadata.modified()?)?;
+    drop(destination_file);
+    fs::set_permissions(destination, source_metadata.permissions())?;
+
     if bytes_copied != expected_size {
         anyhow::bail!(
             "Incomplete copy for {}: expected {} bytes, copied {} bytes. Original file preserved.",
@@ -399,6 +405,26 @@ mod test_copy_verification {
 
         assert_eq!(fs::read(destination)?, contents);
         assert!(source.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn copy_file_with_progress_keeps_modification_time_and_permissions() -> anyhow::Result<()> {
+        let tmp = tempfile::TempDir::new()?;
+        let source = tmp.path().join("source.bin");
+        let destination = tmp.path().join("destination.bin");
+        fs::write(&source, b"contents")?;
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        File::options().write(true).open(&source)?.set_modified(old_time)?;
+        let mut permissions = fs::metadata(&source)?.permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source, permissions)?;
+
+        copy_file_with_progress(&source, &destination, 8, &ProgressBar::hidden())?;
+
+        let copied = fs::metadata(&destination)?;
+        assert_eq!(copied.modified()?, old_time);
+        assert!(copied.permissions().readonly());
         Ok(())
     }
 
