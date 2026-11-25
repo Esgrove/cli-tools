@@ -16,6 +16,7 @@ use crate::normalize_extension;
 use crate::{DotFormat, DotRenameConfig};
 use cli_tools_common::get_normalized_file_name_and_extension;
 use cli_tools_common::os_str_to_string;
+use cli_tools_common::{OverwritePolicy, RenameOutcome};
 
 #[cfg(not(test))]
 const PROGRESS_BAR_CHARS: &str = "=> ";
@@ -398,20 +399,17 @@ impl DotRename {
             let mut new_str = cli_tools_common::get_relative_path_or_filename(&new_path, &self.root);
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
-            let capitalization_change_only = if new_str.to_lowercase() == old_str.to_lowercase() {
-                // File path contains only capitalization changes:
-                // Need to use a temp file to work around case-insensitive file systems.
-                true
-            } else {
-                false
-            };
+            // On a case-insensitive file system a capitalization only change finds the source itself at the target.
+            // Only a different existing entry counts as a conflict.
+            let target_is_other_entry = fs::symlink_metadata(&new_path).is_ok()
+                && !cli_tools_common::paths_refer_to_same_file(&path, &new_path);
 
             // Handle directory renaming when target already exists
             // Copy files from source to target directory and remove source directory if empty
-            let is_directory_merge = path.is_dir() && new_path.exists() && !capitalization_change_only;
+            let is_directory_merge = path.is_dir() && new_path.is_dir() && target_is_other_entry;
             let mut skip_rename = false;
 
-            if !capitalization_change_only && new_path.exists() && !self.config.overwrite && !is_directory_merge {
+            if target_is_other_entry && !self.config.overwrite && !is_directory_merge {
                 if self.config.increment_name {
                     match Self::get_incremented_path(&new_path) {
                         Ok(incremented_path) => {
@@ -470,14 +468,19 @@ impl DotRename {
                 continue;
             }
 
-            let rename_result = if capitalization_change_only {
-                Self::rename_with_temp_file(&path, &new_path)
+            let policy = if self.config.overwrite {
+                OverwritePolicy::Overwrite
             } else {
-                fs::rename(&path, &new_path)
+                OverwritePolicy::Skip
             };
-
-            match rename_result {
-                Ok(()) => {
+            match cli_tools_common::safe_rename(&path, &new_path, policy) {
+                Ok(RenameOutcome::SkippedExisting) => {
+                    println!(
+                        "{}",
+                        format!("Skipping rename to already existing file: {new_str}").yellow()
+                    );
+                }
+                Ok(_) => {
                     num_renamed += 1;
                 }
                 Err(e) => {
@@ -605,13 +608,6 @@ impl DotRename {
     /// which misses case-only and extension-only changes like `Photo.JPG` → `Photo.jpg`.
     fn path_changed(old: &Path, new: &Path) -> bool {
         cli_tools_common::path_to_string(old) != cli_tools_common::path_to_string(new)
-    }
-
-    /// Rename a file with an intermediate temp file to work around case-insensitive file systems.
-    fn rename_with_temp_file(path: &PathBuf, new_path: &PathBuf) -> std::io::Result<()> {
-        let temp_file = cli_tools_common::append_extension_to_path(new_path, ".tmp");
-        fs::rename(path, &temp_file)?;
-        fs::rename(&temp_file, new_path)
     }
 
     fn get_incremented_path(original: &Path) -> Result<PathBuf> {
@@ -2031,7 +2027,26 @@ mod test_rename_conflicts {
     }
 
     #[test]
-    fn a_capitalization_only_change_goes_through_a_temporary_file() {
+    fn a_different_file_differing_only_by_case_is_never_replaced() {
+        let temporary = temporary_directory();
+        if !cli_tools_common::directory_is_case_sensitive(temporary.path()).expect("case probe should work") {
+            return;
+        }
+        std::fs::write(temporary.path().join("Photo.JPG"), b"UPPER").expect("file should be written");
+        std::fs::write(temporary.path().join("Photo.jpg"), b"ORIGINAL").expect("file should be written");
+
+        dots(temporary.path(), DotRenameConfig::default(), false)
+            .run()
+            .expect("the run should succeed");
+
+        let original = std::fs::read_to_string(temporary.path().join("Photo.jpg")).expect("the file should exist");
+        assert_eq!(original, "ORIGINAL");
+        let upper = std::fs::read_to_string(temporary.path().join("Photo.JPG")).expect("the file should exist");
+        assert_eq!(upper, "UPPER");
+    }
+
+    #[test]
+    fn a_capitalization_only_change_is_applied() {
         let temporary = temporary_directory();
         std::fs::write(temporary.path().join("photo.JPG"), b"image").expect("file should be written");
 
