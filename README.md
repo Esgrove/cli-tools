@@ -720,10 +720,10 @@ See the [crate README](./crates/xtask/README.md) for the task file reference.
 ```console
 Run a project's tasks from xtask.toml in parallel
 
-Usage: xtask [OPTIONS] [TASK]...
-       xtask <COMMAND>
+Usage: xtask [OPTIONS] [TASK]... [COMMAND]
 
 Commands:
+  list        List the resolved tasks, dependencies, and resource locks without running them
   completion  Generate shell completion script
   help        Print this message or the help of the given subcommand(s)
 
@@ -733,7 +733,6 @@ Arguments:
 Options:
   -j, --jobs <N>         Maximum number of tasks to run concurrently [default: min(CPUs, 6)]
   -f, --fail-fast        Stop starting new tasks after the first failure
-  -l, --list             List the resolved tasks, dependencies, and resource locks without running them
   -S, --scope <SCOPE>    Only run tasks tagged with this scope or a scope it includes
   -C, --config <PATH>    Path to the task file [default: xtask.toml in the current directory or a parent]
   -O, --output <OUTPUT>  Output style: interactive progress, CI log stream, or plain lines [possible values: auto, rich, ci, plain]
@@ -743,8 +742,6 @@ Options:
   -v, --verbose          Print commands as they run
   -h, --help             Print help (see more with '--help')
   -V, --version          Print version
-
-No xtask.toml found in the current directory or its parents.
 ```
 
 ## Vtag

@@ -110,7 +110,7 @@ fn ends_with_failure_recap_and_result_lines_without_a_summary_table() {
 #[test]
 fn runs_selected_task_ids_with_prerequisites() {
     let repository = repository();
-    let output = run_xtask(repository.path(), &["-l", "use-device"]);
+    let output = run_xtask(repository.path(), &["list", "use-device"]);
     let text = stdout(&output);
     assert!(output.status.success(), "{text}");
     assert!(text.contains("Resolved tasks (2):"));
@@ -132,7 +132,7 @@ fn does_not_search_past_the_repository_root() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("No xtask.toml found"));
 
-    let explicit = run_xtask(&inner, &["--config", "../xtask.toml", "--list"]);
+    let explicit = run_xtask(&inner, &["--config", "../xtask.toml", "list"]);
     assert!(
         explicit.status.success(),
         "{}",
@@ -149,6 +149,18 @@ fn help_lists_project_flags_and_the_task_file() {
     assert!(text.contains("Project flags:"));
     assert!(text.contains("-a, --all"));
     assert!(text.contains("Task file: "));
+}
+
+#[test]
+fn help_without_a_task_file_has_no_task_file_note() {
+    let directory = tempfile::tempdir().expect("should create temp dir");
+    std::fs::create_dir_all(directory.path().join(".git")).expect("should create repository");
+    let output = run_xtask(directory.path(), &["-h"]);
+    let text = stdout(&output);
+    assert!(output.status.success());
+    assert!(text.contains("list"));
+    assert!(!text.contains("xtask.toml found"));
+    assert!(!text.contains("Task file: "));
 }
 
 #[test]

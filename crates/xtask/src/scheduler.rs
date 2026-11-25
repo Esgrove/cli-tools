@@ -70,7 +70,7 @@ pub struct TaskSpec {
     pub resources: Vec<Resource>,
     /// Scope tags this task belongs to.
     pub scopes: Vec<String>,
-    /// Concise command summary printed in `--dryrun` and `--list`.
+    /// Concise command summary printed in `--dryrun` and `list`.
     pub dry_run_summary: String,
     /// Action executed when the task is scheduled.
     pub action: TaskAction,

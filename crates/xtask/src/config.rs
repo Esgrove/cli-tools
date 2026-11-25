@@ -16,7 +16,7 @@ use crate::condition::{BUILTIN_CONDITIONS, Condition};
 pub const TASK_FILE_NAME: &str = "xtask.toml";
 
 /// Short options used by the generic command line arguments, which task file flags cannot use.
-pub const RESERVED_SHORT_FLAGS: &[char] = &['C', 'd', 'f', 'h', 'j', 'K', 'l', 'O', 'S', 'T', 'v', 'V'];
+pub const RESERVED_SHORT_FLAGS: &[char] = &['C', 'd', 'f', 'h', 'j', 'K', 'O', 'S', 'T', 'v', 'V'];
 
 /// Long options used by the generic command line arguments, which task file flags cannot use.
 pub const RESERVED_LONG_FLAGS: &[&str] = &[
@@ -26,7 +26,6 @@ pub const RESERVED_LONG_FLAGS: &[&str] = &[
     "fail-fast",
     "help",
     "jobs",
-    "list",
     "output",
     "scope",
     "tail-lines",
@@ -37,8 +36,8 @@ pub const RESERVED_LONG_FLAGS: &[&str] = &[
 /// Platforms a flag can be limited to with `platforms`.
 const PLATFORMS: &[&str] = &["macos", "linux", "windows"];
 
-/// Name of the shell completion subcommand, which cannot be used as a task ID.
-const COMPLETION_SUBCOMMAND: &str = "completion";
+/// Names of the subcommands, which cannot be used as task IDs.
+const SUBCOMMANDS: &[&str] = &["completion", "list"];
 
 /// Root structure deserialized from `xtask.toml`.
 #[derive(Debug, Default, Deserialize)]
@@ -373,8 +372,11 @@ impl TaskFile {
     }
 
     fn validate_task(&self, task: &TaskConfig, builtins: &BTreeSet<String>) -> Result<()> {
-        if task.id == COMPLETION_SUBCOMMAND {
-            bail!("Task ID '{COMPLETION_SUBCOMMAND}' is reserved for the shell completion subcommand");
+        if SUBCOMMANDS.contains(&task.id.as_str()) {
+            bail!(
+                "Task ID '{}' is reserved for the xtask subcommand of the same name",
+                task.id
+            );
         }
         if task.id.is_empty() || task.id.starts_with('-') {
             bail!("Task ID '{}' must not be empty or start with a dash", task.id);
@@ -611,6 +613,7 @@ mod test_task_file_validation {
     #[test]
     fn rejects_reserved_task_id_and_invalid_steps() {
         assert!(validate("[[tasks]]\nid = \"completion\"\nlabel = \"C\"\ncommand = [\"true\"]").is_err());
+        assert!(validate("[[tasks]]\nid = \"list\"\nlabel = \"L\"\ncommand = [\"true\"]").is_err());
         assert!(validate("[[tasks]]\nid = \"a\"\nlabel = \"A\"").is_err());
         assert!(validate("[[tasks]]\nid = \"a\"\nlabel = \"A\"\ncommand = []").is_err());
     }

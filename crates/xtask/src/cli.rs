@@ -14,7 +14,7 @@ use clap::{Arg, ArgAction, ArgMatches, CommandFactory, FromArgMatches, Parser, S
 use clap_complete::Shell;
 use serde::Deserialize;
 
-use crate::config::{TASK_FILE_NAME, TaskFile, TaskFileLocation};
+use crate::config::{TaskFile, TaskFileLocation};
 use crate::process::shell_quote;
 
 /// Generic command line arguments shared by every project.
@@ -25,8 +25,7 @@ use crate::process::shell_quote;
     about = "Run a project's tasks from xtask.toml in parallel",
     long_about = "Run a project's tasks from xtask.toml in parallel.\n\n\
         The task file is searched for in the current directory and its parents up to the git repository root. \
-        Project specific flags declared in the task file are listed below the generic options.",
-    args_conflicts_with_subcommands = true
+        Project specific flags declared in the task file are listed below the generic options."
 )]
 pub struct Args {
     #[command(subcommand)]
@@ -44,16 +43,12 @@ pub struct Args {
     #[arg(short = 'f', long)]
     pub fail_fast: bool,
 
-    /// List the resolved tasks, dependencies, and resource locks without running them
-    #[arg(short = 'l', long)]
-    pub list: bool,
-
     /// Only run tasks tagged with this scope or a scope it includes
-    #[arg(short = 'S', long, value_name = "SCOPE")]
+    #[arg(short = 'S', long, value_name = "SCOPE", global = true)]
     pub scope: Option<String>,
 
     /// Path to the task file [default: xtask.toml in the current directory or a parent]
-    #[arg(short = 'C', long, value_name = "PATH", value_hint = clap::ValueHint::FilePath)]
+    #[arg(short = 'C', long, value_name = "PATH", value_hint = clap::ValueHint::FilePath, global = true)]
     pub config: Option<PathBuf>,
 
     /// Output style: interactive progress, CI log stream, or plain lines
@@ -80,6 +75,14 @@ pub struct Args {
 /// Subcommands for `xtask`.
 #[derive(Debug, Subcommand)]
 pub enum XtaskCommand {
+    /// List the resolved tasks, dependencies, and resource locks without running them
+    #[command(name = "list")]
+    List {
+        /// Task IDs to list with their prerequisites, instead of every task enabled by the flags
+        #[arg(value_name = "TASK")]
+        task_ids: Vec<String>,
+    },
+
     /// Generate shell completion script
     #[command(name = "completion")]
     Completion {
@@ -234,8 +237,11 @@ impl ParsedCli {
         let flags = resolve_flags(task_file, &self.flags, current_os)?;
         let rerun_prefix = self.rerun_prefix(task_file);
         let args = self.args;
-        let task_ids = args
-            .task_ids
+        let (task_ids, list_tasks) = match args.command {
+            Some(XtaskCommand::List { task_ids }) => (task_ids, true),
+            _ => (args.task_ids, false),
+        };
+        let task_ids = task_ids
             .into_iter()
             .map(|id| id.trim().to_owned())
             .filter(|id| !id.is_empty())
@@ -249,7 +255,7 @@ impl ParsedCli {
                 .unwrap_or_else(default_jobs)
                 .max(1),
             fail_fast: args.fail_fast || user_config.fail_fast,
-            list_tasks: args.list,
+            list_tasks,
             scope: args.scope,
             dry_run: args.dryrun,
             verbose: args.verbose,
@@ -428,7 +434,7 @@ impl ColorMode {
 
 /// Build the clap command with the generic arguments and the project flags from `task_file`.
 ///
-/// `location` is shown in the help text, or a note that no task file was found when it is `None`.
+/// `location` is shown in the help text when a task file was found.
 #[must_use]
 pub fn build_command(task_file: Option<&TaskFile>, location: Option<&TaskFileLocation>) -> clap::Command {
     let mut command = Args::command();
@@ -438,18 +444,18 @@ pub fn build_command(task_file: Option<&TaskFile>, location: Option<&TaskFileLoc
                 .long(name.clone())
                 .action(ArgAction::SetTrue)
                 .help(flag.help.clone())
-                .help_heading("Project flags");
+                .help_heading("Project flags")
+                .global(true);
             if let Some(short) = flag.short {
                 arg = arg.short(short);
             }
             command = command.arg(arg);
         }
     }
-    let note = location.map_or_else(
-        || format!("No {TASK_FILE_NAME} found in the current directory or its parents."),
-        |location| format!("Task file: {}", location.path.display()),
-    );
-    command.after_help(note)
+    if let Some(location) = location {
+        command = command.after_help(format!("Task file: {}", location.path.display()));
+    }
+    command
 }
 
 /// Parse `argv` against [`build_command`].
@@ -657,7 +663,6 @@ mod test_argument_parsing {
                 "--tail-lines",
                 "0",
                 "--fail-fast",
-                "--list",
                 "--dryrun",
                 "--verbose",
             ],
@@ -669,13 +674,33 @@ mod test_argument_parsing {
         assert_eq!(parsed.args.output, Some(OutputMode::Plain));
         assert_eq!(parsed.args.color, Some(ColorMode::Never));
         assert_eq!(parsed.args.tail_lines, Some(0));
-        assert!(parsed.args.fail_fast && parsed.args.list && parsed.args.dryrun && parsed.args.verbose);
+        assert!(parsed.args.fail_fast && parsed.args.dryrun && parsed.args.verbose);
     }
 
     #[test]
     fn rejects_unknown_project_flag_without_task_file() {
         assert!(parse_args(["xtask", "--all"], None, None).is_err());
         assert!(parse_args(["xtask", "--jobs", "0"], None, None).is_err());
+    }
+
+    #[test]
+    fn parses_list_subcommand_with_project_flags_and_scope() {
+        let trailing = options(&["xtask", "list", "-a", "--scope", "mobile", "fmt"], "macos").expect("should parse");
+        assert!(trailing.list_tasks);
+        assert!(trailing.flag("all"));
+        assert_eq!(trailing.scope.as_deref(), Some("mobile"));
+        assert_eq!(trailing.task_ids, ["fmt"]);
+
+        let leading = options(&["xtask", "-a", "list"], "macos").expect("should parse");
+        assert!(leading.list_tasks);
+        assert!(leading.flag("all"));
+        assert_eq!(leading.task_ids, [] as [std::string::String; 0]);
+    }
+
+    #[test]
+    fn run_without_subcommand_does_not_list() {
+        let options = options(&["xtask", "fmt"], "macos").expect("should parse");
+        assert!(!options.list_tasks);
     }
 
     #[test]

@@ -462,7 +462,7 @@ fn read_optional(path: &Path) -> Result<Option<String>> {
     }
 }
 
-/// One line summary of the command steps for `--dryrun` and `--list`.
+/// One line summary of the command steps for `--dryrun` and `list`.
 fn summarize_steps(steps: &[CommandStepConfig]) -> String {
     steps
         .iter()

@@ -32,7 +32,7 @@ xtask -ac
 xtask cargo-fmt cargo-clippy
 
 # Show what would run
-xtask --list
+xtask list
 xtask --dryrun -a
 ```
 
