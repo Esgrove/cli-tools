@@ -115,7 +115,8 @@ so that benchmarks can import them directly without duplicating code.
 - `crates/common/benches/lib.rs` - Shared utility functions
 - `crates/common/benches/simd.rs` - SIMD byte scanning kernels against the scalar code they replace,
   from token to file length, precomputed `ByteSet` against per-call sets, bitmap walks, and the newline index
-- `crates/dirmove/benches/dir_move.rs` - Prefix grouping, file matching, contiguity checks
+- `crates/dirmove/benches/dir_move.rs` - Prefix grouping, file matching, contiguity checks,
+  and matching and grouping 500 and 5000 generated files
 - `crates/dupefind/benches/dupe_find.rs` - Stem normalization, duplicate grouping, regex matching,
   and the full matcher on 1000 and 10000 generated files
 - `crates/dots/benches/format.rs` - Dot-rename formatting pipeline

@@ -16,7 +16,10 @@ use cli_tools_dirmove::candidates::{
 use cli_tools_dirmove::grouping::PrefixGroupBuilder;
 use cli_tools_dirmove::name_filter::is_unwanted_directory;
 use cli_tools_dirmove::utils::{filter_numeric_resolution_and_glue_parts, normalize_name};
-use cli_tools_dirmove::{FileInfo, FilteredParts, PrefixIndex};
+use cli_tools_dirmove::{
+    CustomMapping, DirectoryInfo, DirectoryMatcher, FileInfo, FilteredParts, GroupingOptions, NameFilter,
+    PrefixGrouper, PrefixIndex, Roots,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -898,6 +901,85 @@ fn bench_find_prefix_candidates_scaled(criterion: &mut Criterion) {
 // Criterion groups
 // ---------------------------------------------------------------------------
 
+/// File names for a directory of the given size: series of eight episodes and unrelated files,
+/// each named in one of several conventions.
+fn generated_file_names(count: usize) -> Vec<String> {
+    const WORDS: &[&str] = &[
+        "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Theta", "Kappa", "Lambda", "Sigma", "Omega", "Rho",
+    ];
+    (0..count)
+        .map(|index| {
+            let series = index / 8;
+            let first = WORDS[series % WORDS.len()];
+            let second = WORDS[(series / WORDS.len()) % WORDS.len()];
+            let third = WORDS[(series / (WORDS.len() * WORDS.len())) % WORDS.len()];
+            match index % 4 {
+                0 => format!("{first}.{second}.{third}.S01E{:02}.1080p.mkv", index % 8),
+                1 => format!("{first} {second} {third} Episode {}.mp4", index % 8),
+                2 => format!("{first}{second}{third}.Part.{}.2024.mkv", index % 8),
+                _ => format!("{}.{first}.{second}.{third}.{}.x265.mp4", series % 3, index % 8),
+            }
+        })
+        .collect()
+}
+
+/// Destination directories whose names match some of the generated series.
+fn generated_directories(count: usize) -> Vec<DirectoryInfo> {
+    generated_file_names(count * 8)
+        .iter()
+        .step_by(8)
+        .enumerate()
+        .map(|(index, name)| {
+            let directory = name.split('.').take(3).collect::<Vec<_>>().join(" ");
+            let nested = if index % 3 == 0 { "nested/" } else { "" };
+            DirectoryInfo::new(PathBuf::from(format!("/output/{nested}{directory}")))
+        })
+        .collect()
+}
+
+fn bench_matching_and_grouping_scaled(c: &mut Criterion) {
+    let roots = Roots::new(vec![PathBuf::from("/input")], vec![PathBuf::from("/output")]);
+    let name_filter = NameFilter::new(["site", "watch"], ["episode", "part"]);
+    let custom_mappings: Vec<CustomMapping> = ["Alpha.Beta", "Gamma", "Omega Rho", "Kappa.Kappa"]
+        .iter()
+        .filter_map(|pattern| CustomMapping::new(pattern, &format!("Mapped {pattern}")))
+        .collect();
+    let grouping_options = GroupingOptions::new(3, 4, ["episode", "part"], Vec::<String>::new());
+    let grouper = PrefixGrouper::new(&grouping_options, &name_filter);
+    let mut group = c.benchmark_group("dir_move/scaled");
+    group.sample_size(10);
+    for count in [500, 5_000] {
+        let names = generated_file_names(count);
+        let paths: Vec<PathBuf> = names
+            .iter()
+            .map(|name| PathBuf::from(format!("/input/{name}")))
+            .collect();
+        let mut directories = generated_directories(count / 16);
+        directories.extend(
+            custom_mappings
+                .iter()
+                .map(|mapping| DirectoryInfo::new(PathBuf::from(format!("/output/Mapped {}", mapping.pattern())))),
+        );
+        let matcher = DirectoryMatcher::new(&roots, &name_filter, &custom_mappings);
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let files = make_filtered_files(&name_refs);
+        group.bench_with_input(BenchmarkId::new("match_files", count), &paths, |b, paths| {
+            b.iter(|| matcher.match_files(black_box(paths), &directories));
+        });
+        group.bench_with_input(BenchmarkId::new("match_custom_mappings", count), &paths, |b, paths| {
+            b.iter(|| matcher.match_custom_mappings(black_box(paths), &directories));
+        });
+        group.bench_with_input(
+            BenchmarkId::new("collect_all_prefix_groups", count),
+            &files,
+            |b, files| {
+                b.iter(|| grouper.collect_all_prefix_groups(black_box(files)));
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_normalize_name,
@@ -919,6 +1001,7 @@ criterion_group!(
     bench_prefix_group_builder,
     bench_batch_preprocessing,
     bench_is_unwanted_directory,
+    bench_matching_and_grouping_scaled,
 );
 
 criterion_main!(benches);

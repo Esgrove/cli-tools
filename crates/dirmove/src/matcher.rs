@@ -162,15 +162,22 @@ impl<'a> DirectoryMatcher<'a> {
     /// Directory name length breaks same-depth ties, favoring more specific names before shorter broad matches.
     #[must_use]
     pub fn sorted_directory_indices(&self, directories: &[DirectoryInfo]) -> Vec<usize> {
-        let mut indexed_directories: Vec<_> = directories.iter().enumerate().collect();
-        indexed_directories.sort_by(|(_, left), (_, right)| {
-            self.roots
-                .output_depth(&right.path)
-                .cmp(&self.roots.output_depth(&left.path))
-                .then_with(|| right.name.chars().count().cmp(&left.name.chars().count()))
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        indexed_directories.into_iter().map(|(index, _)| index).collect()
+        // The depth and name length are computed once per directory instead of once per comparison.
+        // The index is the last key, so equal directories keep their input order.
+        let mut keyed_directories: Vec<_> = directories
+            .iter()
+            .enumerate()
+            .map(|(index, directory)| {
+                (
+                    std::cmp::Reverse(self.roots.output_depth(&directory.path)),
+                    std::cmp::Reverse(directory.name.chars().count()),
+                    directory.name.as_str(),
+                    index,
+                )
+            })
+            .collect();
+        keyed_directories.sort_unstable();
+        keyed_directories.into_iter().map(|(_, _, _, index)| index).collect()
     }
 
     /// Match files to directories based on normalized name matching.
@@ -229,6 +236,13 @@ impl<'a> DirectoryMatcher<'a> {
         directories: &[DirectoryInfo],
     ) -> HashMap<usize, Vec<FileMatch>> {
         let mut custom_matches: HashMap<usize, Vec<FileMatch>> = HashMap::new();
+        // Each mapping resolves to the same directory for every file, so resolve them all once.
+        let sorted_directories = self.sorted_directory_indices(directories);
+        let mapping_directories: Vec<Option<usize>> = self
+            .custom_mappings
+            .iter()
+            .map(|mapping| Self::mapping_directory(mapping, directories, &sorted_directories))
+            .collect();
 
         for (file_index, file_path) in files.iter().enumerate() {
             let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) else {
@@ -236,9 +250,9 @@ impl<'a> DirectoryMatcher<'a> {
             };
 
             let file_name_normalized = utils::normalize_name(file_name);
-            for mapping in self.custom_mappings {
+            for (mapping, mapping_directory) in self.custom_mappings.iter().zip(&mapping_directories) {
                 if file_name_normalized.contains(&mapping.pattern)
-                    && let Some(directory_index) = self.find_directory_for_custom_mapping(mapping, directories)
+                    && let Some(directory_index) = *mapping_directory
                     && let Some(range) = NormalizedFilename::new(file_name).find_match(&mapping.pattern)
                 {
                     custom_matches.entry(directory_index).or_default().push(FileMatch {
@@ -263,15 +277,7 @@ impl<'a> DirectoryMatcher<'a> {
         mapping: &CustomMapping,
         directories: &[DirectoryInfo],
     ) -> Option<usize> {
-        let target_normalized = utils::normalize_name(&mapping.directory);
-
-        self.sorted_directory_indices(directories)
-            .into_iter()
-            .find(|&directory_index| {
-                directories
-                    .get(directory_index)
-                    .is_some_and(|directory| utils::normalize_name(&directory.name) == target_normalized)
-            })
+        Self::mapping_directory(mapping, directories, &self.sorted_directory_indices(directories))
     }
 
     /// Match input directories to destination directories with the same normalized name.
@@ -355,6 +361,20 @@ impl<'a> DirectoryMatcher<'a> {
                 })
             })
             .collect()
+    }
+
+    /// The first directory in priority order whose normalized name is the mapping's target directory.
+    fn mapping_directory(
+        mapping: &CustomMapping,
+        directories: &[DirectoryInfo],
+        sorted_directories: &[usize],
+    ) -> Option<usize> {
+        let target_normalized = utils::normalize_name(&mapping.directory);
+        sorted_directories.iter().copied().find(|&directory_index| {
+            directories
+                .get(directory_index)
+                .is_some_and(|directory| utils::normalize_name(&directory.name) == target_normalized)
+        })
     }
 }
 
