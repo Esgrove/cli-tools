@@ -87,7 +87,7 @@ pub struct DotRenameConfig {
     pub recurse: bool,
     pub regex_replace: Vec<(Regex, String)>,
     pub regex_replace_after: Vec<(Regex, String)>,
-    pub remove_from_start: Vec<String>,
+    pub remove_from_start: Vec<Regex>,
     pub remove_random: bool,
     pub rename_directories: bool,
     pub replace: Vec<(String, String)>,
@@ -205,6 +205,21 @@ impl DotsConfig {
             .collect()
     }
 
+    /// Compile the words removed from the start of a name into case-sensitive word boundary regexes.
+    ///
+    /// # Errors
+    /// Returns an error if any regex pattern is invalid.
+    pub fn compile_remove_from_start_patterns(patterns: Vec<String>) -> anyhow::Result<Vec<Regex>> {
+        patterns
+            .into_iter()
+            .map(|pattern| {
+                let escaped = regex::escape(&pattern);
+                Regex::new(&format!(r"\b{escaped}\b"))
+                    .with_context(|| format!("Invalid remove from start pattern: {pattern}"))
+            })
+            .collect()
+    }
+
     /// Compile regex patterns from string pairs.
     ///
     /// # Errors
@@ -266,7 +281,7 @@ impl DotRenameConfig {
             recurse: user_config.recurse || user_config.prefix_dir_recursive || user_config.suffix_dir_recursive,
             regex_replace: config_regex,
             regex_replace_after: Vec::default(),
-            remove_from_start: user_config.remove_from_start,
+            remove_from_start: DotsConfig::compile_remove_from_start_patterns(user_config.remove_from_start)?,
             remove_random: user_config.remove_random,
             rename_directories: user_config.directory,
             replace: user_config.replace,

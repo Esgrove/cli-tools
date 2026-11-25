@@ -178,11 +178,7 @@ impl DotRename {
         progress_bar.finish_and_clear();
 
         // Sort sequentially after parallel collection
-        results.sort_by(|(a, _), (b, _)| {
-            a.to_string_lossy()
-                .to_lowercase()
-                .cmp(&b.to_string_lossy().to_lowercase())
-        });
+        results.sort_by_cached_key(|(path, _)| cli_tools_common::path_to_string(path).to_lowercase());
 
         Ok(results)
     }
@@ -239,11 +235,7 @@ impl DotRename {
         progress_bar.finish_and_clear();
 
         // Sort results
-        results.sort_by(|(a, _), (b, _)| {
-            a.to_string_lossy()
-                .to_lowercase()
-                .cmp(&b.to_string_lossy().to_lowercase())
-        });
+        results.sort_by_cached_key(|(path, _)| cli_tools_common::path_to_string(path).to_lowercase());
 
         results
     }

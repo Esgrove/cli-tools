@@ -8,9 +8,11 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use regex::Regex;
 
 use cli_tools_dots::{
-    DotFormat, DotRenameConfig, collapse_consecutive_dots, collapse_consecutive_dots_in_place, remove_extra_dots,
+    DotFormat, DotRenameConfig, DotsConfig, collapse_consecutive_dots, collapse_consecutive_dots_in_place,
+    remove_extra_dots,
 };
 
 /// Create a default `DotRenameConfig` for benchmarking.
@@ -48,6 +50,25 @@ fn config_with_prefix_suffix() -> DotRenameConfig {
     DotRenameConfig {
         prefix: Some("MyPrefix".to_string()),
         suffix: Some("MySuffix".to_string()),
+        ..default_config()
+    }
+}
+
+/// Create a config that uses the regex driven options a typical user config sets.
+fn config_with_regex_options() -> DotRenameConfig {
+    DotRenameConfig {
+        remove_from_start: DotsConfig::compile_remove_from_start_patterns(vec![
+            "Site".to_string(),
+            "Watch Online".to_string(),
+            "Download".to_string(),
+        ])
+        .expect("valid patterns"),
+        regex_replace: vec![(
+            Regex::new(r"(?i)\bpart\.(\d+)").expect("valid regex"),
+            "Pt.$1".to_string(),
+        )],
+        move_to_start: vec![Regex::new(r"(?i)\bSeries\.\d+").expect("valid regex")],
+        move_to_end: vec![Regex::new(r"(?i)\bExtended\b").expect("valid regex")],
         ..default_config()
     }
 }
@@ -234,6 +255,26 @@ fn bench_format_name_with_replacements(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_format_name_with_regex_options(c: &mut Criterion) {
+    let config = config_with_regex_options();
+    let formatter = DotFormat::new(&config);
+
+    let names = [
+        "Site.Movie.Name.2024.1080p",
+        "Some Show Part 2 Extended Watch Online",
+        "Download.Series.3.Episode.Title.Site.Extra",
+        "No.Options.Apply.Here",
+    ];
+
+    let mut group = c.benchmark_group("format_name/regex_options");
+    for name in &names {
+        group.bench_with_input(BenchmarkId::from_parameter(name), name, |b, input| {
+            b.iter(|| formatter.format_name(black_box(input)));
+        });
+    }
+    group.finish();
+}
+
 fn bench_format_name_with_prefix_suffix(c: &mut Criterion) {
     let config = config_with_prefix_suffix();
     let formatter = DotFormat::new(&config);
@@ -403,6 +444,7 @@ criterion_group!(
     bench_format_name_written_dates,
     bench_format_name_year_first,
     bench_format_name_with_replacements,
+    bench_format_name_with_regex_options,
     bench_format_name_with_prefix_suffix,
     bench_format_name_without_prefix_suffix,
     bench_format_directory_name,

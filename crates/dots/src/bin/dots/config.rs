@@ -101,7 +101,7 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
             || user_config.suffix_dir_recursive,
         regex_replace,
         regex_replace_after: Vec::default(),
-        remove_from_start: user_config.remove_from_start,
+        remove_from_start: DotsConfig::compile_remove_from_start_patterns(user_config.remove_from_start)?,
         remove_random: cli.random || user_config.remove_random,
         rename_directories: cli.directory || user_config.directory,
         replace,

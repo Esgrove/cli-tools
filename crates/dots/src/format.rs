@@ -399,8 +399,7 @@ impl DotFormat<'_> {
     }
 
     fn remove_from_start(&self, name: &mut String) {
-        for pattern in &self.config.remove_from_start {
-            let re = Regex::new(&format!(r"\b{}\b", regex::escape(pattern))).expect("Failed to create regex pattern");
+        for re in &self.config.remove_from_start {
             if let Some(last_match) = re.find_iter(name).last()
                 && let Some((before_last, after_last)) = name.split_at_checked(last_match.start())
             {
@@ -1421,9 +1420,11 @@ mod test_remove_from_start {
     use std::sync::LazyLock;
 
     use super::*;
+    use crate::DotsConfig;
 
     static REMOVE_START_CONFIG: LazyLock<DotRenameConfig> = LazyLock::new(|| DotRenameConfig {
-        remove_from_start: vec!["Test".to_string(), "test".to_string()],
+        remove_from_start: DotsConfig::compile_remove_from_start_patterns(vec!["Test".to_string(), "test".to_string()])
+            .unwrap(),
         ..Default::default()
     });
 
