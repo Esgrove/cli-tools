@@ -6,29 +6,28 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::prefix_index::PrefixIndex;
 use crate::utils::normalize_name;
 
-/// Information about a file for grouping purposes.
-/// Uses `Cow` for efficient string handling - avoids cloning when possible.
+/// A file's original and filtered names, used to find the prefixes it shares with other files.
 ///
-/// Includes pre-computed split and lowercased parts to avoid redundant work in hot loops
-/// where `prefix_matches_normalized` and `parts_are_contiguous_in_original` are called O(N × K × N) times.
-pub struct FileInfo<'a> {
+/// The split and lowercased parts are computed once,
+/// since prefix matching and contiguity checks run for every candidate prefix of every file.
+pub struct FileInfo {
     /// Path to the file.
-    pub path: Cow<'a, Path>,
+    pub path: PathBuf,
     /// Original filename after stripping ignored prefixes (used for contiguity checks).
-    pub original_name: Cow<'a, str>,
+    pub original_name: String,
     /// Filtered filename with numeric/resolution/glue parts removed (used for prefix matching).
-    pub filtered_name: Cow<'a, str>,
-    /// Pre-computed: `original_name` split by `'.'` (owned, for thread safety).
-    pub original_parts: Vec<String>,
+    pub filtered_name: String,
+    /// Pre-computed: `original_name` split by `'.'`.
+    original_parts: Vec<String>,
     /// Pre-computed: `original_parts` lowercased, in the same order.
-    pub original_parts_lower: Vec<String>,
+    original_parts_lower: Vec<String>,
     /// Pre-computed filtered name parts and their combinations for efficient prefix matching.
-    pub filtered_parts: FilteredParts,
+    filtered_parts: FilteredParts,
 }
 
 /// Pre-computed part combinations from a filtered filename for efficient prefix matching.
@@ -66,38 +65,49 @@ pub struct PrefixCandidate<'a> {
     pub start_position: usize,
 }
 
-impl FileInfo<'_> {
-    /// Create a new `FileInfo` with owned strings.
-    /// Pre-computes split and lowercased parts for efficient matching in hot loops.
+impl FileInfo {
+    /// Create a new `FileInfo`, pre-computing the split and lowercased parts for matching in hot loops.
     pub fn new(path: PathBuf, original_name: String, filtered_name: String) -> Self {
         let original_parts: Vec<String> = original_name.split('.').map(String::from).collect();
         let original_parts_lower: Vec<String> = original_parts.iter().map(|part| part.to_lowercase()).collect();
         let filtered_parts = FilteredParts::new(&filtered_name);
 
         Self {
-            path: Cow::Owned(path),
-            original_name: Cow::Owned(original_name),
-            filtered_name: Cow::Owned(filtered_name),
+            path,
+            original_name,
+            filtered_name,
             original_parts,
             original_parts_lower,
             filtered_parts,
         }
     }
 
-    /// Get the path as a `PathBuf`.
+    /// Return `original_name` split on `'.'`.
     #[must_use]
-    pub fn path_buf(&self) -> PathBuf {
-        self.path.to_path_buf()
+    pub fn original_parts(&self) -> &[String] {
+        &self.original_parts
+    }
+
+    /// Return `original_parts` lowercased, in the same order.
+    #[must_use]
+    pub fn original_parts_lower(&self) -> &[String] {
+        &self.original_parts_lower
+    }
+
+    /// Return the pre-computed part combinations of `filtered_name`.
+    #[must_use]
+    pub const fn filtered_parts(&self) -> &FilteredParts {
+        &self.filtered_parts
     }
 }
 
-impl fmt::Debug for FileInfo<'_> {
+impl fmt::Debug for FileInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileInfo")
             .field("path", &self.path)
             .field("original_name", &self.original_name)
             .field("filtered_name", &self.filtered_name)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -261,7 +271,7 @@ impl<'a> PrefixCandidate<'a> {
 #[must_use]
 pub fn find_prefix_candidates<'a>(
     file_name: &'a str,
-    all_files: &[FileInfo<'_>],
+    all_files: &[FileInfo],
     min_group_size: usize,
     min_prefix_chars: usize,
 ) -> Vec<PrefixCandidate<'a>> {
@@ -275,7 +285,7 @@ pub fn find_prefix_candidates<'a>(
 #[must_use]
 pub fn find_prefix_candidates_indexed<'a>(
     file_name: &'a str,
-    all_files: &[FileInfo<'_>],
+    all_files: &[FileInfo],
     index: &PrefixIndex<'_>,
     min_group_size: usize,
     min_prefix_chars: usize,
@@ -392,12 +402,11 @@ pub fn count_prefix_chars(prefix: &str) -> usize {
 
 /// Check if pre-computed [`FileInfo`] parts contain the given normalized target.
 ///
-/// Delegates to [`FilteredParts::prefix_matches_normalized`]
-/// which uses the pre-split and pre-lowercased single,
-/// 2-part, and 3-part combinations stored on `FilteredParts` to avoid redundant `split('.')`, `to_lowercase()`,
-/// and `format!()` calls in the O(N × K × N) hot loop inside `find_prefix_candidates`.
+/// Delegates to [`FilteredParts::prefix_matches_normalized`].
+/// Grouping looks files up through [`PrefixIndex`] instead,
+/// and this per-file check is the reference that the index is tested and benchmarked against.
 #[must_use]
-pub fn prefix_matches_normalized_precomputed(file_info: &FileInfo<'_>, target_normalized: &str) -> bool {
+pub fn prefix_matches_normalized_precomputed(file_info: &FileInfo, target_normalized: &str) -> bool {
     file_info.filtered_parts.prefix_matches_normalized(target_normalized)
 }
 
@@ -548,7 +557,7 @@ mod test_helpers {
 
     /// Create `FileInfo` from original filenames by applying the standard filtering.
     /// The original name and filtered name are both derived from the input.
-    pub fn make_filtered_files(names: &[&str]) -> Vec<FileInfo<'static>> {
+    pub fn make_filtered_files(names: &[&str]) -> Vec<FileInfo> {
         names
             .iter()
             .map(|name| {
@@ -1597,7 +1606,7 @@ mod test_prefix_candidates {
 
     #[test]
     fn empty_file_list() {
-        let files: Vec<FileInfo<'_>> = Vec::new();
+        let files: Vec<FileInfo> = Vec::new();
         let candidates = find_prefix_candidates("Some.Name.mp4", &files, 2, 1);
         assert_eq!(candidates, [] as [PrefixCandidate<'_>; 0]);
     }

@@ -389,7 +389,7 @@ impl DestinationMatchInfo<'_> {
 /// Returns the mapped directory names in sorted order with their files and highlight ranges.
 #[must_use]
 pub fn group_files_by_custom_mapping(
-    files_with_names: &[FileInfo<'_>],
+    files_with_names: &[FileInfo],
     custom_mappings: &[CustomMapping],
 ) -> BTreeMap<String, Vec<ListedFile>> {
     let mut mapping_groups: BTreeMap<String, Vec<ListedFile>> = BTreeMap::new();
@@ -403,7 +403,7 @@ pub fn group_files_by_custom_mapping(
             continue;
         };
 
-        let path = file_info.path_buf();
+        let path = file_info.path.clone();
         let filename = path_to_filename_string(&path);
         if let Some(range) = NormalizedFilename::new(&filename).find_match(&mapping.pattern) {
             mapping_groups

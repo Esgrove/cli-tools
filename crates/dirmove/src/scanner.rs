@@ -88,13 +88,13 @@ impl ScanOptions {
 
     /// Return whether a lowercase name contains any include pattern, or there are no include patterns.
     #[must_use]
-    pub fn is_included(&self, name_lowercase: &str) -> bool {
+    fn is_included(&self, name_lowercase: &str) -> bool {
         self.include.is_empty() || self.include.iter().any(|pattern| name_lowercase.contains(pattern))
     }
 
     /// Return whether a lowercase name contains any exclude pattern.
     #[must_use]
-    pub fn is_excluded(&self, name_lowercase: &str) -> bool {
+    fn is_excluded(&self, name_lowercase: &str) -> bool {
         self.exclude.iter().any(|pattern| name_lowercase.contains(pattern))
     }
 }
@@ -143,7 +143,7 @@ impl<'a> Scanner<'a> {
     ///
     /// # Errors
     /// Returns an error if an input directory cannot be read.
-    pub fn collect_files_with_names(&self) -> Result<Vec<FileInfo<'static>>> {
+    pub fn collect_files_with_names(&self) -> Result<Vec<FileInfo>> {
         let mut files_with_names = Vec::new();
         let mut seen_paths = HashSet::new();
 

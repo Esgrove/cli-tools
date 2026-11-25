@@ -335,7 +335,7 @@ impl Unpacker {
     ///
     /// Symlinks are not followed, matching how `plan` moves them as links.
     #[must_use]
-    pub fn contains_unpack_directory(&self, directory: &Path) -> bool {
+    fn contains_unpack_directory(&self, directory: &Path) -> bool {
         let Ok(entries) = std::fs::read_dir(directory) else {
             return false;
         };

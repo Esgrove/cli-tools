@@ -95,7 +95,7 @@ impl Roots {
     /// Paths outside all output roots fall back to absolute component count,
     /// which keeps ordering deterministic for synthetic paths.
     #[must_use]
-    pub fn output_depth(&self, directory: &Path) -> usize {
+    pub(crate) fn output_depth(&self, directory: &Path) -> usize {
         self.output
             .iter()
             .filter_map(|output_root| directory.strip_prefix(output_root).ok())

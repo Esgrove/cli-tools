@@ -658,7 +658,7 @@ impl DirMove {
     /// Updates `moved_files` with files that were successfully moved.
     fn process_custom_mappings_create_mode(
         &self,
-        files_with_names: &[FileInfo<'_>],
+        files_with_names: &[FileInfo],
         moved_files: &mut HashSet<PathBuf>,
     ) -> anyhow::Result<()> {
         if self.config.custom_mappings.is_empty() {

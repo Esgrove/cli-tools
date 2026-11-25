@@ -302,8 +302,11 @@ pub fn print_match_debug(matches: &HashMap<usize, Vec<FileMatch>>, directories: 
 }
 
 /// Print the unique processed names used for grouping.
-pub fn print_grouping_names_debug(files_with_names: &[FileInfo<'_>]) {
-    let unique_names: HashSet<_> = files_with_names.iter().map(|f| f.filtered_name.as_ref()).collect();
+pub fn print_grouping_names_debug(files_with_names: &[FileInfo]) {
+    let unique_names: HashSet<_> = files_with_names
+        .iter()
+        .map(|file| file.filtered_name.as_str())
+        .collect();
     let mut sorted_names: Vec<_> = unique_names.into_iter().collect();
     sorted_names.sort_unstable();
     eprintln!("Unique processed names for grouping:");

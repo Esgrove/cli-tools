@@ -13,7 +13,7 @@ use crate::utils;
 const MIN_DIRECTORY_NAME_CHARS: usize = 4;
 
 /// Directory names that should be deleted when encountered.
-pub const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
+const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
 
 /// Ignored prefix and ignored group name rules for file and directory names.
 #[derive(Debug, Clone, Default)]
@@ -95,7 +95,11 @@ impl NameFilter {
     /// `directory_name_normalized` must be precomputed by the caller to avoid repeated normalization
     /// while filtering the full destination directory list.
     #[must_use]
-    pub fn should_skip_destination_directory(&self, directory_name: &str, directory_name_normalized: &str) -> bool {
+    pub(crate) fn should_skip_destination_directory(
+        &self,
+        directory_name: &str,
+        directory_name_normalized: &str,
+    ) -> bool {
         if self.is_unusable_normalized_name(directory_name_normalized) {
             return true;
         }

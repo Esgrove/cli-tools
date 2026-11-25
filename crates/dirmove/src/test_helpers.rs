@@ -213,7 +213,7 @@ pub fn make_test_fixture(prefix_overrides: Vec<&str>) -> Fixture {
 
 /// Create test files with path, original name, and filtered name.
 /// For simple tests, the original and filtered names are the same.
-pub fn make_test_files(names: &[&str]) -> Vec<FileInfo<'static>> {
+pub fn make_test_files(names: &[&str]) -> Vec<FileInfo> {
     names
         .iter()
         .map(|name| FileInfo::new(PathBuf::from(*name), (*name).to_string(), (*name).to_string()))

@@ -26,10 +26,10 @@ struct IndexEntry<'a> {
 impl<'a> PrefixIndex<'a> {
     /// Index the part combinations of the files.
     #[must_use]
-    pub fn new(files: &'a [FileInfo<'_>]) -> Self {
+    pub fn new(files: &'a [FileInfo]) -> Self {
         let mut entries = Vec::new();
         for (file_index, info) in files.iter().enumerate() {
-            let parts = &info.filtered_parts;
+            let parts = info.filtered_parts();
             let combinations = parts
                 .parts_lower
                 .iter()
@@ -51,7 +51,7 @@ impl<'a> PrefixIndex<'a> {
     /// A file matches exactly when [`FilteredParts::prefix_matches_normalized`] accepts it:
     /// one of its combinations equals the target,
     /// or starts with it at a word boundary of the original casing.
-    pub fn matching_files(&self, target: &str, matches: &mut Vec<usize>) {
+    pub(crate) fn matching_files(&self, target: &str, matches: &mut Vec<usize>) {
         matches.clear();
         if target.is_empty() {
             return;
@@ -78,10 +78,10 @@ mod test_prefix_index {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::filter_numeric_resolution_and_glue_parts;
+    use crate::utils::filter_numeric_resolution_and_glue_parts;
 
     /// Build the file infos the way `dirmove` does, filtering each name first.
-    fn files(names: &[&str]) -> Vec<FileInfo<'static>> {
+    fn files(names: &[&str]) -> Vec<FileInfo> {
         names
             .iter()
             .map(|name| {
@@ -133,7 +133,7 @@ mod test_prefix_index {
             let expected: Vec<usize> = files
                 .iter()
                 .enumerate()
-                .filter(|(_, file)| file.filtered_parts.prefix_matches_normalized(target))
+                .filter(|(_, file)| file.filtered_parts().prefix_matches_normalized(target))
                 .map(|(position, _)| position)
                 .collect();
             assert_eq!(matches, expected, "target {target:?}");

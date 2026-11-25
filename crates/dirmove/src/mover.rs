@@ -13,7 +13,7 @@ use cli_tools_common::{TargetReservations, path_to_filename_string, paths_refer_
 use cli_tools_media::file_hash::hash_file;
 
 /// Size of chunks used when copying files across devices.
-pub const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 /// One step of moving a batch of files into a directory.
 #[derive(Debug)]

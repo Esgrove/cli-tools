@@ -69,7 +69,7 @@ pub struct PrefixGroup {
 /// Intermediate data structure for building prefix groups.
 /// A validated prefix candidate ready to be merged into prefix groups.
 /// Produced during the parallel first pass of `collect_all_prefix_groups`.
-pub struct ValidCandidate {
+struct ValidCandidate {
     /// Normalized group key (lowercase, no dots).
     pub key: String,
     /// Path to the file this candidate belongs to.
@@ -200,7 +200,7 @@ impl<'a> PrefixGrouper<'a> {
     /// Files can appear in multiple groups, since they are only excluded once actually moved.
     /// Returns a map from display prefix to its group, where the part count indicates specificity.
     #[must_use]
-    pub fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, PrefixGroup> {
+    pub fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo]) -> HashMap<String, PrefixGroup> {
         self.collect_all_prefix_groups_with_progress(files_with_names, &())
     }
 
@@ -208,7 +208,7 @@ impl<'a> PrefixGrouper<'a> {
     #[must_use]
     pub fn collect_all_prefix_groups_with_progress(
         &self,
-        files_with_names: &[FileInfo<'_>],
+        files_with_names: &[FileInfo],
         progress: &impl GroupingProgress,
     ) -> HashMap<String, PrefixGroup> {
         let prefix_index = PrefixIndex::new(files_with_names);
@@ -229,7 +229,7 @@ impl<'a> PrefixGrouper<'a> {
     /// or that any of its file names starts with.
     /// Groups that end up under the same prefix are merged.
     #[must_use]
-    pub fn apply_prefix_overrides(&self, groups: HashMap<String, PrefixGroup>) -> HashMap<String, PrefixGroup> {
+    fn apply_prefix_overrides(&self, groups: HashMap<String, PrefixGroup>) -> HashMap<String, PrefixGroup> {
         if self.options.prefix_overrides.is_empty() {
             return groups;
         }
@@ -322,7 +322,7 @@ impl<'a> PrefixGrouper<'a> {
     /// or whose parts are not contiguous in the file's original name are left out.
     fn first_pass(
         &self,
-        files_with_names: &[FileInfo<'_>],
+        files_with_names: &[FileInfo],
         prefix_index: &PrefixIndex<'_>,
         progress: &impl GroupingProgress,
     ) -> HashMap<String, PrefixGroupBuilder> {
@@ -342,7 +342,7 @@ impl<'a> PrefixGrouper<'a> {
                 );
 
                 let mut valid_candidates: Vec<ValidCandidate> = Vec::new();
-                let file_path = file_info.path_buf();
+                let file_path = file_info.path.clone();
 
                 for candidate in prefix_candidates {
                     let key = utils::normalize_name(&candidate.prefix);
@@ -358,8 +358,8 @@ impl<'a> PrefixGrouper<'a> {
                     // Filtering can make non-adjacent parts look adjacent,
                     // so the file itself must have the prefix parts contiguous in its original name.
                     if !candidates::parts_are_contiguous_lowered(
-                        &file_info.original_parts,
-                        &file_info.original_parts_lower,
+                        file_info.original_parts(),
+                        file_info.original_parts_lower(),
                         &candidate_parts,
                         &candidate_combined,
                     ) {
@@ -414,7 +414,7 @@ impl<'a> PrefixGrouper<'a> {
     /// This handles cases like `JosephExampleTV` joining the `JosephExample` group,
     /// using the prefix index instead of checking every group against every file.
     fn second_pass(
-        files_with_names: &[FileInfo<'_>],
+        files_with_names: &[FileInfo],
         prefix_index: &PrefixIndex<'_>,
         prefix_groups: &mut HashMap<String, PrefixGroupBuilder>,
         progress: &impl GroupingProgress,
@@ -441,11 +441,11 @@ impl<'a> PrefixGrouper<'a> {
                     let Some(file_info) = files_with_names.get(index) else {
                         continue;
                     };
-                    let file_path = file_info.path_buf();
+                    let file_path = file_info.path.clone();
                     if !existing_files.contains(&file_path)
                         && candidates::parts_are_contiguous_lowered(
-                            &file_info.original_parts,
-                            &file_info.original_parts_lower,
+                            file_info.original_parts(),
+                            file_info.original_parts_lower(),
                             &[group_key.as_str()],
                             group_combined,
                         )
@@ -541,7 +541,7 @@ impl PrefixGroupBuilder {
     /// Prefers CamelCase (mixed case) over all-uppercase or all-lowercase.
     /// Uses alphabetical order as final tiebreaker for determinism.
     #[must_use]
-    pub fn is_better_prefix(new_prefix: &str, current_prefix: &str) -> bool {
+    fn is_better_prefix(new_prefix: &str, current_prefix: &str) -> bool {
         let new_score = Self::casing_score(new_prefix);
         let current_score = Self::casing_score(current_prefix);
 
@@ -561,7 +561,7 @@ impl PrefixGroupBuilder {
     /// Mixed case starting with lowercase = 1
     /// All lowercase or all uppercase = 0
     #[must_use]
-    pub fn casing_score(prefix: &str) -> u8 {
+    fn casing_score(prefix: &str) -> u8 {
         let mut chars = prefix.chars();
         let Some(first) = chars.next() else {
             return 0;

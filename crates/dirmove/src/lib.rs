@@ -24,15 +24,14 @@ pub mod utils;
 #[cfg(test)]
 mod test_helpers;
 
-pub use candidates::*;
-pub use grouping::{GroupingOptions, GroupingProgress, GroupingStage, PrefixGrouper};
+pub use candidates::{FileInfo, FilteredParts, PrefixCandidate};
+pub use grouping::{GroupingOptions, GroupingProgress, GroupingStage, PrefixGroup, PrefixGrouper};
 pub use matcher::{CustomMapping, DirectoryMatcher, FileMatch, ListedFile, NormalizedFilename};
-pub use merge::{DirectoryMerger, MergeEvent, MergeObserver};
-pub use mover::*;
+pub use merge::{DirectoryMerger, MergeEvent, MergeObserver, MergePair};
+pub use mover::{MoveEvent, MoveObserver, MoveReport};
 pub use name_filter::NameFilter;
-pub use prefix_index::*;
+pub use prefix_index::PrefixIndex;
 pub use roots::Roots;
 pub use scanner::{DirectoryScan, ScanOptions, Scanner};
-pub use types::*;
+pub use types::DirectoryInfo;
 pub use unpack::{EntryMove, PlannedMove, UnpackCandidates, UnpackEvent, UnpackObserver, UnpackPlan, Unpacker};
-pub use utils::*;
