@@ -139,6 +139,8 @@ pub enum SkipReason {
     ResolutionBelowLimit { width: u32, height: u32, limit: u32 },
     /// Output file already exists
     OutputExists { path: PathBuf, source_duration: f64 },
+    /// Another file in the same run produces the same output path
+    OutputConflict { path: PathBuf },
     /// File no longer exists (may have been moved or renamed)
     FileMissing,
     /// Failed to get video info
@@ -859,6 +861,13 @@ impl std::fmt::Display for SkipReason {
             }
             Self::OutputExists { path, .. } => {
                 write!(f, "Output file already exists: \"{}\"", path.display())
+            }
+            Self::OutputConflict { path } => {
+                write!(
+                    f,
+                    "Another file in this run has the same output: \"{}\"",
+                    path.display()
+                )
             }
             Self::FileMissing => write!(f, "File no longer exists"),
             Self::AnalysisFailed { error } => {

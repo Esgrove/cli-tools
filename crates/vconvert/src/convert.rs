@@ -21,7 +21,9 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::VideoConvertArgs;
-use crate::classification::{ClassificationRequest, probe_and_classify, should_include_file};
+use crate::classification::{
+    ClassificationRequest, probe_and_classify, resolve_output_collisions, should_include_file,
+};
 use crate::cli::{DatabaseMode, clean_scan_cache, clear_database, list_extensions, show_database_contents};
 use crate::config::{Config, VideoConvertConfig};
 use crate::database::{Database, PendingAction};
@@ -661,6 +663,7 @@ impl VideoConvert {
         // Combine cache hits (Phase 1) with ffprobe results (Phase 2)
         let mut results = cache_results;
         results.extend(probe_results.into_iter().map(|entry| entry.result));
+        let results = resolve_output_collisions(results);
 
         // Collect files into separate vectors
         let mut conversions = Vec::new();
@@ -797,6 +800,10 @@ impl VideoConvert {
                                 }
                             }
                         }
+                        SkipReason::OutputConflict { .. } => {
+                            analysis_stats.skipped_output_conflict += 1;
+                            print_yellow!("{}: {reason}", cli_tools_common::path_to_string_relative(&file.path));
+                        }
                         SkipReason::FileMissing => {
                             analysis_stats.file_missing += 1;
                             print_yellow!(
@@ -814,6 +821,7 @@ impl VideoConvert {
                         && !matches!(reason, SkipReason::AnalysisFailed { .. })
                         && !matches!(reason, SkipReason::OutputExists { .. })
                         && !matches!(reason, SkipReason::FileMissing)
+                        && !matches!(reason, SkipReason::OutputConflict { .. })
                     {
                         print_yellow!("{}: {reason}", cli_tools_common::path_to_string_relative(&file.path));
                     }

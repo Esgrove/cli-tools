@@ -8,6 +8,8 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use regex::Regex;
 
+use cli_tools_common::TargetReservations;
+
 use crate::config::Config;
 use crate::ffmpeg::{movie_stream_processing_required, probe_video_info};
 use crate::types::{
@@ -249,6 +251,60 @@ impl<'a> ClassificationRequest<'a> {
                 source_duration: self.info.duration,
             },
         }
+    }
+}
+
+/// Skip results whose output path another result in the same run already claims.
+///
+/// Results are ordered by input path first, so the same file wins on every run.
+/// Outputs differing only by case also collide, since they are the same file on case-insensitive file systems.
+pub fn resolve_output_collisions(mut results: Vec<AnalysisResult>) -> Vec<AnalysisResult> {
+    results.sort_by(|left, right| input_path(left).cmp(input_path(right)));
+    let mut reservations = TargetReservations::new();
+    results
+        .into_iter()
+        .map(
+            |result| match processable(&result).map(|file| file.output_path.clone()) {
+                Some(output_path) if !reservations.reserve(&output_path) => into_output_conflict(result, output_path),
+                _ => result,
+            },
+        )
+        .collect()
+}
+
+/// Input file path of an analysis result.
+fn input_path(result: &AnalysisResult) -> &Path {
+    match result {
+        AnalysisResult::NeedsConversion(processable)
+        | AnalysisResult::NeedsRemux(processable)
+        | AnalysisResult::NeedsRename(processable)
+        | AnalysisResult::NeedsSubtitleMux(processable) => &processable.file.path,
+        AnalysisResult::Skip { file, .. } => &file.path,
+    }
+}
+
+/// The file to process for a result that writes an output, or `None` for a skipped file.
+const fn processable(result: &AnalysisResult) -> Option<&ProcessableFile> {
+    match result {
+        AnalysisResult::NeedsConversion(processable)
+        | AnalysisResult::NeedsRemux(processable)
+        | AnalysisResult::NeedsRename(processable)
+        | AnalysisResult::NeedsSubtitleMux(processable) => Some(processable),
+        AnalysisResult::Skip { .. } => None,
+    }
+}
+
+/// Turn a result into a skip caused by an output path conflict.
+fn into_output_conflict(result: AnalysisResult, path: PathBuf) -> AnalysisResult {
+    match result {
+        AnalysisResult::NeedsConversion(processable)
+        | AnalysisResult::NeedsRemux(processable)
+        | AnalysisResult::NeedsRename(processable)
+        | AnalysisResult::NeedsSubtitleMux(processable) => AnalysisResult::Skip {
+            file: processable.file,
+            reason: SkipReason::OutputConflict { path },
+        },
+        skip @ AnalysisResult::Skip { .. } => skip,
     }
 }
 
@@ -1849,5 +1905,106 @@ mod test_file_inclusion {
 
         config.movie_mode = true;
         assert!(should_include_file(&config, &converted_mp4));
+    }
+}
+
+#[cfg(test)]
+mod test_resolve_output_collisions {
+    use super::*;
+    use crate::types::{ProcessableFile, SkipReason, VideoFile, VideoInfo};
+
+    fn h264_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 1_000_000_000,
+            duration: 3600.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    fn conversion(input: &str, output: &str) -> AnalysisResult {
+        AnalysisResult::NeedsConversion(ProcessableFile::new(
+            VideoFile::new(Path::new(input), 0),
+            h264_info(),
+            PathBuf::from(output),
+            Vec::new(),
+        ))
+    }
+
+    fn rename(input: &str, output: &str) -> AnalysisResult {
+        AnalysisResult::NeedsRename(ProcessableFile::new(
+            VideoFile::new(Path::new(input), 0),
+            h264_info(),
+            PathBuf::from(output),
+            Vec::new(),
+        ))
+    }
+
+    fn processable_outputs(results: &[AnalysisResult]) -> Vec<PathBuf> {
+        results
+            .iter()
+            .filter_map(|result| match result {
+                AnalysisResult::NeedsConversion(file)
+                | AnalysisResult::NeedsRemux(file)
+                | AnalysisResult::NeedsRename(file)
+                | AnalysisResult::NeedsSubtitleMux(file) => Some(file.output_path.clone()),
+                AnalysisResult::Skip { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_inputs_with_the_same_output_keep_only_the_first() {
+        let results = resolve_output_collisions(vec![
+            conversion("/videos/movie.mp4", "/videos/movie.x265.mp4"),
+            conversion("/videos/movie.mkv", "/videos/movie.x265.mp4"),
+        ]);
+
+        assert_eq!(
+            processable_outputs(&results),
+            vec![PathBuf::from("/videos/movie.x265.mp4")]
+        );
+        assert!(results.iter().any(|result| matches!(
+            result,
+            AnalysisResult::Skip {
+                file,
+                reason: SkipReason::OutputConflict { .. }
+            } if file.path == Path::new("/videos/movie.mp4")
+        )));
+    }
+
+    #[test]
+    fn renames_onto_the_same_name_keep_only_one() {
+        let results = resolve_output_collisions(vec![
+            rename("/videos/show.x265.mkv", "/videos/show.mkv"),
+            rename("/videos/show.av1.mkv", "/videos/show.mkv"),
+        ]);
+
+        assert_eq!(processable_outputs(&results).len(), 1);
+    }
+
+    #[test]
+    fn outputs_differing_only_by_case_collide() {
+        let results = resolve_output_collisions(vec![
+            conversion("/videos/a.mkv", "/videos/Movie.x265.mp4"),
+            conversion("/videos/b.mkv", "/videos/movie.x265.mp4"),
+        ]);
+
+        assert_eq!(processable_outputs(&results).len(), 1);
+    }
+
+    #[test]
+    fn distinct_outputs_are_kept() {
+        let results = resolve_output_collisions(vec![
+            conversion("/videos/a.mkv", "/videos/a.x265.mp4"),
+            conversion("/videos/b.mkv", "/videos/b.x265.mp4"),
+        ]);
+
+        assert_eq!(processable_outputs(&results).len(), 2);
     }
 }

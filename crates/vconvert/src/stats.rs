@@ -23,6 +23,7 @@ pub struct AnalysisStats {
     pub(crate) skipped_duration_long: usize,
     pub(crate) skipped_resolution_low: usize,
     pub(crate) skipped_duplicate: usize,
+    pub(crate) skipped_output_conflict: usize,
     pub(crate) duplicates_deleted: usize,
     pub(crate) duplicate_delete_failed: usize,
     pub(crate) file_missing: usize,
@@ -61,6 +62,7 @@ impl AnalysisStats {
             + self.skipped_duration_long
             + self.skipped_resolution_low
             + self.skipped_duplicate
+            + self.skipped_output_conflict
             + self.duplicates_deleted
             + self.duplicate_delete_failed
             + self.file_missing
@@ -92,6 +94,9 @@ impl AnalysisStats {
             }
             if self.skipped_duplicate > 0 {
                 println!(" - Output exists:        {}", self.skipped_duplicate);
+            }
+            if self.skipped_output_conflict > 0 {
+                println!(" - Output conflict:      {}", self.skipped_output_conflict);
             }
             if self.duplicates_deleted > 0 {
                 println!(" - Duplicates deleted:   {}", self.duplicates_deleted);
@@ -356,12 +361,13 @@ mod analysis_stats_tests {
             skipped_duration_long: 1,
             skipped_resolution_low: 2,
             skipped_duplicate: 6,
+            skipped_output_conflict: 3,
             duplicates_deleted: 2,
             duplicate_delete_failed: 1,
             file_missing: 1,
             analysis_failed: 0,
         };
-        assert_eq!(stats.total_skipped(), 27);
+        assert_eq!(stats.total_skipped(), 30);
     }
 
     #[test]
@@ -569,13 +575,14 @@ mod test_summary_branches {
             skipped_duration_long: 9,
             skipped_resolution_low: 10,
             skipped_duplicate: 11,
+            skipped_output_conflict: 16,
             duplicates_deleted: 12,
             duplicate_delete_failed: 13,
             file_missing: 14,
             analysis_failed: 15,
         };
 
-        assert_eq!(stats.total_skipped(), 95);
+        assert_eq!(stats.total_skipped(), 111);
         stats.print_summary();
     }
 
