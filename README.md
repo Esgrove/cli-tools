@@ -16,6 +16,14 @@ Install a single tool straight from GitHub by its package name:
 cargo install --locked --git https://github.com/Esgrove/cli-tools cli-tools-slb
 ```
 
+### Performance
+
+The tools target Apple Silicon (M1 and newer) and x86-64 with AVX2 as the minimum,
+and their SIMD code uses NEON and AVX2.
+Memory use is not an optimization goal: the tools assume 32 GB or more of system memory
+and freely trade hundreds of megabytes for speed.
+See [`docs/simd.md`](./docs/simd.md) for the SIMD design and measurements.
+
 ### Using a tool as a library
 
 Tools with reusable logic also expose it as a library,

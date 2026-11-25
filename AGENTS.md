@@ -62,6 +62,9 @@ cd fuzz && cargo +nightly fuzz run slb_format -- -max_total_time=300
 # Build with debug symbols for a profiler, since the release profile carries none
 cargo build --profile profiling --bin <name>
 
+# Profile on macOS with the Time Profiler, then demangle the Rust symbols with: xcrun llvm-cxxfilt
+xctrace record --template 'Time Profiler' --output target/<name>.trace --launch -- target/profiling/<name> [args]
+
 # Run all benchmarks
 cargo bench
 
@@ -75,11 +78,16 @@ cargo bench --bench resolution
 cargo bench --bench semantic_line_breaks
 cargo bench --bench simd
 
-# Run benchmarks matching a filter pattern
-cargo bench -- "normalize_stem"
+# Run benchmarks matching a filter pattern.
+# Criterion arguments need --bench, since the library test harnesses reject them.
+cargo bench --workspace --bench '*' -- "normalize_stem"
 
 # Quick benchmark run (fewer iterations, faster feedback)
-cargo bench -- --quick
+cargo bench --workspace --bench '*' -- --quick
+
+# Save a baseline before a change and compare against it after
+cargo bench --workspace --bench '*' -- --save-baseline before
+cargo bench --workspace --bench '*' -- --baseline before
 ```
 
 ### Required tools
@@ -305,6 +313,16 @@ so a project that pulls in one tool does not build the others.
 - Prefer full names over abbreviations. For example: `directories` instead of `dirs`.
 - Create docstrings for structs and functions.
 - Avoid trailing comments.
+
+### Performance targets
+
+- The tools run on Apple Silicon (M1 and newer) and on x86-64 Windows with AVX2 as the minimum.
+  SIMD code targets NEON and AVX2.
+  Code that does not compile on a machine without NEON or AVX2 is acceptable.
+- Memory use is not an optimization goal. Assume 32 GB or more of system memory.
+  Using hundreds of megabytes, or even one or two gigabytes, is fine when it gives a noticeable speedup.
+  Prefer precomputed tables, indexes, and buffers over recomputing values.
+- Back every optimization with a benchmark that shows the gain, and keep the benchmark.
 
 ### Comments and documentation formatting
 
