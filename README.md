@@ -26,6 +26,14 @@ so another project can depend on just that crate without building the rest of th
 cli-tools-slb = { git = "https://github.com/Esgrove/cli-tools" }
 ```
 
+A crate whose binary has dependencies of its own puts them behind a default `cli` feature.
+Turn it off to build only the library:
+
+```toml
+[dependencies]
+cli-tools-dirmove = { git = "https://github.com/Esgrove/cli-tools", default-features = false }
+```
+
 | Crate                                     | Binary     | Library contents                                           |
 | ----------------------------------------- | ---------- | ---------------------------------------------------------- |
 | [`cli-tools-common`](./crates/common)     |            | Path, formatting, printing, config, and completion helpers |

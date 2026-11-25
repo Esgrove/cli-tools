@@ -9,6 +9,10 @@ Long running steps report what they do through the `MoveObserver`, `MergeObserve
 and `GroupingProgress` traits, which the binary implements to print progress.
 See the [`dirmove` section](../../README.md#dirmove) of the main README for usage.
 
+The binary's own dependencies, such as clap, indicatif, and the `SQLite` name database,
+are behind the default `cli` feature.
+Depend on the crate with `default-features = false` to build only the library.
+
 | Module          | Contents                                                                    |
 | --------------- | --------------------------------------------------------------------------- |
 | `roots`         | Input and output roots and the display paths shown relative to them         |

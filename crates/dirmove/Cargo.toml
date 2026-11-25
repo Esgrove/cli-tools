@@ -15,29 +15,51 @@ path = "src/lib.rs"
 [[bin]]
 name = "dirmove"
 path = "src/bin/dirmove/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Dependencies of the dirmove binary, left out by library users with `default-features = false`.
+cli = [
+    "cli-tools-common/completion",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:colored",
+    "dep:dirs",
+    "dep:indicatif",
+    "dep:rusqlite",
+    "dep:serde",
+    "dep:toml",
+    "dep:toml_edit",
+]
 
 [dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
-cli-tools-common = { workspace = true, features = ["completion"] }
+cli-tools-common = { workspace = true }
 cli-tools-media = { workspace = true }
-colored = { workspace = true }
-dirs = { workspace = true }
-indicatif = { workspace = true }
 rayon = { workspace = true }
-rusqlite = { workspace = true }
-serde = { workspace = true }
-toml = { workspace = true }
-toml_edit = { workspace = true }
 walkdir = { workspace = true }
+
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+colored = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+toml_edit = { workspace = true, optional = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 criterion = { workspace = true }
+
+[[test]]
+name = "dirmove_cli_tests"
+required-features = ["cli"]
 
 [[bench]]
 name = "dir_move"

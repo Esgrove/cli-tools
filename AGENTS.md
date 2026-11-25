@@ -7,6 +7,9 @@ Each tool is its own crate under `crates/` with a package name prefixed by `cli-
 Shared helpers live in the `cli-tools-common` and `cli-tools-media` library crates.
 Tools with reusable logic expose it as a library from the same crate,
 so other projects can depend on just that crate and extend it.
+Such a crate puts the dependencies only its binary uses behind a default `cli` feature,
+lists it under `required-features` for the binary and the tests that run it,
+and a library user turns it off with `default-features = false`.
 
 ## Build and Test Commands
 
