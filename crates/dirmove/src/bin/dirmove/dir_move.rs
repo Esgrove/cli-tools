@@ -880,39 +880,39 @@ impl DirMove {
         }
 
         // Walk depth-first so children get removed before parents.
-        let mut dirs: Vec<PathBuf> = WalkDir::new(root_dir)
+        let mut directories: Vec<PathBuf> = WalkDir::new(root_dir)
             .follow_links(false)
             .into_iter()
             .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_dir())
-            .map(|e| e.path().to_path_buf())
+            .filter(|entry| entry.file_type().is_dir())
+            .map(|entry| entry.path().to_path_buf())
             .collect();
 
-        dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
 
-        for d in dirs {
-            if d != root_dir && !touched_dirs.contains(&d) {
+        for directory in directories {
+            if directory != root_dir && !touched_dirs.contains(&directory) {
                 continue;
             }
 
-            let is_empty = std::fs::read_dir(&d).is_ok_and(|mut it| it.next().is_none());
+            let is_empty = std::fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none());
             if !is_empty {
                 continue;
             }
 
             if self.config.dryrun {
                 if self.config.verbose {
-                    println!("  {} Would remove empty dir: {}", "→".yellow(), d.display());
+                    println!("  {} Would remove empty dir: {}", "→".yellow(), directory.display());
                 }
                 continue;
             }
 
-            if std::fs::remove_dir(&d).is_ok() {
+            if std::fs::remove_dir(&directory).is_ok() {
                 if self.config.verbose {
-                    println!("  {} Removed empty dir: {}", "→".green(), d.display());
+                    println!("  {} Removed empty dir: {}", "→".green(), directory.display());
                 }
-                if let Some(p) = d.parent() {
-                    touched_dirs.insert(p.to_path_buf());
+                if let Some(parent) = directory.parent() {
+                    touched_dirs.insert(parent.to_path_buf());
                 }
             }
         }
@@ -10445,15 +10445,18 @@ mod test_min_prefix_chars {
         let root = tmp.path().to_path_buf();
 
         // Various dotted prefixes all below threshold of 15
-        std::fs::write(root.join("One.Two.File.001.mp4"), "").unwrap(); // 6 chars
+        // The prefix is 6 chars long.
+        std::fs::write(root.join("One.Two.File.001.mp4"), "").unwrap();
         std::fs::write(root.join("One.Two.File.002.mp4"), "").unwrap();
         std::fs::write(root.join("One.Two.File.003.mp4"), "").unwrap();
 
-        std::fs::write(root.join("Alpha.Beta.Video.001.mp4"), "").unwrap(); // 9 chars
+        // The prefix is 9 chars long.
+        std::fs::write(root.join("Alpha.Beta.Video.001.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.Beta.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.Beta.Video.003.mp4"), "").unwrap();
 
-        std::fs::write(root.join("Super.Long.Prefix.Content.001.mp4"), "").unwrap(); // 15 chars
+        // The prefix is 15 chars long.
+        std::fs::write(root.join("Super.Long.Prefix.Content.001.mp4"), "").unwrap();
         std::fs::write(root.join("Super.Long.Prefix.Content.002.mp4"), "").unwrap();
         std::fs::write(root.join("Super.Long.Prefix.Content.003.mp4"), "").unwrap();
 

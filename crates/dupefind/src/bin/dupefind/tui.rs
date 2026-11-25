@@ -420,12 +420,18 @@ fn render_ui(
     ] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),                // Header
-            Constraint::Length(file_list_height), // File list (compact)
-            Constraint::Length(details_height),   // File details
-            Constraint::Length(3),                // Status/Edit area
-            Constraint::Length(3),                // Help
-            Constraint::Min(0),                   // Spacer (unused space below)
+            // Header
+            Constraint::Length(3),
+            // File list (compact)
+            Constraint::Length(file_list_height),
+            // File details
+            Constraint::Length(details_height),
+            // Status/Edit area
+            Constraint::Length(3),
+            // Help
+            Constraint::Length(3),
+            // Spacer (unused space below)
+            Constraint::Min(0),
         ])
         .areas(area);
 
