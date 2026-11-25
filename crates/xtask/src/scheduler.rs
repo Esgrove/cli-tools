@@ -487,12 +487,18 @@ fn worker_loop(state: &Arc<(Mutex<SchedulerState>, Condvar)>, ctx: &TaskContext,
                     return;
                 }
 
-                drop(guard);
-                emit_blocked_notifications(&ctx.reporter, &blocked_notifications);
-                blocked_notifications.clear();
-
-                let reacquired = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard = cvar.wait(reacquired).unwrap_or_else(std::sync::PoisonError::into_inner);
+                if blocked_notifications.is_empty() {
+                    // Waiting on the held guard releases the lock and sleeps in one step,
+                    // so a task that finishes in between cannot slip its notification past this worker.
+                    guard = cvar.wait(guard).unwrap_or_else(std::sync::PoisonError::into_inner);
+                } else {
+                    // Notifications are emitted without the lock,
+                    // so the state is checked again before waiting since it may have changed meanwhile.
+                    drop(guard);
+                    emit_blocked_notifications(&ctx.reporter, &blocked_notifications);
+                    blocked_notifications.clear();
+                    guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
             }
         };
 
@@ -671,6 +677,39 @@ mod test_scheduler {
             scopes: Vec::new(),
             dry_run_summary: id.to_owned(),
             action: Box::new(|_, _| Ok(TaskActionResult::Passed)),
+        }
+    }
+
+    #[test]
+    fn a_long_dry_run_chain_never_hangs() {
+        const RUNS: usize = 300;
+        const CHAIN_LENGTH: usize = 40;
+        for run in 0..RUNS {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut ctx = test_context("chain");
+                ctx.dry_run = true;
+                let ids: Vec<String> = (0..CHAIN_LENGTH).map(|index| format!("task{index:02}")).collect();
+                let tasks: Vec<TaskSpec> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(index, id)| {
+                        let deps: Vec<&str> = index
+                            .checked_sub(1)
+                            .and_then(|previous| ids.get(previous))
+                            .map(String::as_str)
+                            .into_iter()
+                            .collect();
+                        noop_task(id, 1, &deps, &[])
+                    })
+                    .collect();
+                let summary = run_schedule(tasks, &ctx, 8, false, "all");
+                let _ = sender.send(summary.map(|summary| summary.reports.len()));
+            });
+            let finished = receiver
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("run {run} of the scheduler hung"));
+            assert_eq!(finished.expect("the schedule should succeed"), CHAIN_LENGTH);
         }
     }
 
