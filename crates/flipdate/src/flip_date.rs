@@ -2,7 +2,6 @@
 //!
 //! Finds dates in file or directory names and renames them to the `yyyy.mm.dd` format.
 
-use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -94,7 +93,10 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
 
 /// Flip date to start with year for all matching directories from the given path.
 pub fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
-    let directories = directories_to_rename(path, config.recurse)?;
+    let mut directories = directories_to_rename(path, config.recurse)?;
+    // Renaming a parent first would leave the stored paths of its subdirectories pointing nowhere,
+    // so the deepest directories are renamed first.
+    directories.sort_by_key(|directory| std::cmp::Reverse(directory.path.components().count()));
     if directories.is_empty() {
         if config.verbose {
             println!("No directories to rename");
@@ -117,13 +119,23 @@ pub fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
             width = max_chars
         );
         if !config.dryrun {
-            fs::rename(&directory.path, &new_path).with_context(|| {
-                format!(
-                    "Failed to rename {} to {}",
-                    directory.path.display(),
-                    new_path.display()
-                )
-            })?;
+            // An existing directory is never replaced, so a name taken by another directory is skipped.
+            match cli_tools_common::safe_rename(&directory.path, &new_path, OverwritePolicy::Skip) {
+                Ok(RenameOutcome::SkippedExisting) => {
+                    eprintln!(
+                        "{}",
+                        format!("Directory already exists: {}", new_path.display()).yellow()
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    cli_tools_common::print_error!(
+                        "Failed to rename {} to {}: {error}",
+                        directory.path.display(),
+                        new_path.display()
+                    );
+                }
+            }
         }
     }
 
@@ -443,6 +455,7 @@ mod test_rename_discovery {
 #[cfg(test)]
 mod test_date_flip_files {
     use super::*;
+    use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -521,6 +534,81 @@ mod test_date_flip_files {
         assert_eq!(
             fs::read_to_string(root.path().join("x 31.12.2020.txt")).expect("read"),
             "source"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_date_flip_directories {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn config(overwrite: bool) -> Config {
+        Config {
+            directory_mode: true,
+            dryrun: false,
+            file_extensions: Vec::new(),
+            overwrite,
+            recurse: true,
+            swap_year: false,
+            verbose: false,
+            year_first: false,
+        }
+    }
+
+    /// Paths of every directory under the root, relative to it and sorted.
+    fn directories(root: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = WalkDir::new(root)
+            .min_depth(1)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_dir())
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("entry should be under the root")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn nested_dated_directories_are_both_renamed() {
+        let root = TempDir::new().expect("temp dir");
+        // The parent sorts before the child by name, so a name ordered run renames the parent first.
+        fs::create_dir_all(root.path().join("A Trip 01.01.2020").join("B Day 31.12.2021")).expect("create");
+
+        date_flip_directories(root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+
+        let names = directories(root.path());
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.contains("01.01.2020") && !name.contains("31.12.2021")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn an_existing_target_directory_is_kept() {
+        let root = TempDir::new().expect("temp dir");
+        fs::create_dir(root.path().join("Trip 01.01.2020")).expect("create");
+        let target = Date::reorder_directory_date("Trip 01.01.2020").expect("has a date");
+        fs::create_dir(root.path().join(&target)).expect("create target");
+        fs::write(root.path().join(&target).join("keep.txt"), "keep").expect("write");
+
+        date_flip_directories(root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+
+        assert!(root.path().join("Trip 01.01.2020").is_dir());
+        assert_eq!(
+            fs::read_to_string(root.path().join(&target).join("keep.txt")).expect("read"),
+            "keep"
         );
     }
 }
