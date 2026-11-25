@@ -12,12 +12,11 @@ use std::path::{Path, PathBuf};
 use colored::Colorize;
 
 use cli_tools_common::{
-    count_label, format_text_with_highlight, path_to_filename_string, path_to_string_relative, print_bold, print_error,
-    print_yellow,
+    count_label, format_text_with_highlight, path_to_filename_string, print_bold, print_error, print_yellow,
 };
 use cli_tools_dirmove::{
     DirectoryInfo, DirectoryMatcher, DirectoryMerger, FileInfo, FileMatch, PrefixGrouper, Roots, Scanner, Unpacker,
-    matcher, merge, mover, scanner, utils,
+    matcher, merge, mover, utils,
 };
 
 use crate::DirMoveArgs;
@@ -72,15 +71,7 @@ impl DirMove {
         let roots = Roots::resolve(&args.path, &args.output)?;
         let config = config_from_args(args)?;
         if config.debug {
-            eprintln!("Config: {config:#?}");
-            eprintln!("Input roots:");
-            for input_root in roots.input() {
-                eprintln!("  {}", input_root.display());
-            }
-            eprintln!("Output roots:");
-            for output_root in roots.output() {
-                eprintln!("  {}", output_root.display());
-            }
+            report::print_run_debug(&config, &roots);
         }
         let dirmove = Self::new_with_roots(roots, config);
         if dirmove.config.debug {
@@ -240,12 +231,7 @@ impl DirMove {
     fn collect_directories(&self) -> anyhow::Result<Vec<DirectoryInfo>> {
         let scan = self.scanner().collect_directories()?;
         if self.config.verbose {
-            for directory in &scan.excluded {
-                println!("Excluding directory: {}", path_to_string_relative(directory));
-            }
-            for directory in &scan.ignored {
-                println!("Ignoring directory: {}", path_to_string_relative(directory));
-            }
+            report::print_scan_skips(&scan);
         }
         Ok(scan.directories)
     }
@@ -320,7 +306,7 @@ impl DirMove {
 
         Ok(files
             .iter()
-            .filter(|file_path| scanner::file_is_available(file_path, consumed_files))
+            .filter(|file_path| file_is_available(file_path, consumed_files))
             .cloned()
             .collect())
     }
@@ -346,7 +332,7 @@ impl DirMove {
                 let file_path = files
                     .get(file_match.index)
                     .ok_or_else(|| anyhow::anyhow!("File match index {} is out of bounds", file_match.index))?;
-                if scanner::file_is_available(file_path, consumed_files) {
+                if file_is_available(file_path, consumed_files) {
                     available_files.push(file_match);
                 }
             }
@@ -382,16 +368,14 @@ impl DirMove {
             .collect::<anyhow::Result<_>>()?;
         let dir_display = self.roots.directory_display_path(dir);
         let move_to_display = self.roots.move_to_display_path(&dir.path, &file_paths);
-        println!(
-            "{}: {}",
-            dir_display.cyan().bold(),
-            count_label(file_matches.len(), "file", "files")
-        );
-
-        for (file_match, file_path) in file_matches.iter().zip(&file_paths) {
-            let filename = path_to_filename_string(file_path);
-            println!("  {}", format_text_with_highlight(&filename, Some(file_match.range)));
-        }
+        let highlighted_names: Vec<String> = file_matches
+            .iter()
+            .zip(&file_paths)
+            .map(|(file_match, file_path)| {
+                format_text_with_highlight(&path_to_filename_string(file_path), Some(file_match.range))
+            })
+            .collect();
+        report::print_file_group(&dir_display.cyan().bold().to_string(), &highlighted_names);
 
         println!("{} Move to: {move_to_display}", "→".green());
 
@@ -411,7 +395,7 @@ impl DirMove {
                 }
             }
         } else {
-            println!("  Skipped");
+            report::print_skipped();
             DirectoryMatchOutcome::Available
         };
 
@@ -491,7 +475,7 @@ impl DirMove {
         if !self.config.dryrun {
             let confirmed = self.config.auto
                 || cli_tools_common::get_user_confirmation(
-                    prompt::directory_merge_confirmation_prompt(source_directories.len()),
+                    report::directory_merge_confirmation_prompt(source_directories.len()),
                     false,
                 )?;
 
@@ -502,7 +486,7 @@ impl DirMove {
                     }
                 }
             } else {
-                println!("  Skipped");
+                report::print_skipped();
             }
         }
         println!();
@@ -524,11 +508,7 @@ impl DirMove {
         self.process_custom_mappings_create_mode(&files_with_names, &mut moved_files)?;
 
         if self.config.debug {
-            eprintln!("prefix_ignores: {:?}", self.config.name_filter.prefix_ignores());
-            eprintln!("Original names after stripping prefix_ignores:");
-            for file_info in &files_with_names {
-                eprintln!("  {}", file_info.original_name);
-            }
+            report::print_prefix_ignores_debug(self.config.name_filter.prefix_ignores(), &files_with_names);
         }
 
         let grouper = self.grouper();
@@ -551,7 +531,7 @@ impl DirMove {
             count_label(total_groups, "group", "groups")
         );
 
-        let parent_dir_normalized = self.output_root_name_normalized();
+        let parent_dir_normalized = self.roots.first_output_normalized_name();
         // Group names ignored during this session with the "s" answer.
         let mut runtime_ignored: HashSet<String> = HashSet::new();
         let mut group_number: usize = 0;
@@ -581,15 +561,6 @@ impl DirMove {
         Ok(())
     }
 
-    /// Return the normalized name of the first output root, so it is never offered as a nested directory.
-    fn output_root_name_normalized(&self) -> Option<String> {
-        self.roots
-            .first_output()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(utils::normalize_name)
-    }
-
     /// Print group information, prompt the user, and move files for a single prefix group.
     fn process_single_group(
         &self,
@@ -603,18 +574,12 @@ impl DirMove {
         let database_suggestion = self.get_database_suggestion_for_prefix(dir_name);
 
         let progress = format!("[{group_number}/{total_groups}]").dimmed();
-        println!(
-            "{progress} {}: {}",
-            dir_name.cyan().bold(),
-            count_label(available_files.len(), "file", "files")
-        );
         let normalized_dir_name = utils::normalize_name(dir_name);
-        for file_path in available_files {
-            println!(
-                "  {}",
-                prompt::format_filename_with_normalized_highlight(file_path, &normalized_dir_name)
-            );
-        }
+        let highlighted_names: Vec<String> = available_files
+            .iter()
+            .map(|file_path| prompt::format_filename_with_normalized_highlight(file_path, &normalized_dir_name))
+            .collect();
+        report::print_file_group(&format!("{progress} {}", dir_name.cyan().bold()), &highlighted_names);
 
         let Some(prompt_result) = self.offer_new_directory(dir_name, database_suggestion.as_deref())? else {
             return Ok(());
@@ -632,25 +597,7 @@ impl DirMove {
     /// Save a group name to `ignored_group_names` in the config file,
     /// and skip later groups with the same name for the rest of the run.
     fn save_ignored_group_name(dir_name: &str, runtime_ignored: &mut HashSet<String>) {
-        match add_ignored_group_name_to_config(dir_name) {
-            Ok(true) => {
-                println!(
-                    "  {} Added '{}' to ignored_group_names in config",
-                    "✓".green(),
-                    dir_name.cyan()
-                );
-            }
-            Ok(false) => {
-                println!(
-                    "  {} '{}' already in ignored_group_names config",
-                    "→".dimmed(),
-                    dir_name.cyan()
-                );
-            }
-            Err(error) => {
-                print_error!("Failed to update config: {error}");
-            }
-        }
+        report::print_ignored_group_name_saved(dir_name, &add_ignored_group_name_to_config(dir_name));
         runtime_ignored.insert(utils::normalize_name(dir_name));
     }
 
@@ -676,7 +623,7 @@ impl DirMove {
         );
 
         let grouper = self.grouper();
-        let parent_dir_normalized = self.output_root_name_normalized();
+        let parent_dir_normalized = self.roots.first_output_normalized_name();
         let mut runtime_ignored = HashSet::new();
 
         for (dir_name, files) in mapping_groups {
@@ -686,15 +633,14 @@ impl DirMove {
                 continue;
             }
 
-            println!(
-                "{}: {} (custom mapping)",
-                dir_name.cyan().bold(),
-                count_label(files.len(), "file", "files")
+            let highlighted_names: Vec<String> = files
+                .iter()
+                .map(|file| format_text_with_highlight(&path_to_filename_string(&file.path), Some(file.range)))
+                .collect();
+            report::print_file_group(
+                &format!("{} (custom mapping)", dir_name.cyan().bold()),
+                &highlighted_names,
             );
-            for file in &files {
-                let filename = path_to_filename_string(&file.path);
-                println!("  {}", format_text_with_highlight(&filename, Some(file.range)));
-            }
 
             if let Some(prompt_result) = self.offer_new_directory(&dir_name, None)? {
                 match prompt_result {
@@ -722,11 +668,7 @@ impl DirMove {
         database_suggestion: Option<&str>,
     ) -> anyhow::Result<Option<PromptResult>> {
         let dir_path = self.roots.first_output().join(dir_name);
-        if dir_path.exists() {
-            println!("  {} Directory already exists", "→".green());
-        } else {
-            println!("  {} Will create directory: {dir_name}", "→".yellow());
-        }
+        report::print_target_directory_status(dir_path.exists(), dir_name);
 
         if self.config.dryrun {
             println!();
@@ -756,6 +698,11 @@ impl DirMove {
     fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<mover::MoveReport> {
         mover::move_files_to_target_dir(dir_path, files, self.config.overwrite, &mut self.reporter())
     }
+}
+
+/// Return whether a file was not moved by an earlier offer and still exists, so another offer can include it.
+fn file_is_available(file_path: &Path, consumed_files: &HashSet<PathBuf>) -> bool {
+    !consumed_files.contains(file_path) && file_path.exists()
 }
 
 #[cfg(test)]

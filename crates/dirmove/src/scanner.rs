@@ -4,8 +4,7 @@
 //! and returns the files to match or group and the directories they can move into.
 
 use std::collections::HashSet;
-use std::hash::BuildHasher;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use walkdir::WalkDir;
@@ -299,12 +298,6 @@ where
     P::Item: AsRef<str>,
 {
     unique_in_order(patterns.into_iter().map(|pattern| pattern.as_ref().to_lowercase()))
-}
-
-/// Return whether a file can still be offered by another matching group.
-#[must_use]
-pub fn file_is_available<S: BuildHasher>(file_path: &Path, consumed_files: &HashSet<PathBuf, S>) -> bool {
-    !consumed_files.contains(file_path) && file_path.exists()
 }
 
 #[cfg(test)]

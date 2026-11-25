@@ -17,8 +17,8 @@ use cli_tools_common::{
     print_magenta, print_yellow,
 };
 use cli_tools_dirmove::{
-    DirectoryInfo, FileInfo, FileMatch, GroupingProgress, GroupingStage, MergeEvent, MergeObserver, MoveEvent,
-    MoveObserver, PlannedMove, Roots, UnpackEvent, UnpackObserver, UnpackPlan,
+    DirectoryInfo, DirectoryScan, FileInfo, FileMatch, GroupingProgress, GroupingStage, MergeEvent, MergeObserver,
+    MoveEvent, MoveObserver, PlannedMove, Roots, UnpackEvent, UnpackObserver, UnpackPlan,
 };
 
 /// Prints unpacking, file moves, and directory merges with a byte progress bar.
@@ -315,6 +315,77 @@ pub fn print_grouping_names_debug(files_with_names: &[FileInfo]) {
     }
 }
 
+/// Print the resolved config and the input and output roots.
+pub fn print_run_debug(config: &impl std::fmt::Debug, roots: &Roots) {
+    eprintln!("Config: {config:#?}");
+    eprintln!("Input roots:");
+    for input_root in roots.input() {
+        eprintln!("  {}", input_root.display());
+    }
+    eprintln!("Output roots:");
+    for output_root in roots.output() {
+        eprintln!("  {}", output_root.display());
+    }
+}
+
+/// Print the destination directories a scan left out by the exclude patterns and the name filter.
+pub fn print_scan_skips(scan: &DirectoryScan) {
+    for directory in &scan.excluded {
+        println!("Excluding directory: {}", path_to_string_relative(directory));
+    }
+    for directory in &scan.ignored {
+        println!("Ignoring directory: {}", path_to_string_relative(directory));
+    }
+}
+
+/// Print the ignored prefixes and each file name left after stripping them.
+pub fn print_prefix_ignores_debug(prefix_ignores: &[String], files_with_names: &[FileInfo]) {
+    eprintln!("prefix_ignores: {prefix_ignores:?}");
+    eprintln!("Original names after stripping prefix_ignores:");
+    for file_info in files_with_names {
+        eprintln!("  {}", file_info.original_name);
+    }
+}
+
+/// Print a group heading with its file count, followed by one already highlighted file name per line.
+pub fn print_file_group(heading: &str, highlighted_names: &[String]) {
+    println!("{heading}: {}", count_label(highlighted_names.len(), "file", "files"));
+    for name in highlighted_names {
+        println!("  {name}");
+    }
+}
+
+/// Print whether the directory an offer moves files into already exists or will be created.
+pub fn print_target_directory_status(exists: bool, name: &str) {
+    if exists {
+        println!("  {} Directory already exists: {}", "→".green(), name.cyan());
+    } else {
+        println!("  {} Will create directory: {}", "→".yellow(), name.cyan());
+    }
+}
+
+/// Print that the user skipped an offer.
+pub fn print_skipped() {
+    println!("  Skipped");
+}
+
+/// Print the outcome of saving a group name to `ignored_group_names` in the config file.
+pub fn print_ignored_group_name_saved(name: &str, result: &anyhow::Result<bool>) {
+    match result {
+        Ok(true) => println!(
+            "  {} Added '{}' to ignored_group_names in config",
+            "✓".green(),
+            name.cyan()
+        ),
+        Ok(false) => println!(
+            "  {} '{}' already in ignored_group_names config",
+            "→".dimmed(),
+            name.cyan()
+        ),
+        Err(error) => print_error!("Failed to update config: {error}"),
+    }
+}
+
 /// Format the title for a whole directory merge offer.
 pub fn directory_merge_title(source_file_counts: &[(&Path, usize)]) -> String {
     source_file_counts
@@ -322,6 +393,15 @@ pub fn directory_merge_title(source_file_counts: &[(&Path, usize)]) -> String {
         .map_or_else(String::new, |(source_directory, _)| {
             path_to_filename_string(source_directory)
         })
+}
+
+/// Return the confirmation prompt for a whole directory merge offer.
+pub const fn directory_merge_confirmation_prompt(source_directory_count: usize) -> &'static str {
+    if source_directory_count == 1 {
+        "Merge directory to this directory?"
+    } else {
+        "Merge directories to this directory?"
+    }
 }
 
 /// Create a progress bar for moving file bytes.
@@ -432,5 +512,26 @@ mod test_move_progress {
         let hash_string = hash.to_string();
         let expected = hash_string.get(..12).expect("BLAKE3 hash should contain 12 characters");
         assert_eq!(short_hash(&hash), expected);
+    }
+}
+
+#[cfg(test)]
+mod test_directory_merge_confirmation_prompt {
+    use super::*;
+
+    #[test]
+    fn directory_merge_confirmation_prompt_uses_singular_for_one_source() {
+        assert_eq!(
+            directory_merge_confirmation_prompt(1),
+            "Merge directory to this directory?"
+        );
+    }
+
+    #[test]
+    fn directory_merge_confirmation_prompt_uses_plural_for_multiple_sources() {
+        assert_eq!(
+            directory_merge_confirmation_prompt(2),
+            "Merge directories to this directory?"
+        );
     }
 }

@@ -13,6 +13,7 @@ use cli_tools_common::{nearest_containing_root, relative_path_within};
 use cli_tools_common::{get_relative_path_or_filename, path_to_filename_string, path_to_string_relative};
 
 use crate::types::DirectoryInfo;
+use crate::utils;
 
 /// Input roots to scan and output roots holding the candidate destination directories.
 ///
@@ -88,6 +89,17 @@ impl Roots {
     #[must_use]
     pub fn first_output(&self) -> &Path {
         self.output.first().expect("Roots always have at least one output root")
+    }
+
+    /// Return the normalized name of the first output root.
+    ///
+    /// A group with this name would create a directory named like the root it is created in.
+    #[must_use]
+    pub fn first_output_normalized_name(&self) -> Option<String> {
+        self.first_output()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(utils::normalize_name)
     }
 
     /// Compute a directory's depth relative to the output root that contains it.
@@ -323,5 +335,25 @@ mod test_display_paths {
 
         assert_eq!(roots.move_to_display_path(&output_directory, &[input_file]), "Example");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_first_output_normalized_name {
+    use super::*;
+
+    #[test]
+    fn normalizes_the_first_output_root_name() {
+        let roots = Roots::new(
+            vec![PathBuf::from("input")],
+            vec![PathBuf::from("/media/My.Shows"), PathBuf::from("/media/Other")],
+        );
+        assert_eq!(roots.first_output_normalized_name().as_deref(), Some("myshows"));
+    }
+
+    #[test]
+    fn a_root_without_a_name_has_none() {
+        let roots = Roots::new(vec![PathBuf::from("input")], vec![PathBuf::from("/")]);
+        assert_eq!(roots.first_output_normalized_name(), None);
     }
 }
