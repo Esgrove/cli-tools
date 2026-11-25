@@ -219,46 +219,6 @@ impl<'a> PrefixGrouper<'a> {
         self.apply_prefix_overrides(display_groups)
     }
 
-    /// Apply prefix overrides to groups.
-    ///
-    /// A group moves under the first override that its prefix starts with, that starts with its prefix,
-    /// or that any of its file names starts with.
-    /// Groups that end up under the same prefix are merged.
-    #[must_use]
-    fn apply_prefix_overrides(&self, groups: HashMap<String, PrefixGroup>) -> HashMap<String, PrefixGroup> {
-        if self.options.prefix_overrides.is_empty() {
-            return groups;
-        }
-
-        let mut result: HashMap<String, PrefixGroup> = HashMap::new();
-
-        for (prefix, group) in groups {
-            let target_prefix = self
-                .options
-                .prefix_overrides
-                .iter()
-                .find(|&override_prefix| {
-                    prefix.starts_with(override_prefix)
-                        || override_prefix.starts_with(&prefix)
-                        || group.files.iter().any(|file| {
-                            file.file_name()
-                                .and_then(|name| name.to_str())
-                                .is_some_and(|name| name.starts_with(override_prefix))
-                        })
-                })
-                .map_or(prefix, std::clone::Clone::clone);
-
-            let entry = result
-                .entry(target_prefix)
-                .or_insert_with(|| PrefixGroup::new(Vec::new(), group.part_count, group.min_start_position));
-            entry.files.extend(group.files);
-            entry.part_count = entry.part_count.max(group.part_count);
-            entry.min_start_position = entry.min_start_position.min(group.min_start_position);
-        }
-
-        result
-    }
-
     /// Order groups for processing, dropping groups smaller than the minimum group size.
     ///
     /// Groups are sorted by start position, earlier first, then by part count, prefix length,
@@ -312,6 +272,62 @@ impl<'a> PrefixGrouper<'a> {
             || parent_directory_normalized.is_some_and(|parent| parent == directory_name_normalized)
     }
 
+    /// Return whether a directory name could ever be offered as a group name.
+    ///
+    /// Hidden names, ignored prefixes, ignored group names, and names with an ignored group part never are,
+    /// so callers that remember known directory names can leave them out.
+    #[must_use]
+    pub fn accepts_group_name(&self, name: &str) -> bool {
+        !name.starts_with('.')
+            && !self.name_filter.is_ignored_prefix(name)
+            && !self.is_ignored_group(&utils::normalize_name(name), name.split([' ', '.']))
+    }
+
+    /// Apply prefix overrides to groups.
+    ///
+    /// A group moves under the first override that its prefix starts with, that starts with its prefix,
+    /// or that any of its file names starts with.
+    /// Groups that end up under the same prefix are merged.
+    #[must_use]
+    fn apply_prefix_overrides(&self, groups: HashMap<String, PrefixGroup>) -> HashMap<String, PrefixGroup> {
+        if self.options.prefix_overrides.is_empty() {
+            return groups;
+        }
+
+        let mut result: HashMap<String, PrefixGroup> = HashMap::new();
+
+        for (prefix, group) in groups {
+            let target_prefix = self
+                .options
+                .prefix_overrides
+                .iter()
+                .find(|&override_prefix| {
+                    prefix.starts_with(override_prefix)
+                        || override_prefix.starts_with(&prefix)
+                        || group.files.iter().any(|file| {
+                            file.file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| name.starts_with(override_prefix))
+                        })
+                })
+                .map_or(prefix, std::clone::Clone::clone);
+
+            let entry = result
+                .entry(target_prefix)
+                .or_insert_with(|| PrefixGroup::new(Vec::new(), group.part_count, group.min_start_position));
+            entry.files.extend(group.files);
+            entry.part_count = entry.part_count.max(group.part_count);
+            entry.min_start_position = entry.min_start_position.min(group.min_start_position);
+        }
+
+        result
+    }
+
+    /// Return whether a normalized group name is ignored, or any of its parts is an ignored group part.
+    fn is_ignored_group<'part>(&self, normalized_name: &str, parts: impl Iterator<Item = &'part str>) -> bool {
+        self.name_filter.matches_ignored_group_name(normalized_name) || self.options.has_ignored_group_part(parts)
+    }
+
     /// Collect prefix candidates from each file in parallel and merge them into group builders.
     ///
     /// Candidates that match an ignored group name, contain an ignored group part,
@@ -345,9 +361,7 @@ impl<'a> PrefixGrouper<'a> {
                     let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
                     let candidate_combined = candidate_parts.join("").to_lowercase();
 
-                    if self.name_filter.matches_ignored_group_name(&key)
-                        || self.options.has_ignored_group_part(candidate_parts.iter().copied())
-                    {
+                    if self.is_ignored_group(&key, candidate_parts.iter().copied()) {
                         continue;
                     }
 
@@ -5738,5 +5752,31 @@ mod test_is_better_prefix {
     #[test]
     fn same_prefix_not_better() {
         assert!(!PrefixGroupBuilder::is_better_prefix("PhotoLab", "PhotoLab"));
+    }
+}
+
+#[cfg(test)]
+mod test_accepts_group_name {
+    use super::*;
+
+    #[test]
+    fn accepts_an_ordinary_name() {
+        let name_filter = NameFilter::new(["studio"], ["ignored name"]);
+        let options = GroupingOptions::new(3, 1, ["sample"], Vec::<String>::new());
+        assert!(PrefixGrouper::new(&options, &name_filter).accepts_group_name("Show Name"));
+    }
+
+    #[test]
+    fn rejects_hidden_names_ignored_prefixes_ignored_names_and_ignored_parts() {
+        let name_filter = NameFilter::new(["studio"], ["ignored name"]);
+        let options = GroupingOptions::new(3, 1, ["sample"], Vec::<String>::new());
+        let grouper = PrefixGrouper::new(&options, &name_filter);
+
+        assert!(!grouper.accepts_group_name(".hidden"));
+        assert!(!grouper.accepts_group_name("Studio"));
+        assert!(!grouper.accepts_group_name("Ignored.Name"));
+        assert!(!grouper.accepts_group_name("IGNORED NAME"));
+        assert!(!grouper.accepts_group_name("Show Sample"));
+        assert!(!grouper.accepts_group_name("Show.SAMPLE.Name"));
     }
 }

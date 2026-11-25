@@ -12,15 +12,29 @@ use cli_tools_common::test_support::TempTree;
 
 /// Run the binary with the given arguments and an empty home directory.
 fn run_dirmove(home: &Path, arguments: &[&str], root: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_dirmove"))
+    dirmove_command(home)
         .args(arguments)
         .arg(root)
-        .env_remove("CARGO_MANIFEST_DIR")
-        .env("HOME", home)
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
         .output()
         .expect("the dirmove binary should run")
+}
+
+/// Build a binary invocation that reads its config and keeps its database under `home`.
+fn dirmove_command(home: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dirmove"));
+    command
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", home)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null());
+    command
+}
+
+/// Return whether the name database exists anywhere under `home`.
+fn database_exists(home: &TempTree) -> bool {
+    home.files().iter().any(|file| file.ends_with("dirmove.db"))
 }
 
 /// Standard output as text.
@@ -134,4 +148,53 @@ fn a_missing_path_is_an_error() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
     assert_eq!(tree.files(), Vec::<String>::new());
+}
+
+#[test]
+fn dryrun_does_not_create_the_name_database() {
+    let tree = library_tree();
+    let home = TempTree::new();
+
+    let output = run_dirmove(
+        home.path(),
+        &[&ARGUMENTS[..], &["--print"]].concat(),
+        &tree.join("Library"),
+    );
+
+    assert_success(&output);
+    assert!(!database_exists(&home), "{:?}", home.files());
+}
+
+#[test]
+fn database_command_reports_a_missing_database_without_creating_it() {
+    let home = TempTree::new();
+
+    let output = dirmove_command(home.path())
+        .arg("database")
+        .output()
+        .expect("the dirmove binary should run");
+
+    assert_success(&output);
+    assert!(stdout(&output).contains("No database at"), "{}", stdout(&output));
+    assert!(!database_exists(&home), "{:?}", home.files());
+}
+
+#[cfg(not(windows))]
+#[test]
+fn database_command_lists_the_directory_names_a_run_stored() {
+    let tree = library_tree();
+    let home = TempTree::new();
+    assert_success(&run_dirmove(home.path(), &ARGUMENTS, &tree.join("Library")));
+    assert!(database_exists(&home), "{:?}", home.files());
+
+    let output = dirmove_command(home.path())
+        .arg("db")
+        .output()
+        .expect("the dirmove binary should run");
+
+    assert_success(&output);
+    let printed = stdout(&output);
+    assert!(printed.contains("Database entries: "), "{printed}");
+    assert!(printed.contains("  Show Alpha"), "{printed}");
+    assert!(printed.contains("  Movie Night"), "{printed}");
 }

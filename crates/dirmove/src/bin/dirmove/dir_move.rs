@@ -21,7 +21,7 @@ use cli_tools_dirmove::{
 
 use crate::DirMoveArgs;
 use crate::config::{Config, add_ignored_group_name_to_config, config_from_args};
-use crate::database::{self, Database};
+use crate::database::Database;
 use crate::prompt::{self, PromptResult};
 use crate::report;
 
@@ -80,10 +80,17 @@ impl DirMove {
         Ok(dirmove)
     }
 
-    /// Create a `DirMove` from resolved roots, opening the default database.
+    /// Create a `DirMove` from resolved roots and open the default database.
+    ///
+    /// A dry run never writes to the database, so it only opens a database that already exists.
     fn new_with_roots(roots: Roots, config: Config) -> Self {
-        let database = match Database::open_default() {
-            Ok(database) => Some(database),
+        let database = if config.dryrun {
+            Database::open_existing()
+        } else {
+            Database::open_default().map(Some)
+        };
+        let database = match database {
+            Ok(database) => database,
             Err(error) => {
                 print_yellow!("Failed to open database: {error}");
                 None
@@ -194,7 +201,7 @@ impl DirMove {
         if let Ok(scan) = self.scanner().collect_directories() {
             for directory_info in scan.directories {
                 let directory_name = path_to_filename_string(&directory_info.path);
-                if database::should_store_name(&directory_name, &self.config)
+                if self.grouper().accepts_group_name(&directory_name)
                     && let Err(error) = database.insert_if_new(&directory_name)
                     && self.config.debug
                 {
@@ -214,7 +221,7 @@ impl DirMove {
             return;
         };
 
-        if database::should_store_name(name, &self.config)
+        if self.grouper().accepts_group_name(name)
             && let Err(e) = db.upsert(name)
             && self.config.debug
         {

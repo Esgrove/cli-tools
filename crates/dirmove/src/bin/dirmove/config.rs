@@ -1,6 +1,6 @@
 //! Configuration parsing for the `dirmove` binary.
 //!
-//! Reads the user config file, combines it with the command line arguments into the library `Config`,
+//! Reads the user config file, combines it with the command line arguments into `Config`,
 //! and adds group names to the ignored names in the user config file.
 
 use std::fs;
@@ -96,6 +96,16 @@ struct UserConfig {
 }
 
 impl DirMoveConfig {
+    /// Parse configuration from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    pub fn from_toml_str(toml_str: &str) -> Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.dirmove)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
+    }
+
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
     ///
@@ -117,16 +127,6 @@ impl DirMoveConfig {
         }
     }
 
-    /// Parse configuration from a TOML string.
-    ///
-    /// # Errors
-    /// Returns an error if the TOML string is invalid.
-    pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.dirmove)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
-    }
-
     /// Create the final config by combining command line args with this user config.
     ///
     /// List options from the user config come first, followed by the ones from the command line.
@@ -136,7 +136,7 @@ impl DirMoveConfig {
         // Command line mappings use the "pattern:dirname" format.
         let cli_mappings = args.custom_mapping.into_iter().filter_map(|mapping| {
             let Some((pattern, directory)) = mapping.split_once(':') else {
-                eprintln!("Warning: Invalid custom mapping format '{mapping}', expected 'pattern:dirname'");
+                print_yellow!("Invalid custom mapping format '{mapping}', expected 'pattern:dirname'");
                 return None;
             };
             Some([pattern.to_string(), directory.to_string()])
@@ -212,10 +212,33 @@ pub fn config_from_args(args: DirMoveArgs) -> Result<Config> {
     Ok(DirMoveConfig::get_user_config()?.into_config(args))
 }
 
-/// Create config from command line args only, ignoring the user config file.
-#[cfg(test)]
-fn config_from_args_default_config(args: DirMoveArgs) -> Config {
-    DirMoveConfig::default().into_config(args)
+/// Add a group name to `ignored_group_names` in the user config file.
+/// The name is stored as-is (not normalized) so the config stays human-readable.
+/// Returns `Ok(true)` if the name was added, `Ok(false)` if it was already present.
+pub fn add_ignored_group_name_to_config(name: &str) -> Result<bool> {
+    let Some(config_path) = cli_tools_common::config_path() else {
+        anyhow::bail!("Could not determine config file path");
+    };
+
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                config_path.display()
+            ));
+        }
+    };
+
+    let (new_content, added) = add_ignored_name_to_toml(&content, name)?;
+
+    if added {
+        cli_tools_common::write_atomically(config_path, new_content)
+            .map_err(|error| anyhow::anyhow!("Failed to write config file {}: {error}", config_path.display()))?;
+    }
+
+    Ok(added)
 }
 
 /// Add a group name to `ignored_group_names` in a TOML document string.
@@ -283,33 +306,10 @@ fn add_ignored_name_to_toml(content: &str, name: &str) -> Result<(String, bool)>
     Ok((document.to_string(), true))
 }
 
-/// Add a group name to `ignored_group_names` in the user config file.
-/// The name is stored as-is (not normalized) so the config stays human-readable.
-/// Returns `Ok(true)` if the name was added, `Ok(false)` if it was already present.
-pub fn add_ignored_group_name_to_config(name: &str) -> Result<bool> {
-    let Some(config_path) = cli_tools_common::config_path() else {
-        anyhow::bail!("Could not determine config file path");
-    };
-
-    let content = match fs::read_to_string(config_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                config_path.display()
-            ));
-        }
-    };
-
-    let (new_content, added) = add_ignored_name_to_toml(&content, name)?;
-
-    if added {
-        fs::write(config_path, new_content)
-            .map_err(|error| anyhow::anyhow!("Failed to write config file {}: {error}", config_path.display()))?;
-    }
-
-    Ok(added)
+/// Create config from command line args only, ignoring the user config file.
+#[cfg(test)]
+fn config_from_args_default_config(args: DirMoveArgs) -> Config {
+    DirMoveConfig::default().into_config(args)
 }
 
 #[cfg(test)]
@@ -523,7 +523,7 @@ ignored_group_names = [
 }
 
 #[cfg(test)]
-mod config_tests {
+mod test_user_config {
     use super::*;
 
     #[test]
@@ -687,7 +687,7 @@ verbose = true
 }
 
 #[cfg(test)]
-mod cli_args_tests {
+mod test_cli_args {
     use super::*;
     use clap::Parser;
 

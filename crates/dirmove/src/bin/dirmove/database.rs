@@ -6,12 +6,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
-use cli_tools_common::print_yellow;
 use cli_tools_dirmove::utils;
-
-use crate::config::Config;
 
 /// Default database filename.
 const DATABASE_FILENAME: &str = "dirmove.db";
@@ -25,57 +22,47 @@ pub struct Database {
 #[derive(Debug, Clone)]
 pub struct DirectoryEntry {
     /// Normalized name for lookups (lowercase, no spaces).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the tests check the stored normalized form")
+    )]
     pub normalized_name: String,
     /// Display name with original casing and spacing.
     pub display_name: String,
 }
 
 impl Database {
-    /// Print debug information about the database contents.
-    pub fn print_debug_info(&self) {
-        eprintln!("Database: {}", Self::path().display());
-        match self.get_all_entries() {
-            Ok(entries) => {
-                if entries.is_empty() {
-                    eprintln!("Database: empty");
-                } else {
-                    eprintln!("Database entries ({}):", entries.len());
-                    for entry in entries {
-                        eprintln!("  {entry}");
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to get database entries: {e}");
-            }
-        }
-    }
-
-    /// Get the database path for display purposes.
-    pub fn path() -> PathBuf {
-        Self::database_path()
-    }
-
     /// Open or create the database at the default path.
     ///
     /// # Errors
     /// Returns an error if the database cannot be opened or initialized.
     pub fn open_default() -> Result<Self> {
-        let path = Self::database_path();
+        let path = database_path();
 
-        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
         }
 
-        let connection =
-            Connection::open(&path).with_context(|| format!("Failed to open database: {}", path.display()))?;
+        Self::open(&path)
+    }
 
-        // Set busy timeout for concurrent access (5 seconds)
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .context("Failed to set busy timeout")?;
+    /// Open the database at the default path only if it already exists, without creating anything.
+    ///
+    /// # Errors
+    /// Returns an error if an existing database cannot be opened or initialized.
+    pub fn open_existing() -> Result<Option<Self>> {
+        let path = database_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        Self::open(&path).map(Some)
+    }
+
+    /// Open an in-memory database for testing.
+    #[cfg(test)]
+    pub fn open_in_memory() -> Result<Self> {
+        let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
 
         let database = Self { connection };
         database.initialize()?;
@@ -120,12 +107,12 @@ impl Database {
 
     /// Get all directory entries sorted by display name.
     pub fn get_all_entries(&self) -> Result<Vec<DirectoryEntry>> {
-        let mut stmt = self
+        let mut statement = self
             .connection
             .prepare("SELECT normalized_name, display_name FROM directory_names ORDER BY display_name")
             .context("Failed to prepare query")?;
 
-        let entries = stmt
+        let entries = statement
             .query_map([], |row| {
                 Ok(DirectoryEntry {
                     normalized_name: row.get(0)?,
@@ -150,16 +137,34 @@ impl Database {
     /// only when they represent the same entity.
     #[allow(clippy::doc_markdown)]
     pub fn exact_match_display_name(&self, directory_name: &str) -> Option<String> {
-        let normalized = utils::normalize_name(directory_name);
-        self.get_all_entries()
-            .ok()?
-            .into_iter()
-            .find(|entry| entry.normalized_name == normalized)
-            .map(|entry| entry.display_name)
+        self.connection
+            .query_row(
+                "SELECT display_name FROM directory_names WHERE normalized_name = ?1",
+                params![utils::normalize_name(directory_name)],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Print where the database is and every stored name to standard error.
+    pub fn print_debug_info(&self) {
+        eprintln!("Database: {}", database_path().display());
+        match self.get_all_entries() {
+            Ok(entries) if entries.is_empty() => eprintln!("Database: empty"),
+            Ok(entries) => {
+                eprintln!("Database entries ({}):", entries.len());
+                for entry in entries {
+                    eprintln!("  {entry}");
+                }
+            }
+            Err(error) => eprintln!("Failed to get database entries: {error}"),
+        }
     }
 
     /// Get the count of directory names in the database.
-    #[allow(unused)]
+    #[cfg(test)]
     pub fn count(&self) -> Result<u64> {
         let count: i64 = self
             .connection
@@ -170,23 +175,15 @@ impl Database {
         Ok(count as u64)
     }
 
-    /// Get the database path.
-    ///
-    /// Uses the platform-specific local data directory:
-    /// - Windows: `%LOCALAPPDATA%\cli-tools\dirmove.db`
-    /// - macOS: `~/Library/Application Support/cli-tools/dirmove.db`
-    /// - Linux: `~/.local/share/cli-tools/dirmove.db`
-    fn database_path() -> PathBuf {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cli-tools");
-        data_dir.join(DATABASE_FILENAME)
-    }
+    /// Open and initialize the database at `path`.
+    fn open(path: &std::path::Path) -> Result<Self> {
+        let connection =
+            Connection::open(path).with_context(|| format!("Failed to open database: {}", path.display()))?;
 
-    /// Open an in-memory database for testing.
-    #[cfg(test)]
-    pub fn open_in_memory() -> Result<Self> {
-        let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
+        // Set busy timeout for concurrent access (5 seconds)
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("Failed to set busy timeout")?;
 
         let database = Self { connection };
         database.initialize()?;
@@ -224,29 +221,16 @@ impl std::fmt::Display for DirectoryEntry {
     }
 }
 
-/// Check if a directory name should be stored in the database.
-///
-/// Hidden names, ignored prefixes, ignored group names, and names with an ignored group part are not stored.
-pub fn should_store_name(name: &str, config: &Config) -> bool {
-    !name.starts_with('.')
-        && !config.name_filter.is_ignored_prefix(name)
-        && !config
-            .name_filter
-            .matches_ignored_group_name(&utils::normalize_name(name))
-        && !config.grouping.has_ignored_group_part(name.split([' ', '.']))
-}
-
 /// Print the number of directory names in the default database and every stored name.
 ///
+/// A missing database is reported and not created.
+///
 /// # Errors
-/// Returns an error if the entries cannot be read from an opened database.
+/// Returns an error if the database cannot be opened or its entries cannot be read.
 pub fn print_entries() -> Result<()> {
-    let database = match Database::open_default() {
-        Ok(database) => database,
-        Err(error) => {
-            print_yellow!("Database not available: {error}");
-            return Ok(());
-        }
+    let Some(database) = Database::open_existing()? else {
+        println!("No database at {}", database_path().display());
+        return Ok(());
     };
     let entries = database.get_all_entries()?;
     println!("Database entries: {}", entries.len());
@@ -254,6 +238,19 @@ pub fn print_entries() -> Result<()> {
         println!("  {}", entry.display_name);
     }
     Ok(())
+}
+
+/// Get the database path.
+///
+/// Uses the platform-specific local data directory:
+/// - Windows: `%LOCALAPPDATA%\cli-tools\dirmove.db`
+/// - macOS: `~/Library/Application Support/cli-tools/dirmove.db`
+/// - Linux: `~/.local/share/cli-tools/dirmove.db`
+fn database_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("cli-tools")
+        .join(DATABASE_FILENAME)
 }
 
 #[cfg(test)]
