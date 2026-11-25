@@ -9,17 +9,32 @@ repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "qtorrent"
-path = "src/main.rs"
+path = "src/bin/qtorrent/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Dependencies of the qtorrent binary, left out by library users with `default-features = false`.
+cli = [
+    "cli-tools-common/completion",
+    "cli-tools-common/diff",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:colored",
+    "dep:toml",
+    "dep:trash",
+    "tokio/full",
+]
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
-cli-tools-common = { workspace = true, features = ["completion", "diff"] }
+cli-tools-common = { workspace = true }
 cli-tools-dots = { workspace = true }
-colored = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -28,14 +43,19 @@ serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
 sha1 = { workspace = true }
-toml = { workspace = true }
-trash = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 walkdir = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+colored = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+trash = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [lints]
 workspace = true

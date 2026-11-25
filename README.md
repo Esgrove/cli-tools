@@ -41,6 +41,7 @@ cli-tools-dirmove = { git = "https://github.com/Esgrove/cli-tools", default-feat
 | [`cli-tools-dirmove`](./crates/dirmove)   | `dirmove`  | Scanning, matching, prefix grouping, unpacking, merging    |
 | [`cli-tools-dots`](./crates/dots)         | `dots`     | Dot formatting and renaming                                |
 | [`cli-tools-dupefind`](./crates/dupefind) | `dupefind` | Name normalization and duplicate grouping                  |
+| [`cli-tools-qtorrent`](./crates/qtorrent) | `qtorrent` | Torrent parsing, naming, tagging, and the qBittorrent API  |
 | [`cli-tools-rsbump`](./crates/rsbump)     | `rsbump`   | Rust version bumps for manifests and Dockerfiles           |
 | [`cli-tools-slb`](./crates/slb)           | `slb`      | Semantic line break checking and formatting                |
 | [`cli-tools-xtask`](./crates/xtask)       | `xtask`    | Parallel task runner with project specific builtins        |

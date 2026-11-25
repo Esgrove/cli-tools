@@ -11,7 +11,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
 
-use crate::config::Config;
 use crate::utils::TorrentInfo;
 
 const HEX_CHARS: &[u8] = b"0123456789abcdef";
@@ -286,8 +285,9 @@ impl FileFilter {
             && !has_image_count_threshold
     }
 
-    /// Check if a file should be excluded. Returns the reason if excluded.
-    #[cfg(test)]
+    /// Check if a single file should be excluded. Returns the reason if excluded.
+    ///
+    /// The minimum image file count depends on the whole torrent, so it is not checked here.
     #[must_use]
     pub fn should_exclude(&self, file: &FileInfo<'_>) -> Option<String> {
         self.should_exclude_with_image_count(file, usize::MAX)
@@ -379,8 +379,11 @@ impl FilteredFiles<'_> {
 ///
 /// Applies file filtering and determines whether to treat this
 /// as a multi-file torrent based on how many files will actually be included after filtering.
-pub fn parse_torrent(path: &Path, config: &Config) -> Result<TorrentInfo> {
-    let filter = &config.file_filter;
+/// The tags are stored on the result for adding the torrent.
+///
+/// # Errors
+/// Returns an error if the file cannot be read or is not a valid torrent.
+pub fn parse_torrent(path: &Path, filter: &FileFilter, tags: Option<String>) -> Result<TorrentInfo> {
     let bytes = fs::read(path).context("Failed to read torrent file")?;
     let torrent = Torrent::from_buffer(&bytes)?;
 
@@ -430,7 +433,7 @@ pub fn parse_torrent(path: &Path, config: &Config) -> Result<TorrentInfo> {
         excluded_indices,
         single_included_file,
         original_name: effective_original_name,
-        tags: config.resolve_tags(path),
+        tags,
     })
 }
 
@@ -486,7 +489,10 @@ where
     lossy_string_vec(deserializer).map(Some)
 }
 
-/// Convert bytes to a hex string.
+/// Convert bytes to a lowercase hex string.
+///
+/// # Panics
+/// Never panics in practice, since the hex digits are always valid UTF-8.
 #[must_use]
 pub fn to_hex(bytes: &[u8]) -> String {
     let mut hex = Vec::with_capacity(bytes.len() * 2);
@@ -553,7 +559,8 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
 
 /// Calculate the length of a bencoded value nested `depth` levels deep.
 ///
-/// Lists and dictionaries recurse, so the depth is capped to turn a hostile file of nested containers into an error
+/// Lists and dictionaries recurse,
+/// so the depth is capped to turn a hostile file of nested containers into an error
 /// instead of a stack overflow.
 fn bencode_value_length_at_depth(data: &[u8], depth: usize) -> Result<usize> {
     if depth > MAX_BENCODE_DEPTH {
@@ -1466,96 +1473,88 @@ mod test_extract_info_dict_bytes {
 #[cfg(test)]
 mod test_parse_torrent {
     use super::*;
-    use clap::Parser;
     use std::path::Path;
-
-    use crate::config::Config;
 
     fn dummy_torrent_path() -> &'static Path {
         Path::new("tests/fixtures/dummy.torrent")
     }
 
-    fn default_config() -> Config {
-        let args = crate::QtorrentArgs::try_parse_from(["test"]).expect("should parse default args");
-        Config::from_args(args).expect("should create default config")
-    }
-
     #[test]
     fn parses_valid_torrent_file() {
-        let config = default_config();
-        let result = parse_torrent(dummy_torrent_path(), &config);
+        let filter = FileFilter::default();
+        let result = parse_torrent(dummy_torrent_path(), &filter, None);
         assert!(result.is_ok());
     }
 
     #[test]
     fn sets_path_correctly() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert_eq!(info.path, dummy_torrent_path());
     }
 
     #[test]
     fn calculates_info_hash() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert_eq!(info.info_hash.len(), 40);
         assert!(info.info_hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn stores_raw_bytes() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert_ne!(info.bytes, [] as [u8; 0]);
     }
 
     #[test]
     fn single_file_torrent_not_multi_file() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert!(!info.original_is_multi_file);
         assert!(!info.effective_is_multi_file);
     }
 
     #[test]
     fn calculates_included_size() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert_eq!(info.included_size, 7);
     }
 
     #[test]
     fn no_excluded_indices_without_filter() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert_eq!(info.excluded_indices, [] as [usize; 0]);
     }
 
     #[test]
     fn sets_original_name() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert_eq!(info.original_name, Some("dummy.txt".to_string()));
     }
 
     #[test]
     fn rename_to_is_none_initially() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert!(info.rename_to.is_none());
     }
 
     #[test]
     fn single_included_file_is_none_for_single_file_torrent() {
-        let config = default_config();
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter::default();
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
         assert!(info.single_included_file.is_none());
     }
 
     #[test]
     fn fails_on_nonexistent_file() {
-        let config = default_config();
-        let result = parse_torrent(Path::new("nonexistent.torrent"), &config);
+        let filter = FileFilter::default();
+        let result = parse_torrent(Path::new("nonexistent.torrent"), &filter, None);
         assert!(result.is_err());
     }
 
@@ -1566,8 +1565,8 @@ mod test_parse_torrent {
         let temp_path = temp_dir.join("invalid_test.torrent");
         std::fs::write(&temp_path, b"not a valid torrent").expect("should write temp file");
 
-        let config = default_config();
-        let result = parse_torrent(&temp_path, &config);
+        let filter = FileFilter::default();
+        let result = parse_torrent(&temp_path, &filter, None);
 
         std::fs::remove_file(&temp_path).ok();
         assert!(result.is_err());
@@ -1575,9 +1574,11 @@ mod test_parse_torrent {
 
     #[test]
     fn filter_excludes_by_extension() {
-        let mut config = default_config();
-        config.file_filter.skip_extensions = vec!["txt".to_string()];
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter {
+            skip_extensions: vec!["txt".to_string()],
+            ..FileFilter::default()
+        };
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
 
         // Single file torrent with txt extension should have the file excluded
         // but since it's single-file, excluded_indices is only populated for multi-file
@@ -1588,9 +1589,11 @@ mod test_parse_torrent {
     #[test]
     fn filter_by_size_on_single_file() {
         // File is 7 bytes, set minimum to 100 bytes
-        let mut config = default_config();
-        config.file_filter.min_size_bytes = Some(100);
-        let info = parse_torrent(dummy_torrent_path(), &config).expect("should parse");
+        let filter = FileFilter {
+            min_size_bytes: Some(100),
+            ..FileFilter::default()
+        };
+        let info = parse_torrent(dummy_torrent_path(), &filter, None).expect("should parse");
 
         // Single file torrent - size filter doesn't affect single-file torrents at parse time
         assert_eq!(info.included_size, 7);
@@ -1600,15 +1603,7 @@ mod test_parse_torrent {
 #[cfg(test)]
 mod test_parse_torrent_all_files_excluded {
     use super::*;
-    use clap::Parser;
     use serde_bytes::ByteBuf;
-
-    use crate::config::Config;
-
-    fn default_config() -> Config {
-        let args = crate::QtorrentArgs::try_parse_from(["test"]).expect("should parse default args");
-        Config::from_args(args).expect("should create default config")
-    }
 
     /// Create a valid multi-file torrent file on disk and return its path.
     /// The torrent contains two `.txt` files, each 500 bytes.
@@ -1647,10 +1642,9 @@ mod test_parse_torrent_all_files_excluded {
         let temp_dir = tempfile::tempdir().expect("should create temp dir");
         let torrent_path = create_multi_file_torrent(temp_dir.path(), "test.torrent");
 
-        let mut config = default_config();
-        config.file_filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None, None);
+        let filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None, None);
 
-        let info = parse_torrent(&torrent_path, &config).expect("should parse");
+        let info = parse_torrent(&torrent_path, &filter, None).expect("should parse");
         assert!(info.all_files_excluded());
         assert_eq!(info.excluded_indices.len(), 2);
         assert_eq!(info.included_size, 0);
@@ -1661,11 +1655,10 @@ mod test_parse_torrent_all_files_excluded {
         let temp_dir = tempfile::tempdir().expect("should create temp dir");
         let torrent_path = create_multi_file_torrent(temp_dir.path(), "test.torrent");
 
-        let mut config = default_config();
         // Both files are 500 bytes. Require at least 1 MB
-        config.file_filter = FileFilter::new(vec![], vec![], Some(1024 * 1024), true, None, None);
+        let filter = FileFilter::new(vec![], vec![], Some(1024 * 1024), true, None, None);
 
-        let info = parse_torrent(&torrent_path, &config).expect("should parse");
+        let info = parse_torrent(&torrent_path, &filter, None).expect("should parse");
         assert!(info.all_files_excluded());
         assert_eq!(info.excluded_indices.len(), 2);
         assert_eq!(info.included_size, 0);
@@ -1703,10 +1696,9 @@ mod test_parse_torrent_all_files_excluded {
         let torrent_path = temp_dir.path().join("mixed.torrent");
         std::fs::write(&torrent_path, &bytes).expect("should write torrent file");
 
-        let mut config = default_config();
-        config.file_filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None, None);
+        let filter = FileFilter::new(vec!["txt".to_string()], vec![], None, true, None, None);
 
-        let info = parse_torrent(&torrent_path, &config).expect("should parse");
+        let info = parse_torrent(&torrent_path, &filter, None).expect("should parse");
         assert!(!info.all_files_excluded());
         assert_eq!(info.excluded_indices.len(), 1);
         assert_eq!(info.included_size, 1_000_000);
@@ -1717,10 +1709,9 @@ mod test_parse_torrent_all_files_excluded {
         let temp_dir = tempfile::tempdir().expect("should create temp dir");
         let torrent_path = create_multi_file_torrent(temp_dir.path(), "test.torrent");
 
-        let mut config = default_config();
-        config.file_filter = FileFilter::default();
+        let filter = FileFilter::default();
 
-        let info = parse_torrent(&torrent_path, &config).expect("should parse");
+        let info = parse_torrent(&torrent_path, &filter, None).expect("should parse");
         assert!(!info.all_files_excluded());
         assert_eq!(info.excluded_indices, [] as [usize; 0]);
         assert_eq!(info.included_size, 1000);

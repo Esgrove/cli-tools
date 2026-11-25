@@ -1,7 +1,7 @@
 //! Helpers for qtorrent.
 //!
-//! Torrent name formatting, media extension detection, and moving added torrent files
-//! into the downloaded directory.
+//! Torrent name formatting, media extension detection,
+//! and moving added torrent files into the downloaded directory.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -28,55 +28,57 @@ static RE_TRAILING_PART: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Information about a torrent file to be added.
+#[derive(Debug)]
 pub struct TorrentInfo {
     /// Path to the torrent file.
-    pub(crate) path: std::path::PathBuf,
+    pub path: PathBuf,
     /// Parsed torrent data.
-    pub(crate) torrent: Torrent,
+    pub torrent: Torrent,
     /// Raw torrent file bytes.
-    pub(crate) bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
     /// Info hash calculated from raw bytes (lowercase hex).
-    pub(crate) info_hash: String,
+    pub info_hash: String,
     /// Whether the original torrent has multiple files.
-    pub(crate) original_is_multi_file: bool,
+    pub original_is_multi_file: bool,
     /// Whether to treat this as multi-file after filtering (determines subdirectory creation).
     /// This is true only if more than one file will be included after filtering.
-    pub(crate) effective_is_multi_file: bool,
+    pub effective_is_multi_file: bool,
     /// Custom name to rename to (None = use torrent's internal name).
-    pub(crate) rename_to: Option<String>,
+    pub rename_to: Option<String>,
     /// Size of the included files.
-    pub(crate) included_size: u64,
+    pub included_size: u64,
     /// Indices of files to exclude (for setting priority to 0).
-    pub(crate) excluded_indices: Vec<usize>,
+    pub excluded_indices: Vec<usize>,
     /// For originally multi-file torrents that become effectively single-file,
     /// store the single included file's name to get the correct extension.
-    pub(crate) single_included_file: Option<String>,
+    pub single_included_file: Option<String>,
     /// Original name from torrent metadata (for file/folder renaming on disk).
     /// For single-file torrents, this is the filename.
     /// For multi-file torrents, this is the root folder name.
-    pub(crate) original_name: Option<String>,
+    pub original_name: Option<String>,
     /// Resolved tags for this torrent (from tag overwrite prefixes or default config tags).
-    pub(crate) tags: Option<String>,
+    pub tags: Option<String>,
 }
 
 /// Summary of files skipped due to directory matching.
 #[derive(Debug, Default)]
 pub struct SkippedDirectorySummary {
     /// Number of files in the skipped directory.
-    pub(crate) file_count: usize,
+    pub file_count: usize,
     /// Total size of all files in the skipped directory.
-    pub(crate) total_size: u64,
+    pub total_size: u64,
 }
 
 impl SkippedDirectorySummary {
     /// Add a file to this summary.
-    pub(crate) const fn add_file(&mut self, size: u64) {
+    pub const fn add_file(&mut self, size: u64) {
         self.file_count += 1;
         self.total_size += size;
     }
 
     /// Returns "file" or "files" based on the count.
-    pub(crate) const fn files_word(&self) -> &'static str {
+    #[must_use]
+    pub const fn files_word(&self) -> &'static str {
         if self.file_count == 1 { "file" } else { "files" }
     }
 }
@@ -86,7 +88,8 @@ impl TorrentInfo {
     ///
     /// Returns `true` for multi-file torrents where every file was filtered out,
     /// meaning there are no files left to download.
-    pub(crate) fn all_files_excluded(&self) -> bool {
+    #[must_use]
+    pub fn all_files_excluded(&self) -> bool {
         self.original_is_multi_file
             && !self.excluded_indices.is_empty()
             && self.excluded_indices.len() == self.torrent.files().len()
@@ -94,7 +97,8 @@ impl TorrentInfo {
 
     /// Get the display name for this torrent (`rename_to` or internal name).
     #[allow(clippy::option_if_let_else)]
-    pub(crate) fn display_name(&self) -> Cow<'_, str> {
+    #[must_use]
+    pub fn display_name(&self) -> Cow<'_, str> {
         if let Some(ref name) = self.rename_to {
             Cow::Borrowed(name.as_str())
         } else if let Some(name) = self.torrent.name() {
@@ -112,7 +116,8 @@ impl TorrentInfo {
     /// If `ignore_filename_patterns` is provided and the torrent filename contains any of these strings,
     /// the filename is ignored and the internal name is used instead.
     #[allow(clippy::option_if_let_else)]
-    pub(crate) fn suggested_name_raw(&self, ignore_filename_patterns: &[String]) -> Cow<'_, str> {
+    #[must_use]
+    pub fn suggested_name_raw(&self, ignore_filename_patterns: &[String]) -> Cow<'_, str> {
         // Try to get name from torrent filename first, unless it matches ignore patterns
         let torrent_filename = self.path.file_stem().and_then(|stem| stem.to_str()).filter(|filename| {
             // Skip filename if it contains any of the ignore patterns
@@ -177,6 +182,7 @@ impl TorrentInfo {
 ///
 /// Only recognises known media extensions to avoid treating names like "Show.Name" as having extension "Name".
 /// Also filters out purely numeric extensions (like `.15` from dates).
+#[must_use]
 pub fn extract_file_extension(name: &str) -> Option<String> {
     let ext = Path::new(name).extension()?.to_string_lossy().to_lowercase();
 
@@ -193,6 +199,7 @@ pub fn extract_file_extension(name: &str) -> Option<String> {
 }
 
 /// Insert a date before the file extension, or at the end if no extension.
+#[must_use]
 pub fn insert_date_before_extension(name: &str, date: &str) -> String {
     let path = Path::new(name);
     path.extension().map_or_else(
@@ -223,6 +230,7 @@ pub fn format_torrent_name(dot_rename: &DotFormat, name: &str, is_multi_file: bo
 }
 
 /// Format a single file name, stripping extension before formatting and restoring it after.
+#[must_use]
 pub fn format_single_file_name(dot_rename: &DotFormat, name: &str) -> String {
     // For single files, strip the extension before formatting and restore it after.
     // DotRename expects names without extensions.
@@ -243,6 +251,7 @@ pub fn format_single_file_name(dot_rename: &DotFormat, name: &str) -> String {
 /// Removes terminal escape sequences and control characters,
 /// and replaces characters that are invalid in file names with spaces
 /// so text on both sides of path separators is preserved.
+#[must_use]
 pub fn sanitize_custom_name(name: &str) -> String {
     let mut characters = name.chars();
     let mut sanitized = String::with_capacity(name.len());
@@ -309,6 +318,7 @@ fn skip_string_sequence(characters: &mut impl Iterator<Item = char>) {
 /// When a user enters a custom rename, they may omit the file extension.
 /// This checks if the reference name has a known extension and the custom name does not,
 /// and appends the extension if missing.
+#[must_use]
 pub fn restore_file_extension(custom_name: &str, reference_name: &str) -> String {
     if let Some(original_ext) = extract_file_extension(reference_name)
         && extract_file_extension(custom_name).is_none()
@@ -322,6 +332,7 @@ pub fn restore_file_extension(custom_name: &str, reference_name: &str) -> String
 ///
 /// Checks the directory containing `torrent_path` first, then its parent directory.
 /// Returns the path to the first matching directory, or `None` if neither exists.
+#[must_use]
 pub fn find_downloaded_directory(torrent_path: &Path) -> Option<PathBuf> {
     let parent = torrent_path.parent()?;
     let direct = parent.join(DOWNLOADED_DIRECTORY_NAME);
@@ -338,6 +349,7 @@ pub fn find_downloaded_directory(torrent_path: &Path) -> Option<PathBuf> {
 
 /// Return the path of a torrent file in `downloaded_directory` sharing the same file name as `torrent_path`,
 /// if one exists and is not `torrent_path` itself.
+#[must_use]
 pub fn existing_torrent_in_downloaded(downloaded_directory: &Path, torrent_path: &Path) -> Option<PathBuf> {
     let file_name = torrent_path.file_name()?;
     let target = downloaded_directory.join(file_name);
@@ -1094,7 +1106,7 @@ mod test_format_single_file_name {
 }
 
 #[cfg(test)]
-mod test_torrent_info_helpers {
+pub(crate) mod test_torrent_info_helpers {
     //! Helper module to create test `TorrentInfo` instances.
 
     use super::*;

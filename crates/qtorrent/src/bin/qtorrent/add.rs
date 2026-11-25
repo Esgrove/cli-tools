@@ -1,0 +1,498 @@
+//! Add workflow of the qtorrent binary.
+//!
+//! Parses the torrent files and adds them to qBittorrent one by one with confirmation,
+//! or shows what would be done in dry-run and offline mode.
+//! Added torrent files are moved to the downloaded directory and skipped duplicates are trashed.
+//! Terminal output lives in `display`, the library events are printed by `printer`,
+//! and the interactive questions live in `prompt`.
+
+mod display;
+mod printer;
+mod prompt;
+
+use std::path::Path;
+
+use anyhow::{Result, bail};
+use colored::Colorize;
+
+use cli_tools_dots::DotRenameConfig;
+use cli_tools_qtorrent::utils;
+use cli_tools_qtorrent::{NameSuggester, TorrentAdder, TorrentInfo, TorrentStats, find_existing_torrent};
+
+use crate::QtorrentArgs;
+use crate::client;
+use crate::config::Config;
+
+use printer::EventPrinter;
+
+/// Main handler for adding torrents to qBittorrent.
+pub struct QTorrent {
+    config: Config,
+    names: NameSuggester,
+}
+
+impl QTorrent {
+    /// Create a new `QTorrent` from command line arguments.
+    ///
+    /// Loads user configuration and merges it with CLI arguments.
+    ///
+    /// # Errors
+    /// Returns an error if the config file cannot be read or parsed.
+    pub fn new(args: QtorrentArgs) -> Result<Self> {
+        let config = Config::from_args(args)?;
+        let dot_rename = if config.use_dots_formatting {
+            Some(DotRenameConfig::from_user_config()?)
+        } else {
+            None
+        };
+        Ok(Self::from_config(config, dot_rename))
+    }
+
+    /// Create a `QTorrent` from a finished config and an optional dots formatting config.
+    fn from_config(config: Config, dot_rename: Option<DotRenameConfig>) -> Self {
+        let names = NameSuggester::new(config.naming.clone(), dot_rename);
+        Self { config, names }
+    }
+
+    /// Run the main workflow to add torrents.
+    ///
+    /// # Errors
+    /// Returns an error if torrents cannot be parsed or added.
+    pub async fn run(self) -> Result<()> {
+        let torrent_paths = self.config.collector.collect()?;
+        if torrent_paths.is_empty() {
+            bail!("No torrent files found");
+        }
+
+        // Parse all torrent files first
+        let torrents = self.parse_torrents(&torrent_paths);
+
+        if torrents.is_empty() {
+            println!("{}", "No valid torrents to add".yellow());
+            return Ok(());
+        }
+
+        if self.config.dryrun {
+            return self.run_dryrun(torrents).await;
+        }
+
+        self.add_torrents_individually(torrents).await
+    }
+
+    /// Connect to qBittorrent and add torrents one by one with individual confirmation.
+    #[allow(clippy::too_many_lines)]
+    async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<()> {
+        let mut client = client::connect(&self.config.connection, self.config.verbose).await?;
+        let adder = TorrentAdder::new(&client, &self.config.add_options, &self.names);
+        let mut printer = EventPrinter::new(self.config.verbose);
+
+        // Get the list of existing torrents to check for duplicates
+        let existing_torrents = client.get_torrent_list().await?;
+        if self.config.verbose {
+            println!(
+                "{} {}",
+                "Existing torrents in qBittorrent:".dimmed(),
+                existing_torrents.len()
+            );
+        }
+
+        let total = torrents.len();
+        let mut stats = TorrentStats::new(total);
+
+        for (index, mut info) in torrents.into_iter().enumerate() {
+            if self.config.verbose {
+                println!("{}", "─".repeat(60));
+            }
+
+            self.print_torrent_info(&info, index + 1, total);
+
+            if info.all_files_excluded() {
+                println!("  {} All files excluded by filters, skipping torrent", "⊘".yellow());
+                stats.inc_skipped();
+                continue;
+            }
+
+            // Determine destination "downloaded" directory once per torrent
+            let torrent_path = info.path.clone();
+            let downloaded_directory = utils::find_downloaded_directory(&torrent_path);
+            let downloaded_collision = downloaded_directory
+                .as_deref()
+                .and_then(|directory| utils::existing_torrent_in_downloaded(directory, &torrent_path));
+
+            if let Some(existing_item) = find_existing_torrent(&info, &existing_torrents) {
+                println!(
+                    "  {} Already exists in qBittorrent as: {}",
+                    "⊘".yellow(),
+                    existing_item.name.cyan()
+                );
+
+                if let Some(existing) = downloaded_collision.as_deref()
+                    && !self.confirm_downloaded_collision(existing, "Continue anyway?")?
+                {
+                    println!("{}", "Skipped.".yellow());
+                    stats.inc_skipped();
+                    trash_duplicate_torrent_file(&torrent_path);
+                    continue;
+                }
+
+                match self
+                    .prompt_rename_existing(&info, &existing_item.name, &adder, &mut printer)
+                    .await
+                {
+                    Ok(true) => stats.inc_renamed(),
+                    Ok(false) => stats.inc_duplicate(),
+                    Err(error) => {
+                        cli_tools_common::print_error!("Failed to rename: {error}");
+                        stats.inc_duplicate();
+                    }
+                }
+
+                // The torrent already exists in qBittorrent, so the torrent file has been processed
+                if let Some(directory) = downloaded_directory.as_deref() {
+                    move_torrent_file(&torrent_path, directory);
+                }
+                continue;
+            }
+
+            let add_confirmed_by_collision = if let Some(existing) = downloaded_collision.as_deref() {
+                if !self.confirm_downloaded_collision(existing, "Add anyway?")? {
+                    println!("{}", "Skipped.".yellow());
+                    stats.inc_skipped();
+                    // Only an identical copy of the downloaded torrent is a duplicate.
+                    // A different torrent that happens to share the file name was never added, so it stays.
+                    if utils::is_duplicate_torrent_file(&torrent_path, existing) {
+                        trash_duplicate_torrent_file(&torrent_path);
+                    }
+                    continue;
+                }
+                true
+            } else {
+                false
+            };
+
+            if let Some(new_name) = self.prompt_rename(&info)? {
+                info.rename_to = Some(new_name);
+            }
+
+            self.print_final_details(&info);
+
+            // Ask for confirmation unless --yes flag is set or the downloaded collision was already confirmed
+            let should_add = if self.config.yes || add_confirmed_by_collision {
+                true
+            } else {
+                cli_tools_common::get_user_confirmation("Add this torrent?", true)
+                    .map_err(|error| anyhow::anyhow!("Failed to get confirmation: {error}"))?
+            };
+
+            if !should_add {
+                println!("{}", "Skipped.".yellow());
+                stats.inc_skipped();
+                continue;
+            }
+
+            match adder.add(info, &mut printer).await {
+                Ok(size) => {
+                    stats.inc_success(size);
+                    if let Some(directory) = downloaded_directory.as_deref() {
+                        move_torrent_file(&torrent_path, directory);
+                    }
+                }
+                Err(error) => {
+                    stats.inc_error();
+                    cli_tools_common::print_error!("{error}");
+                }
+            }
+        }
+
+        client::logout(&mut client).await;
+
+        printer::print_summary(&stats);
+
+        Ok(())
+    }
+
+    /// Show what would be added, with the suggested names and the torrents that already exist.
+    async fn run_dryrun(self, torrents: Vec<TorrentInfo>) -> Result<()> {
+        let torrents_with_names: Vec<TorrentInfo> = torrents
+            .into_iter()
+            .map(|mut info| {
+                info.rename_to = Some(self.names.clean_suggested_name(&info));
+                info
+            })
+            .collect();
+
+        if self.config.offline {
+            self.print_dryrun_summary(&torrents_with_names, None);
+            return Ok(());
+        }
+
+        if !self.config.connection.has_credentials() {
+            cli_tools_common::print_yellow!("No credentials configured. Use --offline to skip qBittorrent connection.");
+            self.print_dryrun_summary(&torrents_with_names, None);
+            return Ok(());
+        }
+
+        match client::connect(&self.config.connection, self.config.verbose).await {
+            Ok(mut client) => {
+                let existing_torrents = client.get_torrent_list().await.ok();
+                self.print_dryrun_summary(&torrents_with_names, existing_torrents.as_ref());
+                client::logout(&mut client).await;
+            }
+            Err(error) => {
+                cli_tools_common::print_yellow!("Failed to connect: {error}");
+                self.print_dryrun_summary(&torrents_with_names, None);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Parse all torrent files and resolve tags for each, printing the files that fail to parse.
+    fn parse_torrents(&self, torrent_paths: &[std::path::PathBuf]) -> Vec<TorrentInfo> {
+        let parsed =
+            cli_tools_qtorrent::parse_torrents(torrent_paths, &self.config.file_filter, &self.config.tag_rules);
+        for (path, error) in &parsed.failures {
+            cli_tools_common::print_error!("Failed to parse {}: {error:#}", path.display());
+        }
+        parsed.torrents
+    }
+}
+
+/// Move the torrent file into the downloaded directory and log the outcome.
+///
+/// Errors are reported as warnings. They do not abort the surrounding workflow.
+fn move_torrent_file(torrent_path: &Path, downloaded_directory: &Path) {
+    match utils::move_torrent_to_downloaded(torrent_path, downloaded_directory) {
+        Ok(destination) => {
+            println!(
+                "  {} Moved torrent file to: {}",
+                "\u{2192}".green(),
+                destination.display().to_string().cyan()
+            );
+        }
+        Err(error) => {
+            cli_tools_common::print_yellow!("Failed to move torrent file to downloaded directory: {error}");
+        }
+    }
+}
+
+/// Move a skipped duplicate torrent file to the trash and log the outcome.
+///
+/// Errors are reported as warnings. They do not abort the surrounding workflow.
+fn trash_duplicate_torrent_file(torrent_path: &Path) {
+    match trash::delete(torrent_path) {
+        Ok(()) => {
+            println!(
+                "  {} Trashed duplicate torrent file: {}",
+                "\u{1f5d1}".yellow(),
+                torrent_path.display().to_string().cyan()
+            );
+        }
+        Err(error) => {
+            cli_tools_common::print_yellow!(
+                "Failed to trash duplicate torrent file {}: {error}",
+                torrent_path.display()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_add_workflow {
+    use std::path::PathBuf;
+
+    use clap::Parser;
+    use serde_bytes::ByteBuf;
+    use tempfile::TempDir;
+
+    use cli_tools_qtorrent::torrent::{Info, Torrent};
+    use cli_tools_qtorrent::{FileFilter, parse_torrent};
+
+    use crate::config::QtorrentConfig;
+    use crate::test_server::{Route, route, serve};
+
+    use super::*;
+
+    /// Directory holding one single-file torrent and an empty `downloaded` directory beside it.
+    struct TorrentDirectory {
+        _temp_directory: TempDir,
+        root: PathBuf,
+        torrent_path: PathBuf,
+    }
+
+    impl TorrentDirectory {
+        fn new() -> Self {
+            let temp_directory = TempDir::new().expect("should create temp directory");
+            let root = temp_directory.path().join("torrents");
+            std::fs::create_dir_all(root.join(utils::DOWNLOADED_DIRECTORY_NAME))
+                .expect("should create downloaded directory");
+            let mut torrent = Torrent::default();
+            torrent.announce = Some("http://tracker.example.com/announce".to_string());
+            torrent.info = Info {
+                name: Some("Example.Video.mp4".to_string()),
+                length: Some(1_000_000),
+                piece_length: 262_144,
+                pieces: ByteBuf::from(vec![0_u8; 20]),
+                ..Info::default()
+            };
+            let torrent_path = root.join("Example.Video.torrent");
+            std::fs::write(
+                &torrent_path,
+                serde_bencode::to_bytes(&torrent).expect("should serialize torrent"),
+            )
+            .expect("should write torrent file");
+            Self {
+                _temp_directory: temp_directory,
+                root,
+                torrent_path,
+            }
+        }
+
+        fn moved_torrent_path(&self) -> PathBuf {
+            self.root
+                .join(utils::DOWNLOADED_DIRECTORY_NAME)
+                .join("Example.Video.torrent")
+        }
+
+        fn info_hash(&self) -> String {
+            parse_torrent(&self.torrent_path, &FileFilter::default(), None)
+                .expect("should parse torrent")
+                .info_hash
+        }
+    }
+
+    fn qtorrent(arguments: &[&str]) -> QTorrent {
+        let args = QtorrentArgs::try_parse_from(arguments).expect("arguments should parse");
+        QTorrent::from_config(
+            Config::from_args_with_user_config(args, QtorrentConfig::default()),
+            None,
+        )
+    }
+
+    /// `QTorrent` for the directory, connecting to the given local port with credentials and `--yes`.
+    fn connected_qtorrent(directory: &TorrentDirectory, port: u16, extra: &[&str]) -> QTorrent {
+        let root = directory.root.to_string_lossy().into_owned();
+        let port = port.to_string();
+        let mut arguments = vec![
+            "qtorrent",
+            root.as_str(),
+            "-H",
+            "127.0.0.1",
+            "-P",
+            port.as_str(),
+            "-u",
+            "user",
+            "-w",
+            "password",
+            "--yes",
+            "--verbose",
+        ];
+        arguments.extend_from_slice(extra);
+        qtorrent(&arguments)
+    }
+
+    fn session_routes(torrent_list: String) -> Vec<Route> {
+        vec![
+            route("/api/v2/auth/login", 200, "Ok."),
+            route("/api/v2/auth/logout", 200, ""),
+            route("/api/v2/app/version", 200, "v5.0.0"),
+            route("/api/v2/app/webapiVersion", 200, "2.11.2"),
+            route("/api/v2/torrents/info", 200, torrent_list),
+            route("/api/v2/torrents/add", 200, "Ok."),
+        ]
+    }
+
+    fn torrent_list_with(info_hash: &str) -> String {
+        format!(
+            r#"[{{"hash":"{info_hash}","name":"Existing Name","added_on":1,"completion_on":-1,"progress":0.0,"ratio":0.0,"save_path":"/downloads","size":1000000,"tags":""}}]"#
+        )
+    }
+
+    #[tokio::test]
+    async fn adds_a_new_torrent_and_moves_the_file_to_downloaded() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let port = serve(session_routes("[]".to_string())).await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert!(!directory.torrent_path.exists());
+        assert!(directory.moved_torrent_path().is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_torrent_is_not_added_again_but_the_file_is_moved() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let mut routes = session_routes(torrent_list_with(&directory.info_hash()));
+        routes.retain(|route| !route.path().starts_with("/api/v2/torrents/add"));
+        let port = serve(routes).await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert!(directory.moved_torrent_path().is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_add_keeps_the_torrent_file_in_place() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let mut routes = session_routes("[]".to_string());
+        routes.retain(|route| !route.path().starts_with("/api/v2/torrents/add"));
+        routes.push(route("/api/v2/torrents/add", 415, ""));
+        let port = serve(routes).await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        assert!(!directory.moved_torrent_path().exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dryrun_with_connection_reports_existing_torrents_without_changes() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let port = serve(session_routes(torrent_list_with(&directory.info_hash()))).await;
+
+        connected_qtorrent(&directory, port, &["--dryrun"]).run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn offline_and_unreachable_dryruns_still_print_the_summary() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let root = directory.root.to_string_lossy().into_owned();
+        let unused_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("should bind a local port");
+            listener.local_addr().expect("should have a local address").port()
+        };
+
+        qtorrent(&["qtorrent", &root, "--offline", "--verbose"]).run().await?;
+        qtorrent(&["qtorrent", &root, "--dryrun"]).run().await?;
+        connected_qtorrent(&directory, unused_port, &["--dryrun"]).run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adding_without_credentials_or_torrents_fails() {
+        let directory = TorrentDirectory::new();
+        let root = directory.root.to_string_lossy().into_owned();
+        let empty = TempDir::new().expect("should create temp directory");
+        let empty_root = empty.path().to_string_lossy().into_owned();
+
+        let credentials_error = qtorrent(&["qtorrent", &root, "--yes"])
+            .run()
+            .await
+            .expect_err("should fail");
+        let empty_error = qtorrent(&["qtorrent", &empty_root, "--yes"])
+            .run()
+            .await
+            .expect_err("should fail");
+
+        assert!(credentials_error.to_string().contains("credentials not configured"));
+        assert!(empty_error.to_string().contains("No torrent files found"));
+    }
+}

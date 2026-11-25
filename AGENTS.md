@@ -212,11 +212,24 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `dockerfile.rs` - Pinning `rust` images in Dockerfiles
     - `registry.rs` - Docker Hub digest lookup
     - `project.rs` - The per-project steps, recorded as report entries, and processing projects in parallel
+- `crates/qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming, show torrent stats.
+  The binary holds the CLI arguments, the user config, the interactive add workflow with its prompts,
+  moving and trashing torrent files, the info subcommand, and all printing.
+  The library modules:
+    - `qbittorrent.rs` - qBittorrent `WebUI` API client and its response types
+    - `connection.rs` - Connection settings and opening an authenticated session
+    - `torrent.rs` - Bencode torrent parsing, info hash, and file filtering
+    - `utils.rs` - Parsed torrent info, name formatting helpers, and the downloaded directory helpers
+    - `naming.rs` - Naming options and the `NameSuggester` for suggested, internal, and custom names
+    - `tags.rs` - Default tags and the prefix and path tag overwrite rules
+    - `collector.rs` - Collecting torrent files from the input paths with include and exclude globs
+    - `add.rs` - Parsing torrents, finding existing ones, and the `TorrentAdder`, reported to an `AddObserver`
+    - `add/file_updates.rs` - Dots renaming the files of an added torrent and skipping excluded files
+    - `statistics.rs` - Torrent status classification, sorting, and per status counts and sizes
+    - `stats.rs` - Outcome counters of one add run
 - Binary only crates:
     - `crates/div/` → `div` - Print divider comments
     - `crates/flipdate/` → `flipdate` - Flip dates in filenames
-    - `crates/qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming,
-      show torrent stats
     - `crates/rxrename/` → `rxrename` - Remove a trailing "_1" from file names
     - `crates/thumbs/` → `thumbs` - Create video thumbnail sheets
     - `crates/vconvert/` → `vconvert` - Video conversion to HEVC/MP4

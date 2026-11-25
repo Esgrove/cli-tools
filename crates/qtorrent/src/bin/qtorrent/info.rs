@@ -1,28 +1,19 @@
-//! Info subcommand module.
+//! Info subcommand of the qtorrent binary.
 //!
-//! Connects to qBittorrent and displays statistics about existing torrents,
+//! Connects to qBittorrent and prints statistics about existing torrents,
 //! including total count, sizes, and completion status.
 //! Supports sorting by name, size, or save path, and a compact list mode.
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use colored::Colorize;
 
-use crate::QtorrentArgs;
-use crate::SortOrder;
-use crate::config::Config;
-use crate::qbittorrent::{QBittorrentClient, TorrentListItem};
+use cli_tools_qtorrent::{SortOrder, TorrentListItem, TorrentStatistics};
 
-/// Torrent categorized by download status.
-enum TorrentStatus {
-    /// Download is complete.
-    Completed,
-    /// Download is in progress (0 < progress < 1).
-    Downloading,
-    /// Download has not started (progress == 0).
-    NotStarted,
-}
+use crate::QtorrentArgs;
+use crate::client;
+use crate::config::Config;
 
 /// Options controlling how torrent info is printed.
 struct PrintOptions {
@@ -40,7 +31,6 @@ struct PrintOptions {
 ///
 /// # Errors
 /// Returns an error if connection fails or credentials are missing.
-#[allow(clippy::similar_names)]
 pub async fn run(args: QtorrentArgs, sort: SortOrder, list: bool) -> Result<()> {
     let config = Config::from_args(args)?;
     let options = PrintOptions {
@@ -49,77 +39,14 @@ pub async fn run(args: QtorrentArgs, sort: SortOrder, list: bool) -> Result<()> 
         verbose: config.verbose,
     };
 
-    if !config.has_credentials() {
-        bail!(
-            "qBittorrent credentials not configured.\n\
-             Set username and password via command line arguments or in config file:\n\
-             ~/.config/cli-tools.toml under [qtorrent] section"
-        );
-    }
-
-    if options.verbose {
-        cli_tools_common::print_cyan("Connecting to qBittorrent...");
-    }
-
-    let mut client = QBittorrentClient::new(&config.host, config.port);
-    client.login(&config.username, &config.password).await?;
-
-    let app_version = client.get_app_version().await?;
-    let api_version = client.get_api_version().await?;
-
-    if options.verbose {
-        println!(
-            "{} (App {app_version}, API v{api_version})\n",
-            "Connected successfully".green()
-        );
-    }
-
+    let mut client = client::connect(&config.connection, options.verbose).await?;
     let torrents = client.get_torrent_list().await?;
 
     print_statistics(&torrents, &options);
 
-    if let Err(error) = client.logout().await {
-        cli_tools_common::print_yellow!("Failed to logout: {error}");
-    }
+    client::logout(&mut client).await;
 
     Ok(())
-}
-
-/// Classify a torrent by its download status.
-fn classify_torrent(torrent: &TorrentListItem) -> TorrentStatus {
-    if torrent.is_completed() {
-        TorrentStatus::Completed
-    } else if torrent.progress > 0.0 {
-        TorrentStatus::Downloading
-    } else {
-        TorrentStatus::NotStarted
-    }
-}
-
-/// Sort a slice of torrent references by the given sort order.
-fn sort_torrents(torrents: &mut [&TorrentListItem], sort: SortOrder) {
-    match sort {
-        SortOrder::Name => {
-            torrents.sort_unstable_by_key(|torrent| torrent.name.to_lowercase());
-        }
-        SortOrder::Size => {
-            torrents.sort_unstable_by(|first, second| {
-                second
-                    .size
-                    .cmp(&first.size)
-                    .then_with(|| first.name.to_lowercase().cmp(&second.name.to_lowercase()))
-            });
-        }
-        SortOrder::Path => {
-            torrents.sort_unstable_by(|first, second| {
-                first
-                    .save_path
-                    .to_lowercase()
-                    .cmp(&second.save_path.to_lowercase())
-                    .then_with(|| first.name.to_lowercase().cmp(&second.name.to_lowercase()))
-            });
-        }
-    }
 }
 
 /// Print torrent statistics summary and optionally individual torrent details.
@@ -137,63 +64,43 @@ fn statistics_lines(torrents: &HashMap<String, TorrentListItem>, options: &Print
         return vec!["No torrents found".dimmed().to_string()];
     }
 
-    let mut completed: Vec<&TorrentListItem> = Vec::new();
-    let mut downloading: Vec<&TorrentListItem> = Vec::new();
-    let mut not_started: Vec<&TorrentListItem> = Vec::new();
-
-    let mut total_size: u64 = 0;
-    let mut completed_size: u64 = 0;
-    let mut downloading_size: u64 = 0;
-    let mut not_started_size: u64 = 0;
-
-    for torrent in torrents.values() {
-        let size = torrent.size.max(0) as u64;
-        total_size += size;
-
-        match classify_torrent(torrent) {
-            TorrentStatus::Completed => {
-                completed_size += size;
-                completed.push(torrent);
-            }
-            TorrentStatus::Downloading => {
-                downloading_size += size;
-                downloading.push(torrent);
-            }
-            TorrentStatus::NotStarted => {
-                not_started_size += size;
-                not_started.push(torrent);
-            }
-        }
-    }
-
-    // Sort each category
-    sort_torrents(&mut completed, options.sort);
-    sort_torrents(&mut downloading, options.sort);
-    sort_torrents(&mut not_started, options.sort);
+    let statistics = TorrentStatistics::new(torrents, options.sort);
 
     let mut lines = vec![
-        stat_line("Total torrents", torrents.len(), total_size),
-        stat_line("Completed", completed.len(), completed_size),
+        stat_line("Total torrents", statistics.total_count, statistics.total_size),
+        stat_line("Completed", statistics.completed.len(), statistics.completed_size),
     ];
 
-    if !downloading.is_empty() {
-        lines.push(stat_line("Downloading", downloading.len(), downloading_size));
+    if !statistics.downloading.is_empty() {
+        lines.push(stat_line(
+            "Downloading",
+            statistics.downloading.len(),
+            statistics.downloading_size,
+        ));
     }
 
-    if !not_started.is_empty() {
-        lines.push(stat_line("Not started", not_started.len(), not_started_size));
+    if !statistics.not_started.is_empty() {
+        lines.push(stat_line(
+            "Not started",
+            statistics.not_started.len(),
+            statistics.not_started_size,
+        ));
     }
 
     // Individual torrent details in list or verbose mode
     if options.list {
         lines.extend(torrent_section_list_lines(
-            &completed,
-            &downloading,
-            &not_started,
+            &statistics.completed,
+            &statistics.downloading,
+            &statistics.not_started,
             options.verbose,
         ));
     } else if options.verbose {
-        lines.extend(torrent_section_detail_lines(&completed, &downloading, &not_started));
+        lines.extend(torrent_section_detail_lines(
+            &statistics.completed,
+            &statistics.downloading,
+            &statistics.not_started,
+        ));
     }
     lines
 }
@@ -335,96 +242,6 @@ fn torrent_detail_lines(torrent: &TorrentListItem) -> Vec<String> {
         lines.push(format!("    {:<14} {}", "Tags:", torrent.tags.cyan()));
     }
     lines
-}
-
-#[cfg(test)]
-mod test_torrent_classification {
-    use super::*;
-
-    fn torrent(name: &str, progress: f64, completion_on: Option<i64>, size: i64, save_path: &str) -> TorrentListItem {
-        TorrentListItem {
-            hash: name.to_string(),
-            name: name.to_string(),
-            added_on: 1,
-            completion_on,
-            progress,
-            ratio: 0.0,
-            save_path: save_path.to_string(),
-            size,
-            tags: String::new(),
-        }
-    }
-
-    #[test]
-    fn classifies_completed_downloading_and_not_started_torrents() {
-        assert!(matches!(
-            classify_torrent(&torrent("complete", 1.0, None, 1, "/a")),
-            TorrentStatus::Completed
-        ));
-        assert!(matches!(
-            classify_torrent(&torrent("timestamp", 0.5, Some(10), 1, "/a")),
-            TorrentStatus::Completed
-        ));
-        assert!(matches!(
-            classify_torrent(&torrent("downloading", 0.5, None, 1, "/a")),
-            TorrentStatus::Downloading
-        ));
-        assert!(matches!(
-            classify_torrent(&torrent("waiting", 0.0, None, 1, "/a")),
-            TorrentStatus::NotStarted
-        ));
-    }
-
-    #[test]
-    fn sorts_names_case_insensitively() {
-        let alpha = torrent("alpha", 0.0, None, 1, "/b");
-        let beta = torrent("Beta", 0.0, None, 2, "/a");
-        let mut torrents = vec![&beta, &alpha];
-
-        sort_torrents(&mut torrents, SortOrder::Name);
-
-        assert_eq!(
-            torrents.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
-            vec!["alpha", "Beta"]
-        );
-    }
-
-    #[test]
-    fn sorts_size_descending_with_name_tiebreaker() {
-        let alpha = torrent("alpha", 0.0, None, 10, "/b");
-        let beta = torrent("Beta", 0.0, None, 20, "/a");
-        let gamma = torrent("gamma", 0.0, None, 20, "/c");
-        let mut torrents = vec![&gamma, &alpha, &beta];
-
-        sort_torrents(&mut torrents, SortOrder::Size);
-
-        assert_eq!(
-            torrents.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
-            vec!["Beta", "gamma", "alpha"]
-        );
-    }
-
-    #[test]
-    fn sorts_paths_case_insensitively_with_name_tiebreaker() {
-        let alpha = torrent("alpha", 0.0, None, 10, "/same");
-        let beta = torrent("Beta", 0.0, None, 20, "/A");
-        let gamma = torrent("gamma", 0.0, None, 20, "/SAME");
-        let mut torrents = vec![&gamma, &alpha, &beta];
-
-        sort_torrents(&mut torrents, SortOrder::Path);
-
-        assert_eq!(
-            torrents.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(),
-            vec!["Beta", "alpha", "gamma"]
-        );
-    }
-
-    #[test]
-    fn formats_progress_for_each_status() {
-        assert!(format_progress(&torrent("complete", 1.0, None, 1, "/a")).contains("100%"));
-        assert!(format_progress(&torrent("downloading", 0.5, None, 1, "/a")).contains("50%"));
-        assert!(format_progress(&torrent("waiting", 0.0, None, 1, "/a")).contains("0%"));
-    }
 }
 
 #[cfg(test)]
@@ -578,6 +395,13 @@ mod test_statistics_lines {
         let text = report(vec![torrent("broken", 1.0, -1, "")], false, false);
 
         assert!(text.contains("0 B"), "{text}");
+    }
+
+    #[test]
+    fn formats_progress_for_each_status() {
+        assert!(format_progress(&torrent("complete", 1.0, 1, "")).contains("100%"));
+        assert!(format_progress(&torrent("downloading", 0.5, 1, "")).contains("50%"));
+        assert!(format_progress(&torrent("waiting", 0.0, 1, "")).contains("0%"));
     }
 
     #[test]

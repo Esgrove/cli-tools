@@ -10,11 +10,12 @@ use colored::Colorize;
 
 use cli_tools_common::{print_bold, print_magenta_bold};
 
+use cli_tools_qtorrent::torrent::{FileInfo, FilteredFiles};
+use cli_tools_qtorrent::utils;
+use cli_tools_qtorrent::utils::SkippedDirectorySummary;
+use cli_tools_qtorrent::{TorrentInfo, TorrentListItem, find_existing_torrent};
+
 use super::QTorrent;
-use crate::qbittorrent::TorrentListItem;
-use crate::torrent::{FileInfo, FilteredFiles};
-use crate::utils;
-use crate::utils::{SkippedDirectorySummary, TorrentInfo};
 
 impl QTorrent {
     /// Print dry-run summary of all torrents.
@@ -29,7 +30,7 @@ impl QTorrent {
         let duplicate_count = existing_torrents.map_or(0, |existing| {
             torrents
                 .iter()
-                .filter(|info| Self::check_existing_torrent(info, existing).is_some())
+                .filter(|info| find_existing_torrent(info, existing).is_some())
                 .count()
         });
 
@@ -63,7 +64,7 @@ impl QTorrent {
 
             // Show if this torrent already exists
             if let Some(existing) = existing_torrents
-                && let Some(existing_item) = Self::check_existing_torrent(info, existing)
+                && let Some(existing_item) = find_existing_torrent(info, existing)
             {
                 println!("  {} Already exists as: {}", "⊘".yellow(), existing_item.name.cyan());
             }
@@ -72,7 +73,8 @@ impl QTorrent {
 
     /// Print information about a single torrent.
     ///
-    /// The index is displayed as `[index/total]` with the index right-aligned to match the width of the total count.
+    /// The index is displayed
+    /// as `[index/total]` with the index right-aligned to match the width of the total count.
     pub(super) fn print_torrent_info(&self, info: &TorrentInfo, index: usize, total: usize) {
         let internal_name = info.torrent.name().unwrap_or("Unknown");
         let size = cli_tools_common::format_size(info.torrent.total_size());
@@ -117,16 +119,16 @@ impl QTorrent {
         };
         println!("    {} {}", name_label.dimmed(), info.display_name().green());
 
-        if let Some(ref save_path) = self.config.save_path {
+        if let Some(ref save_path) = self.config.add_options.save_path {
             println!("    {} {}", "Save path:".dimmed(), save_path);
         }
-        if let Some(ref category) = self.config.category {
+        if let Some(ref category) = self.config.add_options.category {
             println!("    {} {}", "Category:".dimmed(), category);
         }
         if let Some(ref tags) = info.tags {
             println!("    {} {}", "Tags:".dimmed(), tags);
         }
-        if self.config.paused {
+        if self.config.add_options.paused {
             println!("    {} {}", "State:".dimmed(), "paused".yellow());
         }
         let total_count = info.torrent.files().len();
@@ -188,20 +190,20 @@ impl QTorrent {
 
     /// Print configured options.
     fn print_options(&self) {
-        if let Some(ref save_path) = self.config.save_path {
+        if let Some(ref save_path) = self.config.add_options.save_path {
             println!("{} {}", "Save path:".bold(), save_path);
         }
-        if let Some(ref category) = self.config.category {
+        if let Some(ref category) = self.config.add_options.category {
             println!("{} {}", "Category:".bold(), category);
         }
-        if let Some(ref tags) = self.config.tags {
+        if let Some(ref tags) = self.config.tag_rules.default_tags {
             println!("{} {}", "Tags:".bold(), tags);
         }
 
         println!(
             "{} {}",
             "State:".bold(),
-            if self.config.paused {
+            if self.config.add_options.paused {
                 "paused".yellow()
             } else {
                 "active".green()
@@ -255,7 +257,7 @@ impl QTorrent {
     /// Files excluded due to directory matching are grouped by directory name
     /// instead of listing each file individually.
     fn print_all_files_sorted(&self, filtered: &FilteredFiles<'_>) {
-        let dot_formatter = self.dot_formatter();
+        let dot_formatter = self.names.dot_formatter();
 
         // Group excluded files by directory if they were excluded due to directory matching
         let mut skipped_directories: HashMap<String, SkippedDirectorySummary> = HashMap::new();

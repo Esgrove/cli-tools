@@ -8,18 +8,21 @@
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 mod add;
+mod client;
 mod config;
 mod info;
-mod qbittorrent;
-mod stats;
-mod torrent;
-mod utils;
+
+#[cfg(test)]
+#[path = "../../test_server.rs"]
+mod test_server;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+
+use cli_tools_qtorrent::SortOrder;
 
 use crate::add::QTorrent;
 
@@ -30,8 +33,8 @@ enum Command {
     #[command(name = "info")]
     Info {
         /// Sort torrents
-        #[arg(short = 's', long, value_enum, default_value_t = SortOrder::Name)]
-        sort: SortOrder,
+        #[arg(short = 's', long, value_enum, default_value_t = SortArgument::Name)]
+        sort: SortArgument,
 
         /// Print one line per torrent
         #[arg(short = 'l', long)]
@@ -53,7 +56,7 @@ enum Command {
 
 /// Sort order for the info subcommand torrent listing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum SortOrder {
+enum SortArgument {
     /// Sort alphabetically by torrent name
     #[default]
     Name,
@@ -170,6 +173,16 @@ pub struct QtorrentArgs {
     pub verbose: bool,
 }
 
+impl From<SortArgument> for SortOrder {
+    fn from(sort: SortArgument) -> Self {
+        match sort {
+            SortArgument::Name => Self::Name,
+            SortArgument::Size => Self::Size,
+            SortArgument::Path => Self::Path,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = QtorrentArgs::parse();
@@ -183,7 +196,7 @@ async fn main() -> Result<()> {
             args.verbose,
             env!("CARGO_BIN_NAME"),
         ),
-        Some(Command::Info { sort, list }) => info::run(args, sort, list).await,
+        Some(Command::Info { sort, list }) => info::run(args, sort.into(), list).await,
         None => QTorrent::new(args)?.run().await,
     }
 }
@@ -447,7 +460,7 @@ mod cli_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "info", "-s", "size"]).expect("should parse");
         match args.command {
             Some(Command::Info { sort, list }) => {
-                assert_eq!(sort, SortOrder::Size);
+                assert_eq!(sort, SortArgument::Size);
                 assert!(!list);
             }
             _ => panic!("Expected Info command"),
@@ -459,7 +472,7 @@ mod cli_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "info", "--sort", "path"]).expect("should parse");
         match args.command {
             Some(Command::Info { sort, .. }) => {
-                assert_eq!(sort, SortOrder::Path);
+                assert_eq!(sort, SortArgument::Path);
             }
             _ => panic!("Expected Info command"),
         }
@@ -470,7 +483,7 @@ mod cli_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "info", "-l"]).expect("should parse");
         match args.command {
             Some(Command::Info { sort, list }) => {
-                assert_eq!(sort, SortOrder::Name);
+                assert_eq!(sort, SortArgument::Name);
                 assert!(list);
             }
             _ => panic!("Expected Info command"),
@@ -482,7 +495,7 @@ mod cli_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "info", "-l", "-s", "size", "-v"]).expect("should parse");
         match args.command {
             Some(Command::Info { sort, list }) => {
-                assert_eq!(sort, SortOrder::Size);
+                assert_eq!(sort, SortArgument::Size);
                 assert!(list);
             }
             _ => panic!("Expected Info command"),
@@ -495,7 +508,7 @@ mod cli_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "info"]).expect("should parse");
         match args.command {
             Some(Command::Info { sort, list }) => {
-                assert_eq!(sort, SortOrder::Name);
+                assert_eq!(sort, SortArgument::Name);
                 assert!(!list);
             }
             _ => panic!("Expected Info command"),
@@ -539,8 +552,8 @@ mod config_from_args_tests {
         let args = QtorrentArgs::try_parse_from(["test"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         // Should have host and port (from CLI, config, or defaults)
-        assert_ne!(config.host, "");
-        assert!(config.port > 0);
+        assert_ne!(config.connection.host, "");
+        assert!(config.connection.port > 0);
     }
 
     #[test]
@@ -548,8 +561,8 @@ mod config_from_args_tests {
         let args = QtorrentArgs::try_parse_from(["test", "-H", "192.168.1.1", "-P", "9000"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
         // CLI values should take priority
-        assert_eq!(config.host, "192.168.1.1");
-        assert_eq!(config.port, 9000);
+        assert_eq!(config.connection.host, "192.168.1.1");
+        assert_eq!(config.connection.port, 9000);
     }
 
     #[test]
@@ -608,9 +621,9 @@ mod config_from_args_tests {
     fn config_has_credentials_when_cli_sets_them() {
         let args = QtorrentArgs::try_parse_from(["test", "-u", "user", "-w", "pass"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
-        assert!(config.has_credentials());
-        assert_eq!(config.username, "user");
-        assert_eq!(config.password, "pass");
+        assert!(config.connection.has_credentials());
+        assert_eq!(config.connection.username, "user");
+        assert_eq!(config.connection.password, "pass");
     }
 
     #[test]
@@ -641,10 +654,10 @@ mod config_from_args_tests {
     fn config_cli_boolean_flags_enable_options() {
         let args = QtorrentArgs::try_parse_from(["test", "-a", "-p", "-y", "-r", "-x", "-v"]).expect("should parse");
         let config = Config::from_args(args).expect("config should parse");
-        assert!(config.paused);
+        assert!(config.add_options.paused);
         assert!(config.dryrun);
         assert!(config.yes);
-        assert!(config.recurse);
+        assert!(config.collector.recurse);
         assert!(config.skip_existing);
         assert!(config.verbose);
     }
