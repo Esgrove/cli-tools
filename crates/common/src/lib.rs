@@ -1,15 +1,17 @@
 //! Shared helpers for the `cli-tools` binaries.
 //!
 //! This crate provides reusable path handling, text formatting, coloured printing, date parsing,
-//! diff rendering, user config lookup, and shell completion generation.
+//! diff rendering (behind the `diff` feature), user config lookup, and shell completion generation.
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 pub mod date;
+#[cfg(feature = "diff")]
 pub mod diff;
 pub mod simd;
 pub mod utils;
 
+#[cfg(feature = "diff")]
 pub use diff::{color_diff, diff_lines, show_diff};
 pub use utils::{
     command_exists, find_command, get_relative_path_from_current_working_directory, get_relative_path_or_filename,

@@ -33,7 +33,7 @@ serde = { workspace = true }
 toml = { workspace = true }
 trash = { workspace = true }
 walkdir = { workspace = true }
-cli-tools-common = { workspace = true, features = ["async"] }
+cli-tools-common = { workspace = true, features = ["async", "diff"] }
 cli-tools-media = { workspace = true, features = ["scan-cache"] }
 tokio = { workspace = true, features = ["full"] }
 

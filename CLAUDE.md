@@ -131,6 +131,7 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `date.rs` - Date parsing and formatting utilities
     - `simd.rs` - SIMD byte scanning kernels on `fearless_simd`
     - The `async` feature adds the tokio based directory entry helpers and the I/O semaphore
+    - The `diff` feature adds `diff.rs`, so crates that do not render diffs avoid the `difference` dependency
 - `crates/media/` → `cli-tools-media` - Media helpers:
     - `resolution.rs` - Video resolution parsing and labelling
     - `video_info.rs` - Video metadata from ffprobe
