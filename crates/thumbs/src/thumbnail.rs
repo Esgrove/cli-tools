@@ -1,5 +1,6 @@
 //! Video thumbnail sheet discovery, metadata formatting, and ffmpeg command construction.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,9 +107,10 @@ impl ThumbnailCreator {
         let total_count = video_files.len();
         let progress_width = total_count.to_string().len();
 
-        for (index, video_file) in video_files.iter().enumerate() {
+        let output_paths = thumbnail_paths(&video_files);
+        for (index, (video_file, output_path)) in video_files.iter().zip(&output_paths).enumerate() {
             let progress_prefix = Self::format_progress_prefix(index + 1, total_count, progress_width);
-            match self.create_thumbnail(video_file, &mut stats, &progress_prefix) {
+            match self.create_thumbnail(video_file, output_path, &mut stats, &progress_prefix) {
                 Ok(()) => success_count += 1,
                 Err(e) => {
                     print_error!(
@@ -205,21 +207,19 @@ impl ThumbnailCreator {
     }
 
     /// Create a thumbnail for a single video file.
-    fn create_thumbnail(&self, video_path: &Path, stats: &mut VideoStats, progress_prefix: &str) -> Result<()> {
+    fn create_thumbnail(
+        &self,
+        video_path: &Path,
+        output_path: &Path,
+        stats: &mut VideoStats,
+        progress_prefix: &str,
+    ) -> Result<()> {
         let filename = video_path
             .file_name()
             .and_then(|n| n.to_str())
             .context("Invalid filename")?;
 
-        let file_stem = video_path
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .context("Invalid file stem")?;
-
-        let parent_dir = video_path.parent().context("No parent directory")?;
-
-        let screens_dir = parent_dir.join(SCREENS_DIR_NAME);
-        let output_path = screens_dir.join(format!("{file_stem}.jpg"));
+        let screens_dir = output_path.parent().context("No thumbnail directory")?;
 
         if output_path.exists() && !self.config.overwrite {
             print_yellow!(
@@ -251,13 +251,13 @@ impl ThumbnailCreator {
 
         // Create output directory
         if !self.config.dryrun {
-            std::fs::create_dir_all(&screens_dir)?;
+            std::fs::create_dir_all(screens_dir)?;
         }
 
         // The header holds the file name, which can contain any character,
         // so it is read from a file instead of being quoted into the filter graph.
         let text_file = Self::write_text_file(&params.metadata_text)?;
-        let mut command = self.build_ffmpeg_command(video_path, &output_path, &params, text_file.path());
+        let mut command = self.build_ffmpeg_command(video_path, output_path, &params, text_file.path());
 
         if self.config.dryrun {
             println!("[DRYRUN] {command:#?}");
@@ -478,6 +478,36 @@ impl ThumbnailCreator {
             .replace('\'', "\\'")
             .replace('|', "\\|")
     }
+}
+
+/// Thumbnail path for each video, in the same order.
+///
+/// A thumbnail is named after the video stem.
+/// Videos in the same directory whose stems differ only by case or not at all, such as `a.mp4` and `a.mkv`,
+/// would share one thumbnail, so those keep their full file name instead.
+fn thumbnail_paths(video_files: &[PathBuf]) -> Vec<PathBuf> {
+    let key = |video: &Path| {
+        let parent = video.parent().map_or_default(Path::to_path_buf);
+        let stem = video.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+        (parent, stem)
+    };
+    let mut stem_counts: HashMap<(PathBuf, String), usize> = HashMap::new();
+    for video in video_files {
+        *stem_counts.entry(key(video)).or_default() += 1;
+    }
+    video_files
+        .iter()
+        .map(|video| {
+            let parent = video.parent().unwrap_or_else(|| Path::new(""));
+            let shared_stem = stem_counts.get(&key(video)).is_some_and(|count| *count > 1);
+            let name = if shared_stem {
+                video.file_name().unwrap_or_default().to_string_lossy()
+            } else {
+                video.file_stem().unwrap_or_default().to_string_lossy()
+            };
+            parent.join(SCREENS_DIR_NAME).join(format!("{name}.jpg"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -892,9 +922,36 @@ mod test_thumbnail_file_discovery {
         let creator = creator(video.clone(), false);
         let mut stats = VideoStats::new();
 
-        creator.create_thumbnail(&video, &mut stats, "[1 / 1]")?;
+        creator.create_thumbnail(&video, &screens.join("video.jpg"), &mut stats, "[1 / 1]")?;
 
         assert_eq!(std::fs::read(screens.join("video.jpg"))?, b"existing");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_thumbnail_paths {
+    use super::*;
+
+    #[test]
+    fn videos_sharing_a_stem_get_separate_thumbnails() {
+        let videos = vec![
+            PathBuf::from("/videos/a.mp4"),
+            PathBuf::from("/videos/A.mkv"),
+            PathBuf::from("/videos/b.mp4"),
+            PathBuf::from("/other/a.mp4"),
+        ];
+
+        let paths = thumbnail_paths(&videos);
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/videos/Screens/a.mp4.jpg"),
+                PathBuf::from("/videos/Screens/A.mkv.jpg"),
+                PathBuf::from("/videos/Screens/b.jpg"),
+                PathBuf::from("/other/Screens/a.jpg"),
+            ]
+        );
     }
 }
