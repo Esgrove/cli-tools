@@ -3,7 +3,7 @@
 //! Provides same file detection, case only rename detection,
 //! a collision aware rename that never replaces a different file unless asked to,
 //! destination reservations for detecting collisions within one batch,
-//! and a recursive directory copy that refuses to copy a directory into itself.
+//! atomic file writes, and a recursive directory copy that refuses to copy a directory into itself.
 
 use std::collections::HashSet;
 use std::fs;
@@ -173,6 +173,34 @@ pub fn safe_rename(source: &Path, target: &Path, policy: OverwritePolicy) -> io:
 
     fs::rename(source, target)?;
     Ok(RenameOutcome::Renamed)
+}
+
+/// Replace the contents of a file without ever leaving it partly written.
+///
+/// The new contents go to a temporary file next to the target, which takes the permissions of the target
+/// and is then renamed over it, so an interrupted write leaves the original file as it was.
+/// A symbolic link is resolved first, so the file it points to is updated and the link stays a link.
+///
+/// # Errors
+/// Returns an error if the temporary file cannot be written or renamed over the target.
+pub fn write_atomically(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let target = if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
+    };
+    let temporary = unique_sibling_path(&target, "tmp");
+    let result = (|| {
+        fs::write(&temporary, contents)?;
+        if let Ok(metadata) = fs::metadata(&target) {
+            fs::set_permissions(&temporary, metadata.permissions())?;
+        }
+        fs::rename(&temporary, &target)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Recursively copy a directory and its contents, keeping file modification times.
@@ -624,5 +652,46 @@ mod test_copy_dir_recursive {
         let error = copy_dir_recursive(&source, &source).expect_err("should fail");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+}
+
+#[cfg(test)]
+mod test_write_atomically {
+    use super::*;
+
+    use tempfile::TempDir;
+
+    #[test]
+    fn replaces_contents_and_leaves_no_temporary_file() {
+        let directory = TempDir::new().expect("temp directory");
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "old").expect("write");
+
+        write_atomically(&path, "new").expect("write atomically");
+
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+        assert_eq!(fs::read_dir(directory.path()).expect("read dir").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keeps_permissions_and_symbolic_links() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new().expect("temp directory");
+        let path = directory.path().join("script.sh");
+        let link = directory.path().join("link.sh");
+        fs::write(&path, "old").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).expect("set mode");
+        std::os::unix::fs::symlink(&path, &link).expect("symlink");
+
+        write_atomically(&link, "new").expect("write atomically");
+
+        assert!(fs::symlink_metadata(&link).expect("metadata").file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o750
+        );
     }
 }

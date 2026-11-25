@@ -348,7 +348,7 @@ fn fix_file(
         }
         return;
     };
-    if let Err(error) = fs::write(file, fixed) {
+    if let Err(error) = cli_tools_common::write_atomically(file, fixed) {
         outcome.error = Some(format!("{path}: Failed to write file: {error}"));
         outcome.remaining = result.violations.len();
         return;
