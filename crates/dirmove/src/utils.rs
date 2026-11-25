@@ -1190,9 +1190,8 @@ mod test_filtering {
 }
 
 #[cfg(test)]
-/// Tests for prefix candidate finding with ORIGINAL filenames.
-/// These tests use the original test filenames from before position-agnostic matching was implemented.
-/// Assertions have been updated to reflect the new behavior where group names can be found at any position in the filename.
+/// Tests for prefix candidate finding with realistic filenames.
+/// Group names can be found at any position in the filename.
 mod test_prefix_candidates {
     use super::test_helpers::*;
     use super::*;
