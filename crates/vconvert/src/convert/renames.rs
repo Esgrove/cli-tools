@@ -5,47 +5,39 @@
 
 use std::time::Instant;
 
-use cli_tools_common::{OverwritePolicy, RenameOutcome, print_error, print_yellow};
-use colored::Colorize;
+use cli_tools_common::{OverwritePolicy, RenameOutcome};
 
 use super::VideoConvert;
+use crate::observer::FilePosition;
 use crate::types::ProcessableFile;
 
-impl VideoConvert {
+impl VideoConvert<'_> {
     /// Process all files that need renaming. Returns the number of files successfully renamed.
     pub(super) fn process_renames(&self, files: &[ProcessableFile]) -> usize {
         let start = Instant::now();
         let total = files.len();
-        let num_digits = total.checked_ilog10().map_or(1, |d| d as usize + 1);
         let mut renamed_count = 0;
 
         for (index, file) in files.iter().enumerate() {
-            let file_index = format!("[{:>width$}/{total}]", index + 1, width = num_digits);
+            let position = FilePosition {
+                index: index + 1,
+                total,
+            };
+            self.observer
+                .rename_started(position, &file.file.path, &file.output_path, self.options.dry_run);
 
-            if self.config.dryrun {
-                println!("{}", format!("{file_index} [DRYRUN] Rename:").bold().purple());
-                cli_tools_common::show_diff(
-                    &cli_tools_common::path_to_string_relative(&file.file.path),
-                    &cli_tools_common::path_to_string_relative(&file.output_path),
-                );
+            if self.options.dry_run {
                 renamed_count += 1;
-            } else {
-                println!("{}", format!("{file_index} Rename:").bold().purple());
-                cli_tools_common::show_diff(
-                    &cli_tools_common::path_to_string_relative(&file.file.path),
-                    &cli_tools_common::path_to_string_relative(&file.output_path),
-                );
-                match cli_tools_common::safe_rename(&file.file.path, &file.output_path, OverwritePolicy::Skip) {
-                    Ok(RenameOutcome::SkippedExisting) => {
-                        print_yellow!("Skipping rename, file already exists: {}", file.output_path.display());
-                    }
-                    Ok(_) => renamed_count += 1,
-                    Err(e) => print_error!("Failed to rename {}: {e}", file.file.path.display()),
-                }
+                continue;
+            }
+            match cli_tools_common::safe_rename(&file.file.path, &file.output_path, OverwritePolicy::Skip) {
+                Ok(RenameOutcome::SkippedExisting) => self.observer.rename_skipped_existing(&file.output_path),
+                Ok(_) => renamed_count += 1,
+                Err(error) => self.observer.rename_failed(&file.file.path, &error.into()),
             }
         }
 
-        self.log_renames(renamed_count, total, start.elapsed());
+        self.observer.renames_finished(renamed_count, total, start.elapsed());
         renamed_count
     }
 }
@@ -54,7 +46,7 @@ impl VideoConvert {
 mod test_process_renames {
     use super::super::test_helpers::{converter, processable, video_info};
     use super::*;
-    use crate::config::Config;
+    use crate::options::ConvertOptions;
     use crate::types::VideoFile;
 
     #[test]
@@ -64,7 +56,7 @@ mod test_process_renames {
         std::fs::write(&path, b"video").expect("Failed to write video file");
         let file = processable(&path, "hevc");
         let output = file.output_path.clone();
-        let (_log, converter) = converter(Config::default());
+        let converter = converter(ConvertOptions::default());
 
         let renamed = converter.process_renames(&[file]);
 
@@ -78,9 +70,9 @@ mod test_process_renames {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
         let path = directory.path().join("Movie.mp4");
         std::fs::write(&path, b"video").expect("Failed to write video file");
-        let (_log, converter) = converter(Config {
-            dryrun: true,
-            ..Config::default()
+        let converter = converter(ConvertOptions {
+            dry_run: true,
+            ..ConvertOptions::default()
         });
 
         let renamed = converter.process_renames(&[processable(&path, "hevc")]);
@@ -105,7 +97,7 @@ mod test_process_renames {
                 Vec::new(),
             )
         });
-        let (_log, converter) = converter(Config::default());
+        let converter = converter(ConvertOptions::default());
 
         let renamed = converter.process_renames(&files);
 
@@ -118,7 +110,7 @@ mod test_process_renames {
     fn a_failed_rename_is_not_counted() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
         let missing = directory.path().join("Missing.mp4");
-        let (_log, converter) = converter(Config::default());
+        let converter = converter(ConvertOptions::default());
 
         assert_eq!(converter.process_renames(&[processable(&missing, "hevc")]), 0);
     }

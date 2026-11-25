@@ -8,13 +8,12 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
-use cli_tools_common::print_yellow;
-
 use super::VideoConvert;
 use crate::helpers::path_without_extension;
+use crate::observer::SubtitleMatchProblem;
 use crate::types::{SubtitleFile, VideoFile, movie_subtitle_match_score};
 
-impl VideoConvert {
+impl VideoConvert<'_> {
     /// Gather subtitle sidecars from the directories containing the given video files.
     pub(super) fn gather_subtitle_files_for_video_files(video_files: &[VideoFile]) -> Vec<SubtitleFile> {
         let mut subtitle_files = Vec::new();
@@ -71,10 +70,12 @@ impl VideoConvert {
     }
 
     /// Match subtitle sidecars to video files in the same directory using normalized title tokens.
+    ///
+    /// A subtitle without a matching video, or with several equally good matches, is reported and left out.
     pub(super) fn match_subtitle_files(
+        &self,
         video_files: &[VideoFile],
         subtitle_files: Vec<SubtitleFile>,
-        verbose: bool,
     ) -> HashMap<PathBuf, Vec<SubtitleFile>> {
         let mut matches: HashMap<PathBuf, Vec<SubtitleFile>> = HashMap::new();
 
@@ -90,16 +91,14 @@ impl VideoConvert {
 
             candidates.sort_unstable_by_key(|(score, _)| std::cmp::Reverse(*score));
             let Some((best_score, best_video)) = candidates.first() else {
-                if verbose {
-                    print_yellow!("No matching video found for subtitle: {}", subtitle_file.path.display());
-                }
+                self.observer
+                    .subtitle_not_matched(&subtitle_file.path, SubtitleMatchProblem::NoMatchingVideo);
                 continue;
             };
 
             if candidates.iter().filter(|(score, _)| score == best_score).count() > 1 {
-                if verbose {
-                    print_yellow!("Ambiguous subtitle match skipped: {}", subtitle_file.path.display());
-                }
+                self.observer
+                    .subtitle_not_matched(&subtitle_file.path, SubtitleMatchProblem::Ambiguous);
                 continue;
             }
 
@@ -191,7 +190,9 @@ mod test_subtitle_discovery {
 
 #[cfg(test)]
 mod test_subtitle_matching {
+    use super::super::test_helpers::converter;
     use super::*;
+    use crate::options::ConvertOptions;
 
     #[test]
     fn assigns_multiple_language_subtitles_to_the_same_video() {
@@ -199,11 +200,8 @@ mod test_subtitle_matching {
         let english = SubtitleFile::new(Path::new("movies/Movie.Title.2024.English.srt"), None);
         let finnish = SubtitleFile::new(Path::new("movies/Movie.Title.2024.Finnish.srt"), None);
 
-        let matches = VideoConvert::match_subtitle_files(
-            std::slice::from_ref(&video),
-            vec![english.clone(), finnish.clone()],
-            false,
-        );
+        let matches = converter(ConvertOptions::default())
+            .match_subtitle_files(std::slice::from_ref(&video), vec![english.clone(), finnish.clone()]);
 
         assert_eq!(matches.get(&video.path), Some(&vec![english, finnish]));
     }
@@ -214,8 +212,8 @@ mod test_subtitle_matching {
         let extended_video = VideoFile::new(Path::new("movies/Movie.Title.2024.Extended.mkv"), 0);
         let subtitle = SubtitleFile::new(Path::new("movies/Movie.Title.2024.srt"), None);
 
-        let matches =
-            VideoConvert::match_subtitle_files(&[extended_video, exact_video.clone()], vec![subtitle.clone()], false);
+        let matches = converter(ConvertOptions::default())
+            .match_subtitle_files(&[extended_video, exact_video.clone()], vec![subtitle.clone()]);
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches.get(&exact_video.path), Some(&vec![subtitle]));
@@ -227,8 +225,8 @@ mod test_subtitle_matching {
         let standard_resolution = VideoFile::new(Path::new("movies/Movie.Title.2024.1080p.mp4"), 0);
         let subtitle = SubtitleFile::new(Path::new("movies/Movie.Title.2024.English.srt"), None);
 
-        let matches =
-            VideoConvert::match_subtitle_files(&[high_resolution, standard_resolution], vec![subtitle], false);
+        let matches = converter(ConvertOptions::default())
+            .match_subtitle_files(&[high_resolution, standard_resolution], vec![subtitle]);
 
         assert!(matches.is_empty());
     }
@@ -239,7 +237,8 @@ mod test_subtitle_matching {
         let unrelated = SubtitleFile::new(Path::new("movies/Other.Title.2024.srt"), None);
         let other_directory = SubtitleFile::new(Path::new("subtitles/Movie.Title.2024.srt"), None);
 
-        let matches = VideoConvert::match_subtitle_files(&[video], vec![unrelated, other_directory], false);
+        let matches =
+            converter(ConvertOptions::default()).match_subtitle_files(&[video], vec![unrelated, other_directory]);
 
         assert!(matches.is_empty());
     }

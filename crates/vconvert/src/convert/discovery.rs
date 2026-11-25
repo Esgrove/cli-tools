@@ -12,18 +12,18 @@ use super::VideoConvert;
 use crate::classification::should_include_file;
 use crate::types::VideoFile;
 
-impl VideoConvert {
-    /// Gather video files based on the config settings.
+impl VideoConvert<'_> {
+    /// Gather video files from the input paths that pass the extension and name filters.
     pub(super) fn gather_files_to_process(&self) -> Result<Vec<VideoFile>> {
         let start = Instant::now();
-        let max_depth = if self.config.recurse { usize::MAX } else { 1 };
+        let max_depth = if self.options.recurse { usize::MAX } else { 1 };
         let mut files = Vec::new();
         let mut seen_paths = HashSet::new();
 
-        for path in &self.config.paths {
+        for path in &self.options.paths {
             if path.is_file() {
                 let file = VideoFile::new_with_metadata(path);
-                if should_include_file(&self.config, &file) && seen_paths.insert(file.path.clone()) {
+                if should_include_file(&self.options, &file) && seen_paths.insert(file.path.clone()) {
                     files.push(file);
                 }
                 continue;
@@ -41,14 +41,14 @@ impl VideoConvert {
                     .filter_map(std::result::Result::ok)
                     .filter(|entry| entry.file_type().is_file())
                     .map(VideoFile::from)
-                    .filter(|file| should_include_file(&self.config, file))
+                    .filter(|file| should_include_file(&self.options, file))
                     .filter(|file| seen_paths.insert(file.path.clone())),
             );
         }
 
         files.sort_unstable();
 
-        self.log_gathered_files(files.len(), start.elapsed());
+        self.observer.files_gathered(files.len(), start.elapsed());
 
         Ok(files)
     }
@@ -60,14 +60,14 @@ mod test_gather_files {
 
     use super::super::test_helpers::converter;
     use super::*;
-    use crate::config::Config;
+    use crate::options::ConvertOptions;
 
-    fn config_for(path: &Path, recurse: bool) -> Config {
-        Config {
+    fn options_for(path: &Path, recurse: bool) -> ConvertOptions {
+        ConvertOptions {
             paths: vec![path.to_path_buf()],
             recurse,
             extensions: vec!["mkv".to_string(), "mp4".to_string()],
-            ..Config::default()
+            ..ConvertOptions::default()
         }
     }
 
@@ -81,8 +81,8 @@ mod test_gather_files {
         std::fs::write(root.join("notes.txt"), b"notes").expect("Failed to write text file");
         std::fs::write(nested.join("deep.mp4"), b"video").expect("Failed to write nested video file");
 
-        let (_log, shallow) = converter(config_for(&root, false));
-        let (_log_recursive, recursive) = converter(config_for(&root, true));
+        let shallow = converter(options_for(&root, false));
+        let recursive = converter(options_for(&root, true));
 
         let shallow_names: Vec<String> = shallow
             .gather_files_to_process()
@@ -127,8 +127,8 @@ mod test_gather_files {
             std::fs::write(path, b"subtitle").expect("Failed to write subtitle fixture");
         }
 
-        let mut config = config_for(&first_root, true);
-        config.paths.extend([
+        let mut options = options_for(&first_root, true);
+        options.paths.extend([
             second_root,
             standalone_video.clone(),
             first_video.clone(),
@@ -136,7 +136,7 @@ mod test_gather_files {
             ignored_file,
             first_root,
         ]);
-        let (_log, converter) = converter(config);
+        let converter = converter(options);
         let files = converter.gather_files_to_process().expect("Failed to gather files");
         let paths: HashSet<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
 
@@ -168,10 +168,10 @@ mod test_gather_files {
                 std::fs::write(path, b"video").expect("Failed to write video fixture");
             }
         }
-        let mut config = config_for(&roots[0], false);
-        config.paths.push(roots[1].clone());
-        config.include = vec!["keep".to_string()];
-        let (_log, converter) = converter(config);
+        let mut options = options_for(&roots[0], false);
+        options.paths.push(roots[1].clone());
+        options.include = vec!["keep".to_string()];
+        let converter = converter(options);
 
         let files = converter.gather_files_to_process().expect("Failed to gather files");
 
@@ -187,8 +187,8 @@ mod test_gather_files {
         std::fs::write(&video, b"video").expect("Failed to write video file");
         std::fs::write(&text, b"notes").expect("Failed to write text file");
 
-        let (_log, video_converter) = converter(config_for(&video, false));
-        let (_log_text, text_converter) = converter(config_for(&text, false));
+        let video_converter = converter(options_for(&video, false));
+        let text_converter = converter(options_for(&text, false));
 
         assert_eq!(
             video_converter
@@ -208,7 +208,7 @@ mod test_gather_files {
     #[test]
     fn a_missing_path_is_an_error() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-        let (_log, converter) = converter(config_for(&directory.path().join("missing"), false));
+        let converter = converter(options_for(&directory.path().join("missing"), false));
 
         assert!(converter.gather_files_to_process().is_err());
     }

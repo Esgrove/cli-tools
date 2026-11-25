@@ -1,23 +1,19 @@
 //! Command-line support for video conversion.
 //!
-//! Defines sort and database modes, and implements helpers for displaying database contents.
-
-use std::str::FromStr;
+//! Defines the sort order argument and the database modes,
+//! and implements the database commands that print the database contents.
 
 use anyhow::Result;
 use clap::ValueEnum;
+use cli_tools_vconvert::{Database, PendingAction, SortOrder};
 use colored::Colorize;
-use serde::Deserialize;
 
 use crate::config::Config;
-use crate::database::Database;
 
 /// Sort order options for video files.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortOrder {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SortOrderArgument {
     /// Sort by bitrate (highest first)
-    #[default]
     Bitrate,
     /// Sort by file size (largest first)
     Size,
@@ -52,57 +48,19 @@ pub enum DatabaseMode {
     CleanScanCache,
 }
 
-impl SortOrder {
-    /// Returns the SQL ORDER BY clause for this sort order.
-    #[must_use]
-    pub const fn sql_order_clause(self) -> &'static str {
-        match self {
-            Self::Bitrate => "bitrate_kbps DESC",
-            Self::Size => "size_bytes DESC",
-            Self::SizeAsc => "size_bytes ASC",
-            Self::Duration => "duration DESC",
-            Self::DurationAsc => "duration ASC",
-            Self::Resolution => "width * height DESC",
-            Self::ResolutionAsc => "width * height ASC",
-            Self::Impact => "(bitrate_kbps / frames_per_second) * duration DESC",
-            Self::Name => "full_path ASC",
+impl From<SortOrderArgument> for SortOrder {
+    fn from(argument: SortOrderArgument) -> Self {
+        match argument {
+            SortOrderArgument::Bitrate => Self::Bitrate,
+            SortOrderArgument::Size => Self::Size,
+            SortOrderArgument::SizeAsc => Self::SizeAsc,
+            SortOrderArgument::Duration => Self::Duration,
+            SortOrderArgument::DurationAsc => Self::DurationAsc,
+            SortOrderArgument::Resolution => Self::Resolution,
+            SortOrderArgument::ResolutionAsc => Self::ResolutionAsc,
+            SortOrderArgument::Impact => Self::Impact,
+            SortOrderArgument::Name => Self::Name,
         }
-    }
-}
-
-impl FromStr for SortOrder {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "bitrate" => Ok(Self::Bitrate),
-            "size" => Ok(Self::Size),
-            "size_asc" | "size-asc" => Ok(Self::SizeAsc),
-            "duration" => Ok(Self::Duration),
-            "duration_asc" | "duration-asc" => Ok(Self::DurationAsc),
-            "resolution" => Ok(Self::Resolution),
-            "resolution_asc" | "resolution-asc" => Ok(Self::ResolutionAsc),
-            "impact" => Ok(Self::Impact),
-            "name" => Ok(Self::Name),
-            _ => Err(format!("Unknown sort order: {s}")),
-        }
-    }
-}
-
-impl std::fmt::Display for SortOrder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Self::Bitrate => "bitrate",
-            Self::Size => "size",
-            Self::SizeAsc => "size-asc",
-            Self::Duration => "duration",
-            Self::DurationAsc => "duration-asc",
-            Self::Resolution => "resolution",
-            Self::ResolutionAsc => "resolution-asc",
-            Self::Impact => "impact",
-            Self::Name => "name",
-        };
-        write!(f, "{name}")
     }
 }
 
@@ -217,7 +175,7 @@ pub fn show_database_contents(database: &Database, config: &Config) -> Result<()
         println!();
         println!("{}", "Pending files:".bold());
 
-        let files = database.get_pending_files(&config.db_filter)?;
+        let files = database.get_pending_files(&config.options.pending_file_filter())?;
         let total_matching = files.len();
         let display_count = config
             .display_limit
@@ -231,9 +189,9 @@ pub fn show_database_contents(database: &Database, config: &Config) -> Result<()
             let bitrate_str = format!("{:.1} Mbps", file.bitrate_kbps as f64 / 1000.0);
             let duration_str = cli_tools_common::format_duration(std::time::Duration::from_secs_f64(file.duration));
             let action_str = match file.action {
-                crate::database::PendingAction::Convert => "CONVERT".yellow(),
-                crate::database::PendingAction::Remux => "REMUX".cyan(),
-                crate::database::PendingAction::SubtitleMux => "SUBS".purple(),
+                PendingAction::Convert => "CONVERT".yellow(),
+                PendingAction::Remux => "REMUX".cyan(),
+                PendingAction::SubtitleMux => "SUBS".purple(),
             };
             println!(
                 "  [{action_str}] {:<5} {:>10} {:>10} {:>10} - {}",
@@ -261,112 +219,20 @@ pub fn show_database_contents(database: &Database, config: &Config) -> Result<()
 }
 
 #[cfg(test)]
-mod sort_order_tests {
+mod sort_order_argument_tests {
     use super::*;
 
-    fn parse(s: &str) -> Result<SortOrder, String> {
-        <SortOrder as std::str::FromStr>::from_str(s)
-    }
-
     #[test]
-    fn from_str_parses_bitrate() {
-        assert_eq!(parse("bitrate").expect("bitrate should parse"), SortOrder::Bitrate);
-        assert_eq!(
-            parse("BITRATE").expect("uppercase bitrate should parse"),
-            SortOrder::Bitrate
-        );
-    }
+    fn every_argument_maps_to_the_sort_order_of_the_same_name() {
+        for argument in SortOrderArgument::value_variants() {
+            let name = argument
+                .to_possible_value()
+                .expect("every sort order has a value name")
+                .get_name()
+                .to_string();
 
-    #[test]
-    fn from_str_parses_size() {
-        assert_eq!(parse("size").expect("size should parse"), SortOrder::Size);
-        assert_eq!(
-            parse("size_asc").expect("snake case size ascending should parse"),
-            SortOrder::SizeAsc
-        );
-        assert_eq!(
-            parse("size-asc").expect("kebab case size ascending should parse"),
-            SortOrder::SizeAsc
-        );
-    }
-
-    #[test]
-    fn from_str_parses_duration() {
-        assert_eq!(parse("duration").expect("duration should parse"), SortOrder::Duration);
-        assert_eq!(
-            parse("duration_asc").expect("snake case duration ascending should parse"),
-            SortOrder::DurationAsc
-        );
-        assert_eq!(
-            parse("duration-asc").expect("kebab case duration ascending should parse"),
-            SortOrder::DurationAsc
-        );
-    }
-
-    #[test]
-    fn from_str_parses_resolution() {
-        assert_eq!(
-            parse("resolution").expect("resolution should parse"),
-            SortOrder::Resolution
-        );
-        assert_eq!(
-            parse("resolution_asc").expect("snake case resolution ascending should parse"),
-            SortOrder::ResolutionAsc
-        );
-        assert_eq!(
-            parse("resolution-asc").expect("kebab case resolution ascending should parse"),
-            SortOrder::ResolutionAsc
-        );
-    }
-
-    #[test]
-    fn from_str_parses_impact() {
-        assert_eq!(parse("impact").expect("impact should parse"), SortOrder::Impact);
-    }
-
-    #[test]
-    fn from_str_parses_name() {
-        assert_eq!(parse("name").expect("name should parse"), SortOrder::Name);
-    }
-
-    #[test]
-    fn from_str_returns_error_for_unknown() {
-        let error = parse("unknown").expect_err("unknown sort order should fail");
-        assert_eq!(error, "Unknown sort order: unknown");
-    }
-
-    #[test]
-    fn display_formats_correctly() {
-        assert_eq!(format!("{}", SortOrder::Bitrate), "bitrate");
-        assert_eq!(format!("{}", SortOrder::Size), "size");
-        assert_eq!(format!("{}", SortOrder::SizeAsc), "size-asc");
-        assert_eq!(format!("{}", SortOrder::Duration), "duration");
-        assert_eq!(format!("{}", SortOrder::DurationAsc), "duration-asc");
-        assert_eq!(format!("{}", SortOrder::Resolution), "resolution");
-        assert_eq!(format!("{}", SortOrder::ResolutionAsc), "resolution-asc");
-        assert_eq!(format!("{}", SortOrder::Impact), "impact");
-        assert_eq!(format!("{}", SortOrder::Name), "name");
-    }
-
-    #[test]
-    fn sql_order_clause_returns_valid_sql() {
-        assert_eq!(SortOrder::Bitrate.sql_order_clause(), "bitrate_kbps DESC");
-        assert_eq!(SortOrder::Size.sql_order_clause(), "size_bytes DESC");
-        assert_eq!(SortOrder::SizeAsc.sql_order_clause(), "size_bytes ASC");
-        assert_eq!(SortOrder::Duration.sql_order_clause(), "duration DESC");
-        assert_eq!(SortOrder::DurationAsc.sql_order_clause(), "duration ASC");
-        assert_eq!(SortOrder::Resolution.sql_order_clause(), "width * height DESC");
-        assert_eq!(SortOrder::ResolutionAsc.sql_order_clause(), "width * height ASC");
-        assert_eq!(
-            SortOrder::Impact.sql_order_clause(),
-            "(bitrate_kbps / frames_per_second) * duration DESC"
-        );
-        assert_eq!(SortOrder::Name.sql_order_clause(), "full_path ASC");
-    }
-
-    #[test]
-    fn default_is_bitrate() {
-        assert_eq!(SortOrder::default(), SortOrder::Bitrate);
+            assert_eq!(SortOrder::from(*argument).to_string(), name);
+        }
     }
 }
 
@@ -397,9 +263,9 @@ mod database_mode_tests {
 mod test_database_reporting {
     use std::path::PathBuf;
 
+    use cli_tools_vconvert::{ConvertOptions, VideoInfo};
+
     use super::*;
-    use crate::database::{PendingAction, PendingFileFilter};
-    use crate::types::VideoInfo;
 
     /// Video info for a file of the given size and bitrate.
     fn video_info(size_bytes: u64, bitrate_kbps: u64) -> VideoInfo {
@@ -495,9 +361,9 @@ mod test_database_reporting {
         show_database_contents(
             &database,
             &Config {
-                db_filter: PendingFileFilter {
+                options: ConvertOptions {
                     extensions: vec!["webm".to_string()],
-                    ..PendingFileFilter::default()
+                    ..ConvertOptions::default()
                 },
                 ..Config::default()
             },

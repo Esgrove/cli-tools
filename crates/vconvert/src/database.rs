@@ -13,8 +13,8 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::SortOrder;
 use crate::bitrate_limit::MinimumBitrate;
+use crate::options::SortOrder;
 use crate::types::VideoInfo;
 
 /// Default database filename.
@@ -159,6 +159,7 @@ impl Database {
     }
 
     /// Get the database path for display purposes.
+    #[must_use]
     pub fn path() -> PathBuf {
         Self::database_path()
     }
@@ -191,12 +192,11 @@ impl Database {
         Ok(database)
     }
 
-    /// Open an in-memory database for testing.
+    /// Open an empty in-memory database, for tests and for runs that keep no state.
     ///
     /// # Errors
     /// Returns an error if the database cannot be created.
-    #[cfg(test)]
-    pub(crate) fn open_in_memory() -> Result<Self> {
+    pub fn open_in_memory() -> Result<Self> {
         let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
 
         let database = Self { connection };
@@ -300,7 +300,6 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
-    #[cfg(test)]
     pub fn upsert_pending_file(
         &self,
         path: &Path,
@@ -525,7 +524,6 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Part of public API for future use"))]
     pub fn get_pending_file(&self, path: &Path) -> Result<Option<PendingFile>> {
         let path_str = path.to_string_lossy();
 
@@ -568,7 +566,6 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Part of public API for future use"))]
     pub fn remove_pending_file_by_id(&self, id: i64) -> Result<bool> {
         let rows_affected = self
             .connection
@@ -723,6 +720,7 @@ impl Database {
 
 impl PendingFile {
     /// Convert to `VideoInfo` for processing.
+    #[must_use]
     pub fn to_video_info(&self) -> VideoInfo {
         VideoInfo {
             codec: self.codec.clone(),
@@ -740,6 +738,7 @@ impl PendingFile {
     /// Whether the file on disk has a different modification time than when it was scanned.
     ///
     /// Entries without a stored time, or files whose time cannot be read, count as unchanged.
+    #[must_use]
     pub fn is_changed_on_disk(&self) -> bool {
         self.modified_time
             .zip(file_modified_time(&self.full_path))

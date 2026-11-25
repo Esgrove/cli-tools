@@ -1,27 +1,25 @@
 //! Command-line entry point for the video conversion tool.
 //!
-//! Defines CLI arguments and subcommands, initializes logging, and dispatches conversion or completion generation.
+//! Defines CLI arguments and subcommands, installs the Ctrl+C handler,
+//! and dispatches conversion, the database commands, or completion generation.
 
-mod bitrate_limit;
-pub(crate) mod classification;
 mod cli;
 mod config;
-mod convert;
-mod database;
-mod ffmpeg;
-mod helpers;
 mod logger;
-mod stats;
-mod types;
+mod reporter;
+mod run;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use colored::Colorize;
 
-pub use crate::cli::{DatabaseMode, SortOrder};
-use crate::convert::VideoConvert;
+use crate::cli::{DatabaseMode, SortOrderArgument};
+use crate::config::{Config, VideoConvertConfig};
 
 /// Subcommands for vconvert.
 #[derive(Subcommand)]
@@ -111,7 +109,7 @@ pub(crate) struct VideoConvertArgs {
 
     /// Sort files
     #[arg(short = 's', long, name = "ORDER", num_args = 0..=1, default_missing_value = "bitrate")]
-    sort: Option<SortOrder>,
+    sort: Option<SortOrderArgument>,
 
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
@@ -180,16 +178,33 @@ impl VideoConvertArgs {
 fn main() -> Result<()> {
     let args = VideoConvertArgs::parse();
     if let Some(VideoConvertCommand::Completion { shell, install }) = &args.command {
-        cli_tools_common::generate_shell_completion(
+        return cli_tools_common::generate_shell_completion(
             *shell,
             VideoConvertArgs::command(),
             *install,
             args.verbose,
             env!("CARGO_BIN_NAME"),
-        )
-    } else {
-        VideoConvert::new(args)?.run()
+        );
     }
+
+    let user_config = VideoConvertConfig::get_user_config()?;
+    let config = Config::try_from_args(args, user_config)?;
+
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    if config.processes_files() {
+        let abort_flag_handler = Arc::clone(&abort_flag);
+        ctrlc::set_handler(move || {
+            if abort_flag_handler.load(Ordering::SeqCst) {
+                // Second Ctrl+C - force exit
+                std::process::exit(130);
+            }
+            println!("\n{}", "Received Ctrl+C, finishing current file...".yellow().bold());
+            abort_flag_handler.store(true, Ordering::SeqCst);
+        })
+        .expect("Failed to set Ctrl+C handler");
+    }
+
+    run::run(&config, &abort_flag)
 }
 
 #[cfg(test)]
@@ -298,7 +313,7 @@ mod test_video_convert_args_parsing {
         let args = VideoConvertArgs::try_parse_from(["vconvert", "--sort"])
             .expect("Failed to parse sort flag without a value");
 
-        assert_eq!(args.sort, Some(SortOrder::Bitrate));
+        assert_eq!(args.sort, Some(SortOrderArgument::Bitrate));
     }
 
     #[test]
@@ -306,7 +321,7 @@ mod test_video_convert_args_parsing {
         let args = VideoConvertArgs::try_parse_from(["vconvert", "--sort", "duration-asc"])
             .expect("Failed to parse explicit sort order");
 
-        assert_eq!(args.sort, Some(SortOrder::DurationAsc));
+        assert_eq!(args.sort, Some(SortOrderArgument::DurationAsc));
     }
 
     #[test]

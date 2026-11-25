@@ -22,7 +22,6 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
-    #[cfg(test)]
     pub fn upsert_scanned_file(&self, path: &Path, info: &VideoInfo) -> Result<()> {
         let path_str = path.to_string_lossy();
         let now = SystemTime::now()

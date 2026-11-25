@@ -1,46 +1,44 @@
 //! Analysis and conversion statistics for video processing.
 //!
-//! Collects per-file and aggregate outcomes, and implements formatted run summaries.
+//! Collects per-file and aggregate outcomes of the analysis and of the processing.
 
 use std::ops::AddAssign;
 use std::time::Duration;
 
-use colored::Colorize;
-
-use crate::types::ProcessResult;
+use crate::types::{ProcessResult, SkipReason};
 
 /// Statistics from the video file analysis.
 #[derive(Debug, Default)]
 pub struct AnalysisStats {
-    pub(crate) to_rename: usize,
-    pub(crate) to_remux: usize,
-    pub(crate) to_subtitle_mux: usize,
-    pub(crate) to_convert: usize,
-    pub(crate) skipped_converted: usize,
-    pub(crate) skipped_bitrate_low: usize,
-    pub(crate) skipped_bitrate_high: usize,
-    pub(crate) skipped_duration_short: usize,
-    pub(crate) skipped_duration_long: usize,
-    pub(crate) skipped_resolution_low: usize,
-    pub(crate) skipped_duplicate: usize,
-    pub(crate) skipped_output_conflict: usize,
-    pub(crate) duplicates_deleted: usize,
-    pub(crate) duplicate_delete_failed: usize,
-    pub(crate) file_missing: usize,
-    pub(crate) analysis_failed: usize,
+    pub to_rename: usize,
+    pub to_remux: usize,
+    pub to_subtitle_mux: usize,
+    pub to_convert: usize,
+    pub skipped_converted: usize,
+    pub skipped_bitrate_low: usize,
+    pub skipped_bitrate_high: usize,
+    pub skipped_duration_short: usize,
+    pub skipped_duration_long: usize,
+    pub skipped_resolution_low: usize,
+    pub skipped_duplicate: usize,
+    pub skipped_output_conflict: usize,
+    pub duplicates_deleted: usize,
+    pub duplicate_delete_failed: usize,
+    pub file_missing: usize,
+    pub analysis_failed: usize,
 }
 
 /// Statistics for the conversion run
 #[derive(Debug, Default)]
 pub struct RunStats {
-    pub(crate) files_renamed: usize,
-    pub(crate) files_remuxed: usize,
-    pub(crate) files_subtitle_muxed: usize,
-    pub(crate) files_converted: usize,
-    pub(crate) files_failed: usize,
-    pub(crate) total_original_size: u64,
-    pub(crate) total_converted_size: u64,
-    pub(crate) total_duration: Duration,
+    pub files_renamed: usize,
+    pub files_remuxed: usize,
+    pub files_subtitle_muxed: usize,
+    pub files_converted: usize,
+    pub files_failed: usize,
+    pub total_original_size: u64,
+    pub total_converted_size: u64,
+    pub total_duration: Duration,
 }
 
 /// Statistics for a single file conversion
@@ -54,7 +52,8 @@ pub struct ConversionStats {
 
 impl AnalysisStats {
     /// Get the total number of skipped files.
-    pub(crate) const fn total_skipped(&self) -> usize {
+    #[must_use]
+    pub const fn total_skipped(&self) -> usize {
         self.skipped_converted
             + self.skipped_bitrate_low
             + self.skipped_bitrate_high
@@ -68,58 +67,28 @@ impl AnalysisStats {
             + self.file_missing
     }
 
-    /// Print analysis summary.
-    pub(crate) fn print_summary(&self) {
-        println!("To rename:               {}", self.to_rename);
-        println!("To remux:                {}", self.to_remux);
-        println!("To subtitle mux:         {}", self.to_subtitle_mux);
-        println!("To convert:              {}", self.to_convert);
-        if self.total_skipped() > 0 {
-            println!("Skipped:                 {}", self.total_skipped());
-            println!(" - Already converted:    {}", self.skipped_converted);
-            if self.skipped_bitrate_low > 0 {
-                println!(" - Below bitrate limit:  {}", self.skipped_bitrate_low);
-            }
-            if self.skipped_bitrate_high > 0 {
-                println!(" - Above bitrate limit:  {}", self.skipped_bitrate_high);
-            }
-            if self.skipped_duration_short > 0 {
-                println!(" - Below duration limit: {}", self.skipped_duration_short);
-            }
-            if self.skipped_duration_long > 0 {
-                println!(" - Above duration limit: {}", self.skipped_duration_long);
-            }
-            if self.skipped_resolution_low > 0 {
-                println!(" - Below resolution limit: {}", self.skipped_resolution_low);
-            }
-            if self.skipped_duplicate > 0 {
-                println!(" - Output exists:        {}", self.skipped_duplicate);
-            }
-            if self.skipped_output_conflict > 0 {
-                println!(" - Output conflict:      {}", self.skipped_output_conflict);
-            }
-            if self.duplicates_deleted > 0 {
-                println!(" - Duplicates deleted:   {}", self.duplicates_deleted);
-            }
-            if self.duplicate_delete_failed > 0 {
-                println!(
-                    "{}",
-                    format!(" - Delete failed:        {}", self.duplicate_delete_failed).red()
-                );
-            }
-            if self.file_missing > 0 {
-                println!(" - File missing:         {}", self.file_missing);
-            }
-        }
-        if self.analysis_failed > 0 {
-            println!("{}", format!("Analysis failed:         {}", self.analysis_failed).red());
-        }
+    /// Count a skipped file under its reason.
+    pub(crate) const fn count_skip(&mut self, reason: &SkipReason) {
+        let counter = match reason {
+            SkipReason::AlreadyConverted => &mut self.skipped_converted,
+            SkipReason::BitrateBelowThreshold { .. } => &mut self.skipped_bitrate_low,
+            SkipReason::BitrateAboveThreshold { .. } => &mut self.skipped_bitrate_high,
+            SkipReason::DurationBelowThreshold { .. } => &mut self.skipped_duration_short,
+            SkipReason::DurationAboveThreshold { .. } => &mut self.skipped_duration_long,
+            SkipReason::ResolutionBelowLimit { .. } => &mut self.skipped_resolution_low,
+            SkipReason::OutputExists { .. } => &mut self.skipped_duplicate,
+            SkipReason::OutputConflict { .. } => &mut self.skipped_output_conflict,
+            SkipReason::FileMissing => &mut self.file_missing,
+            SkipReason::AnalysisFailed { .. } => &mut self.analysis_failed,
+        };
+        *counter += 1;
     }
 }
 
 impl ConversionStats {
     /// Create conversion stats with original and converted file sizes and bitrates.
-    pub(crate) const fn new(
+    #[must_use]
+    pub const fn new(
         original_size: u64,
         original_bitrate_kbps: u64,
         converted_size: u64,
@@ -170,57 +139,10 @@ impl RunStats {
     }
 
     /// Calculate total space saved (negative if size increased).
+    #[must_use]
     #[allow(clippy::cast_possible_wrap)]
-    pub(crate) const fn space_saved(&self) -> i64 {
+    pub const fn space_saved(&self) -> i64 {
         self.total_original_size as i64 - self.total_converted_size as i64
-    }
-
-    /// Print a summary of conversion statistics.
-    pub(crate) fn print_summary(&self) {
-        println!("{}", "\n--- Conversion Summary ---".bold().magenta());
-        println!("Files renamed:           {}", self.files_renamed);
-        println!("Files remuxed:           {}", self.files_remuxed);
-        println!("Files subtitle muxed:    {}", self.files_subtitle_muxed);
-        println!("Files converted:         {}", self.files_converted);
-        println!(
-            "Files failed:            {}",
-            if self.files_failed > 0 {
-                self.files_failed.to_string().red()
-            } else {
-                "0".normal()
-            }
-        );
-        println!();
-
-        if self.files_converted > 0 {
-            let original_str = cli_tools_common::format_size(self.total_original_size);
-            let converted_str = cli_tools_common::format_size(self.total_converted_size);
-
-            if self.total_original_size > 0 {
-                let saved = self.space_saved();
-                let ratio = saved as f64 / self.total_original_size as f64 * 100.0;
-                let saved_str = cli_tools_common::format_size(saved.unsigned_abs());
-
-                let max_width = original_str.len().max(converted_str.len()).max(saved_str.len());
-
-                println!("Total original size:     {original_str:>max_width$}");
-                println!("Total converted size:    {converted_str:>max_width$}");
-
-                if saved >= 0 {
-                    println!("Space saved:             {saved_str:>max_width$} ({ratio:.1}%)");
-                } else {
-                    println!("Space increased:         {saved_str:>max_width$} ({ratio:.1}%)");
-                }
-            } else {
-                println!("Total original size:     {original_str}");
-                println!("Total converted size:    {converted_str}");
-            }
-        }
-
-        println!(
-            "Total time:              {}",
-            cli_tools_common::format_duration(self.total_duration)
-        );
     }
 }
 
@@ -336,7 +258,58 @@ mod conversion_stats_tests {
 
 #[cfg(test)]
 mod analysis_stats_tests {
+    use std::path::PathBuf;
+
     use super::*;
+
+    #[test]
+    fn count_skip_counts_each_reason_once() {
+        let reasons = [
+            SkipReason::AlreadyConverted,
+            SkipReason::BitrateBelowThreshold {
+                bitrate: 1,
+                threshold: 2,
+            },
+            SkipReason::BitrateAboveThreshold {
+                bitrate: 2,
+                threshold: 1,
+            },
+            SkipReason::DurationBelowThreshold {
+                duration: 1.0,
+                threshold: 2.0,
+            },
+            SkipReason::DurationAboveThreshold {
+                duration: 2.0,
+                threshold: 1.0,
+            },
+            SkipReason::ResolutionBelowLimit {
+                width: 640,
+                height: 360,
+                limit: 720,
+            },
+            SkipReason::OutputExists {
+                path: PathBuf::from("out.mp4"),
+                source_duration: 1.0,
+            },
+            SkipReason::OutputConflict {
+                path: PathBuf::from("out.mp4"),
+            },
+            SkipReason::FileMissing,
+            SkipReason::AnalysisFailed {
+                error: "probe failed".to_string(),
+            },
+        ];
+        let mut stats = AnalysisStats::default();
+
+        for reason in &reasons {
+            stats.count_skip(reason);
+        }
+
+        assert_eq!(stats.total_skipped(), 9);
+        assert_eq!(stats.analysis_failed, 1);
+        assert_eq!(stats.skipped_duplicate, 1);
+        assert_eq!(stats.skipped_output_conflict, 1);
+    }
 
     #[test]
     fn default_values_are_zero() {
@@ -554,74 +527,6 @@ mod test_additional_run_results {
         assert_eq!(stats.total_original_size, 2_000);
         assert_eq!(stats.total_converted_size, 1_000);
         assert_eq!(stats.total_duration, Duration::from_secs(10));
-    }
-}
-
-#[cfg(test)]
-mod test_summary_branches {
-    use super::*;
-
-    #[test]
-    fn analysis_summary_handles_every_reported_category() {
-        let stats = AnalysisStats {
-            to_rename: 1,
-            to_remux: 2,
-            to_subtitle_mux: 3,
-            to_convert: 4,
-            skipped_converted: 5,
-            skipped_bitrate_low: 6,
-            skipped_bitrate_high: 7,
-            skipped_duration_short: 8,
-            skipped_duration_long: 9,
-            skipped_resolution_low: 10,
-            skipped_duplicate: 11,
-            skipped_output_conflict: 16,
-            duplicates_deleted: 12,
-            duplicate_delete_failed: 13,
-            file_missing: 14,
-            analysis_failed: 15,
-        };
-
-        assert_eq!(stats.total_skipped(), 111);
-        stats.print_summary();
-    }
-
-    #[test]
-    fn analysis_summary_handles_no_skips_or_failures() {
-        let stats = AnalysisStats::default();
-
-        assert_eq!(stats.total_skipped(), 0);
-        stats.print_summary();
-    }
-
-    #[test]
-    fn run_summary_handles_saved_increased_and_zero_original_sizes() {
-        let saved = RunStats {
-            files_converted: 1,
-            total_original_size: 2_097_152,
-            total_converted_size: 1_048_576,
-            ..Default::default()
-        };
-        let increased = RunStats {
-            files_converted: 1,
-            files_failed: 1,
-            total_original_size: 524_288,
-            total_converted_size: 1_048_576,
-            ..Default::default()
-        };
-        let zero_original = RunStats {
-            files_converted: 1,
-            total_converted_size: 1_024,
-            ..Default::default()
-        };
-
-        assert_eq!(saved.space_saved(), 1_048_576);
-        assert_eq!(increased.space_saved(), -524_288);
-        assert_eq!(zero_original.space_saved(), -1_024);
-        saved.print_summary();
-        increased.print_summary();
-        zero_original.print_summary();
-        RunStats::default().print_summary();
     }
 }
 

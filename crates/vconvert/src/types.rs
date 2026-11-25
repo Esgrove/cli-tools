@@ -5,13 +5,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use colored::Colorize;
 use regex::Regex;
 
 use crate::bitrate_limit::MinimumBitrate;
 use crate::classification::{RE_10BIT, RE_AV1, RE_SOURCE_CODEC, RE_X265};
-use crate::cli::SortOrder;
-use crate::config::{Config, TARGET_EXTENSION};
+use crate::options::{ConvertOptions, SortOrder, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
 /// Codec used in output filenames to identify the video codec.
@@ -91,93 +89,94 @@ pub enum AnalysisResult {
 #[derive(Debug, Clone)]
 pub struct VideoInfo {
     /// Video codec name (e.g., "hevc", "h264")
-    pub(crate) codec: String,
+    pub codec: String,
     /// Video bitrate in kbps
-    pub(crate) bitrate_kbps: u64,
+    pub bitrate_kbps: u64,
     /// File size in bytes
-    pub(crate) size_bytes: u64,
+    pub size_bytes: u64,
     /// Duration in seconds
-    pub(crate) duration: f64,
+    pub duration: f64,
     /// Video width in pixels
-    pub(crate) width: u32,
+    pub width: u32,
     /// Video height in pixels
-    pub(crate) height: u32,
+    pub height: u32,
     /// Framerate in frames per second
-    pub(crate) frames_per_second: f64,
+    pub frames_per_second: f64,
     /// Video bit depth per color channel.
-    pub(crate) bit_depth: u8,
+    pub bit_depth: u8,
     /// Warning message from ffprobe stderr (if any)
-    pub(crate) warning: Option<String>,
+    pub warning: Option<String>,
 }
 
 /// Filter options for video file analysis.
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisFilter {
     /// Minimum bitrate threshold.
-    pub(crate) min_bitrate: MinimumBitrate,
+    pub min_bitrate: MinimumBitrate,
     /// Maximum bitrate threshold in kbps.
-    pub(crate) max_bitrate: Option<u64>,
+    pub max_bitrate: Option<u64>,
     /// Minimum duration threshold in seconds.
-    pub(crate) min_duration: Option<f64>,
+    pub min_duration: Option<f64>,
     /// Maximum duration threshold in seconds.
-    pub(crate) max_duration: Option<f64>,
+    pub max_duration: Option<f64>,
     /// Minimum resolution. Both width and height must be at least this many pixels.
-    pub(crate) min_resolution: Option<u32>,
+    pub min_resolution: Option<u32>,
     /// Whether to overwrite existing output files.
-    pub(crate) overwrite: bool,
+    pub overwrite: bool,
 }
 
 /// A video file with its path and parsed name components.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VideoFile {
-    pub(crate) path: PathBuf,
-    pub(crate) name: String,
-    pub(crate) extension: String,
+    pub path: PathBuf,
+    pub name: String,
+    pub extension: String,
     /// File size in bytes, captured from filesystem metadata during discovery.
     /// Used for scan cache lookups without additional `stat()` calls.
-    pub(crate) size_bytes: u64,
+    pub size_bytes: u64,
 }
 
 /// Result of running ffprobe on a cache miss,
 /// bundling everything needed to write the result back to the scan cache and continue with analysis.
 pub struct VideoInfoCache {
     /// Classification result for the file.
-    pub(crate) result: AnalysisResult,
+    pub result: AnalysisResult,
     /// Original file path, kept separately
     /// so the caller can write the cache entry without digging into the `AnalysisResult` enum.
-    pub(crate) path: PathBuf,
+    pub path: PathBuf,
     /// `VideoInfo` from ffprobe to persist in the scan cache.
     /// `None` only when ffprobe itself failed.
-    pub(crate) info: Option<VideoInfo>,
+    pub info: Option<VideoInfo>,
 }
 
 /// A video file with its analyzed info, ready for processing.
 #[derive(Debug)]
 pub struct ProcessableFile {
-    pub(crate) file: VideoFile,
-    pub(crate) info: VideoInfo,
-    pub(crate) output_path: PathBuf,
-    pub(crate) subtitle_files: Vec<SubtitleFile>,
+    pub file: VideoFile,
+    pub info: VideoInfo,
+    pub output_path: PathBuf,
+    pub subtitle_files: Vec<SubtitleFile>,
 }
 
 /// A subtitle sidecar file that can be embedded into a movie-mode output file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtitleFile {
-    pub(crate) path: PathBuf,
-    pub(crate) extension: String,
-    pub(crate) paired_sub_path: Option<PathBuf>,
+    pub path: PathBuf,
+    pub extension: String,
+    pub paired_sub_path: Option<PathBuf>,
 }
 
 /// Output from the analysis phase.
+#[derive(Debug, Default)]
 pub struct AnalysisOutput {
     /// Files that need full conversion (non-HEVC to HEVC).
-    pub(crate) conversions: Vec<ProcessableFile>,
+    pub conversions: Vec<ProcessableFile>,
     /// Files that need remuxing (target codec but wrong container).
-    pub(crate) remuxes: Vec<ProcessableFile>,
+    pub remuxes: Vec<ProcessableFile>,
     /// Files that need to be renamed (target codec MP4 without codec suffix).
-    pub(crate) renames: Vec<ProcessableFile>,
+    pub renames: Vec<ProcessableFile>,
     /// Files that only need external subtitle sidecars muxed in.
-    pub(crate) subtitle_muxes: Vec<ProcessableFile>,
+    pub subtitle_muxes: Vec<ProcessableFile>,
 }
 
 /// Sorting operations for a slice of processable files.
@@ -273,8 +272,8 @@ impl std::fmt::Display for ProcessingOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Completed => Ok(()),
-            Self::Aborted => write!(f, "{}", "Aborted by user".bold().red()),
-            Self::OutOfDiskSpace => write!(f, "{}", "Stopped: not enough free disk space".bold().red()),
+            Self::Aborted => f.write_str("Aborted by user"),
+            Self::OutOfDiskSpace => f.write_str("Stopped: not enough free disk space"),
         }
     }
 }
@@ -537,23 +536,24 @@ impl std::fmt::Display for VideoInfo {
     }
 }
 
-impl From<&Config> for AnalysisFilter {
-    /// Create analysis filters from the resolved runtime configuration.
-    fn from(config: &Config) -> Self {
+impl From<&ConvertOptions> for AnalysisFilter {
+    /// Create analysis filters from the run options.
+    fn from(options: &ConvertOptions) -> Self {
         Self {
-            min_bitrate: config.min_bitrate,
-            max_bitrate: config.max_bitrate,
-            min_duration: config.min_duration,
-            max_duration: config.max_duration,
-            min_resolution: config.min_resolution,
-            overwrite: config.overwrite,
+            min_bitrate: options.min_bitrate,
+            max_bitrate: options.max_bitrate,
+            min_duration: options.min_duration,
+            max_duration: options.max_duration,
+            min_resolution: options.min_resolution,
+            overwrite: options.overwrite,
         }
     }
 }
 
 impl VideoFile {
     /// Create a new `VideoFile` from a path and pre-fetched file size.
-    pub(crate) fn new(path: &Path, size_bytes: u64) -> Self {
+    #[must_use]
+    pub fn new(path: &Path, size_bytes: u64) -> Self {
         let path = path.to_owned();
         let name = cli_tools_common::path_to_file_stem_string(&path);
         let extension = cli_tools_common::path_to_file_extension_string(&path);
@@ -678,12 +678,8 @@ impl From<walkdir::DirEntry> for VideoFile {
 
 impl ProcessableFile {
     /// Create a processable file using the output path rules for the selected mode.
-    pub(crate) fn for_mode(
-        file: VideoFile,
-        info: VideoInfo,
-        subtitle_files: Vec<SubtitleFile>,
-        movie_mode: bool,
-    ) -> Self {
+    #[must_use]
+    pub fn for_mode(file: VideoFile, info: VideoInfo, subtitle_files: Vec<SubtitleFile>, movie_mode: bool) -> Self {
         let output_path = file.get_output_path_for_mode_and_bit_depth(
             info.codec_suffix(),
             movie_mode,
@@ -797,17 +793,7 @@ impl SubtitleFile {
 }
 
 /// Return a match score when a subtitle sidecar stem appears to belong to a video stem.
-/// Print the paths of all supplied subtitle sidecar files.
-pub fn print_subtitle_files(subtitle_files: &[SubtitleFile]) {
-    if subtitle_files.is_empty() {
-        return;
-    }
-    println!("Subtitles:");
-    for subtitle_file in subtitle_files {
-        println!("  - {}", cli_tools_common::path_to_string_relative(&subtitle_file.path));
-    }
-}
-
+#[must_use]
 pub fn movie_subtitle_match_score(video_stem: &str, subtitle_stem: &str) -> Option<usize> {
     let video_tokens = normalized_movie_tokens(video_stem);
     let subtitle_tokens = normalized_movie_tokens(subtitle_stem);

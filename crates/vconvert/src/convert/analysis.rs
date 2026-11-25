@@ -9,28 +9,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cli_tools_common::{print_error, print_yellow};
-use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use super::VideoConvert;
-use super::duplicates::print_duplicate_outcome;
 use crate::classification::{ClassificationRequest, probe_and_classify, resolve_output_collisions};
 use crate::database::Database;
 use crate::stats::AnalysisStats;
 use crate::types::{
-    AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessableFile, ProcessableFileSliceExt, SkipReason, SubtitleFile,
-    VideoFile, VideoInfo, VideoInfoCache,
+    AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessableFileSliceExt, SkipReason, SubtitleFile, VideoFile,
+    VideoInfo, VideoInfoCache,
 };
 
-const PROGRESS_BAR_CHARS: &str = "=>-";
-const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
-
-impl VideoConvert {
+impl VideoConvert<'_> {
     /// Analyze files in parallel to determine which need processing.
     /// Runs ffprobe on each file concurrently and filters based on video information.
-    #[allow(clippy::too_many_lines)]
     pub(super) fn analyze_files(
         &self,
         files: Vec<VideoFile>,
@@ -40,9 +32,9 @@ impl VideoConvert {
         let start = Instant::now();
         let total_files = files.len();
 
-        // Extract config values needed for analysis to avoid borrowing self in parallel context
-        let filter = AnalysisFilter::from(&self.config);
-        let movie_mode = self.config.movie_mode;
+        // Extract the values needed for analysis to avoid borrowing self in the parallel context
+        let filter = AnalysisFilter::from(&self.options);
+        let movie_mode = self.options.movie_mode;
 
         // Phase 1 (sequential): bulk-load the scan cache into a HashMap for O(1) lookups,
         // then split files into cache hits (classified immediately) and cache misses.
@@ -64,38 +56,23 @@ impl VideoConvert {
             }
         }
 
-        let cache_hit_count = cache_results.len();
-        let cache_miss_count = cache_misses.len();
-        if self.config.verbose && cache_hit_count > 0 {
-            println!(
-                "Scan cache: {}, {} — running ffprobe on {}",
-                cli_tools_common::count_label(cache_hit_count, "hit", "hits"),
-                cli_tools_common::count_label(cache_miss_count, "miss", "misses"),
-                cli_tools_common::count_label(cache_miss_count, "file", "files")
-            );
-        }
+        self.observer
+            .scan_cache_checked(cache_results.len(), cache_misses.len());
 
         // Phase 2 (parallel): run ffprobe only on cache misses.
         let probe_results: Vec<VideoInfoCache> = if cache_misses.is_empty() {
             Vec::new()
         } else {
-            let progress_bar = ProgressBar::new(cache_miss_count as u64);
-            progress_bar.set_style(
-                ProgressStyle::default_bar()
-                    .template(PROGRESS_BAR_TEMPLATE)
-                    .expect("Failed to set progress bar template")
-                    .progress_chars(PROGRESS_BAR_CHARS),
-            );
-
+            self.observer.probing_started(cache_misses.len());
             let results: Vec<VideoInfoCache> = cache_misses
                 .into_par_iter()
                 .map(|(file, subtitles)| {
                     let result = probe_and_classify(file, subtitles, &filter, movie_mode);
-                    progress_bar.inc(1);
+                    self.observer.file_probed();
                     result
                 })
                 .collect();
-            progress_bar.finish_and_clear();
+            self.observer.probing_finished();
             results
         };
 
@@ -104,10 +81,8 @@ impl VideoConvert {
             .iter()
             .filter_map(|entry| entry.info.as_ref().map(|info| (entry.path.as_path(), info)))
             .collect();
-        if let Err(error) = database.batch_upsert_scanned_files(&cache_entries)
-            && self.config.verbose
-        {
-            print_yellow!("Failed to write scan cache: {error}");
+        if let Err(error) = database.batch_upsert_scanned_files(&cache_entries) {
+            self.observer.scan_cache_write_failed(&error);
         }
 
         // Combine cache hits (Phase 1) with ffprobe results (Phase 2)
@@ -115,125 +90,56 @@ impl VideoConvert {
         results.extend(probe_results.into_iter().map(|entry| entry.result));
         let results = resolve_output_collisions(results);
 
-        // Collect files into separate vectors
-        let mut conversions = Vec::new();
-        let mut remuxes = Vec::new();
-        let mut renames: Vec<ProcessableFile> = Vec::new();
-        let mut subtitle_muxes = Vec::new();
+        let mut output = AnalysisOutput::default();
         let mut analysis_stats = AnalysisStats::default();
-        // Collect duplicate pairs for verbose output when not deleting
-        let mut duplicate_pairs: Vec<(PathBuf, PathBuf)> = Vec::new();
 
         for result in results {
             match result {
                 AnalysisResult::NeedsConversion(processable) => {
                     analysis_stats.to_convert += 1;
-                    conversions.push(processable);
+                    output.conversions.push(processable);
                 }
                 AnalysisResult::NeedsRemux(processable) => {
                     analysis_stats.to_remux += 1;
-                    remuxes.push(processable);
+                    output.remuxes.push(processable);
                 }
                 AnalysisResult::NeedsRename(processable) => {
                     analysis_stats.to_rename += 1;
-                    renames.push(processable);
+                    output.renames.push(processable);
                 }
                 AnalysisResult::NeedsSubtitleMux(processable) => {
                     analysis_stats.to_subtitle_mux += 1;
-                    subtitle_muxes.push(processable);
+                    output.subtitle_muxes.push(processable);
                 }
                 AnalysisResult::Skip { file, reason } => {
-                    match &reason {
-                        SkipReason::AlreadyConverted => {
-                            analysis_stats.skipped_converted += 1;
-                        }
-                        SkipReason::BitrateBelowThreshold { .. } => {
-                            analysis_stats.skipped_bitrate_low += 1;
-                        }
-                        SkipReason::BitrateAboveThreshold { .. } => {
-                            analysis_stats.skipped_bitrate_high += 1;
-                        }
-                        SkipReason::DurationBelowThreshold { .. } => {
-                            analysis_stats.skipped_duration_short += 1;
-                        }
-                        SkipReason::DurationAboveThreshold { .. } => {
-                            analysis_stats.skipped_duration_long += 1;
-                        }
-                        SkipReason::ResolutionBelowLimit { .. } => {
-                            analysis_stats.skipped_resolution_low += 1;
-                        }
-                        SkipReason::OutputExists {
+                    if self.options.delete_duplicates
+                        && let SkipReason::OutputExists {
                             path: target_path,
                             source_duration,
-                        } => {
-                            if self.config.delete_duplicates {
-                                let outcome = self.delete_duplicate(&file.path, target_path, *source_duration);
-                                print_duplicate_outcome(&file.path, target_path, &outcome);
-                                if outcome.removes_source() {
-                                    analysis_stats.duplicates_deleted += 1;
-                                } else {
-                                    analysis_stats.duplicate_delete_failed += 1;
-                                }
-                            } else {
-                                analysis_stats.skipped_duplicate += 1;
-                                if self.config.verbose {
-                                    duplicate_pairs.push((file.path.clone(), target_path.clone()));
-                                }
-                            }
-                        }
-                        SkipReason::OutputConflict { .. } => {
-                            analysis_stats.skipped_output_conflict += 1;
-                            print_yellow!("{}: {reason}", cli_tools_common::path_to_string_relative(&file.path));
-                        }
-                        SkipReason::FileMissing => {
-                            analysis_stats.file_missing += 1;
-                            print_yellow!(
-                                "{}: File no longer exists (may have been moved or renamed)",
-                                cli_tools_common::path_to_string_relative(&file.path)
-                            );
-                        }
-                        SkipReason::AnalysisFailed { error } => {
-                            analysis_stats.analysis_failed += 1;
-                            print_error!("{}: {error}", cli_tools_common::path_to_string_relative(&file.path));
-                        }
-                    }
-                    // Print skipped files (except OutputExists which is handled above, and AnalysisFailed)
-                    if self.config.verbose
-                        && !matches!(reason, SkipReason::AnalysisFailed { .. })
-                        && !matches!(reason, SkipReason::OutputExists { .. })
-                        && !matches!(reason, SkipReason::FileMissing)
-                        && !matches!(reason, SkipReason::OutputConflict { .. })
+                        } = &reason
                     {
-                        print_yellow!("{}: {reason}", cli_tools_common::path_to_string_relative(&file.path));
+                        let outcome = self.delete_duplicate(&file.path, target_path, *source_duration);
+                        if outcome.removes_source() {
+                            analysis_stats.duplicates_deleted += 1;
+                        } else {
+                            analysis_stats.duplicate_delete_failed += 1;
+                        }
+                        self.observer.duplicate_handled(&file.path, target_path, &outcome);
+                    } else {
+                        analysis_stats.count_skip(&reason);
+                        self.observer.file_skipped(&file.path, &reason);
                     }
                 }
             }
         }
 
-        // Print duplicate pairs if verbose and not deleting duplicates
-        if self.config.verbose && !self.config.delete_duplicates && !duplicate_pairs.is_empty() {
-            println!();
-            println!("{}", "Duplicate pairs:".bold());
-            for (source, target) in &duplicate_pairs {
-                println!("  {}", cli_tools_common::path_to_string_relative(source));
-                println!("  {}", cli_tools_common::path_to_string_relative(target));
-                println!();
-            }
-        }
+        output.conversions.sort_by_order(self.options.sort);
+        output.remuxes.sort_by_order(self.options.sort);
+        output.subtitle_muxes.sort_by_order(self.options.sort);
 
-        // Sort conversions based on configured sort order
-        conversions.sort_by_order(self.config.sort);
-        remuxes.sort_by_order(self.config.sort);
-        subtitle_muxes.sort_by_order(self.config.sort);
+        self.observer
+            .analysis_finished(&analysis_stats, total_files, start.elapsed());
 
-        self.log_analysis_stats(&analysis_stats, total_files, start.elapsed());
-        analysis_stats.print_summary();
-
-        AnalysisOutput {
-            conversions,
-            remuxes,
-            renames,
-            subtitle_muxes,
-        }
+        output
     }
 }

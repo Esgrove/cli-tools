@@ -227,12 +227,35 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `add/file_updates.rs` - Dots renaming the files of an added torrent and skipping excluded files
     - `statistics.rs` - Torrent status classification, sorting, and per status counts and sizes
     - `stats.rs` - Outcome counters of one add run
+- `crates/vconvert/` → `vconvert` - Convert video files to HEVC in an MP4 container.
+  The binary holds the CLI arguments, the user config, the database commands, the run log,
+  and the reporter that prints the progress events.
+  The library runs no CLI parsing and prints nothing, reporting progress through the `ConvertObserver` trait.
+  The binary's own dependencies are behind the default `cli` feature.
+  The library modules:
+    - `options.rs` - Run options, sort order, known video extensions, and movie mode languages
+    - `observer.rs` - The `ConvertObserver` trait and the data its progress events carry
+    - `convert.rs` - `VideoConvert`, running a scan or the pending database files through the processing plan
+    - `convert/discovery.rs` - Gathering the input files
+    - `convert/subtitles.rs` - Finding subtitle sidecars and matching them to videos
+    - `convert/analysis.rs` - Classifying files from the scan cache and with ffprobe
+    - `convert/duplicates.rs` - Deleting sources whose converted output already exists
+    - `convert/renames.rs` - Renaming files to carry their codec label
+    - `convert/plan.rs` - The remuxes, subtitle muxes, and conversions of one run, and the file count limit
+    - `convert/operations.rs` - The per-file ffmpeg remux, subtitle mux, and conversion with their fallbacks
+    - `convert/file_disposal.rs` - Deleting or trashing replaced files and removing partial outputs
+    - `classification.rs` - Deciding whether a file is skipped, renamed, remuxed, muxed, or converted
+    - `ffmpeg.rs` - Building and running ffmpeg and ffprobe commands, and validating outputs
+    - `database.rs` - `SQLite` storage for pending files, with the scan cache in `database/scanned_files.rs`
+    - `bitrate_limit.rs` - Minimum bitrate tiers by resolution and framerate
+    - `types.rs` - Video metadata, processable files, skip reasons, and processing results
+    - `stats.rs` - Analysis and run statistics
+    - `helpers.rs` - Output path, duration, and disk space helpers
 - Binary only crates:
     - `crates/div/` → `div` - Print divider comments
     - `crates/flipdate/` → `flipdate` - Flip dates in filenames
     - `crates/rxrename/` → `rxrename` - Remove a trailing "_1" from file names
     - `crates/thumbs/` → `thumbs` - Create video thumbnail sheets
-    - `crates/vconvert/` → `vconvert` - Video conversion to HEVC/MP4
     - `crates/vres/` → `vres` - Add video resolution to file names
     - `crates/vstats/` → `vstats` - Collect and print video file statistics
     - `crates/visaparse/` → `visaparse` - Parse Finvoice XML credit card statements and collect data

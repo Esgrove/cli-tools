@@ -1,26 +1,35 @@
 //! File logging for video conversion runs.
 //!
 //! Records configuration, analysis summaries, processing outcomes, and conversion statistics.
+//! The logger is a `ConvertObserver`, so it receives the same progress events as the terminal output.
 
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use cli_tools_common::print_yellow;
+use cli_tools_vconvert::{
+    AnalysisStats, ConversionStats, ConvertObserver, FilePosition, Operation, ProcessResult, ProcessableFile, RunStats,
+    VideoInfo,
+};
 use jiff::ZonedDateTime;
 
-use cli_tools_common::print_yellow;
-
 use crate::config::Config;
-use crate::stats::{AnalysisStats, ConversionStats, RunStats};
-use crate::types::VideoInfo;
+use crate::reporter::format_file_position;
 
 /// Simple file logger for conversion operations.
 /// Creates a new file for each run.
 /// Outputs to ~/logs/cli-tools/video_convert_<timestamp>.log
 pub struct FileLogger {
+    state: Mutex<LogState>,
+}
+
+/// The log file and whether writing to it has failed.
+struct LogState {
     writer: BufWriter<File>,
     /// Set after the first failed write, so the warning is printed only once.
     write_failed: bool,
@@ -48,10 +57,7 @@ impl FileLogger {
             .open(&log_path)
             .with_context(|| format!("Failed to create log file: {}", log_path.display()))?;
 
-        Ok(Self {
-            writer: BufWriter::new(file),
-            write_failed: false,
-        })
+        Ok(Self::from_writer(BufWriter::new(file)))
     }
 
     /// Logger writing to a temporary file, which lives as long as the returned handle.
@@ -59,13 +65,17 @@ impl FileLogger {
     pub(crate) fn temporary() -> (tempfile::NamedTempFile, Self) {
         let log_file = tempfile::NamedTempFile::new().expect("Failed to create temporary log file");
         let writer = BufWriter::new(log_file.reopen().expect("Failed to reopen temporary log file"));
-        (
-            log_file,
-            Self {
+        (log_file, Self::from_writer(writer))
+    }
+
+    /// Logger writing to the given writer.
+    const fn from_writer(writer: BufWriter<File>) -> Self {
+        Self {
+            state: Mutex::new(LogState {
                 writer,
                 write_failed: false,
-            },
-        )
+            }),
+        }
     }
 
     fn timestamp() -> String {
@@ -73,29 +83,30 @@ impl FileLogger {
     }
 
     /// Log when starting the program
-    pub(crate) fn log_init(&mut self, config: &Config) {
+    pub(crate) fn log_init(&self, config: &Config) {
         self.write_entry(|writer| {
             write!(writer, "[{}] INIT", Self::timestamp())?;
-            for path in &config.paths {
+            let options = &config.options;
+            for path in &options.paths {
                 write!(writer, " \"{}\"", path.display())?;
             }
             writeln!(writer)?;
-            writeln!(writer, "  min_bitrate: {}", config.min_bitrate)?;
+            writeln!(writer, "  min_bitrate: {}", options.min_bitrate)?;
             writeln!(writer, "  convert_all: {}", config.convert_all)?;
             writeln!(writer, "  convert_other: {}", config.convert_other)?;
-            if !config.include.is_empty() {
-                writeln!(writer, "  include: {:?}", config.include)?;
+            if !options.include.is_empty() {
+                writeln!(writer, "  include: {:?}", options.include)?;
             }
-            if !config.exclude.is_empty() {
-                writeln!(writer, "  exclude: {:?}", config.exclude)?;
+            if !options.exclude.is_empty() {
+                writeln!(writer, "  exclude: {:?}", options.exclude)?;
             }
-            writeln!(writer, "  extensions: {:?}", config.extensions)?;
-            writeln!(writer, "  recurse: {}", config.recurse)?;
-            writeln!(writer, "  movie_mode: {}", config.movie_mode)?;
-            writeln!(writer, "  delete: {}", config.delete)?;
-            writeln!(writer, "  overwrite: {}", config.overwrite)?;
-            writeln!(writer, "  dryrun: {}", config.dryrun)?;
-            if let Some(count) = config.count {
+            writeln!(writer, "  extensions: {:?}", options.extensions)?;
+            writeln!(writer, "  recurse: {}", options.recurse)?;
+            writeln!(writer, "  movie_mode: {}", options.movie_mode)?;
+            writeln!(writer, "  delete: {}", options.delete)?;
+            writeln!(writer, "  overwrite: {}", options.overwrite)?;
+            writeln!(writer, "  dryrun: {}", options.dry_run)?;
+            if let Some(count) = options.count {
                 writeln!(writer, "  count: {count}")?;
             }
             writeln!(writer, "  verbose: {}", config.verbose)
@@ -103,7 +114,7 @@ impl FileLogger {
     }
 
     /// Log file gathering results
-    pub(crate) fn log_gathered_files(&mut self, file_count: usize, duration: Duration) {
+    pub(crate) fn log_gathered_files(&self, file_count: usize, duration: Duration) {
         self.write_entry(|writer| {
             writeln!(
                 writer,
@@ -117,7 +128,7 @@ impl FileLogger {
 
     /// Log when starting a conversion or remux operation
     pub(crate) fn log_start(
-        &mut self,
+        &self,
         file_path: &Path,
         operation: &str,
         file_index: &str,
@@ -144,7 +155,7 @@ impl FileLogger {
 
     /// Log when a conversion or remux finishes successfully
     pub(crate) fn log_success(
-        &mut self,
+        &self,
         file_path: &Path,
         operation: &str,
         file_index: &str,
@@ -166,7 +177,7 @@ impl FileLogger {
     }
 
     /// Log when a conversion or remux fails
-    pub(crate) fn log_failure(&mut self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
+    pub(crate) fn log_failure(&self, file_path: &Path, operation: &str, file_index: &str, error: &str) {
         self.write_entry(|writer| {
             writeln!(
                 writer,
@@ -181,7 +192,7 @@ impl FileLogger {
     }
 
     /// Log analysis phase statistics
-    pub(crate) fn log_analysis_stats(&mut self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
+    pub(crate) fn log_analysis_stats(&self, stats: &AnalysisStats, total_files: usize, duration: Duration) {
         self.write_entry(|writer| {
             writeln!(
                 writer,
@@ -211,7 +222,7 @@ impl FileLogger {
     }
 
     /// Log rename operation statistics
-    pub(crate) fn log_renames(&mut self, renamed_count: usize, total_count: usize, duration: Duration) {
+    pub(crate) fn log_renames(&self, renamed_count: usize, total_count: usize, duration: Duration) {
         self.write_entry(|writer| {
             writeln!(
                 writer,
@@ -225,7 +236,7 @@ impl FileLogger {
     }
 
     /// Log final statistics
-    pub(crate) fn log_stats(&mut self, stats: &RunStats) {
+    pub(crate) fn log_stats(&self, stats: &RunStats) {
         self.write_entry(|writer| {
             writeln!(writer, "[{}] STATISTICS", Self::timestamp())?;
             writeln!(writer, "  Files converted: {}", stats.files_converted)?;
@@ -267,23 +278,94 @@ impl FileLogger {
     }
 
     /// Write one log entry and flush it, warning once if the log file cannot be written.
-    fn write_entry(&mut self, write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>) {
-        let result = write(&mut self.writer).and_then(|()| self.writer.flush());
+    fn write_entry(&self, write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let result = write(&mut state.writer).and_then(|()| state.writer.flush());
+        let first_failure = result.is_err() && !state.write_failed;
+        if first_failure {
+            state.write_failed = true;
+        }
+        drop(state);
         if let Err(error) = result
-            && !self.write_failed
+            && first_failure
         {
-            self.write_failed = true;
             print_yellow!("Failed to write to the log file: {error}");
+        }
+    }
+
+    /// Whether a write to the log file has failed.
+    #[cfg(test)]
+    fn write_failed(&self) -> bool {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).write_failed
+    }
+}
+
+impl ConvertObserver for FileLogger {
+    fn files_gathered(&self, file_count: usize, duration: Duration) {
+        self.log_gathered_files(file_count, duration);
+    }
+
+    fn analysis_finished(&self, stats: &AnalysisStats, file_count: usize, duration: Duration) {
+        self.log_analysis_stats(stats, file_count, duration);
+    }
+
+    fn renames_finished(&self, renamed_count: usize, total_count: usize, duration: Duration) {
+        self.log_renames(renamed_count, total_count, duration);
+    }
+
+    fn file_started(
+        &self,
+        operation: Operation,
+        position: FilePosition,
+        file: &ProcessableFile,
+        quality_level: Option<u8>,
+    ) {
+        self.log_start(
+            &file.file.path,
+            operation.as_str(),
+            &format_file_position(position),
+            &file.info,
+            quality_level,
+        );
+    }
+
+    fn file_finished(
+        &self,
+        operation: Operation,
+        position: FilePosition,
+        file: &ProcessableFile,
+        result: &ProcessResult,
+        duration: Duration,
+    ) {
+        let file_index = format_file_position(position);
+        match result {
+            ProcessResult::Failed { error } => {
+                self.log_failure(&file.file.path, operation.as_str(), &file_index, error);
+            }
+            ProcessResult::Converted { stats } => {
+                self.log_success(
+                    &file.output_path,
+                    operation.as_str(),
+                    &file_index,
+                    duration,
+                    Some(stats),
+                );
+            }
+            ProcessResult::Remuxed {} | ProcessResult::SubtitlesMuxed {} => {
+                self.log_success(&file.output_path, operation.as_str(), &file_index, duration, None);
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod test_file_logger {
-    use super::*;
-    use crate::bitrate_limit::MinimumBitrate;
     use std::path::PathBuf;
+
+    use cli_tools_vconvert::{ConvertOptions, MinimumBitrate};
     use tempfile::NamedTempFile;
+
+    use super::*;
 
     fn create_logger() -> (NamedTempFile, FileLogger) {
         FileLogger::temporary()
@@ -310,21 +392,24 @@ mod test_file_logger {
 
     #[test]
     fn logs_complete_initial_configuration() {
-        let (log_file, mut logger) = create_logger();
+        let (log_file, logger) = create_logger();
         let config = Config {
+            options: ConvertOptions {
+                count: Some(12),
+                delete: true,
+                dry_run: true,
+                exclude: vec!["sample".to_string()],
+                extensions: vec!["mp4".to_string(), "mkv".to_string()],
+                include: vec!["movie".to_string()],
+                min_bitrate: MinimumBitrate::Fixed(6_000),
+                movie_mode: true,
+                overwrite: true,
+                paths: vec![PathBuf::from("videos")],
+                recurse: true,
+                ..ConvertOptions::default()
+            },
             convert_all: true,
             convert_other: true,
-            count: Some(12),
-            delete: true,
-            dryrun: true,
-            exclude: vec!["sample".to_string()],
-            extensions: vec!["mp4".to_string(), "mkv".to_string()],
-            include: vec!["movie".to_string()],
-            min_bitrate: MinimumBitrate::Fixed(6_000),
-            movie_mode: true,
-            overwrite: true,
-            paths: vec![PathBuf::from("videos")],
-            recurse: true,
             verbose: true,
             ..Default::default()
         };
@@ -350,7 +435,7 @@ mod test_file_logger {
 
     #[test]
     fn logs_processing_events_with_and_without_optional_details() {
-        let (log_file, mut logger) = create_logger();
+        let (log_file, logger) = create_logger();
         let info = video_info();
         let conversion_stats = ConversionStats::new(1_048_576, 8_500, 524_288, 4_000);
 
@@ -394,7 +479,7 @@ mod test_file_logger {
 
     #[test]
     fn logs_analysis_and_run_statistic_branches() {
-        let (log_file, mut logger) = create_logger();
+        let (log_file, logger) = create_logger();
         let analysis_stats = AnalysisStats {
             to_convert: 4,
             to_remux: 3,
@@ -452,25 +537,22 @@ mod test_file_logger {
     fn write_failure_is_remembered_and_logging_continues() {
         let log_file = NamedTempFile::new().expect("Failed to create temporary log file");
         let read_only = File::open(log_file.path()).expect("Failed to open temporary log file read-only");
-        let mut logger = FileLogger {
-            writer: BufWriter::new(read_only),
-            write_failed: false,
-        };
+        let logger = FileLogger::from_writer(BufWriter::new(read_only));
 
         logger.log_gathered_files(1, Duration::ZERO);
-        assert!(logger.write_failed);
+        assert!(logger.write_failed());
 
         logger.log_renames(1, 1, Duration::ZERO);
-        assert!(logger.write_failed);
+        assert!(logger.write_failed());
     }
 
     #[test]
     fn successful_writes_leave_failure_flag_unset() {
-        let (log_file, mut logger) = create_logger();
+        let (log_file, logger) = create_logger();
 
         logger.log_gathered_files(1, Duration::ZERO);
 
-        assert!(!logger.write_failed);
+        assert!(!logger.write_failed());
         assert!(read_log(&log_file, logger).contains("GATHER FILES"));
     }
 }

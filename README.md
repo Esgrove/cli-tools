@@ -44,6 +44,7 @@ cli-tools-dirmove = { git = "https://github.com/Esgrove/cli-tools", default-feat
 | [`cli-tools-qtorrent`](./crates/qtorrent) | `qtorrent` | Torrent parsing, naming, tagging, and the qBittorrent API  |
 | [`cli-tools-rsbump`](./crates/rsbump)     | `rsbump`   | Rust version bumps for manifests and Dockerfiles           |
 | [`cli-tools-slb`](./crates/slb)           | `slb`      | Semantic line break checking and formatting                |
+| [`cli-tools-vconvert`](./crates/vconvert) | `vconvert` | Video analysis, conversion runs, and the pending database  |
 | [`cli-tools-xtask`](./crates/xtask)       | `xtask`    | Parallel task runner with project specific builtins        |
 
 ## Configuration

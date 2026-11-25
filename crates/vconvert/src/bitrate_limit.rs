@@ -69,6 +69,7 @@ pub struct BitrateTiersConfig {
 
 impl ResolutionTier {
     /// Classify a video by its dimensions, treating portrait and non 16:9 videos by their 16:9 equivalent.
+    #[must_use]
     pub fn from_dimensions(width: u32, height: u32) -> Self {
         let equivalent_height = equivalent_height(width, height);
         if equivalent_height <= HD_720_MAX_HEIGHT {
@@ -83,6 +84,7 @@ impl ResolutionTier {
 
 impl MinimumBitrate {
     /// Return the minimum bitrate in kbps for a video with the given properties.
+    #[must_use]
     pub fn threshold(&self, width: u32, height: u32, frames_per_second: f64) -> u64 {
         match self {
             Self::Fixed(limit) => *limit,
@@ -124,6 +126,7 @@ impl MinimumBitrate {
 
 impl BitrateTiers {
     /// Return the minimum bitrate for a resolution tier and framerate class.
+    #[must_use]
     pub const fn threshold(&self, tier: ResolutionTier, high_frame_rate: bool) -> u64 {
         match (tier, high_frame_rate) {
             (ResolutionTier::Hd720, false) => self.hd_720,
@@ -138,6 +141,7 @@ impl BitrateTiers {
 
 impl BitrateTiersConfig {
     /// Resolve configured overrides on top of the default tiers.
+    #[must_use]
     pub fn resolve(&self) -> BitrateTiers {
         let defaults = BitrateTiers::default();
         BitrateTiers {

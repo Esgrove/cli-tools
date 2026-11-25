@@ -9,7 +9,7 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result};
 
-use crate::config::{MOVIE_AUDIO_LANGUAGES, MOVIE_SUBTITLE_LANGUAGES, TARGET_EXTENSION};
+use crate::options::{MOVIE_AUDIO_LANGUAGES, MOVIE_SUBTITLE_LANGUAGES, TARGET_EXTENSION};
 use crate::types::{Codec, SubtitleFile, VideoInfo};
 
 /// Arguments included in every ffmpeg invocation.
@@ -84,6 +84,9 @@ impl<'a> ConversionOptions<'a> {
 ///
 /// CUDA filtering uploads frames to the GPU and preserves 10-bit input when required.
 /// Movie mode maps selected internal streams and any external subtitle inputs.
+///
+/// # Errors
+/// Returns an error if the movie mode stream languages cannot be probed.
 pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Command> {
     let mut command = Command::new("ffmpeg");
     command
@@ -141,6 +144,9 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
 }
 
 /// Build an ffmpeg command that embeds external subtitles without converting video.
+///
+/// # Errors
+/// Returns an error if the stream languages of the input cannot be probed.
 pub fn build_subtitle_mux_command(input: &Path, output: &Path, subtitle_files: &[SubtitleFile]) -> Result<Command> {
     let mut command = Command::new("ffmpeg");
     command.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input);
@@ -158,6 +164,7 @@ pub fn build_subtitle_mux_command(input: &Path, output: &Path, subtitle_files: &
 }
 
 /// Build an ffmpeg command that remuxes the primary video and all audio streams.
+#[must_use]
 pub fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool, codec: Codec) -> Command {
     let mut command = Command::new("ffmpeg");
     command.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input).args([
@@ -179,6 +186,9 @@ pub fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool, c
 }
 
 /// Probe video metadata from the first real video stream in a media file.
+///
+/// # Errors
+/// Returns an error if ffprobe cannot be run or its output has no usable video stream.
 pub fn probe_video_info(path: &Path) -> Result<VideoInfo> {
     let output = Command::new("ffprobe")
         .args([
@@ -205,6 +215,9 @@ pub fn probe_video_info(path: &Path) -> Result<VideoInfo> {
 }
 
 /// Probe unique language tags for one ffmpeg stream type.
+///
+/// # Errors
+/// Returns an error if ffprobe cannot be run or fails.
 pub fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSet<String>> {
     let output = Command::new("ffprobe")
         .args([
@@ -245,6 +258,9 @@ fn parse_stream_languages(stdout: &str) -> BTreeSet<String> {
 }
 
 /// Return whether applying movie-mode stream maps would remove any internal tracks.
+///
+/// # Errors
+/// Returns an error if the stream languages cannot be probed.
 pub fn movie_stream_processing_required(input: &Path) -> Result<bool> {
     let audio_languages = probe_stream_languages(input, "a")?;
     let subtitle_languages = probe_stream_languages(input, "s")?;
@@ -255,6 +271,9 @@ pub fn movie_stream_processing_required(input: &Path) -> Result<bool> {
 }
 
 /// Validate subtitle mux output before deleting or replacing any source files.
+///
+/// # Errors
+/// Returns an error describing why the output cannot replace the input.
 pub fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) -> Result<()> {
     let output_info = probe_video_info(output).context("Failed to get subtitle mux output info")?;
     if output_info.duration < input_info.duration * MIN_MUX_DURATION_RATIO {
@@ -281,6 +300,9 @@ pub fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) 
 }
 
 /// Run a command in a new process group so Ctrl+C remains under the parent process's control.
+///
+/// # Errors
+/// Returns an error if the command cannot be started or waited on.
 pub fn run_command_isolated(command: &mut Command) -> std::io::Result<ExitStatus> {
     #[cfg(windows)]
     {

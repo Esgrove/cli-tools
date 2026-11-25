@@ -1,6 +1,7 @@
 //! Video classification rules for the conversion pipeline.
 //!
-//! Determines whether files should be skipped, renamed, remuxed, or converted, and selects movie-mode streams.
+//! Determines whether files should be skipped, renamed, remuxed, or converted,
+//! and selects movie-mode streams.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -10,8 +11,8 @@ use regex::Regex;
 
 use cli_tools_common::TargetReservations;
 
-use crate::config::Config;
 use crate::ffmpeg::{movie_stream_processing_required, probe_video_info};
+use crate::options::ConvertOptions;
 use crate::types::{
     AnalysisFilter, AnalysisResult, ProcessableFile, SkipReason, SubtitleFile, VideoFile, VideoInfo, VideoInfoCache,
 };
@@ -258,6 +259,7 @@ impl<'a> ClassificationRequest<'a> {
 ///
 /// Results are ordered by input path first, so the same file wins on every run.
 /// Outputs differing only by case also collide, since they are the same file on case-insensitive file systems.
+#[must_use]
 pub fn resolve_output_collisions(mut results: Vec<AnalysisResult>) -> Vec<AnalysisResult> {
     results.sort_by(|left, right| input_path(left).cmp(input_path(right)));
     let mut reservations = TargetReservations::new();
@@ -339,31 +341,32 @@ fn into_output_conflict(result: AnalysisResult, path: PathBuf) -> AnalysisResult
 }
 
 /// Return whether a video file should be included for analysis.
-pub fn should_include_file(config: &Config, file: &VideoFile) -> bool {
+pub fn should_include_file(options: &ConvertOptions, file: &VideoFile) -> bool {
     // In normal mode, skip files already marked with a target codec suffix.
     // Movie mode still analyzes them because loose subtitle sidecars may need muxing.
-    if !config.movie_mode
+    if !options.movie_mode
         && (RE_X265.is_match(&file.name) || RE_AV1.is_match(&file.name))
         && file.extension == file.target_extension(false, false)
     {
         return false;
     }
 
-    if !config.extensions.iter().any(|extension| extension == &file.extension) {
+    if !options.extensions.iter().any(|extension| extension == &file.extension) {
         return false;
     }
 
-    if config.exclude.iter().any(|pattern| file.name.contains(pattern)) {
+    if options.exclude.iter().any(|pattern| file.name.contains(pattern)) {
         return false;
     }
 
-    config.include.is_empty() || config.include.iter().any(|pattern| file.name.contains(pattern))
+    options.include.is_empty() || options.include.iter().any(|pattern| file.name.contains(pattern))
 }
 
 /// Run ffprobe on a file and classify the result.
 ///
 /// Returns a `VideoInfoCache` containing the analysis result, the file path,
 /// and the `VideoInfo` to write back to the scan cache (`None` only when ffprobe failed).
+#[must_use]
 pub fn probe_and_classify(
     file: VideoFile,
     subtitle_files: Vec<SubtitleFile>,
@@ -1881,60 +1884,66 @@ mod test_classification_with_subtitles {
 mod test_file_inclusion {
     use super::*;
 
-    fn config_with_extensions(extensions: &[&str]) -> Config {
-        Config {
+    fn options_with_extensions(extensions: &[&str]) -> ConvertOptions {
+        ConvertOptions {
             extensions: extensions.iter().map(ToString::to_string).collect(),
-            ..Config::default()
+            ..ConvertOptions::default()
         }
     }
 
     #[test]
     fn includes_allowed_extensions() {
-        let config = config_with_extensions(&["mp4", "mkv"]);
+        let options = options_with_extensions(&["mp4", "mkv"]);
 
-        assert!(should_include_file(&config, &VideoFile::new(Path::new("Movie.mp4"), 0)));
-        assert!(should_include_file(&config, &VideoFile::new(Path::new("Movie.mkv"), 0)));
+        assert!(should_include_file(
+            &options,
+            &VideoFile::new(Path::new("Movie.mp4"), 0)
+        ));
+        assert!(should_include_file(
+            &options,
+            &VideoFile::new(Path::new("Movie.mkv"), 0)
+        ));
     }
 
     #[test]
     fn rejects_extensions_outside_the_allowlist() {
-        let config = config_with_extensions(&["mp4", "mkv"]);
+        let options = options_with_extensions(&["mp4", "mkv"]);
         let file = VideoFile::new(Path::new("Movie.avi"), 0);
 
-        assert!(!should_include_file(&config, &file));
+        assert!(!should_include_file(&options, &file));
     }
 
     #[test]
     fn applies_include_and_exclude_patterns() {
-        let mut config = config_with_extensions(&["mp4"]);
-        config.include = vec!["Director".to_string(), "Extended".to_string()];
-        config.exclude = vec!["Sample".to_string()];
+        let mut options = options_with_extensions(&["mp4"]);
+        options.include = vec!["Director".to_string(), "Extended".to_string()];
+        options.exclude = vec!["Sample".to_string()];
 
         assert!(should_include_file(
-            &config,
+            &options,
             &VideoFile::new(Path::new("Movie.Director.Cut.mp4"), 0)
         ));
         assert!(!should_include_file(
-            &config,
+            &options,
             &VideoFile::new(Path::new("Movie.Theatrical.mp4"), 0)
         ));
         assert!(!should_include_file(
-            &config,
+            &options,
             &VideoFile::new(Path::new("Movie.Director.Sample.mp4"), 0)
         ));
     }
 
     #[test]
     fn skips_labeled_target_files_only_in_normal_mode() {
-        let mut config = config_with_extensions(&["mp4", "mkv"]);
+        let mut options = options_with_extensions(&["mp4", "mkv"]);
         let converted_mp4 = VideoFile::new(Path::new("Movie.x265.mp4"), 0);
         let remux_candidate = VideoFile::new(Path::new("Movie.av1.mkv"), 0);
 
-        assert!(!should_include_file(&config, &converted_mp4));
-        assert!(should_include_file(&config, &remux_candidate));
+        assert!(!should_include_file(&options, &converted_mp4));
+        assert!(should_include_file(&options, &remux_candidate));
 
-        config.movie_mode = true;
-        assert!(should_include_file(&config, &converted_mp4));
+        options.movie_mode = true;
+        assert!(should_include_file(&options, &converted_mp4));
     }
 }
 

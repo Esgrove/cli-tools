@@ -1,39 +1,18 @@
 //! Configuration loading and resolution for video conversion.
 //!
-//! Defines file and runtime settings, and combines command-line arguments with user configuration.
+//! Defines the user config file settings,
+//! and combines command-line arguments with the user configuration into the run options.
 
 use std::fs;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use cli_tools_vconvert::options::{ALL_EXTENSIONS, DEFAULT_EXTENSIONS, OTHER_EXTENSIONS};
+use cli_tools_vconvert::{BitrateTiersConfig, ConvertOptions, MinimumBitrate, SortOrder};
 use itertools::Itertools;
 use serde::Deserialize;
 
-use crate::DatabaseMode;
-use crate::SortOrder;
 use crate::VideoConvertArgs;
-use crate::bitrate_limit::{BitrateTiersConfig, MinimumBitrate};
-use crate::database::PendingFileFilter;
-
-/// Audio languages preserved by movie mode.
-pub const MOVIE_AUDIO_LANGUAGES: &[&str] = &["eng", "fin", "fra", "fre", "jpn", "swe", "nog", "nor"];
-
-/// Subtitle languages preserved by movie mode.
-pub const MOVIE_SUBTITLE_LANGUAGES: &[&str] = &["eng", "fin", "swe"];
-
-/// Output container used when movie mode does not preserve MKV.
-pub const TARGET_EXTENSION: &str = "mp4";
-
-/// Default video extensions
-const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];
-
-/// Other video extensions excluding mp4
-const OTHER_EXTENSIONS: &[&str] = &["mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm", "mpeg"];
-
-/// All video extensions
-const ALL_EXTENSIONS: &[&str] = &[
-    "mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm", "mpeg",
-];
+use crate::cli::DatabaseMode;
 
 /// Default display limit for showing pending files.
 const DEFAULT_DISPLAY_LIMIT: usize = 100;
@@ -84,30 +63,12 @@ pub struct VideoConvertConfig {
 /// Final config combined from CLI arguments and user config file.
 #[derive(Debug, Default)]
 pub struct Config {
+    /// Options passed to the converter.
+    pub(crate) options: ConvertOptions,
     pub(crate) convert_all: bool,
     pub(crate) convert_other: bool,
-    pub(crate) count: Option<usize>,
     pub(crate) database_mode: Option<DatabaseMode>,
-    pub(crate) db_filter: PendingFileFilter,
-    pub(crate) delete: bool,
-    pub(crate) delete_duplicates: bool,
     pub(crate) display_limit: Option<usize>,
-    pub(crate) dryrun: bool,
-    pub(crate) exclude: Vec<String>,
-    pub(crate) extensions: Vec<String>,
-    pub(crate) include: Vec<String>,
-    pub(crate) max_bitrate: Option<u64>,
-    pub(crate) max_duration: Option<f64>,
-    pub(crate) min_bitrate: MinimumBitrate,
-    pub(crate) min_duration: Option<f64>,
-    pub(crate) min_resolution: Option<u32>,
-    pub(crate) movie_mode: bool,
-    pub(crate) overwrite: bool,
-    pub(crate) paths: Vec<PathBuf>,
-    pub(crate) recurse: bool,
-    pub(crate) skip_convert: bool,
-    pub(crate) skip_remux: bool,
-    pub(crate) sort: SortOrder,
     pub(crate) verbose: bool,
 }
 
@@ -197,7 +158,11 @@ impl Config {
         let max_duration = args.max_duration.or(user_config.max_duration);
         let min_resolution = args.min_resolution.or(user_config.min_resolution);
         let count = args.count.or(user_config.count);
-        let sort = args.sort.or(user_config.sort).unwrap_or(SortOrder::Name);
+        let sort = args
+            .sort
+            .map(SortOrder::from)
+            .or(user_config.sort)
+            .unwrap_or(SortOrder::Name);
 
         // Display limit: CLI overrides config, default is 100, 0 means no limit
         let display_limit = match args.display_limit.or(user_config.display_limit) {
@@ -206,45 +171,39 @@ impl Config {
             None => Some(DEFAULT_DISPLAY_LIMIT),
         };
 
-        // Build db_filter with merged values
-        let db_filter = PendingFileFilter {
-            action: None,
-            extensions: extensions.clone(),
-            min_bitrate: Some(min_bitrate),
-            max_bitrate,
-            min_duration,
-            max_duration,
-            limit: count,
-            sort: Some(sort),
-        };
-
         Ok(Self {
+            options: ConvertOptions {
+                paths,
+                extensions,
+                include,
+                exclude,
+                min_bitrate,
+                max_bitrate,
+                min_duration,
+                max_duration,
+                min_resolution,
+                movie_mode: args.movie,
+                overwrite: args.force || user_config.overwrite,
+                delete: args.delete || user_config.delete,
+                delete_duplicates: args.delete_duplicates || user_config.delete_duplicates,
+                dry_run: args.print,
+                recurse: args.recurse || user_config.recurse,
+                skip_convert: args.skip_convert,
+                skip_remux: args.skip_remux,
+                count,
+                sort,
+            },
             convert_all,
             convert_other,
-            count,
             database_mode,
-            db_filter,
-            delete: args.delete || user_config.delete,
-            delete_duplicates: args.delete_duplicates || user_config.delete_duplicates,
             display_limit,
-            dryrun: args.print,
-            exclude,
-            extensions,
-            include,
-            max_bitrate,
-            max_duration,
-            min_bitrate,
-            min_duration,
-            min_resolution,
-            movie_mode: args.movie,
-            overwrite: args.force || user_config.overwrite,
-            paths,
-            recurse: args.recurse || user_config.recurse,
-            skip_convert: args.skip_convert,
-            skip_remux: args.skip_remux,
-            sort,
             verbose: args.verbose || user_config.verbose,
         })
+    }
+
+    /// Whether this run processes video files, as opposed to only reading or clearing the database.
+    pub(crate) fn processes_files(&self) -> bool {
+        self.database_mode.is_none_or(|mode| mode == DatabaseMode::Process)
     }
 
     /// Convert a slice of strings to lowercase.
@@ -457,8 +416,9 @@ mod config_lowercase_vec_tests {
 
 #[cfg(test)]
 mod config_test_helpers {
-    use super::*;
     use clap::Parser;
+
+    use super::*;
 
     pub(super) fn parse_args(arguments: &[&str]) -> VideoConvertArgs {
         VideoConvertArgs::try_parse_from(std::iter::once("vconvert").chain(arguments.iter().copied()))
@@ -480,39 +440,40 @@ mod config_default_resolution_tests {
         let config = resolve_config(&[], VideoConvertConfig::default());
         let expected_path = cli_tools_common::resolve_input_path(None).expect("current directory should resolve");
 
-        assert_eq!(config.min_bitrate, MinimumBitrate::default());
+        assert_eq!(config.options.min_bitrate, MinimumBitrate::default());
         assert!(!config.convert_all);
         assert!(!config.convert_other);
-        assert_eq!(config.count, None);
+        assert_eq!(config.options.count, None);
         assert_eq!(config.database_mode, None);
-        assert!(!config.delete);
-        assert!(!config.delete_duplicates);
+        assert!(!config.options.delete);
+        assert!(!config.options.delete_duplicates);
         assert_eq!(config.display_limit, Some(DEFAULT_DISPLAY_LIMIT));
-        assert!(!config.dryrun);
-        assert_eq!(config.exclude, [] as [String; 0]);
-        assert_eq!(config.extensions, DEFAULT_EXTENSIONS);
-        assert_eq!(config.include, [] as [String; 0]);
-        assert_eq!(config.max_bitrate, None);
-        assert_eq!(config.max_duration, None);
-        assert_eq!(config.min_duration, None);
-        assert_eq!(config.min_resolution, None);
-        assert!(!config.movie_mode);
-        assert!(!config.overwrite);
-        assert_eq!(config.paths, vec![expected_path]);
-        assert!(!config.recurse);
-        assert!(!config.skip_convert);
-        assert!(!config.skip_remux);
-        assert_eq!(config.sort, SortOrder::Name);
+        assert!(!config.options.dry_run);
+        assert_eq!(config.options.exclude, [] as [String; 0]);
+        assert_eq!(config.options.extensions, DEFAULT_EXTENSIONS);
+        assert_eq!(config.options.include, [] as [String; 0]);
+        assert_eq!(config.options.max_bitrate, None);
+        assert_eq!(config.options.max_duration, None);
+        assert_eq!(config.options.min_duration, None);
+        assert_eq!(config.options.min_resolution, None);
+        assert!(!config.options.movie_mode);
+        assert!(!config.options.overwrite);
+        assert_eq!(config.options.paths, vec![expected_path]);
+        assert!(!config.options.recurse);
+        assert!(!config.options.skip_convert);
+        assert!(!config.options.skip_remux);
+        assert_eq!(config.options.sort, SortOrder::Name);
         assert!(!config.verbose);
 
-        assert!(config.db_filter.action.is_none());
-        assert_eq!(config.db_filter.extensions, config.extensions);
-        assert_eq!(config.db_filter.min_bitrate, Some(config.min_bitrate));
-        assert_eq!(config.db_filter.max_bitrate, config.max_bitrate);
-        assert_eq!(config.db_filter.min_duration, config.min_duration);
-        assert_eq!(config.db_filter.max_duration, config.max_duration);
-        assert_eq!(config.db_filter.limit, config.count);
-        assert_eq!(config.db_filter.sort, Some(config.sort));
+        let filter = config.options.pending_file_filter();
+        assert!(filter.action.is_none());
+        assert_eq!(filter.extensions, config.options.extensions);
+        assert_eq!(filter.min_bitrate, Some(config.options.min_bitrate));
+        assert_eq!(filter.max_bitrate, config.options.max_bitrate);
+        assert_eq!(filter.min_duration, config.options.min_duration);
+        assert_eq!(filter.max_duration, config.options.max_duration);
+        assert_eq!(filter.limit, config.options.count);
+        assert_eq!(filter.sort, Some(config.options.sort));
     }
 
     #[test]
@@ -529,7 +490,7 @@ mod config_default_resolution_tests {
         );
 
         assert_eq!(
-            config.paths,
+            config.options.paths,
             vec![
                 cli_tools_common::resolve_input_path(Some(directory.path())).expect("Failed to resolve directory"),
                 cli_tools_common::resolve_input_path(Some(&video)).expect("Failed to resolve video"),
@@ -606,35 +567,36 @@ mod config_cli_resolution_tests {
             VideoConvertConfig::default(),
         );
 
-        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(9000));
-        assert_eq!(config.max_bitrate, Some(50000));
-        assert_eq!(config.min_duration, Some(60.0));
-        assert_eq!(config.max_duration, Some(7200.0));
-        assert_eq!(config.min_resolution, Some(720));
-        assert_eq!(config.count, Some(12));
+        assert_eq!(config.options.min_bitrate, MinimumBitrate::Fixed(9000));
+        assert_eq!(config.options.max_bitrate, Some(50000));
+        assert_eq!(config.options.min_duration, Some(60.0));
+        assert_eq!(config.options.max_duration, Some(7200.0));
+        assert_eq!(config.options.min_resolution, Some(720));
+        assert_eq!(config.options.count, Some(12));
         assert_eq!(config.display_limit, Some(25));
-        assert!(config.delete);
-        assert!(config.delete_duplicates);
-        assert!(config.dryrun);
-        assert!(config.overwrite);
-        assert_eq!(config.include, ["Alpha", "Beta"]);
-        assert_eq!(config.exclude, ["Skip"]);
-        assert_eq!(config.extensions, ["mkv", "avi"]);
-        assert!(config.recurse);
-        assert!(config.skip_convert);
-        assert!(config.movie_mode);
-        assert!(config.skip_remux);
-        assert_eq!(config.sort, SortOrder::DurationAsc);
+        assert!(config.options.delete);
+        assert!(config.options.delete_duplicates);
+        assert!(config.options.dry_run);
+        assert!(config.options.overwrite);
+        assert_eq!(config.options.include, ["Alpha", "Beta"]);
+        assert_eq!(config.options.exclude, ["Skip"]);
+        assert_eq!(config.options.extensions, ["mkv", "avi"]);
+        assert!(config.options.recurse);
+        assert!(config.options.skip_convert);
+        assert!(config.options.movie_mode);
+        assert!(config.options.skip_remux);
+        assert_eq!(config.options.sort, SortOrder::DurationAsc);
         assert!(config.verbose);
         assert_eq!(config.database_mode, Some(DatabaseMode::Process));
 
-        assert_eq!(config.db_filter.extensions, config.extensions);
-        assert_eq!(config.db_filter.min_bitrate, Some(MinimumBitrate::Fixed(9000)));
-        assert_eq!(config.db_filter.max_bitrate, Some(50000));
-        assert_eq!(config.db_filter.min_duration, Some(60.0));
-        assert_eq!(config.db_filter.max_duration, Some(7200.0));
-        assert_eq!(config.db_filter.limit, Some(12));
-        assert_eq!(config.db_filter.sort, Some(SortOrder::DurationAsc));
+        let filter = config.options.pending_file_filter();
+        assert_eq!(filter.extensions, config.options.extensions);
+        assert_eq!(filter.min_bitrate, Some(MinimumBitrate::Fixed(9000)));
+        assert_eq!(filter.max_bitrate, Some(50000));
+        assert_eq!(filter.min_duration, Some(60.0));
+        assert_eq!(filter.max_duration, Some(7200.0));
+        assert_eq!(filter.limit, Some(12));
+        assert_eq!(filter.sort, Some(SortOrder::DurationAsc));
     }
 
     #[test]
@@ -683,17 +645,17 @@ mod config_cli_resolution_tests {
             user_config,
         );
 
-        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(7000));
-        assert_eq!(config.count, Some(4));
+        assert_eq!(config.options.min_bitrate, MinimumBitrate::Fixed(7000));
+        assert_eq!(config.options.count, Some(4));
         assert_eq!(config.display_limit, None);
-        assert_eq!(config.exclude, ["CliExclude", "Shared", "ConfigExclude"]);
-        assert_eq!(config.extensions, ["mkv"]);
-        assert_eq!(config.include, ["CliInclude", "Shared", "ConfigInclude"]);
-        assert_eq!(config.max_bitrate, Some(60000));
-        assert_eq!(config.max_duration, Some(9000.0));
-        assert_eq!(config.min_duration, Some(90.0));
-        assert_eq!(config.min_resolution, Some(1080));
-        assert_eq!(config.sort, SortOrder::Impact);
+        assert_eq!(config.options.exclude, ["CliExclude", "Shared", "ConfigExclude"]);
+        assert_eq!(config.options.extensions, ["mkv"]);
+        assert_eq!(config.options.include, ["CliInclude", "Shared", "ConfigInclude"]);
+        assert_eq!(config.options.max_bitrate, Some(60000));
+        assert_eq!(config.options.max_duration, Some(9000.0));
+        assert_eq!(config.options.min_duration, Some(90.0));
+        assert_eq!(config.options.min_resolution, Some(1080));
+        assert_eq!(config.options.sort, SortOrder::Impact);
     }
 }
 
@@ -727,23 +689,23 @@ mod config_user_resolution_tests {
         };
         let config = resolve_config(&[], user_config);
 
-        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(6500));
+        assert_eq!(config.options.min_bitrate, MinimumBitrate::Fixed(6500));
         assert!(config.convert_all);
         assert!(config.convert_other);
-        assert_eq!(config.count, Some(3));
-        assert!(config.delete);
-        assert!(config.delete_duplicates);
+        assert_eq!(config.options.count, Some(3));
+        assert!(config.options.delete);
+        assert!(config.options.delete_duplicates);
         assert_eq!(config.display_limit, Some(15));
-        assert_eq!(config.exclude, ["ConfigExclude"]);
-        assert_eq!(config.extensions, ["webm"]);
-        assert_eq!(config.include, ["ConfigInclude"]);
-        assert_eq!(config.max_bitrate, Some(45000));
-        assert_eq!(config.max_duration, Some(8000.0));
-        assert_eq!(config.min_duration, Some(45.0));
-        assert_eq!(config.min_resolution, Some(576));
-        assert!(config.overwrite);
-        assert!(config.recurse);
-        assert_eq!(config.sort, SortOrder::ResolutionAsc);
+        assert_eq!(config.options.exclude, ["ConfigExclude"]);
+        assert_eq!(config.options.extensions, ["webm"]);
+        assert_eq!(config.options.include, ["ConfigInclude"]);
+        assert_eq!(config.options.max_bitrate, Some(45000));
+        assert_eq!(config.options.max_duration, Some(8000.0));
+        assert_eq!(config.options.min_duration, Some(45.0));
+        assert_eq!(config.options.min_resolution, Some(576));
+        assert!(config.options.overwrite);
+        assert!(config.options.recurse);
+        assert_eq!(config.options.sort, SortOrder::ResolutionAsc);
         assert!(config.verbose);
     }
 }
@@ -761,7 +723,7 @@ mod config_minimum_bitrate_resolution_tests {
         };
         let config = resolve_config(&["--bitrate", "5000"], user_config);
 
-        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(5000));
+        assert_eq!(config.options.min_bitrate, MinimumBitrate::Fixed(5000));
     }
 
     #[test]
@@ -778,7 +740,7 @@ bitrate = 7000
         .expect("bitrate settings should parse");
         let config = resolve_config(&[], user_config);
 
-        assert_eq!(config.min_bitrate, MinimumBitrate::Fixed(7000));
+        assert_eq!(config.options.min_bitrate, MinimumBitrate::Fixed(7000));
     }
 
     #[test]
@@ -793,11 +755,12 @@ bitrate = 7000
         .expect("bitrate tiers should parse");
         let config = resolve_config(&[], user_config);
 
-        assert_eq!(config.min_bitrate.threshold(1280, 720, 25.0), 3000);
-        assert_eq!(config.min_bitrate.threshold(1280, 720, 60.0), 6000);
-        assert_eq!(config.min_bitrate.threshold(1920, 1080, 24.0), 8000);
-        assert_eq!(config.min_bitrate.threshold(3840, 2160, 60.0), 30000);
-        assert_eq!(config.db_filter.min_bitrate, Some(config.min_bitrate));
+        assert_eq!(config.options.min_bitrate.threshold(1280, 720, 25.0), 3000);
+        assert_eq!(config.options.min_bitrate.threshold(1280, 720, 60.0), 6000);
+        assert_eq!(config.options.min_bitrate.threshold(1920, 1080, 24.0), 8000);
+        assert_eq!(config.options.min_bitrate.threshold(3840, 2160, 60.0), 30000);
+        let filter = config.options.pending_file_filter();
+        assert_eq!(filter.min_bitrate, Some(config.options.min_bitrate));
     }
 }
 
@@ -811,7 +774,7 @@ mod config_extension_resolution_tests {
         let config = resolve_config(&["--all"], VideoConvertConfig::default());
 
         assert!(config.convert_all);
-        assert_eq!(config.extensions, ALL_EXTENSIONS);
+        assert_eq!(config.options.extensions, ALL_EXTENSIONS);
     }
 
     #[test]
@@ -819,7 +782,7 @@ mod config_extension_resolution_tests {
         let config = resolve_config(&["--other"], VideoConvertConfig::default());
 
         assert!(config.convert_other);
-        assert_eq!(config.extensions, OTHER_EXTENSIONS);
-        assert!(!config.extensions.iter().any(|extension| extension == "mp4"));
+        assert_eq!(config.options.extensions, OTHER_EXTENSIONS);
+        assert!(!config.options.extensions.iter().any(|extension| extension == "mp4"));
     }
 }

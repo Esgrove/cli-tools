@@ -5,9 +5,6 @@
 
 use std::path::Path;
 
-use cli_tools_common::print_error;
-use colored::Colorize;
-
 use super::VideoConvert;
 use crate::ffmpeg::probe_video_info;
 use crate::helpers::{duration_difference_ratio, format_duplicate_duration_match};
@@ -17,7 +14,7 @@ const MAX_DUPLICATE_DURATION_DIFFERENCE: f64 = 0.1;
 
 /// What happened to a source file whose converted output already exists.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum DuplicateOutcome {
+pub enum DuplicateOutcome {
     /// The source was deleted.
     Deleted { duration_message: String },
     /// The source would be deleted, but this is a dry run.
@@ -40,12 +37,13 @@ pub(super) enum DuplicateOutcome {
 
 impl DuplicateOutcome {
     /// Whether the source was deleted, or would be deleted in a dry run.
-    pub(super) const fn removes_source(&self) -> bool {
+    #[must_use]
+    pub const fn removes_source(&self) -> bool {
         matches!(self, Self::Deleted { .. } | Self::WouldDelete { .. })
     }
 }
 
-impl VideoConvert {
+impl VideoConvert<'_> {
     /// Delete a source file whose converted output already exists,
     /// after checking that the output really is a converted copy of it.
     pub(super) fn delete_duplicate(&self, source: &Path, target: &Path, source_duration: f64) -> DuplicateOutcome {
@@ -75,7 +73,7 @@ impl VideoConvert {
         }
 
         let duration_message = format_duplicate_duration_match(source_duration, target_info.duration);
-        if self.config.dryrun {
+        if self.options.dry_run {
             DuplicateOutcome::WouldDelete { duration_message }
         } else if let Err(error) = self.delete_file(source) {
             DuplicateOutcome::DeleteFailed {
@@ -87,66 +85,18 @@ impl VideoConvert {
     }
 }
 
-/// Print the outcome of a duplicate deletion for the source and its existing output.
-pub(super) fn print_duplicate_outcome(source: &Path, target: &Path, outcome: &DuplicateOutcome) {
-    let source_display = cli_tools_common::path_to_string_relative(source);
-    let target_display = cli_tools_common::path_to_string_relative(target);
-    match outcome {
-        DuplicateOutcome::Deleted { duration_message } => {
-            println!(
-                "{} ({duration_message})",
-                format!("Deleted duplicate: {source_display}").green()
-            );
-        }
-        DuplicateOutcome::WouldDelete { duration_message } => {
-            println!(
-                "{} ({duration_message})",
-                format!("Would delete duplicate: {source_display}").yellow()
-            );
-        }
-        DuplicateOutcome::RefusedSameFile => {
-            print_error!(
-                "Refusing to delete duplicate because source and target are the same file:\n  {source_display}"
-            );
-        }
-        DuplicateOutcome::RefusedNotTargetCodec => {
-            print_error!(
-                "Refusing to delete duplicate because target is not HEVC/AV1:\n  Source: {source_display}\n  Target: {target_display}"
-            );
-        }
-        DuplicateOutcome::DurationMismatch {
-            source_duration,
-            target_duration,
-            difference_ratio,
-        } => {
-            print_error!(
-                "Duration mismatch for duplicate - source: {:.1}s, target: {:.1}s ({:.3}% difference)\n  Source: {source_display}\n  Target: {target_display}",
-                source_duration,
-                target_duration,
-                difference_ratio * 100.0,
-            );
-        }
-        DuplicateOutcome::ProbeFailed { error } => {
-            print_error!("Failed to get duration of target file {target_display}: {error}");
-        }
-        DuplicateOutcome::DeleteFailed { error } => {
-            print_error!("Failed to delete duplicate {source_display}: {error}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod test_delete_duplicate {
     use super::super::test_helpers::converter;
     use super::*;
-    use crate::config::Config;
+    use crate::options::ConvertOptions;
 
     #[test]
     fn refuses_when_source_and_target_are_the_same_file() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
         let path = directory.path().join("Movie.mp4");
         std::fs::write(&path, b"video").expect("Failed to write video file");
-        let (_log, converter) = converter(Config::default());
+        let converter = converter(ConvertOptions::default());
 
         let outcome = converter.delete_duplicate(&path, &path, 60.0);
 
@@ -160,7 +110,7 @@ mod test_delete_duplicate {
         let source = directory.path().join("Movie.mkv");
         let target = directory.path().join("Movie.x265.mp4");
         std::fs::write(&source, b"video").expect("Failed to write source file");
-        let (_log, converter) = converter(Config::default());
+        let converter = converter(ConvertOptions::default());
 
         let outcome = converter.delete_duplicate(&source, &target, 60.0);
 

@@ -9,31 +9,57 @@ repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "vconvert"
-path = "src/main.rs"
+path = "src/bin/vconvert/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Dependencies of the vconvert binary, left out by library users with `default-features = false`.
+cli = [
+    "cli-tools-common/completion",
+    "cli-tools-common/diff",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:colored",
+    "dep:ctrlc",
+    "dep:indicatif",
+    "dep:itertools",
+    "dep:jiff",
+    "dep:toml",
+]
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
-cli-tools-common = { workspace = true, features = ["completion", "diff"] }
-colored = { workspace = true }
-ctrlc = { workspace = true }
+cli-tools-common = { workspace = true }
 dirs = { workspace = true }
-indicatif = { workspace = true }
-itertools = { workspace = true }
-jiff = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
-toml = { workspace = true }
 trash = { workspace = true }
 walkdir = { workspace = true }
 
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+colored = { workspace = true, optional = true }
+ctrlc = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
+itertools = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
+toml = { workspace = true }
+
+[[test]]
+name = "vconvert_cli_tests"
+required-features = ["cli"]
 
 [lints]
 workspace = true
