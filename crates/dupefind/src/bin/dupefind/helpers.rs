@@ -16,6 +16,7 @@ use cli_tools_dupefind::hash::{
     CalculatedFileHash, IndexedFileHash, calculate_file_hash_with_progress, collect_hash_candidates, group_hash_matches,
 };
 use cli_tools_dupefind::{DupeFileInfo, DuplicateGroup};
+use cli_tools_media::file_hash::fingerprint_file;
 use cli_tools_media::scan_cache::{CachedFileHash, ScanCache};
 use cli_tools_media::video_info::VideoInfo;
 
@@ -74,10 +75,11 @@ fn collect_metadata_for_groups_with_cache(
 
     for path in &all_files {
         let path_key = path.to_string_lossy();
-        let file_size = std::fs::metadata(path).map(|file_metadata| file_metadata.len()).ok();
+        // Size and modification time both have to match, since a replaced file can have the same size.
+        let fingerprint = fingerprint_file(path).ok();
 
         if let Some(cached) = cached_entries.get(path_key.as_ref())
-            && file_size == Some(cached.size_bytes)
+            && fingerprint.is_some_and(|fingerprint| cached.is_current(&fingerprint))
         {
             metadata.insert(path.clone(), cached.to_video_info());
         } else {

@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
 use crate::Resolution;
+use crate::file_hash::{FileFingerprint, fingerprint_file};
 use crate::video_info::VideoInfo;
 
 /// Default database filename (shared with `vconvert`).
@@ -126,6 +127,28 @@ impl ScanCache {
                 ",
             )
             .context("Failed to initialise scanned_files table")?;
+        // Columns added after the table first shipped, so a database created earlier gets them too.
+        // `bit_depth` is written by vconvert, which shares the table.
+        self.add_column_if_missing("bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
+        Ok(())
+    }
+
+    /// Add a column to `scanned_files` unless it already exists.
+    fn add_column_if_missing(&self, column_name: &str, column_definition: &str) -> Result<()> {
+        let mut statement = self.connection.prepare("PRAGMA table_info(scanned_files)")?;
+        let column_exists = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|name| name == column_name);
+        if !column_exists {
+            self.connection
+                .execute(
+                    &format!("ALTER TABLE scanned_files ADD COLUMN {column_name} {column_definition}"),
+                    [],
+                )
+                .with_context(|| format!("Failed to add column {column_name} to scanned_files"))?;
+        }
         Ok(())
     }
 
@@ -138,7 +161,7 @@ impl ScanCache {
     pub fn get_all(&self) -> Result<HashMap<String, CachedVideoInfo>> {
         let mut statement = self.connection.prepare(
             r"
-            SELECT full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second
+            SELECT full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, modified_time_ns
             FROM scanned_files
             ",
         )?;
@@ -154,6 +177,7 @@ impl ScanCache {
                     width: row.get::<_, i64>(5)? as u32,
                     height: row.get::<_, i64>(6)? as u32,
                     frames_per_second: row.get(7)?,
+                    modified_time_ns: row.get(8)?,
                 };
                 Ok((path, entry))
             })?
@@ -265,21 +289,31 @@ impl ScanCache {
             let (width, height) = info.resolution.map_or((0u32, 0u32), |r| (r.width, r.height));
             // frames per second not available in shared VideoInfo
             let frames_per_second = 0.0f64;
+            let modified_time_ns = fingerprint_file(path).map_or(0, |fingerprint| fingerprint.modified_time_ns);
 
             transaction
                 .execute(
                     r"
-                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time, modified_time_ns)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                     ON CONFLICT(full_path) DO UPDATE SET
+                        frames_per_second = CASE
+                            WHEN excluded.frames_per_second > 0 THEN excluded.frames_per_second
+                            WHEN scanned_files.size_bytes = excluded.size_bytes THEN scanned_files.frames_per_second
+                            ELSE 0
+                        END,
+                        bit_depth = CASE
+                            WHEN scanned_files.size_bytes = excluded.size_bytes THEN scanned_files.bit_depth
+                            ELSE 0
+                        END,
                         size_bytes = excluded.size_bytes,
                         codec = excluded.codec,
                         bitrate_kbps = excluded.bitrate_kbps,
                         duration = excluded.duration,
                         width = excluded.width,
                         height = excluded.height,
-                        frames_per_second = excluded.frames_per_second,
-                        scanned_time = excluded.scanned_time
+                        scanned_time = excluded.scanned_time,
+                        modified_time_ns = excluded.modified_time_ns
                     ",
                     params![
                         path_str,
@@ -291,6 +325,7 @@ impl ScanCache {
                         height,
                         frames_per_second,
                         now,
+                        modified_time_ns,
                     ],
                 )
                 .context("Failed to upsert scanned file")?;
@@ -341,9 +376,20 @@ pub struct CachedVideoInfo {
     pub height: u32,
     /// Frames per second.
     pub frames_per_second: f64,
+    /// File modification time as nanoseconds since the Unix epoch, zero when it was not recorded.
+    pub modified_time_ns: i64,
 }
 
 impl CachedVideoInfo {
+    /// Return whether this entry still describes the file with the given fingerprint.
+    ///
+    /// A file replaced by another of the same size has a new modification time,
+    /// and an entry stored without a modification time is never current.
+    #[must_use]
+    pub const fn is_current(&self, fingerprint: &FileFingerprint) -> bool {
+        self.size_bytes == fingerprint.size_bytes && self.modified_time_ns == fingerprint.modified_time_ns
+    }
+
     /// Convert to the shared `VideoInfo` type used by the rest of the library.
     #[must_use]
     pub fn to_video_info(&self) -> VideoInfo {
@@ -423,6 +469,65 @@ mod test_scan_cache_upsert {
         assert_eq!(cached.width, 1920);
         assert_eq!(cached.height, 1080);
         assert!((cached.duration - 120.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn an_entry_is_stale_once_the_file_changes_with_the_same_size() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("clip.mp4");
+        std::fs::write(&path, b"abc").expect("write");
+        let set_time = |seconds: u64| {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open")
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+                .expect("set time");
+        };
+        set_time(1_000_000_000);
+        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
+        let info = VideoInfo {
+            size_bytes: Some(3),
+            ..sample_video_info()
+        };
+        cache
+            .batch_upsert(&[(path.as_path(), &info)])
+            .expect("Failed to upsert");
+        let key = path.to_string_lossy().into_owned();
+
+        let cached = cache.get_all().expect("entries").remove(&key).expect("entry");
+        assert!(cached.is_current(&fingerprint_file(&path).expect("fingerprint")));
+
+        std::fs::write(&path, b"xyz").expect("write");
+        set_time(1_100_000_000);
+        assert!(!cached.is_current(&fingerprint_file(&path).expect("fingerprint")));
+    }
+
+    #[test]
+    fn upsert_keeps_the_frame_rate_another_tool_stored_for_the_same_file() {
+        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
+        cache
+            .connection
+            .execute(
+                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time) \
+                 VALUES ('/videos/test.mp4', 1000000, 'h264', 5000, 120.5, 1920, 1080, 29.97, 0)",
+                [],
+            )
+            .expect("insert");
+
+        cache
+            .batch_upsert(&[(Path::new("/videos/test.mp4"), &sample_video_info())])
+            .expect("Failed to upsert");
+
+        let frames_per_second: f64 = cache
+            .connection
+            .query_row(
+                "SELECT frames_per_second FROM scanned_files WHERE full_path = '/videos/test.mp4'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert!((frames_per_second - 29.97).abs() < 0.001, "{frames_per_second}");
     }
 
     #[test]
@@ -604,6 +709,7 @@ mod test_cached_video_info_conversion {
             width: 1920,
             height: 1080,
             frames_per_second: 29.97,
+            modified_time_ns: 0,
         };
 
         let video_info = cached.to_video_info();
@@ -627,6 +733,7 @@ mod test_cached_video_info_conversion {
             width: 640,
             height: 480,
             frames_per_second: 24.0,
+            modified_time_ns: 0,
         };
 
         let video_info = cached.to_video_info();
@@ -643,6 +750,7 @@ mod test_cached_video_info_conversion {
             width: 640,
             height: 480,
             frames_per_second: 24.0,
+            modified_time_ns: 0,
         };
 
         let video_info = cached.to_video_info();
@@ -659,6 +767,7 @@ mod test_cached_video_info_conversion {
             width: 640,
             height: 480,
             frames_per_second: 24.0,
+            modified_time_ns: 0,
         };
 
         let video_info = cached.to_video_info();
