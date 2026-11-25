@@ -13,43 +13,47 @@ pub static CURRENT_YEAR: LazyLock<i32> =
     LazyLock::new(|| i32::from(Timestamp::now().to_zoned_datetime(TimeZone::UTC).year()));
 
 pub static RE_YEAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(20\d{2})\b").expect("Failed to create regex pattern for yyyy year"));
+    LazyLock::new(|| Regex::new(r"\b(20[0-9]{2})\b").expect("Failed to create regex pattern for yyyy year"));
 
 pub static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?P<year>[12]\d{3})\.(?P<month>[12]\d|3[01]|0?[1-9])\.(?P<day>[12]\d|3[01]|0?[1-9])\b")
+    Regex::new(r"\b(?P<year>[12][0-9]{3})\.(?P<month>[12][0-9]|3[01]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9])\b")
         .expect("Failed to create regex pattern for correct date")
 });
 
 static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?P<day>[12]\d|3[01]|0?[1-9])\.(?P<month>1[0-2]|0?[1-9])\.(?P<year>\d{4})")
+    Regex::new(r"(?P<day>[12][0-9]|3[01]|0?[1-9])\.(?P<month>1[0-2]|0?[1-9])\.(?P<year>[0-9]{4})")
         .expect("Failed to create regex pattern for dd.mm.yyyy")
 });
 
 static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?P<year>[12]\d{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12]\d|3[01]|0?[1-9])")
+    Regex::new(r"(?P<year>[12][0-9]{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9])")
         .expect("Failed to create regex pattern for yyyy.mm.dd")
 });
 
 static RE_FULL_DATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|\D)(?P<date>(?:[12]\d|3[01]|0?[1-9])\.(?:0?[1-9]|1[0-2])\.\d{4})(?:\b|\D)")
+    Regex::new(r"(?:\b|[^0-9])(?P<date>(?:[12][0-9]|3[01]|0?[1-9])\.(?:0?[1-9]|1[0-2])\.[0-9]{4})(?:\b|[^0-9])")
         .expect("Failed to create regex pattern for full date")
 });
 
 /// Regex for MM.DD.YYYY format where day > 12 (unambiguous cases).
 /// Only matches when the day component is 13-31, making it clearly MM.DD.YYYY format.
 static RE_FULL_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|\D)(?P<date>(?:0?[1-9]|1[0-2])\.(?:1[3-9]|2\d|3[01])\.\d{4})(?:\b|\D)")
+    Regex::new(r"(?:\b|[^0-9])(?P<date>(?:0?[1-9]|1[0-2])\.(?:1[3-9]|2[0-9]|3[01])\.[0-9]{4})(?:\b|[^0-9])")
         .expect("Failed to create regex pattern for MM.DD.YYYY full date")
 });
 
 static RE_SHORT_DATE_DAY_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|[^a-zA-Z\d])(?P<date>(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2])\.\d{2})(?:\b|[^a-zA-Z\d])")
-        .expect("Failed to create regex pattern for short date")
+    Regex::new(
+        r"(?:\b|[^a-zA-Z0-9])(?P<date>(?:0?[1-9]|[12][0-9]|3[01])\.(?:0?[1-9]|1[0-2])\.[0-9]{2})(?:\b|[^a-zA-Z0-9])",
+    )
+    .expect("Failed to create regex pattern for short date")
 });
 
 static RE_SHORT_DATE_YEAR_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|[^a-zA-Z\d])(?P<date>(\d{2})\.(?:0?[1-9]|[12]\d|3[01])\.(?:0?[1-9]|1[0-2]))(?:\b|[^a-zA-Z\d])")
-        .expect("Failed to create regex pattern for short date")
+    Regex::new(
+        r"(?:\b|[^a-zA-Z0-9])(?P<date>([0-9]{2})\.(?:0?[1-9]|[12][0-9]|3[01])\.(?:0?[1-9]|1[0-2]))(?:\b|[^a-zA-Z0-9])",
+    )
+    .expect("Failed to create regex pattern for short date")
 });
 
 pub struct Date {
