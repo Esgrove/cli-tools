@@ -562,6 +562,7 @@ dependencies = [
  "colored",
  "criterion",
  "dirs",
+ "proptest",
  "regex",
  "rusqlite",
  "tempfile",
