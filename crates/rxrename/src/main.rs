@@ -13,7 +13,8 @@ use clap_complete::Shell;
 use walkdir::WalkDir;
 
 use cli_tools_common::{
-    count_label, print_error, print_magenta_bold, resolve_input_path, should_skip_entry, trash_or_delete,
+    count_label, os_str_to_string, print_error, print_magenta_bold, resolve_input_path, should_skip_entry,
+    trash_or_delete,
 };
 
 /// Action to take when a conflicting unsuffixed file already exists.
@@ -171,8 +172,7 @@ fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
         .filter(|e| {
             e.path()
                 .file_stem()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s.ends_with("_1"))
+                .is_some_and(|stem| os_str_to_string(stem).ends_with("_1"))
         })
         .map(walkdir::DirEntry::into_path)
         .collect();
@@ -192,21 +192,28 @@ fn process_file(
     dryrun: bool,
     action: ConflictAction,
 ) -> Result<Outcome> {
+    // Parts of the name that are not valid UTF-8 are removed, so the new name is a clean string.
     let stem = file_with_suffix
         .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("Non-UTF-8 filename: {}", file_with_suffix.display()))?;
+        .map(os_str_to_string)
+        .ok_or_else(|| anyhow::anyhow!("Missing file name: {}", file_with_suffix.display()))?;
 
-    // Build the unsuffixed name: strip trailing "_1" and re-add the extension exactly,
-    // since an extension that is not valid UTF-8 has no lossless string form.
+    // Build the unsuffixed name: strip trailing "_1" and re-add the extension
     let new_stem = stem
         .strip_suffix("_1")
         .ok_or_else(|| anyhow::anyhow!("Filename does not end with '_1': {}", file_with_suffix.display()))?;
-    let mut original_name = std::ffi::OsString::from(new_stem);
-    if let Some(extension) = file_with_suffix.extension() {
-        original_name.push(".");
-        original_name.push(extension);
-    }
+    let original_name = match file_with_suffix.extension().map(os_str_to_string) {
+        // Dropping an extension with no valid characters would leave the bare stem,
+        // which could be an unrelated file that the conflict handling then removes.
+        Some(extension) if extension.is_empty() => {
+            anyhow::bail!(
+                "Extension has no valid UTF-8 characters: {}",
+                file_with_suffix.display()
+            );
+        }
+        Some(extension) => format!("{new_stem}.{extension}"),
+        None => new_stem.to_string(),
+    };
     let file_without_suffix = file_with_suffix.with_file_name(&original_name);
 
     let relative = file_with_suffix.strip_prefix(root).unwrap_or(file_with_suffix);
@@ -377,13 +384,13 @@ mod test_process_file {
 
     #[cfg(unix)]
     #[test]
-    fn an_extension_that_is_not_utf8_is_kept() -> anyhow::Result<()> {
+    fn a_name_that_is_not_utf8_is_sanitized() -> anyhow::Result<()> {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
         let temp_directory = tempfile::TempDir::new()?;
-        let suffixed = temp_directory.path().join(OsStr::from_bytes(b"clip_1.m\xffv"));
-        let expected = temp_directory.path().join(OsStr::from_bytes(b"clip.m\xffv"));
+        let suffixed = temp_directory.path().join(OsStr::from_bytes(b"cl\xfeip_1.m\xffv"));
+        let expected = temp_directory.path().join("clip.mv");
         let unrelated = temp_directory.path().join("clip");
         // File systems such as APFS reject names that are not valid UTF-8, so there is nothing to test there.
         if std::fs::write(&suffixed, b"new").is_err() {
@@ -396,6 +403,28 @@ mod test_process_file {
         assert!(matches!(outcome, Outcome::Renamed));
         assert_eq!(std::fs::read(&expected)?, b"new");
         assert_eq!(std::fs::read(&unrelated)?, b"unrelated");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_with_no_valid_characters_is_an_error() -> anyhow::Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join(OsStr::from_bytes(b"clip_1.\xff"));
+        let unrelated = temp_directory.path().join("clip");
+        if std::fs::write(&suffixed, b"new").is_err() {
+            return Ok(());
+        }
+        std::fs::write(&unrelated, b"unrelated")?;
+
+        let result = process_file(temp_directory.path(), &suffixed, 1, 1, 1, false, ConflictAction::Delete);
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&unrelated)?, b"unrelated");
+        assert_eq!(std::fs::read(&suffixed)?, b"new");
         Ok(())
     }
 
