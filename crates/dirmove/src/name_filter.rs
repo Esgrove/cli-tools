@@ -309,3 +309,33 @@ mod test_name_filter_new {
         assert!(filter.matches_ignored_group_name("seasonone"));
     }
 }
+
+#[cfg(test)]
+mod test_should_skip_destination_directory {
+    use super::*;
+
+    /// Return whether the filter skips a destination directory name.
+    fn skips(name_filter: &NameFilter, name: &str) -> bool {
+        name_filter.should_skip_destination_directory(name, &utils::normalize_name(name))
+    }
+
+    #[test]
+    fn skips_short_numeric_and_ignored_names() {
+        let name_filter = NameFilter::new(Vec::<String>::new(), ["ignored name"]);
+
+        assert!(skips(&name_filter, "Abc"));
+        assert!(skips(&name_filter, "2024"));
+        assert!(skips(&name_filter, "Ignored.Name"));
+        assert!(!skips(&name_filter, "Show Name"));
+    }
+
+    #[test]
+    fn skips_names_that_become_unusable_once_a_prefix_is_stripped() {
+        let name_filter = NameFilter::new(["studio"], ["ignored name"]);
+
+        assert!(skips(&name_filter, "Studio 2024"));
+        assert!(skips(&name_filter, "Studio Abc"));
+        assert!(skips(&name_filter, "Studio Ignored Name"));
+        assert!(!skips(&name_filter, "Studio Show Name"));
+    }
+}

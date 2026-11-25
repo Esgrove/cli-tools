@@ -68,8 +68,8 @@ pub struct PrefixGroup {
     pub min_start_position: usize,
 }
 
-/// Intermediate data structure for building prefix groups.
 /// A validated prefix candidate ready to be merged into prefix groups.
+///
 /// Produced during the parallel first pass of `collect_all_prefix_groups`.
 struct ValidCandidate {
     /// Normalized group key (lowercase, no dots).
@@ -1365,133 +1365,79 @@ mod test_ignored_group_names {
 #[cfg(test)]
 mod test_parent_directory_skipped {
     use super::*;
+    use crate::roots::Roots;
     use crate::test_helpers::*;
+
+    /// Group the files in `root` and return the prefixes and the directory names that would be offered,
+    /// skipping names equal to the root's own name the same way create mode does.
+    fn grouped_and_offered(root: &std::path::Path) -> (Vec<String>, Vec<String>) {
+        let fixture = Fixture::new(root.to_path_buf(), TestConfig::test_with_group_size(3));
+        let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
+        let grouper = fixture.grouper();
+        let groups = grouper.collect_all_prefix_groups(&files_with_names);
+        let parent_normalized =
+            Roots::new(vec![root.to_path_buf()], vec![root.to_path_buf()]).first_output_normalized_name();
+
+        let mut prefixes: Vec<String> = groups.keys().cloned().collect();
+        prefixes.sort();
+        let mut offered: Vec<String> = prefixes
+            .iter()
+            .map(|prefix| grouper.directory_name_for_prefix(prefix))
+            .filter(|name| !grouper.should_skip_group(name, parent_normalized.as_deref(), &HashSet::<String>::new()))
+            .collect();
+        offered.sort();
+        (prefixes, offered)
+    }
+
+    /// Create `root_name` with three files named `file_prefix` followed by an episode number.
+    fn tree_with_series(root_name: &str, file_prefix: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join(root_name);
+        std::fs::create_dir(&root).unwrap();
+        for episode in 1..=3 {
+            std::fs::write(root.join(format!("{file_prefix}.ep{episode}.mp4")), "").unwrap();
+        }
+        (tmp, root)
+    }
 
     #[test]
     fn parent_dir_name_not_offered_as_new_dir() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Create a directory named "My Series" to use as the root
-        let root = tmp.path().join("My Series");
-        std::fs::create_dir(&root).unwrap();
+        let (_tmp, root) = tree_with_series("My Series", "My.Series");
 
-        // Create files that would normally group under "My Series"
-        std::fs::write(root.join("My.Series.S01E01.mp4"), "").unwrap();
-        std::fs::write(root.join("My.Series.S01E02.mp4"), "").unwrap();
-        std::fs::write(root.join("My.Series.S01E03.mp4"), "").unwrap();
+        let (prefixes, offered) = grouped_and_offered(&root);
 
-        let config = TestConfig::test_with_group_size(3);
-
-        let fixture = Fixture::new(root.clone(), config);
-        let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
-        let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
-
-        // The groups are collected, but when processing in create_dirs_and_move_files,
-        // "My Series" would be skipped because it matches the parent directory name.
-        // We verify here that groups are found but the dir_name would match parent.
-        assert!(
-            groups.contains_key("My.Series") || groups.contains_key("MySeries"),
-            "Files should still form a group based on prefix"
-        );
-
-        // The actual directory name after converting would be "My Series"
-        // which matches the parent - this is checked in create_dirs_and_move_files
-        let parent_name = root.file_name().unwrap().to_str().unwrap();
-        assert_eq!(parent_name, "My Series");
-
-        // Verify the prefix would convert to same name as parent
-        if let Some(group) = groups.get("My.Series") {
-            let dir_name = "My.Series".replace('.', " ");
-            assert_eq!(dir_name.to_lowercase(), parent_name.to_lowercase());
-            assert_eq!(group.files.len(), 3);
-        }
+        assert!(prefixes.contains(&"My.Series".to_string()), "{prefixes:?}");
+        assert!(!offered.iter().any(|name| name == "My Series"), "{offered:?}");
     }
 
     #[test]
     fn parent_dir_name_case_insensitive() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Create a directory with different case
-        let root = tmp.path().join("MYSERIES");
-        std::fs::create_dir(&root).unwrap();
+        let (_tmp, root) = tree_with_series("MYSERIES", "MySeries");
 
-        std::fs::write(root.join("MySeries.ep1.mp4"), "").unwrap();
-        std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
-        std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
+        let (prefixes, offered) = grouped_and_offered(&root);
 
-        let config = TestConfig::test_with_group_size(3);
-
-        let fixture = Fixture::new(root.clone(), config);
-        let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
-        let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
-
-        // Files should form a group
-        assert!(groups.contains_key("MySeries"));
-
-        // Parent dir is "MYSERIES", proposed dir would be "MySeries"
-        // These should match via normalize_name
-        let parent_name = root.file_name().unwrap().to_str().unwrap();
-        assert_eq!(parent_name, "MYSERIES");
-
-        let dir_name = "MySeries";
-        assert_eq!(utils::normalize_name(parent_name), utils::normalize_name(dir_name));
+        assert!(prefixes.contains(&"MySeries".to_string()), "{prefixes:?}");
+        assert!(!offered.iter().any(|name| name == "MySeries"), "{offered:?}");
     }
 
     #[test]
     fn parent_dir_name_with_spaces_matches_concatenated() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Parent directory has spaces, proposed name is concatenated
-        let root = tmp.path().join("My Series");
-        std::fs::create_dir(&root).unwrap();
+        let (_tmp, root) = tree_with_series("My Series", "MySeries");
 
-        std::fs::write(root.join("MySeries.ep1.mp4"), "").unwrap();
-        std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
-        std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
+        let (prefixes, offered) = grouped_and_offered(&root);
 
-        let config = TestConfig::test_with_group_size(3);
-
-        let fixture = Fixture::new(root.clone(), config);
-        let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
-        let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
-
-        // Files should form a group
-        assert!(groups.contains_key("MySeries"));
-
-        // Parent dir is "My Series", proposed dir would be "MySeries"
-        // These should match via normalize_name (strips spaces and dots)
-        let parent_name = root.file_name().unwrap().to_str().unwrap();
-        assert_eq!(parent_name, "My Series");
-
-        let dir_name = "MySeries";
-        assert_eq!(utils::normalize_name(parent_name), utils::normalize_name(dir_name));
+        assert!(prefixes.contains(&"MySeries".to_string()), "{prefixes:?}");
+        assert!(!offered.iter().any(|name| name == "MySeries"), "{offered:?}");
     }
 
     #[test]
     fn parent_dir_name_with_dots_matches_spaced() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Parent directory has dots, proposed name has spaces
-        let root = tmp.path().join("My.Series");
-        std::fs::create_dir(&root).unwrap();
+        let (_tmp, root) = tree_with_series("My.Series", "My.Series");
 
-        std::fs::write(root.join("My.Series.ep1.mp4"), "").unwrap();
-        std::fs::write(root.join("My.Series.ep2.mp4"), "").unwrap();
-        std::fs::write(root.join("My.Series.ep3.mp4"), "").unwrap();
+        let (prefixes, offered) = grouped_and_offered(&root);
 
-        let config = TestConfig::test_with_group_size(3);
-
-        let fixture = Fixture::new(root.clone(), config);
-        let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
-        let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
-
-        // The prefix "My.Series" becomes dir_name "My Series" after dot replacement
-        // Parent dir is "My.Series" which normalizes to "myseries"
-        // Dir name "My Series" also normalizes to "myseries"
-        let parent_name = root.file_name().unwrap().to_str().unwrap();
-        assert_eq!(parent_name, "My.Series");
-
-        let dir_name = "My Series";
-        assert_eq!(utils::normalize_name(parent_name), utils::normalize_name(dir_name));
-
-        // Verify groups were found
-        assert!(!groups.is_empty());
+        assert!(prefixes.contains(&"My.Series".to_string()), "{prefixes:?}");
+        assert!(!offered.iter().any(|name| name == "My Series"), "{offered:?}");
     }
 
     #[test]
@@ -5778,5 +5724,128 @@ mod test_accepts_group_name {
         assert!(!grouper.accepts_group_name("IGNORED NAME"));
         assert!(!grouper.accepts_group_name("Show Sample"));
         assert!(!grouper.accepts_group_name("Show.SAMPLE.Name"));
+    }
+}
+
+#[cfg(test)]
+mod test_group_naming_and_skipping {
+    use super::*;
+
+    /// Build a grouper with the given prefix ignores and ignored group names.
+    fn with_filter<R>(
+        prefix_ignores: &[&str],
+        ignored_group_names: &[&str],
+        run: impl FnOnce(&PrefixGrouper<'_>) -> R,
+    ) -> R {
+        let name_filter = NameFilter::new(prefix_ignores, ignored_group_names);
+        let options = GroupingOptions::new(2, 1, Vec::<String>::new(), Vec::<String>::new());
+        run(&PrefixGrouper::new(&options, &name_filter))
+    }
+
+    #[test]
+    fn directory_name_replaces_dots_and_strips_ignored_prefixes() {
+        with_filter(&["studio"], &[], |grouper| {
+            assert_eq!(grouper.directory_name_for_prefix("Show.Name"), "Show Name");
+            assert_eq!(grouper.directory_name_for_prefix("Studio.Show.Name"), "Show Name");
+            assert_eq!(grouper.directory_name_for_prefix("ShowName"), "ShowName");
+        });
+    }
+
+    #[test]
+    fn skips_empty_ignored_and_too_short_names() {
+        with_filter(&["studio"], &["ignored name"], |grouper| {
+            let none = HashSet::<String>::new();
+            assert!(grouper.should_skip_group("", None, &none));
+            assert!(grouper.should_skip_group("Ignored Name", None, &none));
+            assert!(grouper.should_skip_group("Studio", None, &none));
+            assert!(grouper.should_skip_group("Abc", None, &none));
+            assert!(grouper.should_skip_group("2024", None, &none));
+            assert!(!grouper.should_skip_group("Show Name", None, &none));
+        });
+    }
+
+    #[test]
+    fn skips_the_parent_directory_name_and_names_ignored_during_the_run() {
+        with_filter(&[], &[], |grouper| {
+            let runtime_ignored = HashSet::from(["skippedname".to_string()]);
+            assert!(grouper.should_skip_group("My Series", Some("myseries"), &HashSet::<String>::new()));
+            assert!(grouper.should_skip_group("Skipped.Name", None, &runtime_ignored));
+            assert!(!grouper.should_skip_group("My Series", Some("other"), &runtime_ignored));
+        });
+    }
+
+    #[test]
+    fn processing_order_drops_small_groups_and_prefers_specific_early_prefixes() {
+        with_filter(&[], &[], |grouper| {
+            let files = |count: usize| (0..count).map(|index| PathBuf::from(format!("{index}.mp4"))).collect();
+            let groups = HashMap::from([
+                ("Late".to_string(), PrefixGroup::new(files(5), 1, 1)),
+                ("Show".to_string(), PrefixGroup::new(files(4), 1, 0)),
+                ("Show.Name".to_string(), PrefixGroup::new(files(3), 2, 0)),
+                ("Small".to_string(), PrefixGroup::new(files(1), 1, 0)),
+                ("Long.Show".to_string(), PrefixGroup::new(files(2), 2, 0)),
+            ]);
+
+            let order: Vec<String> = grouper
+                .groups_in_processing_order(groups)
+                .into_iter()
+                .map(|(prefix, _)| prefix)
+                .collect();
+
+            assert_eq!(order, ["Show.Name", "Long.Show", "Show", "Late"]);
+        });
+    }
+}
+
+#[cfg(test)]
+mod test_grouping_progress {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::test_helpers::make_test_files;
+
+    /// Progress that records stages and counts the advances of each stage.
+    #[derive(Default)]
+    struct RecordedProgress {
+        /// Stage, expected length, and advance count of each started stage.
+        stages: Mutex<Vec<(GroupingStage, u64, u64)>>,
+        /// Number of finished stages.
+        finished: Mutex<usize>,
+    }
+
+    impl GroupingProgress for RecordedProgress {
+        fn start_stage(&self, stage: GroupingStage, length: u64) {
+            self.stages.lock().unwrap().push((stage, length, 0));
+        }
+
+        fn advance(&self) {
+            if let Some(last) = self.stages.lock().unwrap().last_mut() {
+                last.2 += 1;
+            }
+        }
+
+        fn finish_stage(&self) {
+            *self.finished.lock().unwrap() += 1;
+        }
+    }
+
+    #[test]
+    fn reports_both_stages_with_one_advance_per_item() {
+        let name_filter = NameFilter::default();
+        let options = GroupingOptions::new(2, 1, Vec::<String>::new(), Vec::<String>::new());
+        let files = make_test_files(&["Show.Name.S01E01.mp4", "Show.Name.S01E02.mp4", "Other.Clip.mp4"]);
+        let progress = RecordedProgress::default();
+
+        let groups =
+            PrefixGrouper::new(&options, &name_filter).collect_all_prefix_groups_with_progress(&files, &progress);
+
+        assert!(!groups.is_empty());
+        let stages = progress.stages.lock().unwrap().clone();
+        assert_eq!(stages.len(), 2, "{stages:?}");
+        assert_eq!(stages[0].0, GroupingStage::CollectingPrefixes);
+        assert_eq!((stages[0].1, stages[0].2), (3, 3));
+        assert_eq!(stages[1].0, GroupingStage::MatchingFilesToGroups);
+        assert_eq!(stages[1].1, stages[1].2);
+        assert_eq!(*progress.finished.lock().unwrap(), 2);
     }
 }

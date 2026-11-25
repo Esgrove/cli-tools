@@ -198,3 +198,83 @@ fn database_command_lists_the_directory_names_a_run_stored() {
     assert!(printed.contains("  Show Alpha"), "{printed}");
     assert!(printed.contains("  Movie Night"), "{printed}");
 }
+
+#[test]
+fn create_mode_groups_loose_files_into_a_new_directory() {
+    let tree = TempTree::new();
+    tree.file_with("Inbox/Show.Name.S01E01.mkv", "one");
+    tree.file_with("Inbox/Show.Name.S01E02.mkv", "two");
+    tree.file_with("Inbox/Show.Name.S01E03.mkv", "three");
+    tree.file_with("Inbox/Unrelated.mkv", "other");
+    let home = TempTree::new();
+
+    let output = run_dirmove(home.path(), &["--auto", "--create"], &tree.join("Inbox"));
+
+    assert_success(&output);
+    assert_eq!(
+        tree.snapshot(),
+        vec![
+            "Inbox/",
+            "Inbox/Show Name/",
+            "Inbox/Show Name/Show.Name.S01E01.mkv: one",
+            "Inbox/Show Name/Show.Name.S01E02.mkv: two",
+            "Inbox/Show Name/Show.Name.S01E03.mkv: three",
+            "Inbox/Unrelated.mkv: other",
+        ]
+    );
+}
+
+#[test]
+fn files_move_to_the_output_root_that_has_the_matching_directory() {
+    let tree = TempTree::new();
+    tree.file_with("Inbox/Show.Alpha.S01E01.mkv", "one");
+    tree.dir("First Library/Other Show");
+    tree.dir("Second Library/Show Alpha");
+    let home = TempTree::new();
+
+    let output = run_dirmove(
+        home.path(),
+        &[
+            "--auto",
+            "--output",
+            &tree.join("First Library").to_string_lossy(),
+            "--output",
+            &tree.join("Second Library").to_string_lossy(),
+        ],
+        &tree.join("Inbox"),
+    );
+
+    assert_success(&output);
+    assert_eq!(tree.read("Second Library/Show Alpha/Show.Alpha.S01E01.mkv"), "one");
+    assert!(!tree.exists("Inbox/Show.Alpha.S01E01.mkv"));
+}
+
+#[test]
+fn files_only_leaves_matching_input_directories_in_place() {
+    let tree = TempTree::new();
+    tree.file_with("Inbox/Show Alpha/Show.Alpha.S01E01.mkv", "nested");
+    tree.file_with("Inbox/Show.Alpha.S01E02.mkv", "loose");
+    tree.dir("Library/Show Alpha");
+    let home = TempTree::new();
+    let output_argument = tree.join("Library").to_string_lossy().into_owned();
+
+    let output = run_dirmove(
+        home.path(),
+        &["--auto", "--files-only", "--output", &output_argument],
+        &tree.join("Inbox"),
+    );
+
+    assert_success(&output);
+    assert_eq!(tree.read("Inbox/Show Alpha/Show.Alpha.S01E01.mkv"), "nested");
+    assert_eq!(tree.read("Library/Show Alpha/Show.Alpha.S01E02.mkv"), "loose");
+
+    let without_files_only = run_dirmove(
+        home.path(),
+        &["--auto", "--output", &output_argument],
+        &tree.join("Inbox"),
+    );
+
+    assert_success(&without_files_only);
+    assert_eq!(tree.read("Library/Show Alpha/Show.Alpha.S01E01.mkv"), "nested");
+    assert!(!tree.exists("Inbox/Show Alpha"));
+}

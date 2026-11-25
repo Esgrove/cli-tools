@@ -115,6 +115,8 @@ impl<'a> Scanner<'a> {
     ///
     /// Explicit file inputs are included directly. Directory inputs contribute only their direct child files.
     /// Files are kept when they pass the include and exclude patterns.
+    /// Hidden files are kept too, unlike in `collect_files_with_names`,
+    /// so a hidden file whose name contains a directory name is still offered for that directory.
     ///
     /// # Errors
     /// Returns an error if an input directory cannot be read.
@@ -442,5 +444,95 @@ mod test_scan_options {
         let options = ScanOptions::new(Vec::<String>::new(), ["SAMPLE"], false);
         assert!(options.is_excluded("show.sample.mp4"));
         assert!(!options.is_excluded("show.mp4"));
+    }
+}
+
+#[cfg(test)]
+mod test_collect_files {
+    use std::path::Path;
+
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    /// Build a scanner over the given input roots with the given include and exclude patterns.
+    fn scan_files(inputs: Vec<PathBuf>, include: &[&str], exclude: &[&str]) -> Vec<String> {
+        let roots = Roots::new(inputs, vec![PathBuf::from("output")]);
+        let options = ScanOptions::new(include, exclude, false);
+        let name_filter = NameFilter::default();
+        let mut names: Vec<String> = Scanner::new(&roots, &options, &name_filter)
+            .collect_files()
+            .unwrap()
+            .iter()
+            .map(|path| cli_tools_common::path_to_filename_string(path))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Return the file names that `collect_files_with_names` finds under one root.
+    fn scan_named_files(root: &Path) -> Vec<String> {
+        let roots = Roots::new(vec![root.to_path_buf()], vec![root.to_path_buf()]);
+        let options = ScanOptions::default();
+        let name_filter = NameFilter::default();
+        let mut names: Vec<String> = Scanner::new(&roots, &options, &name_filter)
+            .collect_files_with_names()
+            .unwrap()
+            .iter()
+            .map(|file| cli_tools_common::path_to_filename_string(&file.path))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn collects_only_direct_child_files() {
+        let tree = TempTree::with_entries(&["root/a.mp4", "root/b.mkv", "root/nested/c.mp4", "root/empty/"]);
+
+        assert_eq!(scan_files(vec![tree.join("root")], &[], &[]), ["a.mp4", "b.mkv"]);
+    }
+
+    #[test]
+    fn applies_include_and_exclude_patterns_ignoring_case() {
+        let tree = TempTree::with_entries(&["root/Show.One.mp4", "root/Show.Sample.mp4", "root/Other.mp4"]);
+
+        assert_eq!(
+            scan_files(vec![tree.join("root")], &["SHOW"], &["sample"]),
+            ["Show.One.mp4"]
+        );
+    }
+
+    #[test]
+    fn explicit_file_inputs_are_included_and_not_repeated() {
+        let tree = TempTree::with_entries(&["root/a.mp4", "root/b.mp4", "elsewhere/c.mp4"]);
+
+        let names = scan_files(
+            vec![tree.join("root"), tree.join("root/a.mp4"), tree.join("elsewhere/c.mp4")],
+            &[],
+            &[],
+        );
+
+        assert_eq!(names, ["a.mp4", "b.mp4", "c.mp4"]);
+    }
+
+    #[test]
+    fn a_root_given_twice_is_scanned_once() {
+        let tree = TempTree::with_entries(&["root/a.mp4"]);
+
+        assert_eq!(
+            scan_files(vec![tree.join("root"), tree.join("root")], &[], &[]),
+            ["a.mp4"]
+        );
+    }
+
+    #[test]
+    fn hidden_files_are_offered_for_moves_but_never_grouped() {
+        let tree = TempTree::with_entries(&["root/.Show.Name.mp4", "root/Show.Name.mp4"]);
+
+        assert_eq!(
+            scan_files(vec![tree.join("root")], &[], &[]),
+            [".Show.Name.mp4", "Show.Name.mp4"]
+        );
+        assert_eq!(scan_named_files(&tree.join("root")), ["Show.Name.mp4"]);
     }
 }

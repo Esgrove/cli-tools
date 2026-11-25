@@ -357,3 +357,59 @@ mod test_first_output_normalized_name {
         assert_eq!(roots.first_output_normalized_name(), None);
     }
 }
+
+#[cfg(test)]
+mod test_output_depth {
+    use super::*;
+
+    #[test]
+    fn depth_is_relative_to_the_output_root() {
+        let roots = Roots::new(vec![PathBuf::from("/input")], vec![PathBuf::from("/media")]);
+
+        assert_eq!(roots.output_depth(Path::new("/media/Show")), 1);
+        assert_eq!(roots.output_depth(Path::new("/media/Show/Season 1")), 2);
+    }
+
+    #[test]
+    fn the_deepest_relative_depth_wins_when_roots_overlap() {
+        let roots = Roots::new(
+            vec![PathBuf::from("/input")],
+            vec![PathBuf::from("/media/shows"), PathBuf::from("/media")],
+        );
+
+        assert_eq!(roots.output_depth(Path::new("/media/shows/Show")), 2);
+    }
+
+    #[test]
+    fn paths_outside_every_root_use_their_component_count() {
+        let roots = Roots::new(vec![PathBuf::from("/input")], vec![PathBuf::from("/media")]);
+
+        assert_eq!(roots.output_depth(Path::new("relative/Show")), 2);
+    }
+}
+
+#[cfg(test)]
+mod test_merge_display_path_with_several_inputs {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn each_input_directory_is_shown_relative_to_its_own_input_root() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let first_root = tmp.path().join("first");
+        let second_root = tmp.path().join("second");
+        let output_root = tmp.path().join("output");
+        std::fs::create_dir_all(first_root.join("Alpha"))?;
+        std::fs::create_dir_all(second_root.join("nested").join("Beta"))?;
+        std::fs::create_dir_all(&output_root)?;
+
+        let roots = Roots::new(vec![first_root.clone(), second_root.clone()], vec![output_root]);
+
+        assert_eq!(roots.merge_display_path(&first_root.join("Alpha")), "Alpha");
+        assert_eq!(
+            roots.merge_display_path(&second_root.join("nested").join("Beta")),
+            Path::new("nested").join("Beta").display().to_string()
+        );
+        Ok(())
+    }
+}
