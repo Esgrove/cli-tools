@@ -435,6 +435,31 @@ replace = [
 # Delete files with width or height smaller than this limit (default: 500)
 # delete_limit = 500
 
+[rsbump]
+# Upgrade dependencies with "cargo upgrade --incompatible" and "cargo update"
+# update = false
+
+# Run "cargo clean"
+# clean = false
+
+# Run "cargo clippy --fix" and "cargo test" after updating
+# check = false
+
+# Commit the changes in each git repository
+# commit = false
+
+# Include projects whose git repository has uncommitted changes
+# force = false
+
+# Print the output of successful commands too
+# verbose = false
+
+# Number of projects processed in parallel (default: number of CPUs)
+# jobs = 8
+
+# Maximum directory depth when searching for projects (default: 5)
+# max_depth = 5
+
 [visaparse]
 # Only print information without writing to file
 # print = false

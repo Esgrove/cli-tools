@@ -532,6 +532,42 @@ Options:
   -h, --help             Print help (see more with '--help')
 ```
 
+## Rsbump
+
+Bump the Rust projects under the given paths, or the current directory, to the local Rust toolchain version.
+Sets `rust-version` in `Cargo.toml`, keeping its number of components,
+and pins `rust` images in Dockerfiles to the same version, so `rust:1-slim-trixie` becomes `rust:1.100-slim-trixie`.
+A pinned image digest is replaced with the current digest of the new tag from Docker Hub.
+Workspace members resolve to their workspace root, and projects are processed in parallel.
+Projects in a git repository with uncommitted changes are skipped unless `--force` is given.
+Upgrading dependencies needs `cargo upgrade` from `cargo-edit`.
+
+```console
+Bump Rust projects to the local Rust toolchain version
+
+Usage: rsbump [OPTIONS] [PATHS]... [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PATHS]...  Directories or Cargo.toml files to search for Rust projects. Defaults to current directory
+
+Options:
+  -u, --update         Upgrade dependencies with "cargo upgrade --incompatible" and "cargo update"
+  -c, --clean          Run "cargo clean"
+  -k, --check          Run "cargo clippy --fix" and "cargo test" after updating
+  -g, --commit         Commit the changes in each git repository
+  -f, --force          Include projects whose git repository has uncommitted changes
+  -p, --print          Only print what would change without changing anything
+  -j, --jobs <N>       Number of projects processed in parallel. Defaults to the number of CPUs
+  -m, --max-depth <N>  Maximum directory depth when searching for projects [default: 5]
+  -v, --verbose        Print the output of successful commands too
+  -h, --help           Print help
+  -V, --version        Print version
+```
+
 ## Rxrename
 
 Recursively remove a trailing `_1` from file names, for example `clip_1.mp4` becomes `clip.mp4`.

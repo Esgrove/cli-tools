@@ -173,6 +173,8 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `crates/flipdate/` → `flipdate` - Flip dates in filenames
     - `crates/qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming,
       show torrent stats
+    - `crates/rsbump/` → `rsbump` - Bump Rust projects to the local toolchain version,
+      pin `rust` Docker images to match, and optionally upgrade, clean, verify, and commit
     - `crates/rxrename/` → `rxrename` - Remove a trailing "_1" from file names
     - `crates/thumbs/` → `thumbs` - Create video thumbnail sheets
     - `crates/vconvert/` → `vconvert` - Video conversion to HEVC/MP4

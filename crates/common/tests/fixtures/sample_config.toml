@@ -133,6 +133,16 @@ overwrite = false
 recurse = false
 verbose = false
 
+[rsbump]
+update = false
+clean = false
+check = false
+commit = false
+force = false
+verbose = false
+jobs = 4
+max_depth = 5
+
 [video_stats]
 recurse = false
 verbose = false

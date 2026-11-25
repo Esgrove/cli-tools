@@ -43,6 +43,7 @@ fn sample_config_has_all_sections() {
         "resolution",
         "thumbnail",
         "slb",
+        "rsbump",
     ];
 
     for section in expected_sections {

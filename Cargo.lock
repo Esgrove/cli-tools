@@ -547,6 +547,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cli-tools-rsbump"
+version = "12.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "cli-tools-common",
+ "colored",
+ "rayon",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "toml_edit",
+ "walkdir",
+]
+
+[[package]]
 name = "cli-tools-rxrename"
 version = "12.0.0"
 dependencies = [
@@ -3022,6 +3042,7 @@ dependencies = [
  "cookie",
  "cookie_store",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
