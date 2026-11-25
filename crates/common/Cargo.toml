@@ -29,6 +29,7 @@ trash = { workspace = true }
 unicode-normalization = { workspace = true }
 walkdir = { workspace = true }
 tokio = { workspace = true, features = ["fs", "sync"], optional = true }
+tempfile = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
@@ -36,6 +37,7 @@ windows-sys = { workspace = true }
 [features]
 async = ["dep:num_cpus", "dep:tokio"]
 diff = ["dep:difference"]
+test-support = ["dep:tempfile"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }

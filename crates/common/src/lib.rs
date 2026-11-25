@@ -10,6 +10,8 @@ pub mod date;
 pub mod diff;
 pub mod file_handling;
 pub mod simd;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod utils;
 
 #[cfg(feature = "diff")]
