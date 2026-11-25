@@ -381,6 +381,13 @@ impl TaskFile {
         if task.id.is_empty() || task.id.starts_with('-') {
             bail!("Task ID '{}' must not be empty or start with a dash", task.id);
         }
+        // The ID names the task's log file, so it has to be a plain file name.
+        if task.id.contains(['/', '\\']) || task.id == "." || task.id == ".." {
+            bail!(
+                "Task ID '{}' must not contain a path separator or be '.' or '..'",
+                task.id
+            );
+        }
         if let Some(expression) = &task.when {
             let condition =
                 Condition::parse(expression).with_context(|| format!("Invalid 'when' for task '{}'", task.id))?;
@@ -616,6 +623,15 @@ mod test_task_file_validation {
         assert!(validate("[[tasks]]\nid = \"list\"\nlabel = \"L\"\ncommand = [\"true\"]").is_err());
         assert!(validate("[[tasks]]\nid = \"a\"\nlabel = \"A\"").is_err());
         assert!(validate("[[tasks]]\nid = \"a\"\nlabel = \"A\"\ncommand = []").is_err());
+    }
+
+    #[test]
+    fn rejects_task_ids_that_are_not_plain_file_names() {
+        for id in ["ns/sub", "ns\\\\sub", ".", ".."] {
+            let raw = format!("[[tasks]]\nid = \"{id}\"\nlabel = \"L\"\ncommand = [\"true\"]");
+            assert!(validate(&raw).is_err(), "{id}");
+        }
+        assert!(validate("[[tasks]]\nid = \"a.b-c_d\"\nlabel = \"L\"\ncommand = [\"true\"]").is_ok());
     }
 
     #[test]
