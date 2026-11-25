@@ -499,6 +499,12 @@ impl DirMove {
                 continue;
             };
 
+            // When the target lies inside the source, the entry holding the target stays where it is,
+            // since moving it would move a directory into itself.
+            if target.starts_with(&entry_path) || cli_tools_common::paths_refer_to_same_file(&entry_path, target) {
+                continue;
+            }
+
             let target_path = target.join(entry_name);
 
             if target_path.exists() {
@@ -7311,6 +7317,30 @@ mod test_merge_prefixed_directories {
         // Source directory should be deleted (empty after merge)
         assert_not_exists(&root_for_asserts.join("studio alpha"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn merging_a_directory_into_its_own_child_skips_the_child() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        write_file(&root.join("Show").join("episode.mkv"), "episode")?;
+        write_file(&root.join("Show").join("Show").join("other.mkv"), "other")?;
+        let source = root.join("Show");
+        let target = source.join("Show");
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec![], false, false, false));
+        dirmove.merge_directory_contents(&source, &target)?;
+
+        let file_count = walkdir::WalkDir::new(&source)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .count();
+        assert_eq!(file_count, 2);
+        assert_eq!(std::fs::read_to_string(target.join("episode.mkv"))?, "episode");
+        assert_eq!(std::fs::read_to_string(target.join("other.mkv"))?, "other");
+        assert_not_exists(&target.join("Show"));
         Ok(())
     }
 
