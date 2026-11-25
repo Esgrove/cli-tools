@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use cli_tools_common::{
-    path_to_filename_string, paths_refer_to_same_file, print_error, print_yellow, unique_sibling_path,
+    TargetReservations, path_to_filename_string, paths_refer_to_same_file, print_error, print_yellow,
+    unique_sibling_path,
 };
 use cli_tools_media::file_hash::hash_file;
 
@@ -63,20 +64,34 @@ pub fn move_files_to_target_dir(
     let progress_bar = create_move_progress_bar(total_size, hide_progress);
 
     let mut report = MoveReport::default();
+    // Names are sanitized to valid UTF-8, so two sources can end up with the same destination.
+    // Overwrite only replaces files that existed before the move, never another file moved in the same batch.
+    let mut reservations = TargetReservations::new();
     for (index, file_path) in files.iter().enumerate() {
-        let Some(os_file_name) = file_path.file_name() else {
+        let file_name = path_to_filename_string(file_path);
+        if file_name.is_empty() {
             progress_bar.suspend(|| {
                 print_error(&format!("Could not get file name for path: {}", file_path.display()));
             });
             report.failed_files.push(file_path.clone());
             continue;
-        };
-        let file_name = path_to_filename_string(file_path);
+        }
 
         progress_bar.set_message(format!("[{}/{}] {file_name}", index + 1, files.len()));
         let expected_size = file_sizes.get(file_path).copied().unwrap_or(0);
-        // The destination keeps the exact name, which may not be valid UTF-8 and has no lossless string form.
-        let new_path = dir_path.join(os_file_name);
+        let new_path = dir_path.join(&file_name);
+
+        if !reservations.reserve(&new_path) {
+            progress_bar.suspend(|| {
+                print_yellow(&format!(
+                    "Skipping {}, another file in this move has the same name",
+                    file_path.display()
+                ));
+            });
+            progress_bar.inc(expected_size);
+            report.skipped_files.push(file_path.clone());
+            continue;
+        }
 
         if new_path.exists() && !overwrite {
             progress_bar.suspend(|| {
@@ -730,7 +745,7 @@ mod test_move_files {
 
     #[cfg(unix)]
     #[test]
-    fn a_file_name_that_is_not_utf8_is_kept_exactly() -> anyhow::Result<()> {
+    fn a_file_name_that_is_not_utf8_is_sanitized() -> anyhow::Result<()> {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
@@ -738,8 +753,7 @@ mod test_move_files {
         let input = temp_directory.path().join("input");
         let output = temp_directory.path().join("output");
         fs::create_dir(&input)?;
-        let name = OsStr::from_bytes(b"Show.E01\xff.mkv");
-        let source = input.join(name);
+        let source = input.join(OsStr::from_bytes(b"Show.E01\xff.mkv"));
         // File systems such as APFS reject names that are not valid UTF-8, so there is nothing to test there.
         if fs::write(&source, "episode").is_err() {
             return Ok(());
@@ -748,7 +762,33 @@ mod test_move_files {
         let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
 
         assert_eq!(report.moved_files, vec![source]);
-        assert_eq!(fs::read_to_string(output.join(name))?, "episode");
+        assert_eq!(fs::read_to_string(output.join("Show.E01.mkv"))?, "episode");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn names_that_sanitize_alike_never_overwrite_each_other() -> anyhow::Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_directory = tempfile::TempDir::new()?;
+        let input = temp_directory.path().join("input");
+        let output = temp_directory.path().join("output");
+        fs::create_dir(&input)?;
+        let first = input.join(OsStr::from_bytes(b"Show.E01\xfe.mkv"));
+        let second = input.join(OsStr::from_bytes(b"Show.E01\xff.mkv"));
+        if fs::write(&first, "first").is_err() {
+            return Ok(());
+        }
+        fs::write(&second, "second")?;
+
+        let report = move_files_to_target_dir(&output, &[first.clone(), second.clone()], true, false, true)?;
+
+        assert_eq!(report.moved_files, vec![first]);
+        assert_eq!(report.skipped_files, vec![second.clone()]);
+        assert_eq!(fs::read_to_string(output.join("Show.E01.mkv"))?, "first");
+        assert_eq!(fs::read_to_string(&second)?, "second");
         Ok(())
     }
 
