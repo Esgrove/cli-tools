@@ -67,16 +67,6 @@ pub struct FilteredParts {
     pub three_parts_original: Vec<String>,
 }
 
-/// A pair of directories to merge: source (with prefix) into target (without prefix).
-/// Used during the `merge_prefixed_directories` operation.
-#[derive(Debug)]
-pub struct MergePair {
-    /// Directory with the `prefix_ignore` prefix (to be merged from).
-    pub source: PathBuf,
-    /// Directory without the prefix (to be merged into).
-    pub target: PathBuf,
-}
-
 /// A candidate prefix for grouping files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixCandidate<'a> {
@@ -311,14 +301,6 @@ impl DirectoryInfo {
     pub fn new(path: PathBuf) -> Self {
         let name = path_to_filename_string(&path).to_lowercase().replace('.', " ");
         Self { path, name }
-    }
-}
-
-impl MergePair {
-    /// Create a new `MergePair`.
-    #[must_use]
-    pub const fn new(source: PathBuf, target: PathBuf) -> Self {
-        Self { source, target }
     }
 }
 

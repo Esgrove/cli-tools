@@ -213,7 +213,20 @@ pub fn find_command(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Whether the path is a regular file with an executable permission bit on Unix, or any regular file elsewhere.
+/// Count the regular files under a directory, recursively.
+///
+/// Symlinks are not followed, and entries that cannot be read are not counted.
+#[must_use]
+pub fn count_files(directory: &Path) -> usize {
+    walkdir::WalkDir::new(directory)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .count()
+}
+
+/// Whether the path is a regular file with an executable permission bit on Unix,
+/// or any regular file elsewhere.
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
@@ -487,5 +500,45 @@ mod test_find_command {
         assert!(find_command(&script.to_string_lossy()).is_none());
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("should chmod");
         assert_eq!(find_command(&script.to_string_lossy()), Some(script));
+    }
+}
+
+#[cfg(test)]
+mod test_count_files {
+    use super::*;
+
+    /// Create an empty file, creating its parent directories.
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("path should have a parent")).expect("should create parents");
+        std::fs::write(path, "").expect("should write file");
+    }
+
+    #[test]
+    fn counts_files_in_nested_directories() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        touch(&temp.path().join("a.txt"));
+        touch(&temp.path().join("nested/b.txt"));
+        touch(&temp.path().join("nested/deeper/c.txt"));
+        std::fs::create_dir(temp.path().join("empty")).expect("should create directory");
+
+        assert_eq!(count_files(temp.path()), 3);
+    }
+
+    #[test]
+    fn missing_directory_has_no_files() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        assert_eq!(count_files(&temp.path().join("missing")), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_not_counted() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        touch(&temp.path().join("outside/target.txt"));
+        touch(&temp.path().join("inside/real.txt"));
+        std::os::unix::fs::symlink(temp.path().join("outside"), temp.path().join("inside/linked"))
+            .expect("should create symlink");
+
+        assert_eq!(count_files(&temp.path().join("inside")), 1);
     }
 }

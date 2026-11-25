@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::grouping::{GroupingOptions, PrefixGrouper};
 use crate::matcher::{CustomMapping, DirectoryMatcher};
+use crate::merge::{DirectoryMerger, find_prefix_merge_pairs};
 use crate::name_filter::NameFilter;
 use crate::roots::Roots;
 use crate::scanner::{ScanOptions, Scanner};
@@ -237,6 +238,22 @@ pub fn make_file_paths(names: &[&str]) -> Vec<PathBuf> {
 /// Unpack the given directory names under `root` without reporting anything.
 pub fn unpack(root: &Path, names: &[&str], recurse: bool, dry_run: bool, overwrite: bool) {
     Unpacker::new(names, overwrite, dry_run).unpack(&[root.to_path_buf()], recurse, &mut ());
+}
+
+/// Merge every directory under `root` with an ignored prefix into its unprefixed sibling, reporting nothing.
+pub fn merge_prefixed(
+    root: &Path,
+    prefix_ignores: &[&str],
+    recurse: bool,
+    dry_run: bool,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    let name_filter = NameFilter::new(prefix_ignores, Vec::<String>::new());
+    let merger = DirectoryMerger::new(overwrite, dry_run);
+    for pair in find_prefix_merge_pairs(&[root.to_path_buf()], recurse, &name_filter)? {
+        merger.merge(&pair.source, &pair.target, &mut ())?;
+    }
+    Ok(())
 }
 
 /// Write a file, creating its parent directories.

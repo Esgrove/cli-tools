@@ -22,10 +22,10 @@ pub use file_handling::{
     write_atomically,
 };
 pub use utils::{
-    command_exists, find_command, get_relative_path_from_current_working_directory, get_relative_path_or_filename,
-    glob_to_regex, leading_whitespace, lowercase_extension, os_str_to_string, path_to_file_extension_string,
-    path_to_file_stem_string, path_to_filename_string, path_to_string, path_to_string_relative,
-    path_to_string_relative_to, starts_with_ignore_case, strings_from,
+    command_exists, count_files, find_command, get_relative_path_from_current_working_directory,
+    get_relative_path_or_filename, glob_to_regex, leading_whitespace, lowercase_extension, os_str_to_string,
+    path_to_file_extension_string, path_to_file_stem_string, path_to_filename_string, path_to_string,
+    path_to_string_relative, path_to_string_relative_to, starts_with_ignore_case, strings_from,
 };
 
 use std::env;
@@ -194,7 +194,8 @@ pub fn colorize_bool(value: bool) -> ColoredString {
 /// This is useful when producing a cleaned display filename
 /// after removing tokens such as codecs, resolutions, or release tags.
 /// Consecutive separators made from dots, hyphens, underscores,
-/// or whitespace are reduced to the first separator in each sequence, then any remaining separator is trimmed from both ends.
+/// or whitespace are reduced to the first separator in each sequence,
+/// then any remaining separator is trimmed from both ends.
 ///
 /// # Examples
 ///
