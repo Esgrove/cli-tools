@@ -14,6 +14,7 @@ use tokio::process::Command;
 use tokio::sync::SemaphorePermit;
 use walkdir::WalkDir;
 
+use cli_tools_common::file_handling::TargetReservations;
 use cli_tools_common::{create_semaphore_for_io_bound, print_bold, print_green};
 use cli_tools_media::Resolution;
 use cli_tools_media::resolution::print_fuzzy_resolution_ranges;
@@ -109,8 +110,19 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
 
     print_bold!("Resolution               Label   Path");
 
+    // Several files can map to the same target, for example "Movie.mp4" and "Movie.1920x1080.mp4".
+    // Only the first one is renamed, so overwrite never replaces a file renamed earlier in the same run.
+    let mut reservations = TargetReservations::new();
     let mut num_renamed = 0;
     for (result, new_path) in files_to_process {
+        if !reservations.reserve(&new_path) {
+            cli_tools_common::print_error!(
+                "Skipping {}, another file is already renamed to {}",
+                cli_tools_common::path_to_string_relative(&result.file),
+                cli_tools_common::path_to_string_relative(&new_path)
+            );
+            continue;
+        }
         match result.rename(&new_path, config.overwrite, config.dryrun) {
             Ok(()) => num_renamed += 1,
             Err(error) => cli_tools_common::print_error!("{error}"),
@@ -209,7 +221,8 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
         let mut dir_entries = tokio::fs::read_dir(&path).await?;
         while let Some(ref entry) = dir_entries.next_entry().await? {
             let path = entry.path();
-            if path.is_file()
+            // The entry type does not follow symlinks, matching the recursive walk.
+            if entry.file_type().await.is_ok_and(|file_type| file_type.is_file())
                 && !cli_tools_common::is_hidden_tokio(entry)
                 && !cli_tools_common::is_system_directory_tokio(entry)
                 && let Some(ext) = path.extension().and_then(|s| s.to_str())
@@ -1005,5 +1018,314 @@ mod test_delete_low_resolution_files {
         let remaining = delete_low_resolution_files(results, 720, &config(false));
 
         assert_eq!(kept(&remaining), vec!["large.mp4"]);
+    }
+}
+
+#[cfg(test)]
+mod test_gather_nested_trees {
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    /// Paths of the gathered files relative to the tree root, sorted, with "/" separators.
+    fn relative(tree: &TempTree, files: &[PathBuf]) -> Vec<String> {
+        let mut paths: Vec<String> = files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(tree.path())
+                    .expect("gathered file should be inside the tree")
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// Gather from the tree root in both modes and return the relative paths as (shallow, recursive).
+    async fn gather_both(tree: &TempTree) -> (Vec<String>, Vec<String>) {
+        let shallow = gather_video_files(tree.path(), false, false)
+            .await
+            .expect("shallow gathering should succeed");
+        let deep = gather_video_files(tree.path(), true, false)
+            .await
+            .expect("recursive gathering should succeed");
+        (relative(tree, &shallow), relative(tree, &deep))
+    }
+
+    #[tokio::test]
+    async fn videos_at_every_depth_are_gathered_only_when_recursing() {
+        let tree = TempTree::with_entries(&[
+            "top.mp4",
+            "one/first.mkv",
+            "one/two/second.mp4",
+            "one/two/three/third.mp4",
+            "one/two/three/notes.txt",
+            "other/four/five/six/deepest.mp4",
+            "empty/nested/",
+        ]);
+
+        let (shallow, deep) = gather_both(&tree).await;
+
+        assert_eq!(shallow, vec!["top.mp4"]);
+        assert_eq!(
+            deep,
+            vec![
+                "one/first.mkv",
+                "one/two/second.mp4",
+                "one/two/three/third.mp4",
+                "other/four/five/six/deepest.mp4",
+                "top.mp4",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_directories_and_files_are_skipped_at_any_depth() {
+        let tree = TempTree::with_entries(&[
+            "visible.mp4",
+            ".hidden.mp4",
+            ".cache/inside.mp4",
+            "season/episode.mp4",
+            "season/.partial.mp4",
+            "season/.thumbnails/preview.mp4",
+            "season/extras/.git/object.mp4",
+            "season/extras/bonus.mp4",
+        ]);
+
+        let (shallow, deep) = gather_both(&tree).await;
+
+        assert_eq!(shallow, vec!["visible.mp4"]);
+        assert_eq!(
+            deep,
+            vec!["season/episode.mp4", "season/extras/bonus.mp4", "visible.mp4"]
+        );
+    }
+
+    #[tokio::test]
+    async fn system_directories_are_skipped_when_recursing() {
+        let tree = TempTree::with_entries(&[
+            "movie.mp4",
+            "$RECYCLE.BIN/deleted.mp4",
+            "nested/#Recycle/removed.mp4",
+            "nested/kept.mp4",
+        ]);
+
+        let (_, deep) = gather_both(&tree).await;
+
+        assert_eq!(deep, vec!["movie.mp4", "nested/kept.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn labelled_files_are_skipped_in_nested_directories_too() {
+        let tree = TempTree::with_entries(&["a/b/c/plain.mp4", "a/b/c/done.1080p.mp4", "a/b/vertical.1080x1920.mp4"]);
+
+        let (_, deep) = gather_both(&tree).await;
+
+        assert_eq!(deep, vec!["a/b/c/plain.mp4", "a/b/vertical.1080x1920.mp4"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_directories_are_not_followed() {
+        let tree = TempTree::with_entries(&["library/show/episode.mp4"]);
+        tree.symlink("library", "shortcut");
+        tree.symlink("library", "library/show/loop");
+
+        let (shallow, deep) = gather_both(&tree).await;
+
+        assert_eq!(shallow, Vec::<String>::new());
+        assert_eq!(deep, vec!["library/show/episode.mp4"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_files_are_skipped_in_both_modes() {
+        let tree = TempTree::with_entries(&["real.mp4", "nested/real.mkv"]);
+        tree.symlink("real.mp4", "link.mp4");
+        tree.symlink("nested/real.mkv", "nested/link.mkv");
+
+        let (shallow, deep) = gather_both(&tree).await;
+
+        assert_eq!(shallow, vec!["real.mp4"]);
+        assert_eq!(deep, vec!["nested/real.mkv", "real.mp4"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_non_utf8_name_is_skipped_without_failing_the_walk() {
+        let tree = TempTree::with_entries(&["valid.mp4", "nested/valid.mp4"]);
+        let created = tree.non_utf8_file("nested", "broken", "mp4").is_some();
+
+        let (_, deep) = gather_both(&tree).await;
+
+        assert_eq!(
+            deep,
+            vec!["nested/valid.mp4", "valid.mp4"],
+            "non-UTF-8 created: {created}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_root_that_is_a_non_video_file_is_an_error() {
+        let tree = TempTree::with_entries(&["notes.txt"]);
+
+        let shallow = gather_video_files(&tree.join("notes.txt"), false, false).await;
+        let deep = gather_video_files(&tree.join("notes.txt"), true, false).await;
+
+        assert!(shallow.is_err());
+        assert!(deep.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_nested_video_file_given_as_the_root_is_gathered_alone() {
+        let tree = TempTree::with_entries(&["a/b/c/clip.mp4", "a/b/c/other.mp4"]);
+        let file = tree.join("a/b/c/clip.mp4");
+
+        let files = gather_video_files(&file, true, false)
+            .await
+            .expect("a single video file should be accepted");
+
+        assert_eq!(files, vec![file]);
+    }
+
+    #[tokio::test]
+    async fn gathering_does_not_change_the_tree() {
+        let tree = TempTree::with_entries(&["a/one.mp4", "a/b/two.mkv", "a/b/c/three.txt", ".hidden/four.mp4"]);
+        let before = tree.snapshot();
+
+        gather_both(&tree).await;
+
+        assert_eq!(tree.snapshot(), before);
+    }
+}
+
+#[cfg(test)]
+mod test_add_resolution_labels_in_trees {
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    /// Config for renaming inside the tree.
+    fn config(tree: &TempTree, dryrun: bool, overwrite: bool) -> Config {
+        Config {
+            debug: false,
+            delete_limit: None,
+            dryrun,
+            overwrite,
+            path: tree.path().to_path_buf(),
+            recurse: true,
+            verbose: true,
+        }
+    }
+
+    /// Probe results that give every relative path the same resolution.
+    fn results(tree: &TempTree, relative_paths: &[&str], width: u32, height: u32) -> Vec<FFProbeResult> {
+        relative_paths
+            .iter()
+            .map(|relative| FFProbeResult {
+                file: tree.join(relative),
+                resolution: Resolution::new(width, height),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn files_in_nested_directories_are_renamed_in_place() {
+        let tree = TempTree::new();
+        tree.file_with("movie.mp4", "top");
+        tree.file_with("a/movie.mp4", "one level");
+        tree.file_with("a/b/c/movie.x265.mkv", "three levels");
+        let files = results(&tree, &["movie.mp4", "a/movie.mp4", "a/b/c/movie.x265.mkv"], 1920, 1080);
+
+        let renamed = add_resolution_labels(&config(&tree, false, false), files);
+
+        assert_eq!(renamed, 3);
+        assert_eq!(
+            tree.snapshot(),
+            vec![
+                "a/",
+                "a/b/",
+                "a/b/c/",
+                "a/b/c/movie.1080p.x265.mkv: three levels",
+                "a/movie.1080p.mp4: one level",
+                "movie.1080p.mp4: top",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dryrun_leaves_the_whole_tree_unchanged() {
+        let tree = TempTree::new();
+        tree.file_with("a/movie.mp4", "one");
+        tree.file_with("a/b/clip.1920x1080.mp4", "two");
+        let before = tree.snapshot();
+        let files = results(&tree, &["a/movie.mp4", "a/b/clip.1920x1080.mp4"], 1920, 1080);
+
+        let renamed = add_resolution_labels(&config(&tree, true, false), files);
+
+        assert_eq!(renamed, 2);
+        assert_eq!(tree.snapshot(), before);
+    }
+
+    #[test]
+    fn two_files_with_the_same_target_keep_both_without_overwrite() {
+        let tree = TempTree::new();
+        tree.file_with("dir/Movie.mp4", "plain");
+        tree.file_with("dir/Movie.1920x1080.mp4", "full resolution");
+        let files = results(&tree, &["dir/Movie.mp4", "dir/Movie.1920x1080.mp4"], 1920, 1080);
+
+        let renamed = add_resolution_labels(&config(&tree, false, false), files);
+
+        assert_eq!(renamed, 1);
+        assert_eq!(tree.files().len(), 2, "{:?}", tree.snapshot());
+    }
+
+    #[test]
+    fn two_files_with_the_same_target_keep_both_with_overwrite() {
+        let tree = TempTree::new();
+        tree.file_with("dir/Movie.mp4", "plain");
+        tree.file_with("dir/Movie.1920x1080.mp4", "full resolution");
+        let files = results(&tree, &["dir/Movie.mp4", "dir/Movie.1920x1080.mp4"], 1920, 1080);
+
+        let renamed = add_resolution_labels(&config(&tree, false, true), files);
+
+        assert_eq!(renamed, 1);
+        let snapshot = tree.snapshot();
+        assert_eq!(tree.files().len(), 2, "{snapshot:?}");
+        assert!(snapshot.iter().any(|entry| entry.ends_with(": plain")), "{snapshot:?}");
+        assert!(
+            snapshot.iter().any(|entry| entry.ends_with(": full resolution")),
+            "{snapshot:?}"
+        );
+    }
+
+    #[test]
+    fn targets_differing_only_by_case_are_not_both_renamed_onto_each_other() {
+        let tree = TempTree::new();
+        tree.file_with("dir/movie.mp4", "lower");
+        tree.file_with("dir/MOVIE.1920x1080.mp4", "upper");
+        let files = results(&tree, &["dir/movie.mp4", "dir/MOVIE.1920x1080.mp4"], 1920, 1080);
+
+        add_resolution_labels(&config(&tree, false, true), files);
+
+        let snapshot = tree.snapshot();
+        assert!(snapshot.iter().any(|entry| entry.ends_with(": lower")), "{snapshot:?}");
+        assert!(snapshot.iter().any(|entry| entry.ends_with(": upper")), "{snapshot:?}");
+    }
+
+    #[test]
+    fn overwrite_replaces_a_file_that_existed_before_the_run() {
+        let tree = TempTree::new();
+        tree.file_with("dir/movie.mp4", "new");
+        tree.file_with("dir/movie.1080p.mp4", "old");
+        let files = results(&tree, &["dir/movie.mp4"], 1920, 1080);
+
+        let renamed = add_resolution_labels(&config(&tree, false, true), files);
+
+        assert_eq!(renamed, 1);
+        assert_eq!(tree.snapshot(), vec!["dir/", "dir/movie.1080p.mp4: new"]);
     }
 }
