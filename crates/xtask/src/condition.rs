@@ -11,6 +11,13 @@ use anyhow::{Result, bail};
 /// Condition names that are always available, evaluated from the platform and the run options.
 pub const BUILTIN_CONDITIONS: &[&str] = &["macos", "linux", "windows", "unix", "ci", "dryrun"];
 
+/// Most tokens accepted in one expression.
+///
+/// Parsing, evaluating, and dropping a condition all recurse once per level of the tree,
+/// and a tree is never deeper than its token count,
+/// so the cap turns a runaway expression into an error instead of a stack overflow.
+const MAX_TOKENS: usize = 1024;
+
 /// Parsed boolean condition expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Condition {
@@ -51,6 +58,9 @@ impl Condition {
         let tokens = tokenize(expression)?;
         if tokens.is_empty() {
             bail!("Empty condition expression");
+        }
+        if tokens.len() > MAX_TOKENS {
+            bail!("Condition has more than {MAX_TOKENS} tokens");
         }
         let mut parser = Parser { tokens, position: 0 };
         let condition = parser.parse_or()?;
@@ -239,5 +249,149 @@ mod test_condition_parsing {
     fn propagates_resolver_errors() {
         let condition = Condition::parse("unknown").expect("should parse");
         assert!(condition.evaluate(&mut |_| bail!("unknown identifier")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_condition_properties {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Small identifier set, so expressions repeat names and the truth table stays small.
+    const NAMES: &[&str] = &["ci", "macos", "sign-in", "fast_path", "a1"];
+
+    /// Generated condition tree.
+    fn condition() -> impl Strategy<Value = Condition> {
+        let leaf = prop::sample::select(NAMES).prop_map(|name| Condition::Identifier(name.to_string()));
+        leaf.prop_recursive(6, 48, 2, |inner| {
+            prop_oneof![
+                inner.clone().prop_map(|condition| Condition::Not(Box::new(condition))),
+                (inner.clone(), inner.clone())
+                    .prop_map(|(left, right)| Condition::And(Box::new(left), Box::new(right))),
+                (inner.clone(), inner).prop_map(|(left, right)| Condition::Or(Box::new(left), Box::new(right))),
+            ]
+        })
+    }
+
+    /// Render with every binary operation in parentheses, so parsing must rebuild the same tree.
+    fn render(condition: &Condition) -> String {
+        match condition {
+            Condition::Identifier(name) => name.clone(),
+            Condition::Not(inner) => format!("!{}", render(inner)),
+            Condition::And(left, right) => format!("({} && {})", render(left), render(right)),
+            Condition::Or(left, right) => format!("({} || {})", render(left), render(right)),
+        }
+    }
+
+    /// Render without parentheses where precedence makes them unnecessary.
+    fn render_minimal(condition: &Condition) -> String {
+        match condition {
+            Condition::Identifier(name) => name.clone(),
+            Condition::Not(inner) => match inner.as_ref() {
+                Condition::And(..) | Condition::Or(..) => format!("!({})", render_minimal(inner)),
+                _ => format!("!{}", render_minimal(inner)),
+            },
+            Condition::And(left, right) => {
+                let wrap = |side: &Condition, parenthesize_and: bool| match side {
+                    Condition::Or(..) => format!("({})", render_minimal(side)),
+                    Condition::And(..) if parenthesize_and => format!("({})", render_minimal(side)),
+                    _ => render_minimal(side),
+                };
+                format!("{} && {}", wrap(left, false), wrap(right, true))
+            }
+            Condition::Or(left, right) => {
+                let right_text = match right.as_ref() {
+                    Condition::Or(..) => format!("({})", render_minimal(right)),
+                    _ => render_minimal(right),
+                };
+                format!("{} || {}", render_minimal(left), right_text)
+            }
+        }
+    }
+
+    /// Evaluate with the names set to true by the bits of `assignment`.
+    fn truth(condition: &Condition, assignment: u8) -> bool {
+        condition
+            .evaluate(&mut |name: &str| {
+                let index = NAMES.iter().position(|known| *known == name).unwrap_or_default();
+                Ok(assignment & (1 << index) != 0)
+            })
+            .expect("resolving a known name never fails")
+    }
+
+    proptest! {
+        #[test]
+        fn parsing_a_rendered_condition_rebuilds_it(condition in condition()) {
+            let parsed = Condition::parse(&render(&condition)).expect("a rendered condition should parse");
+            prop_assert_eq!(parsed, condition);
+        }
+
+        #[test]
+        fn minimal_parentheses_keep_the_same_tree(condition in condition()) {
+            let text = render_minimal(&condition);
+            let parsed = Condition::parse(&text).expect("a rendered condition should parse");
+            prop_assert_eq!(parsed, condition, "{}", text);
+        }
+
+        #[test]
+        fn identifiers_are_listed_in_order(condition in condition()) {
+            let text = render(&condition);
+            let expected: Vec<&str> = text
+                .split(|character: char| !is_identifier_character(character))
+                .filter(|part| !part.is_empty())
+                .collect();
+            prop_assert_eq!(condition.identifiers(), expected);
+        }
+
+        #[test]
+        fn rendering_preserves_the_truth_table(condition in condition()) {
+            let parsed = Condition::parse(&render_minimal(&condition)).expect("a rendered condition should parse");
+            for assignment in 0..32_u8 {
+                prop_assert_eq!(truth(&parsed, assignment), truth(&condition, assignment));
+            }
+        }
+
+        #[test]
+        fn parsing_never_panics(text in "[a-z!&|() \\-_]{0,60}") {
+            let _ = Condition::parse(&text);
+        }
+    }
+
+    #[test]
+    fn deeply_nested_expressions_are_an_error_instead_of_a_stack_overflow() {
+        let negations = format!("{}ci", "!".repeat(100_000));
+        assert!(Condition::parse(&negations).is_err());
+        let parentheses = format!("{}ci{}", "(".repeat(100_000), ")".repeat(100_000));
+        assert!(Condition::parse(&parentheses).is_err());
+    }
+
+    #[test]
+    fn long_flat_chains_are_an_error_instead_of_a_stack_overflow() {
+        let chain = vec!["ci"; 100_000].join(" && ");
+        assert!(Condition::parse(&chain).is_err());
+    }
+
+    #[test]
+    fn the_longest_accepted_chain_parses_evaluates_and_drops() {
+        let chain = vec!["ci"; MAX_TOKENS.div_ceil(2)].join(" && ");
+        let condition = Condition::parse(&chain).expect("a chain within the limit should parse");
+        assert!(
+            condition
+                .evaluate(&mut |_| Ok(true))
+                .expect("evaluation should succeed")
+        );
+
+        let negations = format!("{}ci", "!".repeat(MAX_TOKENS - 1));
+        let condition = Condition::parse(&negations).expect("nesting within the limit should parse");
+        assert!(
+            !condition
+                .evaluate(&mut |_| Ok(true))
+                .expect("evaluation should succeed")
+        );
+
+        let half = (MAX_TOKENS - 1) / 2;
+        let parentheses = format!("{}ci{}", "(".repeat(half), ")".repeat(half));
+        assert!(Condition::parse(&parentheses).is_ok());
     }
 }

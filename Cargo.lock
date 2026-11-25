@@ -773,6 +773,7 @@ dependencies = [
  "dunce",
  "indicatif",
  "jiff",
+ "proptest",
  "serde",
  "tempfile",
  "toml",
