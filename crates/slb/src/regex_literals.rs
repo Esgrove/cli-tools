@@ -5,7 +5,7 @@
 //! The decision is made from the code before the slash,
 //! and the scanner is told the line is uncertain when neither reading can be ruled out.
 
-use super::scanner::{Backtick, Cursor, NormalStep, RE_BLOCK_SCALAR, ScanState, rest_starts_with};
+use super::scanner::{Backtick, Cursor, LineChars, NormalStep, RE_BLOCK_SCALAR, ScanState, rest_starts_with};
 use super::string_syntax::StringSyntax;
 
 /// Preserve subsequent source when an unsupported regex may hide a multiline construct.
@@ -113,13 +113,13 @@ pub(super) fn regex_can_start(prefix: &str) -> bool {
 /// Escapes and character classes hide slash characters.
 /// Unescaped quotes can start strings after division or within paths, even inside a presumed regex class.
 /// Nested classes may use Unicode set syntax, so leave them unchanged rather than guess at their boundaries.
-pub(super) fn find_regex_end(chars: &[(usize, char)], mut index: usize) -> Option<usize> {
+pub(super) fn find_regex_end(chars: LineChars<'_>, mut index: usize) -> Option<usize> {
     let mut in_class = false;
-    while let Some(&(_, character)) = chars.get(index) {
+    while let Some((_, character)) = chars.get(index) {
         match character {
             '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\'' | '"' | '`' => return None,
             '\\' => {
-                let &(_, escaped) = chars.get(index + 1)?;
+                let (_, escaped) = chars.get(index + 1)?;
                 if matches!(escaped, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
                     return None;
                 }
@@ -147,7 +147,7 @@ pub(super) fn find_regex_end(chars: &[(usize, char)], mut index: usize) -> Optio
 /// Do not consume a comment opener as a regex delimiter, but allow comments attached after a complete regex.
 /// A statement separator makes an attached comment ambiguous, so the caller must leave that source unchanged.
 pub(super) fn regex_end_overlaps_comment(
-    chars: &[(usize, char)],
+    chars: LineChars<'_>,
     end: usize,
     candidate: &str,
     syntax: &StringSyntax,
@@ -158,7 +158,7 @@ pub(super) fn regex_end_overlaps_comment(
 }
 
 /// Whether a line or block comment opener begins at a character index.
-pub(super) fn comment_starts_at(chars: &[(usize, char)], index: usize, syntax: &StringSyntax) -> bool {
+pub(super) fn comment_starts_at(chars: LineChars<'_>, index: usize, syntax: &StringSyntax) -> bool {
     rest_starts_with(chars, index, syntax.line_marker)
         || syntax
             .block_comment

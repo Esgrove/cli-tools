@@ -201,11 +201,15 @@ fn run_lines(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: b
 }
 
 /// Split text into lines keeping each line's own ending.
+///
+/// Every newline is found in one SIMD pass over the whole text,
+/// which is faster than searching again from the start of each line.
 fn split_lines(text: &str) -> Vec<SourceLine<'_>> {
-    let mut lines = Vec::new();
+    let newlines = cli_tools_common::simd::byte_positions(text.as_bytes(), b'\n');
+    let mut lines = Vec::with_capacity(newlines.len() + 1);
     let mut start = 0;
-    for (index, _) in text.match_indices('\n') {
-        let line_end = if text.get(..index).is_some_and(|before| before.ends_with('\r')) {
+    for index in newlines {
+        let line_end = if index.checked_sub(1).and_then(|before| text.as_bytes().get(before)) == Some(&b'\r') {
             index - 1
         } else {
             index

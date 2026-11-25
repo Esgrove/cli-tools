@@ -12,8 +12,27 @@ use regex::Regex;
 use super::regex_literals::{
     comment_starts_at, division_can_start, find_regex_end, regex_can_start, regex_end_overlaps_comment, uncertain_regex,
 };
-use super::string_syntax::{StringSyntax, first_byte_or_slash};
+use super::string_syntax::StringSyntax;
 use cli_tools_common::leading_whitespace;
+use cli_tools_common::simd::ByteSet;
+
+/// Bytes that can change the state inside a double quoted string.
+const DOUBLE_QUOTED_SET: ByteSet = ByteSet::new(b"\"\\");
+
+/// Bytes that can change the state inside a single quoted string.
+const SINGLE_QUOTED_SET: ByteSet = ByteSet::new(b"'\\");
+
+/// Bytes that can change the state inside a backtick quoted string.
+const BACKTICK_QUOTED_SET: ByteSet = ByteSet::new(b"`\\");
+
+/// Bytes that can change the state inside a Rust raw string.
+const RAW_STRING_SET: ByteSet = ByteSet::new(b"\"");
+
+/// Bytes that can change the state inside a JavaScript template literal.
+const TEMPLATE_SET: ByteSet = ByteSet::new(b"\\`");
+
+/// Bytes that can change the state inside a Go raw string.
+const BACKTICK_RAW_SET: ByteSet = ByteSet::new(b"`");
 
 /// Matches a shell heredoc start and captures the terminator word.
 static RE_HEREDOC: LazyLock<Regex> =
@@ -80,6 +99,18 @@ pub(super) enum NormalStep {
     Uncertain,
 }
 
+/// The characters of one line, indexed by character position.
+///
+/// An ASCII line is its own index, since every character is one byte.
+/// Only a line with multibyte characters is decoded into a table of byte offsets and characters.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum LineChars<'a> {
+    /// A line of ASCII bytes, where the character index is the byte offset.
+    Ascii(&'a [u8]),
+    /// The byte offset and character of every character of a line with multibyte characters.
+    Decoded(&'a [(usize, char)]),
+}
+
 /// Result of scanning one line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanResult {
@@ -100,6 +131,50 @@ pub(super) struct Cursor {
     pub(super) uncertain: bool,
     /// Heredoc terminator to enter after this line.
     pub(super) pending_heredoc: Option<String>,
+}
+
+impl<'a> LineChars<'a> {
+    /// View the line, decoding it into the buffer only when it has multibyte characters.
+    pub(super) fn new(line: &'a str, buffer: &'a mut Vec<(usize, char)>) -> Self {
+        if line.is_ascii() {
+            Self::Ascii(line.as_bytes())
+        } else {
+            buffer.clear();
+            buffer.extend(line.char_indices());
+            Self::Decoded(buffer.as_slice())
+        }
+    }
+
+    /// The byte offset and character at the character index.
+    #[inline]
+    pub(super) fn get(self, index: usize) -> Option<(usize, char)> {
+        match self {
+            Self::Ascii(bytes) => bytes.get(index).map(|&byte| (index, char::from(byte))),
+            Self::Decoded(chars) => chars.get(index).copied(),
+        }
+    }
+
+    /// Number of characters in the line.
+    #[inline]
+    pub(super) const fn len(self) -> usize {
+        match self {
+            Self::Ascii(bytes) => bytes.len(),
+            Self::Decoded(chars) => chars.len(),
+        }
+    }
+
+    /// Index of the first character at or after `from` that starts at or after the byte offset.
+    fn index_at_byte(self, from: usize, byte_offset: usize) -> usize {
+        match self {
+            Self::Ascii(_) => byte_offset.max(from),
+            Self::Decoded(chars) => {
+                from + chars
+                    .get(from..)
+                    .unwrap_or_default()
+                    .partition_point(|&(byte, _)| byte < byte_offset)
+            }
+        }
+    }
 }
 
 /// Scan one line of code for a comment marker that follows code.
@@ -123,8 +198,7 @@ pub(super) fn scan_line_buffered(
     if let Some(result) = line_level_state(line, &mut state) {
         return result;
     }
-    if state == ScanState::Normal && !cli_tools_common::simd::contains_byte_of(line.as_bytes(), &syntax.trigger_bytes())
-    {
+    if state == ScanState::Normal && !cli_tools_common::simd::contains_byte_in(line.as_bytes(), &syntax.trigger_set) {
         return ScanResult {
             state: normal_line_end_state(line, syntax),
             comment_start: None,
@@ -145,9 +219,7 @@ fn scan_characters(
     characters: &mut Vec<(usize, char)>,
     skip_ahead: bool,
 ) -> ScanResult {
-    characters.clear();
-    characters.extend(line.char_indices());
-    let chars = characters.as_slice();
+    let chars = LineChars::new(line, characters);
     let mut cursor = Cursor::default();
     while cursor.index < chars.len() {
         if skip_ahead {
@@ -201,69 +273,43 @@ fn normal_line_end_state(line: &str, syntax: &StringSyntax) -> ScanState {
 /// Returns `chars.len()` when no such character remains.
 fn next_significant_index(
     line: &str,
-    chars: &[(usize, char)],
+    chars: LineChars<'_>,
     index: usize,
     state: &ScanState,
     syntax: &StringSyntax,
 ) -> usize {
-    let Some((set, length)) = significant_bytes(state, syntax) else {
+    let Some(set) = significant_set(state, syntax) else {
         return index;
     };
-    let Some(&(start, _)) = chars.get(index) else {
+    let Some((start, _)) = chars.get(index) else {
         return index;
     };
     let rest = line.as_bytes().get(start..).unwrap_or_default();
     // The significant bytes are ASCII, so a match sits on a character boundary.
-    cli_tools_common::simd::find_byte_of(rest, set.get(..length).unwrap_or_default()).map_or(chars.len(), |offset| {
-        let target = start + offset;
-        index
-            + chars
-                .get(index..)
-                .unwrap_or_default()
-                .partition_point(|&(byte, _)| byte < target)
-    })
+    cli_tools_common::simd::find_byte_in(rest, set)
+        .map_or(chars.len(), |offset| chars.index_at_byte(index, start + offset))
 }
 
-/// Bytes that can change the given state, padded into a fixed array with the used length,
-/// or `None` when every character needs a look.
-fn significant_bytes(state: &ScanState, syntax: &StringSyntax) -> Option<([u8; 8], usize)> {
+/// Bytes that can change the given state, or `None` when every character needs a look.
+const fn significant_set<'a>(state: &ScanState, syntax: &'a StringSyntax) -> Option<&'a ByteSet> {
     match state {
-        ScanState::Normal => {
-            let [marker, block, double, single, backtick, heredoc, slash] = syntax.trigger_bytes();
-            let raw = if syntax.rust_raw_strings { b'r' } else { slash };
-            Some(([marker, block, double, single, backtick, heredoc, slash, raw], 8))
-        }
-        ScanState::InBlockComment(_) => syntax.block_comment.map(|(open, close)| {
-            let close = first_byte_or_slash(close);
-            let open = if syntax.nested_block_comments {
-                first_byte_or_slash(open)
-            } else {
-                close
-            };
-            padded([close, open])
-        }),
-        ScanState::InString(quote) | ScanState::InTripleQuote(quote) => u8::try_from(*quote)
-            .ok()
-            .filter(u8::is_ascii)
-            .map(|quote| padded([quote, b'\\'])),
-        ScanState::InRawString(_) => Some(padded(*b"\"")),
-        ScanState::InTemplate => Some(padded(*b"\\`")),
-        ScanState::InBacktickRaw => Some(padded(*b"`")),
+        ScanState::Normal => Some(&syntax.normal_set),
+        ScanState::InBlockComment(_) => syntax.block_comment_set.as_ref(),
+        ScanState::InString(quote) | ScanState::InTripleQuote(quote) => match quote {
+            '"' => Some(&DOUBLE_QUOTED_SET),
+            '\'' => Some(&SINGLE_QUOTED_SET),
+            '`' => Some(&BACKTICK_QUOTED_SET),
+            _ => None,
+        },
+        ScanState::InRawString(_) => Some(&RAW_STRING_SET),
+        ScanState::InTemplate => Some(&TEMPLATE_SET),
+        ScanState::InBacktickRaw => Some(&BACKTICK_RAW_SET),
         ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) | ScanState::Uncertain => None,
     }
 }
 
-/// The bytes copied into an eight byte array, with how many of them are used.
-fn padded<const LENGTH: usize>(bytes: [u8; LENGTH]) -> ([u8; 8], usize) {
-    let mut padded = [0u8; 8];
-    for (slot, byte) in padded.iter_mut().zip(bytes) {
-        *slot = byte;
-    }
-    (padded, LENGTH.min(8))
-}
-
 /// Whether the remaining line at the character index starts with `needle`.
-pub(super) fn rest_starts_with(chars: &[(usize, char)], index: usize, needle: &str) -> bool {
+pub(super) fn rest_starts_with(chars: LineChars<'_>, index: usize, needle: &str) -> bool {
     needle
         .chars()
         .enumerate()
@@ -304,7 +350,7 @@ fn line_level_state(line: &str, state: &mut ScanState) -> Option<ScanResult> {
 }
 
 /// Advance through a string or block comment that started earlier, returning the new state.
-fn continue_state(state: ScanState, chars: &[(usize, char)], index: &mut usize, syntax: &StringSyntax) -> ScanState {
+fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syntax: &StringSyntax) -> ScanState {
     let Some(character) = char_at(chars, *index) else {
         return state;
     };
@@ -373,9 +419,9 @@ fn continue_state(state: ScanState, chars: &[(usize, char)], index: &mut usize, 
 }
 
 /// Scan one character in the normal state.
-fn scan_normal(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
+fn scan_normal(line: &str, chars: LineChars<'_>, cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
     let index = cursor.index;
-    let Some(&(byte, character)) = chars.get(index) else {
+    let Some((byte, character)) = chars.get(index) else {
         return NormalStep::Continue(ScanState::Normal);
     };
 
@@ -442,8 +488,8 @@ fn scan_normal(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax:
 }
 
 /// Skip regex literals without mistaking division operators or ordinary paths for their contents.
-fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
-    let Some(&(byte, _)) = chars.get(cursor.index) else {
+fn scan_slash(line: &str, chars: LineChars<'_>, cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
+    let Some((byte, _)) = chars.get(cursor.index) else {
         return NormalStep::Continue(ScanState::Normal);
     };
     let prefix = line.get(..byte).unwrap_or_default();
@@ -451,7 +497,7 @@ fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: 
         cursor.index += 1;
         if chars
             .get(cursor.index)
-            .is_some_and(|(_, character)| *character == '=' || *character == '/' && syntax.line_marker != "//")
+            .is_some_and(|(_, character)| character == '=' || character == '/' && syntax.line_marker != "//")
         {
             cursor.index += 1;
         }
@@ -459,7 +505,7 @@ fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: 
     }
     let rest = line.get(byte..).unwrap_or_default();
     if let Some(end) = find_regex_end(chars, cursor.index + 1) {
-        let end_byte = chars.get(end).map_or(line.len(), |&(offset, _)| offset);
+        let end_byte = chars.get(end).map_or(line.len(), |(offset, _)| offset);
         let candidate = line.get(byte..end_byte).unwrap_or_default();
         if syntax.heredoc && candidate.contains("<<") {
             return uncertain_regex(rest, chars.len(), cursor, syntax);
@@ -493,7 +539,7 @@ fn scan_slash(line: &str, chars: &[(usize, char)], cursor: &mut Cursor, syntax: 
 }
 
 /// Scan a string or character literal starting at the cursor.
-fn scan_quote(chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSyntax, quote: char) -> NormalStep {
+fn scan_quote(chars: LineChars<'_>, cursor: &mut Cursor, syntax: &StringSyntax, quote: char) -> NormalStep {
     let index = cursor.index;
     if quote == '\'' && syntax.single_quote == SingleQuote::CharLiteral {
         cursor.index = skip_char_literal(chars, index);
@@ -522,16 +568,16 @@ fn scan_quote(chars: &[(usize, char)], cursor: &mut Cursor, syntax: &StringSynta
 }
 
 /// The character at the byte-indexed position, if any.
-fn char_at(chars: &[(usize, char)], position: usize) -> Option<char> {
-    chars.get(position).map(|(_, character)| *character)
+fn char_at(chars: LineChars<'_>, position: usize) -> Option<char> {
+    chars.get(position).map(|(_, character)| character)
 }
 
 /// Whether three consecutive `quote` characters start at `index`.
-fn is_triple(chars: &[(usize, char)], index: usize, quote: char) -> bool {
+fn is_triple(chars: LineChars<'_>, index: usize, quote: char) -> bool {
     (0..3).all(|offset| {
         chars
             .get(index + offset)
-            .is_some_and(|(_, character)| *character == quote)
+            .is_some_and(|(_, character)| character == quote)
     })
 }
 
@@ -546,20 +592,20 @@ const fn uncertain_result() -> ScanResult {
 
 /// Index one past the closing quote of a string starting after `start`, or `None` when unterminated.
 fn find_string_end(
-    chars: &[(usize, char)],
+    chars: LineChars<'_>,
     start: usize,
     quote: char,
     backslash_escapes: bool,
     doubled_quote_escape: bool,
 ) -> Option<usize> {
     let mut index = start;
-    while let Some(&(_, character)) = chars.get(index) {
+    while let Some((_, character)) = chars.get(index) {
         if character == '\\' && backslash_escapes {
             index += 2;
             continue;
         }
         if character == quote {
-            if doubled_quote_escape && chars.get(index + 1).is_some_and(|(_, next)| *next == quote) {
+            if doubled_quote_escape && chars.get(index + 1).is_some_and(|(_, next)| next == quote) {
                 index += 2;
                 continue;
             }
@@ -571,7 +617,7 @@ fn find_string_end(
 }
 
 /// Index after a character literal starting at `start`, or `start + 1` for a lifetime.
-fn skip_char_literal(chars: &[(usize, char)], start: usize) -> usize {
+fn skip_char_literal(chars: LineChars<'_>, start: usize) -> usize {
     if char_at(chars, start + 1) == Some('\\') {
         let mut index = start + 2;
         while index < chars.len() && index < start + 12 {
@@ -589,7 +635,7 @@ fn skip_char_literal(chars: &[(usize, char)], start: usize) -> usize {
 }
 
 /// Whether the `r` at `index` starts a Rust raw string such as `r"` or `br#"`.
-fn is_raw_string_start(chars: &[(usize, char)], index: usize) -> bool {
+fn is_raw_string_start(chars: LineChars<'_>, index: usize) -> bool {
     let mut offset = 1;
     while char_at(chars, index + offset) == Some('#') {
         offset += 1;
@@ -755,5 +801,56 @@ mod test_trigger_prefilter {
         ] {
             assert_same_scan(text, kind, &format!("{kind:?}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod test_line_chars {
+    use super::*;
+
+    /// The decoded table of a line, the form every line used before the ASCII shortcut.
+    fn decoded(line: &str) -> Vec<(usize, char)> {
+        line.char_indices().collect()
+    }
+
+    #[test]
+    fn ascii_view_matches_the_decoded_table() {
+        for line in [
+            "",
+            "x",
+            "let value = \"text\"; // note",
+            "a/b/c  /* block */ r#\"raw\"#",
+        ] {
+            let table = decoded(line);
+            let ascii = LineChars::Ascii(line.as_bytes());
+            let full = LineChars::Decoded(&table);
+            assert_eq!(ascii.len(), full.len(), "{line:?}");
+            for index in 0..=line.len() + 1 {
+                assert_eq!(ascii.get(index), full.get(index), "{line:?} {index}");
+                for byte_offset in 0..=line.len() + 1 {
+                    assert_eq!(
+                        ascii.index_at_byte(index.min(line.len()), byte_offset).min(line.len()),
+                        full.index_at_byte(index.min(line.len()), byte_offset),
+                        "{line:?} {index} {byte_offset}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decodes_only_lines_with_multibyte_characters() {
+        let mut buffer = Vec::new();
+        assert!(matches!(
+            LineChars::new("plain ascii", &mut buffer),
+            LineChars::Ascii(_)
+        ));
+        assert_eq!(buffer, [] as [(usize, char); 0]);
+        let view = LineChars::new("café — ok", &mut buffer);
+        assert!(matches!(view, LineChars::Decoded(_)));
+        assert_eq!(view.len(), "café — ok".chars().count());
+        assert_eq!(view.get(3), Some((3, 'é')));
+        assert_eq!(view.get(4), Some((5, ' ')));
+        assert_eq!(view.index_at_byte(0, 6), 5);
     }
 }

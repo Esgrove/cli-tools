@@ -120,7 +120,7 @@ so that benchmarks can import them directly without duplicating code.
 - `crates/dots/benches/format.rs` - Dot-rename formatting pipeline
 - `crates/media/benches/resolution.rs` - Resolution labeling and regex matching
 - `crates/slb/benches/semantic_line_breaks.rs` - Prose tokenizing, boundary detection, paragraph reflow,
-  comment scanning, and whole file checking and formatting
+  comment scanning, whole file checking and formatting, and checking every source of this repository
 
 ### SIMD benchmarks
 

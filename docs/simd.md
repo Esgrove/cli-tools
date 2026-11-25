@@ -295,6 +295,83 @@ including characters such as `İ` whose lowercase form has a different byte leng
 The one-shot `find_prefix_candidates` still exists for tests and single lookups,
 but it builds an index per call, so callers checking many files should use `find_prefix_candidates_indexed`.
 
+## Vector first byte classes
+
+A Time Profiler trace of `slb` checking a 29 MB corpus of this repository's sources showed
+where the per-call kernels still lost time on short lines:
+
+- `split_lines` spent 8.9 percent in the standard library's word at a time `memchr`, restarted on every line.
+- `find_byte_of` and `contains_byte_of` spent about 4 percent splatting the set
+  and rebuilding the scalar table on every call,
+  and the tokenizer searched again from each word start, classifying the same block several times.
+- The scanner decoded every line it scanned into a table of byte offsets and characters,
+  and mapped each SIMD hit back to a character index with a binary search, about 8 percent together.
+
+Four changes reorganize that work around vectors:
+
+1. `ByteSet` is built once, usually as a constant, and holds two nibble lookup tables.
+   A whole vector is classified with two table lookups, `tbl` on NEON and `pshufb` on AVX2,
+   whatever the size of the set, instead of one compare per byte of the set.
+   The scanner's sets for each language and state live in `StringSyntax` and in constants.
+2. `level()` returns the compile-time level when the build target already guarantees AVX2 or NEON,
+   so `dispatch!` folds to one code path and the kernels inline into their callers.
+   Other targets still detect the level once at runtime.
+3. `ByteBitmap` classifies a whole text in one pass into one bit per byte,
+   and finding the next match from any position is a mask and `trailing_zeros`.
+   The tokenizer builds one per line and walks it for every word boundary,
+   and the token vector is sized from the number of candidates.
+4. `split_lines` collects every newline of the file in one `byte_positions` pass.
+   The scanner indexes an ASCII line directly by byte, and decodes only lines with multibyte characters.
+
+### Results on the M4 Pro
+
+`cargo bench` against a baseline saved just before the change, same session.
+Untouched control benchmarks such as `is_system_directory_path` came out 6 to 11 percent slower in the second run,
+so the gains below are, if anything, understated.
+
+| Benchmark                              |   Before |    After | Change |
+| -------------------------------------- | -------: | -------: | -----: |
+| `repo_corpus/check` (whole repository) | 23.00 ms | 19.05 ms | −17.0% |
+| `repo_corpus/format`                   | 24.73 ms | 20.72 ms | −16.1% |
+| `check/large_rust_file`                | 975.9 µs | 799.2 µs | −18.4% |
+| `format/large_rust_file`               | 993.3 µs | 814.5 µs | −17.9% |
+| `check/large_prose_file`               | 2.364 ms | 2.138 ms |  −9.6% |
+| `check/large_markdown_file`            | 1.238 ms | 1.174 ms |  −5.6% |
+| `tokenize_line/long_sentence`          | 1.461 µs | 1.025 µs | −29.0% |
+| `scan/scan_lines_rust`                 | 105.3 µs | 31.18 µs | −70.4% |
+| `scan/fix_trailing_comments`           | 135.6 µs | 61.39 µs | −55.1% |
+| `scan/split_source_regions` (Rust)     | 362.0 µs | 289.2 µs | −20.5% |
+| `scan/split_c_regions`                 | 267.5 µs | 220.6 µs | −17.5% |
+| `scan/scan_lines_multibyte_rust`       | 150.2 µs | 136.7 µs |  −9.2% |
+
+Kernel microbenchmarks, median times in the same session:
+
+| Benchmark                                    |   16 B |  128 B |  1 KB |   64 KB |
+| -------------------------------------------- | -----: | -----: | ----: | ------: |
+| `contains_trigger`, 7 byte set, per-call set | 1.4 ns | 8.5 ns | 68 ns | 4.38 µs |
+| `contains_trigger`, `ByteSet`                | 1.4 ns | 4.9 ns | 39 ns | 2.45 µs |
+| `find_whitespace`, 10 byte set, per-call set | 1.2 ns | 8.7 ns | 69 ns | 4.43 µs |
+| `find_whitespace`, `ByteSet`                 | 1.2 ns | 4.9 ns | 39 ns | 2.47 µs |
+
+| Benchmark                        | Search from each word | Bitmap walk |
+| -------------------------------- | --------------------: | ----------: |
+| `line_boundaries`, 40 byte line  |                 49 ns |       18 ns |
+| `line_boundaries`, 120 byte line |                173 ns |       49 ns |
+
+| Benchmark              | `match_indices('\n')` | `byte_positions` |
+| ---------------------- | --------------------: | ---------------: |
+| `newline_index`, 64 KB |               7.60 µs |          2.42 µs |
+| `newline_index`, 1 MB  |                115 µs |          31.7 µs |
+
+In the re-profiled `slb` run, `scan_lines` dropped from 24 to 15 percent of the time,
+`find_byte_in` from 11 to 6 percent, and the token vector growth disappeared.
+Paragraph reflow, at 37 percent, is now the largest part, and none of it is byte scanning.
+
+A whole-file index of the scanner's byte classes was considered as a further step.
+With the sets precomputed and the level fixed at compile time, the per-line call costs a few nanoseconds,
+so it would save well under one percent while adding a second scanner code path.
+The 7950X numbers for this section are still to be measured, with `./simd-bench.sh` and the `repo_corpus` benchmarks.
+
 ## Repeating the measurements
 
 ```shell

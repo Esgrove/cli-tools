@@ -8,6 +8,7 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
+use cli_tools_common::simd::{ByteBitmap, ByteSet};
 use regex::Regex;
 
 use super::options::FormatOptions;
@@ -17,7 +18,10 @@ use super::token::{Token, TokenKind, is_closer, is_opener};
 const EM_DASH: char = '\u{2014}';
 
 /// ASCII whitespace and the lead bytes of every other whitespace character and of the em dash.
-const CHUNK_END_CANDIDATES: &[u8] = b" \t\n\x0b\x0c\r\xc2\xe1\xe2\xe3";
+const CHUNK_END_CANDIDATES: ByteSet = ByteSet::new(b" \t\n\x0b\x0c\r\xc2\xe1\xe2\xe3");
+
+/// The backtick that delimits a code span.
+const BACKTICK: ByteSet = ByteSet::new(b"`");
 
 /// Matches a URL such as `https://example.com/path` or `www.example.com`.
 static RE_URL: LazyLock<Regex> =
@@ -59,7 +63,9 @@ static RE_MARKDOWN_STRUCTURE: LazyLock<Regex> =
 /// so the em dash rewrite can handle them uniformly.
 #[must_use]
 pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) -> Vec<Token<'_>> {
-    let mut tokens = Vec::new();
+    let candidates = ByteBitmap::new(content.as_bytes(), &CHUNK_END_CANDIDATES);
+    // Every token ends at a candidate or at the end of the line, which bounds the token count.
+    let mut tokens = Vec::with_capacity(candidates.count() + 1);
     let mut position = 0;
     while position < content.len() {
         let rest = content.get(position..).unwrap_or_default();
@@ -74,9 +80,9 @@ pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) 
         let end = if normalize_dashes && character == EM_DASH {
             position + EM_DASH.len_utf8()
         } else {
-            chunk_end(content, position, normalize_dashes)
+            chunk_end(content, &candidates, position, normalize_dashes)
         };
-        let (token, next) = read_token(content, position, end, origin_line);
+        let (token, next) = read_token(content, &candidates, position, end, origin_line);
         tokens.push(token);
         position = next.max(position + character.len_utf8());
     }
@@ -142,27 +148,36 @@ fn demote_command_separators(tokens: &mut [Token<'_>]) {
 ///
 /// An em dash ends the chunk when the dash rewrite is on,
 /// so a dash written against a word becomes a token of its own.
-fn chunk_end(text: &str, start: usize, split_dashes: bool) -> usize {
-    let rest = text.get(start..).unwrap_or_default();
-    let mut offset = 0;
-    while let Some(found) = rest
-        .as_bytes()
-        .get(offset..)
-        .and_then(|tail| cli_tools_common::simd::find_byte_of(tail, CHUNK_END_CANDIDATES))
-    {
-        let position = offset + found;
+///
+/// `candidates` is the bitmap of [`CHUNK_END_CANDIDATES`] over the whole text,
+/// so the search walks bits and only decodes a character at a candidate that is not ASCII.
+fn chunk_end(text: &str, candidates: &ByteBitmap, start: usize, split_dashes: bool) -> usize {
+    let mut from = start;
+    while let Some(position) = candidates.next_from(from) {
         // Candidates are ASCII or lead bytes, so the position is always a character boundary.
-        let character = rest.get(position..).and_then(|tail| tail.chars().next());
-        if character.is_some_and(|character| character.is_whitespace() || split_dashes && character == EM_DASH) {
-            return start + position;
+        let ends_chunk = match text.as_bytes().get(position) {
+            Some(byte) if byte.is_ascii() => true,
+            _ => text
+                .get(position..)
+                .and_then(|tail| tail.chars().next())
+                .is_some_and(|character| character.is_whitespace() || split_dashes && character == EM_DASH),
+        };
+        if ends_chunk {
+            return position;
         }
-        offset = position + 1;
+        from = position + 1;
     }
     text.len()
 }
 
 /// Read one token starting at `start`, returning the token and the byte index where it ends.
-fn read_token(text: &str, start: usize, word_end: usize, origin_line: usize) -> (Token<'_>, usize) {
+fn read_token<'a>(
+    text: &'a str,
+    candidates: &ByteBitmap,
+    start: usize,
+    word_end: usize,
+    origin_line: usize,
+) -> (Token<'a>, usize) {
     let mut leading_end = start;
     while leading_end < word_end {
         let chunk = text.get(leading_end..word_end).unwrap_or_default();
@@ -190,7 +205,7 @@ fn read_token(text: &str, start: usize, word_end: usize, origin_line: usize) -> 
 
     if let Some((atom_end, kind)) = atom_at(text, leading_end) {
         // The atom and the punctuation after it are one run of the line, so the core is one slice of it.
-        let tail_end = chunk_end(text, atom_end, false);
+        let tail_end = chunk_end(text, candidates, atom_end, false);
         let tail = text.get(atom_end..tail_end).unwrap_or_default();
         let trailing_start = atom_end + trailing_punctuation_start(tail, 0);
         let core = text.get(leading_end..trailing_start).unwrap_or_default();
@@ -280,7 +295,7 @@ fn backtick_span_end(text: &str, start: usize) -> Option<usize> {
     let mut index = start + run;
     while index < bytes.len() {
         let rest = bytes.get(index..)?;
-        let offset = cli_tools_common::simd::find_byte_of(rest, b"`")?;
+        let offset = cli_tools_common::simd::find_byte_in(rest, &BACKTICK)?;
         index += offset;
         let closing = backtick_run(bytes, index);
         if closing == run {
@@ -554,7 +569,12 @@ mod test_chunk_end {
             for (start, _) in line.char_indices() {
                 for split_dashes in [false, true] {
                     assert_eq!(
-                        chunk_end(line, start, split_dashes),
+                        chunk_end(
+                            line,
+                            &ByteBitmap::new(line.as_bytes(), &CHUNK_END_CANDIDATES),
+                            start,
+                            split_dashes
+                        ),
                         chunk_end_by_characters(line, start, split_dashes),
                         "{line:?} from {start} split {split_dashes}"
                     );

@@ -7,6 +7,9 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+/// Bytes that mark a line as code wherever they appear.
+const CODE_MARKERS: cli_tools_common::simd::ByteSet = cli_tools_common::simd::ByteSet::new(b"=({");
+
 /// Matches a backtick code span for removal before code detection.
 static RE_CODE_SPAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`]*`").expect("Invalid code span regex"));
 
@@ -77,7 +80,8 @@ pub fn looks_like_code(line: &str) -> bool {
     if text.ends_with(['{', '}']) || ((text.ends_with(");") || text.ends_with("),")) && !is_parenthetical_aside(text)) {
         return true;
     }
-    let has_code_characters = cli_tools_common::simd::contains_byte_of(text.as_bytes(), b"=({") || text.contains("::");
+    let has_code_characters =
+        cli_tools_common::simd::contains_byte_in(text.as_bytes(), &CODE_MARKERS) || text.contains("::");
     if text.ends_with(';') && has_code_characters {
         return true;
     }

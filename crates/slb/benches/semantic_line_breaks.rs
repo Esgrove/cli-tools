@@ -4,12 +4,13 @@
 
 use std::fmt::Write as _;
 use std::hint::black_box;
+use std::path::Path;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use cli_tools_common::glob_to_regex;
 use cli_tools_slb::boundaries::{clause_rank, find_boundaries};
-use cli_tools_slb::comments::{fix_trailing_comments, split_source_regions};
+use cli_tools_slb::comments::{fix_trailing_comments, scan_lines, split_source_regions};
 use cli_tools_slb::markdown::split_paragraphs;
 use cli_tools_slb::project_config::discover_width;
 use cli_tools_slb::reflow::reflow_paragraph;
@@ -253,6 +254,46 @@ fn paragraph() -> Paragraph {
     }
 }
 
+/// The Rust sources and Markdown documents of this repository, loaded once,
+/// so the corpus benchmarks measure the mix of code, comments, and prose the tool really sees.
+///
+/// Test fixtures are left out, since many of them are deliberately malformed.
+fn repository_corpus() -> Vec<(String, FileKind)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files: Vec<(String, FileKind)> = walkdir::WalkDir::new(&root)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !matches!(name.as_ref(), "target" | "fixtures" | ".git" | "fuzz")
+        })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| {
+            let kind = match entry.path().extension()?.to_str()? {
+                "rs" => FileKind::Rust,
+                "md" => FileKind::Markdown,
+                _ => return None,
+            };
+            Some((std::fs::read_to_string(entry.path()).ok()?, kind))
+        })
+        .collect();
+    files.retain(|(text, _)| !text.is_empty());
+    files
+}
+
+/// Rust source whose comments and strings put multibyte characters right next to the bytes the scanner looks for.
+fn multibyte_rust_source() -> String {
+    let block = "/// Café — naïve “quotes” and a non\u{a0}breaking space\u{a0}// before a marker.
+let greeting = \"héllo — wörld // not a comment\"; // trailing — comment with é
+let raw = r#\"raw é string with \"quotes\" — and // slashes\"#;
+let character = 'é'; let dash = '—'; let lifetime: &'static str = \"ü\";
+/* block comment — with é and ü */ let value = 1; // ünïcode trailing
+let path = \"C:\\\\Ürsprung\\\\Données\"; let empty = \"\";
+";
+    block.repeat(200)
+}
+
 fn bench_tokenize(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("tokenize_line");
     group.bench_function("long_sentence", |bencher| {
@@ -350,6 +391,30 @@ fn bench_format(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn bench_repository_corpus(criterion: &mut Criterion) {
+    let options = FormatOptions::default();
+    let corpus = repository_corpus();
+    let bytes: usize = corpus.iter().map(|(text, _)| text.len()).sum();
+    let mut group = criterion.benchmark_group("repo_corpus");
+    group.sample_size(20);
+    group.throughput(criterion::Throughput::Bytes(bytes as u64));
+    group.bench_function("check", |bencher| {
+        bencher.iter(|| {
+            for (text, kind) in black_box(&corpus) {
+                black_box(check(text, *kind, &options));
+            }
+        });
+    });
+    group.bench_function("format", |bencher| {
+        bencher.iter(|| {
+            for (text, kind) in black_box(&corpus) {
+                black_box(format(text, *kind, &options));
+            }
+        });
+    });
+    group.finish();
+}
+
 fn bench_check(criterion: &mut Criterion) {
     let options = FormatOptions::default();
     let rust_file = large_rust_source();
@@ -378,7 +443,15 @@ fn bench_scan(criterion: &mut Criterion) {
     let shell_lines: Vec<&str> = shell.lines().collect();
     let python_lines: Vec<&str> = python.lines().collect();
     let c_lines: Vec<&str> = c_plus_plus.lines().collect();
+    let multibyte = multibyte_rust_source();
+    let multibyte_lines: Vec<&str> = multibyte.lines().collect();
     let mut group = criterion.benchmark_group("scan");
+    group.bench_function("scan_lines_rust", |bencher| {
+        bencher.iter(|| scan_lines(black_box(&lines), FileKind::Rust));
+    });
+    group.bench_function("scan_lines_multibyte_rust", |bencher| {
+        bencher.iter(|| scan_lines(black_box(&multibyte_lines), FileKind::Rust));
+    });
     group.bench_function("split_source_regions", |bencher| {
         bencher.iter(|| split_source_regions(black_box(&lines), FileKind::Rust));
     });
@@ -454,6 +527,7 @@ criterion_group!(
     bench_reword_semicolons,
     bench_format,
     bench_check,
+    bench_repository_corpus,
     bench_scan,
     bench_split_paragraphs,
     bench_project_config
