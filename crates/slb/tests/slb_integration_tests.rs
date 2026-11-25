@@ -448,3 +448,23 @@ fn reflowing_keeps_the_line_endings_of_untouched_lines() {
     assert!(fixed.ends_with("\n\nfour\nfive\n"), "{fixed:?}");
     assert_eq!(fixed.matches("\r\n").count(), 1, "{fixed:?}");
 }
+
+#[test]
+fn a_line_the_fix_changes_is_reported_as_fixable() {
+    let text = "Term with link [a link text that is long](https://example.com/a/very/long/url/that/should/not/break/anything/at/all) and This is a fairly long sentence that goes on and on, and it keeps going with more clauses, so that it surely exceeds the configured width of the line.\n";
+    for max_width in 40..=60 {
+        let options = FormatOptions {
+            max_width,
+            ..FormatOptions::default()
+        };
+
+        let result = format(text, FileKind::Markdown, &options);
+
+        assert!(result.fixed_text.is_some(), "width {max_width}");
+        assert!(
+            result.violations.iter().any(|violation| violation.fixable),
+            "width {max_width}: {:?}",
+            result.violations
+        );
+    }
+}

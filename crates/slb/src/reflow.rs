@@ -220,12 +220,19 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
 }
 
 /// Sort the violations by line and kind, keeping a single report of each over long line.
+///
+/// The kept report is fixable when any report of that line is,
+/// since a part that cannot be broken does not stop the fix from changing the rest of the line.
 fn sort_violations(violations: &mut Vec<Violation>) {
     violations.sort_by_key(|violation| (violation.line, violation.kind));
     violations.dedup_by(|second, first| {
-        first.line == second.line
+        let same_long_line = first.line == second.line
             && first.kind == ViolationKind::LineTooLong
-            && second.kind == ViolationKind::LineTooLong
+            && second.kind == ViolationKind::LineTooLong;
+        if same_long_line {
+            first.fixable |= second.fixable;
+        }
+        same_long_line
     });
 }
 
