@@ -60,13 +60,21 @@ pub struct Date {
 
 impl Date {
     /// Check that date is valid
+    ///
+    /// The year has to be after 1990 and not in the future, and the day has to exist in that month,
+    /// so 31.02 and 29.02 outside a leap year are rejected.
     #[must_use]
     pub fn try_from(year: i32, month: i32, day: i32) -> Option<Self> {
-        if year <= *CURRENT_YEAR && year > 1990 && month > 0 && month <= 12 && day > 0 && day <= 31 {
-            Some(Self { year, month, day })
-        } else {
-            None
+        if year > *CURRENT_YEAR || year <= 1990 {
+            return None;
         }
+        jiff::civil::Date::new(
+            i16::try_from(year).ok()?,
+            i8::try_from(month).ok()?,
+            i8::try_from(day).ok()?,
+        )
+        .ok()?;
+        Some(Self { year, month, day })
     }
 
     #[must_use]
@@ -112,10 +120,9 @@ impl Date {
         if RE_CORRECT_DATE_FORMAT.is_match(filename) {
             if swap_year {
                 let captures = RE_CORRECT_DATE_FORMAT.captures(filename)?;
-                let original_date = captures.get(0)?.as_str();
+                let original_date = captures.get(0)?;
                 let swapped_date = Self::parse_date_from_match(filename, &captures)?.swap_year()?;
-                let updated_filename = filename.replacen(original_date, &swapped_date.dot_format(), 1);
-                return Some(updated_filename);
+                return replace_range(filename, original_date.range(), &swapped_date.dot_format());
             }
             // Correctly formatted, skip...
             if verbose {
@@ -137,14 +144,14 @@ impl Date {
 
                 // MM.DD.YYYY format
                 if let Some(date) = Self::parse_date_from_mm_dd_yyyy(month, day, year) {
-                    best_match = Some((date_str.to_string(), date.to_string()));
+                    best_match = Some((date_match.range(), date.to_string()));
                 }
             }
         }
 
-        if let Some((original_date, flip_date)) = best_match {
-            let new_name = filename.replacen(&original_date, &flip_date, 1);
-            return Some(new_name);
+        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
+        if let Some((date_range, flip_date)) = best_match {
+            return replace_range(filename, date_range, &flip_date);
         }
 
         // Check for full dates in DD.MM.YYYY format (European style)
@@ -159,14 +166,14 @@ impl Date {
                 };
 
                 if let Some(date) = Self::parse_date_from_dd_mm_yyyy(day, month, year) {
-                    best_match = Some((date_str.to_string(), date.to_string()));
+                    best_match = Some((date_match.range(), date.to_string()));
                 }
             }
         }
 
-        if let Some((original_date, flip_date)) = best_match {
-            let new_name = filename.replacen(&original_date, &flip_date, 1);
-            return Some(new_name);
+        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
+        if let Some((date_range, flip_date)) = best_match {
+            return replace_range(filename, date_range, &flip_date);
         }
 
         // Check for short dates
@@ -185,14 +192,14 @@ impl Date {
                     .flatten()
                     .or_else(|| Self::parse_from_short(third, month, first))
                 {
-                    best_match = Some((date_str.to_string(), date.to_string()));
+                    best_match = Some((date_match.range(), date.to_string()));
                 }
             }
         }
 
-        if let Some((original_date, flip_date)) = best_match {
-            let new_name = filename.replace(&original_date, &flip_date);
-            return Some(new_name);
+        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
+        if let Some((date_range, flip_date)) = best_match {
+            return replace_range(filename, date_range, &flip_date);
         }
 
         // Check for short dates
@@ -207,14 +214,14 @@ impl Date {
                 };
 
                 if let Some(date) = Self::parse_from_short(year, month, day) {
-                    best_match = Some((date_str.to_string(), date.to_string()));
+                    best_match = Some((date_match.range(), date.to_string()));
                 }
             }
         }
 
-        if let Some((original_date, flip_date)) = best_match {
-            let new_name = filename.replace(&original_date, &flip_date);
-            return Some(new_name);
+        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
+        if let Some((date_range, flip_date)) = best_match {
+            return replace_range(filename, date_range, &flip_date);
         }
 
         None
@@ -348,6 +355,13 @@ impl std::fmt::Display for Date {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}.{:02}.{:02}", self.year, self.month, self.day)
     }
+}
+
+/// Replace the byte range of a regex match in the text.
+fn replace_range(text: &str, range: std::ops::Range<usize>, replacement: &str) -> Option<String> {
+    let before = text.get(..range.start)?;
+    let after = text.get(range.end..)?;
+    Some(format!("{before}{replacement}{after}"))
 }
 
 #[cfg(test)]
@@ -894,6 +908,38 @@ mod invalid_date_tests {
         // Year too old
         let filename = "archive.15.03.1980.txt";
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+    }
+
+    #[test]
+    fn days_past_the_end_of_the_month_are_invalid() {
+        assert_eq!(
+            Date::reorder_filename_date("Video 31.02.2020.mp4", false, false, false),
+            None
+        );
+        assert_eq!(
+            Date::reorder_filename_date("Clip 2.31.2020.mp4", false, false, false),
+            None
+        );
+        assert_eq!(
+            Date::reorder_filename_date("Note 31.04.2021.txt", false, false, false),
+            None
+        );
+        assert_eq!(Date::reorder_directory_date("Trip 31.04.2021"), None);
+        assert_eq!(Date::reorder_directory_date("Trip 30.02.2021"), None);
+        assert!(Date::try_from(2020, 2, 29).is_some(), "2020 is a leap year");
+        assert!(Date::try_from(2021, 2, 29).is_none());
+    }
+
+    #[test]
+    fn only_the_matched_date_is_rewritten() {
+        let renamed = Date::reorder_filename_date("Show 11.2.20 1.2.20.mp4", false, false, false)
+            .expect("a short date should be found");
+        assert!(renamed.starts_with("Show 11.2.20 "), "{renamed}");
+        assert!(!renamed.contains("12020"), "{renamed}");
+
+        let renamed = Date::reorder_filename_date("Show 11.12.2020 1.12.2020.mp4", false, false, false)
+            .expect("a full date should be found");
+        assert!(renamed.starts_with("Show 11.12.2020 "), "{renamed}");
     }
 }
 
