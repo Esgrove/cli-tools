@@ -533,7 +533,9 @@ impl DirMove {
                 continue;
             }
 
-            if entry_path.is_dir() {
+            // The entry's own type is used so a symlink to a directory moves as a link,
+            // instead of merging the files out of the directory it points to.
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
                 directory_entries.push((entry_path, target_path));
             } else {
                 file_entries.push(entry_path);
@@ -748,26 +750,27 @@ impl DirMove {
 
             let target = parent.join(name);
 
-            if path.is_file() {
+            // Symlinks are moved as links like files,
+            // so unpacking never pulls files out of a directory a link points to.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
                 info.file_moves.push(MoveInfo::new(path, target));
-            } else if path.is_dir() {
-                // If subdirectory name matches an unpack directory name, recurse into it.
-                // Otherwise, check if it contains nested unpack directories.
-                if self.config.unpack_directory_names.contains(&name.to_lowercase()) {
-                    // Recursively collect from nested matching directories.
-                    let nested_info = self.collect_unpack_info(&path, parent);
-                    info.file_moves.extend(nested_info.file_moves);
-                    info.directory_moves.extend(nested_info.directory_moves);
-                } else if self.contains_unpack_directory(&path) {
-                    // Non-matching directory contains nested unpack dirs,
-                    // recurse into it with this directory as the new parent.
-                    let nested_info = self.collect_unpack_info(&path, &target);
-                    info.file_moves.extend(nested_info.file_moves);
-                    info.directory_moves.extend(nested_info.directory_moves);
-                } else {
-                    // No nested unpack dirs, move the entire directory directly (more efficient).
-                    info.directory_moves.push(MoveInfo::new(path, target));
-                }
+            } else if self.config.unpack_directory_names.contains(&name.to_lowercase()) {
+                // Recursively collect from nested matching directories.
+                let nested_info = self.collect_unpack_info(&path, parent);
+                info.file_moves.extend(nested_info.file_moves);
+                info.directory_moves.extend(nested_info.directory_moves);
+            } else if self.contains_unpack_directory(&path) {
+                // Non-matching directory contains nested unpack dirs,
+                // recurse into it with this directory as the new parent.
+                let nested_info = self.collect_unpack_info(&path, &target);
+                info.file_moves.extend(nested_info.file_moves);
+                info.directory_moves.extend(nested_info.directory_moves);
+            } else {
+                // No nested unpack dirs, move the entire directory directly (more efficient).
+                info.directory_moves.push(MoveInfo::new(path, target));
             }
         }
 
@@ -782,7 +785,8 @@ impl DirMove {
 
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if !path.is_dir() {
+            // Symlinks are not followed, matching how `collect_unpack_info` moves them as links.
+            if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
                 continue;
             }
 
@@ -11162,3 +11166,7 @@ mod test_read_prompt_answer {
         assert_eq!(answer.as_deref().map(str::trim), Some(""));
     }
 }
+
+#[cfg(test)]
+#[path = "dir_move_tree_tests.rs"]
+mod test_tree_edge_cases;
