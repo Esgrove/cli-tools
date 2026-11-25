@@ -58,7 +58,7 @@ impl VideoInfo {
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng:format=bit_rate,duration",
+                "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng,rotate:stream_side_data=rotation:format=bit_rate,duration",
                 "-of",
                 "default=nokey=0:noprint_wrappers=1",
             ])
@@ -79,8 +79,6 @@ impl VideoInfo {
         let mut codec: Option<String> = None;
         let mut bitrate_kbps: Option<u64> = None;
         let mut duration: Option<f64> = None;
-        let mut width: Option<u32> = None;
-        let mut height: Option<u32> = None;
 
         for line in output.lines() {
             let line = line.trim();
@@ -100,8 +98,6 @@ impl VideoInfo {
                             duration = Some(seconds);
                         }
                     }
-                    "width" => width = value.parse().ok(),
-                    "height" => height = value.parse().ok(),
                     _ => {}
                 }
             }
@@ -109,7 +105,7 @@ impl VideoInfo {
 
         Self {
             size_bytes: None,
-            resolution: Resolution::from_options(width, height),
+            resolution: parse_display_resolution(output),
             duration,
             codec,
             bitrate_kbps,
@@ -424,6 +420,38 @@ fn compute_median_u64(values: &[u64]) -> u64 {
     }
 }
 
+/// Parse the displayed resolution from ffprobe `key=value` output.
+///
+/// Keys may come in any order, and a later value replaces an earlier one.
+/// A video stored sideways with a quarter turn rotation, such as a portrait phone video,
+/// is displayed with its width and height swapped, so they are swapped here too.
+/// The rotation comes from the display matrix side data as `rotation`,
+/// or from the older `rotate` tag as `TAG:rotate`.
+#[must_use]
+pub fn parse_display_resolution(output: &str) -> Option<Resolution> {
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let mut rotation: Option<f64> = None;
+    for line in output.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        match key {
+            "width" => width = value.parse().ok(),
+            "height" => height = value.parse().ok(),
+            "rotation" | "TAG:rotate" => rotation = value.parse().ok(),
+            _ => {}
+        }
+    }
+    let resolution = Resolution::from_options(width, height)?;
+    let quarter_turn = rotation.is_some_and(|degrees| (degrees.rem_euclid(180.0) - 90.0).abs() < 1.0);
+    Some(if quarter_turn {
+        Resolution::new(resolution.height, resolution.width)
+    } else {
+        resolution
+    })
+}
+
 #[cfg(test)]
 mod test_video_info {
     use super::*;
@@ -629,6 +657,28 @@ mod test_compute_median_u64 {
 #[cfg(test)]
 mod test_parse_ffprobe_output {
     use super::*;
+
+    #[test]
+    fn a_quarter_turn_rotation_swaps_the_dimensions() {
+        for rotation in [
+            "rotation=90",
+            "rotation=-90",
+            "rotation=270",
+            "TAG:rotate=90",
+            "rotation=-90.000000",
+        ] {
+            let output = format!("codec_name=h264\nwidth=1920\nheight=1080\n{rotation}\nduration=10.0\n");
+            let info = VideoInfo::parse_ffprobe_output(&output);
+            assert_eq!(info.resolution, Some(Resolution::new(1080, 1920)), "{rotation}");
+        }
+    }
+
+    #[test]
+    fn a_half_turn_rotation_keeps_the_dimensions() {
+        let output = "codec_name=h264\nwidth=1920\nheight=1080\nrotation=180\n";
+        let info = VideoInfo::parse_ffprobe_output(output);
+        assert_eq!(info.resolution, Some(Resolution::new(1920, 1080)));
+    }
 
     #[test]
     fn parses_all_fields() {

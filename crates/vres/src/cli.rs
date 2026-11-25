@@ -17,6 +17,7 @@ use walkdir::WalkDir;
 use cli_tools_common::{create_semaphore_for_io_bound, print_bold, print_green};
 use cli_tools_media::Resolution;
 use cli_tools_media::resolution::print_fuzzy_resolution_ranges;
+use cli_tools_media::video_info::parse_display_resolution;
 
 use crate::config::Config;
 use crate::resolution::FFProbeResult;
@@ -263,9 +264,9 @@ async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
             "-v",
             "error",
             "-select_streams",
-            "v",
+            "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=width,height:stream_side_data=rotation:stream_tags=rotate",
             "-output_format",
             "default=nokey=0:noprint_wrappers=1",
         ])
@@ -290,42 +291,15 @@ async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
     }
 }
 
-/// Parse ffprobe output in format "width=1920\nheight=1080\n"
-#[inline]
+/// Parse the displayed resolution from ffprobe `key=value` output such as "width=1920\nheight=1080\n".
+///
+/// A rotated video reports its stored dimensions with a rotation, which is applied here.
+///
+/// # Errors
+/// Returns an error if the output has no width or no height.
 pub fn parse_ffprobe_output(output: &[u8]) -> anyhow::Result<Resolution> {
-    let mut lines = output.split(|&b| b == b'\n');
-
-    let width = lines
-        .next()
-        // Skip "width="
-        .and_then(|line| line.get(6..))
-        // Handle Windows CRLF
-        .map(|w| w.strip_suffix(b"\r").unwrap_or(w))
-        .ok_or_else(|| anyhow!("Missing width"))?;
-
-    let height = lines
-        .next()
-        // Skip "height="
-        .and_then(|line| line.get(7..))
-        // Handle Windows CRLF
-        .map(|h| h.strip_suffix(b"\r").unwrap_or(h))
-        .ok_or_else(|| anyhow!("Missing height"))?;
-
-    // SAFETY: ffprobe output is always valid ASCII digits
-    #[allow(unsafe_code)]
-    let width_str = unsafe { std::str::from_utf8_unchecked(width) };
-    #[allow(unsafe_code)]
-    let height_str = unsafe { std::str::from_utf8_unchecked(height) };
-
-    let width = width_str
-        .parse()
-        .map_err(|e| anyhow!("Failed to parse width '{width_str}': {e}"))?;
-
-    let height = height_str
-        .parse()
-        .map_err(|e| anyhow!("Failed to parse height '{height_str}': {e}"))?;
-
-    Ok(Resolution::new(width, height))
+    let text = String::from_utf8_lossy(output);
+    parse_display_resolution(&text).ok_or_else(|| anyhow!("Missing width or height in ffprobe output: {text:?}"))
 }
 
 #[cfg(test)]
@@ -523,6 +497,13 @@ mod ffpprobe_tests {
     }
 
     #[test]
+    fn parse_ffprobe_output_swaps_dimensions_for_a_rotated_video() {
+        let output = b"width=1920\nheight=1080\nrotation=-90\n";
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!((result.width, result.height), (1080, 1920));
+    }
+
+    #[test]
     fn parse_ffprobe_output_missing_width() {
         let output = b"height=1080\n";
         let result = parse_ffprobe_output(output);
@@ -713,11 +694,9 @@ mod ffpprobe_tests {
 
     #[test]
     fn parse_ffprobe_output_swapped_order() {
-        // ffprobe always outputs width first, but test what happens if swapped
         let output = b"height=1080\nwidth=1920\n";
-        let result = parse_ffprobe_output(output);
-        // This should fail because we expect width= first
-        assert!(result.is_err());
+        let result = parse_ffprobe_output(output).unwrap();
+        assert_eq!((result.width, result.height), (1920, 1080));
     }
 
     #[test]
