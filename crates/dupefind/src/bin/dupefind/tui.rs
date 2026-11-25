@@ -1,7 +1,7 @@
 //! Interactive terminal interface for reviewing and resolving duplicate groups.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use crossterm::ExecutableCommand;
@@ -11,7 +11,7 @@ use itertools::Itertools;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use cli_tools_common::print_yellow;
+use cli_tools_common::{OverwritePolicy, RenameOutcome, print_yellow};
 
 use cli_tools_media::video_info::VideoInfo;
 
@@ -529,8 +529,17 @@ fn render_ui(
     frame.render_widget(help, help_area);
 }
 
-/// Apply all collected actions
+/// Apply all collected actions, moving deleted files to the trash when possible.
 fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyhow::Result<()> {
+    apply_actions_with(duplicates, actions, &cli_tools_common::trash_or_delete)
+}
+
+/// Apply all collected actions, removing files with the given delete function.
+fn apply_actions_with(
+    duplicates: &[DuplicateGroup],
+    actions: &[GroupAction],
+    delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
     let actionable: Vec<&GroupAction> = actions
         .iter()
         .filter(|a| !matches!(a.action, DuplicateAction::Skip | DuplicateAction::Quit))
@@ -556,54 +565,45 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
                     .get(*keep_index)
                     .copied()
                     .context("Selected file to keep is unavailable")?;
+                let mut others: Vec<&DupeFileInfo> = sorted_files
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, file)| *index != *keep_index && !same_location(&file.path, &keep_file.path))
+                    .map(|(_, file)| *file)
+                    .collect();
 
-                // Handle rename if specified
                 if let Some(new_stem) = new_name {
-                    let new_filename = format!("{new_stem}.{}", keep_file.extension);
-                    let new_path = keep_file.path.with_file_name(&new_filename);
-
+                    let new_path = keep_file
+                        .path
+                        .with_file_name(format!("{new_stem}.{}", keep_file.extension));
                     if new_path != keep_file.path {
-                        println!("{}", colored::Colorize::cyan("Rename:"));
-                        cli_tools_common::show_diff(
-                            &cli_tools_common::path_to_string_relative(&keep_file.path),
-                            &cli_tools_common::path_to_string_relative(&new_path),
-                        );
-                        std::fs::rename(&keep_file.path, &new_path)?;
+                        // Another member of the group may already hold the new name.
+                        // It is deleted anyway, so remove it first instead of letting the rename replace it.
+                        if let Some(position) = others.iter().position(|file| same_location(&file.path, &new_path)) {
+                            let occupant = others.remove(position);
+                            if !delete_duplicate(&occupant.path, delete_file) {
+                                print_yellow!("Keeping original name since {} still exists", new_path.display());
+                                delete_all(&others, delete_file);
+                                continue;
+                            }
+                        }
+                        rename_file(&keep_file.path, &new_path)?;
                     }
                 }
 
-                // Delete other files
-                for (i, file) in sorted_files.iter().enumerate() {
-                    if i != *keep_index {
-                        // Use direct delete for network paths since trash doesn't work there
-                        let result = if cli_tools_common::is_network_path(&file.path) {
-                            println!("{}: {}", colored::Colorize::red("Delete"), file.path.display());
-                            std::fs::remove_file(&file.path)
-                        } else {
-                            println!("{}: {}", colored::Colorize::yellow("Trash"), file.path.display());
-                            trash::delete(&file.path).map_err(std::io::Error::other)
-                        };
-                        if let Err(e) = result {
-                            print_yellow!("Failed to delete {}: {e}", file.path.display());
-                        }
-                    }
-                }
+                delete_all(&others, delete_file);
             }
             DuplicateAction::RenameOnly { rename_index, new_name } => {
-                let rename_file = sorted_files
+                let file_to_rename = sorted_files
                     .get(*rename_index)
                     .copied()
                     .context("Selected file to rename is unavailable")?;
-                let new_filename = format!("{new_name}.{}", rename_file.extension);
-                let new_path = rename_file.path.with_file_name(&new_filename);
+                let new_path = file_to_rename
+                    .path
+                    .with_file_name(format!("{new_name}.{}", file_to_rename.extension));
 
-                if new_path != rename_file.path {
-                    println!("{}", colored::Colorize::cyan("Rename:"));
-                    cli_tools_common::show_diff(
-                        &cli_tools_common::path_to_string_relative(&rename_file.path),
-                        &cli_tools_common::path_to_string_relative(&new_path),
-                    );
-                    std::fs::rename(&rename_file.path, &new_path)?;
+                if new_path != file_to_rename.path {
+                    rename_file(&file_to_rename.path, &new_path)?;
                 }
             }
             DuplicateAction::Skip | DuplicateAction::Quit => unreachable!(),
@@ -611,6 +611,56 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
     }
 
     Ok(())
+}
+
+/// Rename a file without replacing a different existing file, printing the change.
+fn rename_file(source: &Path, target: &Path) -> anyhow::Result<()> {
+    println!("{}", colored::Colorize::cyan("Rename:"));
+    cli_tools_common::show_diff(
+        &cli_tools_common::path_to_string_relative(source),
+        &cli_tools_common::path_to_string_relative(target),
+    );
+    let outcome = cli_tools_common::safe_rename(source, target, OverwritePolicy::Skip)
+        .with_context(|| format!("Failed to rename {}", source.display()))?;
+    if outcome == RenameOutcome::SkippedExisting {
+        print_yellow!("Skipping rename, file already exists: {}", target.display());
+    }
+    Ok(())
+}
+
+/// Delete every given file, reporting failures without stopping.
+fn delete_all(files: &[&DupeFileInfo], delete_file: &dyn Fn(&Path) -> std::io::Result<()>) {
+    for file in files {
+        delete_duplicate(&file.path, delete_file);
+    }
+}
+
+/// Delete one duplicate file and return whether it was removed.
+fn delete_duplicate(path: &Path, delete_file: &dyn Fn(&Path) -> std::io::Result<()>) -> bool {
+    // Network paths are deleted directly since trash doesn't work there
+    if cli_tools_common::is_network_path(path) {
+        println!("{}: {}", colored::Colorize::red("Delete"), path.display());
+    } else {
+        println!("{}: {}", colored::Colorize::yellow("Trash"), path.display());
+    }
+    if let Err(error) = delete_file(path) {
+        print_yellow!("Failed to delete {}: {error}", path.display());
+        return false;
+    }
+    true
+}
+
+/// Check whether two paths name the same location, resolving case and links.
+///
+/// Hard links to the same data are separate names, so they do not count as the same location.
+fn same_location(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Find the index of the best file to preselect based on resolution and codec.
@@ -1052,5 +1102,84 @@ mod test_apply_actions {
         let error = apply_actions(&[group], &actions).expect_err("an unknown file should fail");
 
         assert!(error.to_string().contains("unavailable"), "{error}");
+    }
+
+    /// Group of files written with the given contents.
+    fn group_with_contents(directory: &std::path::Path, files: &[(&str, &str)]) -> DuplicateGroup {
+        let files = files
+            .iter()
+            .map(|(name, content)| {
+                let path = directory.join(name);
+                std::fs::write(&path, content).expect("file should be written");
+                file(&path.to_string_lossy())
+            })
+            .collect();
+        DuplicateGroup::new("movie".to_string(), files)
+    }
+
+    /// Delete files directly so tests never touch the system trash.
+    fn remove_file(path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    /// Read a file in the directory, or `None` when it does not exist.
+    fn read(directory: &std::path::Path, name: &str) -> Option<String> {
+        std::fs::read_to_string(directory.join(name)).ok()
+    }
+
+    #[test]
+    fn keep_and_rename_onto_another_group_member_keeps_the_kept_content() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_with_contents(directory.path(), &[("Movie.1080p.mkv", "KEEP"), ("Movie.mkv", "OTHER")]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: Some("Movie".to_string()),
+            },
+        }];
+
+        apply_actions_with(&[group], &actions, &remove_file).expect("the action should succeed");
+
+        assert_eq!(read(directory.path(), "Movie.mkv").as_deref(), Some("KEEP"));
+        assert_eq!(read(directory.path(), "Movie.1080p.mkv"), None);
+    }
+
+    #[test]
+    fn keep_and_rename_onto_an_unrelated_file_keeps_that_file() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        std::fs::write(directory.path().join("c.mp4"), "UNRELATED").expect("file should be written");
+        let group = group_with_contents(directory.path(), &[("a.mp4", "A"), ("b.mp4", "B")]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: Some("c".to_string()),
+            },
+        }];
+
+        apply_actions_with(&[group], &actions, &remove_file).expect("the action should succeed");
+
+        assert_eq!(read(directory.path(), "c.mp4").as_deref(), Some("UNRELATED"));
+        assert_eq!(read(directory.path(), "a.mp4").as_deref(), Some("A"));
+        assert_eq!(read(directory.path(), "b.mp4"), None);
+    }
+
+    #[test]
+    fn rename_only_onto_an_existing_file_keeps_both_files() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_with_contents(directory.path(), &[("a.mp4", "A"), ("b.mp4", "B")]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::RenameOnly {
+                rename_index: 0,
+                new_name: "b".to_string(),
+            },
+        }];
+
+        apply_actions_with(&[group], &actions, &remove_file).expect("the action should succeed");
+
+        assert_eq!(read(directory.path(), "a.mp4").as_deref(), Some("A"));
+        assert_eq!(read(directory.path(), "b.mp4").as_deref(), Some("B"));
     }
 }
