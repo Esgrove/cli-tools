@@ -9,7 +9,8 @@ namespace example
 	};
 
 	// Render through the low-level encoder rather than the high-level display list
-	// (the legacy engine and the current engine expose the same path), so no variant-specific branch is needed.
+	// (the legacy engine and the current engine expose the same path),
+	// so no variant-specific branch is needed.
 	void render();
 
 	// The helper returns the visible content bounds (requiring the requested ancestor to remain visible on the chain).
@@ -21,8 +22,8 @@ namespace example
 	// and is the rendering path exposed by both engine variants the adapter supports.
 	void draw();
 
-	// Out-of-band runtime helpers exist for operations that must take place without going through `session.create`
-	// (which serializes sessions and rejects another request while one is active).
+	// Out-of-band runtime helpers exist for operations that must take place
+	// without going through `session.create` (which serializes sessions and rejects another request while one is active).
 	// The helpers below are shared dispatch primitives that every runtime handler uses.
 	// Per-operation handlers only choose an action and an argument shape.
 	void dispatch();
@@ -39,7 +40,8 @@ namespace example
 	//
 	// 3. Cancel-then-run action (`runtime.service.restart`):
 	//    if a session is active and `force=false`, return a clear error.
-	//    With `force=true`, cancel the active session, wait for its worker to stop, and then dispatch as shape 2.
+	//    With `force=true`, cancel the active session,
+	//    wait for its worker to stop, and then dispatch as shape 2.
 	void shapes();
 
 	// Polling uses wall-clock time because the purpose is to wait for a predicate to become true,

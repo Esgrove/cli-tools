@@ -283,3 +283,59 @@ fn every_input_fixture_has_an_expected_output() {
         assert!(expected.exists(), "missing expected output for {input}");
     }
 }
+
+/// Format the text, format the result again, and check that nothing fixable remains.
+fn assert_idempotent(text: &str, kind: FileKind, max_width: usize) {
+    let options = FormatOptions {
+        max_width,
+        ..FormatOptions::default()
+    };
+    let first = format(text, kind, &options)
+        .fixed_text
+        .unwrap_or_else(|| text.to_string());
+    let second = format(&first, kind, &options);
+
+    assert_eq!(
+        second.fixed_text.as_deref().unwrap_or(&first),
+        first,
+        "formatting twice at width {max_width} changed the result of\n{text}"
+    );
+    assert!(
+        second.violations.iter().all(|violation| !violation.fixable),
+        "fixable violations remain at width {max_width} in\n{first}\n{:?}",
+        second.violations
+    );
+}
+
+/// A sentence long enough to need a break, with clause words that give the planner several choices.
+const OVERLONG_SENTENCE: &str = "Some words here, more words there, and a few before first into were as against \
+     which about against being the at while where most!";
+
+#[test]
+fn fixing_an_overlong_markdown_line_is_idempotent() {
+    for max_width in 40..=100 {
+        assert_idempotent(&format!("{OVERLONG_SENTENCE}\n"), FileKind::Markdown, max_width);
+    }
+}
+
+#[test]
+fn fixing_an_overlong_comment_line_is_idempotent() {
+    for max_width in 40..=100 {
+        assert_idempotent(
+            &format!("fn f() {{\n    // {OVERLONG_SENTENCE}\n}}\n"),
+            FileKind::Rust,
+            max_width,
+        );
+    }
+}
+
+#[test]
+fn fixing_an_overlong_docstring_is_idempotent() {
+    for max_width in 40..=100 {
+        assert_idempotent(
+            &format!("def f():\n    \"\"\"{OVERLONG_SENTENCE}\n    \"\"\"\n"),
+            FileKind::Python,
+            max_width,
+        );
+    }
+}

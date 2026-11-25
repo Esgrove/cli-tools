@@ -18,7 +18,8 @@ then reaches the service adapter which performs the operation and records the re
   - The restart path creates a fresh identifier and reports it to the caller.
 
 > Every fixture pair must round trip:
-> formatting the expected output again must not change it, and no fixable violation may remain in the result.
+> formatting the expected output again must not change it,
+> and no fixable violation may remain in the result.
 
 Use the [configuration reference](https://example.com/automation/configuration) to inspect defaults,
 and run `examplectl session wait --timeout 30` when the service needs more time.

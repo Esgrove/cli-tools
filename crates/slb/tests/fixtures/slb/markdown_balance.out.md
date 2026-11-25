@@ -20,4 +20,5 @@ The `find_boundaries` function returns candidates ranked by [`Rank`](../src/sema
 and a caller picks the highest ranked one that still fits the width.
 
 > Every fixture pair must round trip:
-> formatting the expected output again must not change it, and that invariant is checked by every fixture test.
+> formatting the expected output again must not change it,
+> and that invariant is checked by every fixture test.

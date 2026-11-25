@@ -194,7 +194,7 @@ pub(super) fn split_tokens<'text>(
         return vec![tokens];
     }
 
-    let breaks = plan_line_breaks(&tokens, run, relaid_out, options);
+    let breaks = plan_line_breaks(&tokens, run, options);
     let mut pieces: Vec<Vec<Token>> = Vec::with_capacity(breaks.len() + 1);
     let mut rest = tokens;
     let mut line_start = 0;
@@ -261,7 +261,12 @@ pub(super) fn over_long_line_violations(
 /// The whole run is planned at once so that the lines come out balanced.
 /// Of the break sets that use equally good boundaries the most even one wins,
 /// so a long sentence becomes two medium length lines instead of one full line and a short remainder.
-fn plan_line_breaks(tokens: &[Token<'_>], budgets: Budgets, relaid_out: bool, options: &FormatOptions) -> Vec<usize> {
+///
+/// The formatter chooses every line of a run it breaks, even one the author wrote as a single line,
+/// so the lines aim at the comfortable fill a relaid out run uses.
+/// Formatting the result again joins those lines into a relaid out run,
+/// and planning both the same way keeps that second run from moving the breaks.
+fn plan_line_breaks(tokens: &[Token<'_>], budgets: Budgets, options: &FormatOptions) -> Vec<usize> {
     let count = tokens.len();
     let widths = cumulative_widths(tokens);
     let mut ranks = vec![None; count + 1];
@@ -298,8 +303,8 @@ fn plan_line_breaks(tokens: &[Token<'_>], budgets: Budgets, relaid_out: bool, op
     let mut ranked_ends = Vec::new();
     // Only the first line of the paragraph has a budget of its own,
     // so the width it aims at and the prefix it carries are the same for every other line.
-    let first = LineWidths::new(limit, budgets.first, relaid_out, options.strict);
-    let rest = LineWidths::new(limit, budgets.rest, relaid_out, options.strict);
+    let first = LineWidths::new(limit, budgets.first, true, options.strict);
+    let rest = LineWidths::new(limit, budgets.rest, true, options.strict);
     for start in (0..count).rev() {
         let line_widths @ LineWidths { budget, prefix, .. } = if start == 0 { first } else { rest };
         // The cap only binds where a semantic boundary can honour it.
