@@ -827,7 +827,32 @@ cargo test --workspace
 
 # Run tests for a single crate
 cargo test -p cli-tools-slb
+
+# Run clippy, every test, and each fuzz target for 30 seconds
+./test.sh
+
+# Deeper property tests and longer fuzzing, or skip fuzzing
+./test.sh --cases 20000 --fuzz-time 300
+./test.sh --no-fuzz
 ```
+
+Property tests use [proptest](https://github.com/proptest-rs/proptest)
+and run as part of `cargo test` with 256 generated cases each.
+Set `PROPTEST_CASES` to run more.
+They live in `tests/*_property_tests.rs` files,
+or in a `test_*_properties` module when they need private items.
+
+Fuzz targets use [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and the nightly toolchain,
+and live in their own workspace under `fuzz/`.
+See [fuzz/README.md](fuzz/README.md).
+
+```shell
+rustup toolchain install nightly
+cargo install --locked cargo-fuzz
+```
+
+Filesystem tests build nested temporary trees with `cli_tools_common::test_support::TempTree`,
+enabled by the `test-support` feature of `cli-tools-common` as a dev-dependency.
 
 ### Code Coverage
 

@@ -47,6 +47,15 @@ cargo nextest run --workspace
 # Run tests with coverage report (text output)
 cargo llvm-cov nextest --workspace
 
+# Run clippy, all tests, and every fuzz target, see ./test.sh -h
+./test.sh
+
+# Run the property tests with more generated cases
+PROPTEST_CASES=20000 cargo test --workspace property
+
+# Fuzz one target with the nightly toolchain
+cd fuzz && cargo +nightly fuzz run slb_format -- -max_total_time=300
+
 # Build with debug symbols for a profiler, since the release profile carries none
 cargo build --profile profiling --bin <name>
 
@@ -134,6 +143,8 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `simd.rs` - SIMD byte scanning kernels on `fearless_simd`
     - The `async` feature adds the tokio based directory entry helpers and the I/O semaphore
     - The `diff` feature adds `diff.rs`, so crates that do not render diffs avoid the `difference` dependency
+    - The `test-support` feature adds `test_support.rs` with `TempTree`,
+      which builds nested temporary trees and snapshots them for tests
 - `crates/media/` → `cli-tools-media` - Media helpers:
     - `resolution.rs` - Video resolution parsing and labelling
     - `video_info.rs` - Video metadata from ffprobe
@@ -244,6 +255,13 @@ Do not wrap prose by splitting a sentence at an arbitrary point in the middle.
 
 ## Testing
 
+- Cover happy paths, edge cases, and nested directory trees.
+  Build trees with `cli_tools_common::test_support::TempTree`,
+  from the `test-support` feature of `cli-tools-common` enabled as a dev-dependency.
+- Property tests use `proptest`. Put them in `tests/<crate>_property_tests.rs`,
+  or in a root-level `test_*_properties` module when they need private items.
+  Turn every shrunk failure into an example unit test in the owning module.
+- Fuzz targets live in `fuzz/fuzz_targets/`, a separate nightly workspace. See `fuzz/README.md`.
 - **NEVER use nested modules inside test modules** - all test modules must be separate root-level `#[cfg(test)]` modules
 - Do NOT wrap test modules in a single parent `mod tests` module
 - When a split leaves several files sharing test helpers,
