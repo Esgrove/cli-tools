@@ -14,8 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
 colored = { workspace = true }
 difference = { workspace = true, optional = true }
 dirs = { workspace = true }
@@ -36,6 +36,7 @@ windows-sys = { workspace = true }
 
 [features]
 async = ["dep:num_cpus", "dep:tokio"]
+completion = ["dep:clap", "dep:clap_complete"]
 diff = ["dep:difference"]
 test-support = ["dep:tempfile"]
 

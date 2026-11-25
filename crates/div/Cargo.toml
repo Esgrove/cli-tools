@@ -17,7 +17,7 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
-cli-tools-common = { workspace = true }
+cli-tools-common = { workspace = true, features = ["completion"] }
 
 [lints]
 workspace = true

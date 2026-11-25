@@ -20,7 +20,7 @@ path = "src/bin/xtask/main.rs"
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["string"] }
 clap_complete = { workspace = true }
-cli-tools-common = { workspace = true }
+cli-tools-common = { workspace = true, features = ["completion"] }
 console = { workspace = true }
 dunce = { workspace = true }
 indicatif = { workspace = true }

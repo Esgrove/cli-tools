@@ -4,6 +4,10 @@ Shared helpers for the cli-tools binaries: path handling, formatting, printing, 
 
 Library crate shared by the `cli-tools` binaries.
 
+The `completion` feature adds `generate_shell_completion` and pulls in clap,
+so a library that reads no command line arguments can leave it out.
+The `diff` feature adds the coloured diff helpers.
+
 The `test-support` feature adds `test_support::TempTree` for tests.
 It builds nested files, directories, symlinks, and non-UTF-8 names in a temporary directory with a visible name,
 and snapshots the tree as sorted relative paths so a test can compare the whole result at once.

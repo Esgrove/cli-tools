@@ -141,6 +141,8 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `diff.rs` - Coloured diff rendering (`color_diff` and `show_diff` for renames, `diff_lines` for files)
     - `date.rs` - Date parsing and formatting utilities
     - `simd.rs` - SIMD byte scanning kernels on `fearless_simd`
+    - The `completion` feature adds `completion.rs` with shell completion generation,
+      so library crates that take no command line arguments avoid clap
     - The `async` feature adds the tokio based directory entry helpers and the I/O semaphore
     - The `diff` feature adds `diff.rs`, so crates that do not render diffs avoid the `difference` dependency
     - The `test-support` feature adds `test_support.rs` with `TempTree`,
