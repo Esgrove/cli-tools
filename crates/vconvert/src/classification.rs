@@ -272,6 +272,36 @@ pub fn resolve_output_collisions(mut results: Vec<AnalysisResult>) -> Vec<Analys
         .collect()
 }
 
+/// Check whether a file loaded from the database can safely write its output.
+///
+/// Returns the reason to skip it when the output is the input file,
+/// when the output already exists and overwriting is off,
+/// or when another file in the same run already claims the output.
+pub fn database_output_conflict(
+    processable: &ProcessableFile,
+    overwrite: bool,
+    reservations: &mut TargetReservations,
+) -> Option<SkipReason> {
+    let output_path = &processable.output_path;
+    if cli_tools_common::paths_refer_to_same_file(output_path, &processable.file.path) {
+        return Some(SkipReason::AnalysisFailed {
+            error: "Output path resolves to the input file, refusing in-place conversion/remux".to_string(),
+        });
+    }
+    if !overwrite && output_path.exists() {
+        return Some(SkipReason::OutputExists {
+            path: output_path.clone(),
+            source_duration: processable.info.duration,
+        });
+    }
+    if !reservations.reserve(output_path) {
+        return Some(SkipReason::OutputConflict {
+            path: output_path.clone(),
+        });
+    }
+    None
+}
+
 /// Input file path of an analysis result.
 fn input_path(result: &AnalysisResult) -> &Path {
     match result {
@@ -2006,5 +2036,75 @@ mod test_resolve_output_collisions {
         ]);
 
         assert_eq!(processable_outputs(&results).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod test_database_output_conflict {
+    use super::*;
+    use crate::types::{ProcessableFile, SkipReason, VideoFile, VideoInfo};
+
+    fn info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 10000,
+            size_bytes: 1024,
+            duration: 60.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    fn processable(input: &Path) -> ProcessableFile {
+        ProcessableFile::for_mode(VideoFile::new(input, 1024), info(), Vec::new(), false)
+    }
+
+    #[test]
+    fn an_existing_output_is_skipped_without_overwrite() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let input = directory.path().join("film.mkv");
+        std::fs::write(&input, b"source").expect("write input");
+        let file = processable(&input);
+        std::fs::write(&file.output_path, b"PRECIOUS existing output").expect("write output");
+
+        let reason = database_output_conflict(&file, false, &mut TargetReservations::new());
+
+        assert!(matches!(reason, Some(SkipReason::OutputExists { .. })), "{reason:?}");
+    }
+
+    #[test]
+    fn an_existing_output_is_allowed_with_overwrite() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let input = directory.path().join("film.mkv");
+        std::fs::write(&input, b"source").expect("write input");
+        let file = processable(&input);
+        std::fs::write(&file.output_path, b"old output").expect("write output");
+
+        assert!(database_output_conflict(&file, true, &mut TargetReservations::new()).is_none());
+    }
+
+    #[test]
+    fn a_second_file_with_the_same_output_is_skipped() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = processable(&directory.path().join("film.mkv"));
+        let second = processable(&directory.path().join("film.mp4"));
+        let mut reservations = TargetReservations::new();
+
+        assert!(database_output_conflict(&first, false, &mut reservations).is_none());
+        let reason = database_output_conflict(&second, false, &mut reservations);
+
+        assert!(matches!(reason, Some(SkipReason::OutputConflict { .. })), "{reason:?}");
+    }
+
+    #[test]
+    fn an_output_equal_to_the_input_is_skipped() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let input = directory.path().join("film.x265.mp4");
+        let file = ProcessableFile::new(VideoFile::new(&input, 1024), info(), input.clone(), Vec::new());
+
+        assert!(database_output_conflict(&file, true, &mut TargetReservations::new()).is_some());
     }
 }

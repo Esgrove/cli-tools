@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use cli_tools_common::{OverwritePolicy, RenameOutcome, print_error, print_yellow};
+use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations, print_error, print_yellow};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -22,7 +22,7 @@ use walkdir::WalkDir;
 
 use crate::VideoConvertArgs;
 use crate::classification::{
-    ClassificationRequest, probe_and_classify, resolve_output_collisions, should_include_file,
+    ClassificationRequest, database_output_conflict, probe_and_classify, resolve_output_collisions, should_include_file,
 };
 use crate::cli::{DatabaseMode, clean_scan_cache, clear_database, list_extensions, show_database_contents};
 use crate::config::{Config, VideoConvertConfig};
@@ -483,6 +483,7 @@ impl VideoConvert {
         let mut remux_files = Vec::new();
         let mut subtitle_mux_files = Vec::new();
         let mut conversion_files = Vec::new();
+        let mut reservations = TargetReservations::new();
 
         for pending_file in pending_files.into_iter().filter(|file| file.full_path.exists()) {
             let video_file = VideoFile::new_with_metadata(&pending_file.full_path);
@@ -493,6 +494,21 @@ impl VideoConvert {
                 probe_video_info(&pending_file.full_path).unwrap_or_else(|_| pending_file.to_video_info())
             };
             let processable = ProcessableFile::for_mode(video_file, info, subtitles, self.config.movie_mode);
+            // The output may have appeared since the scan, so the scan time checks are repeated here.
+            // A blocked row is dropped from the database and a new scan classifies the file again.
+            if let Some(reason) = database_output_conflict(&processable, self.config.overwrite, &mut reservations) {
+                print_yellow!(
+                    "{}: {reason}",
+                    cli_tools_common::path_to_string_relative(&processable.file.path)
+                );
+                if let Err(error) = database.remove_pending_file(&pending_file.full_path) {
+                    print_error!(
+                        "Failed to remove {} from database: {error}",
+                        pending_file.full_path.display()
+                    );
+                }
+                continue;
+            }
             match pending_file.action {
                 PendingAction::Convert => conversion_files.push(processable),
                 PendingAction::Remux => remux_files.push(processable),
