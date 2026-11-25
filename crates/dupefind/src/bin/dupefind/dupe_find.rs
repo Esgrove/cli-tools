@@ -16,7 +16,7 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use walkdir::WalkDir;
 
-use cli_tools_common::{print_error, print_yellow};
+use cli_tools_common::{OverwritePolicy, RenameOutcome, print_error, print_yellow};
 use cli_tools_dupefind::{
     DupeFileInfo, DuplicateGroup, DuplicateMatchOptions, filter_ignored_groups, find_duplicates,
     format_filename_with_highlight, group_matches_ignore,
@@ -123,8 +123,8 @@ impl DupeFind {
             return Ok(());
         }
 
-        // Interactive mode when not in print/dryrun mode
-        if !self.config.dryrun {
+        // Interactive mode when not moving and not in print/dryrun mode
+        if !self.config.dryrun && !self.config.move_files {
             let metadata = helpers::collect_metadata_for_groups(&duplicates);
             return crate::tui::run_interactive(&duplicates, &metadata);
         }
@@ -144,7 +144,7 @@ impl DupeFind {
         }
 
         if self.config.move_files {
-            self.move_duplicates(&duplicates)?;
+            self.move_duplicates(&duplicates);
         }
 
         Ok(())
@@ -222,7 +222,7 @@ impl DupeFind {
     }
 
     /// Move duplicate files to a Duplicates directory
-    fn move_duplicates(&self, duplicates: &[DuplicateGroup]) -> anyhow::Result<()> {
+    fn move_duplicates(&self, duplicates: &[DuplicateGroup]) {
         // Use the first root as the duplicates directory location
         let duplicates_dir = self.roots.first().map_or_else(
             || {
@@ -242,9 +242,22 @@ impl DupeFind {
 
         for group in duplicates {
             let group_name = group.display_name();
+            let target_dir = duplicates_dir.join(&group_name);
+            // The file the interactive view would preselect stays in place, and only the others are moved.
+            let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|file| &file.path).collect();
+            let best_index = crate::tui::find_best_file_index(&sorted_files);
+            if let Some(best) = sorted_files.get(best_index) {
+                println!(
+                    "{}: {}",
+                    "Keep".green(),
+                    cli_tools_common::path_to_string_relative(&best.path)
+                );
+            }
 
-            for file in &group.files {
-                let target_dir = duplicates_dir.join(&group_name);
+            for (index, file) in sorted_files.iter().enumerate() {
+                if index == best_index {
+                    continue;
+                }
                 let target_path =
                     cli_tools_common::get_unique_path(&target_dir, &file.filename, &file.stem, &file.extension);
 
@@ -262,24 +275,20 @@ impl DupeFind {
                     continue;
                 }
 
-                if cli_tools_common::get_user_confirmation("Move file?", false)? {
-                    // Create directory if needed
-                    if let Err(e) = std::fs::create_dir_all(&target_dir) {
-                        print_yellow!("Failed to create directory {}: {e}", target_dir.display());
-                        continue;
-                    }
+                if let Err(e) = std::fs::create_dir_all(&target_dir) {
+                    print_yellow!("Failed to create directory {}: {e}", target_dir.display());
+                    continue;
+                }
 
-                    match std::fs::rename(&file.path, &target_path) {
-                        Ok(()) => println!("{}", "Moved".green()),
-                        Err(e) => print_error!("Failed to move file: {e}"),
+                match cli_tools_common::safe_rename(&file.path, &target_path, OverwritePolicy::Skip) {
+                    Ok(RenameOutcome::SkippedExisting) => {
+                        print_yellow!("Skipping move, file already exists: {}", target_path.display());
                     }
-                } else {
-                    println!("Skipped");
+                    Ok(_) => {}
+                    Err(e) => print_error!("Failed to move file: {e}"),
                 }
             }
         }
-
-        Ok(())
     }
 }
 
@@ -412,13 +421,57 @@ mod test_move_duplicates {
     }
 
     #[test]
+    fn moving_keeps_the_best_file_and_moves_the_others() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_in(directory.path(), &["movie.720p.mp4", "movie.1080p.mp4", "movie.mp4"]);
+        let mut finder = dryrun_finder(directory.path().to_path_buf());
+        finder.config.dryrun = false;
+
+        finder.move_duplicates(&[group]);
+
+        assert!(
+            directory.path().join("movie.1080p.mp4").is_file(),
+            "the best file should stay"
+        );
+        assert!(!directory.path().join("movie.720p.mp4").exists());
+        assert!(!directory.path().join("movie.mp4").exists());
+        let moved: usize = walkdir::WalkDir::new(directory.path().join("Duplicates"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .count();
+        assert_eq!(moved, 2);
+    }
+
+    #[test]
+    fn run_with_move_moves_without_the_interactive_view() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let root = directory.path().join("videos");
+        for subdirectory in ["first", "second"] {
+            let path = root.join(subdirectory);
+            std::fs::create_dir_all(&path).expect("should create subdirectory");
+            std::fs::write(path.join("Movie.Name.mp4"), b"video").expect("should write video file");
+        }
+        let mut finder = dryrun_finder(root.clone());
+        finder.config.dryrun = false;
+        finder.config.recurse = true;
+
+        finder.run().expect("the run should succeed");
+
+        let remaining = [root.join("first/Movie.Name.mp4"), root.join("second/Movie.Name.mp4")]
+            .iter()
+            .filter(|path| path.is_file())
+            .count();
+        assert_eq!(remaining, 1, "one copy should stay in place");
+        assert!(root.join("Duplicates").is_dir());
+    }
+
+    #[test]
     fn a_dryrun_moves_nothing_and_creates_no_directory() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let group = group_in(directory.path(), &["movie.1080p.mp4", "movie.720p.mp4"]);
 
-        dryrun_finder(directory.path().to_path_buf())
-            .move_duplicates(&[group])
-            .expect("a dryrun should succeed");
+        dryrun_finder(directory.path().to_path_buf()).move_duplicates(&[group]);
 
         assert!(directory.path().join("movie.1080p.mp4").is_file());
         assert!(directory.path().join("movie.720p.mp4").is_file());
@@ -432,9 +485,7 @@ mod test_move_duplicates {
     fn no_duplicate_groups_is_a_no_op() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
 
-        dryrun_finder(directory.path().to_path_buf())
-            .move_duplicates(&[])
-            .expect("an empty list should succeed");
+        dryrun_finder(directory.path().to_path_buf()).move_duplicates(&[]);
 
         assert!(!directory.path().join("Duplicates").exists());
     }
@@ -445,9 +496,7 @@ mod test_move_duplicates {
         let first = group_in(directory.path(), &["one.1080p.mp4", "one.720p.mp4"]);
         let second = group_in(directory.path(), &["two.1080p.mp4", "two.720p.mp4"]);
 
-        dryrun_finder(directory.path().to_path_buf())
-            .move_duplicates(&[first, second])
-            .expect("a dryrun should succeed");
+        dryrun_finder(directory.path().to_path_buf()).move_duplicates(&[first, second]);
 
         assert_eq!(
             std::fs::read_dir(directory.path())
@@ -467,7 +516,7 @@ mod test_move_duplicates {
             ..dryrun_finder(directory.path().to_path_buf())
         };
 
-        finder.move_duplicates(&[group]).expect("a dryrun should succeed");
+        finder.move_duplicates(&[group]);
 
         assert!(directory.path().join("movie.1080p.mp4").is_file());
     }

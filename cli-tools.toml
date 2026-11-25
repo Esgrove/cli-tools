@@ -124,7 +124,8 @@ replace = [
 # Only print changes without moving files
 # dryrun = false
 
-# Move duplicates to a "Duplicates" directory
+# Move every duplicate except the best file of each group to a "Duplicates" directory,
+# instead of choosing interactively
 # move_files = false
 
 # Recurse into subdirectories

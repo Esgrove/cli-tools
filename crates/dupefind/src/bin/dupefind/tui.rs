@@ -664,7 +664,7 @@ fn same_location(left: &Path, right: &Path) -> bool {
 }
 
 /// Find the index of the best file to preselect based on resolution and codec.
-fn find_best_file_index(files: &[&DupeFileInfo]) -> usize {
+pub fn find_best_file_index(files: &[&DupeFileInfo]) -> usize {
     files
         .iter()
         .enumerate()

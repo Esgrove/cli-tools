@@ -30,7 +30,7 @@ struct Args {
     #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
     extension: Vec<String>,
 
-    /// Move duplicates to a "Duplicates" directory
+    /// Move every duplicate except the best file of each group to a "Duplicates" directory
     #[arg(short = 'm', long = "move")]
     move_files: bool,
 
