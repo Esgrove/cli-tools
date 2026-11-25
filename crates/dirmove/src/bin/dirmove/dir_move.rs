@@ -702,34 +702,37 @@ impl DirMove {
         };
         match prompt_result {
             PromptResult::Confirmed(target_path) => self.move_group(&target_path, available_files, moved_files),
-            PromptResult::SaveToIgnored => {
-                match add_ignored_group_name_to_config(dir_name) {
-                    Ok(true) => {
-                        println!(
-                            "  {} Added '{}' to ignored_group_names in config",
-                            "✓".green(),
-                            dir_name.cyan()
-                        );
-                    }
-                    Ok(false) => {
-                        println!(
-                            "  {} '{}' already in ignored_group_names config",
-                            "→".dimmed(),
-                            dir_name.cyan()
-                        );
-                    }
-                    Err(error) => {
-                        print_error!("Failed to update config: {error}");
-                    }
-                }
-                // Later groups with the same name are skipped for the rest of the run.
-                runtime_ignored.insert(utils::normalize_name(dir_name));
-            }
+            PromptResult::SaveToIgnored => Self::save_ignored_group_name(dir_name, runtime_ignored),
             PromptResult::Skipped => {}
         }
         println!();
 
         Ok(())
+    }
+
+    /// Save a group name to `ignored_group_names` in the config file,
+    /// and skip later groups with the same name for the rest of the run.
+    fn save_ignored_group_name(dir_name: &str, runtime_ignored: &mut HashSet<String>) {
+        match add_ignored_group_name_to_config(dir_name) {
+            Ok(true) => {
+                println!(
+                    "  {} Added '{}' to ignored_group_names in config",
+                    "✓".green(),
+                    dir_name.cyan()
+                );
+            }
+            Ok(false) => {
+                println!(
+                    "  {} '{}' already in ignored_group_names config",
+                    "→".dimmed(),
+                    dir_name.cyan()
+                );
+            }
+            Err(error) => {
+                print_error!("Failed to update config: {error}");
+            }
+        }
+        runtime_ignored.insert(utils::normalize_name(dir_name));
     }
 
     /// Process custom mappings in create mode, offering to create directories for matching files.
@@ -755,7 +758,7 @@ impl DirMove {
 
         let grouper = self.grouper();
         let parent_dir_normalized = self.output_root_name_normalized();
-        let runtime_ignored = HashSet::new();
+        let mut runtime_ignored = HashSet::new();
 
         for (dir_name, files) in mapping_groups {
             if files.is_empty()
@@ -775,9 +778,13 @@ impl DirMove {
             }
 
             if let Some(prompt_result) = self.offer_new_directory(&dir_name, None)? {
-                if let PromptResult::Confirmed(target_path) = prompt_result {
-                    let file_paths: Vec<_> = files.iter().map(|file| file.path.clone()).collect();
-                    self.move_group(&target_path, &file_paths, moved_files);
+                match prompt_result {
+                    PromptResult::Confirmed(target_path) => {
+                        let file_paths: Vec<_> = files.iter().map(|file| file.path.clone()).collect();
+                        self.move_group(&target_path, &file_paths, moved_files);
+                    }
+                    PromptResult::SaveToIgnored => Self::save_ignored_group_name(&dir_name, &mut runtime_ignored),
+                    PromptResult::Skipped => {}
                 }
                 println!();
             }
