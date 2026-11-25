@@ -47,7 +47,7 @@ impl VideoInfo {
     ///
     /// # Errors
     ///
-    /// Returns an error if ffprobe cannot be executed.
+    /// Returns an error if ffprobe cannot be executed or cannot read the file.
     pub fn from_path(path: &Path) -> anyhow::Result<Self> {
         let size_bytes = std::fs::metadata(path).map(|m| m.len()).ok();
 
@@ -65,6 +65,13 @@ impl VideoInfo {
             .arg(path)
             .output()
             .context("Failed to execute ffprobe")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "ffprobe failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut info = Self::parse_ffprobe_output(&stdout);
@@ -455,6 +462,20 @@ pub fn parse_display_resolution(output: &str) -> Option<Resolution> {
 #[cfg(test)]
 mod test_video_info {
     use super::*;
+
+    #[test]
+    fn a_file_ffprobe_cannot_read_is_an_error() {
+        if !cli_tools_common::command_exists("ffprobe") {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("garbage.mp4");
+        std::fs::write(&path, b"not a video").expect("write");
+
+        let result = VideoInfo::from_path(&path);
+
+        assert!(result.is_err(), "{result:?}");
+    }
 
     #[test]
     fn resolution_returns_some_when_present() {
