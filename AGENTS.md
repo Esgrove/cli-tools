@@ -114,7 +114,7 @@ so that benchmarks can import them directly without duplicating code.
 - `crates/common/benches/date.rs` - Date parsing and reordering
 - `crates/common/benches/lib.rs` - Shared utility functions
 - `crates/common/benches/simd.rs` - SIMD byte scanning kernels against the scalar code they replace,
-  from token to file length
+  from token to file length, precomputed `ByteSet` against per-call sets, bitmap walks, and the newline index
 - `crates/dirmove/benches/dir_move.rs` - Prefix grouping, file matching, contiguity checks
 - `crates/dupefind/benches/dupe_find.rs` - Stem normalization, duplicate grouping, regex matching
 - `crates/dots/benches/format.rs` - Dot-rename formatting pipeline
@@ -124,7 +124,8 @@ so that benchmarks can import them directly without duplicating code.
 
 ### SIMD benchmarks
 
-`crates/common/src/simd.rs` detects the best SIMD level once per process.
+`crates/common/src/simd.rs` uses the compile-time SIMD level when the target already has AVX2 or NEON,
+and detects the best level once per process otherwise.
 `./simd-bench.sh` runs the benchmarks that go through the kernels and writes a summary table to `target/`.
 See `docs/simd.md` for the evaluation and its results.
 
@@ -151,7 +152,7 @@ A binary only crate keeps its binary in `src/main.rs`.
       atomic file writes, and recursive directory copy
     - `diff.rs` - Coloured diff rendering (`color_diff` and `show_diff` for renames, `diff_lines` for files)
     - `date.rs` - Date parsing and formatting utilities
-    - `simd.rs` - SIMD byte scanning kernels on `fearless_simd`
+    - `simd.rs` - SIMD byte scanning kernels on `fearless_simd`, precomputed `ByteSet` classes, and `ByteBitmap`
     - The `completion` feature adds `completion.rs` with shell completion generation,
       so library crates that take no command line arguments avoid clap
     - The `async` feature adds the tokio based directory entry helpers and the I/O semaphore

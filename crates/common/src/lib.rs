@@ -209,10 +209,10 @@ pub fn colorize_bool(value: bool) -> ColoredString {
 /// ```
 #[must_use]
 pub fn collapse_repeated_separators(text: &str) -> String {
-    const SEPARATORS: &[u8] = b".-_ \t\n\x0b\x0c\r";
+    const SEPARATORS: simd::ByteSet = simd::ByteSet::new(b".-_ \t\n\x0b\x0c\r");
     let trim = |character: char| matches!(character, '.' | '-' | '_') || character.is_whitespace();
     // Unicode whitespace also counts as a separator, so only ASCII text can skip the regex.
-    if text.is_ascii() && !simd::has_adjacent_bytes_of(text.as_bytes(), SEPARATORS) {
+    if text.is_ascii() && !simd::has_adjacent_bytes_in(text.as_bytes(), &SEPARATORS) {
         return text.trim_matches(trim).to_string();
     }
     let collapsed = RE_REPEATED_SEPARATORS.replace_all(text, |captures: &regex::Captures<'_>| {

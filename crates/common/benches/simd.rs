@@ -8,7 +8,8 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use cli_tools_common::simd::{
-    byte_positions, contains_byte_of, count_chars, find_byte_of, has_adjacent_bytes_of, level,
+    ByteBitmap, ByteSet, byte_positions, contains_byte_in, contains_byte_of, count_chars, find_byte_in, find_byte_of,
+    has_adjacent_bytes_in, has_adjacent_bytes_of, level,
 };
 
 /// Input lengths in bytes, from a short token to a large file.
@@ -17,8 +18,20 @@ const LENGTHS: &[usize] = &[4, 8, 16, 32, 64, 128, 1024, 65_536];
 /// Bytes that can start a string or comment in Rust source, the scanner trigger set.
 const TRIGGERS: &[u8] = b"/\"'`<#r";
 
+/// The scanner trigger set, precomputed.
+const TRIGGER_SET: ByteSet = ByteSet::new(TRIGGERS);
+
+/// The same candidate set as `CHUNK_END_CANDIDATES` in the private slb tokenizer module.
+const WHITESPACE_CANDIDATES: &[u8] = b" \t\n\x0b\x0c\r\xc2\xe1\xe2\xe3";
+
+/// The whitespace candidates, precomputed.
+const WHITESPACE_SET: ByteSet = ByteSet::new(WHITESPACE_CANDIDATES);
+
 /// Separators collapsed by `collapse_repeated_separators`.
 const SEPARATORS: &[u8] = b".-_ \t";
+
+/// The separators, precomputed.
+const SEPARATOR_SET: ByteSet = ByteSet::new(SEPARATORS);
 
 /// ASCII prose of the given length without any trigger or separator pair.
 fn ascii_text(length: usize) -> String {
@@ -109,6 +122,9 @@ fn bench_find_byte_of(criterion: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", length), bytes, |bencher, bytes| {
             bencher.iter(|| contains_byte_of(black_box(bytes), TRIGGERS));
         });
+        group.bench_with_input(BenchmarkId::new("simd_byte_set", length), bytes, |bencher, bytes| {
+            bencher.iter(|| contains_byte_in(black_box(bytes), &TRIGGER_SET));
+        });
     }
     group.finish();
 }
@@ -116,8 +132,6 @@ fn bench_find_byte_of(criterion: &mut Criterion) {
 /// Benchmark finding the next whitespace candidate against the character loop the tokenizer used before.
 fn bench_find_whitespace(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("simd/find_whitespace");
-    // The same candidate set as `CHUNK_END_CANDIDATES` in the private slb tokenizer module.
-    let whitespace = b" \t\n\x0b\x0c\r\xc2\xe1\xe2\xe3";
     for &length in LENGTHS {
         let word = "x".repeat(length);
         let bytes = word.as_bytes();
@@ -130,7 +144,10 @@ fn bench_find_whitespace(criterion: &mut Criterion) {
             });
         });
         group.bench_with_input(BenchmarkId::new("simd", length), bytes, |bencher, bytes| {
-            bencher.iter(|| find_byte_of(black_box(bytes), whitespace));
+            bencher.iter(|| find_byte_of(black_box(bytes), WHITESPACE_CANDIDATES));
+        });
+        group.bench_with_input(BenchmarkId::new("simd_byte_set", length), bytes, |bencher, bytes| {
+            bencher.iter(|| find_byte_in(black_box(bytes), &WHITESPACE_SET));
         });
     }
     group.finish();
@@ -151,6 +168,9 @@ fn bench_adjacent_separators(criterion: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new("simd", length), bytes, |bencher, bytes| {
             bencher.iter(|| has_adjacent_bytes_of(black_box(bytes), SEPARATORS));
+        });
+        group.bench_with_input(BenchmarkId::new("simd_byte_set", length), bytes, |bencher, bytes| {
+            bencher.iter(|| has_adjacent_bytes_in(black_box(bytes), &SEPARATOR_SET));
         });
     }
     group.finish();
@@ -179,6 +199,71 @@ fn bench_byte_positions(criterion: &mut Criterion) {
 }
 
 /// Benchmark the fixed dispatch cost on empty input, and print the detected SIMD level.
+/// Benchmark finding every word boundary of a prose line, the tokenizer's access pattern,
+/// with a search from each word start against one bitmap walked bit by bit.
+fn bench_line_boundaries(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("simd/line_boundaries");
+    for length in [40, 80, 120, 1024] {
+        let line = ascii_text(length);
+        let bytes = line.as_bytes();
+        group.bench_with_input(
+            BenchmarkId::new("find_from_each_word", length),
+            bytes,
+            |bencher, bytes| {
+                bencher.iter(|| {
+                    let mut count = 0usize;
+                    let mut start = 0;
+                    while let Some(found) = bytes
+                        .get(start..)
+                        .and_then(|tail| find_byte_in(black_box(tail), &WHITESPACE_SET))
+                    {
+                        count += 1;
+                        start += found + 1;
+                    }
+                    count
+                });
+            },
+        );
+        group.bench_with_input(BenchmarkId::new("bitmap_walk", length), bytes, |bencher, bytes| {
+            bencher.iter(|| {
+                let bitmap = ByteBitmap::new(black_box(bytes), &WHITESPACE_SET);
+                let mut count = 0usize;
+                let mut start = 0;
+                while let Some(position) = bitmap.next_from(start) {
+                    count += 1;
+                    start = position + 1;
+                }
+                count
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Benchmark collecting every newline of a whole file, which is how slb splits a file into lines.
+fn bench_newline_index(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("simd/newline_index");
+    for length in [65_536, 1_048_576] {
+        let text: String = "let value = compute(input); // a short line of code\n"
+            .chars()
+            .cycle()
+            .take(length)
+            .collect();
+        group.bench_with_input(BenchmarkId::new("match_indices", length), &text, |bencher, text| {
+            bencher.iter(|| {
+                black_box(text.as_str())
+                    .match_indices('\n')
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>()
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("byte_positions", length), &text, |bencher, text| {
+            bencher.iter(|| byte_positions(black_box(text.as_bytes()), b'\n'));
+        });
+    }
+    group.finish();
+}
+
 fn bench_dispatch(criterion: &mut Criterion) {
     eprintln!("SIMD level: {:?}", level());
     let mut group = criterion.benchmark_group("simd/dispatch");
@@ -187,6 +272,9 @@ fn bench_dispatch(criterion: &mut Criterion) {
     });
     group.bench_function("contains_byte_of_empty", |bencher| {
         bencher.iter(|| contains_byte_of(black_box(b""), TRIGGERS));
+    });
+    group.bench_function("contains_byte_in_empty", |bencher| {
+        bencher.iter(|| contains_byte_in(black_box(b""), &TRIGGER_SET));
     });
     group.finish();
 }
@@ -198,6 +286,8 @@ criterion_group!(
     bench_find_whitespace,
     bench_adjacent_separators,
     bench_byte_positions,
+    bench_line_boundaries,
+    bench_newline_index,
     bench_dispatch
 );
 criterion_main!(benches);
