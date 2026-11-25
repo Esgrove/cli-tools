@@ -24,6 +24,32 @@ pub type Resource = String;
 /// Action closure executed by a task.
 pub type TaskAction = Box<dyn FnOnce(&TaskContext, &Path) -> Result<TaskActionResult> + Send>;
 
+/// Result returned by an individual task action callback.
+#[derive(Debug)]
+pub enum TaskActionResult {
+    /// Task completed successfully.
+    Passed,
+    /// Task was intentionally skipped (for example, an optional tool was not installed).
+    Skipped(String),
+    /// Task ran in `--dryrun` mode.
+    DryRun,
+}
+
+/// Final recorded outcome of a task in a run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskOutcome {
+    /// Task succeeded.
+    Passed,
+    /// Task failed with an error message.
+    Failed(String),
+    /// Task was not started because a prerequisite failed or `--fail-fast` stopped scheduling.
+    Blocked(String),
+    /// Task was skipped with a reason.
+    Skipped(String),
+    /// Task ran in `--dryrun` mode.
+    DryRun,
+}
+
 /// Runtime values discovered by setup tasks and shared with downstream tasks.
 #[derive(Debug, Default)]
 pub struct SharedState {
@@ -115,32 +141,6 @@ struct SchedulerState {
     held_resources: BTreeSet<Resource>,
     any_failed: bool,
     stop_scheduling: bool,
-}
-
-/// Result returned by an individual task action callback.
-#[derive(Debug)]
-pub enum TaskActionResult {
-    /// Task completed successfully.
-    Passed,
-    /// Task was intentionally skipped (for example, an optional tool was not installed).
-    Skipped(String),
-    /// Task ran in `--dryrun` mode.
-    DryRun,
-}
-
-/// Final recorded outcome of a task in a run.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TaskOutcome {
-    /// Task succeeded.
-    Passed,
-    /// Task failed with an error message.
-    Failed(String),
-    /// Task was not started because a prerequisite failed or `--fail-fast` stopped scheduling.
-    Blocked(String),
-    /// Task was skipped with a reason.
-    Skipped(String),
-    /// Task ran in `--dryrun` mode.
-    DryRun,
 }
 
 impl TaskContext {

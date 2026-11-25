@@ -42,6 +42,20 @@ const INTERACTIVE_DRAW_HZ: u8 = 15;
 const FAST_DURATION_SECS: f64 = 10.0;
 const SLOW_DURATION_SECS: f64 = 30.0;
 
+enum ReporterBackend {
+    Interactive(Box<InteractiveState>),
+    Line(LineTarget),
+}
+
+#[derive(Clone, Debug)]
+enum LineTarget {
+    Stdout,
+    #[cfg(test)]
+    Buffer(Arc<Mutex<Vec<u8>>>),
+    #[cfg(test)]
+    Silent,
+}
+
 /// Resolved UI configuration driving terminal rendering, color styling, and failure hints.
 #[derive(Clone, Debug)]
 pub struct UiConfig {
@@ -110,20 +124,6 @@ struct ActiveTask {
     started_at: Instant,
     buffer: TaskLineBuffer,
     bar: Option<ProgressBar>,
-}
-
-enum ReporterBackend {
-    Interactive(Box<InteractiveState>),
-    Line(LineTarget),
-}
-
-#[derive(Clone, Debug)]
-enum LineTarget {
-    Stdout,
-    #[cfg(test)]
-    Buffer(Arc<Mutex<Vec<u8>>>),
-    #[cfg(test)]
-    Silent,
 }
 
 impl UiConfig {

@@ -25,6 +25,30 @@ static CMAKE_VERSION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static CMAKE_NAME_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)project\s*\(\s*["']?([^"'\s)]+)["']?"#).expect("Invalid regex"));
 
+/// Subcommands for vtag.
+#[derive(Subcommand, Debug)]
+enum VersionTagCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
+/// Supported project types for version tagging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectType {
+    CMake,
+    Python,
+    Rust,
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create git version tags for a project (CMake, Python, Rust)")]
 struct Args {
@@ -58,30 +82,6 @@ struct Args {
     /// Prefix for the tag names, for example "rust-" for tags like rust-v1.2.3
     #[arg(short = 't', long, value_name = "PREFIX", default_value = "")]
     tag_prefix: String,
-}
-
-/// Subcommands for vtag.
-#[derive(Subcommand, Debug)]
-enum VersionTagCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
-}
-
-/// Supported project types for version tagging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectType {
-    CMake,
-    Python,
-    Rust,
 }
 
 /// Decides which root manifests in the history of a subdirectory project belong to that project.

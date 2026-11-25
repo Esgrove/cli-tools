@@ -33,6 +33,100 @@ struct ConditionContext<'a> {
     is_ci: bool,
 }
 
+/// Paths of the files a command task writes exported variables and notes to.
+struct ExportFiles {
+    env: PathBuf,
+    notes: PathBuf,
+}
+
+impl ConditionContext<'_> {
+    /// Whether a task with the given `when` expression is enabled.
+    fn is_enabled(&self, when: Option<&str>) -> Result<bool> {
+        let Some(expression) = when else {
+            return Ok(true);
+        };
+        let condition = Condition::parse(expression)?;
+        self.evaluate(&condition, 0)
+    }
+
+    fn evaluate(&self, condition: &Condition, depth: usize) -> Result<bool> {
+        if depth > self.conditions.len() {
+            bail!("Conditions refer to each other in a cycle");
+        }
+        condition.evaluate(&mut |name| self.resolve(name, depth))
+    }
+
+    fn resolve(&self, name: &str, depth: usize) -> Result<bool> {
+        if let Some(enabled) = self.flags.get(name) {
+            return Ok(*enabled);
+        }
+        if let Some(condition) = self.conditions.get(name) {
+            return self.evaluate(condition, depth.saturating_add(1));
+        }
+        match name {
+            "macos" => Ok(cfg!(target_os = "macos")),
+            "linux" => Ok(cfg!(target_os = "linux")),
+            "windows" => Ok(cfg!(windows)),
+            "unix" => Ok(cfg!(unix)),
+            "ci" => Ok(self.is_ci),
+            "dryrun" => Ok(self.dry_run),
+            other => bail!("Unknown condition '{other}'"),
+        }
+    }
+}
+
+impl ExportFiles {
+    /// Export files stored next to the task's log file.
+    fn for_log(log_path: &Path) -> Self {
+        Self {
+            env: log_path.with_extension("env"),
+            notes: log_path.with_extension("notes"),
+        }
+    }
+
+    /// Remove files left by an earlier run with the same log path.
+    fn reset(&self) -> Result<()> {
+        for path in [&self.env, &self.notes] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).with_context(|| format!("Failed to remove {}", path.display())),
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the exported variables and notes into the shared state.
+    ///
+    /// Each `KEY=VALUE` line of the env file adds a value, so repeating a key makes a list variable.
+    fn collect(&self, context: &TaskContext) -> Result<()> {
+        if let Some(content) = read_optional(&self.env)? {
+            let mut exported: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                let Some((key, value)) = line.split_once('=') else {
+                    bail!(
+                        "Invalid line in {}: expected KEY=VALUE, got '{line}'",
+                        self.env.display()
+                    );
+                };
+                exported
+                    .entry(key.trim().to_owned())
+                    .or_default()
+                    .push(value.to_owned());
+            }
+            for (key, values) in exported {
+                context.set_variable(key, values);
+            }
+        }
+        if let Some(content) = read_optional(&self.notes)? {
+            for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                context.add_note(line.to_owned());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Run the task file with the resolved options.
 ///
 /// Returns whether every task passed, was skipped, or was blocked only by `--fail-fast`.
@@ -105,42 +199,6 @@ pub fn plan(
     let all_tasks = build_tasks(task_file, &condition_context, &location.root, builtins)?;
     let selected_scopes = resolve_scope(task_file, options.scope.as_deref())?;
     filter_tasks(all_tasks, selected_scopes.as_ref(), &options.task_ids)
-}
-
-impl ConditionContext<'_> {
-    /// Whether a task with the given `when` expression is enabled.
-    fn is_enabled(&self, when: Option<&str>) -> Result<bool> {
-        let Some(expression) = when else {
-            return Ok(true);
-        };
-        let condition = Condition::parse(expression)?;
-        self.evaluate(&condition, 0)
-    }
-
-    fn evaluate(&self, condition: &Condition, depth: usize) -> Result<bool> {
-        if depth > self.conditions.len() {
-            bail!("Conditions refer to each other in a cycle");
-        }
-        condition.evaluate(&mut |name| self.resolve(name, depth))
-    }
-
-    fn resolve(&self, name: &str, depth: usize) -> Result<bool> {
-        if let Some(enabled) = self.flags.get(name) {
-            return Ok(*enabled);
-        }
-        if let Some(condition) = self.conditions.get(name) {
-            return self.evaluate(condition, depth.saturating_add(1));
-        }
-        match name {
-            "macos" => Ok(cfg!(target_os = "macos")),
-            "linux" => Ok(cfg!(target_os = "linux")),
-            "windows" => Ok(cfg!(windows)),
-            "unix" => Ok(cfg!(unix)),
-            "ci" => Ok(self.is_ci),
-            "dryrun" => Ok(self.dry_run),
-            other => bail!("Unknown condition '{other}'"),
-        }
-    }
 }
 
 /// Name of the operating system as used by flag `platforms` and the built-in conditions.
@@ -289,64 +347,6 @@ fn build_action(
         }
         Ok(TaskActionResult::Passed)
     }))
-}
-
-/// Paths of the files a command task writes exported variables and notes to.
-struct ExportFiles {
-    env: PathBuf,
-    notes: PathBuf,
-}
-
-impl ExportFiles {
-    /// Export files stored next to the task's log file.
-    fn for_log(log_path: &Path) -> Self {
-        Self {
-            env: log_path.with_extension("env"),
-            notes: log_path.with_extension("notes"),
-        }
-    }
-
-    /// Remove files left by an earlier run with the same log path.
-    fn reset(&self) -> Result<()> {
-        for path in [&self.env, &self.notes] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).with_context(|| format!("Failed to remove {}", path.display())),
-            }
-        }
-        Ok(())
-    }
-
-    /// Read the exported variables and notes into the shared state.
-    ///
-    /// Each `KEY=VALUE` line of the env file adds a value, so repeating a key makes a list variable.
-    fn collect(&self, context: &TaskContext) -> Result<()> {
-        if let Some(content) = read_optional(&self.env)? {
-            let mut exported: BTreeMap<String, Vec<String>> = BTreeMap::new();
-            for line in content.lines().filter(|line| !line.trim().is_empty()) {
-                let Some((key, value)) = line.split_once('=') else {
-                    bail!(
-                        "Invalid line in {}: expected KEY=VALUE, got '{line}'",
-                        self.env.display()
-                    );
-                };
-                exported
-                    .entry(key.trim().to_owned())
-                    .or_default()
-                    .push(value.to_owned());
-            }
-            for (key, values) in exported {
-                context.set_variable(key, values);
-            }
-        }
-        if let Some(content) = read_optional(&self.notes)? {
-            for line in content.lines().filter(|line| !line.trim().is_empty()) {
-                context.add_note(line.to_owned());
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Validate the requested scope and return it together with every scope it includes.

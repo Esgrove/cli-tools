@@ -23,6 +23,22 @@ use clap_complete::Shell;
 pub use crate::cli::{DatabaseMode, SortOrder};
 use crate::convert::VideoConvert;
 
+/// Subcommands for vconvert.
+#[derive(Subcommand)]
+enum VideoConvertCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
 pub(crate) struct VideoConvertArgs {
@@ -159,22 +175,6 @@ impl VideoConvertArgs {
             None
         }
     }
-}
-
-/// Subcommands for vconvert.
-#[derive(Subcommand)]
-enum VideoConvertCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> Result<()> {

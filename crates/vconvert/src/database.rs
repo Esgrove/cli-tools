@@ -20,6 +20,17 @@ use crate::types::VideoInfo;
 /// Default database filename.
 const DATABASE_FILENAME: &str = "vconvert.db";
 
+/// Action type for a pending file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingAction {
+    /// File needs full conversion to HEVC.
+    Convert,
+    /// File is already HEVC but needs remuxing to MP4 container.
+    Remux,
+    /// File needs external subtitle sidecars muxed into the movie container.
+    SubtitleMux,
+}
+
 /// Database wrapper for pending file operations.
 pub struct Database {
     connection: Connection,
@@ -57,17 +68,6 @@ pub struct PendingFile {
     pub created_time: i64,
     /// File's modification time when scanned, used to detect later changes.
     pub modified_time: Option<i64>,
-}
-
-/// Action type for a pending file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingAction {
-    /// File needs full conversion to HEVC.
-    Convert,
-    /// File is already HEVC but needs remuxing to MP4 container.
-    Remux,
-    /// File needs external subtitle sidecars muxed into the movie container.
-    SubtitleMux,
 }
 
 /// Statistics about the database contents.
@@ -721,26 +721,6 @@ impl Database {
     }
 }
 
-/// Convert a database row to a `PendingFile`.
-fn row_to_pending_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingFile> {
-    Ok(PendingFile {
-        id: row.get(0)?,
-        full_path: PathBuf::from(row.get::<_, String>(1)?),
-        extension: row.get(2)?,
-        codec: row.get(3)?,
-        bitrate_kbps: row.get::<_, i64>(4)? as u64,
-        size_bytes: row.get::<_, i64>(5)? as u64,
-        duration: row.get(6)?,
-        width: row.get::<_, i64>(7)? as u32,
-        height: row.get::<_, i64>(8)? as u32,
-        frames_per_second: row.get(9)?,
-        bit_depth: row.get::<_, i64>(10)? as u8,
-        action: PendingAction::from_str(&row.get::<_, String>(11)?),
-        created_time: row.get(12)?,
-        modified_time: row.get(13)?,
-    })
-}
-
 impl PendingFile {
     /// Convert to `VideoInfo` for processing.
     pub fn to_video_info(&self) -> VideoInfo {
@@ -782,15 +762,6 @@ impl std::fmt::Display for DatabaseStats {
     }
 }
 
-/// File modification time in whole seconds since the Unix epoch, or `None` if it cannot be read.
-fn file_modified_time(path: &Path) -> Option<i64> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64)
-}
-
 impl std::fmt::Display for ExtensionStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -801,6 +772,35 @@ impl std::fmt::Display for ExtensionStats {
             cli_tools_common::format_size(self.total_size)
         )
     }
+}
+
+/// Convert a database row to a `PendingFile`.
+fn row_to_pending_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingFile> {
+    Ok(PendingFile {
+        id: row.get(0)?,
+        full_path: PathBuf::from(row.get::<_, String>(1)?),
+        extension: row.get(2)?,
+        codec: row.get(3)?,
+        bitrate_kbps: row.get::<_, i64>(4)? as u64,
+        size_bytes: row.get::<_, i64>(5)? as u64,
+        duration: row.get(6)?,
+        width: row.get::<_, i64>(7)? as u32,
+        height: row.get::<_, i64>(8)? as u32,
+        frames_per_second: row.get(9)?,
+        bit_depth: row.get::<_, i64>(10)? as u8,
+        action: PendingAction::from_str(&row.get::<_, String>(11)?),
+        created_time: row.get(12)?,
+        modified_time: row.get(13)?,
+    })
+}
+
+/// File modification time in whole seconds since the Unix epoch, or `None` if it cannot be read.
+fn file_modified_time(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
 }
 
 #[cfg(test)]

@@ -10,6 +10,22 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
+/// Subcommands for flipdate.
+#[derive(Subcommand)]
+enum FlipDateCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     author,
@@ -56,22 +72,6 @@ pub struct Args {
     /// Print verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
-}
-
-/// Subcommands for flipdate.
-#[derive(Subcommand)]
-enum FlipDateCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> anyhow::Result<()> {

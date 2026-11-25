@@ -15,6 +15,22 @@ use clap_complete::Shell;
 
 use config::Config;
 
+/// Subcommands for vres.
+#[derive(Subcommand, Debug)]
+enum VideoResolutionCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Add video resolution to filenames")]
 pub struct Args {
@@ -49,22 +65,6 @@ pub struct Args {
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
-}
-
-/// Subcommands for vres.
-#[derive(Subcommand, Debug)]
-enum VideoResolutionCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 #[tokio::main]

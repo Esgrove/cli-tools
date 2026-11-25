@@ -16,6 +16,31 @@ use cli_tools_common::leading_whitespace;
 
 pub use super::looks_like_code::looks_like_code;
 
+/// Classification of one content line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LineClass {
+    /// Empty or whitespace only.
+    Blank,
+    /// Opens a fenced code block with the given marker character and length.
+    FenceOpen(char, usize),
+    /// Opens a math block.
+    MathFence,
+    /// Opens an HTML comment.
+    HtmlComment,
+    /// Starts an HTML block.
+    HtmlBlock,
+    /// Single verbatim line such as a heading, rule, table row, or link reference.
+    Verbatim,
+    /// Blockquote line.
+    Blockquote,
+    /// List item with the content starting at the given character column.
+    ListItem(usize),
+    /// A field or tag line that always starts a new paragraph.
+    Field,
+    /// Ordinary prose.
+    Text,
+}
+
 /// A place a paragraph was kept verbatim by a heuristic rather than by Markdown structure.
 ///
 /// The paragraphs behind a fenced code block, a heading, a table,
@@ -30,6 +55,17 @@ pub struct SkipNotice {
     pub line: usize,
     /// Reason the paragraph was kept verbatim.
     pub message: Cow<'static, str>,
+}
+
+/// Base prefix, start line, and document mode shared by every paragraph split from one run of lines.
+#[derive(Clone, Copy)]
+struct SplitContext<'a> {
+    /// Prefix prepended to every paragraph prefix, for example the comment marker.
+    base_prefix: &'a str,
+    /// Zero based index of the first line in the text buffer.
+    start_line: usize,
+    /// Whether front matter detection and hard break markers are enabled.
+    is_document: bool,
 }
 
 /// Marker text that excludes the surrounding paragraph from formatting.
@@ -117,31 +153,6 @@ static RE_FIELD: LazyLock<Regex> =
 static RE_ALIGNED_COLUMNS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\S\s{3,}\S").expect("Invalid aligned columns regex"));
 
-/// Classification of one content line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum LineClass {
-    /// Empty or whitespace only.
-    Blank,
-    /// Opens a fenced code block with the given marker character and length.
-    FenceOpen(char, usize),
-    /// Opens a math block.
-    MathFence,
-    /// Opens an HTML comment.
-    HtmlComment,
-    /// Starts an HTML block.
-    HtmlBlock,
-    /// Single verbatim line such as a heading, rule, table row, or link reference.
-    Verbatim,
-    /// Blockquote line.
-    Blockquote,
-    /// List item with the content starting at the given character column.
-    ListItem(usize),
-    /// A field or tag line that always starts a new paragraph.
-    Field,
-    /// Ordinary prose.
-    Text,
-}
-
 /// Split content lines into verbatim regions and prose paragraphs.
 ///
 /// `base_prefix` is prepended to every paragraph prefix, for example the comment marker.
@@ -178,17 +189,6 @@ pub fn has_ignore_file_marker(lines: &[&str]) -> bool {
         .iter()
         .take(IGNORE_FILE_SEARCH_LINES)
         .any(|line| line.contains(IGNORE_FILE_MARKER))
-}
-
-/// Base prefix, start line, and document mode shared by every paragraph split from one run of lines.
-#[derive(Clone, Copy)]
-struct SplitContext<'a> {
-    /// Prefix prepended to every paragraph prefix, for example the comment marker.
-    base_prefix: &'a str,
-    /// Zero based index of the first line in the text buffer.
-    start_line: usize,
-    /// Whether front matter detection and hard break markers are enabled.
-    is_document: bool,
 }
 
 /// Split content lines, using the given indentation as the mark of a block of its own.

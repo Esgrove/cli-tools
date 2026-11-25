@@ -12,6 +12,22 @@ use clap_complete::Shell;
 
 use crate::dupe_find::DupeFind;
 
+/// Subcommands for dupefind.
+#[derive(Subcommand)]
+enum DupeFindCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Find duplicate video files based on identifier patterns")]
 struct Args {
@@ -61,22 +77,6 @@ struct Args {
     /// Print debug output (extensions, patterns, etc.)
     #[arg(short = 'D', long, global = true)]
     debug: bool,
-}
-
-/// Subcommands for dupefind.
-#[derive(Subcommand)]
-enum DupeFindCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> anyhow::Result<()> {

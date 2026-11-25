@@ -15,6 +15,14 @@ use super::{
 };
 use crate::scheduler::TaskOutcome;
 
+/// Where the last write left the cursor within an `indicatif` redraw.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrawWritePhase {
+    AtLineStart,
+    ExpectingFiller,
+    AfterLine,
+}
+
 /// Overall progress bar and outcome counters of the interactive view.
 pub(super) struct InteractiveState {
     pub(super) multi: MultiProgress,
@@ -34,14 +42,6 @@ pub(super) struct InteractiveState {
 pub(super) struct CleanLineTerm {
     inner: Term,
     phase: Mutex<DrawWritePhase>,
-}
-
-/// Where the last write left the cursor within an `indicatif` redraw.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DrawWritePhase {
-    AtLineStart,
-    ExpectingFiller,
-    AfterLine,
 }
 
 impl InteractiveState {

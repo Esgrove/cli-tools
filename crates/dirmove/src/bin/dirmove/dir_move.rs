@@ -34,13 +34,6 @@ use crate::config::add_ignored_group_name_to_config;
 use crate::config::{Config, CustomMapping};
 use crate::database::Database;
 
-/// Read one prompt answer, or `None` when the input has ended without one.
-fn read_prompt_answer(mut reader: impl std::io::BufRead) -> std::io::Result<Option<String>> {
-    let mut input = String::new();
-    let bytes_read = reader.read_line(&mut input)?;
-    Ok((bytes_read > 0).then_some(input))
-}
-
 #[cfg(test)]
 const HIDE_MOVE_PROGRESS: bool = true;
 #[cfg(not(test))]
@@ -2745,6 +2738,13 @@ impl DirMove {
             database,
         }
     }
+}
+
+/// Read one prompt answer, or `None` when the input has ended without one.
+fn read_prompt_answer(mut reader: impl std::io::BufRead) -> std::io::Result<Option<String>> {
+    let mut input = String::new();
+    let bytes_read = reader.read_line(&mut input)?;
+    Ok((bytes_read > 0).then_some(input))
 }
 
 /// Map a lowercase prefix length to its ending byte boundary in the original string.

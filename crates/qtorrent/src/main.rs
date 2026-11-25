@@ -23,6 +23,47 @@ use clap_complete::Shell;
 
 use crate::add::QTorrent;
 
+/// Subcommands for qtorrent.
+#[derive(Subcommand)]
+enum Command {
+    /// Show info and statistics for existing torrents in qBittorrent
+    #[command(name = "info")]
+    Info {
+        /// Sort torrents
+        #[arg(short = 's', long, value_enum, default_value_t = SortOrder::Name)]
+        sort: SortOrder,
+
+        /// Print one line per torrent
+        #[arg(short = 'l', long)]
+        list: bool,
+    },
+
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
+/// Sort order for the info subcommand torrent listing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum SortOrder {
+    /// Sort alphabetically by torrent name
+    #[default]
+    Name,
+    /// Sort by total size (largest first)
+    Size,
+    /// Sort by save path
+    Path,
+}
+
+#[allow(clippy::doc_markdown)]
 /// Add torrents to qBittorrent with automatic file renaming.
 ///
 /// Parses `.torrent` files and adds them to qBittorrent,
@@ -36,7 +77,6 @@ use crate::add::QTorrent;
     name = env!("CARGO_BIN_NAME"),
     about = "Add torrents to qBittorrent with automatic file renaming"
 )]
-#[allow(clippy::doc_markdown)]
 pub struct QtorrentArgs {
     #[command(subcommand)]
     command: Option<Command>,
@@ -128,46 +168,6 @@ pub struct QtorrentArgs {
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     pub verbose: bool,
-}
-
-/// Subcommands for qtorrent.
-#[derive(Subcommand)]
-enum Command {
-    /// Show info and statistics for existing torrents in qBittorrent
-    #[command(name = "info")]
-    Info {
-        /// Sort torrents
-        #[arg(short = 's', long, value_enum, default_value_t = SortOrder::Name)]
-        sort: SortOrder,
-
-        /// Print one line per torrent
-        #[arg(short = 'l', long)]
-        list: bool,
-    },
-
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
-}
-
-/// Sort order for the info subcommand torrent listing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum SortOrder {
-    /// Sort alphabetically by torrent name
-    #[default]
-    Name,
-    /// Sort by total size (largest first)
-    Size,
-    /// Sort by save path
-    Path,
 }
 
 #[tokio::main]

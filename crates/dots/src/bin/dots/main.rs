@@ -14,6 +14,57 @@ use clap_complete::Shell;
 
 use cli_tools_dots::DotRename;
 
+#[derive(Subcommand)]
+enum Command {
+    /// Prefix files with a name or parent directory name
+    #[command(name = "prefix")]
+    Prefix {
+        /// Input directory
+        #[arg(value_hint = clap::ValueHint::DirPath)]
+        path: Option<PathBuf>,
+
+        /// Prefix name (if not specified, uses parent directory name)
+        #[arg(short = 'x', long)]
+        name: Option<String>,
+
+        /// Force prefix to always be at the start of the filename
+        #[arg(short = 'S', long)]
+        start: bool,
+
+        /// Use each file's parent directory name as prefix
+        #[arg(short = 'R', long)]
+        recursive: bool,
+    },
+
+    /// Suffix files with a name or parent directory name
+    #[command(name = "suffix")]
+    Suffix {
+        /// Input directory
+        #[arg(value_hint = clap::ValueHint::DirPath)]
+        path: Option<PathBuf>,
+
+        /// Suffix name (if not specified, uses parent directory name)
+        #[arg(short = 'x', long)]
+        name: Option<String>,
+
+        /// Use each file's parent directory name as suffix
+        #[arg(short = 'R', long)]
+        recursive: bool,
+    },
+
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Rename files to use dot formatting")]
 struct DotsCli {
@@ -111,57 +162,6 @@ struct DotsCli {
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Prefix files with a name or parent directory name
-    #[command(name = "prefix")]
-    Prefix {
-        /// Input directory
-        #[arg(value_hint = clap::ValueHint::DirPath)]
-        path: Option<PathBuf>,
-
-        /// Prefix name (if not specified, uses parent directory name)
-        #[arg(short = 'x', long)]
-        name: Option<String>,
-
-        /// Force prefix to always be at the start of the filename
-        #[arg(short = 'S', long)]
-        start: bool,
-
-        /// Use each file's parent directory name as prefix
-        #[arg(short = 'R', long)]
-        recursive: bool,
-    },
-
-    /// Suffix files with a name or parent directory name
-    #[command(name = "suffix")]
-    Suffix {
-        /// Input directory
-        #[arg(value_hint = clap::ValueHint::DirPath)]
-        path: Option<PathBuf>,
-
-        /// Suffix name (if not specified, uses parent directory name)
-        #[arg(short = 'x', long)]
-        name: Option<String>,
-
-        /// Use each file's parent directory name as suffix
-        #[arg(short = 'R', long)]
-        recursive: bool,
-    },
-
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 impl DotsCli {

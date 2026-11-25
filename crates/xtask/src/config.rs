@@ -39,6 +39,21 @@ const PLATFORMS: &[&str] = &["macos", "linux", "windows"];
 /// Names of the subcommands, which cannot be used as task IDs.
 const SUBCOMMANDS: &[&str] = &["completion", "list"];
 
+/// Required command entry supporting either `"tool"` or `{ name = "tool", hint = "..." }`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RequiredCommandConfig {
+    /// Bare command name using the default error message.
+    Name(String),
+    /// Command name paired with a custom installation hint.
+    Detailed {
+        /// Executable name on `PATH`.
+        name: String,
+        /// Custom message shown when the executable is absent.
+        hint: String,
+    },
+}
+
 /// Root structure deserialized from `xtask.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,21 +200,6 @@ pub struct CommandStepConfig {
     /// for example `["xcbeautify"]`. Output is not piped when the command is missing.
     #[serde(default)]
     pub pipe_through: Vec<String>,
-}
-
-/// Required command entry supporting either `"tool"` or `{ name = "tool", hint = "..." }`.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-pub enum RequiredCommandConfig {
-    /// Bare command name using the default error message.
-    Name(String),
-    /// Command name paired with a custom installation hint.
-    Detailed {
-        /// Executable name on `PATH`.
-        name: String,
-        /// Custom message shown when the executable is absent.
-        hint: String,
-    },
 }
 
 /// Task file location and the project root its relative paths resolve against.

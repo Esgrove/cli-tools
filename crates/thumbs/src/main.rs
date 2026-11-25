@@ -15,6 +15,22 @@ use clap_complete::Shell;
 
 use crate::thumbnail::ThumbnailCreator;
 
+/// Subcommands for thumbs.
+#[derive(Subcommand)]
+enum ThumbnailCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Create thumbnail sheets for video files using ffmpeg")]
 pub(crate) struct ThumbnailArgs {
@@ -64,22 +80,6 @@ pub(crate) struct ThumbnailArgs {
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
-}
-
-/// Subcommands for thumbs.
-#[derive(Subcommand)]
-enum ThumbnailCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> Result<()> {

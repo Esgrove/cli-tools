@@ -5,6 +5,22 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 
+/// Subcommands for div.
+#[derive(Subcommand)]
+enum DividerCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     author,
@@ -34,22 +50,6 @@ struct Args {
     /// Print verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
-}
-
-/// Subcommands for div.
-#[derive(Subcommand)]
-enum DividerCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> anyhow::Result<()> {

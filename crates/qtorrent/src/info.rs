@@ -14,16 +14,6 @@ use crate::SortOrder;
 use crate::config::Config;
 use crate::qbittorrent::{QBittorrentClient, TorrentListItem};
 
-/// Options controlling how torrent info is printed.
-struct PrintOptions {
-    /// Sort order for torrent listing.
-    sort: SortOrder,
-    /// Show torrents on one line.
-    list: bool,
-    /// Show additional detail.
-    verbose: bool,
-}
-
 /// Torrent categorized by download status.
 enum TorrentStatus {
     /// Download is complete.
@@ -32,6 +22,16 @@ enum TorrentStatus {
     Downloading,
     /// Download has not started (progress == 0).
     NotStarted,
+}
+
+/// Options controlling how torrent info is printed.
+struct PrintOptions {
+    /// Sort order for torrent listing.
+    sort: SortOrder,
+    /// Show torrents on one line.
+    list: bool,
+    /// Show additional detail.
+    verbose: bool,
 }
 
 /// Run the info subcommand.

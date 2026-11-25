@@ -29,6 +29,41 @@ pub struct ScanCache {
     connection: Connection,
 }
 
+/// A cached BLAKE3 hash and the file metadata used to determine whether it is still valid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedFileHash {
+    /// File size when the hash was calculated.
+    pub size_bytes: u64,
+    /// File modification time as nanoseconds since the Unix epoch.
+    pub modified_time_ns: i64,
+    /// Lowercase hexadecimal BLAKE3 hash.
+    pub blake3_hash: String,
+}
+
+/// A row from the `scanned_files` cache with non-optional fields matching the database schema.
+///
+/// This is intentionally separate from `VideoInfo` (which uses `Option` fields)
+/// because the database columns are `NOT NULL`.
+#[derive(Debug, Clone)]
+pub struct CachedVideoInfo {
+    /// File size in bytes (used to detect file changes).
+    pub size_bytes: u64,
+    /// Video codec name.
+    pub codec: String,
+    /// Video bitrate in kbps.
+    pub bitrate_kbps: u64,
+    /// Duration in seconds.
+    pub duration: f64,
+    /// Video width in pixels.
+    pub width: u32,
+    /// Video height in pixels.
+    pub height: u32,
+    /// Frames per second.
+    pub frames_per_second: f64,
+    /// File modification time as nanoseconds since the Unix epoch, zero when it was not recorded.
+    pub modified_time_ns: i64,
+}
+
 impl ScanCache {
     /// Open (or create) the shared cache database at the default path.
     ///
@@ -337,47 +372,12 @@ impl ScanCache {
     }
 }
 
-/// A cached BLAKE3 hash and the file metadata used to determine whether it is still valid.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CachedFileHash {
-    /// File size when the hash was calculated.
-    pub size_bytes: u64,
-    /// File modification time as nanoseconds since the Unix epoch.
-    pub modified_time_ns: i64,
-    /// Lowercase hexadecimal BLAKE3 hash.
-    pub blake3_hash: String,
-}
-
 impl CachedFileHash {
     /// Return whether this hash still describes a file with the given metadata.
     #[must_use]
     pub const fn is_current(&self, size_bytes: u64, modified_time_ns: i64) -> bool {
         self.size_bytes == size_bytes && self.modified_time_ns == modified_time_ns
     }
-}
-
-/// A row from the `scanned_files` cache with non-optional fields matching the database schema.
-///
-/// This is intentionally separate from `VideoInfo` (which uses `Option` fields)
-/// because the database columns are `NOT NULL`.
-#[derive(Debug, Clone)]
-pub struct CachedVideoInfo {
-    /// File size in bytes (used to detect file changes).
-    pub size_bytes: u64,
-    /// Video codec name.
-    pub codec: String,
-    /// Video bitrate in kbps.
-    pub bitrate_kbps: u64,
-    /// Duration in seconds.
-    pub duration: f64,
-    /// Video width in pixels.
-    pub width: u32,
-    /// Video height in pixels.
-    pub height: u32,
-    /// Frames per second.
-    pub frames_per_second: f64,
-    /// File modification time as nanoseconds since the Unix epoch, zero when it was not recorded.
-    pub modified_time_ns: i64,
 }
 
 impl CachedVideoInfo {

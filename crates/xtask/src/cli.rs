@@ -21,60 +21,6 @@ use crate::process::shell_quote;
 /// Built-in short options that take a value, so the rest of a group of short flags after one of them is that value.
 const SHORT_OPTIONS_WITH_VALUES: &[char] = &['j', 'S', 'C', 'O', 'K', 'T'];
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "xtask",
-    version,
-    about = "Run a project's tasks from xtask.toml in parallel",
-    long_about = "Run a project's tasks from xtask.toml in parallel.\n\n\
-        The task file is searched for in the current directory and its parents up to the git repository root. \
-        Project specific flags declared in the task file are listed below the generic options."
-)]
-pub struct Args {
-    #[command(subcommand)]
-    pub command: Option<XtaskCommand>,
-
-    /// Task IDs to run with their prerequisites, instead of every task enabled by the flags
-    #[arg(value_name = "TASK")]
-    pub task_ids: Vec<String>,
-
-    /// Maximum number of tasks to run concurrently [default: min(CPUs, 6)]
-    #[arg(short = 'j', long, value_name = "N", value_parser = parse_positive_jobs)]
-    pub jobs: Option<usize>,
-
-    /// Stop starting new tasks after the first failure
-    #[arg(short = 'f', long)]
-    pub fail_fast: bool,
-
-    /// Only run tasks tagged with this scope or a scope it includes
-    #[arg(short = 'S', long, value_name = "SCOPE", global = true)]
-    pub scope: Option<String>,
-
-    /// Path to the task file [default: xtask.toml in the current directory or a parent]
-    #[arg(short = 'C', long, value_name = "PATH", value_hint = clap::ValueHint::FilePath, global = true)]
-    pub config: Option<PathBuf>,
-
-    /// Output style: interactive progress, CI log stream, or plain lines
-    #[arg(short = 'O', long, value_enum)]
-    pub output: Option<OutputMode>,
-
-    /// When to use ANSI colors
-    #[arg(short = 'K', long, value_enum)]
-    pub color: Option<ColorMode>,
-
-    /// Live output lines shown per running task in rich mode, 0 for a spinner only
-    #[arg(short = 'T', long, value_name = "N")]
-    pub tail_lines: Option<usize>,
-
-    /// Print the resolved commands without running them
-    #[arg(short = 'd', long)]
-    pub dryrun: bool,
-
-    /// Print commands as they run
-    #[arg(short = 'v', long)]
-    pub verbose: bool,
-}
-
 /// Subcommands for `xtask`.
 #[derive(Debug, Subcommand)]
 pub enum XtaskCommand {
@@ -136,6 +82,60 @@ pub enum ColorMode {
     Always,
     /// Never emit ANSI color sequences.
     Never,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "xtask",
+    version,
+    about = "Run a project's tasks from xtask.toml in parallel",
+    long_about = "Run a project's tasks from xtask.toml in parallel.\n\n\
+        The task file is searched for in the current directory and its parents up to the git repository root. \
+        Project specific flags declared in the task file are listed below the generic options."
+)]
+pub struct Args {
+    #[command(subcommand)]
+    pub command: Option<XtaskCommand>,
+
+    /// Task IDs to run with their prerequisites, instead of every task enabled by the flags
+    #[arg(value_name = "TASK")]
+    pub task_ids: Vec<String>,
+
+    /// Maximum number of tasks to run concurrently [default: min(CPUs, 6)]
+    #[arg(short = 'j', long, value_name = "N", value_parser = parse_positive_jobs)]
+    pub jobs: Option<usize>,
+
+    /// Stop starting new tasks after the first failure
+    #[arg(short = 'f', long)]
+    pub fail_fast: bool,
+
+    /// Only run tasks tagged with this scope or a scope it includes
+    #[arg(short = 'S', long, value_name = "SCOPE", global = true)]
+    pub scope: Option<String>,
+
+    /// Path to the task file [default: xtask.toml in the current directory or a parent]
+    #[arg(short = 'C', long, value_name = "PATH", value_hint = clap::ValueHint::FilePath, global = true)]
+    pub config: Option<PathBuf>,
+
+    /// Output style: interactive progress, CI log stream, or plain lines
+    #[arg(short = 'O', long, value_enum)]
+    pub output: Option<OutputMode>,
+
+    /// When to use ANSI colors
+    #[arg(short = 'K', long, value_enum)]
+    pub color: Option<ColorMode>,
+
+    /// Live output lines shown per running task in rich mode, 0 for a spinner only
+    #[arg(short = 'T', long, value_name = "N")]
+    pub tail_lines: Option<usize>,
+
+    /// Print the resolved commands without running them
+    #[arg(short = 'd', long)]
+    pub dryrun: bool,
+
+    /// Print commands as they run
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 /// Parsed command line: the generic arguments plus the raw state of every project flag.

@@ -14,6 +14,79 @@ use crate::cli::SortOrder;
 use crate::config::{Config, TARGET_EXTENSION};
 use crate::stats::ConversionStats;
 
+/// Codec used in output filenames to identify the video codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    /// HEVC/H.265 codec, uses "x265" suffix.
+    X265,
+    /// AV1 codec, uses "av1" suffix.
+    Av1,
+}
+
+/// Reasons why a file was skipped
+#[derive(Debug)]
+pub enum SkipReason {
+    /// File is already HEVC in MP4 container
+    AlreadyConverted,
+    /// File bitrate is below the minimum threshold
+    BitrateBelowThreshold { bitrate: u64, threshold: u64 },
+    /// File bitrate is above the maximum threshold
+    BitrateAboveThreshold { bitrate: u64, threshold: u64 },
+    /// File duration is below the minimum threshold
+    DurationBelowThreshold { duration: f64, threshold: f64 },
+    /// File duration is above the maximum threshold
+    DurationAboveThreshold { duration: f64, threshold: f64 },
+    /// Either dimension (width or height) is below the minimum resolution limit
+    ResolutionBelowLimit { width: u32, height: u32, limit: u32 },
+    /// Output file already exists
+    OutputExists { path: PathBuf, source_duration: f64 },
+    /// Another file in the same run produces the same output path
+    OutputConflict { path: PathBuf },
+    /// File no longer exists (may have been moved or renamed)
+    FileMissing,
+    /// Failed to get video info
+    AnalysisFailed { error: String },
+}
+
+/// Result of processing a single file
+#[derive(Debug)]
+pub enum ProcessResult {
+    /// File was converted successfully
+    Converted { stats: ConversionStats },
+    /// File was remuxed (already HEVC, just changed container to MP4)
+    Remuxed {},
+    /// External subtitle sidecars were embedded without video conversion.
+    SubtitlesMuxed {},
+    /// Failed to process file
+    Failed { error: String },
+}
+
+/// Outcome of processing a batch of files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingOutcome {
+    /// All files in the batch were processed, or the configured limit was reached.
+    Completed,
+    /// Processing was aborted by the user with Ctrl+C.
+    Aborted,
+    /// Processing was stopped because the disk does not have enough free space.
+    OutOfDiskSpace,
+}
+
+/// Result of analyzing a video file to determine what action to take.
+#[derive(Debug)]
+pub enum AnalysisResult {
+    /// File needs to be converted to HEVC
+    NeedsConversion(ProcessableFile),
+    /// File is already HEVC but needs remuxing to MP4
+    NeedsRemux(ProcessableFile),
+    /// File should be renamed to add codec suffix
+    NeedsRename(ProcessableFile),
+    /// File needs external subtitle sidecars muxed in without video conversion.
+    NeedsSubtitleMux(ProcessableFile),
+    /// File should be skipped
+    Skip { file: VideoFile, reason: SkipReason },
+}
+
 /// Information about a video file from ffprobe
 #[derive(Debug, Clone)]
 pub struct VideoInfo {
@@ -113,99 +186,65 @@ pub trait ProcessableFileSliceExt {
     fn sort_by_order(&mut self, sort_order: SortOrder);
 }
 
-/// Codec used in output filenames to identify the video codec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Codec {
-    /// HEVC/H.265 codec, uses "x265" suffix.
-    X265,
-    /// AV1 codec, uses "av1" suffix.
-    Av1,
-}
+impl Codec {
+    /// Get the string representation of this codec suffix.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X265 => "x265",
+            Self::Av1 => "av1",
+        }
+    }
 
-/// Reasons why a file was skipped
-#[derive(Debug)]
-pub enum SkipReason {
-    /// File is already HEVC in MP4 container
-    AlreadyConverted,
-    /// File bitrate is below the minimum threshold
-    BitrateBelowThreshold { bitrate: u64, threshold: u64 },
-    /// File bitrate is above the maximum threshold
-    BitrateAboveThreshold { bitrate: u64, threshold: u64 },
-    /// File duration is below the minimum threshold
-    DurationBelowThreshold { duration: f64, threshold: f64 },
-    /// File duration is above the maximum threshold
-    DurationAboveThreshold { duration: f64, threshold: f64 },
-    /// Either dimension (width or height) is below the minimum resolution limit
-    ResolutionBelowLimit { width: u32, height: u32, limit: u32 },
-    /// Output file already exists
-    OutputExists { path: PathBuf, source_duration: f64 },
-    /// Another file in the same run produces the same output path
-    OutputConflict { path: PathBuf },
-    /// File no longer exists (may have been moved or renamed)
-    FileMissing,
-    /// Failed to get video info
-    AnalysisFailed { error: String },
-}
-
-/// Result of processing a single file
-#[derive(Debug)]
-pub enum ProcessResult {
-    /// File was converted successfully
-    Converted { stats: ConversionStats },
-    /// File was remuxed (already HEVC, just changed container to MP4)
-    Remuxed {},
-    /// External subtitle sidecars were embedded without video conversion.
-    SubtitlesMuxed {},
-    /// Failed to process file
-    Failed { error: String },
-}
-
-/// Outcome of processing a batch of files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessingOutcome {
-    /// All files in the batch were processed, or the configured limit was reached.
-    Completed,
-    /// Processing was aborted by the user with Ctrl+C.
-    Aborted,
-    /// Processing was stopped because the disk does not have enough free space.
-    OutOfDiskSpace,
-}
-
-/// Result of analyzing a video file to determine what action to take.
-#[derive(Debug)]
-pub enum AnalysisResult {
-    /// File needs to be converted to HEVC
-    NeedsConversion(ProcessableFile),
-    /// File is already HEVC but needs remuxing to MP4
-    NeedsRemux(ProcessableFile),
-    /// File should be renamed to add codec suffix
-    NeedsRename(ProcessableFile),
-    /// File needs external subtitle sidecars muxed in without video conversion.
-    NeedsSubtitleMux(ProcessableFile),
-    /// File should be skipped
-    Skip { file: VideoFile, reason: SkipReason },
-}
-
-impl AnalysisResult {
-    /// Create a skipped analysis result for a file that could not be analyzed.
-    pub(crate) const fn analysis_failed(file: VideoFile, error: String) -> Self {
-        Self::Skip {
-            file,
-            reason: SkipReason::AnalysisFailed { error },
+    /// Get the regex that matches this codec suffix in filenames.
+    #[must_use]
+    pub fn regex(self) -> &'static Regex {
+        match self {
+            Self::X265 => &RE_X265,
+            Self::Av1 => &RE_AV1,
         }
     }
 }
 
-impl From<&Config> for AnalysisFilter {
-    /// Create analysis filters from the resolved runtime configuration.
-    fn from(config: &Config) -> Self {
-        Self {
-            min_bitrate: config.min_bitrate,
-            max_bitrate: config.max_bitrate,
-            min_duration: config.min_duration,
-            max_duration: config.max_duration,
-            min_resolution: config.min_resolution,
-            overwrite: config.overwrite,
+impl std::fmt::Display for Codec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyConverted => write!(f, "Already target codec in target container"),
+            Self::BitrateBelowThreshold { bitrate, threshold } => {
+                write!(f, "Bitrate {bitrate} kbps is below threshold {threshold} kbps")
+            }
+            Self::BitrateAboveThreshold { bitrate, threshold } => {
+                write!(f, "Bitrate {bitrate} kbps is above threshold {threshold} kbps")
+            }
+            Self::DurationBelowThreshold { duration, threshold } => {
+                write!(f, "Duration {duration:.1}s is below threshold {threshold:.1}s")
+            }
+            Self::DurationAboveThreshold { duration, threshold } => {
+                write!(f, "Duration {duration:.1}s is above threshold {threshold:.1}s")
+            }
+            Self::ResolutionBelowLimit { width, height, limit } => {
+                write!(f, "Resolution {width}x{height} is below minimum limit {limit}")
+            }
+            Self::OutputExists { path, .. } => {
+                write!(f, "Output file already exists: \"{}\"", path.display())
+            }
+            Self::OutputConflict { path } => {
+                write!(
+                    f,
+                    "Another file in this run has the same output: \"{}\"",
+                    path.display()
+                )
+            }
+            Self::FileMissing => write!(f, "File no longer exists"),
+            Self::AnalysisFailed { error } => {
+                write!(f, "Failed to analyze: {error}")
+            }
         }
     }
 }
@@ -229,234 +268,23 @@ impl ProcessResult {
     }
 }
 
-impl ProcessableFile {
-    /// Create a processable file using the output path rules for the selected mode.
-    pub(crate) fn for_mode(
-        file: VideoFile,
-        info: VideoInfo,
-        subtitle_files: Vec<SubtitleFile>,
-        movie_mode: bool,
-    ) -> Self {
-        let output_path = file.get_output_path_for_mode_and_bit_depth(
-            info.codec_suffix(),
-            movie_mode,
-            !subtitle_files.is_empty(),
-            info.bit_depth,
-        );
-        Self::new(file, info, output_path, subtitle_files)
+impl std::fmt::Display for ProcessingOutcome {
+    /// Format the reason processing stopped. `Completed` formats as an empty string.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Completed => Ok(()),
+            Self::Aborted => write!(f, "{}", "Aborted by user".bold().red()),
+            Self::OutOfDiskSpace => write!(f, "{}", "Stopped: not enough free disk space".bold().red()),
+        }
     }
+}
 
-    /// Create a new `ProcessableFile` with its resolved output path.
-    pub(crate) const fn new(
-        file: VideoFile,
-        info: VideoInfo,
-        output_path: PathBuf,
-        subtitle_files: Vec<SubtitleFile>,
-    ) -> Self {
-        Self {
+impl AnalysisResult {
+    /// Create a skipped analysis result for a file that could not be analyzed.
+    pub(crate) const fn analysis_failed(file: VideoFile, error: String) -> Self {
+        Self::Skip {
             file,
-            info,
-            output_path,
-            subtitle_files,
-        }
-    }
-}
-
-impl ProcessableFileSliceExt for [ProcessableFile] {
-    #[inline]
-    fn sort_by_order(&mut self, sort_order: SortOrder) {
-        match sort_order {
-            SortOrder::Bitrate => {
-                self.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.bitrate_kbps));
-            }
-            SortOrder::Size => {
-                self.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.size_bytes));
-            }
-            SortOrder::SizeAsc => {
-                self.sort_unstable_by_key(|file| file.info.size_bytes);
-            }
-            SortOrder::Duration => {
-                self.sort_unstable_by(|left, right| {
-                    right
-                        .info
-                        .duration
-                        .partial_cmp(&left.info.duration)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            SortOrder::DurationAsc => {
-                self.sort_unstable_by(|left, right| {
-                    left.info
-                        .duration
-                        .partial_cmp(&right.info.duration)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            SortOrder::Resolution => {
-                self.sort_unstable_by(|left, right| {
-                    let left_pixels = u64::from(left.info.width) * u64::from(left.info.height);
-                    let right_pixels = u64::from(right.info.width) * u64::from(right.info.height);
-                    right_pixels.cmp(&left_pixels)
-                });
-            }
-            SortOrder::ResolutionAsc => {
-                self.sort_unstable_by(|left, right| {
-                    let left_pixels = u64::from(left.info.width) * u64::from(left.info.height);
-                    let right_pixels = u64::from(right.info.width) * u64::from(right.info.height);
-                    left_pixels.cmp(&right_pixels)
-                });
-            }
-            SortOrder::Impact => {
-                self.sort_unstable_by(|left, right| {
-                    let left_impact =
-                        (left.info.bitrate_kbps as f64 / left.info.frames_per_second) * left.info.duration;
-                    let right_impact =
-                        (right.info.bitrate_kbps as f64 / right.info.frames_per_second) * right.info.duration;
-                    right_impact
-                        .partial_cmp(&left_impact)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-            SortOrder::Name => {
-                self.sort_unstable_by(|left, right| left.file.path.cmp(&right.file.path));
-            }
-        }
-    }
-}
-
-impl SubtitleFile {
-    /// Create a subtitle sidecar file from a path and optional paired `.sub` file.
-    pub(crate) fn new(path: &Path, paired_sub_path: Option<PathBuf>) -> Self {
-        Self {
-            path: path.to_owned(),
-            extension: cli_tools_common::path_to_file_extension_string(path),
-            paired_sub_path,
-        }
-    }
-
-    /// Return true when the extension is a supported external subtitle format.
-    pub(crate) fn is_supported_extension(extension: &str) -> bool {
-        matches!(extension, "idx" | "srt" | "sub")
-    }
-
-    /// Return all sidecar paths that should be removed after successful muxing.
-    pub(crate) fn paths_to_delete(&self) -> Vec<&Path> {
-        let mut paths = vec![self.path.as_path()];
-        if let Some(path) = &self.paired_sub_path {
-            paths.push(path.as_path());
-        }
-        paths
-    }
-}
-
-impl VideoFile {
-    /// Create a new `VideoFile` from a path and pre-fetched file size.
-    pub(crate) fn new(path: &Path, size_bytes: u64) -> Self {
-        let path = path.to_owned();
-        let name = cli_tools_common::path_to_file_stem_string(&path);
-        let extension = cli_tools_common::path_to_file_extension_string(&path);
-
-        Self {
-            path,
-            name,
-            extension,
-            size_bytes,
-        }
-    }
-
-    /// Create a new `VideoFile` from a path, reading file size from filesystem metadata.
-    ///
-    /// Falls back to 0 if the metadata cannot be read.
-    pub(crate) fn new_with_metadata(path: &Path) -> Self {
-        let size_bytes = fs::metadata(path).map_or(0, |metadata| metadata.len());
-        Self::new(path, size_bytes)
-    }
-
-    /// Compute the output path using movie-mode and bit-depth filename rules.
-    pub(crate) fn get_output_path_for_mode_and_bit_depth(
-        &self,
-        suffix: Codec,
-        movie_mode: bool,
-        has_external_subtitles: bool,
-        bit_depth: u8,
-    ) -> PathBuf {
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let target_extension = self.target_extension(movie_mode, has_external_subtitles);
-        let new_stem = if suffix.regex().is_match(&self.name) {
-            self.name.clone()
-        } else if RE_SOURCE_CODEC.is_match(&self.name) {
-            RE_SOURCE_CODEC.replace_all(&self.name, suffix.as_str()).into_owned()
-        } else {
-            format!("{}.{suffix}", self.name)
-        };
-        let new_stem = if bit_depth > 8 {
-            Self::add_10bit_label(&new_stem, suffix)
-        } else {
-            new_stem
-        };
-        parent.join(format!("{new_stem}.{target_extension}"))
-    }
-
-    /// Compute the output path after removing stale labels.
-    pub(crate) fn get_output_path_without_stale_labels(
-        &self,
-        remove_target_codec_labels: bool,
-        remove_10bit_label: bool,
-    ) -> Option<PathBuf> {
-        let cleaned_stem = self.name_without_stale_labels(remove_target_codec_labels, remove_10bit_label)?;
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        Some(parent.join(format!("{cleaned_stem}.{}", self.extension)))
-    }
-
-    /// Return the target container extension for this file.
-    pub(crate) fn target_extension(&self, movie_mode: bool, has_external_subtitles: bool) -> &'static str {
-        if movie_mode && (self.extension == "mkv" || has_external_subtitles) {
-            "mkv"
-        } else {
-            TARGET_EXTENSION
-        }
-    }
-
-    pub(crate) fn has_10bit_label(&self) -> bool {
-        RE_10BIT.is_match(&self.name)
-    }
-
-    pub(crate) fn has_target_codec_label(&self) -> bool {
-        RE_X265.is_match(&self.name) || RE_AV1.is_match(&self.name)
-    }
-
-    fn name_without_stale_labels(&self, remove_target_codec_labels: bool, remove_10bit_label: bool) -> Option<String> {
-        if (!remove_target_codec_labels || !self.has_target_codec_label())
-            && (!remove_10bit_label || !self.has_10bit_label())
-        {
-            return None;
-        }
-
-        let mut cleaned = self.name.clone();
-        if remove_target_codec_labels {
-            cleaned = RE_X265.replace_all(&cleaned, "").into_owned();
-            cleaned = RE_AV1.replace_all(&cleaned, "").into_owned();
-        }
-        if remove_10bit_label {
-            cleaned = RE_10BIT.replace_all(&cleaned, "").into_owned();
-        }
-
-        let cleaned = cli_tools_common::collapse_repeated_separators(&cleaned);
-        if cleaned.is_empty() || cleaned == self.name {
-            None
-        } else {
-            Some(cleaned)
-        }
-    }
-
-    fn add_10bit_label(stem: &str, suffix: Codec) -> String {
-        if RE_10BIT.is_match(stem) {
-            return stem.to_string();
-        }
-        if suffix.regex().is_match(stem) {
-            suffix.regex().replace(stem, format!("10bit.{suffix}")).into_owned()
-        } else {
-            format!("{stem}.10bit")
+            reason: SkipReason::AnalysisFailed { error },
         }
     }
 }
@@ -685,29 +513,286 @@ impl VideoInfo {
     }
 }
 
-impl Codec {
-    /// Get the string representation of this codec suffix.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::X265 => "x265",
-            Self::Av1 => "av1",
+impl std::fmt::Display for VideoInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Codec:      {}", self.codec)?;
+        writeln!(f, "Size:       {}", cli_tools_common::format_size(self.size_bytes))?;
+        writeln!(
+            f,
+            "Bitrate:    {:.2} Mbps @ {:.0} FPS",
+            self.bitrate_kbps as f64 / 1000.0,
+            self.frames_per_second
+        )?;
+        writeln!(
+            f,
+            "Duration:   {}",
+            cli_tools_common::format_duration_seconds(self.duration)
+        )?;
+        writeln!(f, "Resolution: {}x{}", self.width, self.height)?;
+        write!(f, "Bit depth:  {}-bit", self.bit_depth)?;
+        if let Some(warning) = &self.warning {
+            write!(f, "\nWarning:    {warning}")?;
         }
+        Ok(())
     }
+}
 
-    /// Get the regex that matches this codec suffix in filenames.
-    #[must_use]
-    pub fn regex(self) -> &'static Regex {
-        match self {
-            Self::X265 => &RE_X265,
-            Self::Av1 => &RE_AV1,
+impl From<&Config> for AnalysisFilter {
+    /// Create analysis filters from the resolved runtime configuration.
+    fn from(config: &Config) -> Self {
+        Self {
+            min_bitrate: config.min_bitrate,
+            max_bitrate: config.max_bitrate,
+            min_duration: config.min_duration,
+            max_duration: config.max_duration,
+            min_resolution: config.min_resolution,
+            overwrite: config.overwrite,
         }
     }
 }
 
-impl std::fmt::Display for Codec {
+impl VideoFile {
+    /// Create a new `VideoFile` from a path and pre-fetched file size.
+    pub(crate) fn new(path: &Path, size_bytes: u64) -> Self {
+        let path = path.to_owned();
+        let name = cli_tools_common::path_to_file_stem_string(&path);
+        let extension = cli_tools_common::path_to_file_extension_string(&path);
+
+        Self {
+            path,
+            name,
+            extension,
+            size_bytes,
+        }
+    }
+
+    /// Create a new `VideoFile` from a path, reading file size from filesystem metadata.
+    ///
+    /// Falls back to 0 if the metadata cannot be read.
+    pub(crate) fn new_with_metadata(path: &Path) -> Self {
+        let size_bytes = fs::metadata(path).map_or(0, |metadata| metadata.len());
+        Self::new(path, size_bytes)
+    }
+
+    /// Compute the output path using movie-mode and bit-depth filename rules.
+    pub(crate) fn get_output_path_for_mode_and_bit_depth(
+        &self,
+        suffix: Codec,
+        movie_mode: bool,
+        has_external_subtitles: bool,
+        bit_depth: u8,
+    ) -> PathBuf {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let target_extension = self.target_extension(movie_mode, has_external_subtitles);
+        let new_stem = if suffix.regex().is_match(&self.name) {
+            self.name.clone()
+        } else if RE_SOURCE_CODEC.is_match(&self.name) {
+            RE_SOURCE_CODEC.replace_all(&self.name, suffix.as_str()).into_owned()
+        } else {
+            format!("{}.{suffix}", self.name)
+        };
+        let new_stem = if bit_depth > 8 {
+            Self::add_10bit_label(&new_stem, suffix)
+        } else {
+            new_stem
+        };
+        parent.join(format!("{new_stem}.{target_extension}"))
+    }
+
+    /// Compute the output path after removing stale labels.
+    pub(crate) fn get_output_path_without_stale_labels(
+        &self,
+        remove_target_codec_labels: bool,
+        remove_10bit_label: bool,
+    ) -> Option<PathBuf> {
+        let cleaned_stem = self.name_without_stale_labels(remove_target_codec_labels, remove_10bit_label)?;
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        Some(parent.join(format!("{cleaned_stem}.{}", self.extension)))
+    }
+
+    /// Return the target container extension for this file.
+    pub(crate) fn target_extension(&self, movie_mode: bool, has_external_subtitles: bool) -> &'static str {
+        if movie_mode && (self.extension == "mkv" || has_external_subtitles) {
+            "mkv"
+        } else {
+            TARGET_EXTENSION
+        }
+    }
+
+    pub(crate) fn has_10bit_label(&self) -> bool {
+        RE_10BIT.is_match(&self.name)
+    }
+
+    pub(crate) fn has_target_codec_label(&self) -> bool {
+        RE_X265.is_match(&self.name) || RE_AV1.is_match(&self.name)
+    }
+
+    fn name_without_stale_labels(&self, remove_target_codec_labels: bool, remove_10bit_label: bool) -> Option<String> {
+        if (!remove_target_codec_labels || !self.has_target_codec_label())
+            && (!remove_10bit_label || !self.has_10bit_label())
+        {
+            return None;
+        }
+
+        let mut cleaned = self.name.clone();
+        if remove_target_codec_labels {
+            cleaned = RE_X265.replace_all(&cleaned, "").into_owned();
+            cleaned = RE_AV1.replace_all(&cleaned, "").into_owned();
+        }
+        if remove_10bit_label {
+            cleaned = RE_10BIT.replace_all(&cleaned, "").into_owned();
+        }
+
+        let cleaned = cli_tools_common::collapse_repeated_separators(&cleaned);
+        if cleaned.is_empty() || cleaned == self.name {
+            None
+        } else {
+            Some(cleaned)
+        }
+    }
+
+    fn add_10bit_label(stem: &str, suffix: Codec) -> String {
+        if RE_10BIT.is_match(stem) {
+            return stem.to_string();
+        }
+        if suffix.regex().is_match(stem) {
+            suffix.regex().replace(stem, format!("10bit.{suffix}")).into_owned()
+        } else {
+            format!("{stem}.10bit")
+        }
+    }
+}
+
+impl std::fmt::Display for VideoFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        write!(f, "{}", self.path.display())
+    }
+}
+
+impl From<walkdir::DirEntry> for VideoFile {
+    fn from(entry: walkdir::DirEntry) -> Self {
+        let size_bytes = entry.metadata().map_or(0, |metadata| metadata.len());
+        Self::new(entry.path(), size_bytes)
+    }
+}
+
+impl ProcessableFile {
+    /// Create a processable file using the output path rules for the selected mode.
+    pub(crate) fn for_mode(
+        file: VideoFile,
+        info: VideoInfo,
+        subtitle_files: Vec<SubtitleFile>,
+        movie_mode: bool,
+    ) -> Self {
+        let output_path = file.get_output_path_for_mode_and_bit_depth(
+            info.codec_suffix(),
+            movie_mode,
+            !subtitle_files.is_empty(),
+            info.bit_depth,
+        );
+        Self::new(file, info, output_path, subtitle_files)
+    }
+
+    /// Create a new `ProcessableFile` with its resolved output path.
+    pub(crate) const fn new(
+        file: VideoFile,
+        info: VideoInfo,
+        output_path: PathBuf,
+        subtitle_files: Vec<SubtitleFile>,
+    ) -> Self {
+        Self {
+            file,
+            info,
+            output_path,
+            subtitle_files,
+        }
+    }
+}
+
+impl ProcessableFileSliceExt for [ProcessableFile] {
+    #[inline]
+    fn sort_by_order(&mut self, sort_order: SortOrder) {
+        match sort_order {
+            SortOrder::Bitrate => {
+                self.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.bitrate_kbps));
+            }
+            SortOrder::Size => {
+                self.sort_unstable_by_key(|file| std::cmp::Reverse(file.info.size_bytes));
+            }
+            SortOrder::SizeAsc => {
+                self.sort_unstable_by_key(|file| file.info.size_bytes);
+            }
+            SortOrder::Duration => {
+                self.sort_unstable_by(|left, right| {
+                    right
+                        .info
+                        .duration
+                        .partial_cmp(&left.info.duration)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::DurationAsc => {
+                self.sort_unstable_by(|left, right| {
+                    left.info
+                        .duration
+                        .partial_cmp(&right.info.duration)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::Resolution => {
+                self.sort_unstable_by(|left, right| {
+                    let left_pixels = u64::from(left.info.width) * u64::from(left.info.height);
+                    let right_pixels = u64::from(right.info.width) * u64::from(right.info.height);
+                    right_pixels.cmp(&left_pixels)
+                });
+            }
+            SortOrder::ResolutionAsc => {
+                self.sort_unstable_by(|left, right| {
+                    let left_pixels = u64::from(left.info.width) * u64::from(left.info.height);
+                    let right_pixels = u64::from(right.info.width) * u64::from(right.info.height);
+                    left_pixels.cmp(&right_pixels)
+                });
+            }
+            SortOrder::Impact => {
+                self.sort_unstable_by(|left, right| {
+                    let left_impact =
+                        (left.info.bitrate_kbps as f64 / left.info.frames_per_second) * left.info.duration;
+                    let right_impact =
+                        (right.info.bitrate_kbps as f64 / right.info.frames_per_second) * right.info.duration;
+                    right_impact
+                        .partial_cmp(&left_impact)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            SortOrder::Name => {
+                self.sort_unstable_by(|left, right| left.file.path.cmp(&right.file.path));
+            }
+        }
+    }
+}
+
+impl SubtitleFile {
+    /// Create a subtitle sidecar file from a path and optional paired `.sub` file.
+    pub(crate) fn new(path: &Path, paired_sub_path: Option<PathBuf>) -> Self {
+        Self {
+            path: path.to_owned(),
+            extension: cli_tools_common::path_to_file_extension_string(path),
+            paired_sub_path,
+        }
+    }
+
+    /// Return true when the extension is a supported external subtitle format.
+    pub(crate) fn is_supported_extension(extension: &str) -> bool {
+        matches!(extension, "idx" | "srt" | "sub")
+    }
+
+    /// Return all sidecar paths that should be removed after successful muxing.
+    pub(crate) fn paths_to_delete(&self) -> Vec<&Path> {
+        let mut paths = vec![self.path.as_path()];
+        if let Some(path) = &self.paired_sub_path {
+            paths.push(path.as_path());
+        }
+        paths
     }
 }
 
@@ -808,91 +893,6 @@ fn is_ignored_movie_token(token: &str) -> bool {
             | "x264"
             | "x265"
     )
-}
-
-impl std::fmt::Display for VideoInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Codec:      {}", self.codec)?;
-        writeln!(f, "Size:       {}", cli_tools_common::format_size(self.size_bytes))?;
-        writeln!(
-            f,
-            "Bitrate:    {:.2} Mbps @ {:.0} FPS",
-            self.bitrate_kbps as f64 / 1000.0,
-            self.frames_per_second
-        )?;
-        writeln!(
-            f,
-            "Duration:   {}",
-            cli_tools_common::format_duration_seconds(self.duration)
-        )?;
-        writeln!(f, "Resolution: {}x{}", self.width, self.height)?;
-        write!(f, "Bit depth:  {}-bit", self.bit_depth)?;
-        if let Some(warning) = &self.warning {
-            write!(f, "\nWarning:    {warning}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::fmt::Display for VideoFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.path.display())
-    }
-}
-
-impl std::fmt::Display for SkipReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyConverted => write!(f, "Already target codec in target container"),
-            Self::BitrateBelowThreshold { bitrate, threshold } => {
-                write!(f, "Bitrate {bitrate} kbps is below threshold {threshold} kbps")
-            }
-            Self::BitrateAboveThreshold { bitrate, threshold } => {
-                write!(f, "Bitrate {bitrate} kbps is above threshold {threshold} kbps")
-            }
-            Self::DurationBelowThreshold { duration, threshold } => {
-                write!(f, "Duration {duration:.1}s is below threshold {threshold:.1}s")
-            }
-            Self::DurationAboveThreshold { duration, threshold } => {
-                write!(f, "Duration {duration:.1}s is above threshold {threshold:.1}s")
-            }
-            Self::ResolutionBelowLimit { width, height, limit } => {
-                write!(f, "Resolution {width}x{height} is below minimum limit {limit}")
-            }
-            Self::OutputExists { path, .. } => {
-                write!(f, "Output file already exists: \"{}\"", path.display())
-            }
-            Self::OutputConflict { path } => {
-                write!(
-                    f,
-                    "Another file in this run has the same output: \"{}\"",
-                    path.display()
-                )
-            }
-            Self::FileMissing => write!(f, "File no longer exists"),
-            Self::AnalysisFailed { error } => {
-                write!(f, "Failed to analyze: {error}")
-            }
-        }
-    }
-}
-
-impl std::fmt::Display for ProcessingOutcome {
-    /// Format the reason processing stopped. `Completed` formats as an empty string.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Completed => Ok(()),
-            Self::Aborted => write!(f, "{}", "Aborted by user".bold().red()),
-            Self::OutOfDiskSpace => write!(f, "{}", "Stopped: not enough free disk space".bold().red()),
-        }
-    }
-}
-
-impl From<walkdir::DirEntry> for VideoFile {
-    fn from(entry: walkdir::DirEntry) -> Self {
-        let size_bytes = entry.metadata().map_or(0, |metadata| metadata.len());
-        Self::new(entry.path(), size_bytes)
-    }
 }
 
 #[cfg(test)]

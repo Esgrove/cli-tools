@@ -204,6 +204,14 @@ struct RawParsedItem {
     sum: f64,
 }
 
+/// Represents one credit card purchase.
+#[derive(Debug, Clone, PartialEq)]
+struct VisaItem {
+    date: Date,
+    name: String,
+    sum: f64,
+}
+
 impl RawParsedItem {
     /// Convert this raw parsed item into a `VisaItem` with the given year.
     fn into_visa_item(self, year: i32) -> Result<VisaItem> {
@@ -216,14 +224,6 @@ impl RawParsedItem {
             sum: self.sum,
         })
     }
-}
-
-/// Represents one credit card purchase.
-#[derive(Debug, Clone, PartialEq)]
-struct VisaItem {
-    date: Date,
-    name: String,
-    sum: f64,
 }
 
 impl VisaItem {

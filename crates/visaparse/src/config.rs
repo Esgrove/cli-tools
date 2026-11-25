@@ -38,6 +38,23 @@ struct UserConfig {
     visaparse: VisaParseConfig,
 }
 
+/// Final config combined from CLI arguments and user config file.
+#[derive(Debug)]
+pub struct Config {
+    /// Input path (file or directory).
+    pub input_path: PathBuf,
+    /// Output path for generated files.
+    pub output_path: PathBuf,
+    /// Only print information without writing to file.
+    pub print: bool,
+    /// How many total sums to print with verbose output.
+    pub number: usize,
+    /// Print verbose output.
+    pub verbose: bool,
+    /// Uppercase name prefixes left out of the DJ sheet.
+    pub filter_prefixes: Vec<String>,
+}
+
 impl VisaParseConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
@@ -66,23 +83,6 @@ impl VisaParseConfig {
             .map(|config| config.visaparse)
             .map_err(|e| anyhow!("Failed to parse config: {e}"))
     }
-}
-
-/// Final config combined from CLI arguments and user config file.
-#[derive(Debug)]
-pub struct Config {
-    /// Input path (file or directory).
-    pub input_path: PathBuf,
-    /// Output path for generated files.
-    pub output_path: PathBuf,
-    /// Only print information without writing to file.
-    pub print: bool,
-    /// How many total sums to print with verbose output.
-    pub number: usize,
-    /// Print verbose output.
-    pub verbose: bool,
-    /// Uppercase name prefixes left out of the DJ sheet.
-    pub filter_prefixes: Vec<String>,
 }
 
 impl Config {

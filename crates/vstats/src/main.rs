@@ -17,6 +17,22 @@ use clap_complete::Shell;
 use crate::collector::StatsCollector;
 use crate::config::Config;
 
+/// Subcommands for vstats.
+#[derive(Subcommand)]
+enum VideoStatsCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Collect and print video file statistics")]
 pub(crate) struct VideoStatsArgs {
@@ -34,22 +50,6 @@ pub(crate) struct VideoStatsArgs {
     /// Print verbose per-file output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
-}
-
-/// Subcommands for vstats.
-#[derive(Subcommand)]
-enum VideoStatsCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> Result<()> {

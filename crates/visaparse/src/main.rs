@@ -15,6 +15,22 @@ use clap_complete::Shell;
 pub use crate::config::Config;
 use crate::parse::visa_parse;
 
+/// Subcommands for visaparse.
+#[derive(Subcommand, Debug)]
+enum VisaParseCommand {
+    /// Generate shell completion script
+    #[command(name = "completion")]
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install completion script to the shell's completion directory
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
 /// Command line arguments for visaparse.
 #[derive(Parser, Debug)]
 #[command(
@@ -46,22 +62,6 @@ pub struct VisaParseArgs {
     /// Print verbose output
     #[arg(short, long, global = true)]
     pub verbose: bool,
-}
-
-/// Subcommands for visaparse.
-#[derive(Subcommand, Debug)]
-enum VisaParseCommand {
-    /// Generate shell completion script
-    #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> Result<()> {
