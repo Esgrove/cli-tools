@@ -70,15 +70,42 @@ impl RustVersion {
             return Err(anyhow!("rustc --version failed"));
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        Self::from_rustc_output(&text).ok_or_else(|| anyhow!("Unexpected rustc --version output: {}", text.trim()))
+        let version = Self::from_rustc_output(&text)
+            .ok_or_else(|| anyhow!("Unexpected rustc --version output: {}", text.trim()))?;
+        if Self::is_prerelease_rustc_output(&text) {
+            println!(
+                "Local toolchain is a pre-release ({}), targeting the latest stable release {version}",
+                text.trim()
+            );
+        }
+        Ok(version)
     }
 
     /// Parse the output of `rustc --version`, for example "rustc 1.100.0 (0ef1bc386 2026-11-09)".
+    ///
+    /// A nightly or beta toolchain such as "rustc 1.101.0-nightly" is ahead of the newest stable release,
+    /// and a manifest or Docker image cannot use a version that is not released yet,
+    /// so it gives the stable release before it, here 1.100.0.
     #[must_use]
     pub fn from_rustc_output(output: &str) -> Option<Self> {
         let version = output.split_whitespace().nth(1)?;
-        let numeric = version.split('-').next()?;
-        Self::parse(numeric)
+        let (numeric, prerelease) = version
+            .split_once('-')
+            .map_or((version, false), |(numeric, _)| (numeric, true));
+        let parsed = Self::parse(numeric)?;
+        if prerelease && parsed.minor > 0 {
+            Some(Self::new(parsed.major, parsed.minor - 1, 0))
+        } else {
+            Some(parsed)
+        }
+    }
+
+    /// Whether `rustc --version` output is from a nightly or beta toolchain.
+    fn is_prerelease_rustc_output(output: &str) -> bool {
+        output
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|version| version.contains('-'))
     }
 
     /// Parse a version with one to three numeric components, such as "1", "1.94", or "1.94.0".
@@ -205,9 +232,11 @@ mod test_rust_version {
     }
 
     #[test]
-    fn parses_nightly_rustc_output() {
-        let version = RustVersion::from_rustc_output("rustc 1.101.0-nightly (abcdef123 2026-11-20)");
-        assert_eq!(version, Some(RustVersion::new(1, 101, 0)));
+    fn a_nightly_or_beta_toolchain_targets_the_latest_stable_release() {
+        let nightly = RustVersion::from_rustc_output("rustc 1.101.0-nightly (abcdef123 2026-11-20)");
+        let beta = RustVersion::from_rustc_output("rustc 1.101.0-beta.3 (abcdef123 2026-11-20)");
+        assert_eq!(nightly, Some(RustVersion::new(1, 100, 0)));
+        assert_eq!(beta, Some(RustVersion::new(1, 100, 0)));
     }
 
     #[test]
