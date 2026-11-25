@@ -9,7 +9,8 @@ use colored::Colorize;
 use jiff::{Timestamp, tz::TimeZone};
 use regex::{Captures, Regex};
 
-pub static CURRENT_YEAR: LazyLock<i32> = LazyLock::new(|| i32::from(Timestamp::now().to_zoned(TimeZone::UTC).year()));
+pub static CURRENT_YEAR: LazyLock<i32> =
+    LazyLock::new(|| i32::from(Timestamp::now().to_zoned_datetime(TimeZone::UTC).year()));
 
 pub static RE_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(20\d{2})\b").expect("Failed to create regex pattern for yyyy year"));

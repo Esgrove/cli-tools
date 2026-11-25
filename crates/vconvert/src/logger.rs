@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 
 use cli_tools_common::print_yellow;
 
@@ -39,7 +39,7 @@ impl FileLogger {
 
         let log_path = log_dir.join(format!(
             "video_convert_{}.log",
-            Zoned::now().strftime("%Y-%m-%d_%H-%M-%S")
+            ZonedDateTime::now().strftime("%Y-%m-%d_%H-%M-%S")
         ));
 
         let file = OpenOptions::new()
@@ -69,7 +69,7 @@ impl FileLogger {
     }
 
     fn timestamp() -> String {
-        Zoned::now().strftime("%Y-%m-%d %H:%M:%S").to_string()
+        ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S").to_string()
     }
 
     /// Log when starting the program

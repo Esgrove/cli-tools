@@ -935,7 +935,7 @@ pub fn format_timestamp(timestamp: i64) -> String {
         |_| "unknown".to_string(),
         |timestamp| {
             timestamp
-                .to_zoned(TimeZone::system())
+                .to_zoned_datetime(TimeZone::system())
                 .strftime("%Y-%m-%d %H:%M")
                 .to_string()
         },

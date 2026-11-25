@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use encoding_rs::Encoding;
-use jiff::{Zoned, civil::Date};
+use jiff::{ZonedDateTime, civil::Date};
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -373,7 +373,7 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
 /// Read transaction lines from an XML file.
 fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
     let mut lines: Vec<String> = Vec::new();
-    let mut year = i32::from(Zoned::now().year());
+    let mut year = i32::from(ZonedDateTime::now().year());
     let xml_file = match File::open(file) {
         Ok(f) => f,
         Err(e) => {
