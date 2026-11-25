@@ -58,7 +58,8 @@ These rules apply to first-party Rust sources and shell scripts in the workspace
 ## Code style
 
 - Rust 2024 edition, with clippy pedantic and nursery lints enabled.
-- No plain `unwrap`. Use proper error handling, or `.expect()` in constants and tests.
+- No plain `unwrap` in non-test code. Use proper error handling, or `.expect()` in constants.
+  Tests may use `unwrap()`, and use `.expect()` only when its message adds real diagnostic value.
 - Use `anyhow` with `Result<T>` return types for error handling.
 - Use `clap` derive macros. Every CLI argument has both a short and a long option.
 - Use descriptive names, no single character variables, and full names over abbreviations.

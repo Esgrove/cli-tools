@@ -269,7 +269,9 @@ so a project that pulls in one tool does not build the others.
 
 - Uses Rust 2024 edition
 - Clippy is configured with pedantic and nursery lints enabled
-- Do not use plain unwrap. Use proper error handling or `.expect()` in constants and test cases.
+- Do not use plain unwrap in non-test code. Use proper error handling, or `.expect()` in constants.
+  Tests may use `unwrap()`.
+  Use `.expect()` in a test only when its message adds real diagnostic value without making the test much longer.
 - Use `anyhow` for error handling with `Result<T>` return types
 - Use `clap` with derive macros for CLI argument parsing
 - Every CLI argument must provide both a short and a long option
