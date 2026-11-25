@@ -34,6 +34,13 @@ use crate::config::add_ignored_group_name_to_config;
 use crate::config::{Config, CustomMapping};
 use crate::database::Database;
 
+/// Read one prompt answer, or `None` when the input has ended without one.
+fn read_prompt_answer(mut reader: impl std::io::BufRead) -> std::io::Result<Option<String>> {
+    let mut input = String::new();
+    let bytes_read = reader.read_line(&mut input)?;
+    Ok((bytes_read > 0).then_some(input))
+}
+
 #[cfg(test)]
 const HIDE_MOVE_PROGRESS: bool = true;
 #[cfg(not(test))]
@@ -2403,8 +2410,11 @@ impl DirMove {
         );
         std::io::stdout().flush()?;
 
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
+        // Without an answer, such as when the input is not a terminal, nothing is moved.
+        let Some(input) = read_prompt_answer(std::io::stdin().lock())? else {
+            println!("  Skipped, no answer");
+            return Ok(PromptResult::Skipped);
+        };
         let input = input.trim();
 
         // Empty input, "y", or "yes" confirms the effective suggestion.
@@ -11110,5 +11120,24 @@ mod test_filename_directory_highlight {
         let filename = path_to_filename_string(&files[file_match.index]);
 
         assert_eq!(file_match.range.extract_from(&filename), Some("Certain.Name"));
+    }
+}
+
+#[cfg(test)]
+mod test_read_prompt_answer {
+    use super::*;
+
+    #[test]
+    fn ended_input_gives_no_answer() {
+        assert_eq!(
+            read_prompt_answer(std::io::Cursor::new("")).expect("reading should work"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_line_is_an_empty_answer() {
+        let answer = read_prompt_answer(std::io::Cursor::new("\n")).expect("reading should work");
+        assert_eq!(answer.as_deref().map(str::trim), Some(""));
     }
 }
