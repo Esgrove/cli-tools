@@ -646,14 +646,19 @@ impl DirMove {
                 continue;
             }
 
+            // A failed move is reported and the remaining entries are still moved.
             // Move directories that don't match unpack names directly.
             for MoveInfo { source, target } in &unpack_info.directory_moves {
-                self.move_directory(source, target, &mut touched_dirs)?;
+                if let Err(error) = self.move_directory(source, target, &mut touched_dirs) {
+                    print_error!("Failed to move {}: {error:#}", path_to_string_relative(source));
+                }
             }
 
             // Move individual files.
             for MoveInfo { source, target } in &unpack_info.file_moves {
-                self.unpack_move_one_file(source, target, &mut touched_dirs)?;
+                if let Err(error) = self.unpack_move_one_file(source, target, &mut touched_dirs) {
+                    print_error!("Failed to move {}: {error:#}", path_to_string_relative(source));
+                }
             }
 
             touched_dirs.insert(directory.clone());
@@ -6420,6 +6425,22 @@ mod test_unpack {
     use super::test_helpers::*;
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_failed_move_is_reported_and_the_rest_are_still_moved() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Example");
+        // The file named like its unpack directory cannot replace that directory, so its move fails.
+        write_file(&root.join("Videos").join("Videos"), "same name as the parent")?;
+        write_file(&root.join("Videos").join("a.txt"), "a")?;
+        let root_for_asserts = root.clone();
+
+        let dirmove = test_helpers::make_dirmove(root, Config::test_unpack(vec!["videos"], false, false, true));
+        dirmove.unpack_directories()?;
+
+        assert_eq!(std::fs::read_to_string(root_for_asserts.join("a.txt"))?, "a");
+        Ok(())
+    }
 
     #[test]
     fn basic_preserves_structure_and_removes_matched_dir() -> anyhow::Result<()> {
