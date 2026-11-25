@@ -35,6 +35,7 @@ walkdir = { workspace = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }
+proptest = { workspace = true }
 tempfile = { workspace = true }
 criterion = { workspace = true }
 
