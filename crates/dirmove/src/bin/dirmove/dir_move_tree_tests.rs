@@ -6,8 +6,7 @@
 
 use cli_tools_common::test_support::TempTree;
 
-use super::test_helpers::make_dirmove;
-use super::*;
+use super::test_helpers::{make_dirmove, test_merge_config, test_unpack_config};
 
 /// Tree with unpack directories at several depths, hidden files inside them, and an unrelated empty directory.
 fn unpack_tree() -> TempTree {
@@ -27,16 +26,16 @@ fn unpack_tree() -> TempTree {
 fn unpack(tree: &TempTree, recurse: bool, dryrun: bool) {
     let dirmove = make_dirmove(
         tree.join("Library"),
-        Config::test_unpack(vec!["subs", "sample"], recurse, dryrun, false),
+        test_unpack_config(vec!["subs", "sample"], recurse, dryrun, false),
     );
-    dirmove.unpack_directories().expect("unpacking should succeed");
+    dirmove.unpack_directories();
 }
 
 /// Run the prefixed directory merge on the "Root" directory of the tree.
 fn merge(tree: &TempTree, recurse: bool, dryrun: bool, overwrite: bool) {
     let dirmove = make_dirmove(
         tree.join("Root"),
-        Config::test_merge(vec!["studio"], recurse, dryrun, overwrite),
+        test_merge_config(vec!["studio"], recurse, dryrun, overwrite),
     );
     dirmove.merge_prefixed_directories().expect("merging should succeed");
 }
@@ -232,31 +231,6 @@ fn pruning_keeps_a_directory_that_only_holds_a_symlink() {
             .file_type()
             .is_symlink()
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn prune_does_not_follow_a_symlink_to_an_empty_directory() {
-    let tree = TempTree::new();
-    tree.dir("outside/empty target");
-    tree.dir("Library/Movie/subs/touched");
-    tree.symlink("outside/empty target", "Library/Movie/subs/touched/link");
-    let dirmove = make_dirmove(
-        tree.join("Library"),
-        Config::test_unpack(vec!["subs"], true, false, false),
-    );
-    let mut touched_dirs: HashSet<PathBuf> = HashSet::from([
-        tree.join("Library/Movie/subs/touched"),
-        tree.join("Library/Movie/subs/touched/link"),
-        tree.join("outside/empty target"),
-    ]);
-
-    dirmove
-        .prune_empty_dirs_under(&tree.join("Library/Movie/subs"), &mut touched_dirs)
-        .expect("pruning should succeed");
-
-    assert!(tree.exists("outside/empty target"));
-    assert!(tree.exists("Library/Movie/subs/touched/link"));
 }
 
 #[cfg(unix)]

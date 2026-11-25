@@ -1,4 +1,7 @@
-//! Configuration parsing and test helpers for the `dirmove` binary.
+//! Configuration parsing for the `dirmove` binary.
+//!
+//! Reads the user config file, combines it with the command line arguments into the library `Config`,
+//! and adds group names to the ignored names in the user config file.
 
 use std::fs;
 
@@ -8,32 +11,9 @@ use serde::Deserialize;
 use toml_edit::DocumentMut;
 
 use cli_tools_dirmove::utils;
+use cli_tools_dirmove::{Config, CustomMapping};
 
 use crate::DirMoveArgs;
-
-/// Final config combined from CLI arguments and user config file.
-#[derive(Debug, Clone, Default)]
-pub struct Config {
-    pub(crate) auto: bool,
-    pub(crate) create: bool,
-    pub(crate) custom_mappings: Vec<CustomMapping>,
-    pub(crate) debug: bool,
-    pub(crate) dryrun: bool,
-    pub(crate) files_only: bool,
-    pub(crate) include: Vec<String>,
-    pub(crate) exclude: Vec<String>,
-    pub(crate) ignored_group_names: Vec<String>,
-    pub(crate) ignored_group_parts: Vec<String>,
-    pub(crate) min_group_size: usize,
-    pub(crate) min_prefix_chars: usize,
-    pub(crate) overwrite: bool,
-    pub(crate) prefix_ignores: Vec<String>,
-    pub(crate) prefix_overrides: Vec<String>,
-    pub(crate) recurse: bool,
-    pub(crate) verbose: bool,
-    pub(crate) unpack_directory_names: Vec<String>,
-    pub(crate) show_db: bool,
-}
 
 /// Config from the user config file
 #[derive(Debug, Default, Deserialize)]
@@ -81,25 +61,6 @@ struct UserConfig {
     dirmove: DirMoveConfig,
 }
 
-/// A custom mapping pair that maps files containing a pattern to a specific directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CustomMapping {
-    /// Pattern to match in filename (case-insensitive, normalized).
-    pub(crate) pattern: String,
-    /// Target directory name for matching files.
-    pub(crate) directory: String,
-}
-
-impl CustomMapping {
-    /// Create a new custom mapping with normalized pattern (lowercase, no dots/spaces).
-    pub(crate) fn new(pattern: &str, directory: &str) -> Self {
-        Self {
-            pattern: pattern.to_lowercase().replace(['.', ' '], ""),
-            directory: directory.to_string(),
-        }
-    }
-}
-
 impl DirMoveConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
@@ -131,26 +92,10 @@ impl DirMoveConfig {
             .map(|config| config.dirmove)
             .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
     }
-}
 
-impl Config {
-    /// Create config from given command line args and user config file.
-    ///
-    /// # Errors
-    /// Returns an error if the config file cannot be read or parsed.
-    pub fn from_args(args: DirMoveArgs) -> Result<Self> {
-        let user_config = DirMoveConfig::get_user_config()?;
-        Ok(Self::from_args_with_config(args, user_config))
-    }
-
-    /// Create config from command line args only, ignoring the user config file.
-    #[cfg(test)]
-    fn from_args_default_config(args: DirMoveArgs) -> Self {
-        Self::from_args_with_config(args, DirMoveConfig::default())
-    }
-
-    /// Create config by combining command line args with the given user config.
-    fn from_args_with_config(args: DirMoveArgs, user_config: DirMoveConfig) -> Self {
+    /// Create the final config by combining command line args with this user config.
+    fn into_config(self, args: DirMoveArgs) -> Config {
+        let user_config = self;
         let include: Vec<String> = user_config
             .include
             .into_iter()
@@ -235,7 +180,7 @@ impl Config {
             .unique()
             .collect();
 
-        Self {
+        Config {
             auto: args.auto || user_config.auto,
             create: args.create || user_config.create,
             custom_mappings,
@@ -259,129 +204,18 @@ impl Config {
     }
 }
 
+/// Create config from given command line args and user config file.
+///
+/// # Errors
+/// Returns an error if the config file cannot be read or parsed.
+pub fn config_from_args(args: DirMoveArgs) -> Result<Config> {
+    Ok(DirMoveConfig::get_user_config()?.into_config(args))
+}
+
+/// Create config from command line args only, ignoring the user config file.
 #[cfg(test)]
-impl Config {
-    /// Create a test config with specified `min_group_size` and default values.
-    pub fn test_with_group_size(min_group_size: usize) -> Self {
-        Self {
-            min_group_size,
-            min_prefix_chars: 1,
-            dryrun: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config with prefix ignores (automatically lowercased).
-    pub fn test_with_prefix_ignores(prefix_ignores: Vec<&str>) -> Self {
-        Self {
-            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            dryrun: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config with prefix overrides and ignores (ignores automatically lowercased).
-    pub fn test_with_overrides_and_ignores(prefix_overrides: Vec<&str>, prefix_ignores: Vec<&str>) -> Self {
-        Self {
-            prefix_overrides: prefix_overrides.into_iter().map(String::from).collect(),
-            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 5,
-            dryrun: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config for unpack operations.
-    pub fn test_unpack(unpack_names: Vec<&str>, recurse: bool, dryrun: bool, overwrite: bool) -> Self {
-        Self {
-            auto: true,
-            dryrun,
-            overwrite,
-            recurse,
-            unpack_directory_names: unpack_names.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 5,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config with ignored group names (automatically lowercased).
-    pub fn test_with_ignored_group_names(ignored_group_names: Vec<&str>) -> Self {
-        Self {
-            ignored_group_names: ignored_group_names.into_iter().map(utils::normalize_name).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            dryrun: true,
-            create: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config with ignored group parts (automatically lowercased).
-    pub fn test_with_ignored_group_parts(ignored_group_parts: Vec<&str>) -> Self {
-        Self {
-            ignored_group_parts: ignored_group_parts.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            dryrun: true,
-            create: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config with specified `min_group_size` and `min_prefix_chars`.
-    pub fn test_with_group_size_and_min_chars(min_group_size: usize, min_prefix_chars: usize) -> Self {
-        Self {
-            min_group_size,
-            min_prefix_chars,
-            dryrun: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config with prefix ignores and specified `min_group_size` (ignores automatically lowercased).
-    pub fn test_with_ignores_and_group_size(prefix_ignores: Vec<&str>, min_group_size: usize) -> Self {
-        Self {
-            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
-            min_group_size,
-            min_prefix_chars: 1,
-            dryrun: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config with both prefix ignores and ignored group names (both automatically lowercased).
-    pub fn test_with_prefix_ignores_and_ignored_group_names(
-        prefix_ignores: Vec<&str>,
-        ignored_group_names: Vec<&str>,
-    ) -> Self {
-        Self {
-            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
-            ignored_group_names: ignored_group_names.into_iter().map(utils::normalize_name).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
-            dryrun: true,
-            create: true,
-            ..Default::default()
-        }
-    }
-
-    /// Create a test config for merge directory operations with prefix ignores.
-    pub fn test_merge(prefix_ignores: Vec<&str>, recurse: bool, dryrun: bool, overwrite: bool) -> Self {
-        Self {
-            auto: true,
-            dryrun,
-            overwrite,
-            recurse,
-            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 5,
-            ..Default::default()
-        }
-    }
+fn config_from_args_default_config(args: DirMoveArgs) -> Config {
+    DirMoveConfig::default().into_config(args)
 }
 
 /// Add a group name to `ignored_group_names` in a TOML document string.
@@ -853,51 +687,15 @@ verbose = true
 }
 
 #[cfg(test)]
-mod custom_mapping_tests {
-    use super::*;
-
-    #[test]
-    fn new_normalizes_pattern_to_lowercase() {
-        let mapping = CustomMapping::new("SomePattern", "Target Dir");
-        assert_eq!(mapping.pattern, "somepattern");
-    }
-
-    #[test]
-    fn new_removes_dots_from_pattern() {
-        let mapping = CustomMapping::new("some.pattern", "Target Dir");
-        assert_eq!(mapping.pattern, "somepattern");
-    }
-
-    #[test]
-    fn new_removes_spaces_from_pattern() {
-        let mapping = CustomMapping::new("some pattern", "Target Dir");
-        assert_eq!(mapping.pattern, "somepattern");
-    }
-
-    #[test]
-    fn new_preserves_directory_name_case() {
-        let mapping = CustomMapping::new("pattern", "Custom Dir Name");
-        assert_eq!(mapping.directory, "Custom Dir Name");
-    }
-
-    #[test]
-    fn new_handles_mixed_separators() {
-        let mapping = CustomMapping::new("Some.Pattern Here", "Target");
-        assert_eq!(mapping.pattern, "somepatternhere");
-    }
-}
-
-#[cfg(test)]
 mod cli_args_tests {
     use super::*;
-    use crate::config::Config;
     use clap::Parser;
 
     #[test]
     fn a_mapping_pattern_that_normalizes_to_nothing_is_dropped() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", ". :Everything", "-M", "foo:Foo"]).expect("should parse");
 
-        let config = Config::from_args_default_config(args);
+        let config = config_from_args_default_config(args);
 
         assert_eq!(config.custom_mappings.len(), 1);
         assert_eq!(config.custom_mappings[0].pattern, "foo");
@@ -975,14 +773,14 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_uses_cli_min_prefix_chars() {
         let args = DirMoveArgs::try_parse_from(["test", "-m", "8"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         assert_eq!(config.min_prefix_chars, 8);
     }
 
     #[test]
     fn config_from_args_default_min_prefix_chars_is_five() {
         let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         assert_eq!(config.min_prefix_chars, 5);
     }
 
@@ -1073,7 +871,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_ignored_group_parts_lowercase() {
         let args = DirMoveArgs::try_parse_from(["test", "-P", "X265", "-P", "Hevc"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         // CLI ignored group parts should be stored as lowercase
         assert!(config.ignored_group_parts.contains(&"x265".to_string()));
         assert!(config.ignored_group_parts.contains(&"hevc".to_string()));
@@ -1089,7 +887,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_ignored_group_names_lowercase() {
         let args = DirMoveArgs::try_parse_from(["test", "-I", "EPISODE", "-I", "Video"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         // CLI ignored group names should be stored as lowercase
         assert!(config.ignored_group_names.contains(&"episode".to_string()));
         assert!(config.ignored_group_names.contains(&"video".to_string()));
@@ -1099,7 +897,7 @@ mod cli_args_tests {
     fn config_from_args_ignored_group_names_normalized() {
         let args = DirMoveArgs::try_parse_from(["test", "-I", "Season One", "-I", "Big.Show", "-I", "SeasonTwo"])
             .expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         // Spaces, dots, and case should all be normalized via normalize_name
         assert!(
             config.ignored_group_names.contains(&"seasonone".to_string()),
@@ -1129,7 +927,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_includes_cli_patterns() {
         let args = DirMoveArgs::try_parse_from(["test", "-n", "*.mp4", "-n", "*.mkv"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         // CLI patterns should be included (may also have fixture config patterns)
         assert!(config.include.contains(&"*.mp4".to_string()));
         assert!(config.include.contains(&"*.mkv".to_string()));
@@ -1139,7 +937,7 @@ mod cli_args_tests {
     fn config_from_args_cli_flags_enable_options() {
         // CLI boolean flags should enable options (OR with fixture config)
         let args = DirMoveArgs::try_parse_from(["test", "-a", "-c", "-r", "-v"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         assert!(config.auto);
         assert!(config.create);
         assert!(config.recurse);
@@ -1149,7 +947,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_includes_unpack_dirs_lowercase() {
         let args = DirMoveArgs::try_parse_from(["test", "-u", "SUBS", "-u", "Sample"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         // CLI unpack dirs should be included as lowercase
         assert!(config.unpack_directory_names.contains(&"subs".to_string()));
         assert!(config.unpack_directory_names.contains(&"sample".to_string()));
@@ -1158,21 +956,21 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_print_enables_dryrun() {
         let args = DirMoveArgs::try_parse_from(["test", "-p"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         assert!(config.dryrun);
     }
 
     #[test]
     fn config_from_args_force_enables_overwrite() {
         let args = DirMoveArgs::try_parse_from(["test", "-f"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         assert!(config.overwrite);
     }
 
     #[test]
     fn config_from_args_files_only_enables_option() {
         let args = DirMoveArgs::try_parse_from(["test", "-F"]).expect("should parse");
-        let config = Config::from_args(args).expect("config should parse");
+        let config = config_from_args(args).expect("config should parse");
         assert!(config.files_only);
     }
 
@@ -1198,7 +996,7 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_parses_custom_mappings() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "something:Custom Dir"]).expect("should parse");
-        let config = Config::from_args_default_config(args);
+        let config = config_from_args_default_config(args);
         assert_eq!(config.custom_mappings.len(), 1);
         assert_eq!(config.custom_mappings[0].pattern, "something");
         assert_eq!(config.custom_mappings[0].directory, "Custom Dir");
@@ -1207,14 +1005,14 @@ mod cli_args_tests {
     #[test]
     fn config_from_args_normalizes_custom_mapping_pattern() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "Some.Pattern:Target"]).expect("should parse");
-        let config = Config::from_args_default_config(args);
+        let config = config_from_args_default_config(args);
         assert_eq!(config.custom_mappings[0].pattern, "somepattern");
     }
 
     #[test]
     fn config_from_args_warns_on_invalid_mapping_format() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "invalid_no_colon"]).expect("should parse");
-        let config = Config::from_args_default_config(args);
+        let config = config_from_args_default_config(args);
         // Invalid format should be skipped
         assert_eq!(config.custom_mappings, [] as [CustomMapping; 0]);
     }

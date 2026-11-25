@@ -151,7 +151,19 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `file_hash.rs` - File hashing
     - `scan_cache.rs` - `SQLite` cache for directory scan results, behind the `scan-cache` feature
 - `crates/dirmove/` → `dirmove` - Move files to matching directories.
-  The library holds prefix grouping, matching, and the sorted prefix index.
+  The binary holds the interactive run, prompts, printing, and the directory name database.
+  The library modules:
+    - `config.rs` - Resolved options and custom mappings
+    - `roots.rs` - Input and output roots, root resolution, and display paths
+    - `name_filter.rs` - Ignored prefix and ignored group name rules
+    - `scanner.rs` - Collecting input files and directories and the candidate destination directories
+    - `matcher.rs` - Matching files and directories to destination directories, and custom mappings
+    - `grouping.rs` - Grouping files by shared name prefixes for create mode
+    - `prefix_index.rs` - Sorted prefix index used to find prefix candidates
+    - `unpack.rs` - Unpacking configured directory names and finding unwanted directories
+    - `merge.rs` - Merging directory contents and finding prefixed directory merge pairs
+    - `mover.rs` - Reliable file moves with copy verification
+    - `types.rs` and `utils.rs` - Shared types and name normalization, filtering, and prefix candidate helpers
 - `crates/dots/` → `dots` - Rename files to use dot formatting. The library holds formatting and renaming.
 - `crates/dupefind/` → `dupefind` - Find duplicate files. The library holds normalization and grouping.
 - `crates/slb/` → `slb` - Check and format prose with semantic line breaks. The library modules:

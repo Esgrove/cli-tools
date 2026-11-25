@@ -5,6 +5,8 @@
 mod config;
 mod database;
 mod dir_move;
+mod prompt;
+mod report;
 
 use std::path::PathBuf;
 

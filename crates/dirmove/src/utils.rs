@@ -380,6 +380,18 @@ mod test_helpers {
             .collect()
     }
 
+    /// Create `FileInfo` from original filenames by applying the standard filtering.
+    /// The original name and filtered name are both derived from the input.
+    pub fn make_filtered_files(names: &[&str]) -> Vec<FileInfo<'static>> {
+        names
+            .iter()
+            .map(|name| {
+                let filtered = filter_numeric_resolution_and_glue_parts(name);
+                FileInfo::new(PathBuf::from(*name), (*name).to_string(), filtered)
+            })
+            .collect()
+    }
+
     /// Helper to create a `PrefixCandidate` for test assertions.
     pub fn candidate(
         prefix: &str,
@@ -2572,5 +2584,214 @@ mod test_contiguity_equivalence {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test_full_flow {
+    use super::test_helpers::*;
+    use super::*;
+
+    #[test]
+    fn simulation_with_filtering() {
+        let original_filenames = [
+            "ShowName.2023.S01E01.720p.mp4",
+            "ShowName.2024.S01E02.720p.mp4",
+            "ShowName.2025.S01E03.720p.mp4",
+            "OtherShow.2024.Special.mp4",
+            "OtherShow.2024.Episode.mp4",
+        ];
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "ShowName.S01E01.mp4");
+        assert_eq!(filtered[1].filtered_name, "ShowName.S01E02.mp4");
+        assert_eq!(filtered[2].filtered_name, "ShowName.S01E03.mp4");
+        assert_eq!(filtered[3].filtered_name, "OtherShow.Special.mp4");
+        assert_eq!(filtered[4].filtered_name, "OtherShow.Episode.mp4");
+
+        let show_candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        assert_eq!(show_candidates, vec![candidate("ShowName", 3, 1, 0)]);
+
+        let other_candidates = find_prefix_candidates(&filtered[3].filtered_name, &filtered, 2, 1);
+        assert_eq!(other_candidates, vec![candidate("OtherShow", 2, 1, 0)]);
+    }
+
+    #[test]
+    fn with_resolution_numbers() {
+        let original_filenames = [
+            "MovieName.2024.720.rip.mp4",
+            "MovieName.2024.720.other.mp4",
+            "MovieName.2024.720.more.mp4",
+        ];
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "MovieName.rip.mp4");
+        assert_eq!(filtered[1].filtered_name, "MovieName.other.mp4");
+        assert_eq!(filtered[2].filtered_name, "MovieName.more.mp4");
+
+        let candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        assert_eq!(candidates, vec![candidate("MovieName", 3, 1, 0)]);
+    }
+
+    #[test]
+    fn with_resolution_pattern() {
+        let original_filenames = [
+            "MovieName.2024.1080p.rip.mp4",
+            "MovieName.2024.1080p.other.mp4",
+            "MovieName.2024.1080p.more.mp4",
+        ];
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "MovieName.rip.mp4");
+        assert_eq!(filtered[1].filtered_name, "MovieName.other.mp4");
+        assert_eq!(filtered[2].filtered_name, "MovieName.more.mp4");
+
+        let candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        assert_eq!(candidates, vec![candidate("MovieName", 3, 1, 0)]);
+    }
+
+    #[test]
+    fn with_glue_words() {
+        let original_filenames = [
+            "Show.and.Tell.part1.mp4",
+            "Show.and.Tell.part2.mp4",
+            "Show.and.Tell.part3.mp4",
+        ];
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "Show.Tell.part1.mp4");
+        assert_eq!(filtered[1].filtered_name, "Show.Tell.part2.mp4");
+        assert_eq!(filtered[2].filtered_name, "Show.Tell.part3.mp4");
+
+        let candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        // Note: Show.Tell won't match because "Show" and "Tell" are not contiguous in original
+        // (they're separated by "and")
+        // With position-agnostic matching, "Tell" is also found as a candidate
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], candidate("Show", 3, 1, 0));
+        assert_eq!(candidates[1], candidate("Tell", 3, 1, 1));
+    }
+
+    #[test]
+    fn short_prefix_with_shared_parts() {
+        let original_filenames = [
+            "ABC.2023.Thing.v1.mp4",
+            "ABC.2024.Thing.v2.mp4",
+            "ABC.2025.Thing.v3.mp4",
+        ];
+
+        let unfiltered = make_test_files(&original_filenames);
+
+        let candidates_unfiltered = find_prefix_candidates(&unfiltered[0].filtered_name, &unfiltered, 3, 1);
+        // With position-agnostic matching, "Thing" is also found
+        assert_eq!(candidates_unfiltered.len(), 2);
+        assert!(
+            candidates_unfiltered
+                .iter()
+                .any(|c| c.prefix == "ABC" && c.match_count == 3)
+        );
+        assert!(
+            candidates_unfiltered
+                .iter()
+                .any(|c| c.prefix == "Thing" && c.match_count == 3)
+        );
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "ABC.Thing.v1.mp4");
+        assert_eq!(filtered[1].filtered_name, "ABC.Thing.v2.mp4");
+        assert_eq!(filtered[2].filtered_name, "ABC.Thing.v3.mp4");
+
+        let candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        // Note: ABC.Thing won't match because "ABC" and "Thing" are not contiguous in original
+        // (they're separated by year like "2023")
+        // With position-agnostic matching, "Thing" is also found as a candidate
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|c| c.prefix == "ABC" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Thing" && c.match_count == 3));
+    }
+
+    #[test]
+    fn files_with_resolution_grouped_correctly() {
+        let original_filenames = [
+            "Some.Video.1080p.part1.mp4",
+            "Some.Video.1080p.part2.mp4",
+            "Some.Video.1080p.part3.mp4",
+        ];
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "Some.Video.part1.mp4");
+
+        let candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        // With position-agnostic matching, "Video" is also found
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Some.Video" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Some" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Video" && c.match_count == 3));
+
+        let some_video = candidates.iter().find(|c| c.prefix == "Some.Video").unwrap();
+        let dir_name = some_video.prefix.replace('.', " ");
+        assert_eq!(dir_name, "Some Video");
+    }
+
+    #[test]
+    fn files_with_2160p_resolution() {
+        let original_filenames = [
+            "Movie.Name.2160p.file1.mp4",
+            "Movie.Name.2160p.file2.mp4",
+            "Movie.Name.2160p.file3.mp4",
+        ];
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "Movie.Name.file1.mp4");
+
+        let candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        // With position-agnostic matching, "Movie" and "Name" are also found
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Movie.Name" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Movie" && c.match_count == 3));
+
+        let movie_name = candidates.iter().find(|c| c.prefix == "Movie.Name").unwrap();
+        let dir_name = movie_name.prefix.replace('.', " ");
+        assert_eq!(dir_name, "Movie Name");
+    }
+
+    #[test]
+    fn files_with_dimension_resolution() {
+        let original_filenames = [
+            "Cool.Stuff.1920x1080.part1.mp4",
+            "Cool.Stuff.1920x1080.part2.mp4",
+            "Cool.Stuff.1920x1080.part3.mp4",
+        ];
+
+        let filtered = make_filtered_files(&original_filenames);
+
+        assert_eq!(filtered[0].filtered_name, "Cool.Stuff.part1.mp4");
+
+        let candidates = find_prefix_candidates(&filtered[0].filtered_name, &filtered, 3, 1);
+        // With position-agnostic matching, "Stuff" is also found
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.prefix == "Cool.Stuff" && c.match_count == 3)
+        );
+        assert!(candidates.iter().any(|c| c.prefix == "Cool" && c.match_count == 3));
+        assert!(candidates.iter().any(|c| c.prefix == "Stuff" && c.match_count == 3));
+
+        let cool_stuff = candidates.iter().find(|c| c.prefix == "Cool.Stuff").unwrap();
+        let dir_name = cool_stuff.prefix.replace('.', " ");
+        assert_eq!(dir_name, "Cool Stuff");
     }
 }

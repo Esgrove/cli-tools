@@ -1,4 +1,4 @@
-//! `SQLite` database operations for `dir_move`.
+//! `SQLite` database operations for `dirmove`.
 //!
 //! Stores directory names that have been used or seen,
 //! to use as primary candidates for group names when creating new directories.
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
-use cli_tools_dirmove::utils;
+use cli_tools_dirmove::{Config, utils};
 
 /// Default database filename.
 const DATABASE_FILENAME: &str = "dirmove.db";
@@ -136,6 +136,25 @@ impl Database {
         Ok(entries)
     }
 
+    /// Get the stored display name for a directory name, but only if it's an exact match.
+    ///
+    /// An "exact match" means the same letters (case-insensitive), but may differ in:
+    /// - Whitespace (e.g., "JaneDoe" vs "Jane Doe")
+    /// - Dots (e.g., "Jane.Doe" vs "Jane Doe")
+    /// - Case (e.g., "JANE DOE" vs "Jane Doe")
+    ///
+    /// This maps a grouping name to the database's preferred formatting,
+    /// only when they represent the same entity.
+    #[allow(clippy::doc_markdown)]
+    pub fn exact_match_display_name(&self, directory_name: &str) -> Option<String> {
+        let normalized = utils::normalize_name(directory_name);
+        self.get_all_entries()
+            .ok()?
+            .into_iter()
+            .find(|entry| entry.normalized_name == normalized)
+            .map(|entry| entry.display_name)
+    }
+
     /// Get the count of directory names in the database.
     #[allow(unused)]
     pub fn count(&self) -> Result<u64> {
@@ -200,6 +219,17 @@ impl std::fmt::Display for DirectoryEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.display_name)
     }
+}
+
+/// Check if a directory name should be stored in the database.
+///
+/// Hidden names, ignored prefixes, ignored group names, and names with an ignored group part are not stored.
+pub fn should_store_name(name: &str, config: &Config) -> bool {
+    let name_filter = config.name_filter();
+    !name.starts_with('.')
+        && !name_filter.is_ignored_prefix(name)
+        && !name_filter.matches_ignored_group_name(&utils::normalize_name(name))
+        && !config.has_ignored_group_part(name.split([' ', '.']))
 }
 
 #[cfg(test)]
