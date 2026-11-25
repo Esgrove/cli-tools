@@ -344,9 +344,19 @@ pub fn existing_torrent_in_downloaded(downloaded_directory: &Path, torrent_path:
     (target.is_file() && !cli_tools_common::paths_refer_to_same_file(&target, torrent_path)).then_some(target)
 }
 
+/// Whether two torrent files have the same contents.
+#[must_use]
+pub fn is_duplicate_torrent_file(first: &Path, second: &Path) -> bool {
+    match (std::fs::read(first), std::fs::read(second)) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => false,
+    }
+}
+
 /// Move a torrent file into `downloaded_directory`, preserving its file name.
 ///
-/// Overwrites any existing file at the destination.
+/// An identical file at the destination is replaced.
+/// A different file with the same name is kept, and the torrent is moved under a unique name next to it.
 ///
 /// # Errors
 /// Returns an error if the torrent path has no file name or the rename operation fails.
@@ -354,9 +364,15 @@ pub fn move_torrent_to_downloaded(torrent_path: &Path, downloaded_directory: &Pa
     let file_name = torrent_path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("Torrent path has no file name: {}", torrent_path.display()))?;
-    let destination = downloaded_directory.join(file_name);
+    let mut destination = downloaded_directory.join(file_name);
     if cli_tools_common::paths_refer_to_same_file(torrent_path, &destination) {
         return Ok(destination);
+    }
+    if destination.exists() && !is_duplicate_torrent_file(torrent_path, &destination) {
+        let name = cli_tools_common::path_to_filename_string(torrent_path);
+        let stem = cli_tools_common::path_to_file_stem_string(torrent_path);
+        let extension = cli_tools_common::path_to_file_extension_string(torrent_path);
+        destination = cli_tools_common::get_unique_path(downloaded_directory, &name, &stem, &extension);
     }
     std::fs::rename(torrent_path, &destination)
         .with_context(|| format!("Failed to move {} to {}", torrent_path.display(), destination.display()))?;
@@ -490,7 +506,7 @@ mod test_move_torrent_to_downloaded {
     }
 
     #[test]
-    fn overwrites_existing_file_at_destination() {
+    fn keeps_a_different_existing_file_and_moves_under_a_unique_name() {
         let temporary = tempfile::tempdir().expect("create temp dir");
         let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
         std::fs::create_dir(&downloaded).expect("create downloaded dir");
@@ -500,10 +516,39 @@ mod test_move_torrent_to_downloaded {
         std::fs::write(&torrent, b"new").expect("write torrent");
 
         let destination = move_torrent_to_downloaded(&torrent, &downloaded).expect("move succeeds");
+        assert_ne!(destination, existing);
+        assert!(!torrent.exists());
+        assert_eq!(std::fs::read(&existing).expect("read existing"), b"old");
+        assert_eq!(std::fs::read(&destination).expect("read destination"), b"new");
+    }
+
+    #[test]
+    fn replaces_an_identical_existing_file() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let downloaded = temporary.path().join(DOWNLOADED_DIRECTORY_NAME);
+        std::fs::create_dir(&downloaded).expect("create downloaded dir");
+        let existing = downloaded.join("example.torrent");
+        std::fs::write(&existing, b"same").expect("write existing");
+        let torrent = temporary.path().join("example.torrent");
+        std::fs::write(&torrent, b"same").expect("write torrent");
+
+        let destination = move_torrent_to_downloaded(&torrent, &downloaded).expect("move succeeds");
         assert_eq!(destination, existing);
         assert!(!torrent.exists());
-        let contents = std::fs::read(&destination).expect("read destination");
-        assert_eq!(contents, b"new");
+    }
+
+    #[test]
+    fn identical_torrent_files_are_duplicates() {
+        let temporary = tempfile::tempdir().expect("create temp dir");
+        let first = temporary.path().join("first.torrent");
+        let same = temporary.path().join("same.torrent");
+        let other = temporary.path().join("other.torrent");
+        std::fs::write(&first, b"data").expect("write");
+        std::fs::write(&same, b"data").expect("write");
+        std::fs::write(&other, b"different").expect("write");
+
+        assert!(is_duplicate_torrent_file(&first, &same));
+        assert!(!is_duplicate_torrent_file(&first, &other));
     }
 
     #[test]

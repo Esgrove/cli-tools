@@ -156,7 +156,11 @@ impl QTorrent {
                 if !self.confirm_downloaded_collision(existing, "Add anyway?")? {
                     println!("{}", "Skipped.".yellow());
                     stats.inc_skipped();
-                    Self::trash_duplicate_torrent_file(&torrent_path);
+                    // Only an identical copy of the downloaded torrent is a duplicate.
+                    // A different torrent that happens to share the file name was never added, so it stays.
+                    if crate::utils::is_duplicate_torrent_file(&torrent_path, existing) {
+                        Self::trash_duplicate_torrent_file(&torrent_path);
+                    }
                     continue;
                 }
                 true
