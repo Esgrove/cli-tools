@@ -17,6 +17,9 @@ use super::paragraph::Region;
 use super::reflow;
 use super::violation::Violation;
 
+/// Unicode byte order mark some editors write at the start of a UTF-8 file.
+const BYTE_ORDER_MARK: char = '\u{feff}';
+
 /// One line of the input with its original line ending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SourceLine<'a> {
@@ -97,13 +100,28 @@ pub fn format(text: &str, kind: FileKind, options: &FormatOptions) -> FormatResu
     run(text, kind, options, true)
 }
 
+/// Run the pipeline over a text buffer, keeping a leading byte order mark out of the way.
+///
+/// A byte order mark in front of the first line would hide a fence or a comment marker there,
+/// so it is taken off before the lines are read and put back on the fixed text.
+fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -> FormatResult {
+    let Some(body) = text.strip_prefix(BYTE_ORDER_MARK) else {
+        return run_lines(text, kind, options, produce_fix);
+    };
+    let mut result = run_lines(body, kind, options, produce_fix);
+    if let Some(fixed) = &mut result.fixed_text {
+        fixed.insert(0, BYTE_ORDER_MARK);
+    }
+    result
+}
+
 /// Run the pipeline over a text buffer, building the fixed text only when `produce_fix` is set.
 ///
 /// Violations always describe the original text.
 /// Moving a trailing comment to its own line shifts every line number after it,
 /// so the fixed text needs a second prose pass over the rewritten lines,
 /// which is skipped when the caller only asked for the violations.
-fn run(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -> FormatResult {
+fn run_lines(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: bool) -> FormatResult {
     let source = split_lines(text);
     let texts: Vec<&str> = source.iter().map(|line| line.text).collect();
     if markdown::has_ignore_file_marker(&texts) {

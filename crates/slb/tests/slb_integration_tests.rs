@@ -385,3 +385,36 @@ fn a_parenthesized_triple_quoted_string_keeps_its_value() {
 
     assert_eq!(result.fixed_text, None, "the string literal was changed");
 }
+
+#[test]
+fn a_byte_order_mark_does_not_hide_an_opening_fence() {
+    let text = "\u{feff}```text\nThis code line is long enough to be split, and it has a comma, which gives a break point.\n```\n";
+    let options = FormatOptions {
+        max_width: 60,
+        ..FormatOptions::default()
+    };
+
+    let result = format(text, FileKind::Markdown, &options);
+
+    assert_eq!(result.fixed_text, None, "code inside the fence was changed");
+}
+
+#[test]
+fn a_byte_order_mark_is_kept_and_the_first_comment_is_checked() {
+    let text = "\u{feff}// This comment line is long enough to be split, and it has a comma, which gives a break point.\nfn main() {}\n";
+    let options = FormatOptions {
+        max_width: 60,
+        ..FormatOptions::default()
+    };
+
+    let result = format(text, FileKind::Rust, &options);
+
+    let fixed = result.fixed_text.expect("the long comment should be fixed");
+    assert!(fixed.starts_with("\u{feff}// "), "{fixed:?}");
+    assert!(
+        fixed
+            .lines()
+            .all(|line| line.trim_start_matches('\u{feff}').chars().count() <= 66),
+        "{fixed}"
+    );
+}
