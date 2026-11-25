@@ -535,12 +535,15 @@ impl DirMove {
         }
 
         for (entry_path, target_path) in directory_entries {
+            // An existing subdirectory is merged file by file, so overwrite only replaces files with the same name
+            // and never deletes files that exist only in the target.
+            if target_path.is_dir() {
+                self.merge_directory_contents(&entry_path, &target_path)?;
+                moved_count += 1;
+                continue;
+            }
             if target_path.exists() && self.config.overwrite {
-                if target_path.is_dir() {
-                    std::fs::remove_dir_all(&target_path)?;
-                } else {
-                    std::fs::remove_file(&target_path)?;
-                }
+                std::fs::remove_file(&target_path)?;
             }
             if std::fs::rename(&entry_path, &target_path).is_err() {
                 cli_tools_common::copy_dir_recursive(&entry_path, &target_path)?;
@@ -7306,6 +7309,30 @@ mod test_merge_prefixed_directories {
         assert_eq!(content, "new content");
 
         // Source directory should be deleted (empty after merge)
+        assert_not_exists(&root_for_asserts.join("studio alpha"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_merges_existing_subdirectories_without_deleting_their_files() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let root = tmp.path().join("Root");
+        std::fs::create_dir_all(&root)?;
+
+        write_file(&root.join("studio alpha").join("Season 1").join("E03.mkv"), "three")?;
+        write_file(&root.join("alpha").join("Season 1").join("E01.mkv"), "one")?;
+        write_file(&root.join("alpha").join("Season 1").join("E02.mkv"), "two")?;
+
+        let root_for_asserts = root.clone();
+
+        let dirmove = make_dirmove(root, Config::test_merge(vec!["studio"], false, false, true));
+        dirmove.merge_prefixed_directories()?;
+
+        let season = root_for_asserts.join("alpha").join("Season 1");
+        assert_eq!(std::fs::read_to_string(season.join("E01.mkv"))?, "one");
+        assert_eq!(std::fs::read_to_string(season.join("E02.mkv"))?, "two");
+        assert_eq!(std::fs::read_to_string(season.join("E03.mkv"))?, "three");
         assert_not_exists(&root_for_asserts.join("studio alpha"));
 
         Ok(())
