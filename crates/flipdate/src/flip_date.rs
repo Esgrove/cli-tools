@@ -9,7 +9,7 @@ use colored::Colorize;
 use walkdir::WalkDir;
 
 use cli_tools_common::date::Date;
-use cli_tools_common::{OverwritePolicy, RenameOutcome};
+use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations};
 
 pub use crate::config::Config;
 
@@ -71,10 +71,25 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
     } else {
         OverwritePolicy::Skip
     };
+    // Overwriting only replaces files that existed before the run,
+    // never a file that another source in this run was renamed to.
+    let mut reservations = TargetReservations::new();
     for item in files_to_rename {
         // Recursive runs find files in subdirectories, so the new name stays in the file's own directory.
         let new_path = item.path.with_file_name(&item.new_name);
         if new_path == item.path {
+            continue;
+        }
+        if !reservations.reserve(&new_path) {
+            eprintln!(
+                "{}",
+                format!(
+                    "Skipping {}, another file in this run is renamed to {}",
+                    item.path.display(),
+                    item.new_name
+                )
+                .yellow()
+            );
             continue;
         }
         println!("{heading}");
@@ -610,5 +625,329 @@ mod test_date_flip_directories {
             fs::read_to_string(root.path().join(&target).join("keep.txt")).expect("read"),
             "keep"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_nested_trees {
+    use std::collections::BTreeSet;
+
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    /// Config for file mode with every option off except the ones given.
+    fn file_config(recurse: bool, dryrun: bool, overwrite: bool) -> Config {
+        Config {
+            dryrun,
+            file_extensions: FILE_EXTENSIONS.iter().map(ToString::to_string).collect(),
+            overwrite,
+            recurse,
+            ..Config::default()
+        }
+    }
+
+    /// Config for directory mode with every option off except the ones given.
+    fn directory_config(recurse: bool, dryrun: bool) -> Config {
+        Config {
+            directory_mode: true,
+            dryrun,
+            recurse,
+            ..Config::default()
+        }
+    }
+
+    /// Tree with a dated file at every depth, an undated file, and a correctly dated file.
+    fn nested_files() -> TempTree {
+        let tree = TempTree::new();
+        tree.file_with("Report 31.12.2020.txt", "report");
+        tree.file_with("a/Song 01.05.2021.mp3", "song");
+        tree.file_with("a/b/Clip 15.06.2022.mp4", "clip");
+        tree.file_with("a/b/c/Photo 2.3.2023.jpg", "photo");
+        tree.file_with("a/b/c/plain.txt", "plain");
+        tree.file_with("a/b/ok 2020.01.02.txt", "ok");
+        tree.file_with("a/b/skip 01.02.2020.doc", "other extension");
+        tree
+    }
+
+    /// Run file mode on the whole tree.
+    fn flip_files(tree: &TempTree, config: &Config) {
+        date_flip_files(&tree.path().to_path_buf(), config).expect("flip should succeed");
+    }
+
+    /// Run directory mode on the whole tree.
+    fn flip_directories(tree: &TempTree, config: &Config) {
+        date_flip_directories(tree.path().to_path_buf(), config).expect("flip should succeed");
+    }
+
+    /// Contents of every regular file in the tree, so a test can check that nothing was lost.
+    fn contents(tree: &TempTree) -> BTreeSet<String> {
+        tree.files()
+            .iter()
+            .filter(|relative| tree.join(relative).is_file())
+            .map(|relative| tree.read(relative))
+            .collect()
+    }
+
+    #[test]
+    fn recursive_run_renames_files_at_every_depth() {
+        let tree = nested_files();
+
+        flip_files(&tree, &file_config(true, false, false));
+
+        assert_eq!(
+            tree.files(),
+            vec![
+                "Report 2020.12.31.txt",
+                "a/Song 2021.05.01.mp3",
+                "a/b/Clip 2022.06.15.mp4",
+                "a/b/c/Photo 2023.03.02.jpg",
+                "a/b/c/plain.txt",
+                "a/b/ok 2020.01.02.txt",
+                "a/b/skip 01.02.2020.doc",
+            ]
+        );
+        assert_eq!(tree.read("a/b/c/Photo 2023.03.02.jpg"), "photo");
+    }
+
+    #[test]
+    fn non_recursive_run_only_renames_the_top_level() {
+        let tree = nested_files();
+
+        flip_files(&tree, &file_config(false, false, false));
+
+        assert!(tree.exists("Report 2020.12.31.txt"));
+        assert!(tree.exists("a/Song 01.05.2021.mp3"));
+        assert!(tree.exists("a/b/Clip 15.06.2022.mp4"));
+        assert!(tree.exists("a/b/c/Photo 2.3.2023.jpg"));
+    }
+
+    #[test]
+    fn second_run_changes_nothing() {
+        let tree = nested_files();
+        flip_files(&tree, &file_config(true, false, false));
+        let after_first_run = tree.snapshot();
+
+        flip_files(&tree, &file_config(true, false, false));
+
+        assert_eq!(tree.snapshot(), after_first_run);
+    }
+
+    #[test]
+    fn dryrun_leaves_the_tree_unchanged() {
+        let tree = nested_files();
+        tree.dir("Trip 24.12.2019/Day 01.02.2020");
+        let before = tree.snapshot();
+
+        flip_files(&tree, &file_config(true, true, true));
+        flip_directories(&tree, &directory_config(true, true));
+
+        assert_eq!(tree.snapshot(), before);
+    }
+
+    #[test]
+    fn a_file_given_as_the_path_is_renamed_alone() {
+        let tree = nested_files();
+
+        date_flip_files(&tree.join("a/Song 01.05.2021.mp3"), &file_config(false, false, false))
+            .expect("flip should succeed");
+
+        assert!(tree.exists("a/Song 2021.05.01.mp3"));
+        assert!(tree.exists("Report 31.12.2020.txt"));
+        assert!(tree.exists("a/b/Clip 15.06.2022.mp4"));
+    }
+
+    #[test]
+    fn empty_directory_is_a_no_op() {
+        let tree = TempTree::with_entries(&["empty/"]);
+
+        flip_files(&tree, &file_config(true, false, false));
+        flip_directories(&tree, &directory_config(true, false));
+
+        assert_eq!(tree.snapshot(), vec!["empty/"]);
+    }
+
+    #[test]
+    fn hidden_files_and_directories_are_skipped() {
+        let tree = TempTree::new();
+        tree.file(".hidden 01.02.2020.txt");
+        tree.file(".secret/x 01.02.2020.txt");
+        tree.dir(".private/Trip 01.02.2020");
+        tree.file("visible/y 01.02.2020.txt");
+        let hidden_before: Vec<String> = tree
+            .snapshot()
+            .into_iter()
+            .filter(|entry| entry.starts_with('.'))
+            .collect();
+
+        flip_files(&tree, &file_config(true, false, false));
+        flip_directories(&tree, &directory_config(true, false));
+
+        let hidden_after: Vec<String> = tree
+            .snapshot()
+            .into_iter()
+            .filter(|entry| entry.starts_with('.'))
+            .collect();
+        assert_eq!(hidden_after, hidden_before);
+        assert!(tree.exists("visible/y 2020.02.01.txt"));
+    }
+
+    #[test]
+    fn same_target_in_one_directory_keeps_both_files_without_overwrite() {
+        let tree = TempTree::new();
+        tree.file_with("x 01.02.2020.txt", "first");
+        tree.file_with("x 1.2.2020.txt", "second");
+
+        flip_files(&tree, &file_config(false, false, false));
+
+        assert_eq!(tree.files().len(), 2, "{:?}", tree.files());
+        assert!(tree.exists("x 2020.02.01.txt"));
+        assert_eq!(
+            contents(&tree),
+            BTreeSet::from(["first".to_string(), "second".to_string()])
+        );
+    }
+
+    #[test]
+    fn overwrite_never_replaces_a_file_renamed_earlier_in_the_same_run() {
+        let tree = TempTree::new();
+        tree.file_with("x 01.02.2020.txt", "first");
+        tree.file_with("x 1.2.2020.txt", "second");
+
+        flip_files(&tree, &file_config(false, false, true));
+
+        assert_eq!(
+            contents(&tree),
+            BTreeSet::from(["first".to_string(), "second".to_string()])
+        );
+    }
+
+    #[test]
+    fn overwrite_replaces_a_target_that_existed_before_the_run() {
+        let tree = TempTree::new();
+        tree.file_with("x 01.02.2020.txt", "source");
+        tree.file_with("x 2020.02.01.txt", "existing");
+
+        flip_files(&tree, &file_config(false, false, true));
+
+        assert_eq!(tree.files(), vec!["x 2020.02.01.txt"]);
+        assert_eq!(tree.read("x 2020.02.01.txt"), "source");
+    }
+
+    #[test]
+    fn same_name_in_different_directories_is_renamed_in_each() {
+        let tree = TempTree::new();
+        tree.file_with("one/x 01.02.2020.txt", "one");
+        tree.file_with("one/two/x 01.02.2020.txt", "two");
+        tree.file_with("one/two/three/x 01.02.2020.txt", "three");
+
+        flip_files(&tree, &file_config(true, false, false));
+
+        assert_eq!(
+            tree.files(),
+            vec![
+                "one/two/three/x 2020.02.01.txt",
+                "one/two/x 2020.02.01.txt",
+                "one/x 2020.02.01.txt",
+            ]
+        );
+        assert_eq!(tree.read("one/two/three/x 2020.02.01.txt"), "three");
+    }
+
+    #[test]
+    fn target_differing_only_by_case_keeps_both_files() {
+        let tree = TempTree::new();
+        tree.file_with("Clip 01.02.2020.txt", "source");
+        tree.file_with("clip 2020.02.01.txt", "existing");
+
+        flip_files(&tree, &file_config(false, false, false));
+
+        assert_eq!(tree.files().len(), 2, "{:?}", tree.files());
+        assert_eq!(
+            contents(&tree),
+            BTreeSet::from(["existing".to_string(), "source".to_string()])
+        );
+    }
+
+    #[test]
+    fn deeply_nested_dated_directories_are_all_renamed() {
+        let tree = TempTree::new();
+        tree.file_with("Trip 24.12.2019/Day 01.02.2020/Evening 03.04.2021/notes.txt", "notes");
+        tree.dir("Trip 24.12.2019/plain");
+
+        flip_directories(&tree, &directory_config(true, false));
+
+        assert_eq!(
+            tree.dirs(),
+            vec![
+                "2019-12-24 Trip",
+                "2019-12-24 Trip/2020-02-01 Day",
+                "2019-12-24 Trip/2020-02-01 Day/2021-04-03 Evening",
+                "2019-12-24 Trip/plain",
+            ]
+        );
+        assert_eq!(
+            tree.read("2019-12-24 Trip/2020-02-01 Day/2021-04-03 Evening/notes.txt"),
+            "notes"
+        );
+    }
+
+    #[test]
+    fn non_recursive_directory_run_only_renames_the_top_level() {
+        let tree = TempTree::with_entries(&["Trip 24.12.2019/Day 01.02.2020/"]);
+
+        flip_directories(&tree, &directory_config(false, false));
+
+        assert_eq!(tree.dirs(), vec!["2019-12-24 Trip", "2019-12-24 Trip/Day 01.02.2020"]);
+    }
+
+    #[test]
+    fn directories_with_the_same_target_are_both_kept() {
+        let tree = TempTree::new();
+        tree.file_with("Trip 01.02.2020/a.txt", "a");
+        tree.file_with("Trip 1.2.2020/b.txt", "b");
+
+        flip_directories(&tree, &directory_config(false, false));
+
+        assert_eq!(tree.dirs().len(), 2, "{:?}", tree.dirs());
+        assert!(tree.exists("2020-02-01 Trip"));
+        assert_eq!(contents(&tree), BTreeSet::from(["a".to_string(), "b".to_string()]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_not_followed_into_their_targets() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real 01.02.2020.txt", "real");
+        tree.file_with("outside/folder/inner 01.02.2020.txt", "inner");
+        tree.dir("outside/Linked 01.02.2020");
+        tree.symlink("outside/folder", "walked/folder link");
+        tree.symlink("outside/Linked 01.02.2020", "walked/Link 05.06.2020");
+        tree.symlink("outside/real 01.02.2020.txt", "walked/file link 01.02.2020.txt");
+
+        date_flip_files(&tree.join("walked"), &file_config(true, false, false)).expect("flip should succeed");
+        date_flip_directories(tree.join("walked"), &directory_config(true, false)).expect("flip should succeed");
+
+        assert_eq!(tree.read("outside/real 01.02.2020.txt"), "real");
+        assert_eq!(tree.read("outside/folder/inner 01.02.2020.txt"), "inner");
+        assert!(tree.join("outside/Linked 01.02.2020").is_dir());
+        for link in tree.files().iter().filter(|relative| relative.starts_with("walked/")) {
+            assert!(tree.join(link).exists(), "link should still resolve: {link}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn name_that_is_not_utf8_keeps_its_contents() {
+        let tree = TempTree::new();
+        let Some(path) = tree.non_utf8_file("sub", "x 01.02.2020 ", "txt") else {
+            return;
+        };
+        std::fs::write(&path, "data").expect("file should be written");
+
+        flip_files(&tree, &file_config(true, false, false));
+
+        assert_eq!(tree.files().len(), 1, "{:?}", tree.files());
+        assert_eq!(contents(&tree), BTreeSet::from(["data".to_string()]));
     }
 }
