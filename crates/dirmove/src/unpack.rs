@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use walkdir::WalkDir;
 
-use cli_tools_common::{TargetReservations, path_to_filename_string};
+use cli_tools_common::{TargetReservations, path_to_filename_string, unique_in_order};
 
 use crate::name_filter;
 
@@ -123,12 +123,12 @@ impl Unpacker {
         N: IntoIterator,
         N::Item: AsRef<str>,
     {
-        let mut seen = HashSet::new();
-        let unpack_directory_names = unpack_directory_names
-            .into_iter()
-            .map(|name| name.as_ref().trim().to_lowercase())
-            .filter(|name| !name.is_empty() && seen.insert(name.clone()))
-            .collect();
+        let unpack_directory_names = unique_in_order(
+            unpack_directory_names
+                .into_iter()
+                .map(|name| name.as_ref().trim().to_lowercase())
+                .filter(|name| !name.is_empty()),
+        );
         Self {
             unpack_directory_names,
             overwrite,

@@ -6,6 +6,8 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use cli_tools_common::unique_in_order;
+
 use crate::types::DirectoryInfo;
 use crate::utils;
 
@@ -42,16 +44,16 @@ impl NameFilter {
         G: IntoIterator,
         G::Item: AsRef<str>,
     {
-        let mut prefix_ignores: Vec<String> = prefix_ignores
-            .into_iter()
-            .map(|prefix| prefix.as_ref().trim().to_lowercase())
-            .collect();
-        let mut ignored_group_names: Vec<String> = ignored_group_names
-            .into_iter()
-            .map(|name| utils::normalize_name(name.as_ref()))
-            .collect();
-        dedup_in_order(&mut prefix_ignores);
-        dedup_in_order(&mut ignored_group_names);
+        let prefix_ignores = unique_in_order(
+            prefix_ignores
+                .into_iter()
+                .map(|prefix| prefix.as_ref().trim().to_lowercase()),
+        );
+        let ignored_group_names = unique_in_order(
+            ignored_group_names
+                .into_iter()
+                .map(|name| utils::normalize_name(name.as_ref())),
+        );
         let prefixes_with_space = prefix_ignores.iter().map(|prefix| format!("{prefix} ")).collect();
         let prefixes_with_dot = prefix_ignores.iter().map(|prefix| format!("{prefix}.")).collect();
         Self {
@@ -163,12 +165,6 @@ pub fn is_unwanted_directory(name: &str) -> bool {
     UNWANTED_DIRECTORIES
         .iter()
         .any(|unwanted| name.eq_ignore_ascii_case(unwanted))
-}
-
-/// Remove repeated values, keeping the first occurrence of each.
-fn dedup_in_order(values: &mut Vec<String>) {
-    let mut seen = std::collections::HashSet::new();
-    values.retain(|value| seen.insert(value.clone()));
 }
 
 /// Strip lowercase patterns from the start of `name` until none match, comparing case-insensitively.

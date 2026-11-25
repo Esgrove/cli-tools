@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use cli_tools_common::{nearest_containing_root, relative_path_within};
+
 use cli_tools_common::{get_relative_path_or_filename, path_to_filename_string, path_to_string_relative};
 
 use crate::types::DirectoryInfo;
@@ -144,7 +146,7 @@ impl Roots {
             .collect();
         if source_roots
             .iter()
-            .any(|source_root| relative_path_from_root(target, source_root).is_none())
+            .any(|source_root| relative_path_within(target, source_root).is_none())
         {
             return target.display().to_string();
         }
@@ -201,24 +203,8 @@ fn source_root_candidate_for_file(input_root: &Path, file_path: &Path) -> Option
             .flatten();
     }
 
-    relative_path_from_root(file_path, input_root)
+    relative_path_within(file_path, input_root)
         .map(|relative_path| (input_root.to_path_buf(), relative_path.components().count()))
-}
-
-/// Return `path` relative to `root`, using filesystem identity when textual prefixes differ.
-fn relative_path_from_root(path: &Path, root: &Path) -> Option<PathBuf> {
-    if cli_tools_common::paths_refer_to_same_file(path, root) {
-        return Some(PathBuf::new());
-    }
-
-    if let Ok(relative_path) = path.strip_prefix(root) {
-        return Some(relative_path.to_path_buf());
-    }
-
-    path.ancestors()
-        .find(|ancestor| cli_tools_common::paths_refer_to_same_file(ancestor, root))
-        .and_then(|matching_root| path.strip_prefix(matching_root).ok())
-        .map(Path::to_path_buf)
 }
 
 /// Format `path` relative to the nearest root that contains the same filesystem location.
@@ -226,7 +212,7 @@ fn relative_display_path_from_nearest_root(path: &Path, roots: &[PathBuf]) -> Op
     roots
         .iter()
         .filter_map(|root| {
-            let relative_path = relative_path_from_root(path, root)?;
+            let relative_path = relative_path_within(path, root)?;
             Some((relative_path.components().count(), relative_path))
         })
         .min_by_key(|(relative_depth, _)| *relative_depth)
@@ -240,15 +226,6 @@ fn relative_path_to_display(path: &Path, relative_path: &Path) -> String {
     } else {
         relative_path.display().to_string()
     }
-}
-
-/// Return the root that most closely contains `path`, preferring the deepest matching root.
-fn nearest_containing_root<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
-    roots
-        .iter()
-        .filter_map(|root| path.strip_prefix(root).ok().map(|relative| (root.as_path(), relative)))
-        .min_by_key(|(_, relative)| relative.components().count())
-        .map(|(root, _)| root)
 }
 
 #[cfg(test)]

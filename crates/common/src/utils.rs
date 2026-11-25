@@ -140,6 +140,45 @@ pub fn strings_from(values: &[&str]) -> Vec<String> {
     values.iter().map(std::string::ToString::to_string).collect()
 }
 
+/// Remove repeated values, keeping the first occurrence of each in the original order.
+#[must_use]
+pub fn unique_in_order<I>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen = std::collections::HashSet::new();
+    values.into_iter().filter(|value| seen.insert(value.clone())).collect()
+}
+
+/// Return `path` relative to `root`, using filesystem identity when the textual prefixes differ.
+///
+/// The root itself gives an empty path, and a path outside the root gives `None`.
+#[must_use]
+pub fn relative_path_within(path: &Path, root: &Path) -> Option<PathBuf> {
+    if crate::paths_refer_to_same_file(path, root) {
+        return Some(PathBuf::new());
+    }
+
+    if let Ok(relative_path) = path.strip_prefix(root) {
+        return Some(relative_path.to_path_buf());
+    }
+
+    path.ancestors()
+        .find(|ancestor| crate::paths_refer_to_same_file(ancestor, root))
+        .and_then(|matching_root| path.strip_prefix(matching_root).ok())
+        .map(Path::to_path_buf)
+}
+
+/// Return the root that most closely contains `path` textually, preferring the deepest matching root.
+#[must_use]
+pub fn nearest_containing_root<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a Path> {
+    roots
+        .iter()
+        .filter_map(|root| path.strip_prefix(root).ok().map(|relative| (root.as_path(), relative)))
+        .min_by_key(|(_, relative)| relative.components().count())
+        .map(|(root, _)| root)
+}
+
 /// Convert an editorconfig glob into an anchored regular expression.
 #[must_use]
 pub fn glob_to_regex(glob: &str) -> Option<Regex> {
@@ -540,5 +579,77 @@ mod test_count_files {
             .expect("should create symlink");
 
         assert_eq!(count_files(&temp.path().join("inside")), 1);
+    }
+}
+
+#[cfg(test)]
+mod test_unique_in_order {
+    use super::*;
+
+    #[test]
+    fn keeps_the_first_occurrence_in_order() {
+        let values = ["b", "a", "b", "c", "a"].map(String::from);
+        assert_eq!(unique_in_order(values), ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn compares_values_exactly() {
+        let values = ["Name", "name", "name "].map(String::from);
+        assert_eq!(unique_in_order(values), ["Name", "name", "name "]);
+    }
+
+    #[test]
+    fn empty_input_gives_empty_output() {
+        assert_eq!(unique_in_order(Vec::new()), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod test_root_relative_paths {
+    use super::*;
+
+    #[test]
+    fn relative_path_within_strips_the_root() {
+        let path = Path::new("/media/root/shows/file.mp4");
+        assert_eq!(
+            relative_path_within(path, Path::new("/media/root")),
+            Some(PathBuf::from("shows/file.mp4"))
+        );
+    }
+
+    #[test]
+    fn relative_path_within_gives_none_outside_the_root() {
+        assert_eq!(
+            relative_path_within(Path::new("/other/file.mp4"), Path::new("/media/root")),
+            None
+        );
+    }
+
+    #[test]
+    fn relative_path_within_follows_a_symlinked_root() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        let real_root = temp.path().join("real");
+        std::fs::create_dir_all(real_root.join("nested")).expect("should create directories");
+        let canonical_root = real_root.canonicalize().expect("should canonicalize");
+
+        assert_eq!(
+            relative_path_within(&canonical_root.join("nested"), &real_root),
+            Some(PathBuf::from("nested"))
+        );
+        assert_eq!(relative_path_within(&real_root, &real_root), Some(PathBuf::new()));
+    }
+
+    #[test]
+    fn nearest_containing_root_prefers_the_deepest_root() {
+        let roots = [PathBuf::from("/media"), PathBuf::from("/media/shows")];
+        assert_eq!(
+            nearest_containing_root(Path::new("/media/shows/a/file.mp4"), &roots),
+            Some(Path::new("/media/shows"))
+        );
+        assert_eq!(
+            nearest_containing_root(Path::new("/media/movies/file.mp4"), &roots),
+            Some(Path::new("/media"))
+        );
+        assert_eq!(nearest_containing_root(Path::new("/other/file.mp4"), &roots), None);
     }
 }

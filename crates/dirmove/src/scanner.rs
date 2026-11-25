@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use walkdir::WalkDir;
 
+use cli_tools_common::unique_in_order;
+
 use crate::candidates::FileInfo;
 use crate::name_filter::{self, NameFilter};
 use crate::roots::Roots;
@@ -296,12 +298,7 @@ where
     P: IntoIterator,
     P::Item: AsRef<str>,
 {
-    let mut seen = HashSet::new();
-    patterns
-        .into_iter()
-        .map(|pattern| pattern.as_ref().to_lowercase())
-        .filter(|pattern| seen.insert(pattern.clone()))
-        .collect()
+    unique_in_order(patterns.into_iter().map(|pattern| pattern.as_ref().to_lowercase()))
 }
 
 /// Return whether a file can still be offered by another matching group.

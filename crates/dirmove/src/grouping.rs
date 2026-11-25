@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use rayon::prelude::*;
 
+use cli_tools_common::unique_in_order;
+
 use crate::candidates::{self, FileInfo};
 use crate::name_filter::NameFilter;
 use crate::prefix_index::PrefixIndex;
@@ -133,18 +135,12 @@ impl GroupingOptions {
         O: IntoIterator,
         O::Item: Into<String>,
     {
-        let mut seen = HashSet::new();
-        let ignored_group_parts = ignored_group_parts
-            .into_iter()
-            .map(|part| part.as_ref().trim().to_lowercase())
-            .filter(|part| seen.insert(part.clone()))
-            .collect();
-        let mut seen = HashSet::new();
-        let prefix_overrides = prefix_overrides
-            .into_iter()
-            .map(Into::into)
-            .filter(|prefix: &String| seen.insert(prefix.clone()))
-            .collect();
+        let ignored_group_parts = unique_in_order(
+            ignored_group_parts
+                .into_iter()
+                .map(|part| part.as_ref().trim().to_lowercase()),
+        );
+        let prefix_overrides = unique_in_order(prefix_overrides.into_iter().map(Into::into));
         Self {
             min_group_size,
             min_prefix_chars,

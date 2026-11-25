@@ -23,9 +23,10 @@ pub use file_handling::{
 };
 pub use utils::{
     command_exists, count_files, find_command, get_relative_path_from_current_working_directory,
-    get_relative_path_or_filename, glob_to_regex, leading_whitespace, lowercase_extension, os_str_to_string,
-    path_to_file_extension_string, path_to_file_stem_string, path_to_filename_string, path_to_string,
-    path_to_string_relative, path_to_string_relative_to, starts_with_ignore_case, strings_from,
+    get_relative_path_or_filename, glob_to_regex, leading_whitespace, lowercase_extension, nearest_containing_root,
+    os_str_to_string, path_to_file_extension_string, path_to_file_stem_string, path_to_filename_string, path_to_string,
+    path_to_string_relative, path_to_string_relative_to, relative_path_within, starts_with_ignore_case, strings_from,
+    unique_in_order,
 };
 
 use std::env;
