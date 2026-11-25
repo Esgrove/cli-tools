@@ -10,6 +10,7 @@ use colored::Colorize;
 use walkdir::WalkDir;
 
 use cli_tools_common::date::Date;
+use cli_tools_common::{OverwritePolicy, RenameOutcome};
 
 pub use crate::config::Config;
 
@@ -29,7 +30,7 @@ struct RenameItem {
 
 /// Flip date to start with year for all matching files from the given path.
 pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
-    let (files, root) = files_to_rename(path, &config.file_extensions, config.recurse)?;
+    let (files, _root) = files_to_rename(path, &config.file_extensions, config.recurse)?;
     if files.is_empty() {
         if config.verbose {
             println!("No files to process");
@@ -66,18 +67,24 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
         "Rename:".magenta().bold()
     };
 
+    let policy = if config.overwrite {
+        OverwritePolicy::Overwrite
+    } else {
+        OverwritePolicy::Skip
+    };
     for item in files_to_rename {
-        let new_path = root.join(&item.new_name);
+        // Recursive runs find files in subdirectories, so the new name stays in the file's own directory.
+        let new_path = item.path.with_file_name(&item.new_name);
         if new_path == item.path {
             continue;
         }
         println!("{heading}");
         cli_tools_common::show_diff(&item.filename, &item.new_name);
         if !config.dryrun {
-            if new_path.exists() && !config.overwrite {
+            let outcome = cli_tools_common::safe_rename(&item.path, &new_path, policy)
+                .with_context(|| format!("Failed to rename {}", item.path.display()))?;
+            if outcome == RenameOutcome::SkippedExisting {
                 eprintln!("{}", "File already exists".yellow());
-            } else {
-                fs::rename(item.path, new_path).context("Failed to rename file")?;
             }
         }
     }
@@ -430,5 +437,90 @@ mod test_rename_discovery {
         assert!(FILE_EXTENSIONS.contains(&"txt"));
         assert!(FILE_EXTENSIONS.contains(&"mkv"));
         assert_eq!(FILE_EXTENSIONS.len(), 20);
+    }
+}
+
+#[cfg(test)]
+mod test_date_flip_files {
+    use super::*;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn config(overwrite: bool) -> Config {
+        Config {
+            directory_mode: false,
+            dryrun: false,
+            file_extensions: vec!["txt".to_string()],
+            overwrite,
+            recurse: true,
+            swap_year: false,
+            verbose: false,
+            year_first: false,
+        }
+    }
+
+    /// Names of the regular files directly inside a directory.
+    fn file_names(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .expect("directory should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn recursive_rename_keeps_files_in_their_own_directory() {
+        let root = TempDir::new().expect("temp dir");
+        let sub = root.path().join("sub");
+        fs::create_dir(&sub).expect("create sub");
+        fs::write(sub.join("Report 31.12.2020.txt"), "report").expect("write");
+
+        date_flip_files(&root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+
+        assert!(file_names(root.path()).is_empty(), "{:?}", file_names(root.path()));
+        let renamed = file_names(&sub);
+        assert_eq!(renamed.len(), 1);
+        assert_ne!(renamed[0], "Report 31.12.2020.txt");
+    }
+
+    #[test]
+    fn same_names_in_different_directories_both_survive_with_overwrite() {
+        let root = TempDir::new().expect("temp dir");
+        for (directory, content) in [("a", "A"), ("b", "B")] {
+            let path = root.path().join(directory);
+            fs::create_dir(&path).expect("create directory");
+            fs::write(path.join("x 31.12.2020.txt"), content).expect("write");
+        }
+
+        date_flip_files(&root.path().to_path_buf(), &config(true)).expect("flip should succeed");
+
+        for (directory, content) in [("a", "A"), ("b", "B")] {
+            let names = file_names(&root.path().join(directory));
+            assert_eq!(names.len(), 1, "{directory}: {names:?}");
+            let path = root.path().join(directory).join(&names[0]);
+            assert_eq!(fs::read_to_string(path).expect("read"), content);
+        }
+    }
+
+    #[test]
+    fn an_existing_target_is_kept_without_overwrite() {
+        let root = TempDir::new().expect("temp dir");
+        fs::write(root.path().join("x 31.12.2020.txt"), "source").expect("write");
+        let target_name = Date::reorder_filename_date("x 31.12.2020.txt", false, false, false).expect("has a date");
+        fs::write(root.path().join(&target_name), "existing").expect("write");
+
+        date_flip_files(&root.path().to_path_buf(), &config(false)).expect("flip should succeed");
+
+        assert_eq!(
+            fs::read_to_string(root.path().join(&target_name)).expect("read"),
+            "existing"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("x 31.12.2020.txt")).expect("read"),
+            "source"
+        );
     }
 }
