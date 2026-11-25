@@ -330,10 +330,7 @@ pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, St
     // from unicode_normalization crate to retain the correct format and not cause issues later on.
     // https://github.com/unicode-rs/unicode-normalization
 
-    Ok((
-        file_stem.nfc().collect::<String>(),
-        file_extension.nfc().collect::<String>(),
-    ))
+    Ok((into_nfc(file_stem), into_nfc(file_extension)))
 }
 
 /// Get the normalized directory name from a Path with special characters retained.
@@ -343,7 +340,17 @@ pub fn get_normalized_file_name_and_extension(path: &Path) -> Result<(String, St
 pub fn get_normalized_dir_name(path: &Path) -> Result<String> {
     let dir_name = os_str_to_string(path.file_name().context("Failed to get directory name")?);
 
-    Ok(dir_name.nfc().collect::<String>())
+    Ok(into_nfc(dir_name))
+}
+
+/// The text in Unicode NFC, returned as is when it already is, which every ASCII name is.
+fn into_nfc(text: String) -> String {
+    if text.is_ascii() || unicode_normalization::is_nfc_quick(text.chars()) == unicode_normalization::IsNormalized::Yes
+    {
+        text
+    } else {
+        text.nfc().collect()
+    }
 }
 
 /// Check if entry is a hidden file or directory (starts with '.')
