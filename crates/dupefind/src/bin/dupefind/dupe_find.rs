@@ -255,7 +255,9 @@ impl DupeFind {
             }
 
             for (index, file) in sorted_files.iter().enumerate() {
-                if index == best_index {
+                // A copy moved by an earlier run is found again when the duplicates directory is inside a root.
+                // It is already where it belongs, and moving it again would only give it a new numbered name.
+                if index == best_index || file.path.parent() == Some(target_dir.as_path()) {
                     continue;
                 }
                 let target_path =
@@ -709,5 +711,329 @@ mod test_run {
         dryrun_finder(directory.path().to_path_buf())
             .run()
             .expect("an empty directory should succeed");
+    }
+}
+
+#[cfg(test)]
+mod test_gather_nested_trees {
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    /// Finder over the given roots in dryrun mode.
+    fn finder(roots: Vec<PathBuf>, recurse: bool) -> DupeFind {
+        DupeFind {
+            roots,
+            config: Config {
+                debug: false,
+                dryrun: true,
+                extensions: vec!["mp4".to_string(), "mkv".to_string()],
+                hash_compare: false,
+                ignore_matches: vec![],
+                move_files: false,
+                patterns: vec![],
+                prefix_ignores: vec![],
+                recurse,
+                verbose: false,
+            },
+        }
+    }
+
+    /// Gathered paths relative to the tree root, sorted, with "/" separators.
+    fn gathered(tree: &TempTree, roots: Vec<PathBuf>, recurse: bool) -> Vec<String> {
+        let mut paths: Vec<String> = finder(roots, recurse)
+            .gather_files()
+            .iter()
+            .map(|file| {
+                file.path
+                    .strip_prefix(tree.path())
+                    .expect("gathered file should be inside the tree")
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn videos_at_every_depth_are_gathered_only_when_recursing() {
+        let tree = TempTree::with_entries(&[
+            "top.mp4",
+            "a/one.mkv",
+            "a/b/two.mp4",
+            "a/b/c/three.mp4",
+            "a/b/c/d/four.mp4",
+            "a/b/c/readme.txt",
+            "empty/nested/",
+        ]);
+        let root = vec![tree.path().to_path_buf()];
+
+        assert_eq!(gathered(&tree, root.clone(), false), vec!["top.mp4"]);
+        assert_eq!(
+            gathered(&tree, root, true),
+            vec![
+                "a/b/c/d/four.mp4",
+                "a/b/c/three.mp4",
+                "a/b/two.mp4",
+                "a/one.mkv",
+                "top.mp4"
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_and_system_entries_are_skipped_at_any_depth() {
+        let tree = TempTree::with_entries(&[
+            "movie.mp4",
+            ".hidden.mp4",
+            ".cache/inside.mp4",
+            "a/b/.partial.mp4",
+            "a/b/.thumbs/preview.mp4",
+            "a/b/kept.mp4",
+            "a/$RECYCLE.BIN/deleted.mp4",
+            "a/b/c/_Serato_/track.mp4",
+        ]);
+
+        assert_eq!(
+            gathered(&tree, vec![tree.path().to_path_buf()], true),
+            vec!["a/b/kept.mp4", "movie.mp4"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_to_files_and_directories_are_not_followed() {
+        let tree = TempTree::with_entries(&["library/a/b/movie.mp4"]);
+        tree.symlink("library", "shortcut");
+        tree.symlink("library", "library/a/b/loop");
+        tree.symlink("library/a/b/movie.mp4", "linked.mp4");
+
+        assert_eq!(
+            gathered(&tree, vec![tree.path().to_path_buf()], true),
+            vec!["library/a/b/movie.mp4"],
+            "a link must not form a duplicate group with its own target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_name_does_not_stop_the_walk() {
+        let tree = TempTree::with_entries(&["a/valid.mp4", "a/b/valid.mp4"]);
+        let created = tree.non_utf8_file("a/b", "broken", "mp4").is_some();
+
+        let paths = gathered(&tree, vec![tree.path().to_path_buf()], true);
+
+        assert!(paths.contains(&"a/b/valid.mp4".to_string()), "{paths:?}");
+        assert!(paths.contains(&"a/valid.mp4".to_string()), "{paths:?}");
+        assert_eq!(paths.len(), if created { 3 } else { 2 }, "{paths:?}");
+    }
+
+    #[test]
+    fn nested_roots_without_recursion_scan_each_root_one_level_deep() {
+        let tree = TempTree::with_entries(&["top.mp4", "a/middle.mp4", "a/b/deep.mp4"]);
+        let roots = vec![tree.path().to_path_buf(), tree.join("a")];
+
+        assert_eq!(gathered(&tree, roots, false), vec!["a/middle.mp4", "top.mp4"]);
+    }
+
+    #[test]
+    fn sibling_roots_are_both_scanned_recursively() {
+        let tree = TempTree::with_entries(&["first/x/one.mp4", "second/y/z/two.mp4", "outside.mp4"]);
+        let roots = vec![tree.join("first"), tree.join("second")];
+
+        assert_eq!(
+            gathered(&tree, roots, true),
+            vec!["first/x/one.mp4", "second/y/z/two.mp4"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_move_duplicates_in_trees {
+    use cli_tools_common::test_support::TempTree;
+    use cli_tools_dupefind::DupeFileInfo;
+
+    use super::*;
+
+    /// Finder rooted at the tree that moves files, recursing into subdirectories.
+    fn moving_finder(tree: &TempTree, dryrun: bool) -> DupeFind {
+        DupeFind {
+            roots: vec![tree.path().to_path_buf()],
+            config: Config {
+                debug: false,
+                dryrun,
+                extensions: vec!["mp4".to_string(), "mkv".to_string()],
+                hash_compare: false,
+                ignore_matches: vec![],
+                move_files: true,
+                patterns: vec![],
+                prefix_ignores: vec![],
+                recurse: true,
+                verbose: false,
+            },
+        }
+    }
+
+    /// Duplicate group of existing files at the given relative paths.
+    fn group(tree: &TempTree, key: &str, relative_paths: &[&str]) -> DuplicateGroup {
+        let files = relative_paths
+            .iter()
+            .map(|relative| {
+                let path = tree.join(relative);
+                let extension = cli_tools_common::path_to_file_extension_string(&path);
+                DupeFileInfo::new(path, extension)
+            })
+            .collect();
+        DuplicateGroup::new(key.to_string(), files)
+    }
+
+    /// Contents of every file in the tree, sorted, so a test can check that nothing was lost.
+    fn contents(tree: &TempTree) -> Vec<String> {
+        let mut contents: Vec<String> = tree.files().iter().map(|relative| tree.read(relative)).collect();
+        contents.sort();
+        contents
+    }
+
+    #[test]
+    fn duplicates_with_the_same_name_from_different_directories_all_survive() {
+        let tree = TempTree::new();
+        tree.file_with("a/Movie.mp4", "first");
+        tree.file_with("a/b/Movie.mp4", "second");
+        tree.file_with("a/b/c/Movie.mp4", "third");
+        tree.file_with("x/Movie.1080p.mp4", "best");
+        let duplicates = group(
+            &tree,
+            "movie",
+            &["a/Movie.mp4", "a/b/Movie.mp4", "a/b/c/Movie.mp4", "x/Movie.1080p.mp4"],
+        );
+        let before = contents(&tree);
+
+        moving_finder(&tree, false).move_duplicates(&[duplicates]);
+
+        assert_eq!(contents(&tree), before, "no file contents may be lost");
+        assert!(tree.exists("x/Movie.1080p.mp4"), "the best file stays in place");
+        let moved = tree
+            .files()
+            .into_iter()
+            .filter(|path| path.starts_with("Duplicates/"))
+            .count();
+        assert_eq!(moved, 3, "{:?}", tree.snapshot());
+        assert!(!tree.exists("a/Movie.mp4"));
+        assert!(!tree.exists("a/b/Movie.mp4"));
+        assert!(!tree.exists("a/b/c/Movie.mp4"));
+    }
+
+    #[test]
+    fn a_file_already_in_the_target_directory_is_not_overwritten() {
+        let tree = TempTree::new();
+        tree.file_with("a/Movie.mp4", "moving");
+        tree.file_with("b/Movie.1080p.mp4", "best");
+        let duplicates = group(&tree, "movie", &["a/Movie.mp4", "b/Movie.1080p.mp4"]);
+        let target_directory = format!("Duplicates/{}", duplicates.display_name());
+        tree.file_with(&format!("{target_directory}/Movie.mp4"), "already there");
+        let before = contents(&tree);
+
+        moving_finder(&tree, false).move_duplicates(&[duplicates]);
+
+        assert_eq!(contents(&tree), before, "no file contents may be lost");
+        assert!(!tree.exists("a/Movie.mp4"));
+        assert_eq!(tree.read(&format!("{target_directory}/Movie.mp4")), "already there");
+    }
+
+    #[test]
+    fn copies_already_in_the_duplicates_directory_are_not_renamed() {
+        let tree = TempTree::new();
+        tree.file_with("a/Movie.1080p.mp4", "best");
+        tree.file_with("b/Movie.mp4", "new copy");
+        let target_directory = format!(
+            "Duplicates/{}",
+            group(&tree, "movie", &["a/Movie.1080p.mp4"]).display_name()
+        );
+        let moved_earlier = format!("{target_directory}/Movie.mp4");
+        tree.file_with(&moved_earlier, "moved earlier");
+        let duplicates = group(&tree, "movie", &["a/Movie.1080p.mp4", "b/Movie.mp4", &moved_earlier]);
+        let before = contents(&tree);
+
+        moving_finder(&tree, false).move_duplicates(&[duplicates]);
+
+        assert_eq!(contents(&tree), before, "no file contents may be lost");
+        assert_eq!(tree.read(&moved_earlier), "moved earlier", "{:?}", tree.snapshot());
+        assert!(tree.exists("a/Movie.1080p.mp4"));
+        assert!(!tree.exists("b/Movie.mp4"));
+    }
+
+    #[test]
+    fn a_dryrun_leaves_a_nested_tree_unchanged() {
+        let tree = TempTree::new();
+        tree.file_with("a/Movie.mp4", "first");
+        tree.file_with("a/b/c/Movie.720p.mp4", "second");
+        tree.file_with("d/Movie.1080p.mp4", "best");
+        let duplicates = group(
+            &tree,
+            "movie",
+            &["a/Movie.mp4", "a/b/c/Movie.720p.mp4", "d/Movie.1080p.mp4"],
+        );
+        let before = tree.snapshot();
+
+        moving_finder(&tree, true).move_duplicates(&[duplicates]);
+
+        assert_eq!(tree.snapshot(), before);
+    }
+
+    #[test]
+    fn a_full_run_on_a_nested_tree_moves_every_copy_but_one() {
+        let tree = TempTree::new();
+        tree.file_with("shows/season1/Some.Show.mp4", "one");
+        tree.file_with("shows/season1/extra/Some.Show.mp4", "two");
+        tree.file_with("archive/2020/old/Some.Show.mp4", "three");
+        tree.file_with("shows/Other.Thing.mp4", "unique");
+        let before = contents(&tree);
+
+        moving_finder(&tree, false).run().expect("the run should succeed");
+
+        assert_eq!(contents(&tree), before, "no file contents may be lost");
+        let outside_duplicates = tree
+            .files()
+            .into_iter()
+            .filter(|path| !path.starts_with("Duplicates/"))
+            .count();
+        assert_eq!(outside_duplicates, 2, "{:?}", tree.snapshot());
+        assert!(tree.exists("shows/Other.Thing.mp4"));
+    }
+
+    #[test]
+    fn a_second_run_keeps_every_file() {
+        let tree = TempTree::new();
+        tree.file_with("a/Some.Show.mp4", "one");
+        tree.file_with("a/b/Some.Show.mp4", "two");
+        tree.file_with("a/b/c/Some.Show.mp4", "three");
+        let before = contents(&tree);
+
+        moving_finder(&tree, false).run().expect("the first run should succeed");
+        let kept_after_first_run: Vec<String> = tree
+            .files()
+            .into_iter()
+            .filter(|path| !path.starts_with("Duplicates/"))
+            .collect();
+        moving_finder(&tree, false)
+            .run()
+            .expect("the second run should succeed");
+
+        assert_eq!(contents(&tree), before, "no file contents may be lost");
+        let kept_after_second_run: Vec<String> = tree
+            .files()
+            .into_iter()
+            .filter(|path| !path.starts_with("Duplicates/"))
+            .collect();
+        assert_eq!(kept_after_first_run.len(), 1, "{:?}", tree.snapshot());
+        assert_eq!(
+            kept_after_second_run,
+            kept_after_first_run,
+            "the kept copy must stay in place: {:?}",
+            tree.snapshot()
+        );
     }
 }
