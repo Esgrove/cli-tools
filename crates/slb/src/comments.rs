@@ -236,6 +236,18 @@ pub fn fix_trailing_comments_scanned(
         if is_directive(&trailing.text, options) {
             continue;
         }
+        // A line that continues the one above with a backslash has no room for a comment line in between.
+        // Moving the comment there would end the continuation and change what the code does.
+        if continues_previous_line(lines, index) {
+            violations.push(Violation {
+                line: index + 1,
+                column: Some(trailing.column),
+                kind: ViolationKind::TrailingComment,
+                message: "comment shares a line with code inside a line continuation".into(),
+                fixable: false,
+            });
+            continue;
+        }
         // A comment moved above a line that already has a comment above it joins that comment block,
         // and the reflow then merges two separate notes into one sentence.
         // The move is reported so the line can be fixed by hand, but it is not made automatically.
@@ -263,6 +275,14 @@ pub fn fix_trailing_comments_scanned(
         }
     }
     (replacements, violations)
+}
+
+/// Whether the line at `index` continues the line above it, which ends in a backslash.
+fn continues_previous_line(lines: &[&str], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .and_then(|previous| lines.get(previous))
+        .is_some_and(|line| line.trim_end().ends_with('\\'))
 }
 
 /// The line comment marker the trimmed line starts with, when followed by whitespace or the end of the line.

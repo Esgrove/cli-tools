@@ -339,3 +339,36 @@ fn fixing_an_overlong_docstring_is_idempotent() {
         );
     }
 }
+
+/// Format the text with every rule, including moving trailing comments, and check that it stays unchanged.
+fn assert_trailing_comment_kept(text: &str, kind: FileKind) {
+    let options = FormatOptions {
+        rules: RuleSet::ALL,
+        ..FormatOptions::default()
+    };
+
+    let result = format(text, kind, &options);
+
+    assert_eq!(result.fixed_text, None, "a line continuation was changed in\n{text}");
+}
+
+#[test]
+fn trailing_comment_inside_a_shell_line_continuation_is_kept() {
+    assert_trailing_comment_kept(
+        "#!/bin/bash\ndocker run \\\n    --rm \\\n    --name foo # run the container\n",
+        FileKind::Shell,
+    );
+}
+
+#[test]
+fn trailing_comment_inside_a_python_line_continuation_is_kept() {
+    assert_trailing_comment_kept("total = a + \\\n    b  # sum\n", FileKind::Python);
+}
+
+#[test]
+fn trailing_comment_inside_a_c_macro_is_kept() {
+    assert_trailing_comment_kept(
+        "#define FOO(a) \\\n    do_x(a); \\\n    do_y(a) // trailing in macro\n",
+        FileKind::CLike,
+    );
+}
