@@ -326,7 +326,10 @@ impl Date {
 
     fn get_directory_separator(input: &str) -> String {
         let separators = "_-.";
-        if input.starts_with(|c: char| separators.contains(c)) {
+        // A name that is only a date keeps nothing after the date, not even a separator.
+        if input.trim().is_empty() {
+            String::new()
+        } else if input.starts_with(|c: char| separators.contains(c)) {
             input.trim().to_string()
         } else if let Some((separator, rest)) = input
             .chars()
@@ -1526,6 +1529,22 @@ mod mm_dd_yyyy_tests {
 #[cfg(test)]
 mod directory_tests {
     use super::*;
+
+    #[test]
+    fn a_name_that_is_only_a_date_has_no_trailing_separator() {
+        assert_eq!(
+            Date::reorder_directory_date("01.01.2020"),
+            Some("2020-01-01".to_string())
+        );
+        assert_eq!(
+            Date::reorder_directory_date("2020.01.01"),
+            Some("2020-01-01".to_string())
+        );
+        assert_eq!(
+            Date::reorder_directory_date(" 01.01.2020 "),
+            Some("2020-01-01".to_string())
+        );
+    }
 
     #[test]
     fn dd_mm_yyyy_format() {
