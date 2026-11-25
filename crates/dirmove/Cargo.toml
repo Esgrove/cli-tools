@@ -26,7 +26,6 @@ cli-tools-media = { workspace = true }
 colored = { workspace = true }
 dirs = { workspace = true }
 indicatif = { workspace = true }
-itertools = { workspace = true }
 rayon = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

@@ -1,6 +1,6 @@
 //! Printing what the `dirmove` passes find and do.
 //!
-//! `ConsoleReporter` prints file moves and directory merges with a byte progress bar,
+//! `ConsoleReporter` prints unpacking, file moves, and directory merges with a byte progress bar,
 //! and `GroupingProgressBar` shows the progress of grouping files by prefix.
 //! The functions format unpack summaries, whole directory merge offer titles,
 //! and the debug listings of match groups and grouping names.
@@ -18,10 +18,10 @@ use cli_tools_common::{
 };
 use cli_tools_dirmove::{
     DirectoryInfo, FileInfo, FileMatch, GroupingProgress, GroupingStage, MergeEvent, MergeObserver, MoveEvent,
-    MoveInfo, MoveObserver, Roots, UnpackInfo,
+    MoveObserver, PlannedMove, Roots, UnpackEvent, UnpackObserver, UnpackPlan,
 };
 
-/// Prints file moves and directory merges with a byte progress bar.
+/// Prints unpacking, file moves, and directory merges with a byte progress bar.
 pub struct ConsoleReporter<'a> {
     /// Roots used to display merge paths compactly.
     roots: &'a Roots,
@@ -187,6 +187,44 @@ impl MergeObserver for ConsoleReporter<'_> {
     }
 }
 
+impl UnpackObserver for ConsoleReporter<'_> {
+    fn on_unpack_event(&mut self, event: UnpackEvent<'_>) {
+        match event {
+            UnpackEvent::UnwantedDeleted(directory) => {
+                let label = if self.dryrun {
+                    "Would delete unwanted:"
+                } else {
+                    "Deleted unwanted:"
+                };
+                println!("{} {}", label.yellow(), path_to_string_relative(directory));
+            }
+            UnpackEvent::UnwantedDeleteFailed { directory, error } => {
+                print_error!("Failed to delete {}: {error}", path_to_string_relative(directory));
+            }
+            UnpackEvent::Planned { parent, plan } => print_unpack_summary(parent, plan, self.verbose),
+            UnpackEvent::SkippedExistingDirectory(target) => {
+                print_yellow!("Skipping existing directory: {}", target.display());
+            }
+            UnpackEvent::SkippedExistingFile(target) => {
+                print_yellow!("Skipping existing file: {}", target.display());
+            }
+            UnpackEvent::DuplicateTarget(source) => {
+                print_yellow!(
+                    "Skipping {}, another entry moves to the same name",
+                    path_to_string_relative(source)
+                );
+            }
+            UnpackEvent::MoveFailed { source, error } => {
+                print_error!("Failed to move {}: {error:#}", path_to_string_relative(source));
+            }
+            UnpackEvent::Pruned(directory) if self.verbose => {
+                println!("  {} Removed empty dir: {}", "→".green(), directory.display());
+            }
+            UnpackEvent::Pruned(_) => {}
+        }
+    }
+}
+
 impl GroupingProgress for GroupingProgressBar {
     fn start_stage(&self, stage: GroupingStage, length: u64) {
         self.progress_bar.reset();
@@ -207,7 +245,7 @@ impl GroupingProgress for GroupingProgressBar {
 }
 
 /// Print summary of what will be unpacked.
-pub fn print_unpack_summary(target_dir: &Path, info: &UnpackInfo, verbose: bool) {
+fn print_unpack_summary(target_dir: &Path, info: &UnpackPlan, verbose: bool) {
     let dir_display = path_to_string_relative(target_dir);
     let file_count = info.file_moves.len();
     let dir_count = info.directory_moves.len();
@@ -228,13 +266,13 @@ pub fn print_unpack_summary(target_dir: &Path, info: &UnpackInfo, verbose: bool)
 
     print_magenta!("{}", header.bold());
 
-    for MoveInfo { source, target } in &info.directory_moves {
+    for PlannedMove { source, target } in &info.directory_moves {
         let src_display = get_relative_path_or_filename(source, target_dir);
         let dst_display = get_relative_path_or_filename(target, target_dir);
         println!("  {src_display} -> {dst_display}");
     }
     if verbose {
-        for MoveInfo { source, target } in &info.file_moves {
+        for PlannedMove { source, target } in &info.file_moves {
             let src_display = get_relative_path_or_filename(source, target_dir);
             let dst_display = get_relative_path_or_filename(target, target_dir);
             println!("  {src_display} -> {dst_display}");

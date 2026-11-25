@@ -4,7 +4,7 @@
 //! and `Fixture` builds the scanner, grouper, matcher, and name filter
 //! from it the same way a caller composes the library components.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::grouping::{GroupingOptions, PrefixGrouper};
 use crate::matcher::{CustomMapping, DirectoryMatcher};
@@ -12,6 +12,7 @@ use crate::name_filter::NameFilter;
 use crate::roots::Roots;
 use crate::scanner::{ScanOptions, Scanner};
 use crate::types::{DirectoryInfo, FileInfo};
+use crate::unpack::Unpacker;
 
 /// Every option a library test can set, converted into the component options by `Fixture`.
 #[derive(Debug, Clone, Default)]
@@ -231,4 +232,28 @@ pub fn make_test_dirs(names: &[&str]) -> Vec<DirectoryInfo> {
 /// Create file paths from names.
 pub fn make_file_paths(names: &[&str]) -> Vec<PathBuf> {
     names.iter().map(PathBuf::from).collect()
+}
+
+/// Unpack the given directory names under `root` without reporting anything.
+pub fn unpack(root: &Path, names: &[&str], recurse: bool, dry_run: bool, overwrite: bool) {
+    Unpacker::new(names, overwrite, dry_run).unpack(&[root.to_path_buf()], recurse, &mut ());
+}
+
+/// Write a file, creating its parent directories.
+pub fn write_file(path: &Path, contents: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
+/// Assert that a path exists.
+pub fn assert_exists(path: &Path) {
+    assert!(path.exists(), "Expected path to exist: {}", path.display());
+}
+
+/// Assert that a path does not exist.
+pub fn assert_not_exists(path: &Path) {
+    assert!(!path.exists(), "Expected path to NOT exist: {}", path.display());
 }

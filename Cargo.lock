@@ -466,7 +466,6 @@ dependencies = [
  "criterion",
  "dirs",
  "indicatif",
- "itertools 0.15.0",
  "rayon",
  "rusqlite",
  "serde",

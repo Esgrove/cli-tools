@@ -314,6 +314,28 @@ mod test_collect_directories {
     use cli_tools_common::path_to_filename_string;
 
     #[test]
+    fn unwanted_directories_are_skipped() -> anyhow::Result<()> {
+        let tmp = tempfile::TempDir::new()?;
+        let root = tmp.path().join("Example");
+        std::fs::create_dir_all(&root)?;
+        let unwanted = root.join(".unwanted");
+        std::fs::create_dir(&unwanted)?;
+        let serato = root.join("_Serato_");
+        std::fs::create_dir(&serato)?;
+        let normal = root.join("normal");
+        std::fs::create_dir(&normal)?;
+
+        let directories = Fixture::new(root, TestConfig::default())
+            .scanner()
+            .collect_directories()?
+            .directories;
+
+        assert_eq!(directories.len(), 1);
+        assert_eq!(directories[0].path, normal);
+        Ok(())
+    }
+
+    #[test]
     fn collect_directories_filters_ignored_group_names_and_keeps_other_names() -> anyhow::Result<()> {
         let tmp = tempfile::TempDir::new()?;
         let root = tmp.path().to_path_buf();

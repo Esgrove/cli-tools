@@ -6,7 +6,6 @@
 use std::fs;
 
 use anyhow::Result;
-use itertools::Itertools;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
@@ -38,7 +37,7 @@ pub struct Config {
     pub overwrite: bool,
     /// Print verbose output.
     pub verbose: bool,
-    /// Lowercase directory names whose contents are moved up into the parent directory.
+    /// Directory names whose contents are moved up into the parent directory, matched case-insensitively.
     pub unpack_directory_names: Vec<String>,
     /// Ignored prefix and ignored group name rules.
     pub name_filter: NameFilter,
@@ -163,8 +162,6 @@ impl DirMoveConfig {
             .unpack_directories
             .into_iter()
             .chain(args.unpack_directory)
-            .map(|name| name.trim().to_lowercase())
-            .unique()
             .collect();
 
         Config {
@@ -947,12 +944,12 @@ mod cli_args_tests {
     }
 
     #[test]
-    fn config_from_args_includes_unpack_dirs_lowercase() {
+    fn config_from_args_includes_unpack_dirs() {
         let args = DirMoveArgs::try_parse_from(["test", "-u", "SUBS", "-u", "Sample"]).expect("should parse");
         let config = config_from_args(args).expect("config should parse");
-        // CLI unpack dirs should be included as lowercase
-        assert!(config.unpack_directory_names.contains(&"subs".to_string()));
-        assert!(config.unpack_directory_names.contains(&"sample".to_string()));
+        // Case is kept here, the unpacker matches names case-insensitively.
+        assert!(config.unpack_directory_names.contains(&"SUBS".to_string()));
+        assert!(config.unpack_directory_names.contains(&"Sample".to_string()));
     }
 
     #[test]

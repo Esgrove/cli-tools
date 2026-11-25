@@ -32,5 +32,5 @@ pub use prefix_index::*;
 pub use roots::Roots;
 pub use scanner::{DirectoryScan, ScanOptions, Scanner};
 pub use types::*;
-pub use unpack::{EntryMove, UnpackCandidates, Unpacker};
+pub use unpack::{EntryMove, PlannedMove, UnpackCandidates, UnpackEvent, UnpackObserver, UnpackPlan, Unpacker};
 pub use utils::*;

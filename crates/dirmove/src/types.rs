@@ -50,7 +50,8 @@ pub struct FileInfo<'a> {
 ///
 /// Stores single, 2-part, and 3-part combinations in both lowercased and original-cased forms.
 /// This eliminates redundant `split('.')`, `to_lowercase()`,
-/// and `format!()` calls in the O(N × K × N) hot loops inside `find_prefix_candidates` and `prefix_matches_normalized`.
+/// and `format!()` calls in the O(N × K × N) hot loops inside `find_prefix_candidates`
+/// and `prefix_matches_normalized`.
 pub struct FilteredParts {
     /// Single parts, lowercased (e.g., `["photo", "lab", "image"]`).
     pub parts_lower: Vec<String>,
@@ -64,15 +65,6 @@ pub struct FilteredParts {
     pub two_parts_original: Vec<String>,
     /// Contiguous 3-part combinations, original casing (e.g., `["PhotoLabImage"]`).
     pub three_parts_original: Vec<String>,
-}
-
-/// Information about a file move operation.
-#[derive(Debug)]
-pub struct MoveInfo {
-    /// Source path of the file or directory.
-    pub source: PathBuf,
-    /// Target path of the file or directory.
-    pub target: PathBuf,
 }
 
 /// A pair of directories to merge: source (with prefix) into target (without prefix).
@@ -97,15 +89,6 @@ pub struct PrefixCandidate<'a> {
     /// Position in the filename where this prefix starts (0 = beginning).
     /// Lower values indicate prefixes closer to the start of the filename.
     pub start_position: usize,
-}
-
-/// Information about what needs to be moved during an unpack operation.
-#[derive(Debug, Default)]
-pub struct UnpackInfo {
-    /// Files to move.
-    pub file_moves: Vec<MoveInfo>,
-    /// Directories to move directly.
-    pub directory_moves: Vec<MoveInfo>,
 }
 
 /// A group of files that share a common prefix.
@@ -191,7 +174,8 @@ impl fmt::Debug for FileInfo<'_> {
 }
 
 impl FilteredParts {
-    /// Create a new `FilteredParts` by splitting the filtered name on `'.'` and pre-computing all single, 2-part,
+    /// Create a new `FilteredParts` by splitting the filtered name on `'.'`
+    /// and pre-computing all single, 2-part,
     /// and 3-part combinations in both lowercased and original-cased forms.
     pub fn new(filtered_name: &str) -> Self {
         let parts_original: Vec<String> = filtered_name.split('.').map(String::from).collect();
@@ -237,7 +221,8 @@ impl FilteredParts {
     /// Check if any pre-computed part combination matches the given normalized target.
     ///
     /// Checks single parts, 2-part, and 3-part lowered combinations against `target_normalized`,
-    /// requiring a valid word boundary (checked on the corresponding original-cased parts) for `starts_with` matches.
+    /// requiring a valid word boundary (checked on the corresponding original-cased parts)
+    /// for `starts_with` matches.
     #[must_use]
     pub fn prefix_matches_normalized(&self, target_normalized: &str) -> bool {
         if target_normalized.is_empty() {
@@ -280,7 +265,8 @@ impl FilteredParts {
     /// Check if there is a valid word boundary at byte position `prefix_len` in the **original-cased** text.
     ///
     /// The position is a byte offset (typically from `str::len()` on a lowercased counterpart).
-    /// If it does not fall on a UTF-8 character boundary in `original_text`, the function conservatively returns `false`.
+    /// If it does not fall on a UTF-8 character boundary in `original_text`,
+    /// the function conservatively returns `false`.
     ///
     /// Handles Unicode letters (including Scandic characters such as Ä, Ö, Ü, Å)
     /// by inspecting the `char` values on either side of the boundary.
@@ -311,7 +297,8 @@ impl FilteredParts {
         } else if !next.is_alphanumeric() {
             true
         } else {
-            // next is a lowercase letter (ASCII or Unicode). Only a boundary if the previous character was a digit.
+            // next is a lowercase letter (ASCII or Unicode).
+            // Only a boundary if the previous character was a digit.
             prev.is_ascii_digit()
         }
     }
@@ -324,14 +311,6 @@ impl DirectoryInfo {
     pub fn new(path: PathBuf) -> Self {
         let name = path_to_filename_string(&path).to_lowercase().replace('.', " ");
         Self { path, name }
-    }
-}
-
-impl MoveInfo {
-    /// Create a new `MoveInfo`.
-    #[must_use]
-    pub const fn new(source: PathBuf, target: PathBuf) -> Self {
-        Self { source, target }
     }
 }
 

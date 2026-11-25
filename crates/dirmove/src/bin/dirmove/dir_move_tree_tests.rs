@@ -1,4 +1,4 @@
-//! Nested tree and filesystem edge case tests for unpacking and merging directories.
+//! Nested tree and filesystem edge case tests for merging directories.
 //!
 //! Every test builds a tree several levels deep with `TempTree`
 //! and asserts the complete resulting tree, so a lost, duplicated, or misplaced entry fails the test.
@@ -6,30 +6,7 @@
 
 use cli_tools_common::test_support::TempTree;
 
-use super::test_helpers::{make_dirmove, test_merge_config, test_unpack_config};
-
-/// Tree with unpack directories at several depths, hidden files inside them, and an unrelated empty directory.
-fn unpack_tree() -> TempTree {
-    let tree = TempTree::new();
-    tree.file_with("Library/Show A/Season 1/episode.mkv", "episode");
-    tree.file_with("Library/Show A/Season 1/subs/english.srt", "english");
-    tree.file_with("Library/Show A/Season 1/subs/.hidden.nfo", "hidden");
-    tree.file_with("Library/Show A/Season 1/subs/languages/.deep hidden.srt", "deep hidden");
-    tree.file_with("Library/Show A/Season 1/subs/languages/finnish.srt", "finnish");
-    tree.file_with("Library/Show B/extras/sample/clip.mkv", "clip");
-    tree.file_with("Library/Show B/extras/sample/sample/inner clip.mkv", "inner clip");
-    tree.dir("Library/Show B/unrelated empty");
-    tree
-}
-
-/// Run the unpack pass on the "Library" directory of the tree.
-fn unpack(tree: &TempTree, recurse: bool, dryrun: bool) {
-    let dirmove = make_dirmove(
-        tree.join("Library"),
-        test_unpack_config(vec!["subs", "sample"], recurse, dryrun, false),
-    );
-    dirmove.unpack_directories();
-}
+use super::test_helpers::{make_dirmove, test_merge_config};
 
 /// Run the prefixed directory merge on the "Root" directory of the tree.
 fn merge(tree: &TempTree, recurse: bool, dryrun: bool, overwrite: bool) {
@@ -38,64 +15,6 @@ fn merge(tree: &TempTree, recurse: bool, dryrun: bool, overwrite: bool) {
         test_merge_config(vec!["studio"], recurse, dryrun, overwrite),
     );
     dirmove.merge_prefixed_directories().expect("merging should succeed");
-}
-
-#[test]
-fn recursive_unpack_moves_every_file_including_hidden_ones() {
-    let tree = unpack_tree();
-
-    unpack(&tree, true, false);
-
-    assert_eq!(
-        tree.snapshot(),
-        vec![
-            "Library/",
-            "Library/Show A/",
-            "Library/Show A/Season 1/",
-            "Library/Show A/Season 1/.hidden.nfo: hidden",
-            "Library/Show A/Season 1/english.srt: english",
-            "Library/Show A/Season 1/episode.mkv: episode",
-            "Library/Show A/Season 1/languages/",
-            "Library/Show A/Season 1/languages/.deep hidden.srt: deep hidden",
-            "Library/Show A/Season 1/languages/finnish.srt: finnish",
-            "Library/Show B/",
-            "Library/Show B/extras/",
-            "Library/Show B/extras/clip.mkv: clip",
-            "Library/Show B/extras/inner clip.mkv: inner clip",
-            "Library/Show B/unrelated empty/",
-        ]
-    );
-}
-
-#[test]
-fn unpack_is_idempotent() {
-    let tree = unpack_tree();
-    unpack(&tree, true, false);
-    let after_first_run = tree.snapshot();
-
-    unpack(&tree, true, false);
-
-    assert_eq!(tree.snapshot(), after_first_run);
-}
-
-#[test]
-fn non_recursive_unpack_leaves_nested_unpack_directories_alone() {
-    let tree = unpack_tree();
-    let before = tree.snapshot();
-
-    unpack(&tree, false, false);
-
-    assert_eq!(tree.snapshot(), before);
-}
-
-#[test]
-fn dryrun_unpack_on_a_deep_tree_changes_nothing() {
-    let tree = unpack_tree();
-    let before = tree.snapshot();
-
-    unpack(&tree, true, true);
-
-    assert_eq!(tree.snapshot(), before);
 }
 
 /// Tree with a prefixed directory holding hidden files and nested directories to merge into its unprefixed match.
@@ -177,60 +96,6 @@ fn merge_conflicts_keep_both_versions() {
 
     assert_eq!(tree.read("Root/alpha beta/existing.mkv"), "existing");
     assert_eq!(tree.read("Root/studio alpha beta/existing.mkv"), "incoming");
-}
-
-#[cfg(unix)]
-#[test]
-fn unpack_does_not_pull_files_out_of_a_linked_unpack_directory() {
-    let tree = TempTree::new();
-    tree.file_with("outside/real/data.txt", "outside data");
-    tree.file_with("Library/Movie/subs/english.srt", "english");
-    tree.symlink("outside/real", "Library/Movie/subs/sample");
-
-    unpack(&tree, true, false);
-
-    assert_eq!(tree.read("outside/real/data.txt"), "outside data");
-    assert!(!tree.exists("Library/Movie/data.txt"));
-    assert_eq!(tree.read("Library/Movie/english.srt"), "english");
-}
-
-#[cfg(unix)]
-#[test]
-fn unpack_moves_a_linked_directory_as_a_link() {
-    let tree = TempTree::new();
-    tree.file_with("outside/real/data.txt", "outside data");
-    tree.file_with("Library/Movie/subs/english.srt", "english");
-    tree.symlink("outside/real", "Library/Movie/subs/linked");
-
-    unpack(&tree, true, false);
-
-    assert_eq!(tree.read("outside/real/data.txt"), "outside data");
-    let link = tree
-        .join("Library/Movie/linked")
-        .symlink_metadata()
-        .expect("the link should be moved next to the unpacked files");
-    assert!(link.file_type().is_symlink());
-    assert!(!tree.exists("Library/Movie/subs"));
-}
-
-#[cfg(unix)]
-#[test]
-fn pruning_keeps_a_directory_that_only_holds_a_symlink() {
-    let tree = TempTree::new();
-    tree.file("outside/target.txt");
-    tree.file_with("Library/Movie/subs/english.srt", "english");
-    tree.symlink("outside/target.txt", "Library/Movie/subs/keeper/link.txt");
-
-    unpack(&tree, true, false);
-
-    assert!(tree.exists("outside/target.txt"));
-    assert!(
-        tree.join("Library/Movie/keeper/link.txt")
-            .symlink_metadata()
-            .expect("the link should survive")
-            .file_type()
-            .is_symlink()
-    );
 }
 
 #[cfg(unix)]
