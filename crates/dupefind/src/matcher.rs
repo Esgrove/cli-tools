@@ -12,6 +12,19 @@ use regex::Regex;
 
 use super::{DupeFileInfo, DuplicateGroup, MatchRange, normalize_stem, strip_ignored_prefixes};
 
+/// Duplicate groups under construction, with every file in exactly one group.
+///
+/// Groups are numbered, so moving a file between groups updates one number
+/// instead of cloning the group key for every moved file.
+struct GroupSet {
+    /// Group number of each file.
+    file_group: Vec<usize>,
+    /// Key of each group number.
+    keys: Vec<String>,
+    /// File indices of each group number, empty once the group was merged into another.
+    members: Vec<Vec<usize>>,
+}
+
 /// Options controlling duplicate matching.
 #[derive(Debug, Default)]
 pub struct DuplicateMatchOptions<'a> {
@@ -38,20 +51,14 @@ pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'
         })
         .collect();
 
-    let mut file_to_group: HashMap<usize, String> = HashMap::new();
-    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for (index, key) in normalized_keys.into_iter().enumerate() {
-        file_to_group.insert(index, key.clone());
-        groups.entry(key).or_default().push(index);
-    }
+    let mut groups = GroupSet::new(normalized_keys);
 
     let mut filename_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, file) in files.iter().enumerate() {
         let filename = strip_ignored_prefixes(&file.filename, options.prefix_ignores).to_lowercase();
         filename_to_indices.entry(filename).or_default().push(index);
     }
-    merge_matching_indices(filename_to_indices.values(), &mut file_to_group, &mut groups);
+    groups.merge_all(filename_to_indices.values());
 
     let mut pattern_matches: HashMap<usize, MatchRange> = HashMap::new();
     let mut pattern_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
@@ -73,16 +80,15 @@ pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'
             }
         }
     }
-    merge_matching_indices(pattern_to_indices.values(), &mut file_to_group, &mut groups);
+    groups.merge_all(pattern_to_indices.values());
 
     for indices in options.additional_match_groups {
         let valid_indices: Vec<usize> = indices.iter().copied().filter(|index| *index < files.len()).collect();
-        merge_indices_into_groups(&valid_indices, &mut file_to_group, &mut groups);
+        groups.merge(&valid_indices);
     }
 
     groups
-        .into_iter()
-        .filter(|(_, indices)| indices.len() > 1)
+        .into_duplicates()
         .map(|(key, indices)| {
             let group_files = indices
                 .into_iter()
@@ -96,6 +102,90 @@ pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'
         })
         .sorted_by(|left, right| left.key.cmp(&right.key))
         .collect()
+}
+
+#[allow(
+    clippy::indexing_slicing,
+    reason = "group numbers index `keys` and `members`, which always have an entry for every number handed out"
+)]
+impl GroupSet {
+    /// Put every file into the group of its key.
+    fn new(file_keys: Vec<String>) -> Self {
+        let mut numbers: HashMap<String, usize> = HashMap::new();
+        let mut keys = Vec::new();
+        let mut members: Vec<Vec<usize>> = Vec::new();
+        let mut file_group = Vec::with_capacity(file_keys.len());
+        for (index, key) in file_keys.into_iter().enumerate() {
+            let number = *numbers.entry(key).or_insert_with_key(|key| {
+                keys.push(key.clone());
+                members.push(Vec::new());
+                keys.len() - 1
+            });
+            members[number].push(index);
+            file_group.push(number);
+        }
+        Self {
+            file_group,
+            keys,
+            members,
+        }
+    }
+
+    /// Merge every index collection containing at least two files.
+    fn merge_all<'a>(&mut self, index_groups: impl Iterator<Item = &'a Vec<usize>>) {
+        for indices in index_groups {
+            if indices.len() > 1 {
+                self.merge(indices);
+            }
+        }
+    }
+
+    /// Merge the groups of all the files into one group that keeps the key of the first file's group.
+    ///
+    /// The smaller group always moves into the larger one, so a file moves at most a logarithmic number of times.
+    /// Indices past the file count are ignored, and nothing is merged when the first index is past it.
+    fn merge(&mut self, indices: &[usize]) {
+        let file_count = self.file_group.len();
+        let Some((&first, rest)) = indices.split_first() else {
+            return;
+        };
+        let Some(&first_group) = self.file_group.get(first) else {
+            return;
+        };
+        let mut canonical = first_group;
+        for &index in rest.iter().filter(|index| **index < file_count) {
+            let group = self.file_group[index];
+            if group == canonical {
+                continue;
+            }
+            let (survivor, absorbed) = if self.members[group].len() > self.members[canonical].len() {
+                (group, canonical)
+            } else {
+                (canonical, group)
+            };
+            let moved = std::mem::take(&mut self.members[absorbed]);
+            for &index in &moved {
+                self.file_group[index] = survivor;
+            }
+            self.members[survivor].extend(moved);
+            if survivor != canonical {
+                self.keys[survivor] = std::mem::take(&mut self.keys[canonical]);
+                canonical = survivor;
+            }
+        }
+    }
+
+    /// The groups holding more than one file, with their file indices in ascending order.
+    fn into_duplicates(self) -> impl Iterator<Item = (String, Vec<usize>)> {
+        self.keys
+            .into_iter()
+            .zip(self.members)
+            .filter(|(_, members)| members.len() > 1)
+            .map(|(key, mut members)| {
+                members.sort_unstable();
+                (key, members)
+            })
+    }
 }
 
 /// Return whether a duplicate group matches one of the configured ignore values.
@@ -147,19 +237,6 @@ pub fn merge_indices_into_groups<S: BuildHasher>(
                 file_to_group.insert(*moved_index, canonical_group.clone());
             }
             groups.entry(canonical_group.clone()).or_default().extend(to_move);
-        }
-    }
-}
-
-/// Merge every index collection containing at least two files.
-fn merge_matching_indices<'a>(
-    index_groups: impl Iterator<Item = &'a Vec<usize>>,
-    file_to_group: &mut HashMap<usize, String>,
-    groups: &mut HashMap<String, Vec<usize>>,
-) {
-    for indices in index_groups {
-        if indices.len() > 1 {
-            merge_indices_into_groups(indices, file_to_group, groups);
         }
     }
 }
@@ -1048,5 +1125,76 @@ mod test_filter_ignored_groups_regressions {
         )];
         let filtered = finder.filter_ignored_groups(groups);
         assert_eq!(filtered.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod test_group_set {
+    use super::*;
+
+    /// Groups from the key map bookkeeping that `merge_indices_into_groups` implements, sorted for comparison.
+    fn merged_with_key_maps(keys: &[String], merges: &[Vec<usize>]) -> Vec<(String, Vec<usize>)> {
+        let mut file_to_group: HashMap<usize, String> = HashMap::new();
+        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+        for (index, key) in keys.iter().enumerate() {
+            file_to_group.insert(index, key.clone());
+            groups.entry(key.clone()).or_default().push(index);
+        }
+        for indices in merges {
+            merge_indices_into_groups(indices, &mut file_to_group, &mut groups);
+        }
+        let mut result: Vec<(String, Vec<usize>)> = groups
+            .into_iter()
+            .filter(|(_, members)| members.len() > 1)
+            .map(|(key, mut members)| {
+                members.sort_unstable();
+                (key, members)
+            })
+            .collect();
+        result.sort();
+        result
+    }
+
+    /// Groups from `GroupSet`, sorted for comparison.
+    fn merged_with_group_set(keys: &[String], merges: &[Vec<usize>]) -> Vec<(String, Vec<usize>)> {
+        let mut groups = GroupSet::new(keys.to_vec());
+        for indices in merges {
+            groups.merge(indices);
+        }
+        let mut result: Vec<(String, Vec<usize>)> = groups.into_duplicates().collect();
+        result.sort();
+        result
+    }
+
+    #[test]
+    fn matches_the_key_map_bookkeeping_on_generated_merges() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |limit: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize % limit
+        };
+        for round in 0..200 {
+            let file_count = 1 + next(60);
+            let keys: Vec<String> = (0..file_count).map(|_| format!("key{}", next(file_count))).collect();
+            let merges: Vec<Vec<usize>> = (0..next(30))
+                .map(|_| (0..2 + next(5)).map(|_| next(file_count + 3)).collect())
+                .collect();
+            assert_eq!(
+                merged_with_group_set(&keys, &merges),
+                merged_with_key_maps(&keys, &merges),
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_key_of_the_first_file_when_a_larger_group_moves() {
+        let keys: Vec<String> = ["small", "large", "large", "large"].map(String::from).to_vec();
+        let mut groups = GroupSet::new(keys);
+        groups.merge(&[0, 1]);
+        let result: Vec<(String, Vec<usize>)> = groups.into_duplicates().collect();
+        assert_eq!(result, vec![("small".to_string(), vec![0, 1, 2, 3])]);
     }
 }

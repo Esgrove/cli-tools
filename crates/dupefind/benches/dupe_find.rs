@@ -302,99 +302,54 @@ fn bench_regex_matching(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark for pattern-based duplicate detection
+// Benchmark for the full matcher with patterns, prefix ignores, and extra groups at scale
 // ---------------------------------------------------------------------------
 
-fn bench_pattern_matching(c: &mut Criterion) {
-    let patterns: Vec<Regex> = vec![
-        Regex::new(r"[A-Z]{3,4}-\d{3,4}").expect("valid regex"),
-        Regex::new(r"S\d{2}E\d{2}").expect("valid regex"),
-    ];
-
-    let filenames = [
-        "Some.Movie.ABC-123.1080p.x265.mkv",
-        "Some.Movie.ABC-123.720p.x264.mkv",
-        "TV.Show.S01E05.1080p.mkv",
-        "TV.Show.S01E05.720p.mkv",
-        "No.Pattern.Here.1080p.mkv",
-        "Another.WXYZ-5678.2160p.mkv",
-        "Random.File.Without.Pattern.mkv",
-        "Show.S02E10.Special.Edition.mkv",
-    ];
-
-    let mut group = c.benchmark_group("dupe_find/pattern_matching");
-
-    group.bench_function("find_first_pattern_match", |b| {
-        b.iter(|| {
-            for filename in &filenames {
-                for pattern in &patterns {
-                    if pattern.find(black_box(filename)).is_some() {
-                        break;
-                    }
-                }
+/// Generate a library of release names in which every title shows up in several variants,
+/// with a resolution or codec tag, an ignored prefix, a different case, or a pattern identifier.
+fn generated_library(count: usize) -> Vec<DupeFileInfo> {
+    const TAGS: &[&str] = &["1080p.x265", "720p.x264", "2160p.HEVC", "", "1080p", "x264"];
+    const PREFIXES: &[&str] = &["", "", "", "Site.", "Watch."];
+    (0..count)
+        .map(|index| {
+            let title = index / 4;
+            let tag = TAGS.get(index % TAGS.len()).copied().unwrap_or_default();
+            let prefix = PREFIXES.get(index % PREFIXES.len()).copied().unwrap_or_default();
+            let mut stem = format!("{prefix}Title.Number.{title}.Part.{}", title % 7);
+            if title % 5 == 0 {
+                stem = format!("{stem}.ABC-{:03}", title % 1000);
             }
-        });
-    });
-
-    group.bench_function("collect_all_pattern_matches", |b| {
-        b.iter(|| {
-            let mut matches: HashMap<String, Vec<usize>> = HashMap::new();
-            for (idx, filename) in filenames.iter().enumerate() {
-                for pattern in &patterns {
-                    if let Some(m) = pattern.find(black_box(filename)) {
-                        matches.entry(m.as_str().to_string()).or_default().push(idx);
-                        break;
-                    }
-                }
+            if !tag.is_empty() {
+                stem = format!("{stem}.{tag}");
             }
-            matches
-        });
-    });
-
-    group.finish();
+            if index % 3 == 0 {
+                stem = stem.to_lowercase();
+            }
+            DupeFileInfo::new(PathBuf::from(format!("library/{stem}.mkv")), "mkv".to_string())
+        })
+        .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Benchmark filename lowercasing and grouping (first pass of find_all_duplicates)
-// ---------------------------------------------------------------------------
-
-fn bench_filename_grouping(c: &mut Criterion) {
-    let filenames: Vec<&str> = vec![
-        "Movie.Name.2024.1080p.x265.mkv",
-        "movie.name.2024.1080p.x265.mkv",
-        "MOVIE.NAME.2024.1080P.X265.MKV",
-        "Movie.Name.2024.720p.x264.mkv",
-        "Different.Movie.2023.1080p.mkv",
-        "different.movie.2023.1080p.mkv",
-        "TV.Show.S01E01.1080p.mkv",
-        "tv.show.s01e01.1080p.mkv",
-        "Unique.File.2024.mkv",
-        "Another.Unique.File.mkv",
-    ];
-
-    let mut group = c.benchmark_group("dupe_find/filename_grouping");
-
-    group.bench_function("group_by_exact_lowercase", |b| {
-        b.iter(|| {
-            let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-            for (idx, filename) in filenames.iter().enumerate() {
-                groups.entry(black_box(filename).to_lowercase()).or_default().push(idx);
-            }
-            groups
+fn bench_find_duplicates_scaled(c: &mut Criterion) {
+    let patterns = vec![Regex::new(r"[A-Z]{3,4}-\d{3,4}").expect("valid regex")];
+    let prefix_ignores = vec!["Site".to_string(), "Watch".to_string()];
+    let mut group = c.benchmark_group("dupe_find/find_duplicates_scaled");
+    group.sample_size(20);
+    for count in [1_000, 10_000] {
+        let files = generated_library(count);
+        let additional_match_groups: Vec<Vec<usize>> = (0..count / 10).map(|start| vec![start, start + 7]).collect();
+        let options = DuplicateMatchOptions {
+            patterns: &patterns,
+            prefix_ignores: &prefix_ignores,
+            additional_match_groups: &additional_match_groups,
+        };
+        group.bench_with_input(BenchmarkId::new("all_options", count), &files, |b, files| {
+            b.iter(|| find_duplicates(black_box(files), &options));
         });
-    });
-
-    group.bench_function("group_by_normalized_stem", |b| {
-        b.iter(|| {
-            let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-            for (idx, filename) in filenames.iter().enumerate() {
-                let key = normalize_stem(black_box(filename));
-                groups.entry(key).or_default().push(idx);
-            }
-            groups
+        group.bench_with_input(BenchmarkId::new("default_options", count), &files, |b, files| {
+            b.iter(|| find_duplicates(black_box(files), &DuplicateMatchOptions::default()));
         });
-    });
-
+    }
     group.finish();
 }
 
@@ -482,8 +437,7 @@ criterion_group!(
     bench_find_duplicates_medium,
     bench_find_duplicates_large,
     bench_regex_matching,
-    bench_pattern_matching,
-    bench_filename_grouping,
+    bench_find_duplicates_scaled,
     bench_display_name,
     bench_match_range,
 );

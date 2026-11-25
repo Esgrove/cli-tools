@@ -29,12 +29,12 @@ pub fn strip_ignored_prefixes(value: &str, prefix_ignores: &[String]) -> String 
                 return None;
             }
 
-            let prefix_parts: Vec<&str> = prefix.split('.').collect();
-            let mut value_parts = result.splitn(prefix_parts.len() + 1, '.');
-            let matches = prefix_parts.iter().all(|expected| {
+            let part_count = prefix.bytes().filter(|byte| *byte == b'.').count() + 1;
+            let mut value_parts = result.splitn(part_count + 1, '.');
+            let matches = prefix.split('.').all(|expected| {
                 value_parts
                     .next()
-                    .is_some_and(|actual| actual.to_lowercase() == expected.to_lowercase())
+                    .is_some_and(|actual| equals_ignoring_case(actual, expected))
             });
             matches.then(|| value_parts.next()).flatten()
         });
@@ -46,6 +46,16 @@ pub fn strip_ignored_prefixes(value: &str, prefix_ignores: &[String]) -> String 
     }
 
     result.to_string()
+}
+
+/// Whether the texts are equal once both are lowercased, without allocating the lowercase forms.
+fn equals_ignoring_case(left: &str, right: &str) -> bool {
+    if left.is_ascii() && right.is_ascii() {
+        return left.eq_ignore_ascii_case(right);
+    }
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .eq(right.chars().flat_map(char::to_lowercase))
 }
 
 /// Normalize a file stem by removing resolution and codec patterns.
