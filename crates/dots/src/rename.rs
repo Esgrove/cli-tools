@@ -405,8 +405,11 @@ impl DotRename {
                 && !cli_tools_common::paths_refer_to_same_file(&path, &new_path);
 
             // Handle directory renaming when target already exists
-            // Copy files from source to target directory and remove source directory if empty
-            let is_directory_merge = path.is_dir() && new_path.is_dir() && target_is_other_entry;
+            // Copy files from source to target directory and remove source directory if empty.
+            // A symlink to a directory is never merged,
+            // since that would move the files out of the directory it points to.
+            let source_is_real_directory = fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+            let is_directory_merge = source_is_real_directory && new_path.is_dir() && target_is_other_entry;
             let mut skip_rename = false;
 
             if target_is_other_entry && !self.config.overwrite && !is_directory_merge {
@@ -2118,5 +2121,443 @@ mod test_get_incremented_path {
         let incremented = DotRename::get_incremented_path(&taken).expect("a free path should be found");
 
         assert_eq!(incremented, temporary.path().join("Name.4.txt"));
+    }
+}
+
+#[cfg(test)]
+mod test_nested_trees {
+    use super::*;
+    use cli_tools_common::test_support::TempTree;
+
+    /// Tree with unformatted file names at four depths and a few already formatted ones.
+    fn deep_tree() -> TempTree {
+        let tree = TempTree::new();
+        tree.file_with("top file.txt", "top");
+        tree.file_with("level one/second file.txt", "second");
+        tree.file_with("level one/level two/third file.txt", "third");
+        tree.file_with("level one/level two/level three/fourth file.txt", "fourth");
+        tree.file_with("level one/Already.Formatted.txt", "formatted");
+        tree.dir("level one/empty dir");
+        tree
+    }
+
+    /// Run dots on the root of the tree with the given config.
+    fn run(tree: &TempTree, config: DotRenameConfig) {
+        DotRename::new(tree.path().to_path_buf(), config, false)
+            .run()
+            .expect("the run should succeed");
+    }
+
+    #[test]
+    fn recursing_renames_files_at_every_depth_and_keeps_directories() {
+        let tree = deep_tree();
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            tree.snapshot(),
+            vec![
+                "Top.File.txt: top",
+                "level one/",
+                "level one/Already.Formatted.txt: formatted",
+                "level one/Second.File.txt: second",
+                "level one/empty dir/",
+                "level one/level two/",
+                "level one/level two/Third.File.txt: third",
+                "level one/level two/level three/",
+                "level one/level two/level three/Fourth.File.txt: fourth",
+            ]
+        );
+    }
+
+    #[test]
+    fn without_recursing_only_the_root_files_are_renamed() {
+        let tree = deep_tree();
+
+        run(&tree, DotRenameConfig::default());
+
+        assert_eq!(
+            tree.files(),
+            vec![
+                "Top.File.txt",
+                "level one/Already.Formatted.txt",
+                "level one/level two/level three/fourth file.txt",
+                "level one/level two/third file.txt",
+                "level one/second file.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn dryrun_on_a_deep_tree_changes_nothing() {
+        let tree = deep_tree();
+        let before = tree.snapshot();
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                dryrun: true,
+                ..Default::default()
+            },
+        );
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                dryrun: true,
+                rename_directories: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(tree.snapshot(), before);
+    }
+
+    #[test]
+    fn a_second_recursive_run_changes_nothing() {
+        let tree = deep_tree();
+        let config = || DotRenameConfig {
+            recurse: true,
+            ..Default::default()
+        };
+        run(&tree, config());
+        let after_first_run = tree.snapshot();
+
+        run(&tree, config());
+
+        assert_eq!(tree.snapshot(), after_first_run);
+    }
+
+    #[test]
+    fn hidden_files_and_directories_are_skipped_at_every_depth() {
+        let tree = TempTree::new();
+        tree.file(".hidden file.txt");
+        tree.file(".hidden dir/inner file.txt");
+        tree.file("level one/.secret/deep file.txt");
+        tree.file("level one/level two/.another hidden.txt");
+        tree.file("level one/level two/visible file.txt");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            tree.files(),
+            vec![
+                ".hidden dir/inner file.txt",
+                ".hidden file.txt",
+                "level one/.secret/deep file.txt",
+                "level one/level two/.another hidden.txt",
+                "level one/level two/Visible.File.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_directories_are_not_renamed_when_renaming_directories() {
+        let tree = TempTree::with_entries(&[".hidden dir/", "level one/.hidden inner/", "level one/visible dir/"]);
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                rename_directories: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            tree.dirs(),
+            vec![
+                ".hidden dir",
+                "Level One",
+                "Level One/.hidden inner",
+                "Level One/Visible Dir"
+            ]
+        );
+    }
+
+    #[test]
+    fn names_that_format_to_the_same_target_in_one_directory_keep_both_files() {
+        let tree = TempTree::new();
+        tree.file_with("nested/dir/some file.txt", "first");
+        tree.file_with("nested/dir/some_file.txt", "second");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+        );
+
+        let files = tree.files();
+        assert_eq!(files.len(), 2, "no file should be lost: {files:?}");
+        assert!(tree.exists("nested/dir/Some.File.txt"));
+        let mut contents: Vec<String> = files.iter().map(|file| tree.read(file)).collect();
+        contents.sort();
+        assert_eq!(contents, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn names_that_format_to_the_same_target_with_incrementing_get_numbered() {
+        let tree = TempTree::new();
+        tree.file_with("nested/dir/some file.txt", "first");
+        tree.file_with("nested/dir/some_file.txt", "second");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                increment_name: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            tree.files(),
+            vec!["nested/dir/Some.File.2.txt", "nested/dir/Some.File.txt"]
+        );
+    }
+
+    #[test]
+    fn the_same_name_in_different_directories_is_renamed_in_each() {
+        let tree = TempTree::new();
+        tree.file_with("first dir/some file.txt", "first");
+        tree.file_with("second dir/deeper/some file.txt", "second");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            tree.snapshot(),
+            vec![
+                "first dir/",
+                "first dir/Some.File.txt: first",
+                "second dir/",
+                "second dir/deeper/",
+                "second dir/deeper/Some.File.txt: second",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_existing_target_is_kept_without_overwrite() {
+        let tree = TempTree::new();
+        tree.file_with("dir/Some.File.txt", "existing");
+        tree.file_with("dir/some file.txt", "incoming");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            tree.snapshot(),
+            vec!["dir/", "dir/Some.File.txt: existing", "dir/some file.txt: incoming"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_names_are_renamed_without_losing_files() {
+        let tree = TempTree::new();
+        let Some(_) = tree.non_utf8_file("nested dir", "some file", "txt") else {
+            return;
+        };
+        tree.file("nested dir/other file.txt");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+        );
+
+        let files = tree.files();
+        assert_eq!(files.len(), 2, "no file should be lost: {files:?}");
+        assert!(tree.exists("nested dir/Other.File.txt"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod test_symlinks {
+    use super::*;
+    use cli_tools_common::test_support::TempTree;
+
+    /// Tree with a walk root and a directory outside it that the root links to.
+    fn linked_tree() -> TempTree {
+        let tree = TempTree::new();
+        tree.file_with("outside/real dir/inner file.txt", "inner");
+        tree.file_with("outside/real file.txt", "real");
+        tree.file("root/sub dir/plain file.txt");
+        tree.symlink("outside/real dir", "root/sub dir/linked dir");
+        tree.symlink("outside/real file.txt", "root/sub dir/linked file.txt");
+        tree
+    }
+
+    /// Run dots on the "root" directory of the tree.
+    fn run(tree: &TempTree, config: DotRenameConfig) {
+        DotRename::new(tree.join("root"), config, false)
+            .run()
+            .expect("the run should succeed");
+    }
+
+    #[test]
+    fn link_targets_outside_the_root_are_never_renamed() {
+        let tree = linked_tree();
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(tree.read("outside/real file.txt"), "real");
+        assert_eq!(tree.read("outside/real dir/inner file.txt"), "inner");
+        assert!(tree.exists("root/sub dir/Plain.File.txt"));
+        assert!(
+            tree.join("root/sub dir/linked dir")
+                .symlink_metadata()
+                .expect("the directory link should remain")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn directories_behind_a_link_are_not_walked() {
+        let tree = linked_tree();
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                rename_directories: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(tree.exists("outside/real dir/inner file.txt"));
+        assert_eq!(tree.dirs(), vec!["outside", "outside/real dir", "root", "root/Sub Dir"]);
+    }
+
+    #[test]
+    fn a_linked_directory_is_not_merged_into_an_existing_directory() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real/data.txt", "outside data");
+        tree.file_with("root/Some Dir/existing.txt", "existing");
+        tree.symlink("outside/real", "root/some_dir");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                rename_directories: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(tree.read("outside/real/data.txt"), "outside data");
+        assert!(!tree.exists("root/Some Dir/data.txt"));
+        assert!(tree.exists("root/some_dir"));
+    }
+
+    #[test]
+    fn overwrite_does_not_replace_an_existing_directory_with_a_linked_one() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real/data.txt", "outside data");
+        tree.file_with("root/Some Dir/existing.txt", "existing");
+        tree.symlink("outside/real", "root/some_dir");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                rename_directories: true,
+                overwrite: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(tree.read("outside/real/data.txt"), "outside data");
+        assert_eq!(tree.read("root/Some Dir/existing.txt"), "existing");
+    }
+}
+
+#[cfg(test)]
+mod test_remove_empty_directories {
+    use super::*;
+    use cli_tools_common::test_support::TempTree;
+
+    #[test]
+    fn removes_nested_empty_directories_and_keeps_those_with_files() {
+        let tree = TempTree::with_entries(&[
+            "source/empty a/",
+            "source/nested/empty b/",
+            "source/nested/deeper/empty c/",
+            "source/kept/file.txt",
+            "source/nested/hidden keeper/.hidden",
+        ]);
+
+        DotRename::default()
+            .remove_empty_directories(&tree.join("source"))
+            .expect("removal should succeed");
+
+        assert_eq!(
+            tree.dirs(),
+            vec!["source", "source/kept", "source/nested", "source/nested/hidden keeper"]
+        );
+        assert_eq!(
+            tree.files(),
+            vec!["source/kept/file.txt", "source/nested/hidden keeper/.hidden"]
+        );
+    }
+
+    #[test]
+    fn a_tree_of_only_empty_directories_is_removed_entirely() {
+        let tree = TempTree::with_entries(&["source/a/b/c/", "source/d/", "other/"]);
+
+        DotRename::default()
+            .remove_empty_directories(&tree.join("source"))
+            .expect("removal should succeed");
+
+        assert_eq!(tree.dirs(), vec!["other"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_holding_only_a_symlink_is_kept() {
+        let tree = TempTree::new();
+        tree.file("target.txt");
+        tree.dir("source/empty/");
+        tree.symlink("target.txt", "source/link holder/link");
+
+        DotRename::default()
+            .remove_empty_directories(&tree.join("source"))
+            .expect("removal should succeed");
+
+        assert_eq!(tree.dirs(), vec!["source", "source/link holder"]);
+        assert!(tree.exists("target.txt"));
     }
 }
