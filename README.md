@@ -30,7 +30,7 @@ cli-tools-slb = { git = "https://github.com/Esgrove/cli-tools" }
 | ----------------------------------------- | ---------- | ---------------------------------------------------------- |
 | [`cli-tools-common`](./crates/common)     |            | Path, formatting, printing, config, and completion helpers |
 | [`cli-tools-media`](./crates/media)       |            | Resolution parsing, video metadata, hashing, scan cache    |
-| [`cli-tools-dirmove`](./crates/dirmove)   | `dirmove`  | Prefix grouping and directory matching                     |
+| [`cli-tools-dirmove`](./crates/dirmove)   | `dirmove`  | Scanning, matching, prefix grouping, unpacking, merging    |
 | [`cli-tools-dots`](./crates/dots)         | `dots`     | Dot formatting and renaming                                |
 | [`cli-tools-dupefind`](./crates/dupefind) | `dupefind` | Name normalization and duplicate grouping                  |
 | [`cli-tools-slb`](./crates/slb)           | `slb`      | Semantic line break checking and formatting                |
@@ -117,7 +117,7 @@ Options:
   -e, --exclude <EXCLUDE>         Exclude files that match the given pattern
   -i, --ignore <IGNORE>           Ignore prefix when matching filenames
   -I, --ignore-group <GROUP>      Group name to ignore
-  -P, --ignore-group-part <PART>  Ignore groups containing this part (substring match)
+  -P, --ignore-group-part <PART>  Ignore groups with a name part equal to this, ignoring case
   -o, --override <OVERRIDE>       Override prefix to use for directory names
   -u, --unpack <NAME>             Directory name to "unpack" by moving its contents to the parent directory
   -M, --map <MAPPING>             Name to directory mapping pair (pattern:dirname)

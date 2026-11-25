@@ -26,6 +26,9 @@
 # Recurse into subdirectories
 # recurse = false
 
+# Print verbose output
+# verbose = false
+
 # Minimum number of matching files needed to create a group
 # min_group_size = 3
 
@@ -46,7 +49,7 @@
 # In create mode, press "s" at the prompt to skip a group and add it here automatically.
 # ignored_group_names = ["Episode", "Video", "Part", "Chapter", "Scene"]
 
-# Ignore groups containing this part (substring match in any part of group name)
+# Ignore groups with a name part equal to one of these, ignoring case
 # ignored_group_parts = ["x265", "x264", "HEVC"]
 
 # Directory names to "unpack" by moving their contents to the parent directory

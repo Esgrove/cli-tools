@@ -86,7 +86,7 @@ struct DirMoveArgs {
     #[arg(short = 'I', long = "ignore-group", num_args = 1, action = clap::ArgAction::Append, name = "GROUP")]
     ignored_group_name: Vec<String>,
 
-    /// Ignore groups containing this part (substring match)
+    /// Ignore groups with a name part equal to this, ignoring case
     #[arg(short = 'P', long = "ignore-group-part", num_args = 1, action = clap::ArgAction::Append, name = "PART")]
     ignored_group_part: Vec<String>,
 

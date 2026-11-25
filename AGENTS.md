@@ -156,15 +156,19 @@ A binary only crate keeps its binary in `src/main.rs`.
   The library reads no CLI arguments and prints nothing, reporting progress through observer traits instead.
   The library modules:
     - `roots.rs` - Input and output roots, root resolution, and display paths
-    - `name_filter.rs` - Ignored prefix and ignored group name rules
+    - `name_filter.rs` - Ignored prefix, ignored group name, and unwanted directory rules
     - `scanner.rs` - Scan options and collecting input files and directories and the candidate destination directories
     - `matcher.rs` - Matching files and directories to destination directories, and custom mappings
+    - `candidates.rs` - File name parts and the prefix candidates that file names share
     - `grouping.rs` - Grouping options and grouping files by shared name prefixes for create mode
     - `prefix_index.rs` - Sorted prefix index used to find prefix candidates
-    - `unpack.rs` - Unpacking configured directory names and finding unwanted directories
-    - `merge.rs` - Merging directory contents and finding prefixed directory merge pairs
+    - `unpack.rs` - Deleting unwanted directories and unpacking configured directory names,
+      reported to an `UnpackObserver`
+    - `merge.rs` - Merging directory contents and finding prefixed directory merge pairs,
+      reported to a `MergeObserver`
     - `mover.rs` - Reliable file moves with copy verification, reported to a `MoveObserver`
-    - `types.rs` and `utils.rs` - Shared types and name normalization, filtering, and prefix candidate helpers
+    - `types.rs` - The destination directory information shared by scanning and matching
+    - `utils.rs` - Name normalization and filtering
 - `crates/dots/` → `dots` - Rename files to use dot formatting. The library holds formatting and renaming.
 - `crates/dupefind/` → `dupefind` - Find duplicate files. The library holds normalization and grouping.
 - `crates/slb/` → `slb` - Check and format prose with semantic line breaks. The library modules:
