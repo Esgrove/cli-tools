@@ -1,9 +1,9 @@
-//! The update pipeline for one Rust project.
+//! The update pipeline for one Rust project, and running it for many projects in parallel.
 //!
 //! Bumps `rust-version` and the `rust` Docker images,
 //! then runs the optional cargo and git steps in order.
-//! All output is collected into a [`Report`],
-//! so projects processed in parallel do not interleave their output.
+//! Each step is recorded as a [`ReportEntry`] in the project's [`Report`],
+//! so projects processed in parallel do not interleave and callers decide how to show them.
 
 use std::fs;
 use std::io::IsTerminal;
@@ -12,11 +12,11 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use colored::Colorize;
+use rayon::prelude::*;
 
-use cli_tools_common::{diff_lines, get_relative_path_or_filename};
+use cli_tools_common::{command_exists, count_label, get_relative_path_or_filename};
 
-use crate::discovery::find_member_manifests;
+use crate::discovery::{find_dockerfiles, find_member_manifests};
 use crate::dockerfile::update_dockerfile;
 use crate::manifest::{ManifestUpdate, RustVersion, has_workspace_table, update_rust_version};
 use crate::registry::DigestResolver;
@@ -34,7 +34,77 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// Options that control which steps run.
+/// One thing that happened while processing a project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportEntry {
+    /// The project was skipped because its git repository has uncommitted changes.
+    SkippedDirty,
+    /// `rust-version` was raised in a manifest.
+    RustVersionBumped {
+        /// Manifest path relative to the project root.
+        manifest: String,
+        /// Version before the bump.
+        old: String,
+        /// Version after the bump.
+        new: String,
+    },
+    /// The project manifest already has the target `rust-version` or a newer one.
+    RustVersionCurrent(String),
+    /// Neither the project manifest nor any workspace member sets `rust-version`.
+    NoRustVersion,
+    /// A file would change like this in a dry run.
+    Diff {
+        /// File path relative to the project root.
+        path: String,
+        /// Current contents.
+        original: String,
+        /// Contents after the change.
+        updated: String,
+    },
+    /// A Dockerfile has something that needs attention.
+    DockerfileWarning {
+        /// Dockerfile path relative to the project root.
+        path: String,
+        /// What needs attention.
+        warning: String,
+    },
+    /// A `rust` image in a Dockerfile was pinned to the target version.
+    ImagePinned {
+        /// Dockerfile path relative to the project root.
+        path: String,
+        /// Image reference before the change.
+        old: String,
+        /// Image reference after the change.
+        new: String,
+    },
+    /// A command succeeded.
+    StepSucceeded {
+        /// The command line.
+        label: String,
+        /// Combined stdout and stderr.
+        output: String,
+        /// The output is the point of the step, as for a dry run dependency upgrade.
+        output_is_result: bool,
+    },
+    /// A command ran and failed.
+    StepFailed {
+        /// The command line.
+        label: String,
+        /// Combined stdout and stderr.
+        output: String,
+    },
+    /// A step could not be done.
+    Failed(String),
+    /// A step that a dry run does not run.
+    WouldRun(String),
+    /// Nothing is committed because the project is not in a git repository.
+    NotARepository,
+    /// Nothing is committed because the repository had uncommitted changes before the update.
+    NotCommittingDirty,
+    /// The update changed nothing, so there is nothing to commit.
+    NothingToCommit,
+}
+
 /// What bumping one workspace member manifest did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemberUpdate {
@@ -46,8 +116,9 @@ enum MemberUpdate {
     NoField,
 }
 
+/// Options that control which steps run.
 #[derive(Debug, Clone, Copy, Default)]
-#[expect(clippy::struct_excessive_bools, reason = "independent CLI flags")]
+#[expect(clippy::struct_excessive_bools, reason = "each step is switched on independently")]
 pub struct Options {
     /// Run `cargo upgrade` and `cargo update`.
     pub update: bool,
@@ -59,10 +130,8 @@ pub struct Options {
     pub commit: bool,
     /// Process projects with uncommitted changes.
     pub force: bool,
-    /// Only show what would change.
-    pub dryrun: bool,
-    /// Show the output of successful commands.
-    pub verbose: bool,
+    /// Only record what would change, without changing anything.
+    pub dry_run: bool,
 }
 
 /// Shared state for processing all projects.
@@ -99,8 +168,8 @@ pub struct Report {
     pub missing_rust_version: bool,
     /// The changes were committed.
     pub committed: bool,
-    /// Output lines to print under the project heading.
-    pub lines: Vec<String>,
+    /// The steps in the order they happened.
+    pub entries: Vec<ReportEntry>,
 }
 
 /// Output of one external command.
@@ -110,6 +179,17 @@ struct CommandResult {
     /// Combined stdout and stderr.
     output: String,
 }
+
+/// Receives each project report as soon as the project is done.
+///
+/// Projects are processed in parallel, so the method can be called from several threads at once.
+/// The method does nothing by default, and `()` reports nothing.
+pub trait BumpObserver: Sync {
+    /// One project finished.
+    fn on_project_finished(&self, _report: &Report) {}
+}
+
+impl BumpObserver for () {}
 
 impl GitState {
     /// Read the git state of a project.
@@ -138,49 +218,48 @@ impl Report {
             outcome: Outcome::Unchanged,
             missing_rust_version: false,
             committed: false,
-            lines: Vec::new(),
+            entries: Vec::new(),
         }
     }
 
-    /// Add an indented output line.
-    fn push(&mut self, line: impl Into<String>) {
-        self.lines.push(format!("  {}", line.into()));
+    /// Return whether the project failed.
+    #[must_use]
+    pub const fn is_failed(&self) -> bool {
+        matches!(self.outcome, Outcome::Failed(_))
     }
 
-    /// Add command output, indented one level deeper.
-    fn push_output(&mut self, output: &str) {
-        self.lines.extend(
-            output
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| format!("    {line}")),
-        );
+    /// Record an entry.
+    fn push(&mut self, entry: ReportEntry) {
+        self.entries.push(entry);
     }
 
     /// Mark the project failed with a message.
     fn fail(&mut self, message: impl Into<String>) {
         let message = message.into();
-        self.push(format!("{} {message}", "✗".red()));
+        self.push(ReportEntry::Failed(message.clone()));
         self.outcome = Outcome::Failed(message);
     }
 
     /// Run a command as a step, recording its result.
     ///
-    /// Output is shown for failures, for dry runs, and in verbose mode.
     /// Returns whether the step succeeded.
-    fn run_step(&mut self, program: &str, args: &[&str], show_output: bool) -> bool {
+    fn run_step(&mut self, program: &str, args: &[&str], output_is_result: bool) -> bool {
         let label = format!("{program} {}", args.join(" "));
         match run_command(&self.root.clone(), program, args) {
             Ok(result) if result.success => {
-                self.push(format!("{} {label}", "✓".green()));
-                if show_output {
-                    self.push_output(&result.output);
-                }
+                self.push(ReportEntry::StepSucceeded {
+                    label,
+                    output: result.output,
+                    output_is_result,
+                });
                 true
             }
             Ok(result) => {
-                self.fail(format!("{label} failed"));
-                self.push_output(&result.output);
+                self.outcome = Outcome::Failed(format!("{label} failed"));
+                self.push(ReportEntry::StepFailed {
+                    label,
+                    output: result.output,
+                });
                 false
             }
             Err(error) => {
@@ -191,6 +270,76 @@ impl Report {
     }
 }
 
+/// Check that the external tools the options need are installed.
+///
+/// # Errors
+/// Returns an error naming the missing tool and how to install it.
+pub fn check_tools(options: Options) -> Result<()> {
+    if options.update && !command_exists("cargo-upgrade") {
+        anyhow::bail!("cargo upgrade not found, install it with: cargo install cargo-edit");
+    }
+    Ok(())
+}
+
+/// Process every project root in parallel and return the reports in the order of `roots`.
+///
+/// Git states are read for every project before any project changes,
+/// so one project's update cannot make a project in the same repository look dirty.
+/// The observer gets each report as soon as its project is done.
+///
+/// # Errors
+/// Returns an error if a needed tool is missing,
+/// or the thread pool or the Docker Hub client cannot be created.
+pub fn bump_projects(
+    roots: &[PathBuf],
+    target: RustVersion,
+    options: Options,
+    jobs: usize,
+    observer: &impl BumpObserver,
+) -> Result<Vec<Report>> {
+    check_tools(options)?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .context("Failed to build thread pool")?;
+
+    let git_states: Vec<GitState> = pool.install(|| roots.par_iter().map(|root| GitState::read(root, roots)).collect());
+
+    let resolver = DigestResolver::new()?;
+    let commit_lock = Mutex::new(());
+    let context = RunContext {
+        target,
+        options,
+        resolver: &resolver,
+        roots,
+        commit_lock: &commit_lock,
+    };
+
+    Ok(pool.install(|| {
+        roots
+            .par_iter()
+            .zip(git_states.par_iter())
+            .map(|(root, git)| {
+                let report = process_project(root, *git, &context);
+                observer.on_project_finished(&report);
+                report
+            })
+            .collect()
+    }))
+}
+
+/// Return an error naming how many projects failed, if any did.
+///
+/// # Errors
+/// Returns an error when at least one report failed.
+pub fn ensure_none_failed(reports: &[Report]) -> Result<()> {
+    let failed = reports.iter().filter(|report| report.is_failed()).count();
+    if failed > 0 {
+        anyhow::bail!("{} failed", count_label(failed, "project", "projects"));
+    }
+    Ok(())
+}
+
 /// Run every step for one project.
 #[must_use]
 pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Report {
@@ -198,7 +347,7 @@ pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Repo
     let mut report = Report::new(root.to_path_buf());
 
     if git.is_dirty && !options.force {
-        report.push("Skipped, git repository has uncommitted changes".yellow().to_string());
+        report.push(ReportEntry::SkippedDirty);
         report.outcome = Outcome::SkippedDirty;
         return report;
     }
@@ -225,7 +374,7 @@ pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Repo
         return report;
     }
 
-    if options.commit && !options.dryrun {
+    if options.commit && !options.dry_run {
         commit_changes(&mut report, git, rust_changed, context);
     }
     report
@@ -272,26 +421,22 @@ fn bump_root_manifest(
             new,
             content: updated,
         } => {
-            report.push(format!("rust-version {} -> {}", old.yellow(), new.green()));
-            if context.options.dryrun {
-                for line in diff_lines("Cargo.toml", original, &updated) {
-                    report.push(line);
-                }
-            } else {
-                fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
-            }
+            report.push(ReportEntry::RustVersionBumped {
+                manifest: "Cargo.toml".to_string(),
+                old,
+                new,
+            });
+            write_or_record_diff(report, context.options, path, "Cargo.toml", original, updated)?;
             Ok(true)
         }
         ManifestUpdate::Current(version) => {
-            if context.options.verbose {
-                report.push(format!("rust-version {version} is current").dimmed().to_string());
-            }
+            report.push(ReportEntry::RustVersionCurrent(version));
             Ok(false)
         }
         ManifestUpdate::NoField => {
             if !member_has_field {
                 report.missing_rust_version = true;
-                report.push("No rust-version field".yellow().to_string());
+                report.push(ReportEntry::NoRustVersion);
             }
             Ok(false)
         }
@@ -308,14 +453,12 @@ fn bump_member_manifest(report: &mut Report, context: &RunContext, path: &Path) 
             new,
             content: updated,
         } => {
-            report.push(format!("{relative}: rust-version {} -> {}", old.yellow(), new.green()));
-            if context.options.dryrun {
-                for line in diff_lines(&relative, &original, &updated) {
-                    report.push(line);
-                }
-            } else {
-                fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
-            }
+            report.push(ReportEntry::RustVersionBumped {
+                manifest: relative.clone(),
+                old,
+                new,
+            });
+            write_or_record_diff(report, context.options, path, &relative, &original, updated)?;
             Ok(MemberUpdate::Updated)
         }
         ManifestUpdate::Current(_) => Ok(MemberUpdate::Current),
@@ -337,33 +480,51 @@ fn bump_dockerfiles(report: &mut Report, context: &RunContext) -> Result<bool> {
 
     let resolve = |tag: &str| context.resolver.resolve(tag);
     let mut changed = false;
-    for path in crate::discovery::find_dockerfiles(&root, &nested_roots) {
+    for path in find_dockerfiles(&root, &nested_roots) {
         let original = fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
         let update = update_dockerfile(&original, context.target, &resolve);
         let display = get_relative_path_or_filename(&path, &root);
         for warning in &update.warnings {
-            report.push(format!("{display}: {warning}").yellow().to_string());
+            report.push(ReportEntry::DockerfileWarning {
+                path: display.clone(),
+                warning: warning.clone(),
+            });
         }
         if !update.is_changed() {
             continue;
         }
         changed = true;
         for change in &update.changes {
-            report.push(format!(
-                "{display}: {} -> {}",
-                shorten_digest(&change.old).yellow(),
-                shorten_digest(&change.new).green()
-            ));
+            report.push(ReportEntry::ImagePinned {
+                path: display.clone(),
+                old: change.old.clone(),
+                new: change.new.clone(),
+            });
         }
-        if context.options.dryrun {
-            for line in diff_lines(&display, &original, &update.content) {
-                report.push(line);
-            }
-        } else {
-            fs::write(&path, &update.content).with_context(|| format!("Failed to write {}", path.display()))?;
-        }
+        write_or_record_diff(report, context.options, &path, &display, &original, update.content)?;
     }
     Ok(changed)
+}
+
+/// Write the updated contents, or record them as a diff in a dry run.
+fn write_or_record_diff(
+    report: &mut Report,
+    options: Options,
+    path: &Path,
+    display: &str,
+    original: &str,
+    updated: String,
+) -> Result<()> {
+    if options.dry_run {
+        report.push(ReportEntry::Diff {
+            path: display.to_string(),
+            original: original.to_string(),
+            updated,
+        });
+    } else {
+        fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Run the optional cargo steps in order, stopping at the first failure.
@@ -372,7 +533,7 @@ fn bump_dockerfiles(report: &mut Report, context: &RunContext) -> Result<bool> {
 /// Returns whether all steps succeeded.
 fn run_cargo_steps(report: &mut Report, options: Options) -> bool {
     if options.update {
-        let (upgrade_args, update_args): (&[&str], &[&str]) = if options.dryrun {
+        let (upgrade_args, update_args): (&[&str], &[&str]) = if options.dry_run {
             (
                 &["upgrade", "--incompatible", "allow", "--dry-run"],
                 &["update", "--dry-run"],
@@ -380,23 +541,24 @@ fn run_cargo_steps(report: &mut Report, options: Options) -> bool {
         } else {
             (&["upgrade", "--incompatible", "allow"], &["update"])
         };
-        let show_output = options.verbose || options.dryrun;
-        if !report.run_step("cargo", upgrade_args, show_output) || !report.run_step("cargo", update_args, show_output) {
+        if !report.run_step("cargo", upgrade_args, options.dry_run)
+            || !report.run_step("cargo", update_args, options.dry_run)
+        {
             return false;
         }
     }
 
-    if options.dryrun {
+    if options.dry_run {
         if options.clean {
-            report.push("Would run cargo clean".dimmed().to_string());
+            report.push(ReportEntry::WouldRun("cargo clean".to_string()));
         }
         if options.check {
-            report.push("Would run cargo clippy --fix and cargo test".dimmed().to_string());
+            report.push(ReportEntry::WouldRun("cargo clippy --fix and cargo test".to_string()));
         }
         return true;
     }
 
-    if options.clean && !report.run_step("cargo", &["clean"], options.verbose) {
+    if options.clean && !report.run_step("cargo", &["clean"], false) {
         return false;
     }
     if options.check {
@@ -408,8 +570,7 @@ fn run_cargo_steps(report: &mut Report, options: Options) -> bool {
             "--workspace",
             "--all-targets",
         ];
-        if !report.run_step("cargo", &clippy_args, options.verbose)
-            || !report.run_step("cargo", &["test", "--workspace"], options.verbose)
+        if !report.run_step("cargo", &clippy_args, false) || !report.run_step("cargo", &["test", "--workspace"], false)
         {
             return false;
         }
@@ -420,15 +581,11 @@ fn run_cargo_steps(report: &mut Report, options: Options) -> bool {
 /// Commit the project changes when there are any.
 fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, context: &RunContext) {
     if !git.is_repository {
-        report.push("Not a git repository, nothing committed".dimmed().to_string());
+        report.push(ReportEntry::NotARepository);
         return;
     }
     if git.is_dirty {
-        report.push(
-            "Not committing, the repository had uncommitted changes before the update"
-                .yellow()
-                .to_string(),
-        );
+        report.push(ReportEntry::NotCommittingDirty);
         return;
     }
 
@@ -439,9 +596,7 @@ fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, contex
     let root = report.root.clone();
     match has_changes(&root, context.roots) {
         Ok(false) => {
-            if context.options.verbose {
-                report.push("Nothing to commit".dimmed().to_string());
-            }
+            report.push(ReportEntry::NothingToCommit);
             return;
         }
         Ok(true) => {}
@@ -458,9 +613,7 @@ fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, contex
     let mut commit_args = vec!["commit", "--message", message.as_str(), "--"];
     commit_args.extend(pathspecs.iter().map(String::as_str));
 
-    if report.run_step("git", &add_args, context.options.verbose)
-        && report.run_step("git", &commit_args, context.options.verbose)
-    {
+    if report.run_step("git", &add_args, false) && report.run_step("git", &commit_args, false) {
         report.committed = true;
     }
 }
@@ -499,17 +652,6 @@ fn pathspecs(root: &Path, roots: &[PathBuf]) -> Vec<String> {
             .map(|relative| format!(":(exclude){}", relative.display())),
     );
     specs
-}
-
-/// Shorten a digest in an image reference for display.
-fn shorten_digest(reference: &str) -> String {
-    reference.split_once("@sha256:").map_or_else(
-        || reference.to_string(),
-        |(image, digest)| {
-            let short: String = digest.chars().take(12).collect();
-            format!("{image}@sha256:{short}…")
-        },
-    )
 }
 
 /// Run a command in the given directory, capturing stdout and stderr together.
@@ -565,22 +707,6 @@ mod test_pathspecs {
 }
 
 #[cfg(test)]
-mod test_shorten_digest {
-    use super::*;
-
-    #[test]
-    fn shortens_digest() {
-        let reference = "rust:1-slim@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe";
-        assert_eq!(shorten_digest(reference), "rust:1-slim@sha256:6f14b2b4b278…");
-    }
-
-    #[test]
-    fn keeps_reference_without_digest() {
-        assert_eq!(shorten_digest("rust:1.100"), "rust:1.100");
-    }
-}
-
-#[cfg(test)]
 mod test_git_state {
     use super::*;
 
@@ -631,6 +757,11 @@ mod test_bump_manifest {
         let report = process_project(&root, GitState::default(), &context);
 
         assert_eq!(report.outcome, Outcome::Updated);
+        assert!(report.entries.contains(&ReportEntry::RustVersionBumped {
+            manifest: "crates/own/Cargo.toml".to_string(),
+            old: "1.90".to_string(),
+            new: "1.100".to_string(),
+        }));
         let own = fs::read_to_string(root.join("crates/own/Cargo.toml")).expect("read");
         assert!(own.contains("rust-version = \"1.100\""), "{own}");
         let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read");

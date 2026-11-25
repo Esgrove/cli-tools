@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use crate::Args;
-use crate::project::Options;
+use cli_tools_rsbump::Options;
 
 /// Default search depth for projects under the input paths.
 const DEFAULT_MAX_DEPTH: usize = 5;
@@ -53,6 +53,8 @@ pub struct Config {
     pub(crate) options: Options,
     /// Number of projects processed in parallel.
     pub(crate) jobs: usize,
+    /// Print the output of successful commands and the steps that changed nothing.
+    pub(crate) verbose: bool,
     /// Search depth for projects.
     pub(crate) max_depth: usize,
 }
@@ -121,10 +123,10 @@ impl Config {
                 check: args.check || user_config.check,
                 commit: args.commit || user_config.commit,
                 force: args.force || user_config.force,
-                dryrun: args.print,
-                verbose: args.verbose || user_config.verbose,
+                dry_run: args.print,
             },
             jobs,
+            verbose: args.verbose || user_config.verbose,
             max_depth: args.max_depth.or(user_config.max_depth).unwrap_or(DEFAULT_MAX_DEPTH),
         })
     }

@@ -203,13 +203,20 @@ A binary only crate keeps its binary in `src/main.rs`.
 - `crates/xtask/` → `xtask` - Parallel task runner driven by an `xtask.toml` task file.
   The library holds the `Runner` builder that projects extend with Rust builtins.
   See `crates/xtask/README.md` for the module layout.
+- `crates/rsbump/` → `rsbump` - Bump Rust projects to the local toolchain version,
+  pin `rust` Docker images to match, and optionally upgrade, clean, verify, and commit.
+  The binary holds the CLI arguments, the run config, and printing the reports.
+  The library modules:
+    - `discovery.rs` - Finding projects, workspace member manifests, and Dockerfiles
+    - `manifest.rs` - Rust versions, the local toolchain version, and the `rust-version` edit
+    - `dockerfile.rs` - Pinning `rust` images in Dockerfiles
+    - `registry.rs` - Docker Hub digest lookup
+    - `project.rs` - The per-project steps, recorded as report entries, and processing projects in parallel
 - Binary only crates:
     - `crates/div/` → `div` - Print divider comments
     - `crates/flipdate/` → `flipdate` - Flip dates in filenames
     - `crates/qtorrent/` → `qtorrent` - Add torrents to qBittorrent with automatic file renaming,
       show torrent stats
-    - `crates/rsbump/` → `rsbump` - Bump Rust projects to the local toolchain version,
-      pin `rust` Docker images to match, and optionally upgrade, clean, verify, and commit
     - `crates/rxrename/` → `rxrename` - Remove a trailing "_1" from file names
     - `crates/thumbs/` → `thumbs` - Create video thumbnail sheets
     - `crates/vconvert/` → `vconvert` - Video conversion to HEVC/MP4

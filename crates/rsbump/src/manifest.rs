@@ -37,6 +37,16 @@ enum FieldLocation {
     Package,
 }
 
+/// The local `rustc` version and the stable release it targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalToolchain {
+    /// Stable release to bump projects to.
+    pub target: RustVersion,
+    /// The full `rustc --version` output when the toolchain is a nightly or beta,
+    /// whose own version is not released yet.
+    pub prerelease: Option<String>,
+}
+
 /// A Rust version with major, minor, and patch numbers.
 ///
 /// Missing components count as zero when comparing.
@@ -57,11 +67,11 @@ impl RustVersion {
         Self { major, minor, patch }
     }
 
-    /// Read the version of the local `rustc`.
+    /// Read the version of the local `rustc` and return the stable release it targets.
     ///
     /// # Errors
     /// Returns an error if `rustc` cannot be run or its output cannot be parsed.
-    pub fn from_local_toolchain() -> Result<Self> {
+    pub fn from_local_toolchain() -> Result<LocalToolchain> {
         let output = Command::new("rustc")
             .arg("--version")
             .output()
@@ -70,15 +80,10 @@ impl RustVersion {
             return Err(anyhow!("rustc --version failed"));
         }
         let text = String::from_utf8_lossy(&output.stdout);
-        let version = Self::from_rustc_output(&text)
+        let target = Self::from_rustc_output(&text)
             .ok_or_else(|| anyhow!("Unexpected rustc --version output: {}", text.trim()))?;
-        if Self::is_prerelease_rustc_output(&text) {
-            println!(
-                "Local toolchain is a pre-release ({}), targeting the latest stable release {version}",
-                text.trim()
-            );
-        }
-        Ok(version)
+        let prerelease = Self::is_prerelease_rustc_output(&text).then(|| text.trim().to_string());
+        Ok(LocalToolchain { target, prerelease })
     }
 
     /// Parse the output of `rustc --version`, for example "rustc 1.100.0 (0ef1bc386 2026-11-09)".

@@ -9,24 +9,41 @@ repository.workspace = true
 rust-version.workspace = true
 readme = "README.md"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "rsbump"
-path = "src/main.rs"
+path = "src/bin/rsbump/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Dependencies of the rsbump binary, left out by library users with `default-features = false`.
+cli = [
+    "cli-tools-common/completion",
+    "cli-tools-common/diff",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:colored",
+    "dep:toml",
+]
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
-cli-tools-common = { workspace = true, features = ["completion", "diff"] }
-colored = { workspace = true }
+cli-tools-common = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 toml_edit = { workspace = true }
 walkdir = { workspace = true }
+
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+colored = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
