@@ -45,6 +45,8 @@ struct WorkingLine<'a> {
 struct ProseOutput<'a> {
     /// The output lines.
     lines: Vec<Cow<'a, str>>,
+    /// Index of the working line each output line came from, which decides its line ending.
+    origins: Vec<usize>,
     /// Whether each output line belongs to the selection, empty when the whole text is selected.
     selected: Vec<bool>,
     /// Whether the selection is worth tracking, false when every line is selected anyway.
@@ -56,14 +58,16 @@ impl<'a> ProseOutput<'a> {
     fn new(capacity: usize, track_selection: bool) -> Self {
         Self {
             lines: Vec::with_capacity(capacity),
+            origins: Vec::with_capacity(capacity),
             selected: Vec::with_capacity(if track_selection { capacity } else { 0 }),
             track_selection,
         }
     }
 
-    /// Add one line that belongs to the selection.
-    fn push_selected(&mut self, line: Cow<'a, str>) {
+    /// Add one line that belongs to the selection and came from the working line at `origin`.
+    fn push_selected(&mut self, line: Cow<'a, str>, origin: usize) {
         self.lines.push(line);
+        self.origins.push(origin);
         if self.track_selection {
             self.selected.push(true);
         }
@@ -76,6 +80,7 @@ impl<'a> ProseOutput<'a> {
         }
         let copied = lines.get(from..to).unwrap_or_default();
         self.lines.extend(copied.iter().copied().map(Cow::Borrowed));
+        self.origins.extend(from..from + copied.len());
         if self.track_selection {
             self.selected
                 .extend((from..from + copied.len()).map(|index| ranges.contains_line(index + 1)));
@@ -183,7 +188,7 @@ fn run_lines(text: &str, kind: FileKind, options: &FormatOptions, produce_fix: b
 
     let mut fixed_line_ranges = LineRanges::default();
     let fixed_text = output.and_then(|output| {
-        let fixed = assemble(&output.lines, &working, text);
+        let fixed = assemble(&output.lines, &output.origins, &working, text);
         fixed_line_ranges = output.ranges();
         (fixed != text).then_some(fixed)
     });
@@ -276,16 +281,24 @@ fn prose_pass<'a>(
                     match outcome.lines {
                         Some(new_lines) => {
                             let last_index = new_lines.len().saturating_sub(1);
+                            let last_source = paragraph.end_line.saturating_sub(1).max(paragraph.start_line);
                             for (index, content) in new_lines.iter().enumerate() {
                                 let suffix = if index == last_index {
                                     paragraph.last_suffix.as_str()
                                 } else {
                                     ""
                                 };
-                                output.push_selected(Cow::Owned(format!(
-                                    "{}{content}{suffix}",
-                                    paragraph.prefix_for(index)
-                                )));
+                                // The new lines take the endings of the paragraph lines in order,
+                                // and lines past the end of the paragraph take the ending of its last line.
+                                let origin = if index == last_index {
+                                    last_source
+                                } else {
+                                    (paragraph.start_line + index).min(last_source)
+                                };
+                                output.push_selected(
+                                    Cow::Owned(format!("{}{content}{suffix}", paragraph.prefix_for(index))),
+                                    origin,
+                                );
                             }
                         }
                         None => output.copy(lines, paragraph.start_line, paragraph.end_line, ranges),
@@ -366,29 +379,25 @@ fn shift_ranges(ranges: &LineRanges, replacements: &[Option<(String, String)>]) 
     }))
 }
 
-/// Join output lines with line endings taken from the working lines.
+/// Join output lines with the line ending of the working line each of them came from.
 ///
-/// When the line counts differ, the dominant line ending of the original text is used.
-fn assemble(output: &[Cow<'_, str>], working: &[WorkingLine<'_>], original: &str) -> String {
+/// A line whose source has no ending, such as a new line split from a last line without a final newline,
+/// takes the dominant line ending of the original text.
+fn assemble(output: &[Cow<'_, str>], origins: &[usize], working: &[WorkingLine<'_>], original: &str) -> String {
     let default_eol = if original.contains("\r\n") { "\r\n" } else { "\n" };
     let trailing_newline = original.ends_with('\n') || original.is_empty();
     let mut result = String::with_capacity(original.len() + 64);
     let last_index = output.len().saturating_sub(1);
     for (index, line) in output.iter().enumerate() {
         result.push_str(line.as_ref());
-        if index == last_index {
-            if trailing_newline && !output.is_empty() {
-                let eol = working.get(index).map_or(default_eol, |line| line.eol);
-                result.push_str(if eol.is_empty() { default_eol } else { eol });
-            }
-        } else {
-            let eol = if output.len() == working.len() {
-                working.get(index).map_or(default_eol, |line| line.eol)
-            } else {
-                default_eol
-            };
-            result.push_str(if eol.is_empty() { default_eol } else { eol });
+        if index == last_index && !trailing_newline {
+            continue;
         }
+        let eol = origins
+            .get(index)
+            .and_then(|origin| working.get(*origin))
+            .map_or(default_eol, |line| line.eol);
+        result.push_str(if eol.is_empty() { default_eol } else { eol });
     }
     result
 }

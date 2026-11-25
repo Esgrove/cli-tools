@@ -431,3 +431,20 @@ fn a_fence_indented_four_or_more_spaces_does_not_close_a_code_block() {
 
     assert_eq!(result.fixed_text, None, "code inside the fence was changed");
 }
+
+#[test]
+fn reflowing_keeps_the_line_endings_of_untouched_lines() {
+    let text = "one\ntwo\nthree\r\n\nThis prose line is long enough to be split, and it has a comma, which gives a break.\n\nfour\nfive\n";
+    let options = FormatOptions {
+        max_width: 60,
+        ..FormatOptions::default()
+    };
+
+    let fixed = format(text, FileKind::Markdown, &options)
+        .fixed_text
+        .expect("the long line should be split");
+
+    assert!(fixed.starts_with("one\ntwo\nthree\r\n\n"), "{fixed:?}");
+    assert!(fixed.ends_with("\n\nfour\nfive\n"), "{fixed:?}");
+    assert_eq!(fixed.matches("\r\n").count(), 1, "{fixed:?}");
+}
