@@ -232,8 +232,13 @@ impl QBittorrentClient {
             .context("Failed to send add torrent request")?;
 
         let status = response.status();
+        let body = response.text().await.unwrap_or_default();
 
         match status {
+            // qBittorrent answers a torrent it did not add, such as a duplicate, with a success status and "Fails.".
+            StatusCode::OK if body.trim() == "Fails." => {
+                bail!("qBittorrent rejected the torrent, it may already be added")
+            }
             StatusCode::OK => Ok(()),
             StatusCode::UNSUPPORTED_MEDIA_TYPE => {
                 bail!("Torrent file is not valid")
@@ -242,7 +247,6 @@ impl QBittorrentClient {
                 bail!("Authentication required or session expired")
             }
             _ => {
-                let body = response.text().await.unwrap_or_default();
                 bail!("Failed to add torrent: HTTP {status} - {body}")
             }
         }
@@ -842,6 +846,28 @@ mod test_client_with_local_server {
         client.logout().await?;
         assert!(!client.authenticated);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_add_rejected_with_fails_is_an_error() {
+        let client = authenticated_client_for(vec![route("/api/v2/torrents/add", 200, "Fails.")]).await;
+
+        let result = client
+            .add_torrent(AddTorrentParams {
+                torrent_path: "downloads/example.torrent".to_string(),
+                torrent_bytes: b"d4:infod4:name7:exampleee".to_vec(),
+                save_path: None,
+                category: None,
+                tags: None,
+                rename: None,
+                skip_checking: false,
+                paused: false,
+                content_layout: None,
+            })
+            .await;
+
+        let error = result.expect_err("a rejected torrent should not count as added");
+        assert!(error.to_string().contains("rejected"), "{error}");
     }
 
     #[tokio::test]
