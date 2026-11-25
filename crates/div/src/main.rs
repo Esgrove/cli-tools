@@ -79,9 +79,11 @@ fn divider_lines(texts: &[String], length: usize, character: char, align: bool) 
     }
 
     if texts.len() > 1 && align {
+        // Texts are printed uppercased, and uppercasing can make a text longer, such as "ß" becoming "SS",
+        // so the longest text is measured in the form it is printed in.
         let longest: usize = texts
             .iter()
-            .map(|text| text.trim().chars().count())
+            .map(|text| text.trim().to_uppercase().chars().count())
             .max()
             .unwrap_or_default();
 
@@ -127,7 +129,7 @@ fn format_aligned_divider(text: &str, count: usize, character: char, padding_lef
         text
     } else {
         let total_padding: usize = count - message_length;
-        let padding_right: usize = total_padding - padding_left;
+        let padding_right: usize = total_padding.saturating_sub(padding_left);
         format_div_with_text(padding_left, &text, padding_right, &div)
     }
 }
@@ -220,6 +222,17 @@ mod div_tests {
 #[cfg(test)]
 mod test_divider_lines {
     use super::*;
+
+    #[test]
+    fn aligned_text_that_grows_when_uppercased_does_not_panic() {
+        let texts = vec!["ßßßßßßßß".to_string(), "a".to_string()];
+
+        let lines = divider_lines(&texts, 20, '=', true);
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("SSSSSSSSSSSSSSSS"), "{lines:?}");
+        assert_eq!(lines[1].chars().count(), 20, "{lines:?}");
+    }
 
     fn texts(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
