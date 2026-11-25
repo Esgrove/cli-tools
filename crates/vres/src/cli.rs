@@ -77,7 +77,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 ///
 /// Files that already have the correct label are skipped.
 /// Errors during renaming are printed and do not stop processing of remaining files.
-fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) {
+fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
     // Rename remaining files to add resolution labels
     let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = files
         .into_iter()
@@ -102,20 +102,27 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) {
         if config.verbose {
             println!("No video files require renaming");
         }
-        return;
+        return 0;
     } else if config.verbose {
         print_bold!("Renaming {}", cli_tools_common::count_label(num_files, "file", "files"));
     }
 
     print_bold!("Resolution               Label   Path");
 
+    let mut num_renamed = 0;
     for (result, new_path) in files_to_process {
-        if let Err(error) = result.rename(&new_path, config.overwrite, config.dryrun) {
-            cli_tools_common::print_error!("{error}");
+        match result.rename(&new_path, config.overwrite, config.dryrun) {
+            Ok(()) => num_renamed += 1,
+            Err(error) => cli_tools_common::print_error!("{error}"),
         }
     }
 
-    print_green!("Renamed {}", cli_tools_common::count_label(num_files, "file", "files"));
+    let action = if config.dryrun { "Would rename" } else { "Renamed" };
+    print_green!(
+        "{action} {}",
+        cli_tools_common::count_label(num_renamed, "file", "files")
+    );
+    num_renamed
 }
 
 /// Deletes files with resolution smaller than the given limit.
@@ -166,6 +173,18 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
     } else {
         &*RE_RESOLUTIONS
     };
+
+    // A single file given as the input is processed on its own, like the help text says.
+    if path.is_file() {
+        let is_video = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| FILE_EXTENSIONS.contains(&extension));
+        if !is_video {
+            anyhow::bail!("Not a supported video file: {}", path.display());
+        }
+        return Ok(vec![path.to_path_buf()]);
+    }
 
     if recurse {
         for entry in WalkDir::new(path)
@@ -757,6 +776,18 @@ mod test_gather_video_files {
     }
 
     #[tokio::test]
+    async fn a_single_video_file_path_is_gathered() {
+        let directory = temporary_directory();
+        let file = write(directory.path(), "clip.mp4");
+
+        let files = gather_video_files(&file, false, false)
+            .await
+            .expect("a single file should be accepted");
+
+        assert_eq!(files, vec![file]);
+    }
+
+    #[tokio::test]
     async fn keeps_video_files_and_skips_other_types() {
         let directory = temporary_directory();
         write(directory.path(), "movie.mp4");
@@ -865,6 +896,41 @@ mod test_gather_video_files {
             .expect("gathering should succeed");
 
         assert_eq!(files, [] as [PathBuf; 0]);
+    }
+}
+
+#[cfg(test)]
+mod test_add_resolution_labels {
+    use super::*;
+
+    #[test]
+    fn only_successful_renames_are_counted() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let free = directory.path().join("free.mp4");
+        let blocked = directory.path().join("blocked.mp4");
+        std::fs::write(&free, "free").expect("write");
+        std::fs::write(&blocked, "blocked").expect("write");
+        std::fs::write(directory.path().join("blocked.1080p.mp4"), "existing").expect("write");
+        let config = Config {
+            debug: false,
+            delete_limit: None,
+            dryrun: false,
+            overwrite: false,
+            path: directory.path().to_path_buf(),
+            recurse: false,
+            verbose: false,
+        };
+        let results = [free, blocked]
+            .into_iter()
+            .map(|file| FFProbeResult {
+                file,
+                resolution: Resolution::new(1920, 1080),
+            })
+            .collect();
+
+        let renamed = add_resolution_labels(&config, results);
+
+        assert_eq!(renamed, 1);
     }
 }
 
