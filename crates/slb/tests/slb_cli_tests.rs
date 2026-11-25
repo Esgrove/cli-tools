@@ -140,7 +140,7 @@ fn fix_mode_rewrites_the_file_and_exits_with_zero() {
     assert_eq!(exit_code(&output), 0);
     let text = stdout(&output);
     assert!(text.contains("Fixed"), "{text}");
-    assert!(text.contains("0 violation remaining"), "{text}");
+    assert!(text.contains("0 violations remaining"), "{text}");
     let fixed = std::fs::read_to_string(&path).expect("file should be readable");
     assert_eq!(
         fixed,

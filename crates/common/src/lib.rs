@@ -386,13 +386,13 @@ fn read_confirmation(mut reader: impl io::BufRead, default: bool) -> std::io::Re
     }
 }
 
-/// Return the singular or plural noun for a count.
+/// Return the singular noun for a count of one and the plural for any other count, zero included.
 #[must_use]
 pub const fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
-    if count > 1 { plural } else { singular }
+    if count == 1 { singular } else { plural }
 }
 
-/// Format a count and noun with a plural only when the count is greater than one.
+/// Format a count and noun, with the singular only for a count of one.
 #[must_use]
 pub fn count_label(count: usize, singular: &'static str, plural: &'static str) -> String {
     format!("{count} {}", pluralize(count, singular, plural))
@@ -2044,10 +2044,10 @@ mod additional_shared_helper_tests {
 
     #[test]
     fn pluralization_handles_zero_one_and_many() {
-        assert_eq!(pluralize(0, "file", "files"), "file");
+        assert_eq!(pluralize(0, "file", "files"), "files");
         assert_eq!(pluralize(1, "file", "files"), "file");
         assert_eq!(pluralize(2, "file", "files"), "files");
-        assert_eq!(count_label(0, "file", "files"), "0 file");
+        assert_eq!(count_label(0, "file", "files"), "0 files");
         assert_eq!(count_label(2, "file", "files"), "2 files");
     }
 

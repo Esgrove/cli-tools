@@ -268,6 +268,6 @@ mod test_summary_message {
             ..Summary::default()
         };
         let message = summary_message(&summary, &config(&["slb", "--fix"])).to_string();
-        assert!(message.contains("Checked 1 file, fixed 1 file, 0 violation remaining"));
+        assert!(message.contains("Checked 1 file, fixed 1 file, 0 violations remaining"));
     }
 }
