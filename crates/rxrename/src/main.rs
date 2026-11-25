@@ -197,13 +197,16 @@ fn process_file(
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("Non-UTF-8 filename: {}", file_with_suffix.display()))?;
 
-    let extension = file_with_suffix.extension().and_then(|s| s.to_str());
-
-    // Build the unsuffixed name: strip trailing "_1" and re-add extension
+    // Build the unsuffixed name: strip trailing "_1" and re-add the extension exactly,
+    // since an extension that is not valid UTF-8 has no lossless string form.
     let new_stem = stem
         .strip_suffix("_1")
         .ok_or_else(|| anyhow::anyhow!("Filename does not end with '_1': {}", file_with_suffix.display()))?;
-    let original_name = extension.map_or_else(|| new_stem.to_string(), |ext| format!("{new_stem}.{ext}"));
+    let mut original_name = std::ffi::OsString::from(new_stem);
+    if let Some(extension) = file_with_suffix.extension() {
+        original_name.push(".");
+        original_name.push(extension);
+    }
     let file_without_suffix = file_with_suffix.with_file_name(&original_name);
 
     let relative = file_with_suffix.strip_prefix(root).unwrap_or(file_with_suffix);
@@ -371,6 +374,30 @@ mod test_rename_files {
 #[cfg(test)]
 mod test_process_file {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_that_is_not_utf8_is_kept() -> anyhow::Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join(OsStr::from_bytes(b"clip_1.m\xffv"));
+        let expected = temp_directory.path().join(OsStr::from_bytes(b"clip.m\xffv"));
+        let unrelated = temp_directory.path().join("clip");
+        // File systems such as APFS reject names that are not valid UTF-8, so there is nothing to test there.
+        if std::fs::write(&suffixed, b"new").is_err() {
+            return Ok(());
+        }
+        std::fs::write(&unrelated, b"unrelated")?;
+
+        let outcome = process_file(temp_directory.path(), &suffixed, 1, 1, 1, false, ConflictAction::Delete)?;
+
+        assert!(matches!(outcome, Outcome::Renamed));
+        assert_eq!(std::fs::read(&expected)?, b"new");
+        assert_eq!(std::fs::read(&unrelated)?, b"unrelated");
+        Ok(())
+    }
 
     #[test]
     fn dryrun_without_conflict_reports_rename_without_changes() -> anyhow::Result<()> {
