@@ -430,6 +430,15 @@ impl DotRename {
                 println!("{}", format!("Dryrun {number}:").bold().cyan());
                 cli_tools_common::show_diff(&old_str, &new_str);
 
+                // A dry run reports and counts the same skips a real run makes.
+                if skip_rename {
+                    println!(
+                        "{}",
+                        format!("Would skip rename to already existing file: {new_str}").yellow()
+                    );
+                    continue;
+                }
+
                 if is_directory_merge {
                     println!("Would merge directory: {old_str} -> {new_str}");
                 }
@@ -1964,6 +1973,30 @@ mod test_directory_merge {
 mod test_rename_conflicts {
     use super::rename_test_helpers::*;
     use super::*;
+
+    #[test]
+    fn a_dryrun_counts_the_same_renames_as_a_real_run() {
+        let temporary = temporary_directory();
+        let source = temporary.path().join("some file.txt");
+        let target = temporary.path().join("Some.File.txt");
+        std::fs::write(&source, b"source").expect("file should be written");
+        std::fs::write(&target, b"target").expect("file should be written");
+        let paths = vec![(source, target)];
+
+        let dryrun = dots(
+            temporary.path(),
+            DotRenameConfig {
+                dryrun: true,
+                ..Default::default()
+            },
+            false,
+        )
+        .rename_paths(paths.clone());
+        let real = dots(temporary.path(), DotRenameConfig::default(), false).rename_paths(paths);
+
+        assert_eq!(real, 0, "the existing target should be skipped");
+        assert_eq!(dryrun, real);
+    }
 
     #[test]
     fn an_existing_target_is_skipped_by_default() {
