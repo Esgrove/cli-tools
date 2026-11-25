@@ -84,6 +84,19 @@ enum ProjectType {
     Rust,
 }
 
+/// Decides which root manifests in the history of a subdirectory project belong to that project.
+///
+/// A project moved from the repository root into a subdirectory keeps its earlier history in the root manifest.
+/// A root manifest naming another package is a different project, so its versions are not used.
+struct RootFallback {
+    /// The root manifest no longer exists at `HEAD`, so everything it held moved into the subdirectory.
+    root_manifest_gone: bool,
+    /// Package or project name of the subdirectory manifest at `HEAD`.
+    project_name: Option<String>,
+    /// Project type used to read names from manifests.
+    project_type: ProjectType,
+}
+
 impl ProjectType {
     /// The manifest filename for this project type.
     const fn manifest_filename(self) -> &'static str {
@@ -102,6 +115,34 @@ impl fmt::Display for ProjectType {
             Self::Python => write!(f, "Python"),
             Self::Rust => write!(f, "Rust"),
         }
+    }
+}
+
+impl RootFallback {
+    /// Read the root and project manifests at `HEAD`.
+    fn at_head(repo: &Repository, manifest_path: &Path, project_type: ProjectType) -> Self {
+        let head_tree = repo.head().and_then(|head| head.peel_to_tree()).ok();
+        let read = |path: &Path| -> Option<String> {
+            let entry = head_tree.as_ref()?.get_path(path).ok()?;
+            let blob = entry.to_object(repo).ok()?.into_blob().ok()?;
+            Some(String::from_utf8_lossy(blob.content()).into_owned())
+        };
+        let root_manifest_gone = manifest_path
+            .file_name()
+            .is_some_and(|file_name| read(Path::new(file_name)).is_none());
+        let project_name = read(manifest_path).and_then(|content| parse_project_name(&content, project_type));
+        Self {
+            root_manifest_gone,
+            project_name,
+            project_type,
+        }
+    }
+
+    /// Whether a root manifest from the history belongs to the subdirectory project.
+    fn accepts(&self, root_manifest: &str) -> bool {
+        self.root_manifest_gone
+            || (self.project_name.is_some()
+                && parse_project_name(root_manifest, self.project_type) == self.project_name)
     }
 }
 
@@ -163,6 +204,7 @@ fn version_tag(
 
     let repo = Repository::discover(repo_path)?;
     let manifest_path = manifest_path_in_repository(&repo, repo_path, manifest_filename)?;
+    let root_fallback = RootFallback::at_head(&repo, &manifest_path, project_type);
     let mut reverse_walk = repo.revwalk()?;
     reverse_walk.push_head()?;
     reverse_walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
@@ -180,12 +222,15 @@ fn version_tag(
         if let Some((_, from_project_path)) = &entry {
             seen_project_manifest |= *from_project_path;
         }
-        if let Some((entry, _)) = entry
+        if let Some((entry, from_project_path)) = entry
             && let Ok(blob) = entry
                 .to_object(&repo)
                 .and_then(|obj| obj.into_blob().map_err(|_| git2::Error::from_str("Not a blob")))
         {
             let content = std::str::from_utf8(blob.content()).unwrap_or_default();
+            if !from_project_path && !root_fallback.accepts(content) {
+                continue;
+            }
             let Some(version_number) = parse_version(content, project_type) else {
                 if verbose {
                     println!(
@@ -367,6 +412,22 @@ fn manifest_path_in_repository(repo: &Repository, project_path: &Path, manifest_
         )
     })?;
     Ok(relative.join(manifest_filename))
+}
+
+/// Parse the package or project name from manifest content.
+fn parse_project_name(content: &str, project_type: ProjectType) -> Option<String> {
+    let table_name = |table: &str| -> Option<String> {
+        let toml_value: toml::Value = toml::from_str(content).ok()?;
+        toml_value.get(table)?.get("name")?.as_str().map(ToString::to_string)
+    };
+    match project_type {
+        ProjectType::CMake => CMAKE_NAME_REGEX
+            .captures(content)
+            .and_then(|captures| captures.get(1))
+            .map(|name| name.as_str().to_string()),
+        ProjectType::Python => table_name("project"),
+        ProjectType::Rust => table_name("package"),
+    }
 }
 
 /// Find the manifest in a commit tree.
@@ -967,6 +1028,40 @@ mod test_subdirectory_projects {
         version_tag(&root.join("cpp"), false, false, true, false, false, "").expect("tagging should succeed");
 
         assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0", "v1.2.0"]);
+    }
+
+    #[test]
+    fn a_different_project_at_the_root_is_never_used_for_a_subdirectory_project() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        let package = |name: &str, version: &str| format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n");
+        commit_changes(&repository, root, &[("Cargo.toml", Some(&package("a", "1.0.0")))]);
+        commit_changes(&repository, root, &[("Cargo.toml", Some(&package("a", "2.0.0")))]);
+        commit_changes(&repository, root, &[("b/Cargo.toml", Some(&package("b", "0.1.0")))]);
+
+        version_tag(&root.join("b"), false, false, true, false, false, "b-").expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["b-v0.1.0"]);
+    }
+
+    #[test]
+    fn the_same_package_moved_while_the_root_manifest_stays_uses_the_root_history() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        let package = |name: &str, version: &str| format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n");
+        commit_changes(&repository, root, &[("Cargo.toml", Some(&package("app", "1.0.0")))]);
+        commit_changes(
+            &repository,
+            root,
+            &[
+                ("Cargo.toml", Some("[workspace]\nmembers = [\"app\"]\n")),
+                ("app/Cargo.toml", Some(&package("app", "1.1.0"))),
+            ],
+        );
+
+        version_tag(&root.join("app"), false, false, true, false, false, "").expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0"]);
     }
 
     #[test]
