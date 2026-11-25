@@ -3,6 +3,7 @@
 //! Remuxes HEVC and AV1 files to MP4, muxes external subtitles in movie mode, and converts video to HEVC,
 //! retrying with fallback settings and validating each output before the original is removed.
 
+use std::path::Path;
 use std::time::Instant;
 
 use colored::Colorize;
@@ -16,7 +17,7 @@ use crate::ffmpeg::{
 };
 use crate::helpers::{remove_partial_output, temporary_output_path};
 use crate::stats::ConversionStats;
-use crate::types::{ProcessResult, ProcessableFile, print_subtitle_files};
+use crate::types::{ProcessResult, ProcessableFile, VideoInfo, print_subtitle_files};
 
 /// Minimum ratio of output duration to input duration for a conversion to be considered successful.
 const MIN_DURATION_RATIO: f64 = 0.85;
@@ -64,6 +65,9 @@ impl VideoConvert {
         };
 
         if status.success() {
+            if let Some(failure) = self.reject_invalid_remux(input, output, info, file_index) {
+                return failure;
+            }
             if let Err(e) = self.delete_file(input) {
                 print_error!("Failed to delete original file: {e}");
             }
@@ -105,6 +109,9 @@ impl VideoConvert {
             return ProcessResult::Failed { error };
         }
 
+        if let Some(failure) = self.reject_invalid_remux(input, output, info, file_index) {
+            return failure;
+        }
         if let Err(e) = self.delete_file(input) {
             print_error!("Failed to delete original file: {e}");
         }
@@ -116,6 +123,25 @@ impl VideoConvert {
         );
         self.log_success(output, "remux", file_index, duration, None);
         ProcessResult::Remuxed {}
+    }
+
+    /// Check a remux output before the original is deleted,
+    /// removing the output and returning a failure when it is invalid.
+    ///
+    /// A stream copy can exit successfully on a truncated or corrupt input,
+    /// so the output has to keep the duration and audio of the input.
+    fn reject_invalid_remux(
+        &self,
+        input: &Path,
+        output: &Path,
+        info: &VideoInfo,
+        file_index: &str,
+    ) -> Option<ProcessResult> {
+        let error = validate_mux_output(input, output, info).err()?;
+        remove_partial_output(output);
+        let error = format!("Remux output failed validation: {error:#}");
+        self.log_failure(input, "remux", file_index, &error);
+        Some(ProcessResult::Failed { error })
     }
 
     /// Process movie-mode audio and subtitle streams without converting video.
