@@ -576,6 +576,7 @@ dependencies = [
  "cli-tools-common",
  "cli-tools-dots",
  "colored",
+ "proptest",
  "regex",
  "reqwest",
  "serde",

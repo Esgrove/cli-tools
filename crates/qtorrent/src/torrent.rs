@@ -18,6 +18,10 @@ const HEX_CHARS: &[u8] = b"0123456789abcdef";
 const BYTES_PER_KB: u64 = 1024;
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
+/// Deepest nesting of bencode lists and dictionaries accepted when measuring a value.
+/// Real torrents nest a handful of levels, so this only rejects hostile input.
+const MAX_BENCODE_DEPTH: usize = 512;
+
 /// Represents a parsed `.torrent` file.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Torrent {
@@ -542,8 +546,19 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Calculate the length of a bencoded value starting at the given position.
 ///
 /// # Errors
-/// Returns an error if the bencode is malformed.
+/// Returns an error if the bencode is malformed or nested deeper than `MAX_BENCODE_DEPTH`.
 fn bencode_value_length(data: &[u8]) -> Result<usize> {
+    bencode_value_length_at_depth(data, 1)
+}
+
+/// Calculate the length of a bencoded value nested `depth` levels deep.
+///
+/// Lists and dictionaries recurse, so the depth is capped to turn a hostile file of nested containers into an error
+/// instead of a stack overflow.
+fn bencode_value_length_at_depth(data: &[u8], depth: usize) -> Result<usize> {
+    if depth > MAX_BENCODE_DEPTH {
+        bail!("Bencode nested deeper than {MAX_BENCODE_DEPTH} levels");
+    }
     let Some(&value_type) = data.first() else {
         bail!("Empty bencode value");
     };
@@ -559,7 +574,7 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
             let mut pos = 1;
             while data.get(pos).is_some_and(|byte| *byte != b'e') {
                 let remaining = data.get(pos..).context("Malformed bencode list")?;
-                let item_len = bencode_value_length(remaining)?;
+                let item_len = bencode_value_length_at_depth(remaining, depth + 1)?;
                 pos = pos.checked_add(item_len).context("Bencode list length overflow")?;
             }
             if data.get(pos).is_none() {
@@ -574,11 +589,11 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
             while data.get(pos).is_some_and(|byte| *byte != b'e') {
                 // Key (must be a string)
                 let remaining = data.get(pos..).context("Malformed bencode dictionary")?;
-                let key_len = bencode_value_length(remaining)?;
+                let key_len = bencode_value_length_at_depth(remaining, depth + 1)?;
                 pos = pos.checked_add(key_len).context("Bencode dictionary length overflow")?;
                 // Value
                 let remaining = data.get(pos..).context("Malformed bencode dictionary")?;
-                let value_len = bencode_value_length(remaining)?;
+                let value_len = bencode_value_length_at_depth(remaining, depth + 1)?;
                 pos = pos
                     .checked_add(value_len)
                     .context("Bencode dictionary length overflow")?;
@@ -595,10 +610,14 @@ fn bencode_value_length(data: &[u8]) -> Result<usize> {
             let length_bytes = data.get(..colon_pos).context("Malformed bencode string")?;
             let len_str = std::str::from_utf8(length_bytes).context("Invalid length in bencode string")?;
             let str_len: usize = len_str.parse().context("Invalid length number in bencode string")?;
-            colon_pos
+            let end = colon_pos
                 .checked_add(1)
                 .and_then(|content_start| content_start.checked_add(str_len))
-                .context("Bencode string length overflow")
+                .context("Bencode string length overflow")?;
+            if end > data.len() {
+                bail!("Bencode string extends beyond the end of the data");
+            }
+            Ok(end)
         }
         other => bail!("Unknown bencode type: {}", other as char),
     }
@@ -832,6 +851,34 @@ mod test_bencode_value_length {
     fn error_on_unknown_type() {
         let data = b"x";
         assert!(bencode_value_length(data).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_lists_are_an_error_instead_of_a_stack_overflow() {
+        let mut data = vec![b'l'; 100_000];
+        data.extend(std::iter::repeat_n(b'e', 100_000));
+        assert!(bencode_value_length(&data).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_dictionaries_are_an_error_instead_of_a_stack_overflow() {
+        let data = b"d1:a".repeat(100_000);
+        assert!(bencode_value_length(&data).is_err());
+    }
+
+    #[test]
+    fn error_on_string_longer_than_the_data() {
+        assert!(bencode_value_length(b"1:").is_err());
+        assert!(bencode_value_length(b"5:abc").is_err());
+        assert_eq!(bencode_value_length(b"3:abc").expect("should parse"), 5);
+    }
+
+    #[test]
+    fn nesting_up_to_the_limit_is_accepted() {
+        let depth = MAX_BENCODE_DEPTH;
+        let mut data = vec![b'l'; depth];
+        data.extend(std::iter::repeat_n(b'e', depth));
+        assert_eq!(bencode_value_length(&data).expect("should parse"), depth * 2);
     }
 }
 
@@ -1399,6 +1446,21 @@ mod test_extract_info_dict_bytes {
         let result = extract_info_dict_bytes(data);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn deeply_nested_info_value_is_an_error_instead_of_a_stack_overflow() {
+        let mut data = b"d4:info".to_vec();
+        data.extend(std::iter::repeat_n(b'l', 100_000));
+        assert!(extract_info_dict_bytes(&data).is_err());
+        assert!(Torrent::info_hash_from_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_torrent_fails_to_parse_instead_of_overflowing_the_stack() {
+        let mut data = b"d4:info".to_vec();
+        data.extend(std::iter::repeat_n(b'l', 100_000));
+        assert!(Torrent::from_buffer(&data).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1662,5 +1724,129 @@ mod test_parse_torrent_all_files_excluded {
         assert!(!info.all_files_excluded());
         assert_eq!(info.excluded_indices, [] as [usize; 0]);
         assert_eq!(info.included_size, 1000);
+    }
+}
+
+#[cfg(test)]
+mod test_bencode_properties {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Generated bencode value.
+    #[derive(Debug, Clone)]
+    enum Value {
+        Integer(i64),
+        Bytes(Vec<u8>),
+        List(Vec<Self>),
+        Dictionary(Vec<(Vec<u8>, Self)>),
+    }
+
+    impl Value {
+        /// Bencoded bytes of the value.
+        fn encode(&self) -> Vec<u8> {
+            match self {
+                Self::Integer(number) => format!("i{number}e").into_bytes(),
+                Self::Bytes(bytes) => {
+                    let mut encoded = format!("{}:", bytes.len()).into_bytes();
+                    encoded.extend_from_slice(bytes);
+                    encoded
+                }
+                Self::List(items) => {
+                    let mut encoded = vec![b'l'];
+                    for item in items {
+                        encoded.extend(item.encode());
+                    }
+                    encoded.push(b'e');
+                    encoded
+                }
+                Self::Dictionary(entries) => {
+                    let mut encoded = vec![b'd'];
+                    for (key, value) in entries {
+                        encoded.extend(Self::Bytes(key.clone()).encode());
+                        encoded.extend(value.encode());
+                    }
+                    encoded.push(b'e');
+                    encoded
+                }
+            }
+        }
+    }
+
+    /// Nested bencode values whose strings often contain bencode syntax.
+    fn value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            any::<i64>().prop_map(Value::Integer),
+            prop::collection::vec(prop::sample::select(b"ie:ld0123456789info".to_vec()), 0..12).prop_map(Value::Bytes),
+            prop::collection::vec(any::<u8>(), 0..12).prop_map(Value::Bytes),
+        ];
+        leaf.prop_recursive(6, 64, 6, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..6).prop_map(Value::List),
+                prop::collection::vec((prop::collection::vec(any::<u8>(), 0..8), inner), 0..6)
+                    .prop_map(Value::Dictionary),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn length_of_a_valid_value_is_its_encoded_length(value in value(), trailing in prop::collection::vec(any::<u8>(), 0..8)) {
+            let mut encoded = value.encode();
+            let length = encoded.len();
+            encoded.extend(trailing);
+            prop_assert_eq!(bencode_value_length(&encoded).expect("valid bencode should parse"), length);
+        }
+
+        #[test]
+        fn length_never_panics_on_arbitrary_bytes(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+            if let Ok(length) = bencode_value_length(&bytes) {
+                prop_assert!(length <= bytes.len());
+            }
+        }
+
+        #[test]
+        fn truncated_values_are_errors(value in value()) {
+            let encoded = value.encode();
+            for end in 0..encoded.len() {
+                let truncated = encoded.get(..end).unwrap_or_default();
+                prop_assert!(bencode_value_length(truncated).is_err(), "{:?}", truncated);
+            }
+        }
+
+        #[test]
+        fn the_top_level_info_value_is_extracted(
+            before in prop::collection::vec((prop::collection::vec(any::<u8>(), 0..8), value()), 0..4),
+            info in value(),
+            after in prop::collection::vec((prop::collection::vec(any::<u8>(), 0..8), value()), 0..4),
+        ) {
+            let without_info = |entries: Vec<(Vec<u8>, Value)>| {
+                entries.into_iter().filter(|(key, _)| key != b"info").collect::<Vec<_>>()
+            };
+            let mut entries = without_info(before);
+            entries.push((b"info".to_vec(), info.clone()));
+            entries.extend(without_info(after));
+            let torrent = Value::Dictionary(entries).encode();
+            let extracted = extract_info_dict_bytes(&torrent).expect("the info value should be found");
+            let expected = info.encode();
+            prop_assert_eq!(extracted, expected.as_slice());
+        }
+
+        #[test]
+        fn torrent_parsing_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _ = extract_info_dict_bytes(&bytes);
+            let _ = Torrent::from_buffer(&bytes);
+        }
+
+        #[test]
+        fn torrent_parsing_never_panics_on_near_valid_input(value in value(), position in any::<prop::sample::Index>(), byte: u8) {
+            let mut encoded = Value::Dictionary(vec![(b"info".to_vec(), value)]).encode();
+            let index = position.index(encoded.len());
+            if let Some(slot) = encoded.get_mut(index) {
+                *slot = byte;
+            }
+            let _ = extract_info_dict_bytes(&encoded);
+            let _ = Torrent::from_buffer(&encoded);
+        }
     }
 }
