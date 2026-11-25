@@ -51,15 +51,31 @@ pub fn strip_ignored_prefixes(value: &str, prefix_ignores: &[String]) -> String 
 /// Normalize a file stem by removing resolution and codec patterns.
 ///
 /// Converts to lowercase, strips resolution and codec tags, then cleans up repeated separators.
+/// Trimming separators can expose a tag that an underscore hid from the word boundary, as in "_x265.movie",
+/// so the removal repeats until nothing changes, which keeps the result the same for every spelling.
 /// Falls back to the lowercased original stem if normalization would produce an empty string.
 #[must_use]
 pub fn normalize_stem(stem: &str) -> String {
-    let mut normalized = stem.to_lowercase();
-    normalized = RE_RESOLUTION.replace_all(&normalized, "").to_string();
-    normalized = RE_CODEC.replace_all(&normalized, "").to_string();
+    let lowercase = stem.to_lowercase();
+    let mut normalized = remove_tags(&lowercase);
+    if normalized.is_empty() {
+        return lowercase;
+    }
+    // Every pass that changes the text makes it shorter, so this ends.
+    loop {
+        let next = remove_tags(&normalized);
+        if next == normalized || next.is_empty() {
+            return normalized;
+        }
+        normalized = next;
+    }
+}
 
-    let result = cli_tools_common::collapse_repeated_separators(&normalized);
-    if result.is_empty() { stem.to_lowercase() } else { result }
+/// Remove resolution and codec tags from lowercase text and collapse the separators left behind.
+fn remove_tags(text: &str) -> String {
+    let without_resolution = RE_RESOLUTION.replace_all(text, "");
+    let without_codec = RE_CODEC.replace_all(&without_resolution, "");
+    cli_tools_common::collapse_repeated_separators(&without_codec)
 }
 
 #[cfg(test)]
@@ -142,5 +158,23 @@ mod test_normalize_stem {
     fn falls_back_when_everything_is_removed() {
         assert_eq!(normalize_stem("1080p"), "1080p");
         assert_eq!(normalize_stem("X265"), "x265");
+    }
+}
+
+#[cfg(test)]
+mod test_normalize_stem_fixpoint {
+    use super::*;
+
+    #[test]
+    fn a_tag_exposed_by_trimming_is_removed_too() {
+        assert_eq!(normalize_stem("_x265.MovieMovie"), "moviemovie");
+        assert_eq!(normalize_stem("_x265.Movie"), normalize_stem("x265.Movie"));
+        assert_eq!(normalize_stem("-1080p.Show"), "show");
+    }
+
+    #[test]
+    fn a_stem_of_only_tags_falls_back_to_the_lowercase_stem() {
+        assert_eq!(normalize_stem("_x265"), "x265");
+        assert_eq!(normalize_stem("x265"), "x265");
     }
 }

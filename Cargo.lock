@@ -526,6 +526,7 @@ dependencies = [
  "futures",
  "indicatif",
  "itertools 0.15.0",
+ "proptest",
  "ratatui",
  "rayon",
  "regex",
