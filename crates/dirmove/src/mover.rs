@@ -64,18 +64,19 @@ pub fn move_files_to_target_dir(
 
     let mut report = MoveReport::default();
     for (index, file_path) in files.iter().enumerate() {
-        let file_name = path_to_filename_string(file_path);
-        if file_name.is_empty() {
+        let Some(os_file_name) = file_path.file_name() else {
             progress_bar.suspend(|| {
                 print_error(&format!("Could not get file name for path: {}", file_path.display()));
             });
             report.failed_files.push(file_path.clone());
             continue;
-        }
+        };
+        let file_name = path_to_filename_string(file_path);
 
         progress_bar.set_message(format!("[{}/{}] {file_name}", index + 1, files.len()));
         let expected_size = file_sizes.get(file_path).copied().unwrap_or(0);
-        let new_path = dir_path.join(&file_name);
+        // The destination keeps the exact name, which may not be valid UTF-8 and has no lossless string form.
+        let new_path = dir_path.join(os_file_name);
 
         if new_path.exists() && !overwrite {
             progress_bar.suspend(|| {
@@ -698,6 +699,30 @@ mod test_move_files {
 
         assert_eq!(fs::read_to_string(&source)?, "episode");
         assert_eq!(report.failed_files, [] as [PathBuf; 0]);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_name_that_is_not_utf8_is_kept_exactly() -> anyhow::Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_directory = tempfile::TempDir::new()?;
+        let input = temp_directory.path().join("input");
+        let output = temp_directory.path().join("output");
+        fs::create_dir(&input)?;
+        let name = OsStr::from_bytes(b"Show.E01\xff.mkv");
+        let source = input.join(name);
+        // File systems such as APFS reject names that are not valid UTF-8, so there is nothing to test there.
+        if fs::write(&source, "episode").is_err() {
+            return Ok(());
+        }
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+
+        assert_eq!(report.moved_files, vec![source]);
+        assert_eq!(fs::read_to_string(output.join(name))?, "episode");
         Ok(())
     }
 
