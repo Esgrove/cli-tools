@@ -39,8 +39,13 @@ static RE_ITEM_DATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date"));
 
 static RE_START_DATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<StartDate Format="CCYYMMDD">(\d{4})\d{4}</StartDate>"#)
+    Regex::new(r#"<StartDate Format="CCYYMMDD">(\d{4})(\d{2})\d{2}</StartDate>"#)
         .expect("Failed to create regex pattern for start date")
+});
+
+static RE_INVOICING_PERIOD_END_DATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<InvoicingPeriodEndDate Format="CCYYMMDD">(\d{4})(\d{2})\d{2}</InvoicingPeriodEndDate>"#)
+        .expect("Failed to create regex pattern for invoicing period end date")
 });
 
 static RE_SPECIFICATION_FREE_TEXT: LazyLock<Regex> = LazyLock::new(|| {
@@ -177,6 +182,17 @@ pub static DEFAULT_FILTER_PREFIXES: [&str; 82] = [
     "TUNTUR.MAX OY SKI BISTRO",
     "WOLT",
 ];
+
+/// Year and month the statement period ends in, which decides the year of each item.
+///
+/// Items only carry a day and a month,
+/// and an item in a later month than the period end is from the end of the previous year,
+/// such as a December purchase on a January statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatementMonth {
+    year: i32,
+    month: i32,
+}
 
 /// Intermediate parsed data before creating a `VisaItem`.
 /// Used during the parsing phase to handle year transitions.
@@ -341,8 +357,8 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
             )
             .bold()
         );
-        let (raw_lines, year) = read_xml_file(&file);
-        let items = extract_items(&raw_lines, year)?;
+        let (raw_lines, statement) = read_xml_file(&file);
+        let items = extract_items(&raw_lines, statement)?;
         if items.is_empty() {
             println!(" ({})", "0".yellow());
         } else {
@@ -371,14 +387,23 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
 }
 
 /// Read transaction lines from an XML file.
-fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
+///
+/// The statement month comes from the invoicing period end date,
+/// or from the delivery period start date when the period end is missing,
+/// and defaults to the end of the current year.
+fn read_xml_file(file: &Path) -> (Vec<String>, StatementMonth) {
     let mut lines: Vec<String> = Vec::new();
-    let mut year = i32::from(ZonedDateTime::now().year());
+    let mut start_month: Option<StatementMonth> = None;
+    let mut period_end_month: Option<StatementMonth> = None;
+    let default_month = StatementMonth {
+        year: i32::from(ZonedDateTime::now().year()),
+        month: 12,
+    };
     let xml_file = match File::open(file) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("{}", format!("Failed to open file: {}\n{}", file.display(), e).red());
-            return (lines, year);
+            return (lines, default_month);
         }
     };
 
@@ -408,13 +433,16 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
 
     // Process lines as UTF-8
     for line in cow.lines() {
-        if let Some(caps) = RE_START_DATE.captures(line)
-            && let Some(matched) = caps.get(1)
-        {
-            match matched.as_str().parse::<i32>() {
-                Ok(y) => year = y,
-                Err(e) => eprintln!("{}", format!("Failed to parse year from start date: {e}").red()),
+        if let Some(caps) = RE_START_DATE.captures(line) {
+            match statement_month(&caps) {
+                Some(month) => start_month = Some(month),
+                None => eprintln!("{}", "Failed to parse year and month from start date".red()),
             }
+        }
+        if let Some(caps) = RE_INVOICING_PERIOD_END_DATE.captures(line)
+            && let Some(month) = statement_month(&caps)
+        {
+            period_end_month = Some(month);
         }
         if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(line)
             && let Some(matched) = caps.get(1)
@@ -425,11 +453,18 @@ fn read_xml_file(file: &Path) -> (Vec<String>, i32) {
             }
         }
     }
-    (lines, year)
+    (lines, period_end_month.or(start_month).unwrap_or(default_month))
+}
+
+/// Read the year and month captured by a date regex.
+fn statement_month(captures: &regex::Captures<'_>) -> Option<StatementMonth> {
+    let year = captures.get(1)?.as_str().parse().ok()?;
+    let month = captures.get(2)?.as_str().parse().ok()?;
+    Some(StatementMonth { year, month })
 }
 
 /// Convert text lines to visa items.
-fn extract_items(rows: &[String], year: i32) -> Result<Vec<VisaItem>> {
+fn extract_items(rows: &[String], statement: StatementMonth) -> Result<Vec<VisaItem>> {
     let mut parsed_items: Vec<RawParsedItem> = Vec::new();
     for line in rows {
         let (date, name, sum) = split_item_text(line);
@@ -443,24 +478,12 @@ fn extract_items(rows: &[String], year: i32) -> Result<Vec<VisaItem>> {
         parsed_items.push(RawParsedItem { day, month, name, sum });
     }
 
-    // Determine if there's a transition from December to January.
-    let mut year_transition_detected = false;
-    let mut last_month: i32 = 0;
-    for item in &parsed_items {
-        if item.month == 1 && last_month == 12 {
-            year_transition_detected = true;
-            break;
-        }
-        last_month = item.month;
-    }
-
-    let previous_year = year - 1;
     let mut result: Vec<VisaItem> = Vec::new();
     for item in parsed_items {
-        let item_year = if item.month == 12 && year_transition_detected {
-            previous_year
+        let item_year = if item.month > statement.month {
+            statement.year - 1
         } else {
-            year
+            statement.year
         };
 
         match item.into_visa_item(item_year) {
@@ -1026,9 +1049,9 @@ mod test_read_xml_file {
     #[test]
     fn reads_sample_xml_file() {
         let path = Path::new("tests/fixtures/visa_sample.xml");
-        let (lines, year) = read_xml_file(path);
+        let (lines, statement) = read_xml_file(path);
 
-        assert_eq!(year, 2024);
+        assert_eq!(statement, StatementMonth { year: 2024, month: 3 });
         assert_eq!(lines.len(), 8);
 
         // Check that lines contain expected transaction patterns
@@ -1040,10 +1063,10 @@ mod test_read_xml_file {
     #[test]
     fn reads_year_transition_xml_file() {
         let path = Path::new("tests/fixtures/visa_year_transition.xml");
-        let (lines, year) = read_xml_file(path);
+        let (lines, statement) = read_xml_file(path);
 
-        // Year should be extracted from StartDate (2025 from 20250101)
-        assert_eq!(year, 2025);
+        // The statement month comes from the invoicing period end date 20250101
+        assert_eq!(statement, StatementMonth { year: 2025, month: 1 });
         assert_eq!(lines.len(), 6);
 
         // Check December and January transactions are present
@@ -1070,9 +1093,9 @@ mod test_extract_items {
             "05.02. Osto K-MARKET KAMPPI HELSINKI                                        25,50".to_string(),
             "08.02. Osto ALEPA MANNERHEIMINTIE HELSINKI                                  12,95".to_string(),
         ];
-        let year = 2024;
+        let statement = StatementMonth { year: 2024, month: 12 };
 
-        let items = extract_items(&lines, year).expect("should parse items");
+        let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].date, Date::new(2024, 2, 5).expect("valid date"));
@@ -1092,10 +1115,10 @@ mod test_extract_items {
             "02.01. Osto SPOTIFY AB STOCKHOLM                                             9,99".to_string(),
             "15.01. Osto ALEPA HELSINKI                                                  12,00".to_string(),
         ];
-        // Year from StartDate is 2025 (the new year)
-        let year = 2025;
+        // The statement period ends in January 2025
+        let statement = StatementMonth { year: 2025, month: 1 };
 
-        let items = extract_items(&lines, year).expect("should parse items");
+        let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 4);
 
@@ -1115,9 +1138,9 @@ mod test_extract_items {
             "15.02. Osto ALEPA HELSINKI                                                  12,95".to_string(),
             "28.02. Osto WOLT HELSINKI                                                   18,90".to_string(),
         ];
-        let year = 2024;
+        let statement = StatementMonth { year: 2024, month: 12 };
 
-        let items = extract_items(&lines, year).expect("should parse items");
+        let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 3);
         // All items should be in 2024
@@ -1129,9 +1152,9 @@ mod test_extract_items {
     #[test]
     fn handles_empty_lines() {
         let lines: Vec<String> = vec![];
-        let year = 2024;
+        let statement = StatementMonth { year: 2024, month: 12 };
 
-        let items = extract_items(&lines, year).expect("should handle empty");
+        let items = extract_items(&lines, statement).expect("should handle empty");
 
         assert_eq!(items, [] as [VisaItem; 0]);
     }
@@ -1229,8 +1252,8 @@ mod test_integration_xml_parsing {
     #[test]
     fn parses_sample_xml_end_to_end() {
         let path = Path::new("tests/fixtures/visa_sample.xml");
-        let (lines, year) = read_xml_file(path);
-        let items = extract_items(&lines, year).expect("should parse items");
+        let (lines, statement) = read_xml_file(path);
+        let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 8);
 
@@ -1254,8 +1277,8 @@ mod test_integration_xml_parsing {
     #[test]
     fn parses_year_transition_xml_end_to_end() {
         let path = Path::new("tests/fixtures/visa_year_transition.xml");
-        let (lines, year) = read_xml_file(path);
-        let items = extract_items(&lines, year).expect("should parse items");
+        let (lines, statement) = read_xml_file(path);
+        let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 6);
 
@@ -1275,10 +1298,33 @@ mod test_integration_xml_parsing {
     }
 
     #[test]
+    fn december_purchases_in_a_january_statement_belong_to_the_previous_year() {
+        let fixture = std::fs::read_to_string("tests/fixtures/visa_year_transition.xml").expect("fixture");
+        let without_january = fixture
+            .lines()
+            .filter(|line| {
+                !line.contains("<SpecificationFreeText>0") && !line.contains("<SpecificationFreeText>15.01.")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("december_only.xml");
+        std::fs::write(&path, without_january).expect("write");
+
+        let (lines, statement) = read_xml_file(&path);
+        let items = extract_items(&lines, statement).expect("should parse items");
+
+        assert_eq!(items.len(), 3);
+        for item in &items {
+            assert_eq!((item.date.year(), item.date.month()), (2024, 12), "{item}");
+        }
+    }
+
+    #[test]
     fn calculates_correct_totals_from_sample() {
         let path = Path::new("tests/fixtures/visa_sample.xml");
-        let (lines, year) = read_xml_file(path);
-        let items = extract_items(&lines, year).expect("should parse items");
+        let (lines, statement) = read_xml_file(path);
+        let items = extract_items(&lines, statement).expect("should parse items");
         let totals = calculate_totals_for_each_name(&items);
 
         // Total sum should match the expected value
@@ -1709,9 +1755,9 @@ mod test_extract_items_edge_cases {
     #[test]
     fn handles_single_digit_day_and_month() {
         let lines = vec!["05.02. Osto STORE  10,00".to_string()];
-        let year = 2024;
+        let statement = StatementMonth { year: 2024, month: 12 };
 
-        let items = extract_items(&lines, year).expect("should parse");
+        let items = extract_items(&lines, statement).expect("should parse");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].date.day(), 5);
         assert_eq!(items[0].date.month(), 2);
@@ -1720,9 +1766,9 @@ mod test_extract_items_edge_cases {
     #[test]
     fn handles_double_digit_day_and_month() {
         let lines = vec!["15.12. Osto STORE  10,00".to_string()];
-        let year = 2024;
+        let statement = StatementMonth { year: 2024, month: 12 };
 
-        let items = extract_items(&lines, year).expect("should parse");
+        let items = extract_items(&lines, statement).expect("should parse");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].date.day(), 15);
         assert_eq!(items[0].date.month(), 12);
@@ -1731,18 +1777,18 @@ mod test_extract_items_edge_cases {
     #[test]
     fn returns_error_for_invalid_date_format() {
         let lines = vec!["invalid date format  10,00".to_string()];
-        let year = 2024;
+        let statement = StatementMonth { year: 2024, month: 12 };
 
-        let result = extract_items(&lines, year);
+        let result = extract_items(&lines, statement);
         assert!(result.is_err());
     }
 
     #[test]
     fn returns_error_for_invalid_sum() {
         let lines = vec!["05.02. Osto STORE  not_a_number".to_string()];
-        let year = 2024;
+        let statement = StatementMonth { year: 2024, month: 12 };
 
-        let result = extract_items(&lines, year);
+        let result = extract_items(&lines, statement);
         assert!(result.is_err());
     }
 }
