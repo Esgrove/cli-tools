@@ -1,0 +1,625 @@
+//! Safe file handling shared by the tools that rename, move, and copy files.
+//!
+//! Provides same file detection, case only rename detection,
+//! a collision aware rename that never replaces a different file unless asked to,
+//! destination reservations for detecting collisions within one batch,
+//! and a recursive directory copy that refuses to copy a directory into itself.
+
+use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::append_extension_to_path;
+
+/// What to do when a rename target already exists and is a different file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverwritePolicy {
+    /// Leave both files in place and report the rename as skipped.
+    Skip,
+    /// Replace the existing target file. Existing directories are never replaced.
+    Overwrite,
+    /// Return an `AlreadyExists` error.
+    Error,
+}
+
+/// Result of a [`safe_rename`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameOutcome {
+    /// Source and target are the same entry with the same name, so nothing was done.
+    Unchanged,
+    /// The source was renamed to the target.
+    Renamed,
+    /// The source was renamed to a different spelling of its own name through a temporary name,
+    /// for example a capitalization only change on a case-insensitive file system.
+    CaseRenamed,
+    /// The target is a different existing file and the policy was [`OverwritePolicy::Skip`].
+    SkippedExisting,
+}
+
+/// Planned destination paths for one batch of renames or moves.
+///
+/// Paths are compared case-insensitively, so two sources
+/// that would land on names differing only by case count as a collision on every file system.
+#[derive(Debug, Default, Clone)]
+pub struct TargetReservations {
+    reserved: HashSet<String>,
+}
+
+impl TargetReservations {
+    /// Create an empty set of reservations.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reserve a destination path.
+    ///
+    /// Returns `false` when the path, or a path differing only by case, is already reserved.
+    pub fn reserve(&mut self, path: &Path) -> bool {
+        self.reserved.insert(Self::key(path))
+    }
+
+    /// Check whether a path, or a path differing only by case, is already reserved.
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        self.reserved.contains(&Self::key(path))
+    }
+
+    /// Comparison key for a path.
+    fn key(path: &Path) -> String {
+        path.to_string_lossy().to_lowercase()
+    }
+}
+
+/// Check whether two paths refer to the same filesystem entry.
+///
+/// Symbolic links are followed, so a link and its target count as the same file.
+/// Paths that do not exist never refer to the same file unless they are identical.
+#[must_use]
+pub fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    paths_refer_to_same_file_by_metadata(left, right) || paths_refer_to_same_file_by_canonical_path(left, right)
+}
+
+/// Check whether the target only changes the capitalization of the source file name.
+///
+/// Both paths must share the same parent directory,
+/// and the file names must differ but be equal after Unicode lowercasing.
+/// Names that are not valid UTF-8 never count as a case only change.
+#[must_use]
+pub fn is_case_only_change(source: &Path, target: &Path) -> bool {
+    if source.parent() != target.parent() {
+        return false;
+    }
+    let (Some(source_name), Some(target_name)) = (
+        source.file_name().and_then(|name| name.to_str()),
+        target.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return false;
+    };
+
+    source_name != target_name && source_name.to_lowercase() == target_name.to_lowercase()
+}
+
+/// Check whether a directory lives on a case-sensitive file system.
+///
+/// Creates and removes a small probe file inside the directory.
+///
+/// # Errors
+/// Returns an error if the probe file cannot be created or removed.
+pub fn directory_is_case_sensitive(directory: &Path) -> io::Result<bool> {
+    let probe = unique_sibling_path(&directory.join(".case-probe"), "tmp");
+    fs::write(&probe, b"")?;
+    let upper_name = probe
+        .file_name()
+        .map_or_default(|name| name.to_string_lossy().to_uppercase());
+    let case_sensitive = fs::symlink_metadata(directory.join(upper_name)).is_err();
+    fs::remove_file(&probe)?;
+    Ok(case_sensitive)
+}
+
+/// Rename `source` to `target` without silently replacing a different file.
+///
+/// - Identical paths return [`RenameOutcome::Unchanged`].
+/// - When the target already exists and is the source itself under a different spelling,
+///   such as a capitalization only change on a case-insensitive file system,
+///   the rename goes through a temporary sibling name so the new spelling is applied.
+/// - When the target is a different existing entry, the `policy` decides.
+///   An existing directory is never replaced.
+///
+/// The existence check and the rename are separate system calls,
+/// so a file created at the target in between can still be replaced.
+///
+/// # Errors
+/// Returns an error if a rename fails,
+/// or if the target is a different existing entry and the policy is [`OverwritePolicy::Error`],
+/// or the policy is [`OverwritePolicy::Overwrite`] and the target is a directory.
+pub fn safe_rename(source: &Path, target: &Path, policy: OverwritePolicy) -> io::Result<RenameOutcome> {
+    if source == target {
+        return Ok(RenameOutcome::Unchanged);
+    }
+
+    if let Ok(target_metadata) = fs::symlink_metadata(target) {
+        if paths_refer_to_same_entry(source, target) {
+            if source.file_name() == target.file_name() {
+                return Ok(RenameOutcome::Unchanged);
+            }
+            rename_through_temporary(source, target)?;
+            return Ok(RenameOutcome::CaseRenamed);
+        }
+
+        match policy {
+            OverwritePolicy::Skip => return Ok(RenameOutcome::SkippedExisting),
+            OverwritePolicy::Error => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("Target already exists: {}", target.display()),
+                ));
+            }
+            OverwritePolicy::Overwrite => {
+                if target_metadata.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::IsADirectory,
+                        format!("Refusing to replace existing directory: {}", target.display()),
+                    ));
+                }
+            }
+        }
+    }
+
+    fs::rename(source, target)?;
+    Ok(RenameOutcome::Renamed)
+}
+
+/// Recursively copy a directory and its contents, keeping file modification times.
+///
+/// Symbolic links are recreated as links on Unix instead of being followed.
+///
+/// # Errors
+/// Returns an `InvalidInput` error without copying anything when the target is the source
+/// or lies inside it, since the copy would never finish.
+/// Otherwise returns an error if directory creation, reading, or file copying fails.
+pub fn copy_dir_recursive(source: &Path, target: &Path) -> io::Result<()> {
+    let canonical_source = dunce::canonicalize(source)?;
+    let canonical_target = canonicalize_existing_prefix(target)?;
+    if canonical_target.starts_with(&canonical_source) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Cannot copy directory {} into itself at {}",
+                source.display(),
+                target.display()
+            ),
+        ));
+    }
+
+    copy_dir_contents(source, target)
+}
+
+/// Copy directory contents after the caller has checked that the target is outside the source.
+fn copy_dir_contents(source: &Path, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target)?;
+
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            copy_dir_contents(&source_path, &target_path)?;
+        } else if file_type.is_symlink() {
+            copy_symlink(&source_path, &target_path)?;
+        } else {
+            copy_file_with_times(&source_path, &target_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy one file, keeping its permissions and modification time.
+///
+/// # Errors
+/// Returns an error if the copy fails or the modification time cannot be read or set.
+pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
+    let bytes = fs::copy(source, target)?;
+    let modified = fs::metadata(source)?.modified()?;
+    fs::File::options().write(true).open(target)?.set_modified(modified)?;
+    Ok(bytes)
+}
+
+/// Recreate a symbolic link at the target.
+#[cfg(unix)]
+fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
+    let link_target = fs::read_link(source)?;
+    std::os::unix::fs::symlink(link_target, target)
+}
+
+/// Copy the file a symbolic link points to, since creating links needs extra privileges on Windows.
+#[cfg(not(unix))]
+fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
+    copy_file_with_times(source, target).map(|_| ())
+}
+
+/// Canonicalize the longest existing prefix of a path and append the remaining components.
+fn canonicalize_existing_prefix(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    let mut remaining = Vec::new();
+    let mut current = absolute.as_path();
+    loop {
+        if let Ok(canonical) = dunce::canonicalize(current) {
+            return Ok(remaining.iter().rev().fold(canonical, |path, part| path.join(part)));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                remaining.push(name.to_os_string());
+                current = parent;
+            }
+            _ => return Ok(absolute),
+        }
+    }
+}
+
+/// Rename through a unique temporary sibling of the target, for spelling only changes.
+fn rename_through_temporary(source: &Path, target: &Path) -> io::Result<()> {
+    let temporary = unique_sibling_path(target, "rename-tmp");
+    fs::rename(source, &temporary)?;
+    if let Err(error) = fs::rename(&temporary, target) {
+        // Put the source back under its original name so nothing is left behind under the temporary name.
+        let _ = fs::rename(&temporary, source);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Return a path next to `path` with the given extension appended that does not exist yet.
+fn unique_sibling_path(path: &Path, extension: &str) -> PathBuf {
+    let mut candidate = append_extension_to_path(path, extension);
+    let mut counter = 1_u32;
+    while fs::symlink_metadata(&candidate).is_ok() {
+        candidate = append_extension_to_path(path, format!("{counter}.{extension}"));
+        counter += 1;
+    }
+    candidate
+}
+
+/// Check whether two existing paths name the same directory entry without following a final symbolic link.
+#[cfg(unix)]
+fn paths_refer_to_same_entry(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (fs::symlink_metadata(left), fs::symlink_metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
+}
+
+/// Check whether two existing paths name the same directory entry.
+#[cfg(not(unix))]
+fn paths_refer_to_same_entry(left: &Path, right: &Path) -> bool {
+    paths_refer_to_same_file(left, right)
+}
+
+/// Compare device and inode numbers, following symbolic links.
+#[cfg(unix)]
+fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (fs::metadata(left), fs::metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
+    let Some(left_id) = windows_file_id(left) else {
+        return false;
+    };
+    let Some(right_id) = windows_file_id(right) else {
+        return false;
+    };
+
+    left_id == right_id
+}
+
+#[cfg(windows)]
+fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+    };
+
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+
+    // SAFETY: The path buffer is null terminated and lives for the duration of the calls.
+    // The handle returned by CreateFileW is closed before returning when it is valid.
+    #[allow(unsafe_code)]
+    unsafe {
+        let handle = CreateFileW(
+            path_wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+
+        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
+        let result = GetFileInformationByHandle(handle, &raw mut information);
+        _ = CloseHandle(handle);
+
+        (result != 0).then_some((
+            information.dwVolumeSerialNumber,
+            information.nFileIndexHigh,
+            information.nFileIndexLow,
+        ))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+const fn paths_refer_to_same_file_by_metadata(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
+fn paths_refer_to_same_file_by_canonical_path(left: &Path, right: &Path) -> bool {
+    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod test_case_only_change {
+    use super::*;
+
+    #[test]
+    fn detects_capitalization_change_in_same_directory() {
+        assert!(is_case_only_change(
+            Path::new("dir/Photo.JPG"),
+            Path::new("dir/Photo.jpg")
+        ));
+        assert!(is_case_only_change(
+            Path::new("dir/ärrä.txt"),
+            Path::new("dir/ÄRRÄ.txt")
+        ));
+    }
+
+    #[test]
+    fn rejects_identical_names_other_directories_and_different_names() {
+        assert!(!is_case_only_change(Path::new("dir/a.txt"), Path::new("dir/a.txt")));
+        assert!(!is_case_only_change(Path::new("one/a.txt"), Path::new("two/A.txt")));
+        assert!(!is_case_only_change(Path::new("dir/a.txt"), Path::new("dir/b.txt")));
+    }
+}
+
+#[cfg(test)]
+mod test_safe_rename {
+    use super::*;
+
+    use tempfile::TempDir;
+
+    #[test]
+    fn renames_to_free_target() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        let target = directory.path().join("b.txt");
+        fs::write(&source, "a").expect("write");
+
+        let outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("rename");
+
+        assert_eq!(outcome, RenameOutcome::Renamed);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(&target).expect("read"), "a");
+    }
+
+    #[test]
+    fn identical_paths_are_unchanged() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        fs::write(&source, "a").expect("write");
+
+        let outcome = safe_rename(&source, &source, OverwritePolicy::Overwrite).expect("rename");
+
+        assert_eq!(outcome, RenameOutcome::Unchanged);
+        assert_eq!(fs::read_to_string(&source).expect("read"), "a");
+    }
+
+    #[test]
+    fn case_only_rename_applies_new_spelling() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("Photo.JPG");
+        let target = directory.path().join("Photo.jpg");
+        fs::write(&source, "photo").expect("write");
+
+        let outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("rename");
+
+        assert!(matches!(outcome, RenameOutcome::Renamed | RenameOutcome::CaseRenamed));
+        let names: Vec<String> = fs::read_dir(directory.path())
+            .expect("read dir")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["Photo.jpg".to_string()]);
+        assert_eq!(fs::read_to_string(&target).expect("read"), "photo");
+    }
+
+    #[test]
+    fn different_file_differing_by_case_is_not_replaced() {
+        let directory = TempDir::new().expect("temp directory");
+        if !directory_is_case_sensitive(directory.path()).expect("probe") {
+            return;
+        }
+        let source = directory.path().join("Photo.JPG");
+        let target = directory.path().join("Photo.jpg");
+        fs::write(&source, "upper").expect("write");
+        fs::write(&target, "original").expect("write");
+
+        let outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("rename");
+
+        assert_eq!(outcome, RenameOutcome::SkippedExisting);
+        assert_eq!(fs::read_to_string(&source).expect("read"), "upper");
+        assert_eq!(fs::read_to_string(&target).expect("read"), "original");
+    }
+
+    #[test]
+    fn skip_policy_keeps_both_files() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        let target = directory.path().join("b.txt");
+        fs::write(&source, "a").expect("write");
+        fs::write(&target, "b").expect("write");
+
+        let outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("rename");
+
+        assert_eq!(outcome, RenameOutcome::SkippedExisting);
+        assert_eq!(fs::read_to_string(&source).expect("read"), "a");
+        assert_eq!(fs::read_to_string(&target).expect("read"), "b");
+    }
+
+    #[test]
+    fn error_policy_returns_already_exists() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        let target = directory.path().join("b.txt");
+        fs::write(&source, "a").expect("write");
+        fs::write(&target, "b").expect("write");
+
+        let error = safe_rename(&source, &target, OverwritePolicy::Error).expect_err("should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&target).expect("read"), "b");
+    }
+
+    #[test]
+    fn overwrite_policy_replaces_different_file() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        let target = directory.path().join("b.txt");
+        fs::write(&source, "a").expect("write");
+        fs::write(&target, "b").expect("write");
+
+        let outcome = safe_rename(&source, &target, OverwritePolicy::Overwrite).expect("rename");
+
+        assert_eq!(outcome, RenameOutcome::Renamed);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(&target).expect("read"), "a");
+    }
+
+    #[test]
+    fn overwrite_policy_never_replaces_directory() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("a");
+        let target = directory.path().join("b");
+        fs::create_dir(&source).expect("create");
+        fs::create_dir(&target).expect("create");
+        fs::write(target.join("keep.txt"), "keep").expect("write");
+
+        let error = safe_rename(&source, &target, OverwritePolicy::Overwrite).expect_err("should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::IsADirectory);
+        assert_eq!(fs::read_to_string(target.join("keep.txt")).expect("read"), "keep");
+    }
+
+    #[test]
+    fn hard_link_to_source_keeps_data() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        let target = directory.path().join("b.txt");
+        fs::write(&source, "a").expect("write");
+        fs::hard_link(&source, &target).expect("hard link");
+
+        assert!(paths_refer_to_same_file(&source, &target));
+        safe_rename(&source, &target, OverwritePolicy::Skip).expect("rename");
+
+        assert_eq!(fs::read_to_string(&target).expect("read"), "a");
+    }
+}
+
+#[cfg(test)]
+mod test_target_reservations {
+    use super::*;
+
+    #[test]
+    fn detects_repeated_and_case_variant_targets() {
+        let mut reservations = TargetReservations::new();
+
+        assert!(reservations.reserve(Path::new("dir/movie.x265.mp4")));
+        assert!(!reservations.reserve(Path::new("dir/movie.x265.mp4")));
+        assert!(!reservations.reserve(Path::new("dir/Movie.X265.mp4")));
+        assert!(reservations.contains(Path::new("DIR/movie.x265.mp4")));
+        assert!(reservations.reserve(Path::new("dir/other.mp4")));
+    }
+}
+
+#[cfg(test)]
+mod test_copy_dir_recursive {
+    use super::*;
+
+    use tempfile::TempDir;
+
+    #[test]
+    fn copies_nested_contents_and_modification_times() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join("nested")).expect("create");
+        fs::write(source.join("nested").join("file.txt"), "content").expect("write");
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(source.join("nested").join("file.txt"))
+            .expect("open")
+            .set_modified(old_time)
+            .expect("set time");
+        let target = directory.path().join("target");
+
+        copy_dir_recursive(&source, &target).expect("copy");
+
+        let copied = target.join("nested").join("file.txt");
+        assert_eq!(fs::read_to_string(&copied).expect("read"), "content");
+        assert_eq!(
+            fs::metadata(&copied).expect("metadata").modified().expect("time"),
+            old_time
+        );
+    }
+
+    #[test]
+    fn refuses_to_copy_into_own_child() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("Show");
+        fs::create_dir_all(source.join("Show")).expect("create");
+        fs::write(source.join("episode.mkv"), "video").expect("write");
+
+        let error = copy_dir_recursive(&source, &source.join("Show").join("Show")).expect_err("should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!source.join("Show").join("Show").exists());
+    }
+
+    #[test]
+    fn refuses_to_copy_onto_itself() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("Show");
+        fs::create_dir_all(&source).expect("create");
+
+        let error = copy_dir_recursive(&source, &source).expect_err("should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+}

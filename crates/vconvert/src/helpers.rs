@@ -38,22 +38,6 @@ pub fn temporary_output_path(output: &Path) -> PathBuf {
     cli_tools_common::get_unique_path(parent, &temporary_filename, &temporary_stem, &extension)
 }
 
-/// Return true when two paths resolve to the same filesystem entry.
-pub fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    let Ok(left) = std::fs::canonicalize(left) else {
-        return false;
-    };
-    let Ok(right) = std::fs::canonicalize(right) else {
-        return false;
-    };
-
-    left == right
-}
-
 /// Check that the output volume has enough free space for the given file.
 ///
 /// Requires at least `MIN_DISK_SPACE_FACTOR` times the original file size to be free.
@@ -220,7 +204,9 @@ mod test_unique_output_paths {
 
 #[cfg(test)]
 mod test_path_identity {
-    use super::*;
+    use std::path::Path;
+
+    use cli_tools_common::paths_refer_to_same_file;
     use tempfile::tempdir;
 
     #[test]

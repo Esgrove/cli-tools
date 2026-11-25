@@ -127,6 +127,8 @@ A binary only crate keeps its binary in `src/main.rs`.
 - `crates/common/` → `cli-tools-common` - Shared helpers used by every tool:
     - `lib.rs` - Print macros like `print_error!`, path resolution, formatting, user config path, shell completion
     - `utils.rs` - Shared path and text helpers (path to display string, relative paths, glob to regex)
+    - `file_handling.rs` - Same file detection, collision aware and case only renames, batch target reservations,
+      and recursive directory copy
     - `diff.rs` - Coloured diff rendering (`color_diff` and `show_diff` for renames, `diff_lines` for files)
     - `date.rs` - Date parsing and formatting utilities
     - `simd.rs` - SIMD byte scanning kernels on `fearless_simd`

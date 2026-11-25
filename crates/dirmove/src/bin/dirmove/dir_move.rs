@@ -543,7 +543,7 @@ impl DirMove {
                 }
             }
             if std::fs::rename(&entry_path, &target_path).is_err() {
-                utils::copy_dir_recursive(&entry_path, &target_path)?;
+                cli_tools_common::copy_dir_recursive(&entry_path, &target_path)?;
                 std::fs::remove_dir_all(&entry_path)?;
             }
             moved_count += 1;
@@ -830,7 +830,7 @@ impl DirMove {
         // Try rename first (fast, same filesystem).
         // Fall back to recursive copy + remove for cross-device moves.
         if std::fs::rename(source, target).is_err() {
-            utils::copy_dir_recursive(source, target)?;
+            cli_tools_common::copy_dir_recursive(source, target)?;
             std::fs::remove_dir_all(source)?;
         }
 

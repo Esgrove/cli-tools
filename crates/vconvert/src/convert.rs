@@ -28,7 +28,6 @@ use crate::database::{Database, PendingAction};
 use crate::ffmpeg::probe_video_info;
 use crate::helpers::{
     backup_output_path, duration_difference_ratio, format_duplicate_duration_match, has_enough_disk_space,
-    paths_refer_to_same_file,
 };
 use crate::logger::FileLogger;
 use crate::stats::{AnalysisStats, ConversionStats, RunStats};
@@ -715,7 +714,7 @@ impl VideoConvert {
                             source_duration,
                         } => {
                             if self.config.delete_duplicates {
-                                if paths_refer_to_same_file(&file.path, target_path) {
+                                if cli_tools_common::paths_refer_to_same_file(&file.path, target_path) {
                                     print_error!(
                                         "Refusing to delete duplicate because source and target are the same file:\n  {}",
                                         cli_tools_common::path_to_string_relative(&file.path)

@@ -8,11 +8,16 @@
 pub mod date;
 #[cfg(feature = "diff")]
 pub mod diff;
+pub mod file_handling;
 pub mod simd;
 pub mod utils;
 
 #[cfg(feature = "diff")]
 pub use diff::{color_diff, diff_lines, show_diff};
+pub use file_handling::{
+    OverwritePolicy, RenameOutcome, TargetReservations, copy_dir_recursive, copy_file_with_times,
+    directory_is_case_sensitive, is_case_only_change, paths_refer_to_same_file, safe_rename,
+};
 pub use utils::{
     command_exists, find_command, get_relative_path_from_current_working_directory, get_relative_path_or_filename,
     glob_to_regex, leading_whitespace, lowercase_extension, os_str_to_string, path_to_file_extension_string,
@@ -851,81 +856,6 @@ pub fn get_unique_path(dir: &Path, filename: &str, stem: &str, extension: &str) 
     }
 
     path
-}
-
-/// Check whether two paths refer to the same filesystem entry.
-#[must_use]
-pub fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    paths_refer_to_same_file_by_metadata(left, right) || paths_refer_to_same_file_by_canonical_path(left, right)
-}
-
-#[cfg(windows)]
-fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
-    let Some(left_id) = windows_file_id(left) else {
-        return false;
-    };
-    let Some(right_id) = windows_file_id(right) else {
-        return false;
-    };
-
-    left_id == right_id
-}
-
-#[cfg(windows)]
-fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
-    use std::os::windows::ffi::OsStrExt;
-
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
-    };
-
-    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-
-    // SAFETY: The path buffer is null terminated and lives for the duration of the calls.
-    // The handle returned by CreateFileW is closed before returning when it is valid.
-    #[allow(unsafe_code)]
-    unsafe {
-        let handle = CreateFileW(
-            path_wide.as_ptr(),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
-            std::ptr::null_mut(),
-        );
-        if handle == INVALID_HANDLE_VALUE {
-            return None;
-        }
-
-        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
-        let result = GetFileInformationByHandle(handle, &raw mut information);
-        _ = CloseHandle(handle);
-
-        (result != 0).then_some((
-            information.dwVolumeSerialNumber,
-            information.nFileIndexHigh,
-            information.nFileIndexLow,
-        ))
-    }
-}
-
-#[cfg(not(windows))]
-const fn paths_refer_to_same_file_by_metadata(_left: &Path, _right: &Path) -> bool {
-    false
-}
-
-fn paths_refer_to_same_file_by_canonical_path(left: &Path, right: &Path) -> bool {
-    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
 }
 
 /// Format a Unix timestamp as a local datetime string.

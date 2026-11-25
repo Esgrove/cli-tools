@@ -1,7 +1,6 @@
 //! Filename normalization, grouping, and directory utility helpers for `dirmove`.
 
 use std::borrow::Cow;
-use std::path::Path;
 
 use super::prefix_index::PrefixIndex;
 use super::types::{FileInfo, FilteredParts, PrefixCandidate};
@@ -21,28 +20,6 @@ pub const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
 #[must_use]
 pub fn normalize_name(name: &str) -> String {
     name.to_lowercase().replace([' ', '.'], "")
-}
-
-/// Recursively copy a directory and its contents.
-///
-/// # Errors
-///
-/// Returns an error if directory creation, reading, or file copying fails.
-pub fn copy_dir_recursive(source: &Path, target: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(target)?;
-
-    for entry in std::fs::read_dir(source)?.filter_map(Result::ok) {
-        let src_path = entry.path();
-        let dst_path = target.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-
-    Ok(())
 }
 
 /// Filter out dot-separated parts that contain only numeric digits, resolution patterns, or glue words.
