@@ -40,6 +40,8 @@ diff = ["dep:difference"]
 test-support = ["dep:tempfile"]
 
 [dev-dependencies]
+fearless_simd = { workspace = true, features = ["force_support_fallback"] }
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread"] }
 toml = { workspace = true }
 tempfile = { workspace = true }

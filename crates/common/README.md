@@ -14,6 +14,9 @@ Enable it from a dev-dependency:
 cli-tools-common = { workspace = true, features = ["test-support"] }
 ```
 
+Property tests in `tests/common_property_tests.rs` and the `simd` module check the helpers against plain reference code,
+including the scalar fallback of every SIMD kernel.
+
 ```shell
 cargo test -p cli-tools-common
 ```

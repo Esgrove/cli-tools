@@ -293,10 +293,11 @@ fn bits_where(bytes: &[u8], matches: impl Fn(u8) -> bool) -> u64 {
 mod test_helpers {
     use fearless_simd::Level;
 
-    /// Every SIMD level this machine supports, so the tests cover each vector width.
+    /// Every SIMD level this machine supports and the scalar fallback,
+    /// so the tests cover each vector width and the path machines without SIMD take.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub(super) fn test_levels() -> Vec<Level> {
-        let mut levels = vec![Level::new()];
+        let mut levels = vec![Level::new(), Level::fallback()];
         let level = Level::new();
         levels.extend(level.as_sse2().map(Level::Sse2));
         levels.extend(level.as_sse4_2().map(Level::Sse4_2));
@@ -305,10 +306,11 @@ mod test_helpers {
         levels
     }
 
-    /// Every SIMD level this machine supports, so the tests cover each vector width.
+    /// The native SIMD level and the scalar fallback,
+    /// so the tests cover both the vector path and the path machines without SIMD take.
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     pub(super) fn test_levels() -> Vec<Level> {
-        vec![Level::new()]
+        vec![Level::new(), Level::fallback()]
     }
 
     /// Deterministic mixed ASCII and multibyte strings of every length up to about 200 bytes.
@@ -460,5 +462,81 @@ mod test_byte_positions {
     fn public_function_returns_positions() {
         assert_eq!(byte_positions(b"A.B.C", b'.'), vec![1, 3]);
         assert_eq!(byte_positions(b"", b'.'), [] as [usize; 0]);
+    }
+}
+
+#[cfg(test)]
+mod test_kernel_properties {
+    use proptest::prelude::*;
+
+    use super::test_helpers::*;
+    use super::*;
+
+    /// Bytes drawn mostly from a small alphabet so set members and adjacent pairs are common,
+    /// with lengths spanning several 16, 32, and 64 byte blocks.
+    fn bytes_strategy() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(
+            prop_oneof![
+                4 => prop::sample::select(b"._- \t#ab".to_vec()),
+                1 => any::<u8>(),
+            ],
+            0..300,
+        )
+    }
+
+    /// Up to four bytes to search for.
+    fn set_strategy() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(prop_oneof![prop::sample::select(b"._- #".to_vec()), any::<u8>()], 0..4)
+    }
+
+    proptest! {
+        #[test]
+        fn count_chars_matches_std(text in "\\PC{0,200}") {
+            for level in test_levels() {
+                let continuation = dispatch!(level, simd => count_continuation_or_byte(simd, text.as_bytes(), 0x80));
+                prop_assert_eq!(text.len() - continuation, text.chars().count(), "{:?}", level);
+            }
+        }
+
+        #[test]
+        fn count_chars_excluding_matches_std(text in "[._a-z é😀]{0,200}") {
+            for level in test_levels() {
+                let excluded = dispatch!(level, simd => count_continuation_or_byte(simd, text.as_bytes(), b'.'));
+                let expected = text.chars().filter(|character| *character != '.').count();
+                prop_assert_eq!(text.len() - excluded, expected, "{:?}", level);
+            }
+        }
+
+        #[test]
+        fn find_first_of_matches_position(bytes in bytes_strategy(), set in set_strategy()) {
+            let expected = bytes.iter().position(|byte| set.contains(byte));
+            for level in test_levels() {
+                let found = dispatch!(level, simd => find_first_of(simd, &bytes, &set));
+                prop_assert_eq!(found, expected, "{:?}", level);
+            }
+        }
+
+        #[test]
+        fn adjacent_of_matches_windows(bytes in bytes_strategy(), set in set_strategy()) {
+            let expected = bytes.windows(2).any(|pair| pair.iter().all(|byte| set.contains(byte)));
+            for level in test_levels() {
+                let adjacent = dispatch!(level, simd => adjacent_of(simd, &bytes, &set));
+                prop_assert_eq!(adjacent, expected, "{:?}", level);
+            }
+        }
+
+        #[test]
+        fn push_positions_matches_enumerate(bytes in bytes_strategy(), needle in prop::sample::select(b".# a".to_vec())) {
+            let expected: Vec<usize> = bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, byte)| (*byte == needle).then_some(index))
+                .collect();
+            for level in test_levels() {
+                let mut positions = Vec::new();
+                dispatch!(level, simd => push_positions(simd, &bytes, needle, &mut positions));
+                prop_assert_eq!(&positions, &expected, "{:?}", level);
+            }
+        }
     }
 }
