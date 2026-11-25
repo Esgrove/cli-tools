@@ -184,6 +184,16 @@ impl Config {
             .into_iter()
             .chain(cli_mappings)
             .map(|pair| CustomMapping::new(&pair[0], &pair[1]))
+            // An empty pattern would match every file and keep every later mapping from applying.
+            .filter(|mapping| {
+                if mapping.pattern.is_empty() {
+                    eprintln!(
+                        "Warning: Ignoring custom mapping to '{}' with a pattern that is empty after normalization",
+                        mapping.directory
+                    );
+                }
+                !mapping.pattern.is_empty()
+            })
             .collect();
 
         let ignored_group_names: Vec<String> = user_config
@@ -882,6 +892,16 @@ mod cli_args_tests {
     use super::*;
     use crate::config::Config;
     use clap::Parser;
+
+    #[test]
+    fn a_mapping_pattern_that_normalizes_to_nothing_is_dropped() {
+        let args = DirMoveArgs::try_parse_from(["test", "-M", ". :Everything", "-M", "foo:Foo"]).expect("should parse");
+
+        let config = Config::from_args_default_config(args);
+
+        assert_eq!(config.custom_mappings.len(), 1);
+        assert_eq!(config.custom_mappings[0].pattern, "foo");
+    }
 
     #[test]
     fn parses_multiple_include_patterns() {
