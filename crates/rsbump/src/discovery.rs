@@ -74,6 +74,25 @@ pub fn find_dockerfiles(root: &Path, other_roots: &[PathBuf]) -> Vec<PathBuf> {
     dockerfiles
 }
 
+/// Find the member manifests of a workspace, without the root manifest and without nested project roots.
+#[must_use]
+pub fn find_member_manifests(root: &Path, other_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let root_manifest = root.join("Cargo.toml");
+    let mut manifests: Vec<PathBuf> = WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|entry| {
+            !should_skip(entry, &EXCLUDED_DIRECTORIES)
+                && (entry.depth() == 0 || !other_roots.iter().any(|other| other.as_path() == entry.path()))
+        })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.file_name() == "Cargo.toml")
+        .map(DirEntry::into_path)
+        .filter(|path| *path != root_manifest)
+        .collect();
+    manifests.sort();
+    manifests
+}
+
 /// Map a directory holding a `Cargo.toml` to its project root.
 ///
 /// The directory is its own root when its manifest defines a workspace.
@@ -120,6 +139,28 @@ mod test_find_projects {
         let temp = TempDir::new().expect("temp dir");
         let root = temp.path().canonicalize().expect("canonical temp dir");
         (temp, root)
+    }
+
+    #[test]
+    fn member_manifests_skip_the_root_build_output_and_nested_projects() {
+        let (_temp, root) = canonical_temp_dir();
+        let workspace = root.join("ws");
+        write(&root, "ws/Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+        write(&root, "ws/crates/a/Cargo.toml", "[package]\nname = \"a\"\n");
+        write(&root, "ws/crates/b/Cargo.toml", "[package]\nname = \"b\"\n");
+        write(&root, "ws/target/package/c/Cargo.toml", "[package]\nname = \"c\"\n");
+        write(&root, "ws/nested/Cargo.toml", "[workspace]\n");
+        write(&root, "ws/nested/d/Cargo.toml", "[package]\nname = \"d\"\n");
+
+        let members = find_member_manifests(&workspace, &[workspace.clone(), workspace.join("nested")]);
+
+        assert_eq!(
+            members,
+            vec![
+                workspace.join("crates/a/Cargo.toml"),
+                workspace.join("crates/b/Cargo.toml")
+            ]
+        );
     }
 
     #[test]

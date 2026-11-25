@@ -16,8 +16,9 @@ use colored::Colorize;
 
 use cli_tools_common::{diff_lines, get_relative_path_or_filename};
 
+use crate::discovery::find_member_manifests;
 use crate::dockerfile::update_dockerfile;
-use crate::manifest::{ManifestUpdate, RustVersion, update_rust_version};
+use crate::manifest::{ManifestUpdate, RustVersion, has_workspace_table, update_rust_version};
 use crate::registry::DigestResolver;
 
 /// Final state of one project.
@@ -34,6 +35,17 @@ pub enum Outcome {
 }
 
 /// Options that control which steps run.
+/// What bumping one workspace member manifest did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberUpdate {
+    /// The member's own rust-version was raised.
+    Updated,
+    /// The member's own rust-version is already at least the target.
+    Current,
+    /// The member has no rust-version of its own, for example because it inherits the workspace value.
+    NoField,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 #[expect(clippy::struct_excessive_bools, reason = "independent CLI flags")]
 pub struct Options {
@@ -225,7 +237,36 @@ pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Repo
 fn bump_manifest(report: &mut Report, context: &RunContext) -> Result<bool> {
     let path = report.root.join("Cargo.toml");
     let original = fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-    match update_rust_version(&original, context.target)? {
+    // Members that set their own rust-version instead of inheriting it are bumped too.
+    let mut members_changed = false;
+    let mut member_has_field = false;
+    if has_workspace_table(&original) {
+        for member in find_member_manifests(&report.root, context.roots) {
+            match bump_member_manifest(report, context, &member)? {
+                MemberUpdate::Updated => {
+                    members_changed = true;
+                    member_has_field = true;
+                }
+                MemberUpdate::Current => member_has_field = true,
+                MemberUpdate::NoField => {}
+            }
+        }
+    }
+    let root_changed = bump_root_manifest(report, context, &path, &original, member_has_field)?;
+    Ok(root_changed || members_changed)
+}
+
+/// Bump `rust-version` in the project root manifest.
+///
+/// A missing field is only reported when no member sets one either.
+fn bump_root_manifest(
+    report: &mut Report,
+    context: &RunContext,
+    path: &Path,
+    original: &str,
+    member_has_field: bool,
+) -> Result<bool> {
+    match update_rust_version(original, context.target)? {
         ManifestUpdate::Updated {
             old,
             new,
@@ -233,11 +274,11 @@ fn bump_manifest(report: &mut Report, context: &RunContext) -> Result<bool> {
         } => {
             report.push(format!("rust-version {} -> {}", old.yellow(), new.green()));
             if context.options.dryrun {
-                for line in diff_lines("Cargo.toml", &original, &updated) {
+                for line in diff_lines("Cargo.toml", original, &updated) {
                     report.push(line);
                 }
             } else {
-                fs::write(&path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
+                fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
             }
             Ok(true)
         }
@@ -248,10 +289,37 @@ fn bump_manifest(report: &mut Report, context: &RunContext) -> Result<bool> {
             Ok(false)
         }
         ManifestUpdate::NoField => {
-            report.missing_rust_version = true;
-            report.push("No rust-version field".yellow().to_string());
+            if !member_has_field {
+                report.missing_rust_version = true;
+                report.push("No rust-version field".yellow().to_string());
+            }
             Ok(false)
         }
+    }
+}
+
+/// Bump `rust-version` in one workspace member manifest that sets its own value.
+fn bump_member_manifest(report: &mut Report, context: &RunContext, path: &Path) -> Result<MemberUpdate> {
+    let original = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let relative = path.strip_prefix(&report.root).unwrap_or(path).display().to_string();
+    match update_rust_version(&original, context.target)? {
+        ManifestUpdate::Updated {
+            old,
+            new,
+            content: updated,
+        } => {
+            report.push(format!("{relative}: rust-version {} -> {}", old.yellow(), new.green()));
+            if context.options.dryrun {
+                for line in diff_lines(&relative, &original, &updated) {
+                    report.push(line);
+                }
+            } else {
+                fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
+            }
+            Ok(MemberUpdate::Updated)
+        }
+        ManifestUpdate::Current(_) => Ok(MemberUpdate::Current),
+        ManifestUpdate::NoField => Ok(MemberUpdate::NoField),
     }
 }
 
@@ -523,5 +591,53 @@ mod test_git_state {
         let temp = TempDir::new().expect("temp dir");
         let state = GitState::read(temp.path(), &[]);
         assert_eq!(state, GitState::default());
+    }
+}
+
+#[cfg(test)]
+mod test_bump_manifest {
+    use super::*;
+
+    #[test]
+    fn members_with_their_own_rust_version_are_bumped() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path().canonicalize().expect("canonical directory");
+        let write = |relative: &str, content: &str| {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().expect("parent")).expect("create directories");
+            fs::write(path, content).expect("write manifest");
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.90\"\n",
+        );
+        write(
+            "crates/own/Cargo.toml",
+            "[package]\nname = \"own\"\nrust-version = \"1.90\"\n",
+        );
+        let inherited = "[package]\nname = \"inherited\"\nrust-version.workspace = true\n";
+        write("crates/inherited/Cargo.toml", inherited);
+        let resolver = DigestResolver::new().expect("resolver");
+        let roots = vec![root.clone()];
+        let commit_lock = Mutex::new(());
+        let context = RunContext {
+            target: RustVersion::new(1, 100, 0),
+            options: Options::default(),
+            resolver: &resolver,
+            roots: &roots,
+            commit_lock: &commit_lock,
+        };
+
+        let report = process_project(&root, GitState::default(), &context);
+
+        assert_eq!(report.outcome, Outcome::Updated);
+        let own = fs::read_to_string(root.join("crates/own/Cargo.toml")).expect("read");
+        assert!(own.contains("rust-version = \"1.100\""), "{own}");
+        let root_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read");
+        assert!(root_manifest.contains("rust-version = \"1.100\""), "{root_manifest}");
+        assert_eq!(
+            fs::read_to_string(root.join("crates/inherited/Cargo.toml")).expect("read"),
+            inherited
+        );
     }
 }
