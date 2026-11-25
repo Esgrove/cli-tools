@@ -55,6 +55,9 @@ const COMMENT_INDENT: usize = 2;
 /// Matches the opening of a fenced code block.
 static RE_FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s{0,3}(`{3,}|~{3,})").expect("Invalid fence regex"));
 
+/// Most indentation an opening or closing code fence may have.
+const MAX_FENCE_INDENT: usize = 3;
+
 /// Matches an ATX heading.
 static RE_HEADING: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s{0,3}#{1,6}(?:\s|$)").expect("Invalid heading regex"));
@@ -468,14 +471,22 @@ fn starts_with_inline_html_tag(line: &str) -> bool {
 }
 
 /// Index one past the closing fence, or the end of the lines when unterminated.
+///
+/// Like an opening fence, a closing fence has at most three spaces of indentation.
+/// A fence line indented further is part of the code.
 fn find_fence_close(lines: &[&str], open_index: usize, marker: char, length: usize) -> usize {
     lines
         .iter()
         .enumerate()
         .skip(open_index + 1)
         .find(|(_, line)| {
-            let trimmed = line.trim();
-            trimmed.chars().all(|character| character == marker) && trimmed.chars().count() >= length
+            let unindented = line.trim_start();
+            let indent = line.len() - unindented.len();
+            let trimmed = unindented.trim_end();
+            indent <= MAX_FENCE_INDENT
+                && !trimmed.is_empty()
+                && trimmed.chars().all(|character| character == marker)
+                && trimmed.chars().count() >= length
         })
         .map_or(lines.len(), |(position, _)| position + 1)
 }

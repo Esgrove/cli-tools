@@ -418,3 +418,16 @@ fn a_byte_order_mark_is_kept_and_the_first_comment_is_checked() {
         "{fixed}"
     );
 }
+
+#[test]
+fn a_fence_indented_four_or_more_spaces_does_not_close_a_code_block() {
+    let text = "  ```text\n  First code line that is long enough to be split, and it has a comma, which gives a break.\n     ```\n  Second code line that is long enough to be split, and it has a comma, which gives a break.\n  ```\n\nProse after the block.\n";
+    let options = FormatOptions {
+        max_width: 60,
+        ..FormatOptions::default()
+    };
+
+    let result = format(text, FileKind::Markdown, &options);
+
+    assert_eq!(result.fixed_text, None, "code inside the fence was changed");
+}
