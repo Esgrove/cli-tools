@@ -12,6 +12,9 @@ use crate::utils;
 /// Minimum number of normalized characters a destination or group name needs.
 const MIN_DIRECTORY_NAME_CHARS: usize = 4;
 
+/// Directory names that should be deleted when encountered.
+pub const UNWANTED_DIRECTORIES: &[&str] = &[".unwanted"];
+
 /// Ignored prefix and ignored group name rules for file and directory names.
 #[derive(Debug, Clone, Default)]
 pub struct NameFilter {
@@ -148,6 +151,12 @@ impl NameFilter {
             || normalized_name.chars().all(char::is_numeric)
             || self.matches_ignored_group_name(normalized_name)
     }
+}
+
+/// Check if a directory name is in the unwanted list.
+#[must_use]
+pub fn is_unwanted_directory(name: &str) -> bool {
+    UNWANTED_DIRECTORIES.iter().any(|u| name.eq_ignore_ascii_case(u))
 }
 
 /// Remove repeated values, keeping the first occurrence of each.

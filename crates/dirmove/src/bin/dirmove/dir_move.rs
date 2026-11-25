@@ -16,14 +16,14 @@ use cli_tools_common::{
     print_yellow,
 };
 use cli_tools_dirmove::{
-    DirectoryInfo, DirectoryMatcher, DirectoryMerger, FileInfo, FileMatch, PrefixGrouper, PromptResult, Roots, Scanner,
-    Unpacker, matcher, merge, mover, scanner, utils,
+    DirectoryInfo, DirectoryMatcher, DirectoryMerger, FileInfo, FileMatch, PrefixGrouper, Roots, Scanner, Unpacker,
+    matcher, merge, mover, scanner, utils,
 };
 
 use crate::DirMoveArgs;
 use crate::config::{Config, add_ignored_group_name_to_config, config_from_args};
 use crate::database::{self, Database};
-use crate::prompt;
+use crate::prompt::{self, PromptResult};
 use crate::report;
 
 /// Whether progress bars are hidden, which keeps test output clean.

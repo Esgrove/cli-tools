@@ -8,6 +8,7 @@
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
+pub mod candidates;
 pub mod grouping;
 pub mod matcher;
 pub mod merge;
@@ -23,6 +24,7 @@ pub mod utils;
 #[cfg(test)]
 mod test_helpers;
 
+pub use candidates::*;
 pub use grouping::{GroupingOptions, GroupingProgress, GroupingStage, PrefixGrouper};
 pub use matcher::{CustomMapping, DirectoryMatcher, FileMatch, ListedFile, NormalizedFilename};
 pub use merge::{DirectoryMerger, MergeEvent, MergeObserver};

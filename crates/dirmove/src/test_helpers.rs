@@ -6,13 +6,14 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::candidates::FileInfo;
 use crate::grouping::{GroupingOptions, PrefixGrouper};
 use crate::matcher::{CustomMapping, DirectoryMatcher};
 use crate::merge::{DirectoryMerger, find_prefix_merge_pairs};
 use crate::name_filter::NameFilter;
 use crate::roots::Roots;
 use crate::scanner::{ScanOptions, Scanner};
-use crate::types::{DirectoryInfo, FileInfo};
+use crate::types::DirectoryInfo;
 use crate::unpack::Unpacker;
 
 /// Every option a library test can set, converted into the component options by `Fixture`.

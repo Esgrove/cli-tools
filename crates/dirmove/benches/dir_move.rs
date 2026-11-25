@@ -9,11 +9,12 @@ use std::path::PathBuf;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
+use cli_tools_dirmove::grouping::PrefixGroupBuilder;
+use cli_tools_dirmove::name_filter::is_unwanted_directory;
 use cli_tools_dirmove::{
-    FileInfo, FilteredParts, PrefixGroupBuilder, PrefixIndex, count_prefix_chars,
-    filter_numeric_resolution_and_glue_parts, find_prefix_candidates, find_prefix_candidates_indexed,
-    get_all_n_part_sequences, is_unwanted_directory, normalize_name, parts_are_contiguous_lowered,
-    prefix_matches_normalized_precomputed,
+    FileInfo, FilteredParts, PrefixIndex, count_prefix_chars, filter_numeric_resolution_and_glue_parts,
+    find_prefix_candidates, find_prefix_candidates_indexed, get_all_n_part_sequences, normalize_name,
+    parts_are_contiguous_lowered, prefix_matches_normalized_precomputed,
 };
 
 // ---------------------------------------------------------------------------

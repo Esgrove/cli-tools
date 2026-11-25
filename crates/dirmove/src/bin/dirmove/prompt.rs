@@ -4,12 +4,23 @@
 //! reads prompt answers, and highlights the part of a file name that matched a directory name.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 
 use cli_tools_common::{format_text_with_highlight, path_to_filename_string};
-use cli_tools_dirmove::{NormalizedFilename, PromptResult};
+use cli_tools_dirmove::NormalizedFilename;
+
+/// Result of prompting the user for a directory name in create mode.
+#[derive(Debug)]
+pub enum PromptResult {
+    /// User confirmed: move files to this directory path.
+    Confirmed(PathBuf),
+    /// User skipped this group.
+    Skipped,
+    /// User chose to skip and save the group name to `ignored_group_names` in the config file.
+    SaveToIgnored,
+}
 
 /// Prompt the user for directory name confirmation with optional database formatting.
 /// Returns a confirmed path, a skipped result, or a request to save the group as ignored.

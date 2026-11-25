@@ -5,7 +5,7 @@
 //! so this index sorts the lowercased single, two part, and three part combinations of all files once.
 //! Every combination that starts with a prefix then sits in one contiguous range found by binary search.
 
-use super::types::{FileInfo, FilteredParts};
+use crate::candidates::{FileInfo, FilteredParts};
 
 /// Part combinations of a set of files, sorted by their lowercased text.
 pub struct PrefixIndex<'a> {

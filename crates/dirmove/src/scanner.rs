@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use walkdir::WalkDir;
 
-use crate::name_filter::NameFilter;
+use crate::candidates::FileInfo;
+use crate::name_filter::{self, NameFilter};
 use crate::roots::Roots;
-use crate::types::{DirectoryInfo, FileInfo};
+use crate::types::DirectoryInfo;
 use crate::utils;
 
 /// Include and exclude patterns and the recursion setting used while scanning.
@@ -192,7 +193,9 @@ impl<'a> Scanner<'a> {
                 .filter_entry(|entry| {
                     entry.depth() == 0
                         || (!cli_tools_common::should_skip_entry(entry)
-                            && !utils::is_unwanted_directory(&cli_tools_common::os_str_to_string(entry.file_name())))
+                            && !name_filter::is_unwanted_directory(&cli_tools_common::os_str_to_string(
+                                entry.file_name(),
+                            )))
                 })
             {
                 let entry = entry?;
@@ -250,7 +253,7 @@ impl<'a> Scanner<'a> {
 
                 let directory_name = cli_tools_common::path_to_filename_string(&path);
                 if directory_name.starts_with('.')
-                    || utils::is_unwanted_directory(&directory_name)
+                    || name_filter::is_unwanted_directory(&directory_name)
                     || self.options.is_excluded(&directory_name.to_lowercase())
                 {
                     continue;

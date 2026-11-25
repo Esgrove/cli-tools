@@ -14,7 +14,7 @@ use walkdir::WalkDir;
 
 use cli_tools_common::{TargetReservations, path_to_filename_string};
 
-use crate::utils;
+use crate::name_filter;
 
 /// Outcome of moving one entry out of an unpacked directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,7 +241,10 @@ impl Unpacker {
             for entry in walker
                 .into_iter()
                 .filter_entry(|entry| {
-                    entry.file_name().to_str().is_some_and(utils::is_unwanted_directory)
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(name_filter::is_unwanted_directory)
                         || !cli_tools_common::should_skip_entry(entry)
                 })
                 .filter_map(Result::ok)
@@ -254,7 +257,7 @@ impl Unpacker {
                     continue;
                 };
 
-                if utils::is_unwanted_directory(name) {
+                if name_filter::is_unwanted_directory(name) {
                     unwanted_directories.push(entry.path().to_path_buf());
                 } else if self.is_unpack_name(name) {
                     unpack_candidates.push(entry.path().to_path_buf());

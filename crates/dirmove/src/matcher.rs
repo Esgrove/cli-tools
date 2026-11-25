@@ -12,9 +12,10 @@ use anyhow::Result;
 
 use cli_tools_common::{MatchRange, path_to_filename_string};
 
+use crate::candidates::FileInfo;
 use crate::name_filter::NameFilter;
 use crate::roots::Roots;
-use crate::types::{DirectoryInfo, FileInfo};
+use crate::types::DirectoryInfo;
 use crate::utils;
 
 /// A custom mapping pair that maps files containing a pattern to a specific directory.

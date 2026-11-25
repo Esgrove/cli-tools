@@ -10,9 +10,9 @@ use std::path::PathBuf;
 
 use rayon::prelude::*;
 
+use crate::candidates::{self, FileInfo};
 use crate::name_filter::NameFilter;
 use crate::prefix_index::PrefixIndex;
-use crate::types::{FileInfo, PrefixGroup, PrefixGroupBuilder, ValidCandidate};
 use crate::utils;
 
 /// Default minimum number of files in a group.
@@ -50,6 +50,53 @@ pub struct PrefixGrouper<'a> {
     options: &'a GroupingOptions,
     /// Ignored prefix and ignored group name rules.
     name_filter: &'a NameFilter,
+}
+
+/// A group of files that share a common prefix.
+/// Used for organizing files into directories based on their name prefixes.
+#[derive(Debug, Clone)]
+pub struct PrefixGroup {
+    /// Files belonging to this prefix group.
+    pub files: Vec<PathBuf>,
+    /// Number of dot-separated parts in the prefix (1, 2, or 3).
+    /// Higher values indicate more specific prefixes.
+    pub part_count: usize,
+    /// Minimum start position where this prefix appears across all files.
+    /// Lower values indicate prefixes closer to the start of filenames.
+    pub min_start_position: usize,
+}
+
+/// Intermediate data structure for building prefix groups.
+/// A validated prefix candidate ready to be merged into prefix groups.
+/// Produced during the parallel first pass of `collect_all_prefix_groups`.
+pub struct ValidCandidate {
+    /// Normalized group key (lowercase, no dots).
+    pub key: String,
+    /// Path to the file this candidate belongs to.
+    pub file_path: PathBuf,
+    /// Number of dot-separated parts in the prefix.
+    pub part_count: usize,
+    /// Whether the prefix is a concatenated (no-dot) form.
+    pub is_concatenated: bool,
+    /// Position in the filename where this prefix starts.
+    pub start_position: usize,
+    /// The original prefix string.
+    pub prefix: String,
+}
+
+/// Used during the collection phase before converting to final `PrefixGroup`.
+#[derive(Debug)]
+pub struct PrefixGroupBuilder {
+    /// The original prefix string (may contain dots).
+    pub original_prefix: String,
+    /// Files belonging to this prefix group.
+    pub files: Vec<PathBuf>,
+    /// Number of dot-separated parts in the prefix.
+    pub part_count: usize,
+    /// Whether the prefix has a concatenated (no-dot) form.
+    pub has_concatenated_form: bool,
+    /// Minimum start position where this prefix appears across all files.
+    pub min_start_position: usize,
 }
 
 /// Receives progress while files are grouped.
@@ -286,7 +333,7 @@ impl<'a> PrefixGrouper<'a> {
         let first_pass_results: Vec<Vec<ValidCandidate>> = files_with_names
             .par_iter()
             .map(|file_info| {
-                let prefix_candidates = utils::find_prefix_candidates_indexed(
+                let prefix_candidates = candidates::find_prefix_candidates_indexed(
                     &file_info.filtered_name,
                     files_with_names,
                     prefix_index,
@@ -310,7 +357,7 @@ impl<'a> PrefixGrouper<'a> {
 
                     // Filtering can make non-adjacent parts look adjacent,
                     // so the file itself must have the prefix parts contiguous in its original name.
-                    if !utils::parts_are_contiguous_lowered(
+                    if !candidates::parts_are_contiguous_lowered(
                         &file_info.original_parts,
                         &file_info.original_parts_lower,
                         &candidate_parts,
@@ -396,7 +443,7 @@ impl<'a> PrefixGrouper<'a> {
                     };
                     let file_path = file_info.path_buf();
                     if !existing_files.contains(&file_path)
-                        && utils::parts_are_contiguous_lowered(
+                        && candidates::parts_are_contiguous_lowered(
                             &file_info.original_parts,
                             &file_info.original_parts_lower,
                             &[group_key.as_str()],
@@ -417,6 +464,132 @@ impl<'a> PrefixGrouper<'a> {
             }
         }
         progress.finish_stage();
+    }
+}
+
+impl PrefixGroup {
+    /// Create a new `PrefixGroup`.
+    #[must_use]
+    pub const fn new(files: Vec<PathBuf>, part_count: usize, min_start_position: usize) -> Self {
+        Self {
+            files,
+            part_count,
+            min_start_position,
+        }
+    }
+}
+
+impl PrefixGroupBuilder {
+    /// Create a new `PrefixGroupBuilder`.
+    #[must_use]
+    pub fn new(
+        original_prefix: String,
+        file: PathBuf,
+        part_count: usize,
+        has_concatenated_form: bool,
+        start_position: usize,
+    ) -> Self {
+        Self {
+            original_prefix,
+            files: vec![file],
+            part_count,
+            has_concatenated_form,
+            min_start_position: start_position,
+        }
+    }
+
+    /// Add a file to this group and update metadata.
+    /// Prefers concatenated (no-dot) forms for directory names.
+    /// Among concatenated forms, prefers proper casing (starts with uppercase).
+    /// For determinism across platforms, uses alphabetical ordering as tiebreaker.
+    pub fn add_file(
+        &mut self,
+        file: PathBuf,
+        part_count: usize,
+        is_concatenated: bool,
+        start_position: usize,
+        prefix: String,
+    ) {
+        self.files.push(file);
+        self.part_count = self.part_count.max(part_count);
+        self.min_start_position = self.min_start_position.min(start_position);
+
+        // Prefer concatenated (no-dot) form for directory names
+        if is_concatenated {
+            if self.has_concatenated_form {
+                // Already have a concatenated form - prefer better casing or alphabetical order
+                let should_replace = Self::is_better_prefix(&prefix, &self.original_prefix);
+                if should_replace {
+                    self.original_prefix = prefix;
+                }
+            } else {
+                // First concatenated form - use it
+                self.original_prefix = prefix;
+                self.has_concatenated_form = true;
+            }
+        } else if !self.has_concatenated_form {
+            // Without a concatenated form, still choose a deterministic dotted display prefix.
+            // This avoids platform-dependent directory names caused by filesystem iteration order.
+            let should_replace = Self::is_better_prefix(&prefix, &self.original_prefix);
+            if should_replace {
+                self.original_prefix = prefix;
+            }
+        }
+    }
+
+    /// Determine if `new_prefix` is better than `current_prefix` for display.
+    /// Prefers CamelCase (mixed case) over all-uppercase or all-lowercase.
+    /// Uses alphabetical order as final tiebreaker for determinism.
+    #[must_use]
+    pub fn is_better_prefix(new_prefix: &str, current_prefix: &str) -> bool {
+        let new_score = Self::casing_score(new_prefix);
+        let current_score = Self::casing_score(current_prefix);
+
+        if new_score == current_score {
+            // Same casing quality - use alphabetical order for determinism
+            new_prefix < current_prefix
+        } else {
+            // Higher score is better
+            new_score > current_score
+        }
+    }
+
+    /// Score the casing quality of a prefix.
+    /// Higher scores are better.
+    /// CamelCase (mixed case starting with uppercase) = 3
+    /// Starts with uppercase but all same case = 2
+    /// Mixed case starting with lowercase = 1
+    /// All lowercase or all uppercase = 0
+    #[must_use]
+    pub fn casing_score(prefix: &str) -> u8 {
+        let mut chars = prefix.chars();
+        let Some(first) = chars.next() else {
+            return 0;
+        };
+
+        let starts_upper = first.is_ascii_uppercase();
+        let has_upper = starts_upper || chars.clone().any(|c| c.is_ascii_uppercase());
+        let has_lower = first.is_ascii_lowercase() || chars.any(|c| c.is_ascii_lowercase());
+
+        match (starts_upper, has_upper, has_lower) {
+            // CamelCase: starts uppercase, has both upper and lower (e.g., "PhotoLab")
+            (true, true, true) => 3,
+            // Starts uppercase, single case (e.g., "PHOTOLAB")
+            (true, true, false) => 2,
+            // Mixed case but starts lowercase (e.g., "photoLab")
+            (false, true, true) => 1,
+            // All lowercase (e.g., "photolab") or edge cases
+            _ => 0,
+        }
+    }
+
+    /// Convert this builder into a final `PrefixGroup`.
+    #[must_use]
+    pub fn into_prefix_group(self) -> (String, PrefixGroup) {
+        (
+            self.original_prefix,
+            PrefixGroup::new(self.files, self.part_count, self.min_start_position),
+        )
     }
 }
 
@@ -1533,7 +1706,7 @@ mod test_stripped_name_filtering_integration {
     use super::*;
     use crate::test_helpers::*;
 
-    /// Helper to create a `DirMove` with both `prefix_ignores` and `ignored_group_names`.
+    /// Create a fixture with both `prefix_ignores` and `ignored_group_names`.
     fn make_fixture_with_ignores_and_ignored_names(
         root: PathBuf,
         prefix_ignores: Vec<&str>,
@@ -1560,28 +1733,21 @@ mod test_stripped_name_filtering_integration {
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
-        // The prefix "DL.Studio" exists in groups, but when we process it:
-        // 1. dir_name becomes "DL Studio"
-        // 2. After stripping "DL ", it becomes "Studio"
-        // 3. "studio" is in ignored_group_names, so it should be skipped
-
-        // Verify the group exists (it's collected before the skip logic)
-        let has_dl_studio = groups.contains_key("DLStudio") || groups.contains_key("DL.Studio");
-
-        // The key point is that when create_dirs_and_move_files processes this,
-        // it will skip the "Studio" directory because it matches ignored_group_names
-        if has_dl_studio {
-            let dir_name = "DL Studio";
-            let stripped = fixture.name_filter().strip_ignored_prefixes(dir_name);
-            assert_eq!(stripped, "Studio");
-
-            // Verify it would be filtered by ignored_group_names check
-            let normalized = stripped.to_lowercase().replace(' ', "");
-            assert!(
-                fixture.config().ignored_group_names.contains(&normalized),
-                "Stripped name 'studio' should be in ignored_group_names"
-            );
-        }
+        // "DL.Studio" becomes the directory name "Studio" once the "dl" prefix is stripped,
+        // and "studio" is an ignored group name, so no group may be offered as "Studio".
+        let grouper = fixture.grouper();
+        let no_runtime_ignores = HashSet::<String>::new();
+        assert_eq!(grouper.directory_name_for_prefix("DL.Studio"), "Studio");
+        assert!(grouper.should_skip_group("Studio", None, &no_runtime_ignores));
+        let offered: Vec<String> = groups
+            .keys()
+            .map(|prefix| grouper.directory_name_for_prefix(prefix))
+            .filter(|name| !grouper.should_skip_group(name, None, &no_runtime_ignores))
+            .collect();
+        assert!(
+            !offered.iter().any(|name| name.eq_ignore_ascii_case("studio")),
+            "Studio should not be offered: {offered:?}"
+        );
     }
 
     #[test]
@@ -4358,7 +4524,7 @@ mod test_min_prefix_chars {
     fn short_prefix_excluded_with_default_min_chars() {
         // "Alex" has 4 chars, should be excluded with min_prefix_chars=5
         let files = make_test_files(&["Alex.Video.001.mp4", "Alex.Video.002.mp4", "Alex.Video.003.mp4"]);
-        let candidates = utils::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 5);
+        let candidates = candidates::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 5);
 
         // "Alex" (4 chars) should be excluded, but "Video" (5 chars) is found with position-agnostic matching
         assert!(
@@ -4379,7 +4545,7 @@ mod test_min_prefix_chars {
     fn short_prefix_included_with_low_min_chars() {
         // "Alex" has 4 chars, should be included with min_prefix_chars=4
         let files = make_test_files(&["Alex.Video.001.mp4", "Alex.Video.002.mp4", "Alex.Video.003.mp4"]);
-        let candidates = utils::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 4);
+        let candidates = candidates::find_prefix_candidates("Alex.Video.001.mp4", &files, 2, 4);
 
         // Should find single-part prefix "Alex"
         let single_part = candidates.iter().find(|c| c.part_count == 1);
@@ -4394,7 +4560,7 @@ mod test_min_prefix_chars {
     fn exact_threshold_includes_prefix() {
         // "Names" has exactly 5 chars, should be included with min_prefix_chars=5
         let files = make_test_files(&["Names.List.001.txt", "Names.List.002.txt", "Names.List.003.txt"]);
-        let candidates = utils::find_prefix_candidates("Names.List.001.txt", &files, 2, 5);
+        let candidates = candidates::find_prefix_candidates("Names.List.001.txt", &files, 2, 5);
 
         let single_part = candidates.iter().find(|c| c.part_count == 1);
         assert!(
@@ -4412,7 +4578,7 @@ mod test_min_prefix_chars {
             "Alexander.Movie.002.mp4",
             "Alexander.Movie.003.mp4",
         ]);
-        let candidates = utils::find_prefix_candidates("Alexander.Movie.001.mp4", &files, 2, 5);
+        let candidates = candidates::find_prefix_candidates("Alexander.Movie.001.mp4", &files, 2, 5);
 
         let single_part = candidates.iter().find(|c| c.part_count == 1);
         assert!(
@@ -4427,7 +4593,7 @@ mod test_min_prefix_chars {
         // Two-part prefixes ARE affected by min_prefix_chars (counts chars excluding dots)
         let files = make_test_files(&["AB.CD.File.001.mp4", "AB.CD.File.002.mp4", "AB.CD.File.003.mp4"]);
         // With high min_prefix_chars=10, "AB.CD" (4 chars) should be excluded
-        let candidates = utils::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 10);
+        let candidates = candidates::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 10);
 
         let two_part = candidates.iter().find(|c| c.part_count == 2);
         assert!(
@@ -4443,7 +4609,7 @@ mod test_min_prefix_chars {
         );
 
         // But with lower threshold, it should be included
-        let candidates = utils::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 4);
+        let candidates = candidates::find_prefix_candidates("AB.CD.File.001.mp4", &files, 2, 4);
         let two_part = candidates.iter().find(|c| c.part_count == 2);
         assert!(
             two_part.is_some(),
@@ -4458,7 +4624,7 @@ mod test_min_prefix_chars {
         let files = make_test_files(&["日本語.Video.001.mp4", "日本語.Video.002.mp4", "日本語.Video.003.mp4"]);
 
         // With min_prefix_chars=3, "日本語" (3 chars) should be included
-        let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 3);
+        let candidates = candidates::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 3);
         let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
         assert!(
             unicode_prefix.is_some(),
@@ -4467,7 +4633,7 @@ mod test_min_prefix_chars {
 
         // With min_prefix_chars=4, "日本語" (3 chars) should be excluded
         // but "Video" (5 chars) is still found with position-agnostic matching
-        let candidates = utils::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 4);
+        let candidates = candidates::find_prefix_candidates("日本語.Video.001.mp4", &files, 2, 4);
         let unicode_prefix = candidates.iter().find(|c| c.prefix == "日本語");
         assert!(
             unicode_prefix.is_none(),
@@ -4482,7 +4648,7 @@ mod test_min_prefix_chars {
     fn min_chars_zero_allows_all() {
         // With min_prefix_chars=0, even single-char prefixes should work
         let files = make_test_files(&["A.Video.001.mp4", "A.Video.002.mp4", "A.Video.003.mp4"]);
-        let candidates = utils::find_prefix_candidates("A.Video.001.mp4", &files, 2, 0);
+        let candidates = candidates::find_prefix_candidates("A.Video.001.mp4", &files, 2, 0);
 
         let single_part = candidates.iter().find(|c| c.part_count == 1);
         assert!(
@@ -4495,7 +4661,7 @@ mod test_min_prefix_chars {
     fn min_chars_one_allows_single_char() {
         // With min_prefix_chars=1, single-char prefixes should work
         let files = make_test_files(&["X.Files.S01E01.mp4", "X.Files.S01E02.mp4", "X.Files.S01E03.mp4"]);
-        let candidates = utils::find_prefix_candidates("X.Files.S01E01.mp4", &files, 2, 1);
+        let candidates = candidates::find_prefix_candidates("X.Files.S01E01.mp4", &files, 2, 1);
 
         let single_part = candidates.iter().find(|c| c.part_count == 1);
         assert!(
@@ -4699,7 +4865,7 @@ mod test_min_prefix_chars {
     fn dotted_prefix_char_count_excludes_dots() {
         // "A.B" has 2 chars (excluding dot), should be excluded with min=5
         let files = make_test_files(&["A.B.File.001.mp4", "A.B.File.002.mp4", "A.B.File.003.mp4"]);
-        let candidates = utils::find_prefix_candidates("A.B.File.001.mp4", &files, 2, 5);
+        let candidates = candidates::find_prefix_candidates("A.B.File.001.mp4", &files, 2, 5);
 
         // Should NOT find "A.B" (2 chars) as a valid prefix
         let two_part = candidates.iter().find(|c| c.prefix == "A.B");
@@ -4713,7 +4879,7 @@ mod test_min_prefix_chars {
     fn dotted_prefix_included_when_chars_meet_threshold() {
         // "Ab.Cd" has 4 chars (excluding dot), should be included with min=4
         let files = make_test_files(&["Ab.Cd.File.001.mp4", "Ab.Cd.File.002.mp4", "Ab.Cd.File.003.mp4"]);
-        let candidates = utils::find_prefix_candidates("Ab.Cd.File.001.mp4", &files, 2, 4);
+        let candidates = candidates::find_prefix_candidates("Ab.Cd.File.001.mp4", &files, 2, 4);
 
         let two_part = candidates.iter().find(|c| c.prefix == "Ab.Cd");
         assert!(
@@ -4726,7 +4892,7 @@ mod test_min_prefix_chars {
     fn three_part_dotted_prefix_char_count() {
         // "A.B.C" has 3 chars (excluding dots), should be excluded with min=5
         let files = make_test_files(&["A.B.C.File.001.mp4", "A.B.C.File.002.mp4", "A.B.C.File.003.mp4"]);
-        let candidates = utils::find_prefix_candidates("A.B.C.File.001.mp4", &files, 2, 5);
+        let candidates = candidates::find_prefix_candidates("A.B.C.File.001.mp4", &files, 2, 5);
 
         let three_part = candidates.iter().find(|c| c.prefix == "A.B.C");
         assert!(
@@ -4743,7 +4909,7 @@ mod test_min_prefix_chars {
             "Alpha.Beta.Gamma.File.002.mp4",
             "Alpha.Beta.Gamma.File.003.mp4",
         ]);
-        let candidates = utils::find_prefix_candidates("Alpha.Beta.Gamma.File.001.mp4", &files, 2, 10);
+        let candidates = candidates::find_prefix_candidates("Alpha.Beta.Gamma.File.001.mp4", &files, 2, 10);
 
         let three_part = candidates.iter().find(|c| c.prefix == "Alpha.Beta.Gamma");
         assert!(
@@ -4754,17 +4920,17 @@ mod test_min_prefix_chars {
 
     #[test]
     fn count_prefix_chars_helper_works_correctly() {
-        assert_eq!(utils::count_prefix_chars("A"), 1);
-        assert_eq!(utils::count_prefix_chars("AB"), 2);
-        assert_eq!(utils::count_prefix_chars("A.B"), 2);
-        assert_eq!(utils::count_prefix_chars("A.B.C"), 3);
-        assert_eq!(utils::count_prefix_chars("Alpha.Beta"), 9);
-        assert_eq!(utils::count_prefix_chars("Alpha.Beta.Gamma"), 14);
-        assert_eq!(utils::count_prefix_chars("..."), 0);
-        assert_eq!(utils::count_prefix_chars("A...B"), 2);
+        assert_eq!(candidates::count_prefix_chars("A"), 1);
+        assert_eq!(candidates::count_prefix_chars("AB"), 2);
+        assert_eq!(candidates::count_prefix_chars("A.B"), 2);
+        assert_eq!(candidates::count_prefix_chars("A.B.C"), 3);
+        assert_eq!(candidates::count_prefix_chars("Alpha.Beta"), 9);
+        assert_eq!(candidates::count_prefix_chars("Alpha.Beta.Gamma"), 14);
+        assert_eq!(candidates::count_prefix_chars("..."), 0);
+        assert_eq!(candidates::count_prefix_chars("A...B"), 2);
         // Unicode
-        assert_eq!(utils::count_prefix_chars("日本語"), 3);
-        assert_eq!(utils::count_prefix_chars("日.本.語"), 3);
+        assert_eq!(candidates::count_prefix_chars("日本語"), 3);
+        assert_eq!(candidates::count_prefix_chars("日.本.語"), 3);
     }
 
     #[test]
@@ -5473,5 +5639,114 @@ mod test_grouping_options {
         let options = GroupingOptions::default();
         assert_eq!(options.min_group_size(), DEFAULT_MIN_GROUP_SIZE);
         assert_eq!(options.min_prefix_chars(), DEFAULT_MIN_PREFIX_CHARS);
+    }
+}
+
+#[cfg(test)]
+mod test_prefix_group_builder {
+    use super::*;
+
+    #[test]
+    fn dotted_prefix_prefers_stable_display_casing() {
+        let first_file = PathBuf::from("summer.vacation.photo4.jpg");
+        let second_file = PathBuf::from("SUMMER.VACATION.Photo3.jpg");
+        let third_file = PathBuf::from("Summer.Vacation.Photo1.jpg");
+
+        let mut builder = PrefixGroupBuilder::new("summer.vacation".to_string(), first_file, 2, false, 0);
+        builder.add_file(second_file, 2, false, 0, "SUMMER.VACATION".to_string());
+        builder.add_file(third_file, 2, false, 0, "Summer.Vacation".to_string());
+
+        assert_eq!(builder.original_prefix, "Summer.Vacation");
+    }
+
+    #[test]
+    fn concatenated_form_is_not_replaced_by_better_dotted_casing() {
+        let first_file = PathBuf::from("summervacation_photo1.jpg");
+        let second_file = PathBuf::from("Summer.Vacation.Photo2.jpg");
+
+        let mut builder = PrefixGroupBuilder::new("summervacation".to_string(), first_file, 1, true, 0);
+        builder.add_file(second_file, 2, false, 0, "Summer.Vacation".to_string());
+
+        // Concatenated form should be retained
+        assert_eq!(builder.original_prefix, "summervacation");
+    }
+}
+
+#[cfg(test)]
+mod test_casing_score {
+    use super::*;
+
+    #[test]
+    fn camel_case_scores_highest() {
+        // CamelCase (starts uppercase, has both upper and lower) = 3
+        assert_eq!(PrefixGroupBuilder::casing_score("PhotoLab"), 3);
+        assert_eq!(PrefixGroupBuilder::casing_score("NeonLight"), 3);
+        assert_eq!(PrefixGroupBuilder::casing_score("MyApp"), 3);
+    }
+
+    #[test]
+    fn all_uppercase_scores_second() {
+        // Starts uppercase, all same case = 2
+        assert_eq!(PrefixGroupBuilder::casing_score("PHOTOLAB"), 2);
+        assert_eq!(PrefixGroupBuilder::casing_score("NEONLIGHT"), 2);
+        assert_eq!(PrefixGroupBuilder::casing_score("ABC"), 2);
+    }
+
+    #[test]
+    fn mixed_case_starting_lowercase_scores_third() {
+        // Mixed case but starts lowercase = 1
+        assert_eq!(PrefixGroupBuilder::casing_score("photoLab"), 1);
+        assert_eq!(PrefixGroupBuilder::casing_score("neonLight"), 1);
+    }
+
+    #[test]
+    fn all_lowercase_scores_zero() {
+        // All lowercase = 0
+        assert_eq!(PrefixGroupBuilder::casing_score("photolab"), 0);
+        assert_eq!(PrefixGroupBuilder::casing_score("neonlight"), 0);
+    }
+
+    #[test]
+    fn empty_string_scores_zero() {
+        assert_eq!(PrefixGroupBuilder::casing_score(""), 0);
+    }
+}
+
+#[cfg(test)]
+mod test_is_better_prefix {
+    use super::*;
+
+    #[test]
+    fn camel_case_preferred_over_all_uppercase() {
+        assert!(PrefixGroupBuilder::is_better_prefix("PhotoLab", "PHOTOLAB"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("PHOTOLAB", "PhotoLab"));
+    }
+
+    #[test]
+    fn camel_case_preferred_over_all_lowercase() {
+        assert!(PrefixGroupBuilder::is_better_prefix("PhotoLab", "photolab"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("photolab", "PhotoLab"));
+    }
+
+    #[test]
+    fn all_uppercase_preferred_over_all_lowercase() {
+        assert!(PrefixGroupBuilder::is_better_prefix("PHOTOLAB", "photolab"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("photolab", "PHOTOLAB"));
+    }
+
+    #[test]
+    fn alphabetical_order_breaks_ties() {
+        // Both CamelCase - alphabetical order wins
+        assert!(PrefixGroupBuilder::is_better_prefix("NeonLight", "PhotoLab"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("PhotoLab", "NeonLight"));
+
+        // Both all lowercase - alphabetical order wins
+        assert!(PrefixGroupBuilder::is_better_prefix("abc", "xyz"));
+        assert!(!PrefixGroupBuilder::is_better_prefix("xyz", "abc"));
+    }
+
+    #[test]
+    fn same_prefix_not_better() {
+        assert!(!PrefixGroupBuilder::is_better_prefix("PhotoLab", "PhotoLab"));
     }
 }
