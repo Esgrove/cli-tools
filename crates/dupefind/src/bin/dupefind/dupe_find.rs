@@ -62,6 +62,7 @@ impl DupeFind {
         };
 
         let config = Config::from_args(args)?;
+        let roots = deduplicate_roots(roots, config.recurse);
 
         Ok(Self { config, roots })
     }
@@ -181,7 +182,12 @@ impl DupeFind {
         #[cfg(not(test))]
         progress_bar.finish_and_clear();
 
-        files.into_inner().unwrap_or_default()
+        // A file reachable from several roots must only be listed once,
+        // otherwise it would form a duplicate group with itself.
+        let mut files = files.into_inner().unwrap_or_default();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        files.dedup_by(|left, right| left.path == right.path);
+        files
     }
 
     /// Collect video files from a single root directory.
@@ -277,6 +283,26 @@ impl DupeFind {
     }
 }
 
+/// Remove repeated roots, and roots inside another root when scanning recursively.
+///
+/// Roots are already canonical, so a plain path prefix check finds nesting.
+/// Without recursion a nested root is scanned separately and is kept.
+fn deduplicate_roots(mut roots: Vec<PathBuf>, recurse: bool) -> Vec<PathBuf> {
+    roots.sort();
+    roots.dedup();
+    if recurse {
+        let mut kept: Vec<PathBuf> = Vec::with_capacity(roots.len());
+        for root in roots {
+            if !kept.iter().any(|parent| root.starts_with(parent)) {
+                kept.push(root);
+            }
+        }
+        kept
+    } else {
+        roots
+    }
+}
+
 #[cfg(test)]
 mod test_gather_files {
     use std::fs;
@@ -330,6 +356,21 @@ mod test_gather_files {
         assert!(non_recursive.is_empty());
         assert_eq!(recursive.len(), 1);
         assert_eq!(recursive[0].filename, "video.mp4");
+    }
+
+    #[test]
+    fn overlapping_roots_collect_each_file_once() {
+        let temp_directory = tempfile::TempDir::new().expect("should create temp directory");
+        let scan_root = temp_directory.path().join("videos");
+        let nested_directory = scan_root.join("nested");
+        fs::create_dir_all(&nested_directory).expect("should create nested directory");
+        fs::write(nested_directory.join("Only.Movie.mp4"), b"video").expect("should write video file");
+        let mut finder = make_finder(scan_root.clone(), true);
+        finder.roots = vec![scan_root, nested_directory.clone(), nested_directory];
+
+        let files = finder.gather_files();
+
+        assert_eq!(files.len(), 1, "{files:?}");
     }
 }
 
@@ -463,6 +504,34 @@ mod test_new {
         let finder = DupeFind::new(args).expect("existing paths should be accepted");
 
         assert_eq!(finder.roots.len(), 2);
+    }
+
+    #[test]
+    fn repeated_and_nested_paths_are_collapsed_when_recursive() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested).expect("nested directory");
+        let root = directory.path().to_string_lossy().into_owned();
+        let nested = nested.to_string_lossy().into_owned();
+        let args = Args::try_parse_from(["dupefind", "-r", &root, &nested, &root]).expect("arguments should parse");
+
+        let finder = DupeFind::new(args).expect("existing paths should be accepted");
+
+        assert_eq!(finder.roots.len(), 1, "{:?}", finder.roots);
+    }
+
+    #[test]
+    fn nested_paths_are_kept_without_recursion() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested).expect("nested directory");
+        let root = directory.path().to_string_lossy().into_owned();
+        let nested = nested.to_string_lossy().into_owned();
+        let args = Args::try_parse_from(["dupefind", &root, &nested, &nested]).expect("arguments should parse");
+
+        let finder = DupeFind::new(args).expect("existing paths should be accepted");
+
+        assert_eq!(finder.roots.len(), 2, "{:?}", finder.roots);
     }
 
     #[test]
