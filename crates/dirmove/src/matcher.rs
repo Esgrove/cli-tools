@@ -3,7 +3,7 @@
 //! `DirectoryMatcher` ranks destination directories, matches file names to directory names with
 //! and without ignored prefixes, and applies custom mappings.
 //! `NormalizedFilename` maps a normalized name match back to the byte range in the original file name,
-//! so prompts can highlight the matched part.
+//! so callers can highlight the matched part.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -36,7 +36,7 @@ pub struct FileMatch {
     pub range: MatchRange,
 }
 
-/// A file listed for a move prompt and its already computed highlight range.
+/// A file listed for a move and its already computed highlight range.
 #[derive(Debug, Clone)]
 pub struct ListedFile {
     /// Path of the file.

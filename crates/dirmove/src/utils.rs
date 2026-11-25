@@ -32,7 +32,7 @@ pub fn filter_numeric_resolution_and_glue_parts(filename: &str) -> String {
                 return true;
             }
             // Filter purely numeric parts
-            if part.chars().all(|c| c.is_ascii_digit()) {
+            if part.chars().all(|character| character.is_ascii_digit()) {
                 return false;
             }
             // Filter resolution patterns

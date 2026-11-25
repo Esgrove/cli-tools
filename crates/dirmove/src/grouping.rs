@@ -568,8 +568,8 @@ impl PrefixGroupBuilder {
         };
 
         let starts_upper = first.is_ascii_uppercase();
-        let has_upper = starts_upper || chars.clone().any(|c| c.is_ascii_uppercase());
-        let has_lower = first.is_ascii_lowercase() || chars.any(|c| c.is_ascii_lowercase());
+        let has_upper = starts_upper || chars.clone().any(|character| character.is_ascii_uppercase());
+        let has_lower = first.is_ascii_lowercase() || chars.any(|character| character.is_ascii_lowercase());
 
         match (starts_upper, has_upper, has_lower) {
             // CamelCase: starts uppercase, has both upper and lower (e.g., "PhotoLab")
@@ -880,9 +880,9 @@ mod test_prefix_groups {
         // With min_group_size=6, all prefixes with 5 files are excluded
         let config_6 = TestConfig::test_with_group_size(6);
 
-        let dirmove_6 = Fixture::new(root.clone(), config_6);
-        let files_with_names = dirmove_6.scanner().collect_files_with_names().unwrap();
-        let groups_6 = dirmove_6.grouper().collect_all_prefix_groups(&files_with_names);
+        let fixture_6 = Fixture::new(root.clone(), config_6);
+        let files_with_names = fixture_6.scanner().collect_files_with_names().unwrap();
+        let groups_6 = fixture_6.grouper().collect_all_prefix_groups(&files_with_names);
         // With min_group_size=6, all prefixes with 5 files are excluded
         assert!(
             groups_6.is_empty(),
@@ -892,9 +892,9 @@ mod test_prefix_groups {
         // With min_group_size=5, should find the group
         let config_5 = TestConfig::test_with_group_size(5);
 
-        let dirmove_5 = Fixture::new(root.clone(), config_5);
-        let files_with_names = dirmove_5.scanner().collect_files_with_names().unwrap();
-        let groups_5 = dirmove_5.grouper().collect_all_prefix_groups(&files_with_names);
+        let fixture_5 = Fixture::new(root.clone(), config_5);
+        let files_with_names = fixture_5.scanner().collect_files_with_names().unwrap();
+        let groups_5 = fixture_5.grouper().collect_all_prefix_groups(&files_with_names);
         assert!(!groups_5.is_empty(), "min_group_size=5 should find groups");
         assert!(
             groups_5.contains_key("Gallery.Photos"),
@@ -905,9 +905,9 @@ mod test_prefix_groups {
         // With min_group_size=3, should still find the same group
         let config_3 = TestConfig::test_with_group_size(3);
 
-        let dirmove_3 = Fixture::new(root, config_3);
-        let files_with_names = dirmove_3.scanner().collect_files_with_names().unwrap();
-        let groups_3 = dirmove_3.grouper().collect_all_prefix_groups(&files_with_names);
+        let fixture_3 = Fixture::new(root, config_3);
+        let files_with_names = fixture_3.scanner().collect_files_with_names().unwrap();
+        let groups_3 = fixture_3.grouper().collect_all_prefix_groups(&files_with_names);
         assert!(
             groups_3.contains_key("Gallery.Photos"),
             "Should have Gallery.Photos group"
@@ -1661,12 +1661,8 @@ mod test_parent_directory_skipped {
 
     #[test]
     fn prefix_ignore_not_in_create_mode_dir_name() {
-        // This tests the full flow that create_dirs_and_move_files uses:
-        // 1. Collect files with names (strips dot prefixes)
-        // 2. Collect prefix groups
-        // 3. Convert prefix to dir_name by replacing dots with spaces
-        // 4. Strip ignored prefixes from dir_name
-        // The final dir_name should NOT contain any prefix_ignores
+        // Prefix groups become directory names with dots replaced by spaces and ignored prefixes stripped,
+        // so no directory name may contain a prefix ignore.
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
@@ -1684,11 +1680,9 @@ mod test_parent_directory_skipped {
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let prefix_groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
-        // Simulate the dir_name creation logic from create_dirs_and_move_files
+        let grouper = fixture.grouper();
         for prefix in prefix_groups.keys() {
-            // This is exactly what create_dirs_and_move_files does:
-            let dir_name = prefix.replace('.', " ");
-            let dir_name = fixture.name_filter().strip_ignored_prefixes(&dir_name);
+            let dir_name = grouper.directory_name_for_prefix(prefix);
 
             assert!(
                 !dir_name.to_lowercase().contains("studio"),

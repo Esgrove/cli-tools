@@ -660,7 +660,7 @@ mod test_unpack {
     }
 
     #[test]
-    fn dryrun_does_not_modify_files() -> anyhow::Result<()> {
+    fn dry_run_does_not_modify_files() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -980,7 +980,7 @@ mod test_unpack {
     }
 
     #[test]
-    fn dryrun_preserves_empty_matched_directory() -> anyhow::Result<()> {
+    fn dry_run_preserves_empty_matched_directory() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1186,7 +1186,7 @@ mod test_unwanted_directories {
     }
 
     #[test]
-    fn dryrun_preserves() -> anyhow::Result<()> {
+    fn dry_run_preserves() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Example");
         std::fs::create_dir_all(&root)?;
@@ -1293,7 +1293,7 @@ mod test_unpack_trees {
     }
 
     #[test]
-    fn dryrun_unpack_on_a_deep_tree_changes_nothing() {
+    fn dry_run_unpack_on_a_deep_tree_changes_nothing() {
         let tree = unpack_tree();
         let before = tree.snapshot();
 

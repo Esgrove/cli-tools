@@ -1,8 +1,8 @@
 //! Input and output roots, and the display paths shown relative to them.
 //!
-//! `Roots` resolves the independent input and output root sets from command line paths,
+//! `Roots` resolves the independent input and output root sets from the given paths,
 //! ranks destination directories by their depth below an output root,
-//! and formats source and destination paths compactly for prompts.
+//! and formats source and destination paths compactly for display.
 
 use std::path::{Path, PathBuf};
 
@@ -38,7 +38,7 @@ impl Roots {
         Self { input, output }
     }
 
-    /// Resolve input and output root sets from command line paths.
+    /// Resolve input and output root sets from the given paths.
     ///
     /// If no input is given, the current directory is used.
     /// If no output is given, the resolved input roots are reused as output roots.
@@ -104,7 +104,7 @@ impl Roots {
             .unwrap_or_else(|| directory.components().count())
     }
 
-    /// Format a destination directory for prompts relative to the nearest output root.
+    /// Format a destination directory for display relative to the nearest output root.
     ///
     /// With multiple output roots this avoids displaying long absolute paths
     /// when the destination can be shown relative to one of the configured roots.
@@ -152,7 +152,7 @@ impl Roots {
         relative_display_path_from_nearest_root(target, &source_roots).unwrap_or_else(|| target.display().to_string())
     }
 
-    /// Format paths for whole directory merge prompts.
+    /// Format paths for displaying whole directory merges.
     ///
     /// Input root paths stay compact.
     /// Output only roots are shown in full,

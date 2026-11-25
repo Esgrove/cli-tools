@@ -34,8 +34,7 @@ pub struct FileInfo {
 ///
 /// Stores single, 2-part, and 3-part combinations in both lowercased and original-cased forms.
 /// This eliminates redundant `split('.')`, `to_lowercase()`,
-/// and `format!()` calls in the O(N × K × N) hot loops inside `find_prefix_candidates`
-/// and `prefix_matches_normalized`.
+/// and `format!()` calls when every candidate prefix is checked against every file.
 pub struct FilteredParts {
     /// Single parts, lowercased (e.g., `["photo", "lab", "image"]`).
     pub parts_lower: Vec<String>,
@@ -118,7 +117,7 @@ impl FilteredParts {
     pub fn new(filtered_name: &str) -> Self {
         let parts_original: Vec<String> = filtered_name.split('.').map(String::from).collect();
 
-        let parts_lower: Vec<String> = parts_original.iter().map(|p| p.to_lowercase()).collect();
+        let parts_lower: Vec<String> = parts_original.iter().map(|part| part.to_lowercase()).collect();
 
         let two_parts_lower: Vec<String> = parts_lower
             .iter()
@@ -200,7 +199,7 @@ impl FilteredParts {
         false
     }
 
-    /// Check if there is a valid word boundary at byte position `prefix_len` in the **original-cased** text.
+    /// Check if there is a valid word boundary at byte position `boundary` in the **original-cased** text.
     ///
     /// The position is a byte offset (typically from `str::len()` on a lowercased counterpart).
     /// If it does not fall on a UTF-8 character boundary in `original_text`,
@@ -208,20 +207,19 @@ impl FilteredParts {
     ///
     /// Handles Unicode letters (including Scandic characters such as Ä, Ö, Ü, Å)
     /// by inspecting the `char` values on either side of the boundary.
-    ///
     #[must_use]
-    pub fn has_word_boundary_at(original_text: &str, prefix_len: usize) -> bool {
-        if prefix_len == 0 || prefix_len >= original_text.len() {
+    pub fn has_word_boundary_at(original_text: &str, boundary: usize) -> bool {
+        if boundary == 0 || boundary >= original_text.len() {
             return true;
         }
 
         // If the byte offset lands in the middle of a multi-byte character,
         // it is not a valid boundary.
-        if !original_text.is_char_boundary(prefix_len) {
+        if !original_text.is_char_boundary(boundary) {
             return false;
         }
 
-        let Some((before, after)) = original_text.split_at_checked(prefix_len) else {
+        let Some((before, after)) = original_text.split_at_checked(boundary) else {
             return false;
         };
         let (Some(prev), Some(next)) = (before.chars().next_back(), after.chars().next()) else {
@@ -397,7 +395,7 @@ pub fn find_prefix_candidates_indexed<'a>(
 /// Uses `chars().count()` to properly handle Unicode characters.
 #[must_use]
 pub fn count_prefix_chars(prefix: &str) -> usize {
-    prefix.chars().filter(|c| *c != '.').count()
+    prefix.chars().filter(|character| *character != '.').count()
 }
 
 /// Check if pre-computed [`FileInfo`] parts contain the given normalized target.
@@ -447,16 +445,16 @@ pub fn parts_are_contiguous_lowered(
     // Also check if prefix parts combined match multiple contiguous original parts combined
     // e.g., prefix ["PhotoLab"] (single part) matches original ["Photo", "Lab"] (two parts)
     // Also matches if the combined parts START WITH the prefix at a word boundary
-    for start_idx in 0..original_parts.len() {
+    for start_index in 0..original_parts.len() {
         if !lowered_run_can_start_with(
-            original_parts_lower.get(start_idx..).unwrap_or_default(),
+            original_parts_lower.get(start_index..).unwrap_or_default(),
             prefix_combined,
         ) {
             continue;
         }
         let mut combined = String::new();
         let mut combined_lower = String::new();
-        for (part, part_lower) in original_parts.iter().zip(original_parts_lower).skip(start_idx) {
+        for (part, part_lower) in original_parts.iter().zip(original_parts_lower).skip(start_index) {
             combined.push_str(part);
             combined_lower.push_str(part_lower);
             if combined_lower == prefix_combined
@@ -477,37 +475,39 @@ pub fn parts_are_contiguous_lowered(
 
 /// Extract all N-part sequences from a filename as string slices.
 ///
-/// For `A.B.C.D`, with n=2, returns `["A.B", "B.C", "C.D"]`.
+/// For `A.B.C.D` with a `sequence_length` of 2, returns `["A.B", "B.C", "C.D"]`.
 /// This allows finding common group names that appear anywhere in filenames,
 /// not just at the start.
 #[must_use]
-pub fn get_all_n_part_sequences(file_name: &str, n: usize) -> Vec<&str> {
-    if n == 0 {
+pub fn get_all_n_part_sequences(file_name: &str, sequence_length: usize) -> Vec<&str> {
+    if sequence_length == 0 {
         return Vec::new();
     }
 
     // Collect the start position of each part (after each dot, plus position 0)
     let mut part_starts: Vec<usize> = vec![0];
-    for (i, c) in file_name.bytes().enumerate() {
-        if c == b'.' {
-            part_starts.push(i + 1);
+    for (index, byte) in file_name.bytes().enumerate() {
+        if byte == b'.' {
+            part_starts.push(index + 1);
         }
     }
-    let num_parts = part_starts.len();
+    let part_total = part_starts.len();
 
-    if num_parts < n {
+    if part_total < sequence_length {
         return Vec::new();
     }
 
     let mut sequences = Vec::new();
-    for start in 0..=(num_parts - n) {
+    for start in 0..=(part_total - sequence_length) {
         let Some(&start_pos) = part_starts.get(start) else {
             continue;
         };
-        let end_pos = part_starts.get(start + n).map_or(file_name.len(), |next_start| {
-            // End just before the next part's dot
-            next_start.saturating_sub(1)
-        });
+        let end_pos = part_starts
+            .get(start + sequence_length)
+            .map_or(file_name.len(), |next_start| {
+                // End just before the next part's dot
+                next_start.saturating_sub(1)
+            });
 
         if start_pos < end_pos
             && let Some(sequence) = file_name.get(start_pos..end_pos)
@@ -2683,10 +2683,10 @@ mod test_contiguity_equivalence {
                 return true;
             }
         }
-        for start_idx in 0..original_parts.len() {
+        for start_index in 0..original_parts.len() {
             let mut combined = String::new();
             let mut combined_lower = String::new();
-            for part in original_parts.iter().skip(start_idx) {
+            for part in original_parts.iter().skip(start_index) {
                 combined.push_str(part);
                 combined_lower.push_str(&part.to_lowercase());
                 if combined_lower == prefix_combined

@@ -160,7 +160,9 @@ impl NameFilter {
 /// Check if a directory name is in the unwanted list.
 #[must_use]
 pub fn is_unwanted_directory(name: &str) -> bool {
-    UNWANTED_DIRECTORIES.iter().any(|u| name.eq_ignore_ascii_case(u))
+    UNWANTED_DIRECTORIES
+        .iter()
+        .any(|unwanted| name.eq_ignore_ascii_case(unwanted))
 }
 
 /// Remove repeated values, keeping the first occurrence of each.

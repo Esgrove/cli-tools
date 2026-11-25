@@ -47,7 +47,7 @@ pub struct DirectoryMerger {
     /// Whether existing target entries are overwritten.
     overwrite: bool,
     /// Whether to only report what would be moved, without moving anything.
-    dryrun: bool,
+    dry_run: bool,
 }
 
 /// A directory with an ignored prefix and the sibling directory without it, which receives its contents.
@@ -73,10 +73,10 @@ impl DirectoryMerger {
     /// Create a merger.
     ///
     /// With `overwrite`, existing target entries are replaced instead of skipped.
-    /// With `dryrun`, nothing is moved and the observer is told what would be moved.
+    /// With `dry_run`, nothing is moved and the observer is told what would be moved.
     #[must_use]
-    pub const fn new(overwrite: bool, dryrun: bool) -> Self {
-        Self { overwrite, dryrun }
+    pub const fn new(overwrite: bool, dry_run: bool) -> Self {
+        Self { overwrite, dry_run }
     }
 
     /// Merge contents from the source directory into the target directory.
@@ -121,7 +121,7 @@ impl DirectoryMerger {
                 }
             }
 
-            if self.dryrun {
+            if self.dry_run {
                 observer.on_merge_event(MergeEvent::WouldMove(&entry_name));
                 moved_count += 1;
                 continue;
@@ -166,7 +166,7 @@ impl DirectoryMerger {
             observer.on_merge_event(MergeEvent::Moved(moved_count));
         }
 
-        if self.dryrun {
+        if self.dry_run {
             observer.on_merge_event(MergeEvent::WouldRemoveSource(source));
         } else if std::fs::read_dir(source).is_ok_and(|mut entries| entries.next().is_none()) {
             match std::fs::remove_dir(source) {
@@ -419,7 +419,7 @@ mod test_merge_prefixed_directories {
     }
 
     #[test]
-    fn dryrun_does_not_modify_files() -> anyhow::Result<()> {
+    fn dry_run_does_not_modify_files() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
         let root = tmp.path().join("Root");
         std::fs::create_dir_all(&root)?;
@@ -872,7 +872,7 @@ mod test_merge_trees {
     }
 
     #[test]
-    fn dryrun_merge_on_a_deep_tree_changes_nothing() {
+    fn dry_run_merge_on_a_deep_tree_changes_nothing() {
         let tree = merge_tree();
         let before = tree.snapshot();
 

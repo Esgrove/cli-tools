@@ -110,16 +110,19 @@ impl MoveReport {
 ///
 /// Returns an error if the target path cannot be created or is not a directory.
 pub fn move_files_to_target_dir(
-    dir_path: &Path,
+    target_directory: &Path,
     files: &[PathBuf],
     overwrite: bool,
     observer: &mut impl MoveObserver,
 ) -> anyhow::Result<MoveReport> {
-    if !dir_path.exists() {
-        fs::create_dir_all(dir_path)?;
-        observer.on_event(MoveEvent::CreatedDirectory(dir_path));
-    } else if !dir_path.is_dir() {
-        anyhow::bail!("Target path exists but is not a directory: {}", dir_path.display());
+    if !target_directory.exists() {
+        fs::create_dir_all(target_directory)?;
+        observer.on_event(MoveEvent::CreatedDirectory(target_directory));
+    } else if !target_directory.is_dir() {
+        anyhow::bail!(
+            "Target path exists but is not a directory: {}",
+            target_directory.display()
+        );
     }
 
     let file_sizes = collect_file_sizes(files);
@@ -145,7 +148,7 @@ pub fn move_files_to_target_dir(
             name: &file_name,
         });
         let expected_size = file_sizes.get(file_path).copied().unwrap_or(0);
-        let new_path = dir_path.join(&file_name);
+        let new_path = target_directory.join(&file_name);
 
         if !reservations.reserve(&new_path) {
             observer.on_event(MoveEvent::DuplicateName(file_path));
