@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use cli_tools_common::{print_error, print_yellow};
+use cli_tools_common::{OverwritePolicy, RenameOutcome, print_error, print_yellow};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -879,10 +879,12 @@ impl VideoConvert {
                     &cli_tools_common::path_to_string_relative(&file.file.path),
                     &cli_tools_common::path_to_string_relative(&file.output_path),
                 );
-                if let Err(e) = std::fs::rename(&file.file.path, &file.output_path) {
-                    print_error!("Failed to rename {}: {e}", file.file.path.display());
-                } else {
-                    renamed_count += 1;
+                match cli_tools_common::safe_rename(&file.file.path, &file.output_path, OverwritePolicy::Skip) {
+                    Ok(RenameOutcome::SkippedExisting) => {
+                        print_yellow!("Skipping rename, file already exists: {}", file.output_path.display());
+                    }
+                    Ok(_) => renamed_count += 1,
+                    Err(e) => print_error!("Failed to rename {}: {e}", file.file.path.display()),
                 }
             }
         }
@@ -1200,7 +1202,7 @@ mod test_process_files_with_db_cleanup {
 
 #[cfg(test)]
 mod test_gather_and_rename {
-    use super::test_helpers::{converter, processable};
+    use super::test_helpers::{converter, processable, video_info};
     use super::*;
 
     fn config_for(path: &Path, recurse: bool) -> Config {
@@ -1384,6 +1386,31 @@ mod test_gather_and_rename {
 
         assert_eq!(renamed, 1);
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn a_rename_never_replaces_an_existing_file() {
+        let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let first = directory.path().join("show.x265.mkv");
+        let second = directory.path().join("show.av1.mkv");
+        let output = directory.path().join("show.mkv");
+        std::fs::write(&first, b"FIRST").expect("Failed to write video file");
+        std::fs::write(&second, b"SECOND").expect("Failed to write video file");
+        let files = [&first, &second].map(|path| {
+            ProcessableFile::new(
+                VideoFile::new(path, 1024),
+                video_info("h264"),
+                output.clone(),
+                Vec::new(),
+            )
+        });
+        let (_log, converter) = converter(Config::default());
+
+        let renamed = converter.process_renames(&files);
+
+        assert_eq!(renamed, 1);
+        assert_eq!(std::fs::read(&output).expect("output should exist"), b"FIRST");
+        assert_eq!(std::fs::read(&second).expect("second file should remain"), b"SECOND");
     }
 
     #[test]
