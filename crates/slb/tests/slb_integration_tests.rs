@@ -372,3 +372,16 @@ fn trailing_comment_inside_a_c_macro_is_kept() {
         FileKind::CLike,
     );
 }
+
+#[test]
+fn a_parenthesized_triple_quoted_string_keeps_its_value() {
+    let text = "y = (\n    \"\"\"\n    This long string literal is a value that the program uses, and it is also not a docstring at all.\n    \"\"\"\n)\n";
+    let options = FormatOptions {
+        max_width: 60,
+        ..FormatOptions::default()
+    };
+
+    let result = format(text, FileKind::Python, &options);
+
+    assert_eq!(result.fixed_text, None, "the string literal was changed");
+}

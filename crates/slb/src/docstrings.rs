@@ -21,6 +21,12 @@ use super::violation::{Violation, ViolationKind};
 static RE_DOCSTRING_OPEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^(\s*)([rRuUbBfF]{0,2})("""|''')(.*)$"#).expect("Invalid docstring regex"));
 
+/// Characters that leave an expression open at the end of a line,
+/// so a string on the next line is part of that expression.
+const EXPRESSION_CONTINUATIONS: &[char] = &[
+    '(', '[', '{', ',', '\\', '=', '+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '~', '@',
+];
+
 /// A triple quoted docstring spanning more than one line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Docstring<'a> {
@@ -46,9 +52,14 @@ impl<'a> Docstring<'a> {
     /// A docstring opening and closing on one line is not a prose block,
     /// and neither is one with code after the closing quotes,
     /// so both of them give `None` and are left verbatim.
+    /// A string that continues an expression from the line above is a value rather than a docstring,
+    /// so it gives `None` too.
     pub(super) fn at(lines: &[&'a str], index: usize) -> Option<Self> {
         let line = lines.get(index)?;
         let captures = RE_DOCSTRING_OPEN.captures(line)?;
+        if !starts_statement(lines, index) {
+            return None;
+        }
         let indent = captures.get(1).map_or("", |group| group.as_str());
         let string_prefix = captures.get(2).map_or("", |group| group.as_str());
         let quote = captures.get(3).map_or(r#"""""#, |group| group.as_str());
@@ -86,6 +97,21 @@ impl<'a> Docstring<'a> {
     pub(super) fn closing_shares_line(&self) -> bool {
         !self.closing_text.trim().is_empty()
     }
+}
+
+/// Whether line `index` starts a statement rather than continuing an expression from the code above it.
+///
+/// Blank lines and comment lines are passed over.
+/// A file start, a block opener ending in a colon, and a complete statement all start a new statement.
+fn starts_statement(lines: &[&str], index: usize) -> bool {
+    let previous_code = lines
+        .get(..index)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .map(|line| line.split_once('#').map_or(*line, |(code, _)| code).trim_end())
+        .find(|code| !code.trim_start().is_empty());
+    previous_code.is_none_or(|code| !code.ends_with(EXPRESSION_CONTINUATIONS))
 }
 
 /// Build the replacement line pairs that move docstring quotes sharing a line with prose onto their own line.
@@ -267,6 +293,58 @@ mod test_docstring_parsing {
         assert_eq!(Docstring::at(&["    \"\"\"Summary.", "    \"\"\" + tail"], 0), None);
         assert_eq!(Docstring::at(&["    \"\"\"Summary.", "    no close here"], 0), None);
         assert_eq!(Docstring::at(&["value = \"\"\"Summary.", "\"\"\""], 0), None);
+    }
+}
+
+#[cfg(test)]
+mod test_docstring_position {
+    use super::*;
+
+    const BODY: [&str; 2] = ["    \"\"\"", "    Some prose."];
+
+    /// The given lines followed by a docstring opening and body, and the index the docstring opens on.
+    fn with_body<'a>(before: &[&'a str]) -> (Vec<&'a str>, usize) {
+        let mut lines = before.to_vec();
+        let index = lines.len();
+        lines.extend(BODY);
+        lines.push("    \"\"\"");
+        (lines, index)
+    }
+
+    #[test]
+    fn a_string_continuing_an_expression_is_not_a_docstring() {
+        for before in [
+            &["y = ("][..],
+            &["QUERIES = ["],
+            &["call("],
+            &["value = {"],
+            &["    first,"],
+            &["total = a + \\"],
+        ] {
+            let (lines, index) = with_body(before);
+            assert_eq!(Docstring::at(&lines, index), None, "{before:?}");
+        }
+    }
+
+    #[test]
+    fn a_string_as_the_first_statement_is_a_docstring() {
+        let cases: [&[&str]; 5] = [
+            &[],
+            &["#!/usr/bin/env python3", "# A comment."],
+            &["def f():"],
+            &["class Thing(Base):  # trailing note"],
+            &["def f(", "    first,", ") -> int:"],
+        ];
+        for before in cases {
+            let (lines, index) = with_body(before);
+            assert!(Docstring::at(&lines, index).is_some(), "{before:?}");
+        }
+    }
+
+    #[test]
+    fn a_string_after_a_complete_statement_is_an_attribute_docstring() {
+        let (lines, index) = with_body(&["value = 1", ""]);
+        assert!(Docstring::at(&lines, index).is_some());
     }
 }
 
