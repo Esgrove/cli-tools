@@ -375,3 +375,125 @@ mod test_database {
         assert_eq!(format!("{entry}"), "Test");
     }
 }
+
+#[cfg(test)]
+mod test_exact_match_display_name {
+    use super::*;
+
+    /// Create an in-memory database containing the given entries.
+    fn database_with_entries(entries: &[&str]) -> Database {
+        let database = Database::open_in_memory().unwrap();
+        for entry in entries {
+            database.upsert(entry).unwrap();
+        }
+        database
+    }
+
+    #[test]
+    fn exact_match_same_case() {
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("Jane Doe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_different_case() {
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("JANE DOE");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_no_spaces() {
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("JaneDoe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_with_dots() {
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("Jane.Doe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn exact_match_dots_and_different_case() {
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("jane.doe");
+        assert_eq!(suggestion, Some("Jane Doe".to_string()));
+    }
+
+    #[test]
+    fn no_match_for_prefix_only() {
+        // "Jane" should NOT match "Jane Doe" - they are different entities
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("Jane");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn no_match_for_longer_name() {
+        // "Jane Doe Extra" should NOT match "Jane Doe"
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("Jane Doe Extra");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn no_match_for_partial_overlap() {
+        // "Jan" should NOT match "Jane Doe"
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("Jan");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn no_match_for_completely_different() {
+        let database = database_with_entries(&["Jane Doe"]);
+        let suggestion = database.exact_match_display_name("Bob Wilson");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn multiple_entries_exact_match() {
+        let database = database_with_entries(&["Jane Doe", "John Smith", "Bob Wilson"]);
+
+        assert_eq!(
+            database.exact_match_display_name("JohnSmith"),
+            Some("John Smith".to_string())
+        );
+        assert_eq!(
+            database.exact_match_display_name("bob.wilson"),
+            Some("Bob Wilson".to_string())
+        );
+        assert_eq!(database.exact_match_display_name("Alice"), None);
+    }
+
+    #[test]
+    fn empty_database_returns_none() {
+        let database = database_with_entries(&[]);
+        let suggestion = database.exact_match_display_name("Anything");
+        assert_eq!(suggestion, None);
+    }
+
+    #[test]
+    fn preserves_database_formatting() {
+        // Database has specific formatting that should be preserved
+        let database = database_with_entries(&["The Best Show"]);
+
+        // All these variations should return the database's formatting
+        assert_eq!(
+            database.exact_match_display_name("thebestshow"),
+            Some("The Best Show".to_string())
+        );
+        assert_eq!(
+            database.exact_match_display_name("The.Best.Show"),
+            Some("The Best Show".to_string())
+        );
+        assert_eq!(
+            database.exact_match_display_name("THE BEST SHOW"),
+            Some("The Best Show".to_string())
+        );
+    }
+}

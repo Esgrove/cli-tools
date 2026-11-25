@@ -9,6 +9,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
+use cli_tools_common::print_yellow;
+
 use cli_tools_dirmove::grouping::{DEFAULT_MIN_GROUP_SIZE, DEFAULT_MIN_PREFIX_CHARS};
 use cli_tools_dirmove::{CustomMapping, GroupingOptions, NameFilter, ScanOptions, utils};
 
@@ -144,16 +146,15 @@ impl DirMoveConfig {
             .custom_mappings
             .into_iter()
             .chain(cli_mappings)
-            .map(|pair| CustomMapping::new(&pair[0], &pair[1]))
-            // An empty pattern would match every file and keep every later mapping from applying.
-            .filter(|mapping| {
-                if mapping.pattern.is_empty() {
-                    eprintln!(
-                        "Warning: Ignoring custom mapping to '{}' with a pattern that is empty after normalization",
-                        mapping.directory
+            .filter_map(|pair| {
+                let mapping = CustomMapping::new(&pair[0], &pair[1]);
+                if mapping.is_none() {
+                    print_yellow!(
+                        "Ignoring custom mapping to '{}' with a pattern that is empty after normalization",
+                        pair[1]
                     );
                 }
-                !mapping.pattern.is_empty()
+                mapping
             })
             .collect();
 
@@ -697,7 +698,7 @@ mod cli_args_tests {
         let config = config_from_args_default_config(args);
 
         assert_eq!(config.custom_mappings.len(), 1);
-        assert_eq!(config.custom_mappings[0].pattern, "foo");
+        assert_eq!(config.custom_mappings[0].pattern(), "foo");
     }
 
     #[test]
@@ -997,15 +998,15 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "something:Custom Dir"]).expect("should parse");
         let config = config_from_args_default_config(args);
         assert_eq!(config.custom_mappings.len(), 1);
-        assert_eq!(config.custom_mappings[0].pattern, "something");
-        assert_eq!(config.custom_mappings[0].directory, "Custom Dir");
+        assert_eq!(config.custom_mappings[0].pattern(), "something");
+        assert_eq!(config.custom_mappings[0].directory(), "Custom Dir");
     }
 
     #[test]
     fn config_from_args_normalizes_custom_mapping_pattern() {
         let args = DirMoveArgs::try_parse_from(["test", "-M", "Some.Pattern:Target"]).expect("should parse");
         let config = config_from_args_default_config(args);
-        assert_eq!(config.custom_mappings[0].pattern, "somepattern");
+        assert_eq!(config.custom_mappings[0].pattern(), "somepattern");
     }
 
     #[test]

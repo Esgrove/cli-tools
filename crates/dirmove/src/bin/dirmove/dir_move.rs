@@ -19,8 +19,6 @@ use cli_tools_dirmove::{
     DirectoryInfo, DirectoryMatcher, DirectoryMerger, FileInfo, FileMatch, PrefixGrouper, PromptResult, Roots, Scanner,
     Unpacker, matcher, merge, mover, scanner, utils,
 };
-#[cfg(test)]
-use cli_tools_dirmove::{GroupingOptions, NameFilter, ScanOptions};
 
 use crate::DirMoveArgs;
 use crate::config::{Config, add_ignored_group_name_to_config, config_from_args};
@@ -59,23 +57,6 @@ impl DirectoryMatchOutcome {
         match self {
             Self::Consumed(files) => files,
             Self::Available => Vec::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Default for DirMove {
-    /// Create a minimal `DirMove` for tests that do not need filesystem roots.
-    ///
-    /// The current directory placeholder is used as both the input and output root,
-    /// and no database is attached.
-    /// Tests that need a database can use struct update syntax to override only the `database` field.
-    fn default() -> Self {
-        let placeholder_root = PathBuf::from(".");
-        Self {
-            roots: Roots::new(vec![placeholder_root.clone()], vec![placeholder_root]),
-            config: Config::default(),
-            database: None,
         }
     }
 }
@@ -780,6 +761,7 @@ impl DirMove {
 #[cfg(test)]
 mod test_helpers {
     use super::*;
+    pub use cli_tools_dirmove::{CustomMapping, GroupingOptions, ScanOptions};
 
     /// Create a `DirMove` for testing with no database.
     pub fn make_dirmove(root: PathBuf, config: Config) -> DirMove {
@@ -803,17 +785,6 @@ mod test_helpers {
         }
     }
 
-    /// Create a test config with ignored group names.
-    pub fn test_ignored_group_names_config(ignored_group_names: Vec<&str>) -> Config {
-        Config {
-            dryrun: true,
-            create: true,
-            grouping: GroupingOptions::new(3, 1, Vec::<String>::new(), Vec::<String>::new()),
-            name_filter: NameFilter::new(Vec::<String>::new(), ignored_group_names),
-            ..Default::default()
-        }
-    }
-
     /// Assert that a path exists.
     pub fn assert_exists(path: &Path) {
         assert!(path.exists(), "Expected path to exist: {}", path.display());
@@ -829,14 +800,13 @@ mod test_helpers {
 mod test_custom_mappings {
     use super::test_helpers::*;
     use super::*;
-    use cli_tools_dirmove::CustomMapping;
     use tempfile::TempDir;
 
     /// Helper to create a `DirMove` with custom mappings.
     fn make_dirmove_with_mappings(root: PathBuf, mappings: Vec<(&str, &str)>) -> DirMove {
         let custom_mappings = mappings
             .into_iter()
-            .map(|(pattern, dir)| CustomMapping::new(pattern, dir))
+            .map(|(pattern, dir)| CustomMapping::new(pattern, dir).unwrap())
             .collect();
         let config = Config {
             auto: true,
@@ -845,106 +815,6 @@ mod test_custom_mappings {
             ..Default::default()
         };
         make_dirmove(root, config)
-    }
-
-    #[test]
-    fn find_directory_matches_exact_name() {
-        let dirmove = DirMove::default();
-        let mapping = CustomMapping::new("pattern", "Target Dir");
-        let directories = vec![DirectoryInfo {
-            path: PathBuf::from("Target Dir"),
-            name: "target dir".to_string(),
-        }];
-        let result = dirmove
-            .matcher()
-            .find_directory_for_custom_mapping(&mapping, &directories);
-        assert_eq!(result, Some(0));
-    }
-
-    #[test]
-    fn find_directory_matches_normalized_name() {
-        let dirmove = DirMove::default();
-        let mapping = CustomMapping::new("pattern", "Target Dir");
-        let directories = vec![DirectoryInfo {
-            path: PathBuf::from("targetdir"),
-            name: "targetdir".to_string(),
-        }];
-        let result = dirmove
-            .matcher()
-            .find_directory_for_custom_mapping(&mapping, &directories);
-        assert_eq!(result, Some(0));
-    }
-
-    #[test]
-    fn find_directory_matches_dotted_name() {
-        let dirmove = DirMove::default();
-        let mapping = CustomMapping::new("pattern", "Target Dir");
-        let directories = vec![DirectoryInfo {
-            path: PathBuf::from("Target.Dir"),
-            name: "target dir".to_string(),
-        }];
-        let result = dirmove
-            .matcher()
-            .find_directory_for_custom_mapping(&mapping, &directories);
-        assert_eq!(result, Some(0));
-    }
-
-    #[test]
-    fn find_directory_no_match() {
-        let dirmove = DirMove::default();
-        let mapping = CustomMapping::new("pattern", "Target Dir");
-        let directories = vec![DirectoryInfo {
-            path: PathBuf::from("Other Dir"),
-            name: "other dir".to_string(),
-        }];
-        let result = dirmove
-            .matcher()
-            .find_directory_for_custom_mapping(&mapping, &directories);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn find_directory_skips_ignored_group_name() {
-        let dirmove = make_dirmove(PathBuf::from("."), test_ignored_group_names_config(vec!["target dir"]));
-        let mapping = CustomMapping::new("pattern", "Target Dir");
-        let directories = dirmove
-            .config
-            .name_filter
-            .partition_destination_directories(vec![DirectoryInfo {
-                path: PathBuf::from("Target Dir"),
-                name: "target dir".to_string(),
-            }])
-            .0;
-
-        let result = dirmove
-            .matcher()
-            .find_directory_for_custom_mapping(&mapping, &directories);
-
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn find_directory_selects_correct_index() {
-        let dirmove = DirMove::default();
-        let mapping = CustomMapping::new("pattern", "Second Dir");
-        let directories = vec![
-            DirectoryInfo {
-                path: PathBuf::from("First Dir"),
-                name: "first dir".to_string(),
-            },
-            DirectoryInfo {
-                path: PathBuf::from("Second Dir"),
-                name: "second dir".to_string(),
-            },
-            DirectoryInfo {
-                path: PathBuf::from("Third Dir"),
-                name: "third dir".to_string(),
-            },
-        ];
-        let result = dirmove
-            .matcher()
-            .find_directory_for_custom_mapping(&mapping, &directories);
-        assert_eq!(result, Some(1));
     }
 
     #[test]
@@ -984,7 +854,7 @@ mod test_custom_mappings {
         let config = Config {
             auto: true,
             files_only: true,
-            custom_mappings: vec![CustomMapping::new("something", "Custom Dir")],
+            custom_mappings: vec![CustomMapping::new("something", "Custom Dir").unwrap()],
             ..Default::default()
         };
         let dirmove = make_dirmove(root.clone(), config);
@@ -1009,7 +879,7 @@ mod test_custom_mappings {
 
         let config = Config {
             dryrun: true,
-            custom_mappings: vec![CustomMapping::new("something", "Custom Dir")],
+            custom_mappings: vec![CustomMapping::new("something", "Custom Dir").unwrap()],
             ..Default::default()
         };
         let dirmove = make_dirmove(root.clone(), config);
@@ -1042,7 +912,7 @@ mod test_custom_mappings {
         let config = Config {
             auto: true,
             files_only: true,
-            custom_mappings: vec![CustomMapping::new("something", "Custom Dir")],
+            custom_mappings: vec![CustomMapping::new("something", "Custom Dir").unwrap()],
             ..Default::default()
         };
         let dirmove = make_dirmove(root.clone(), config);
@@ -1183,7 +1053,7 @@ mod test_custom_mappings {
         let config = Config {
             auto: true,
             create: true,
-            custom_mappings: vec![CustomMapping::new("example", "Example")],
+            custom_mappings: vec![CustomMapping::new("example", "Example").unwrap()],
             grouping: GroupingOptions::new(10, 0, Vec::<String>::new(), Vec::<String>::new()),
             ..Default::default()
         };
@@ -1203,7 +1073,6 @@ mod test_custom_mappings {
 mod test_output_root {
     use super::test_helpers::*;
     use super::*;
-    use cli_tools_dirmove::CustomMapping;
     use tempfile::TempDir;
 
     #[test]
@@ -1487,7 +1356,7 @@ mod test_output_root {
 
         let config = Config {
             auto: true,
-            custom_mappings: vec![CustomMapping::new("mapped", "Target")],
+            custom_mappings: vec![CustomMapping::new("mapped", "Target").unwrap()],
             scan: ScanOptions::new(Vec::<String>::new(), Vec::<String>::new(), true),
             ..Default::default()
         };
@@ -1576,7 +1445,7 @@ mod test_output_root {
         let config = Config {
             auto: true,
             create: true,
-            custom_mappings: vec![CustomMapping::new("example", "Example")],
+            custom_mappings: vec![CustomMapping::new("example", "Example").unwrap()],
             grouping: GroupingOptions::new(10, 0, Vec::<String>::new(), Vec::<String>::new()),
             ..Default::default()
         };
@@ -1589,139 +1458,6 @@ mod test_output_root {
         assert_exists(&output_root.join("Example").join("Example.two.mp4"));
         assert_exists(&output_root.join("Example").join("Example.three.mp4"));
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_database_suggestion {
-    use super::*;
-    use crate::database::Database;
-
-    /// Helper to create a `DirMove` with an in-memory database containing the given entries.
-    fn make_dirmove_with_db_entries(entries: &[&str]) -> DirMove {
-        let db = Database::open_in_memory().unwrap();
-        for entry in entries {
-            db.upsert(entry).unwrap();
-        }
-        DirMove {
-            database: Some(db),
-            ..DirMove::default()
-        }
-    }
-
-    #[test]
-    fn exact_match_same_case() {
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane Doe");
-        assert_eq!(suggestion, Some("Jane Doe".to_string()));
-    }
-
-    #[test]
-    fn exact_match_different_case() {
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("JANE DOE");
-        assert_eq!(suggestion, Some("Jane Doe".to_string()));
-    }
-
-    #[test]
-    fn exact_match_no_spaces() {
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("JaneDoe");
-        assert_eq!(suggestion, Some("Jane Doe".to_string()));
-    }
-
-    #[test]
-    fn exact_match_with_dots() {
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane.Doe");
-        assert_eq!(suggestion, Some("Jane Doe".to_string()));
-    }
-
-    #[test]
-    fn exact_match_dots_and_different_case() {
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("jane.doe");
-        assert_eq!(suggestion, Some("Jane Doe".to_string()));
-    }
-
-    #[test]
-    fn no_match_for_prefix_only() {
-        // "Jane" should NOT match "Jane Doe" - they are different entities
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane");
-        assert_eq!(suggestion, None);
-    }
-
-    #[test]
-    fn no_match_for_longer_name() {
-        // "Jane Doe Extra" should NOT match "Jane Doe"
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Jane Doe Extra");
-        assert_eq!(suggestion, None);
-    }
-
-    #[test]
-    fn no_match_for_partial_overlap() {
-        // "Jan" should NOT match "Jane Doe"
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Jan");
-        assert_eq!(suggestion, None);
-    }
-
-    #[test]
-    fn no_match_for_completely_different() {
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe"]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Bob Wilson");
-        assert_eq!(suggestion, None);
-    }
-
-    #[test]
-    fn multiple_entries_exact_match() {
-        let dirmove = make_dirmove_with_db_entries(&["Jane Doe", "John Smith", "Bob Wilson"]);
-
-        assert_eq!(
-            dirmove.get_database_suggestion_for_prefix("JohnSmith"),
-            Some("John Smith".to_string())
-        );
-        assert_eq!(
-            dirmove.get_database_suggestion_for_prefix("bob.wilson"),
-            Some("Bob Wilson".to_string())
-        );
-        assert_eq!(dirmove.get_database_suggestion_for_prefix("Alice"), None);
-    }
-
-    #[test]
-    fn no_database_returns_none() {
-        let dirmove = DirMove::default();
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Anything");
-        assert_eq!(suggestion, None);
-    }
-
-    #[test]
-    fn empty_database_returns_none() {
-        let dirmove = make_dirmove_with_db_entries(&[]);
-        let suggestion = dirmove.get_database_suggestion_for_prefix("Anything");
-        assert_eq!(suggestion, None);
-    }
-
-    #[test]
-    fn preserves_database_formatting() {
-        // Database has specific formatting that should be preserved
-        let dirmove = make_dirmove_with_db_entries(&["The Best Show"]);
-
-        // All these variations should return the database's formatting
-        assert_eq!(
-            dirmove.get_database_suggestion_for_prefix("thebestshow"),
-            Some("The Best Show".to_string())
-        );
-        assert_eq!(
-            dirmove.get_database_suggestion_for_prefix("The.Best.Show"),
-            Some("The Best Show".to_string())
-        );
-        assert_eq!(
-            dirmove.get_database_suggestion_for_prefix("THE BEST SHOW"),
-            Some("The Best Show".to_string())
-        );
     }
 }
 

@@ -20,10 +20,10 @@ use crate::utils;
 /// A custom mapping pair that maps files containing a pattern to a specific directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomMapping {
-    /// Pattern to match in filename (case-insensitive, normalized).
-    pub pattern: String,
+    /// Normalized pattern to find in a normalized file name, never empty.
+    pattern: String,
     /// Target directory name for matching files.
-    pub directory: String,
+    directory: String,
 }
 
 /// A file index and the filename range that matched a destination.
@@ -79,13 +79,29 @@ struct DestinationMatchInfo<'a> {
 }
 
 impl CustomMapping {
-    /// Create a new custom mapping with normalized pattern (lowercase, no dots/spaces).
+    /// Create a custom mapping, with the pattern normalized like file names are.
+    ///
+    /// Returns `None` when the pattern is empty after normalization,
+    /// since an empty pattern would match every file and keep every later mapping from applying.
     #[must_use]
-    pub fn new(pattern: &str, directory: &str) -> Self {
-        Self {
-            pattern: pattern.to_lowercase().replace(['.', ' '], ""),
+    pub fn new(pattern: &str, directory: &str) -> Option<Self> {
+        let pattern = utils::normalize_name(pattern);
+        (!pattern.is_empty()).then(|| Self {
+            pattern,
             directory: directory.to_string(),
-        }
+        })
+    }
+
+    /// Return the normalized pattern, lowercase without dots and spaces.
+    #[must_use]
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// Return the target directory name.
+    #[must_use]
+    pub fn directory(&self) -> &str {
+        &self.directory
     }
 }
 
@@ -378,7 +394,7 @@ pub fn group_files_by_custom_mapping(
     let mut mapping_groups: BTreeMap<String, Vec<ListedFile>> = BTreeMap::new();
 
     for file_info in files_with_names {
-        let file_name_normalized = file_info.original_name.to_lowercase().replace(['.', ' '], "");
+        let file_name_normalized = utils::normalize_name(&file_info.original_name);
         let Some(mapping) = custom_mappings
             .iter()
             .find(|mapping| file_name_normalized.contains(&mapping.pattern))
@@ -815,19 +831,334 @@ mod test_custom_mapping {
 
     #[test]
     fn new_normalizes_pattern_to_lowercase() {
-        let mapping = CustomMapping::new("PATTERN", "Directory");
-        assert_eq!(mapping.pattern, "pattern");
+        let mapping = CustomMapping::new("PATTERN", "Directory").unwrap();
+        assert_eq!(mapping.pattern(), "pattern");
     }
 
     #[test]
     fn new_removes_dots_and_spaces_from_pattern() {
-        let mapping = CustomMapping::new("Some.Pattern Name", "Directory");
-        assert_eq!(mapping.pattern, "somepatternname");
+        let mapping = CustomMapping::new("Some.Pattern Name", "Directory").unwrap();
+        assert_eq!(mapping.pattern(), "somepatternname");
     }
 
     #[test]
     fn new_preserves_directory_name_case() {
-        let mapping = CustomMapping::new("pattern", "My Directory");
-        assert_eq!(mapping.directory, "My Directory");
+        let mapping = CustomMapping::new("pattern", "My Directory").unwrap();
+        assert_eq!(mapping.directory(), "My Directory");
+    }
+
+    #[test]
+    fn new_rejects_a_pattern_that_is_empty_after_normalization() {
+        assert_eq!(CustomMapping::new("", "Directory"), None);
+        assert_eq!(CustomMapping::new(" . ", "Directory"), None);
+    }
+}
+
+#[cfg(test)]
+mod test_find_directory_for_custom_mapping {
+    use super::*;
+    use crate::test_helpers::*;
+
+    #[test]
+    fn find_directory_matches_exact_name() {
+        let fixture = Fixture::default();
+        let mapping = CustomMapping::new("pattern", "Target Dir").unwrap();
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("Target Dir"),
+            name: "target dir".to_string(),
+        }];
+        let result = fixture
+            .matcher()
+            .find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn find_directory_matches_normalized_name() {
+        let fixture = Fixture::default();
+        let mapping = CustomMapping::new("pattern", "Target Dir").unwrap();
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("targetdir"),
+            name: "targetdir".to_string(),
+        }];
+        let result = fixture
+            .matcher()
+            .find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn find_directory_matches_dotted_name() {
+        let fixture = Fixture::default();
+        let mapping = CustomMapping::new("pattern", "Target Dir").unwrap();
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("Target.Dir"),
+            name: "target dir".to_string(),
+        }];
+        let result = fixture
+            .matcher()
+            .find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn find_directory_no_match() {
+        let fixture = Fixture::default();
+        let mapping = CustomMapping::new("pattern", "Target Dir").unwrap();
+        let directories = vec![DirectoryInfo {
+            path: PathBuf::from("Other Dir"),
+            name: "other dir".to_string(),
+        }];
+        let result = fixture
+            .matcher()
+            .find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_directory_skips_ignored_group_name() {
+        let fixture = Fixture::new(
+            PathBuf::from("."),
+            TestConfig::test_with_ignored_group_names(vec!["target dir"]),
+        );
+        let mapping = CustomMapping::new("pattern", "Target Dir").unwrap();
+        let directories = fixture
+            .name_filter()
+            .partition_destination_directories(vec![DirectoryInfo {
+                path: PathBuf::from("Target Dir"),
+                name: "target dir".to_string(),
+            }])
+            .0;
+
+        let result = fixture
+            .matcher()
+            .find_directory_for_custom_mapping(&mapping, &directories);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_directory_selects_correct_index() {
+        let fixture = Fixture::default();
+        let mapping = CustomMapping::new("pattern", "Second Dir").unwrap();
+        let directories = vec![
+            DirectoryInfo {
+                path: PathBuf::from("First Dir"),
+                name: "first dir".to_string(),
+            },
+            DirectoryInfo {
+                path: PathBuf::from("Second Dir"),
+                name: "second dir".to_string(),
+            },
+            DirectoryInfo {
+                path: PathBuf::from("Third Dir"),
+                name: "third dir".to_string(),
+            },
+        ];
+        let result = fixture
+            .matcher()
+            .find_directory_for_custom_mapping(&mapping, &directories);
+        assert_eq!(result, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod test_match_custom_mappings {
+    use super::*;
+    use crate::test_helpers::*;
+
+    /// Build a fixture with the given mappings.
+    fn fixture_with_mappings(mappings: &[(&str, &str)]) -> Fixture {
+        let config = TestConfig {
+            custom_mappings: mappings
+                .iter()
+                .map(|(pattern, directory)| CustomMapping::new(pattern, directory).unwrap())
+                .collect(),
+            ..TestConfig::default()
+        };
+        Fixture::new(PathBuf::from("."), config)
+    }
+
+    /// Return the matched file indices of each directory index, sorted by directory index.
+    fn matched_indices(matches: &HashMap<usize, Vec<FileMatch>>) -> Vec<(usize, Vec<usize>)> {
+        let mut result: Vec<_> = matches
+            .iter()
+            .map(|(directory, files)| (*directory, files.iter().map(|file| file.index).collect()))
+            .collect();
+        result.sort();
+        result
+    }
+
+    #[test]
+    fn matches_the_pattern_ignoring_case_and_dots() {
+        let fixture = fixture_with_mappings(&[("Some.Thing", "Custom Dir")]);
+        let directories = make_test_dirs(&["Custom Dir"]);
+        let files = make_file_paths(&["SOMETHING.video.mp4", "some.thing.clip.mp4", "other.mp4"]);
+
+        let matches = fixture.matcher().match_custom_mappings(&files, &directories);
+
+        assert_eq!(matched_indices(&matches), [(0, vec![0, 1])]);
+    }
+
+    #[test]
+    fn a_mapping_without_an_existing_directory_matches_nothing() {
+        let fixture = fixture_with_mappings(&[("something", "Missing Dir")]);
+        let directories = make_test_dirs(&["Other Dir"]);
+        let files = make_file_paths(&["something.mp4"]);
+
+        assert!(fixture.matcher().match_custom_mappings(&files, &directories).is_empty());
+    }
+
+    #[test]
+    fn the_first_mapping_with_an_existing_directory_wins() {
+        let fixture = fixture_with_mappings(&[("show", "Missing"), ("show", "Second"), ("name", "Third")]);
+        let directories = make_test_dirs(&["Second", "Third"]);
+        let files = make_file_paths(&["Show.Name.mp4"]);
+
+        let matches = fixture.matcher().match_custom_mappings(&files, &directories);
+
+        assert_eq!(matched_indices(&matches), [(0, vec![0])]);
+    }
+
+    #[test]
+    fn the_match_range_covers_the_pattern_in_the_original_name() {
+        let fixture = fixture_with_mappings(&[("somepattern", "Target")]);
+        let directories = make_test_dirs(&["Target"]);
+        let files = make_file_paths(&["Show.Some.Pattern.mp4"]);
+
+        let matches = fixture.matcher().match_custom_mappings(&files, &directories);
+        let file_match = matches.get(&0).and_then(|matched| matched.first()).unwrap();
+
+        assert_eq!(
+            file_match.range.extract_from("Show.Some.Pattern.mp4"),
+            Some("Some.Pattern")
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_group_files_by_custom_mapping {
+    use super::*;
+    use crate::test_helpers::*;
+
+    #[test]
+    fn groups_files_by_the_first_matching_mapping() {
+        let mappings = [
+            CustomMapping::new("alpha", "Alpha Dir").unwrap(),
+            CustomMapping::new("beta", "Beta Dir").unwrap(),
+        ];
+        let files = make_test_files(&["Alpha.One.mp4", "Beta.Alpha.mp4", "Beta.Two.mp4", "Gamma.mp4"]);
+
+        let groups = group_files_by_custom_mapping(&files, &mappings);
+
+        let summary: Vec<(String, Vec<String>)> = groups
+            .into_iter()
+            .map(|(directory, files)| {
+                let names = files.iter().map(|file| path_to_filename_string(&file.path)).collect();
+                (directory, names)
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "Alpha Dir".to_string(),
+                    vec!["Alpha.One.mp4".to_string(), "Beta.Alpha.mp4".to_string()]
+                ),
+                ("Beta Dir".to_string(), vec!["Beta.Two.mp4".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_mappings_produce_no_groups() {
+        let files = make_test_files(&["Alpha.One.mp4"]);
+        assert!(group_files_by_custom_mapping(&files, &[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_match_input_directories {
+    use super::*;
+    use crate::test_helpers::*;
+
+    #[test]
+    fn matches_a_source_directory_to_the_destination_with_the_same_name() {
+        let temp_directory = tempfile::TempDir::new().unwrap();
+        let source = temp_directory.path().join("input").join("Show.Name");
+        let target = temp_directory.path().join("output").join("show name");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let directories = vec![DirectoryInfo::new(target.clone())];
+        let fixture = Fixture::default();
+
+        let groups = fixture
+            .matcher()
+            .match_input_directories(vec![source.clone()], &directories)
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0.path, target);
+        assert_eq!(groups[0].1, vec![source]);
+    }
+
+    #[test]
+    fn a_directory_never_matches_itself() {
+        let temp_directory = tempfile::TempDir::new().unwrap();
+        let directory = temp_directory.path().join("Show Name");
+        std::fs::create_dir_all(&directory).unwrap();
+        let directories = vec![DirectoryInfo::new(directory.clone())];
+
+        let groups = Fixture::default()
+            .matcher()
+            .match_input_directories(vec![directory], &directories)
+            .unwrap();
+
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn directories_with_different_names_do_not_match() {
+        let directories = make_test_dirs(&["Other Name"]);
+
+        let groups = Fixture::default()
+            .matcher()
+            .match_input_directories(vec![PathBuf::from("Show Name")], &directories)
+            .unwrap();
+
+        assert!(groups.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_sorted_directory_indices {
+    use super::*;
+    use crate::test_helpers::*;
+
+    #[test]
+    fn longer_names_come_first_at_the_same_depth_then_by_name() {
+        let directories = make_test_dirs(&["Show", "Show Name Extra", "Beta", "Show Name"]);
+
+        let order = Fixture::default().matcher().sorted_directory_indices(&directories);
+
+        assert_eq!(order, [1, 3, 2, 0]);
+    }
+
+    #[test]
+    fn deeper_directories_come_before_longer_shallow_names() {
+        let root = PathBuf::from("root");
+        let directories = vec![
+            DirectoryInfo {
+                path: root.join("A Much Longer Name"),
+                name: "a much longer name".to_string(),
+            },
+            DirectoryInfo {
+                path: root.join("nested").join("Short"),
+                name: "short".to_string(),
+            },
+        ];
+        let fixture = Fixture::new(root, TestConfig::default());
+
+        assert_eq!(fixture.matcher().sorted_directory_indices(&directories), [1, 0]);
     }
 }
