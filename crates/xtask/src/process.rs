@@ -301,11 +301,14 @@ pub fn run_capture(spec: &CommandSpec) -> Result<CommandOutput> {
 }
 
 /// Read up to the last `max_lines` lines from `log_path`.
+///
+/// Tool output is not always valid UTF-8, so invalid bytes are replaced instead of losing the whole tail.
 #[must_use]
 pub fn read_log_tail(log_path: &Path, max_lines: usize) -> Vec<String> {
-    let Ok(contents) = std::fs::read_to_string(log_path) else {
+    let Ok(bytes) = std::fs::read(log_path) else {
         return Vec::new();
     };
+    let contents = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = contents.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     lines
@@ -562,5 +565,21 @@ mod test_process {
         let output = run_capture(&probe).unwrap();
         assert!(output.success);
         assert_eq!(output.stdout, "|");
+    }
+}
+
+#[cfg(test)]
+mod test_read_log_tail {
+    use super::*;
+
+    #[test]
+    fn a_log_with_invalid_utf8_still_gives_its_last_lines() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("task.log");
+        std::fs::write(&path, b"first\nbad \xff byte\nlast line\n").expect("write log");
+
+        let tail = read_log_tail(&path, 2);
+
+        assert_eq!(tail, vec!["bad \u{fffd} byte".to_string(), "last line".to_string()]);
     }
 }
