@@ -21,6 +21,7 @@ cli-tools-common = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
+cli-tools-common = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [lints]

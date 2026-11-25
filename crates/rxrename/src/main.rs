@@ -13,8 +13,8 @@ use clap_complete::Shell;
 use walkdir::WalkDir;
 
 use cli_tools_common::{
-    count_label, os_str_to_string, print_error, print_magenta_bold, resolve_input_path, should_skip_entry,
-    trash_or_delete,
+    count_label, os_str_to_string, print_error, print_magenta_bold, print_yellow, resolve_input_path,
+    should_skip_entry, trash_or_delete,
 };
 
 /// Action to take when a conflicting unsuffixed file already exists.
@@ -202,6 +202,11 @@ fn process_file(
     let new_stem = stem
         .strip_suffix("_1")
         .ok_or_else(|| anyhow::anyhow!("Filename does not end with '_1': {}", file_with_suffix.display()))?;
+    // A name that is only the suffix has no original name to restore,
+    // and dropping the suffix would leave a hidden file such as ".txt".
+    if new_stem.is_empty() {
+        return Ok(Outcome::Skipped);
+    }
     let original_name = match file_with_suffix.extension().map(os_str_to_string) {
         // Dropping an extension with no valid characters would leave the bare stem,
         // which could be an unrelated file that the conflict handling then removes.
@@ -223,6 +228,15 @@ fn process_file(
 
     let needs_trash = if file_without_suffix.exists() {
         if !file_without_suffix.is_file() {
+            return Ok(Outcome::Skipped);
+        }
+        // A sanitized name is not the original spelling, so the existing file may be unrelated,
+        // or another sanitized file renamed earlier in this run, and must not be removed.
+        if file_with_suffix.file_name().and_then(std::ffi::OsStr::to_str).is_none() {
+            print_yellow!(
+                "Skipping: {} already exists and the name had invalid UTF-8 removed",
+                file_without_suffix.display()
+            );
             return Ok(Outcome::Skipped);
         }
         let rel_without = file_without_suffix.strip_prefix(root).unwrap_or(&file_without_suffix);
@@ -408,6 +422,31 @@ mod test_process_file {
 
     #[cfg(unix)]
     #[test]
+    fn a_sanitized_name_never_removes_an_existing_file() -> anyhow::Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp_directory = tempfile::TempDir::new()?;
+        let first = temp_directory.path().join(OsStr::from_bytes(b"cl\xfeip_1.mkv"));
+        let second = temp_directory.path().join(OsStr::from_bytes(b"cl\xffip_1.mkv"));
+        let target = temp_directory.path().join("clip.mkv");
+        if std::fs::write(&first, b"first").is_err() {
+            return Ok(());
+        }
+        std::fs::write(&second, b"second")?;
+
+        let first_outcome = process_file(temp_directory.path(), &first, 1, 2, 1, false, ConflictAction::Delete)?;
+        let second_outcome = process_file(temp_directory.path(), &second, 2, 2, 1, false, ConflictAction::Delete)?;
+
+        assert!(matches!(first_outcome, Outcome::Renamed));
+        assert!(matches!(second_outcome, Outcome::Skipped));
+        assert_eq!(std::fs::read(&target)?, b"first");
+        assert_eq!(std::fs::read(&second)?, b"second");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn an_extension_with_no_valid_characters_is_an_error() -> anyhow::Result<()> {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -500,5 +539,210 @@ mod test_process_file {
         assert!(!suffixed.exists());
         assert_eq!(std::fs::read(&unsuffixed)?, b"new");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_nested_trees {
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    /// Tree with suffixed files at every depth, some with an existing unsuffixed duplicate.
+    fn nested_tree() -> TempTree {
+        let tree = TempTree::new();
+        tree.file_with("top_1.mp4", "new top");
+        tree.file_with("top.mp4", "old top");
+        tree.file_with("a/song_1.mp3", "new song");
+        tree.file_with("a/b/clip_1.mkv", "new clip");
+        tree.file_with("a/b/clip.mkv", "old clip");
+        tree.file_with("a/b/c/photo_1.jpg", "new photo");
+        tree.file_with("a/b/c/keep_10.jpg", "keep");
+        tree.file_with("a/b/c/d/no_extension_1", "bare");
+        tree
+    }
+
+    #[test]
+    fn renames_suffixed_files_at_every_depth() {
+        let tree = nested_tree();
+
+        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(
+            summary,
+            RenameSummary {
+                renamed: 5,
+                removed: 2,
+                failed: 0
+            }
+        );
+        assert_eq!(
+            tree.snapshot(),
+            vec![
+                "a/",
+                "a/b/",
+                "a/b/c/",
+                "a/b/c/d/",
+                "a/b/c/d/no_extension: bare",
+                "a/b/c/keep_10.jpg: keep",
+                "a/b/c/photo.jpg: new photo",
+                "a/b/clip.mkv: new clip",
+                "a/song.mp3: new song",
+                "top.mp4: new top",
+            ]
+        );
+    }
+
+    #[test]
+    fn dryrun_leaves_the_tree_unchanged() {
+        let tree = nested_tree();
+        let before = tree.snapshot();
+
+        let summary = rename_files(tree.path(), true, ConflictAction::Delete);
+
+        assert_eq!(summary.renamed, 5);
+        assert_eq!(summary.removed, 2);
+        assert_eq!(tree.snapshot(), before);
+    }
+
+    #[test]
+    fn second_run_changes_nothing() {
+        let tree = nested_tree();
+        rename_files(tree.path(), false, ConflictAction::Delete);
+        let after_first_run = tree.snapshot();
+
+        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(summary, RenameSummary::default());
+        assert_eq!(tree.snapshot(), after_first_run);
+    }
+
+    #[test]
+    fn hidden_files_and_directories_are_skipped() {
+        let tree = TempTree::new();
+        tree.file(".hidden_1.txt");
+        tree.file(".secret/deep/clip_1.mp4");
+        tree.file("visible/clip_1.mp4");
+
+        rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(
+            tree.files(),
+            vec![".hidden_1.txt", ".secret/deep/clip_1.mp4", "visible/clip.mp4"]
+        );
+    }
+
+    #[test]
+    fn same_name_in_different_directories_is_renamed_in_each() {
+        let tree = TempTree::new();
+        tree.file_with("one/x_1.txt", "one");
+        tree.file_with("one/two/x_1.txt", "two");
+        tree.file_with("one/two/three/x_1.txt", "three");
+
+        rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(tree.read("one/x.txt"), "one");
+        assert_eq!(tree.read("one/two/x.txt"), "two");
+        assert_eq!(tree.read("one/two/three/x.txt"), "three");
+    }
+
+    #[test]
+    fn chained_suffixes_are_removed_one_level_per_file() {
+        let tree = TempTree::new();
+        tree.file_with("x_1_1.txt", "newest");
+        tree.file_with("x_1.txt", "newer");
+
+        rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(tree.snapshot(), vec!["x.txt: newer", "x_1.txt: newest"]);
+    }
+
+    #[test]
+    fn a_name_that_is_only_the_suffix_is_left_alone() {
+        let tree = TempTree::new();
+        tree.file_with("folder/_1.txt", "only suffix");
+        tree.file_with("folder/_1", "bare suffix");
+
+        rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(
+            tree.snapshot(),
+            vec!["folder/", "folder/_1.txt: only suffix", "folder/_1: bare suffix"]
+        );
+    }
+
+    #[test]
+    fn empty_directory_is_a_no_op() {
+        let tree = TempTree::with_entries(&["empty/nested/"]);
+
+        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(summary, RenameSummary::default());
+        assert_eq!(tree.snapshot(), vec!["empty/", "empty/nested/"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn suffixed_symlinks_are_not_renamed_and_their_targets_are_untouched() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real_1.txt", "real");
+        tree.file_with("outside/folder/inner_1.txt", "inner");
+        tree.symlink("outside/real_1.txt", "walked/link_1.txt");
+        tree.symlink("outside/folder", "walked/folder_1");
+
+        rename_files(&tree.join("walked"), false, ConflictAction::Delete);
+
+        assert_eq!(tree.read("outside/real_1.txt"), "real");
+        assert_eq!(tree.read("outside/folder/inner_1.txt"), "inner");
+        assert!(tree.exists("walked/link_1.txt"));
+        assert!(tree.exists("walked/folder_1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_conflicting_symlink_is_removed_without_touching_its_target() {
+        let tree = TempTree::new();
+        tree.file_with("outside/original.txt", "original");
+        tree.file_with("walked/clip_1.txt", "new");
+        tree.symlink("outside/original.txt", "walked/clip.txt");
+
+        rename_files(&tree.join("walked"), false, ConflictAction::Delete);
+
+        assert_eq!(tree.read("outside/original.txt"), "original");
+        assert_eq!(tree.read("walked/clip.txt"), "new");
+        assert!(!tree.join("walked/clip.txt").is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_directory_blocks_the_rename() {
+        let tree = TempTree::new();
+        tree.file_with("outside/folder/inner.txt", "inner");
+        tree.file_with("walked/clip_1.txt", "new");
+        tree.symlink("outside/folder", "walked/clip.txt");
+
+        rename_files(&tree.join("walked"), false, ConflictAction::Delete);
+
+        assert_eq!(tree.read("walked/clip_1.txt"), "new");
+        assert_eq!(tree.read("outside/folder/inner.txt"), "inner");
+    }
+
+    #[test]
+    fn a_target_differing_only_by_case_is_treated_consistently() {
+        let tree = TempTree::new();
+        tree.file_with("Clip_1.txt", "new");
+        tree.file_with("clip.txt", "old");
+        let case_sensitive =
+            cli_tools_common::directory_is_case_sensitive(tree.path()).expect("case probe should succeed");
+
+        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+
+        assert_eq!(summary.failed, 0);
+        if case_sensitive {
+            assert_eq!(tree.snapshot(), vec!["Clip.txt: new", "clip.txt: old"]);
+        } else {
+            assert_eq!(tree.files().len(), 1, "{:?}", tree.files());
+            assert_eq!(tree.read("Clip.txt"), "new");
+        }
     }
 }
