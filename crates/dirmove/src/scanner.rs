@@ -10,18 +10,31 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use walkdir::WalkDir;
 
-use crate::config::Config;
+use crate::name_filter::NameFilter;
 use crate::roots::Roots;
 use crate::types::{DirectoryInfo, FileInfo};
 use crate::utils;
+
+/// Include and exclude patterns and the recursion setting used while scanning.
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    /// Lowercase substrings a file name must contain, when any are given.
+    include: Vec<String>,
+    /// Lowercase substrings that exclude a file or directory name.
+    exclude: Vec<String>,
+    /// Whether destination directories are collected from nested directories too.
+    recurse: bool,
+}
 
 /// Collects files and directories from the configured roots.
 #[derive(Debug, Clone, Copy)]
 pub struct Scanner<'a> {
     /// Roots to scan.
     roots: &'a Roots,
-    /// Options for filtering names.
-    config: &'a Config,
+    /// Include and exclude patterns and the recursion setting.
+    options: &'a ScanOptions,
+    /// Ignored prefix and ignored group name rules.
+    name_filter: &'a NameFilter,
 }
 
 /// Candidate destination directories and the directories left out of them.
@@ -35,11 +48,65 @@ pub struct DirectoryScan {
     pub ignored: Vec<PathBuf>,
 }
 
+impl ScanOptions {
+    /// Create scan options from include and exclude patterns, matched case-insensitively.
+    ///
+    /// Patterns are lowercased and duplicates removed.
+    #[must_use]
+    pub fn new<I, E>(include: I, exclude: E, recurse: bool) -> Self
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+        E: IntoIterator,
+        E::Item: AsRef<str>,
+    {
+        Self {
+            include: lowercase_unique(include),
+            exclude: lowercase_unique(exclude),
+            recurse,
+        }
+    }
+
+    /// Return the lowercase include patterns.
+    #[must_use]
+    pub fn include(&self) -> &[String] {
+        &self.include
+    }
+
+    /// Return the lowercase exclude patterns.
+    #[must_use]
+    pub fn exclude(&self) -> &[String] {
+        &self.exclude
+    }
+
+    /// Return whether destination directories are collected from nested directories too.
+    #[must_use]
+    pub const fn recurse(&self) -> bool {
+        self.recurse
+    }
+
+    /// Return whether a lowercase name contains any include pattern, or there are no include patterns.
+    #[must_use]
+    pub fn is_included(&self, name_lowercase: &str) -> bool {
+        self.include.is_empty() || self.include.iter().any(|pattern| name_lowercase.contains(pattern))
+    }
+
+    /// Return whether a lowercase name contains any exclude pattern.
+    #[must_use]
+    pub fn is_excluded(&self, name_lowercase: &str) -> bool {
+        self.exclude.iter().any(|pattern| name_lowercase.contains(pattern))
+    }
+}
+
 impl<'a> Scanner<'a> {
     /// Create a scanner over the given roots.
     #[must_use]
-    pub const fn new(roots: &'a Roots, config: &'a Config) -> Self {
-        Self { roots, config }
+    pub const fn new(roots: &'a Roots, options: &'a ScanOptions, name_filter: &'a NameFilter) -> Self {
+        Self {
+            roots,
+            options,
+            name_filter,
+        }
     }
 
     /// Collect direct input files from every input root.
@@ -52,15 +119,16 @@ impl<'a> Scanner<'a> {
     pub fn collect_files(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut seen_paths = HashSet::new();
-        for file_path in self.input_file_paths()? {
+        self.for_each_input_file(|mut file_path| {
             let file_name = cli_tools_common::path_to_filename_string(&file_path).to_lowercase();
-            if self.config.is_included(&file_name)
-                && !self.config.is_excluded(&file_name)
+            if self.options.is_included(&file_name)
+                && !self.options.is_excluded(&file_name)
                 && seen_paths.insert(file_path.clone())
             {
+                file_path.shrink_to_fit();
                 files.push(file_path);
             }
-        }
+        })?;
         Ok(files)
     }
 
@@ -75,37 +143,37 @@ impl<'a> Scanner<'a> {
     /// # Errors
     /// Returns an error if an input directory cannot be read.
     pub fn collect_files_with_names(&self) -> Result<Vec<FileInfo<'static>>> {
-        let name_filter = self.config.name_filter();
         let mut files_with_names = Vec::new();
         let mut seen_paths = HashSet::new();
 
-        for file_path in self.input_file_paths()? {
+        self.for_each_input_file(|mut file_path| {
             if !seen_paths.insert(file_path.clone()) {
-                continue;
+                return;
             }
 
             let file_name = cli_tools_common::path_to_filename_string(&file_path);
             if file_name.starts_with('.') {
-                continue;
+                return;
             }
 
             let file_name_lowercase = file_name.to_lowercase();
-            if !self.config.is_included(&file_name_lowercase) || self.config.is_excluded(&file_name_lowercase) {
-                continue;
+            if !self.options.is_included(&file_name_lowercase) || self.options.is_excluded(&file_name_lowercase) {
+                return;
             }
 
-            let original_name = name_filter.strip_ignored_dot_prefixes(&file_name);
+            let original_name = self.name_filter.strip_ignored_dot_prefixes(&file_name);
             let filtered_name = utils::filter_numeric_resolution_and_glue_parts(&original_name);
+            file_path.shrink_to_fit();
             files_with_names.push(FileInfo::new(file_path, original_name, filtered_name));
-        }
+        })?;
 
         Ok(files_with_names)
     }
 
     /// Collect candidate destination directories from every output root.
     ///
-    /// Without `recurse`, only direct child directories of each output root are considered.
-    /// With `recurse`, nested directories are included and later prioritized by depth during matching.
+    /// Without recursion, only direct child directories of each output root are considered.
+    /// With recursion, nested directories are included and later prioritized by depth during matching.
     /// Duplicate paths are ignored when roots overlap.
     ///
     /// # Errors
@@ -114,7 +182,7 @@ impl<'a> Scanner<'a> {
         let mut scan = DirectoryScan::default();
         let mut candidates = Vec::new();
         let mut seen_paths = HashSet::new();
-        let max_depth = if self.config.recurse { usize::MAX } else { 1 };
+        let max_depth = if self.options.recurse { usize::MAX } else { 1 };
 
         for output_root in self.roots.output() {
             for entry in WalkDir::new(output_root)
@@ -138,7 +206,7 @@ impl<'a> Scanner<'a> {
                 }
 
                 let directory_name = cli_tools_common::os_str_to_string(entry.file_name()).to_lowercase();
-                if self.config.is_excluded(&directory_name) {
+                if self.options.is_excluded(&directory_name) {
                     scan.excluded.push(directory_path);
                     continue;
                 }
@@ -147,7 +215,7 @@ impl<'a> Scanner<'a> {
             }
         }
 
-        (scan.directories, scan.ignored) = self.config.name_filter().partition_destination_directories(candidates);
+        (scan.directories, scan.ignored) = self.name_filter.partition_destination_directories(candidates);
         Ok(scan)
     }
 
@@ -183,7 +251,7 @@ impl<'a> Scanner<'a> {
                 let directory_name = cli_tools_common::path_to_filename_string(&path);
                 if directory_name.starts_with('.')
                     || utils::is_unwanted_directory(&directory_name)
-                    || self.config.is_excluded(&directory_name.to_lowercase())
+                    || self.options.is_excluded(&directory_name.to_lowercase())
                 {
                     continue;
                 }
@@ -197,24 +265,40 @@ impl<'a> Scanner<'a> {
         Ok(directories)
     }
 
-    /// List explicit file inputs and the direct child files of input directories, in root order.
-    fn input_file_paths(&self) -> Result<Vec<PathBuf>> {
-        let mut file_paths = Vec::new();
+    /// Visit explicit file inputs and the direct child files of input directories, in root order.
+    ///
+    /// A path built from a directory entry has spare capacity from joining the directory and file name,
+    /// so callers that keep a path shrink it to fit first.
+    fn for_each_input_file(&self, mut visit: impl FnMut(PathBuf)) -> Result<()> {
         for input_root in self.roots.input() {
             if input_root.is_file() {
-                file_paths.push(input_root.clone());
+                visit(input_root.clone());
                 continue;
             }
 
             for entry in std::fs::read_dir(input_root)? {
                 let entry = entry?;
                 if entry.file_type()?.is_file() {
-                    file_paths.push(entry.path());
+                    visit(entry.path());
                 }
             }
         }
-        Ok(file_paths)
+        Ok(())
     }
+}
+
+/// Lowercase patterns and remove duplicates, keeping the first occurrence of each.
+fn lowercase_unique<P>(patterns: P) -> Vec<String>
+where
+    P: IntoIterator,
+    P::Item: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    patterns
+        .into_iter()
+        .map(|pattern| pattern.as_ref().to_lowercase())
+        .filter(|pattern| seen.insert(pattern.clone()))
+        .collect()
 }
 
 /// Return whether a file can still be offered by another matching group.
@@ -225,7 +309,7 @@ pub fn file_is_available<S: BuildHasher>(file_path: &Path, consumed_files: &Hash
 
 #[cfg(test)]
 mod test_collect_directories {
-    use super::*;
+
     use crate::test_helpers::*;
     use cli_tools_common::path_to_filename_string;
 
@@ -244,7 +328,7 @@ mod test_collect_directories {
             std::fs::create_dir(root.join(directory_name))?;
         }
 
-        let config = Config::test_with_ignored_group_names(vec!["EPISODE", "season one"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["EPISODE", "season one"]);
         let fixture = Fixture::new(root, config);
 
         let mut directory_names: Vec<_> = fixture
@@ -278,7 +362,7 @@ mod test_collect_directories {
         }
 
         let config =
-            Config::test_with_prefix_ignores_and_ignored_group_names(vec!["web", "dl"], vec!["studio", "episode"]);
+            TestConfig::test_with_prefix_ignores_and_ignored_group_names(vec!["web", "dl"], vec!["studio", "episode"]);
         let fixture = Fixture::new(root, config);
 
         let mut directory_names: Vec<_> = fixture
@@ -314,10 +398,34 @@ mod test_collect_input_directories {
         std::fs::create_dir(&normal)?;
 
         let roots = Roots::new(vec![root.clone()], vec![root]);
-        let config = Config::default();
-        let directories = Scanner::new(&roots, &config).collect_input_directories()?;
+        let directories =
+            Scanner::new(&roots, &ScanOptions::default(), &NameFilter::default()).collect_input_directories()?;
 
         assert_eq!(directories, vec![normal]);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_scan_options {
+    use super::*;
+
+    #[test]
+    fn everything_is_included_without_include_patterns() {
+        assert!(ScanOptions::default().is_included("anything.mp4"));
+    }
+
+    #[test]
+    fn include_patterns_require_a_match_ignoring_case() {
+        let options = ScanOptions::new(["Show"], Vec::<String>::new(), false);
+        assert!(options.is_included("my.show.mp4"));
+        assert!(!options.is_included("other.mp4"));
+    }
+
+    #[test]
+    fn exclude_patterns_exclude_matching_names_ignoring_case() {
+        let options = ScanOptions::new(Vec::<String>::new(), ["SAMPLE"], false);
+        assert!(options.is_excluded("show.sample.mp4"));
+        assert!(!options.is_excluded("show.mp4"));
     }
 }

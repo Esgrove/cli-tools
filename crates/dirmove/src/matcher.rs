@@ -12,10 +12,19 @@ use anyhow::Result;
 
 use cli_tools_common::{MatchRange, path_to_filename_string};
 
-use crate::config::{Config, CustomMapping};
+use crate::name_filter::NameFilter;
 use crate::roots::Roots;
 use crate::types::{DirectoryInfo, FileInfo};
 use crate::utils;
+
+/// A custom mapping pair that maps files containing a pattern to a specific directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomMapping {
+    /// Pattern to match in filename (case-insensitive, normalized).
+    pub pattern: String,
+    /// Target directory name for matching files.
+    pub directory: String,
+}
 
 /// A file index and the filename range that matched a destination.
 #[derive(Debug, Clone, Copy)]
@@ -49,8 +58,10 @@ pub struct NormalizedFilename {
 pub struct DirectoryMatcher<'a> {
     /// Roots used to rank destination directories by depth.
     roots: &'a Roots,
-    /// Options holding the name filter rules and custom mappings.
-    config: &'a Config,
+    /// Ignored prefix and ignored group name rules.
+    name_filter: &'a NameFilter,
+    /// Patterns that route matching files to a fixed directory.
+    custom_mappings: &'a [CustomMapping],
 }
 
 /// Precomputed destination directory name variants used while matching files.
@@ -65,6 +76,17 @@ struct DestinationMatchInfo<'a> {
     stripped_spaced_name: Option<String>,
     /// Prefix-stripped normalized name, present only when stripping changed the name.
     stripped_normalized_name: Option<String>,
+}
+
+impl CustomMapping {
+    /// Create a new custom mapping with normalized pattern (lowercase, no dots/spaces).
+    #[must_use]
+    pub fn new(pattern: &str, directory: &str) -> Self {
+        Self {
+            pattern: pattern.to_lowercase().replace(['.', ' '], ""),
+            directory: directory.to_string(),
+        }
+    }
 }
 
 impl NormalizedFilename {
@@ -108,8 +130,12 @@ impl NormalizedFilename {
 impl<'a> DirectoryMatcher<'a> {
     /// Create a matcher for destination directories under the given roots.
     #[must_use]
-    pub const fn new(roots: &'a Roots, config: &'a Config) -> Self {
-        Self { roots, config }
+    pub const fn new(roots: &'a Roots, name_filter: &'a NameFilter, custom_mappings: &'a [CustomMapping]) -> Self {
+        Self {
+            roots,
+            name_filter,
+            custom_mappings,
+        }
     }
 
     /// Return directory indices in match priority order.
@@ -138,7 +164,7 @@ impl<'a> DirectoryMatcher<'a> {
     /// so recursive scans prefer deeper destinations before broader shallow matches.
     #[must_use]
     pub fn match_files(&self, files: &[PathBuf], directories: &[DirectoryInfo]) -> HashMap<usize, Vec<FileMatch>> {
-        let name_filter = self.config.name_filter();
+        let name_filter = self.name_filter;
         let mut matches: HashMap<usize, Vec<FileMatch>> = HashMap::new();
         let destination_match_info = self.collect_destination_match_info(directories);
 
@@ -193,7 +219,7 @@ impl<'a> DirectoryMatcher<'a> {
             };
 
             let file_name_normalized = utils::normalize_name(file_name);
-            for mapping in &self.config.custom_mappings {
+            for mapping in self.custom_mappings {
                 if file_name_normalized.contains(&mapping.pattern)
                     && let Some(directory_index) = self.find_directory_for_custom_mapping(mapping, directories)
                     && let Some(range) = NormalizedFilename::new(file_name).find_match(&mapping.pattern)
@@ -281,7 +307,7 @@ impl<'a> DirectoryMatcher<'a> {
         &self,
         directories: &'directories [DirectoryInfo],
     ) -> Vec<DestinationMatchInfo<'directories>> {
-        let name_filter = self.config.name_filter();
+        let name_filter = self.name_filter;
         self.sorted_directory_indices(directories)
             .into_iter()
             .filter_map(|directory_index| {
@@ -442,7 +468,7 @@ mod test_directory_matching {
     fn ignored_group_name_directory_not_offered() {
         let fixture = Fixture::new(
             PathBuf::from("."),
-            Config::test_with_ignored_group_names(vec!["episode"]),
+            TestConfig::test_with_ignored_group_names(vec!["episode"]),
         );
         let dirs = fixture
             .name_filter()
@@ -459,7 +485,7 @@ mod test_directory_matching {
     fn prefix_stripped_ignored_group_name_directory_not_offered() {
         let fixture = Fixture::new(
             PathBuf::from("."),
-            Config::test_with_prefix_ignores_and_ignored_group_names(vec!["dl"], vec!["studio"]),
+            TestConfig::test_with_prefix_ignores_and_ignored_group_names(vec!["dl"], vec!["studio"]),
         );
         let dirs = fixture
             .name_filter()
@@ -780,5 +806,28 @@ mod test_filename_directory_highlight {
         let filename = path_to_filename_string(&files[file_match.index]);
 
         assert_eq!(file_match.range.extract_from(&filename), Some("Certain.Name"));
+    }
+}
+
+#[cfg(test)]
+mod test_custom_mapping {
+    use super::*;
+
+    #[test]
+    fn new_normalizes_pattern_to_lowercase() {
+        let mapping = CustomMapping::new("PATTERN", "Directory");
+        assert_eq!(mapping.pattern, "pattern");
+    }
+
+    #[test]
+    fn new_removes_dots_and_spaces_from_pattern() {
+        let mapping = CustomMapping::new("Some.Pattern Name", "Directory");
+        assert_eq!(mapping.pattern, "somepatternname");
+    }
+
+    #[test]
+    fn new_preserves_directory_name_case() {
+        let mapping = CustomMapping::new("pattern", "My Directory");
+        assert_eq!(mapping.directory, "My Directory");
     }
 }

@@ -12,22 +12,17 @@ use walkdir::WalkDir;
 
 use cli_tools_common::path_to_filename_string;
 
-use crate::mover;
+use crate::mover::{self, MoveObserver};
 use crate::name_filter::NameFilter;
 use crate::types::MergePair;
 
 /// Moves the contents of one directory into another.
-#[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DirectoryMerger {
     /// Whether existing target entries are overwritten.
     overwrite: bool,
-    /// Whether to only report what would be moved.
+    /// Whether to only report what would be moved, without moving anything.
     dryrun: bool,
-    /// Whether the file mover prints every file.
-    verbose: bool,
-    /// Whether the file mover hides its progress bar.
-    hide_progress: bool,
 }
 
 /// One step of merging a source directory into a target directory.
@@ -56,17 +51,27 @@ pub enum MergeEvent<'a> {
     WouldRemoveSource(&'a Path),
 }
 
+/// Receives the steps of merging directories, and the file moves they make.
+///
+/// Every method does nothing by default, and `()` reports nothing.
+pub trait MergeObserver: MoveObserver {
+    /// One step of the merge happened.
+    fn on_merge_event(&mut self, _event: MergeEvent<'_>) {}
+
+    /// The files of one directory were moved into the target directory.
+    fn on_files_moved(&mut self, _report: &mover::MoveReport) {}
+}
+
+impl MergeObserver for () {}
+
 impl DirectoryMerger {
-    /// Create a merger with the given overwrite, dry run, verbose, and progress options.
+    /// Create a merger.
+    ///
+    /// With `overwrite`, existing target entries are replaced instead of skipped.
+    /// With `dryrun`, nothing is moved and the observer is told what would be moved.
     #[must_use]
-    #[allow(clippy::fn_params_excessive_bools)]
-    pub const fn new(overwrite: bool, dryrun: bool, verbose: bool, hide_progress: bool) -> Self {
-        Self {
-            overwrite,
-            dryrun,
-            verbose,
-            hide_progress,
-        }
+    pub const fn new(overwrite: bool, dryrun: bool) -> Self {
+        Self { overwrite, dryrun }
     }
 
     /// Merge contents from the source directory into the target directory.
@@ -79,8 +84,8 @@ impl DirectoryMerger {
     ///
     /// # Errors
     /// Returns an error if the source cannot be read or an entry cannot be moved.
-    pub fn merge(&self, source: &Path, target: &Path, on_event: &mut impl FnMut(MergeEvent<'_>)) -> Result<()> {
-        on_event(MergeEvent::Started { source, target });
+    pub fn merge(&self, source: &Path, target: &Path, observer: &mut impl MergeObserver) -> Result<()> {
+        observer.on_merge_event(MergeEvent::Started { source, target });
 
         let mut skipped_files = Vec::new();
         let mut moved_count = 0;
@@ -104,7 +109,7 @@ impl DirectoryMerger {
 
             if target_path.exists() {
                 if self.overwrite {
-                    on_event(MergeEvent::Overwriting(&entry_name));
+                    observer.on_merge_event(MergeEvent::Overwriting(&entry_name));
                 } else {
                     skipped_files.push(entry_name.into_owned());
                     continue;
@@ -112,7 +117,7 @@ impl DirectoryMerger {
             }
 
             if self.dryrun {
-                on_event(MergeEvent::WouldMove(&entry_name));
+                observer.on_merge_event(MergeEvent::WouldMove(&entry_name));
                 moved_count += 1;
                 continue;
             }
@@ -126,22 +131,17 @@ impl DirectoryMerger {
             }
         }
 
-        // The shared mover prints its own progress and summary,
-        // so moved files are not added to `moved_count` to avoid a duplicate summary line.
+        // Moved files are reported through `on_files_moved` and are not counted in `moved_count`,
+        // which counts the directories and dry run entries.
         if !file_entries.is_empty() {
-            let report = mover::move_files_to_target_dir(
-                target,
-                &file_entries,
-                self.overwrite,
-                self.verbose,
-                self.hide_progress,
-            )?;
+            let report = mover::move_files_to_target_dir(target, &file_entries, self.overwrite, observer)?;
+            observer.on_files_moved(&report);
             skipped_files.extend(report.skipped_files.iter().map(|path| path_to_filename_string(path)));
         }
 
         for (entry_path, target_path) in directory_entries {
             if target_path.is_dir() {
-                self.merge(&entry_path, &target_path, on_event)?;
+                self.merge(&entry_path, &target_path, observer)?;
                 moved_count += 1;
                 continue;
             }
@@ -156,18 +156,18 @@ impl DirectoryMerger {
         }
 
         if !skipped_files.is_empty() {
-            on_event(MergeEvent::Skipped(&skipped_files));
+            observer.on_merge_event(MergeEvent::Skipped(&skipped_files));
         }
         if moved_count > 0 || !skipped_files.is_empty() {
-            on_event(MergeEvent::Moved(moved_count));
+            observer.on_merge_event(MergeEvent::Moved(moved_count));
         }
 
         if self.dryrun {
-            on_event(MergeEvent::WouldRemoveSource(source));
+            observer.on_merge_event(MergeEvent::WouldRemoveSource(source));
         } else if std::fs::read_dir(source).is_ok_and(|mut entries| entries.next().is_none()) {
             match std::fs::remove_dir(source) {
-                Ok(()) => on_event(MergeEvent::SourceRemoved(source)),
-                Err(error) => on_event(MergeEvent::SourceRemoveFailed(source, &error)),
+                Ok(()) => observer.on_merge_event(MergeEvent::SourceRemoved(source)),
+                Err(error) => observer.on_merge_event(MergeEvent::SourceRemoveFailed(source, &error)),
             }
         }
 
@@ -186,7 +186,7 @@ impl DirectoryMerger {
 pub fn find_prefix_merge_pairs(
     output_roots: &[PathBuf],
     recurse: bool,
-    name_filter: NameFilter<'_>,
+    name_filter: &NameFilter,
 ) -> Result<Vec<MergePair>> {
     let mut all_pairs = Vec::new();
     for parent_directory in collect_merge_parent_directories(output_roots, recurse) {
@@ -240,7 +240,7 @@ fn collect_merge_parent_directories(output_roots: &[PathBuf], recurse: bool) -> 
 ///
 /// Returns a pair for each sibling directory with an ignored prefix whose name
 /// with the prefix stripped matches another directory's name, ignoring case.
-fn find_prefix_merge_pairs_in_directory(parent: &Path, name_filter: NameFilter<'_>) -> Result<Vec<MergePair>> {
+fn find_prefix_merge_pairs_in_directory(parent: &Path, name_filter: &NameFilter) -> Result<Vec<MergePair>> {
     let directories: Vec<PathBuf> = std::fs::read_dir(parent)?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))

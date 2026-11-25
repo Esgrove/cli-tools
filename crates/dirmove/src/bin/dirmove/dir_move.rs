@@ -16,12 +16,14 @@ use cli_tools_common::{
     print_yellow,
 };
 use cli_tools_dirmove::{
-    Config, DirectoryInfo, DirectoryMatcher, DirectoryMerger, EntryMove, FileInfo, FileMatch, MoveInfo, PrefixGrouper,
-    PromptResult, Roots, Scanner, Unpacker, matcher, merge, mover, scanner, unpack, utils,
+    DirectoryInfo, DirectoryMatcher, DirectoryMerger, EntryMove, FileInfo, FileMatch, MergeObserver, MoveInfo,
+    PrefixGrouper, PromptResult, Roots, Scanner, Unpacker, matcher, merge, mover, scanner, unpack, utils,
 };
+#[cfg(test)]
+use cli_tools_dirmove::{GroupingOptions, NameFilter, ScanOptions};
 
 use crate::DirMoveArgs;
-use crate::config::{add_ignored_group_name_to_config, config_from_args};
+use crate::config::{Config, add_ignored_group_name_to_config, config_from_args};
 use crate::database::{self, Database};
 use crate::prompt;
 use crate::report;
@@ -128,19 +130,6 @@ impl DirMove {
     /// before normal file-to-directory matching.
     /// Create mode runs last and uses the first output root for newly-created directories.
     pub fn run(&self) -> anyhow::Result<()> {
-        if self.config.show_db {
-            if let Some(db) = &self.database {
-                let entries = db.get_all_entries()?;
-                println!("Database entries: {}", entries.len());
-                for entry in entries {
-                    println!("  {}", entry.display_name);
-                }
-            } else {
-                print_yellow("Database not available");
-            }
-            return Ok(());
-        }
-
         // Unwanted directories are deleted and unpack directories unpacked in a single directory walk.
         self.unpack_directories();
         self.merge_prefixed_directories()?;
@@ -156,27 +145,22 @@ impl DirMove {
 
     /// Return the scanner for the configured roots.
     const fn scanner(&self) -> Scanner<'_> {
-        Scanner::new(&self.roots, &self.config)
+        Scanner::new(&self.roots, &self.config.scan, &self.config.name_filter)
     }
 
     /// Return the matcher for destination directories under the output roots.
-    const fn matcher(&self) -> DirectoryMatcher<'_> {
-        DirectoryMatcher::new(&self.roots, &self.config)
+    fn matcher(&self) -> DirectoryMatcher<'_> {
+        DirectoryMatcher::new(&self.roots, &self.config.name_filter, &self.config.custom_mappings)
     }
 
     /// Return the prefix grouper for create mode.
     const fn grouper(&self) -> PrefixGrouper<'_> {
-        PrefixGrouper::new(&self.config, HIDE_PROGRESS)
+        PrefixGrouper::new(&self.config.grouping, &self.config.name_filter)
     }
 
-    /// Return the merger that moves directory contents.
-    const fn merger(&self) -> DirectoryMerger {
-        DirectoryMerger::new(
-            self.config.overwrite,
-            self.config.dryrun,
-            self.config.verbose,
-            HIDE_PROGRESS,
-        )
+    /// Return the reporter that prints file moves and directory merges.
+    fn reporter(&self) -> report::ConsoleReporter<'_> {
+        report::ConsoleReporter::new(&self.roots, self.config.dryrun, self.config.verbose, HIDE_PROGRESS)
     }
 
     /// Delete unwanted directories and unpack configured directory names across every input root.
@@ -189,7 +173,7 @@ impl DirMove {
     /// Empty directories touched by the unpacking are pruned.
     fn unpack_directories(&self) {
         let unpacker = Unpacker::new(&self.config.unpack_directory_names, self.config.overwrite);
-        let candidates = unpacker.collect_candidates(self.roots.input(), self.config.recurse);
+        let candidates = unpacker.collect_candidates(self.roots.input(), self.config.scan.recurse());
 
         // Unwanted directories come deepest first for safe deletion.
         for directory in candidates.unwanted {
@@ -264,12 +248,12 @@ impl DirMove {
     /// For example, if `prefix_ignore` contains "studio" and there are directories "studio alpha beta"
     /// and "alpha beta", the contents of "studio alpha beta" will be merged into "alpha beta".
     fn merge_prefixed_directories(&self) -> anyhow::Result<()> {
-        let name_filter = self.config.name_filter();
+        let name_filter = &self.config.name_filter;
         if !name_filter.has_prefix_ignores() {
             return Ok(());
         }
 
-        for pair in merge::find_prefix_merge_pairs(self.roots.output(), self.config.recurse, name_filter)? {
+        for pair in merge::find_prefix_merge_pairs(self.roots.output(), self.config.scan.recurse(), name_filter)? {
             self.merge_directory_contents(&pair.source, &pair.target)?;
         }
 
@@ -278,9 +262,7 @@ impl DirMove {
 
     /// Merge contents from the source directory into the target directory and print each step.
     fn merge_directory_contents(&self, source: &Path, target: &Path) -> anyhow::Result<()> {
-        self.merger().merge(source, target, &mut |event| {
-            report::print_merge_event(&event, &self.roots, self.config.dryrun, self.config.verbose);
-        })
+        DirectoryMerger::new(self.config.overwrite, self.config.dryrun).merge(source, target, &mut self.reporter())
     }
 
     /// Print debug information about the database contents.
@@ -623,7 +605,7 @@ impl DirMove {
         self.process_custom_mappings_create_mode(&files_with_names, &mut moved_files)?;
 
         if self.config.debug {
-            eprintln!("prefix_ignores: {:?}", self.config.prefix_ignores);
+            eprintln!("prefix_ignores: {:?}", self.config.name_filter.prefix_ignores());
             eprintln!("Original names after stripping prefix_ignores:");
             for file_info in &files_with_names {
                 eprintln!("  {}", file_info.original_name);
@@ -631,13 +613,14 @@ impl DirMove {
         }
 
         let grouper = self.grouper();
-        let groups_to_process =
-            grouper.groups_in_processing_order(grouper.collect_all_prefix_groups(&files_with_names));
+        let progress = report::GroupingProgressBar::new(HIDE_PROGRESS);
+        let groups = grouper.collect_all_prefix_groups_with_progress(&files_with_names, &progress);
+        let groups_to_process = grouper.groups_in_processing_order(groups);
         if groups_to_process.is_empty() {
             if self.config.verbose {
                 println!(
                     "No file groups with {} or more matching prefixes found",
-                    self.config.min_group_size
+                    self.config.grouping.min_group_size()
                 );
             }
             return Ok(());
@@ -656,7 +639,7 @@ impl DirMove {
 
         for (prefix, group) in groups_to_process {
             let available_files: Vec<_> = group.files.into_iter().filter(|f| !moved_files.contains(f)).collect();
-            if available_files.len() < self.config.min_group_size {
+            if available_files.len() < self.config.grouping.min_group_size() {
                 continue;
             }
 
@@ -845,13 +828,10 @@ impl DirMove {
 
     /// Move files to the target directory, creating it if needed.
     fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<mover::MoveReport> {
-        mover::move_files_to_target_dir(
-            dir_path,
-            files,
-            self.config.overwrite,
-            self.config.verbose,
-            HIDE_PROGRESS,
-        )
+        let mut reporter = self.reporter();
+        let report = mover::move_files_to_target_dir(dir_path, files, self.config.overwrite, &mut reporter)?;
+        reporter.on_files_moved(&report);
+        Ok(report)
     }
 }
 
@@ -887,10 +867,8 @@ mod test_helpers {
             auto: true,
             dryrun,
             overwrite,
-            recurse,
             unpack_directory_names: unpack_names.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 5,
+            scan: ScanOptions::new(Vec::<String>::new(), Vec::<String>::new(), recurse),
             ..Default::default()
         }
     }
@@ -901,22 +879,19 @@ mod test_helpers {
             auto: true,
             dryrun,
             overwrite,
-            recurse,
-            prefix_ignores: prefix_ignores.into_iter().map(str::to_lowercase).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 5,
+            scan: ScanOptions::new(Vec::<String>::new(), Vec::<String>::new(), recurse),
+            name_filter: NameFilter::new(prefix_ignores, Vec::<String>::new()),
             ..Default::default()
         }
     }
 
-    /// Create a test config with ignored group names (automatically normalized).
+    /// Create a test config with ignored group names.
     pub fn test_ignored_group_names_config(ignored_group_names: Vec<&str>) -> Config {
         Config {
-            ignored_group_names: ignored_group_names.into_iter().map(utils::normalize_name).collect(),
-            min_group_size: 3,
-            min_prefix_chars: 1,
             dryrun: true,
             create: true,
+            grouping: GroupingOptions::new(3, 1, Vec::<String>::new(), Vec::<String>::new()),
+            name_filter: NameFilter::new(Vec::<String>::new(), ignored_group_names),
             ..Default::default()
         }
     }
@@ -957,8 +932,7 @@ mod test_custom_mappings {
         let config = Config {
             auto: true,
             custom_mappings,
-            min_group_size: 1,
-            min_prefix_chars: 1,
+            grouping: GroupingOptions::new(1, 1, Vec::<String>::new(), Vec::<String>::new()),
             ..Default::default()
         };
         make_dirmove(root, config)
@@ -1026,7 +1000,7 @@ mod test_custom_mappings {
         let mapping = CustomMapping::new("pattern", "Target Dir");
         let directories = dirmove
             .config
-            .name_filter()
+            .name_filter
             .partition_destination_directories(vec![DirectoryInfo {
                 path: PathBuf::from("Target Dir"),
                 name: "target dir".to_string(),
@@ -1301,7 +1275,7 @@ mod test_custom_mappings {
             auto: true,
             create: true,
             custom_mappings: vec![CustomMapping::new("example", "Example")],
-            min_group_size: 10,
+            grouping: GroupingOptions::new(10, 0, Vec::<String>::new(), Vec::<String>::new()),
             ..Default::default()
         };
         let dirmove = make_dirmove(root.clone(), config);
@@ -1381,7 +1355,7 @@ mod test_output_root {
 
         let config = Config {
             auto: true,
-            recurse: true,
+            scan: ScanOptions::new(Vec::<String>::new(), Vec::<String>::new(), true),
             ..Default::default()
         };
         let dirmove = make_dirmove_with_output(input_root.clone(), output_root, config);
@@ -1407,7 +1381,7 @@ mod test_output_root {
 
         let config = Config {
             auto: true,
-            recurse: true,
+            scan: ScanOptions::new(Vec::<String>::new(), Vec::<String>::new(), true),
             ..Default::default()
         };
         let dirmove = make_dirmove_with_output(input_root.clone(), output_root, config);
@@ -1434,7 +1408,7 @@ mod test_output_root {
 
         let config = Config {
             auto: true,
-            recurse: true,
+            scan: ScanOptions::new(Vec::<String>::new(), Vec::<String>::new(), true),
             ..Default::default()
         };
         let dirmove = make_dirmove_with_output(input_root.clone(), output_root, config);
@@ -1605,7 +1579,7 @@ mod test_output_root {
         let config = Config {
             auto: true,
             custom_mappings: vec![CustomMapping::new("mapped", "Target")],
-            recurse: true,
+            scan: ScanOptions::new(Vec::<String>::new(), Vec::<String>::new(), true),
             ..Default::default()
         };
         let dirmove = make_dirmove_with_roots(vec![input_root.clone()], vec![output_root_a, output_root_b], config);
@@ -1686,8 +1660,7 @@ mod test_output_root {
         let config = Config {
             auto: true,
             create: true,
-            min_group_size: 3,
-            min_prefix_chars: 4,
+            grouping: GroupingOptions::new(3, 4, Vec::<String>::new(), Vec::<String>::new()),
             ..Default::default()
         };
         let dirmove = make_dirmove_with_output(input_root.clone(), output_root.clone(), config);
@@ -1717,8 +1690,7 @@ mod test_output_root {
         let config = Config {
             auto: true,
             create: true,
-            min_group_size: 3,
-            min_prefix_chars: 4,
+            grouping: GroupingOptions::new(3, 4, Vec::<String>::new(), Vec::<String>::new()),
             ..Default::default()
         };
         let dirmove = make_dirmove_with_roots(
@@ -1750,7 +1722,7 @@ mod test_output_root {
             auto: true,
             create: true,
             custom_mappings: vec![CustomMapping::new("example", "Example")],
-            min_group_size: 10,
+            grouping: GroupingOptions::new(10, 0, Vec::<String>::new(), Vec::<String>::new()),
             ..Default::default()
         };
         let dirmove = make_dirmove_with_output(input_root.clone(), output_root.clone(), config);

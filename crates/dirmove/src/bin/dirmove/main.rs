@@ -29,6 +29,10 @@ enum DirMoveCommand {
         #[arg(short = 'I', long)]
         install: bool,
     },
+
+    /// Print the directory names stored in the database
+    #[command(name = "database", visible_alias = "db")]
+    Database,
 }
 
 /// Command-line arguments for the `dirmove` binary.
@@ -114,10 +118,6 @@ struct DirMoveArgs {
     #[arg(short = 'r', long)]
     recurse: bool,
 
-    /// Show database statistics and contents
-    #[arg(short = 'S', long = "show-db")]
-    show_db: bool,
-
     /// Print verbose output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
@@ -126,16 +126,16 @@ struct DirMoveArgs {
 /// Parse CLI arguments and run the requested `dirmove` command.
 fn main() -> anyhow::Result<()> {
     let args = DirMoveArgs::parse();
-    if let Some(DirMoveCommand::Completion { shell, install }) = &args.command {
-        cli_tools_common::generate_shell_completion(
+    match &args.command {
+        Some(DirMoveCommand::Completion { shell, install }) => cli_tools_common::generate_shell_completion(
             *shell,
             DirMoveArgs::command(),
             *install,
             args.verbose,
             env!("CARGO_BIN_NAME"),
-        )
-    } else {
-        DirMove::try_from_args(args)?.run()
+        ),
+        Some(DirMoveCommand::Database) => database::print_entries(),
+        None => DirMove::try_from_args(args)?.run(),
     }
 }
 
@@ -158,15 +158,14 @@ mod test_args {
         assert!(args.min_prefix_chars.is_none());
         assert!(!args.print);
         assert!(!args.recurse);
-        assert!(!args.show_db);
         assert!(!args.verbose);
     }
 
     #[test]
     fn parses_combined_flags() {
         let args = DirMoveArgs::try_parse_from([
-            "dirmove", "input", "second", "-O", "out", "-a", "-c", "-D", "-f", "-F", "-p", "-r", "-S", "-v", "-g", "3",
-            "-m", "4",
+            "dirmove", "input", "second", "-O", "out", "-a", "-c", "-D", "-f", "-F", "-p", "-r", "-v", "-g", "3", "-m",
+            "4",
         ])
         .expect("combined arguments should parse");
         assert_eq!(args.path, vec![PathBuf::from("input"), PathBuf::from("second")]);
@@ -178,7 +177,6 @@ mod test_args {
         assert!(args.files_only);
         assert!(args.print);
         assert!(args.recurse);
-        assert!(args.show_db);
         assert!(args.verbose);
         assert_eq!(args.group, Some(3));
         assert_eq!(args.min_prefix_chars, Some(4));
@@ -235,5 +233,13 @@ mod test_args {
             })
         ));
         DirMoveArgs::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_database_subcommand_and_alias() {
+        for name in ["database", "db"] {
+            let args = DirMoveArgs::try_parse_from(["dirmove", name]).expect("database command should parse");
+            assert!(matches!(args.command, Some(DirMoveCommand::Database)));
+        }
     }
 }

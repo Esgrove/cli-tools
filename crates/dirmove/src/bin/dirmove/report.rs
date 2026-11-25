@@ -1,6 +1,8 @@
 //! Printing what the `dirmove` passes find and do.
 //!
-//! Formats unpack summaries, directory merge progress, whole directory merge offer titles,
+//! `ConsoleReporter` prints file moves and directory merges with a byte progress bar,
+//! and `GroupingProgressBar` shows the progress of grouping files by prefix.
+//! The functions format unpack summaries, whole directory merge offer titles,
 //! and the debug listings of match groups and grouping names.
 
 use std::collections::{HashMap, HashSet};
@@ -8,11 +10,202 @@ use std::path::Path;
 
 use colored::Colorize;
 
+use indicatif::{ProgressBar, ProgressStyle};
+
 use cli_tools_common::{
-    count_label, get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_magenta,
-    print_yellow,
+    count_label, get_relative_path_or_filename, path_to_filename_string, path_to_string_relative, print_error,
+    print_magenta, print_yellow,
 };
-use cli_tools_dirmove::{DirectoryInfo, FileInfo, FileMatch, MergeEvent, MoveInfo, Roots, UnpackInfo};
+use cli_tools_dirmove::{
+    DirectoryInfo, FileInfo, FileMatch, GroupingProgress, GroupingStage, MergeEvent, MergeObserver, MoveEvent,
+    MoveInfo, MoveObserver, MoveReport, Roots, UnpackInfo,
+};
+
+/// Prints file moves and directory merges with a byte progress bar.
+pub struct ConsoleReporter<'a> {
+    /// Roots used to display merge paths compactly.
+    roots: &'a Roots,
+    /// Whether nothing is moved, which changes the merge summary wording.
+    dryrun: bool,
+    /// Whether to print every moved file and every merge step.
+    verbose: bool,
+    /// Whether to hide the progress bar.
+    hide_progress: bool,
+    /// Progress bar of the current batch of file moves.
+    progress_bar: ProgressBar,
+}
+
+/// Shows grouping progress with one progress bar reused for every stage.
+pub struct GroupingProgressBar {
+    /// Progress bar reset at the start of each stage.
+    progress_bar: ProgressBar,
+}
+
+impl<'a> ConsoleReporter<'a> {
+    /// Create a reporter, optionally hiding the progress bar.
+    pub fn new(roots: &'a Roots, dryrun: bool, verbose: bool, hide_progress: bool) -> Self {
+        Self {
+            roots,
+            dryrun,
+            verbose,
+            hide_progress,
+            progress_bar: ProgressBar::hidden(),
+        }
+    }
+
+    /// Print a message above the progress bar.
+    fn print(&self, print_message: impl FnOnce()) {
+        self.progress_bar.suspend(print_message);
+    }
+}
+
+impl GroupingProgressBar {
+    /// Create a grouping progress bar, hidden when `hide_progress` is set.
+    pub fn new(hide_progress: bool) -> Self {
+        let progress_bar = if hide_progress {
+            ProgressBar::hidden()
+        } else {
+            let progress_bar = ProgressBar::new(0);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+                    .expect("Failed to set progress bar template")
+                    .progress_chars("=> "),
+            );
+            progress_bar
+        };
+        Self { progress_bar }
+    }
+}
+
+impl MoveObserver for ConsoleReporter<'_> {
+    fn on_event(&mut self, event: MoveEvent<'_>) {
+        match event {
+            MoveEvent::CreatedDirectory(path) => println!("  Created directory: {}", path_to_filename_string(path)),
+            MoveEvent::Started { total_bytes } => {
+                self.progress_bar = move_progress_bar(total_bytes, self.hide_progress);
+            }
+            MoveEvent::FileStarted { index, count, name } => {
+                self.progress_bar.set_message(format!("[{}/{count}] {name}", index + 1));
+            }
+            MoveEvent::MissingFileName(path) => {
+                self.print(|| print_error!("Could not get file name for path: {}", path.display()));
+            }
+            MoveEvent::DuplicateName(path) => self.print(|| {
+                print_yellow!(
+                    "Skipping {}, another file in this move has the same name",
+                    path.display()
+                );
+            }),
+            MoveEvent::SkippedExisting(path) => {
+                self.print(|| print_yellow!("Skipping existing file: {}", path.display()));
+            }
+            MoveEvent::AlreadyInPlace(path) if self.verbose => {
+                self.print(|| println!("  Already in place: {}", path.display()));
+            }
+            MoveEvent::DirectoryInTheWay(path) => {
+                self.print(|| print_error!("Cannot replace existing directory with a file: {}", path.display()));
+            }
+            MoveEvent::RenameFailed {
+                source,
+                destination,
+                error,
+            } => self.print(|| {
+                print_yellow!(
+                    "Rename failed for {} -> {} ({error}), falling back to copy",
+                    source.display(),
+                    destination.display()
+                );
+            }),
+            MoveEvent::Copied => finish_progress_if_complete(&self.progress_bar),
+            MoveEvent::HashVerified(hash) if self.verbose => {
+                self.print(|| println!("  Hash verified: BLAKE3 {}", short_hash(hash)));
+            }
+            MoveEvent::Moved(name) if self.verbose => self.print(|| println!("  Moved: {name}")),
+            MoveEvent::Failed { source, error } => {
+                self.print(|| print_error!("Failed to move {}: {error}", source.display()));
+            }
+            _ => {}
+        }
+    }
+
+    fn on_progress(&mut self, bytes: u64) {
+        self.progress_bar.inc(bytes);
+    }
+}
+
+impl MergeObserver for ConsoleReporter<'_> {
+    fn on_merge_event(&mut self, event: MergeEvent<'_>) {
+        let verbose = self.verbose;
+        match event {
+            MergeEvent::Started { source, target } => {
+                let source_display = self.roots.merge_display_path(source);
+                let target_display = self.roots.merge_display_path(target);
+                print_magenta!("{}", format!("Merging: {source_display} -> {target_display}").bold());
+            }
+            MergeEvent::Overwriting(name) if verbose => println!("  {} Overwriting: {name}", "→".yellow()),
+            MergeEvent::WouldMove(name) if verbose => println!("  {} Would move: {name}", "→".cyan()),
+            MergeEvent::Skipped(names) => {
+                print_yellow!(
+                    "Skipped {} that already exist (use -f to overwrite):",
+                    count_label(names.len(), "file", "files")
+                );
+                for name in names {
+                    println!("    {name}");
+                }
+            }
+            MergeEvent::Moved(count) => {
+                let action = if self.dryrun { "Would move" } else { "Moved" };
+                println!("  {action} {}", count_label(count, "item", "items"));
+            }
+            MergeEvent::SourceRemoved(source) if verbose => {
+                println!(
+                    "  {} Removed empty directory: {}",
+                    "→".green(),
+                    self.roots.merge_display_path(source)
+                );
+            }
+            MergeEvent::SourceRemoveFailed(source, error) => {
+                print_yellow!(
+                    "Failed to remove empty directory {}: {error}",
+                    self.roots.merge_display_path(source)
+                );
+            }
+            MergeEvent::WouldRemoveSource(source) if verbose => {
+                println!(
+                    "  {} Would remove empty directory: {}",
+                    "→".yellow(),
+                    self.roots.merge_display_path(source)
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn on_files_moved(&mut self, report: &MoveReport) {
+        self.progress_bar.finish_and_clear();
+        println!("  Moved {} files", report.moved_count());
+    }
+}
+
+impl GroupingProgress for GroupingProgressBar {
+    fn start_stage(&self, stage: GroupingStage, length: u64) {
+        self.progress_bar.reset();
+        self.progress_bar.set_length(length);
+        self.progress_bar.set_message(match stage {
+            GroupingStage::CollectingPrefixes => "Collecting prefixes",
+            GroupingStage::MatchingFilesToGroups => "Matching files to groups",
+        });
+    }
+
+    fn advance(&self) {
+        self.progress_bar.inc(1);
+    }
+
+    fn finish_stage(&self) {
+        self.progress_bar.finish_and_clear();
+    }
+}
 
 /// Print summary of what will be unpacked.
 pub fn print_unpack_summary(target_dir: &Path, info: &UnpackInfo, verbose: bool) {
@@ -47,53 +240,6 @@ pub fn print_unpack_summary(target_dir: &Path, info: &UnpackInfo, verbose: bool)
             let dst_display = get_relative_path_or_filename(target, target_dir);
             println!("  {src_display} -> {dst_display}");
         }
-    }
-}
-
-/// Print one step of a directory merge.
-pub fn print_merge_event(event: &MergeEvent<'_>, roots: &Roots, dryrun: bool, verbose: bool) {
-    match *event {
-        MergeEvent::Started { source, target } => {
-            let source_display = roots.merge_display_path(source);
-            let target_display = roots.merge_display_path(target);
-            print_magenta!("{}", format!("Merging: {source_display} -> {target_display}").bold());
-        }
-        MergeEvent::Overwriting(name) if verbose => println!("  {} Overwriting: {name}", "→".yellow()),
-        MergeEvent::WouldMove(name) if verbose => println!("  {} Would move: {name}", "→".cyan()),
-        MergeEvent::Skipped(names) => {
-            print_yellow!(
-                "Skipped {} that already exist (use -f to overwrite):",
-                count_label(names.len(), "file", "files")
-            );
-            for name in names {
-                println!("    {name}");
-            }
-        }
-        MergeEvent::Moved(count) => {
-            let action = if dryrun { "Would move" } else { "Moved" };
-            println!("  {action} {}", count_label(count, "item", "items"));
-        }
-        MergeEvent::SourceRemoved(source) if verbose => {
-            println!(
-                "  {} Removed empty directory: {}",
-                "→".green(),
-                roots.merge_display_path(source)
-            );
-        }
-        MergeEvent::SourceRemoveFailed(source, error) => {
-            print_yellow!(
-                "Failed to remove empty directory {}: {error}",
-                roots.merge_display_path(source)
-            );
-        }
-        MergeEvent::WouldRemoveSource(source) if verbose => {
-            println!(
-                "  {} Would remove empty directory: {}",
-                "→".yellow(),
-                roots.merge_display_path(source)
-            );
-        }
-        _ => {}
     }
 }
 
@@ -138,6 +284,37 @@ pub fn directory_merge_title(source_file_counts: &[(&Path, usize)]) -> String {
         })
 }
 
+/// Create a progress bar for moving file bytes.
+fn move_progress_bar(length: u64, hide_progress: bool) -> ProgressBar {
+    if hide_progress {
+        return ProgressBar::hidden();
+    }
+
+    let progress_bar = ProgressBar::new(length);
+    progress_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("█▓░"),
+    );
+    progress_bar
+}
+
+/// Finish the progress bar once its tracked byte count is complete.
+fn finish_progress_if_complete(progress_bar: &ProgressBar) {
+    if progress_bar
+        .length()
+        .is_some_and(|length| progress_bar.position() >= length)
+    {
+        progress_bar.finish();
+    }
+}
+
+/// Format a BLAKE3 hash for compact verbose output.
+fn short_hash(hash: &blake3::Hash) -> String {
+    hash.to_string().chars().take(12).collect()
+}
+
 #[cfg(test)]
 mod test_directory_merge_title {
     use super::*;
@@ -174,5 +351,46 @@ mod test_directory_merge_title {
 
         assert_eq!(directory_merge_title(&source_file_counts), "Example");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_move_progress {
+    use super::*;
+
+    #[test]
+    fn a_hidden_bar_reports_no_length() {
+        let bar = move_progress_bar(1024, true);
+
+        assert!(bar.is_hidden());
+    }
+
+    #[test]
+    fn a_visible_bar_carries_the_given_length() {
+        let bar = move_progress_bar(1024, false);
+
+        assert_eq!(bar.length(), Some(1024));
+        bar.finish_and_clear();
+    }
+
+    #[test]
+    fn finish_progress_only_marks_complete_bar_finished() {
+        let incomplete = ProgressBar::with_draw_target(Some(10), indicatif::ProgressDrawTarget::hidden());
+        incomplete.set_position(9);
+        finish_progress_if_complete(&incomplete);
+        assert!(!incomplete.is_finished());
+
+        let complete = ProgressBar::with_draw_target(Some(10), indicatif::ProgressDrawTarget::hidden());
+        complete.set_position(10);
+        finish_progress_if_complete(&complete);
+        assert!(complete.is_finished());
+    }
+
+    #[test]
+    fn short_hash_uses_first_twelve_hex_characters() {
+        let hash = blake3::hash(b"contents");
+        let hash_string = hash.to_string();
+        let expected = hash_string.get(..12).expect("BLAKE3 hash should contain 12 characters");
+        assert_eq!(short_hash(&hash), expected);
     }
 }

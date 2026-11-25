@@ -100,6 +100,7 @@ Usage: dirmove [OPTIONS] [PATH]... [COMMAND]
 
 Commands:
   completion  Generate shell completion script
+  database    Print the directory names stored in the database [alias: db]
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -111,7 +112,7 @@ Options:
   -c, --create                    Create directories for files with matching prefixes
   -D, --debug                     Print debug information
   -f, --force                     Overwrite existing files
-  -F, --files-only                Only match input files; do not offer whole-directory merges
+  -F, --files-only                Only match input files, do not offer directory merges
   -n, --include <INCLUDE>         Include files that match the given pattern
   -e, --exclude <EXCLUDE>         Exclude files that match the given pattern
   -i, --ignore <IGNORE>           Ignore prefix when matching filenames
@@ -124,7 +125,6 @@ Options:
   -m, --min-chars <CHARS>         Minimum character count for prefixes to be valid group names
   -p, --print                     Only print changes without moving files
   -r, --recurse                   Recurse into subdirectories
-  -S, --show-db                   Show database statistics and contents
   -v, --verbose                   Print verbose output
   -h, --help                      Print help
   -V, --version                   Print version

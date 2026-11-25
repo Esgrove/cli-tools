@@ -10,10 +10,43 @@ use itertools::Itertools;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
-use cli_tools_dirmove::utils;
-use cli_tools_dirmove::{Config, CustomMapping};
+use cli_tools_dirmove::grouping::{DEFAULT_MIN_GROUP_SIZE, DEFAULT_MIN_PREFIX_CHARS};
+use cli_tools_dirmove::{CustomMapping, GroupingOptions, NameFilter, ScanOptions, utils};
 
 use crate::DirMoveArgs;
+
+/// Options for a `dirmove` run, combined from CLI arguments and the user config file.
+///
+/// The run flags control prompting, printing, and whether anything is moved,
+/// and the library option types hold the matching and grouping rules.
+#[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct Config {
+    /// Confirm every prompt automatically.
+    pub auto: bool,
+    /// Create directories for files that share a name prefix.
+    pub create: bool,
+    /// Patterns that route matching files to a fixed directory.
+    pub custom_mappings: Vec<CustomMapping>,
+    /// Print debug information.
+    pub debug: bool,
+    /// Only print what would be done.
+    pub dryrun: bool,
+    /// Skip whole directory merge offers and only move files.
+    pub files_only: bool,
+    /// Overwrite existing files and directories.
+    pub overwrite: bool,
+    /// Print verbose output.
+    pub verbose: bool,
+    /// Lowercase directory names whose contents are moved up into the parent directory.
+    pub unpack_directory_names: Vec<String>,
+    /// Ignored prefix and ignored group name rules.
+    pub name_filter: NameFilter,
+    /// Include and exclude patterns and the recursion setting.
+    pub scan: ScanOptions,
+    /// Group size, prefix length, ignored part, and prefix override rules.
+    pub grouping: GroupingOptions,
+}
 
 /// Config from the user config file
 #[derive(Debug, Default, Deserialize)]
@@ -94,35 +127,19 @@ impl DirMoveConfig {
     }
 
     /// Create the final config by combining command line args with this user config.
+    ///
+    /// List options from the user config come first, followed by the ones from the command line.
     fn into_config(self, args: DirMoveArgs) -> Config {
         let user_config = self;
-        let include: Vec<String> = user_config
-            .include
-            .into_iter()
-            .chain(args.include)
-            .map(|s| s.to_lowercase())
-            .unique()
-            .collect();
-        let exclude: Vec<String> = user_config
-            .exclude
-            .into_iter()
-            .chain(args.exclude)
-            .map(|s| s.to_lowercase())
-            .unique()
-            .collect();
 
-        // Parse CLI mappings from "pattern:dirname" format
-        let cli_mappings: Vec<[String; 2]> = args
-            .custom_mapping
-            .into_iter()
-            .filter_map(|mapping| {
-                let Some((pattern, directory)) = mapping.split_once(':') else {
-                    eprintln!("Warning: Invalid custom mapping format '{mapping}', expected 'pattern:dirname'");
-                    return None;
-                };
-                Some([pattern.to_string(), directory.to_string()])
-            })
-            .collect();
+        // Command line mappings use the "pattern:dirname" format.
+        let cli_mappings = args.custom_mapping.into_iter().filter_map(|mapping| {
+            let Some((pattern, directory)) = mapping.split_once(':') else {
+                eprintln!("Warning: Invalid custom mapping format '{mapping}', expected 'pattern:dirname'");
+                return None;
+            };
+            Some([pattern.to_string(), directory.to_string()])
+        });
 
         let custom_mappings: Vec<CustomMapping> = user_config
             .custom_mappings
@@ -141,42 +158,12 @@ impl DirMoveConfig {
             })
             .collect();
 
-        let ignored_group_names: Vec<String> = user_config
-            .ignored_group_names
-            .into_iter()
-            .chain(args.ignored_group_name)
-            .map(|s| utils::normalize_name(&s))
-            .unique()
-            .collect();
-
-        let ignored_group_parts: Vec<String> = user_config
-            .ignored_group_parts
-            .into_iter()
-            .chain(args.ignored_group_part)
-            .map(|s| s.trim().to_lowercase())
-            .unique()
-            .collect();
-
-        let prefix_ignores: Vec<String> = user_config
-            .prefix_ignores
-            .into_iter()
-            .chain(args.prefix_ignore)
-            .map(|s| s.trim().to_lowercase())
-            .unique()
-            .collect();
-
-        let prefix_overrides: Vec<String> = user_config
-            .prefix_overrides
-            .into_iter()
-            .chain(args.prefix_override)
-            .unique()
-            .collect();
-
-        let unpack_directory_names: Vec<String> = user_config
+        let recurse = args.recurse || user_config.recurse;
+        let unpack_directory_names = user_config
             .unpack_directories
             .into_iter()
             .chain(args.unpack_directory)
-            .map(|s| s.trim().to_lowercase())
+            .map(|name| name.trim().to_lowercase())
             .unique()
             .collect();
 
@@ -187,19 +174,34 @@ impl DirMoveConfig {
             debug: args.debug || user_config.debug,
             dryrun: args.print || user_config.dryrun,
             files_only: args.files_only,
-            include,
-            exclude,
-            ignored_group_names,
-            ignored_group_parts,
-            min_group_size: args.group.or(user_config.min_group_size).unwrap_or(3),
-            min_prefix_chars: args.min_prefix_chars.or(user_config.min_prefix_chars).unwrap_or(5),
             overwrite: args.force || user_config.overwrite,
-            prefix_ignores,
-            prefix_overrides,
-            recurse: args.recurse || user_config.recurse,
             verbose: args.verbose || user_config.verbose,
             unpack_directory_names,
-            show_db: args.show_db,
+            name_filter: NameFilter::new(
+                user_config.prefix_ignores.into_iter().chain(args.prefix_ignore),
+                user_config
+                    .ignored_group_names
+                    .into_iter()
+                    .chain(args.ignored_group_name),
+            ),
+            scan: ScanOptions::new(
+                user_config.include.into_iter().chain(args.include),
+                user_config.exclude.into_iter().chain(args.exclude),
+                recurse,
+            ),
+            grouping: GroupingOptions::new(
+                args.group
+                    .or(user_config.min_group_size)
+                    .unwrap_or(DEFAULT_MIN_GROUP_SIZE),
+                args.min_prefix_chars
+                    .or(user_config.min_prefix_chars)
+                    .unwrap_or(DEFAULT_MIN_PREFIX_CHARS),
+                user_config
+                    .ignored_group_parts
+                    .into_iter()
+                    .chain(args.ignored_group_part),
+                user_config.prefix_overrides.into_iter().chain(args.prefix_override),
+            ),
         }
     }
 }
@@ -774,14 +776,14 @@ mod cli_args_tests {
     fn config_from_args_uses_cli_min_prefix_chars() {
         let args = DirMoveArgs::try_parse_from(["test", "-m", "8"]).expect("should parse");
         let config = config_from_args(args).expect("config should parse");
-        assert_eq!(config.min_prefix_chars, 8);
+        assert_eq!(config.grouping.min_prefix_chars(), 8);
     }
 
     #[test]
     fn config_from_args_default_min_prefix_chars_is_five() {
         let args = DirMoveArgs::try_parse_from(["test"]).expect("should parse");
         let config = config_from_args(args).expect("config should parse");
-        assert_eq!(config.min_prefix_chars, 5);
+        assert_eq!(config.grouping.min_prefix_chars(), 5);
     }
 
     #[test]
@@ -873,8 +875,8 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "-P", "X265", "-P", "Hevc"]).expect("should parse");
         let config = config_from_args(args).expect("config should parse");
         // CLI ignored group parts should be stored as lowercase
-        assert!(config.ignored_group_parts.contains(&"x265".to_string()));
-        assert!(config.ignored_group_parts.contains(&"hevc".to_string()));
+        assert!(config.grouping.has_ignored_group_part(std::iter::once("x265")));
+        assert!(config.grouping.has_ignored_group_part(std::iter::once("hevc")));
     }
 
     #[test]
@@ -889,8 +891,8 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "-I", "EPISODE", "-I", "Video"]).expect("should parse");
         let config = config_from_args(args).expect("config should parse");
         // CLI ignored group names should be stored as lowercase
-        assert!(config.ignored_group_names.contains(&"episode".to_string()));
-        assert!(config.ignored_group_names.contains(&"video".to_string()));
+        assert!(config.name_filter.matches_ignored_group_name("episode"));
+        assert!(config.name_filter.matches_ignored_group_name("video"));
     }
 
     #[test]
@@ -900,15 +902,15 @@ mod cli_args_tests {
         let config = config_from_args(args).expect("config should parse");
         // Spaces, dots, and case should all be normalized via normalize_name
         assert!(
-            config.ignored_group_names.contains(&"seasonone".to_string()),
+            config.name_filter.matches_ignored_group_name("seasonone"),
             "Space-separated name should be normalized to 'seasonone'"
         );
         assert!(
-            config.ignored_group_names.contains(&"bigshow".to_string()),
+            config.name_filter.matches_ignored_group_name("bigshow"),
             "Dot-separated name should be normalized to 'bigshow'"
         );
         assert!(
-            config.ignored_group_names.contains(&"seasontwo".to_string()),
+            config.name_filter.matches_ignored_group_name("seasontwo"),
             "Concatenated name should be normalized to 'seasontwo'"
         );
     }
@@ -929,8 +931,8 @@ mod cli_args_tests {
         let args = DirMoveArgs::try_parse_from(["test", "-n", "*.mp4", "-n", "*.mkv"]).expect("should parse");
         let config = config_from_args(args).expect("config should parse");
         // CLI patterns should be included (may also have fixture config patterns)
-        assert!(config.include.contains(&"*.mp4".to_string()));
-        assert!(config.include.contains(&"*.mkv".to_string()));
+        assert!(config.scan.include().contains(&"*.mp4".to_string()));
+        assert!(config.scan.include().contains(&"*.mkv".to_string()));
     }
 
     #[test]
@@ -940,7 +942,7 @@ mod cli_args_tests {
         let config = config_from_args(args).expect("config should parse");
         assert!(config.auto);
         assert!(config.create);
-        assert!(config.recurse);
+        assert!(config.scan.recurse());
         assert!(config.verbose);
     }
 

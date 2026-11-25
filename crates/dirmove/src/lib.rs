@@ -1,12 +1,13 @@
 //! Shared `dirmove` library code.
 //!
-//! Contains the resolved options, root handling, file and directory scanning,
-//! name matching, prefix grouping, unpacking, directory merging,
-//! and reliable file moving used by the `dirmove` binary and benchmarks.
+//! Contains root handling, file and directory scanning, name filtering and matching,
+//! prefix grouping, unpacking, directory merging, and reliable file moving.
+//! Nothing here reads command line arguments or prints,
+//! so other projects can use the components directly.
+//! Long running operations report their steps and progress through observer traits.
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
-pub mod config;
 pub mod grouping;
 pub mod matcher;
 pub mod merge;
@@ -22,15 +23,14 @@ pub mod utils;
 #[cfg(test)]
 mod test_helpers;
 
-pub use config::{Config, CustomMapping};
-pub use grouping::PrefixGrouper;
-pub use matcher::{DirectoryMatcher, FileMatch, ListedFile, NormalizedFilename};
-pub use merge::{DirectoryMerger, MergeEvent};
+pub use grouping::{GroupingOptions, GroupingProgress, GroupingStage, PrefixGrouper};
+pub use matcher::{CustomMapping, DirectoryMatcher, FileMatch, ListedFile, NormalizedFilename};
+pub use merge::{DirectoryMerger, MergeEvent, MergeObserver};
 pub use mover::*;
 pub use name_filter::NameFilter;
 pub use prefix_index::*;
 pub use roots::Roots;
-pub use scanner::{DirectoryScan, Scanner};
+pub use scanner::{DirectoryScan, ScanOptions, Scanner};
 pub use types::*;
 pub use unpack::{EntryMove, UnpackCandidates, Unpacker};
 pub use utils::*;

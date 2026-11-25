@@ -12,23 +12,57 @@ use crate::utils;
 /// Minimum number of normalized characters a destination or group name needs.
 const MIN_DIRECTORY_NAME_CHARS: usize = 4;
 
-/// Ignored prefix and ignored group name rules borrowed from a `Config`.
-#[derive(Debug, Clone, Copy)]
-pub struct NameFilter<'a> {
+/// Ignored prefix and ignored group name rules for file and directory names.
+#[derive(Debug, Clone, Default)]
+pub struct NameFilter {
     /// Lowercase prefixes stripped from the start of names.
-    prefix_ignores: &'a [String],
+    prefix_ignores: Vec<String>,
+    /// Each prefix followed by a space, matched against names with spaces as separators.
+    prefixes_with_space: Vec<String>,
+    /// Each prefix followed by a dot, matched against dot separated file names.
+    prefixes_with_dot: Vec<String>,
     /// Normalized group names that are never offered.
-    ignored_group_names: &'a [String],
+    ignored_group_names: Vec<String>,
 }
 
-impl<'a> NameFilter<'a> {
-    /// Create a filter from lowercase prefix ignores and normalized ignored group names.
+impl NameFilter {
+    /// Create a filter from prefixes to ignore and group names to never offer.
+    ///
+    /// Prefixes are trimmed and lowercased, and group names are normalized,
+    /// so both match regardless of case, spacing, and dots.
+    /// Duplicates are removed.
     #[must_use]
-    pub const fn new(prefix_ignores: &'a [String], ignored_group_names: &'a [String]) -> Self {
+    pub fn new<P, G>(prefix_ignores: P, ignored_group_names: G) -> Self
+    where
+        P: IntoIterator,
+        P::Item: AsRef<str>,
+        G: IntoIterator,
+        G::Item: AsRef<str>,
+    {
+        let mut prefix_ignores: Vec<String> = prefix_ignores
+            .into_iter()
+            .map(|prefix| prefix.as_ref().trim().to_lowercase())
+            .collect();
+        let mut ignored_group_names: Vec<String> = ignored_group_names
+            .into_iter()
+            .map(|name| utils::normalize_name(name.as_ref()))
+            .collect();
+        dedup_in_order(&mut prefix_ignores);
+        dedup_in_order(&mut ignored_group_names);
+        let prefixes_with_space = prefix_ignores.iter().map(|prefix| format!("{prefix} ")).collect();
+        let prefixes_with_dot = prefix_ignores.iter().map(|prefix| format!("{prefix}.")).collect();
         Self {
             prefix_ignores,
+            prefixes_with_space,
+            prefixes_with_dot,
             ignored_group_names,
         }
+    }
+
+    /// Return the lowercase prefixes stripped from the start of names.
+    #[must_use]
+    pub fn prefix_ignores(&self) -> &[String] {
+        &self.prefix_ignores
     }
 
     /// Return whether any prefix ignores are configured.
@@ -42,7 +76,7 @@ impl<'a> NameFilter<'a> {
     /// Prefixes are removed repeatedly until none match, comparing case-insensitively.
     #[must_use]
     pub fn strip_ignored_dot_prefixes(&self, filename: &str) -> String {
-        strip_prefixes_with_separator(filename, self.prefix_ignores, '.').into_owned()
+        strip_prefixes(filename, &self.prefixes_with_dot).into_owned()
     }
 
     /// Strip ignored prefixes from a normalized filename (spaces as separators).
@@ -50,7 +84,7 @@ impl<'a> NameFilter<'a> {
     /// Comparison is case-insensitive.
     #[must_use]
     pub fn strip_ignored_prefixes<'name>(&self, filename: &'name str) -> Cow<'name, str> {
-        strip_prefixes_with_separator(filename, self.prefix_ignores, ' ')
+        strip_prefixes(filename, &self.prefixes_with_space)
     }
 
     /// Check whether an existing destination directory should be skipped.
@@ -116,20 +150,24 @@ impl<'a> NameFilter<'a> {
     }
 }
 
-/// Strip lowercase prefixes, each followed by `separator`, from the start of `name` until none match.
-fn strip_prefixes_with_separator<'name>(name: &'name str, prefixes: &[String], separator: char) -> Cow<'name, str> {
-    if prefixes.is_empty() {
+/// Remove repeated values, keeping the first occurrence of each.
+fn dedup_in_order(values: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+}
+
+/// Strip lowercase patterns from the start of `name` until none match, comparing case-insensitively.
+fn strip_prefixes<'name>(name: &'name str, patterns: &[String]) -> Cow<'name, str> {
+    if patterns.is_empty() {
         return Cow::Borrowed(name);
     }
-
-    let patterns: Vec<String> = prefixes.iter().map(|prefix| format!("{prefix}{separator}")).collect();
 
     let mut result = name;
     let mut changed = true;
     while changed {
         changed = false;
         let result_lower = result.to_lowercase();
-        for pattern in &patterns {
+        for pattern in patterns {
             if result_lower.starts_with(pattern.as_str())
                 && let Some(prefix_end) = original_end_for_lowercase_prefix(result, pattern)
                 && let Some(stripped) = result.get(prefix_end..)
@@ -246,5 +284,17 @@ mod test_prefix_ignores {
         let fixture = make_test_fixture_with_ignores(Vec::new(), vec!["a", "b"]);
         let result = fixture.name_filter().strip_ignored_dot_prefixes("a.b.c");
         assert_eq!(result, "c");
+    }
+}
+
+#[cfg(test)]
+mod test_name_filter_new {
+    use super::*;
+
+    #[test]
+    fn normalizes_and_deduplicates_its_rules() {
+        let filter = NameFilter::new([" Studio ", "studio"], ["Season One", "season.one"]);
+        assert_eq!(filter.prefix_ignores(), ["studio"]);
+        assert!(filter.matches_ignored_group_name("seasonone"));
     }
 }

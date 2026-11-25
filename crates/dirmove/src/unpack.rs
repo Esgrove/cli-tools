@@ -15,10 +15,10 @@ use crate::types::{MoveInfo, UnpackInfo};
 use crate::utils;
 
 /// Unpacks directories with configured names into their parents.
-#[derive(Debug, Clone, Copy)]
-pub struct Unpacker<'a> {
+#[derive(Debug, Clone, Default)]
+pub struct Unpacker {
     /// Lowercase directory names to unpack.
-    unpack_directory_names: &'a [String],
+    unpack_directory_names: Vec<String>,
     /// Whether existing targets are overwritten.
     overwrite: bool,
 }
@@ -41,10 +41,23 @@ pub enum EntryMove {
     SkippedExisting,
 }
 
-impl<'a> Unpacker<'a> {
-    /// Create an unpacker for the given lowercase directory names.
+impl Unpacker {
+    /// Create an unpacker for the given directory names, matched case-insensitively.
+    ///
+    /// Names are trimmed and lowercased, and duplicates are removed.
+    /// With `overwrite`, existing targets are replaced instead of skipped.
     #[must_use]
-    pub const fn new(unpack_directory_names: &'a [String], overwrite: bool) -> Self {
+    pub fn new<N>(unpack_directory_names: N, overwrite: bool) -> Self
+    where
+        N: IntoIterator,
+        N::Item: AsRef<str>,
+    {
+        let mut seen = HashSet::new();
+        let unpack_directory_names = unpack_directory_names
+            .into_iter()
+            .map(|name| name.as_ref().trim().to_lowercase())
+            .filter(|name| seen.insert(name.clone()))
+            .collect();
         Self {
             unpack_directory_names,
             overwrite,
@@ -319,11 +332,6 @@ mod test_unpacker {
         Ok(())
     }
 
-    /// Lowercase unpack names from string slices.
-    fn names(unpack_names: &[&str]) -> Vec<String> {
-        unpack_names.iter().map(|name| name.to_lowercase()).collect()
-    }
-
     #[test]
     fn plan_counts_files_and_directories() -> anyhow::Result<()> {
         let tmp = TempDir::new()?;
@@ -337,8 +345,7 @@ mod test_unpacker {
         write_file(&videos.join("Dir1").join("nested.txt"), "nested")?;
         write_file(&videos.join("Dir2").join("nested.txt"), "nested")?;
 
-        let unpack_names = names(&["videos"]);
-        let info = Unpacker::new(&unpack_names, false).plan(&videos, &root);
+        let info = Unpacker::new(["videos"], false).plan(&videos, &root);
 
         assert_eq!(info.file_moves.len(), 3);
         assert_eq!(info.directory_moves.len(), 2);
@@ -355,8 +362,8 @@ mod test_unpacker {
         std::fs::create_dir_all(&path)?;
         write_file(&path.join("file.txt"), "x")?;
 
-        let unpack_names = names(&["videos", "updates", "downloads"]);
-        let candidates = Unpacker::new(&unpack_names, false).collect_candidates(std::slice::from_ref(&root), true);
+        let candidates = Unpacker::new(["videos", "updates", "downloads"], false)
+            .collect_candidates(std::slice::from_ref(&root), true);
 
         assert_eq!(candidates.unpack, vec![root.join("videos")]);
         Ok(())
@@ -372,8 +379,7 @@ mod test_unpacker {
         write_file(&videos.join("file.txt"), "x")?;
         write_file(&root.join("C").join("nothing_special").join("file.txt"), "y")?;
 
-        let unpack_names = names(&["videos"]);
-        let unpacker = Unpacker::new(&unpack_names, false);
+        let unpacker = Unpacker::new(["videos"], false);
 
         assert!(unpacker.contains_unpack_directory(&root.join("A")));
         assert!(unpacker.contains_unpack_directory(&root.join("A").join("B")));
@@ -392,8 +398,7 @@ mod test_unpacker {
         std::fs::create_dir(&videos)?;
         write_file(&videos.join("file.txt"), "x")?;
 
-        let unpack_names = names(&["videos"]);
-        let candidates = Unpacker::new(&unpack_names, false).collect_candidates(&[root], false);
+        let candidates = Unpacker::new(["videos"], false).collect_candidates(&[root], false);
 
         assert_eq!(candidates.unwanted, vec![unwanted]);
         assert_eq!(candidates.unpack, vec![videos]);

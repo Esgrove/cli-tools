@@ -2,22 +2,71 @@
 //!
 //! Moves use a fast `rename` first,
 //! then fall back to chunked copy-verify-delete for cross-device moves.
+//! Each step and the copied bytes are reported to a `MoveObserver`, so callers decide what to show.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use indicatif::{ProgressBar, ProgressStyle};
-
-use cli_tools_common::{
-    TargetReservations, path_to_filename_string, paths_refer_to_same_file, print_error, print_yellow,
-    unique_sibling_path,
-};
+use cli_tools_common::{TargetReservations, path_to_filename_string, paths_refer_to_same_file, unique_sibling_path};
 use cli_tools_media::file_hash::hash_file;
 
 /// Size of chunks used when copying files across devices.
 pub const COPY_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+
+/// One step of moving a batch of files into a directory.
+#[derive(Debug)]
+pub enum MoveEvent<'a> {
+    /// The missing target directory was created.
+    CreatedDirectory(&'a Path),
+    /// Moving started, with the total size of the files in bytes.
+    Started {
+        /// Total size of the files to move.
+        total_bytes: u64,
+    },
+    /// Moving one file started.
+    FileStarted {
+        /// Zero based index of the file in the batch.
+        index: usize,
+        /// Number of files in the batch.
+        count: usize,
+        /// Name of the file in the target directory.
+        name: &'a str,
+    },
+    /// The source path has no file name, so it was not moved.
+    MissingFileName(&'a Path),
+    /// The source was skipped because another file in the batch has the same target name.
+    DuplicateName(&'a Path),
+    /// The source was skipped because the target file exists and overwriting is disabled.
+    SkippedExisting(&'a Path),
+    /// The source already is the target file.
+    AlreadyInPlace(&'a Path),
+    /// The target is a directory, so overwriting cannot replace it with the file.
+    DirectoryInTheWay(&'a Path),
+    /// Renaming failed for a reason other than crossing devices, so the file is copied instead.
+    RenameFailed {
+        /// File being moved.
+        source: &'a Path,
+        /// Target path of the move.
+        destination: &'a Path,
+        /// Error from the rename.
+        error: &'a io::Error,
+    },
+    /// A file was copied across devices.
+    Copied,
+    /// The copy matched the source BLAKE3 hash.
+    HashVerified(&'a blake3::Hash),
+    /// A file with this name was moved.
+    Moved(&'a str),
+    /// Moving the source failed.
+    Failed {
+        /// File that could not be moved.
+        source: &'a Path,
+        /// Why the move failed.
+        error: &'a anyhow::Error,
+    },
+}
 
 /// Summary of a batch move operation.
 #[derive(Debug, Default)]
@@ -29,6 +78,19 @@ pub struct MoveReport {
     /// Source paths that could not be moved.
     pub failed_files: Vec<PathBuf>,
 }
+
+/// Receives the steps and byte progress of moving files.
+///
+/// Every method does nothing by default, and `()` reports nothing.
+pub trait MoveObserver {
+    /// One step of the move happened.
+    fn on_event(&mut self, _event: MoveEvent<'_>) {}
+
+    /// This many more bytes were moved, copied, or skipped.
+    fn on_progress(&mut self, _bytes: u64) {}
+}
+
+impl MoveObserver for () {}
 
 impl MoveReport {
     /// Return the number of files moved successfully.
@@ -49,19 +111,19 @@ pub fn move_files_to_target_dir(
     dir_path: &Path,
     files: &[PathBuf],
     overwrite: bool,
-    verbose: bool,
-    hide_progress: bool,
+    observer: &mut impl MoveObserver,
 ) -> anyhow::Result<MoveReport> {
     if !dir_path.exists() {
         fs::create_dir_all(dir_path)?;
-        println!("  Created directory: {}", path_to_filename_string(dir_path));
+        observer.on_event(MoveEvent::CreatedDirectory(dir_path));
     } else if !dir_path.is_dir() {
         anyhow::bail!("Target path exists but is not a directory: {}", dir_path.display());
     }
 
     let file_sizes = collect_file_sizes(files);
-    let total_size = file_sizes.values().sum();
-    let progress_bar = create_move_progress_bar(total_size, hide_progress);
+    observer.on_event(MoveEvent::Started {
+        total_bytes: file_sizes.values().sum(),
+    });
 
     let mut report = MoveReport::default();
     // Names are sanitized to valid UTF-8, so two sources can end up with the same destination.
@@ -70,45 +132,36 @@ pub fn move_files_to_target_dir(
     for (index, file_path) in files.iter().enumerate() {
         let file_name = path_to_filename_string(file_path);
         if file_name.is_empty() {
-            progress_bar.suspend(|| {
-                print_error(&format!("Could not get file name for path: {}", file_path.display()));
-            });
+            observer.on_event(MoveEvent::MissingFileName(file_path));
             report.failed_files.push(file_path.clone());
             continue;
         }
 
-        progress_bar.set_message(format!("[{}/{}] {file_name}", index + 1, files.len()));
+        observer.on_event(MoveEvent::FileStarted {
+            index,
+            count: files.len(),
+            name: &file_name,
+        });
         let expected_size = file_sizes.get(file_path).copied().unwrap_or(0);
         let new_path = dir_path.join(&file_name);
 
         if !reservations.reserve(&new_path) {
-            progress_bar.suspend(|| {
-                print_yellow(&format!(
-                    "Skipping {}, another file in this move has the same name",
-                    file_path.display()
-                ));
-            });
-            progress_bar.inc(expected_size);
+            observer.on_event(MoveEvent::DuplicateName(file_path));
+            observer.on_progress(expected_size);
             report.skipped_files.push(file_path.clone());
             continue;
         }
 
         if new_path.exists() && !overwrite {
-            progress_bar.suspend(|| {
-                print_yellow(&format!("Skipping existing file: {}", new_path.display()));
-            });
-            progress_bar.inc(expected_size);
+            observer.on_event(MoveEvent::SkippedExisting(&new_path));
+            observer.on_progress(expected_size);
             report.skipped_files.push(file_path.clone());
             continue;
         }
 
         if paths_refer_to_same_file(file_path, &new_path) {
-            if verbose {
-                progress_bar.suspend(|| {
-                    println!("  Already in place: {}", new_path.display());
-                });
-            }
-            progress_bar.inc(expected_size);
+            observer.on_event(MoveEvent::AlreadyInPlace(&new_path));
+            observer.on_progress(expected_size);
             report.skipped_files.push(file_path.clone());
             continue;
         }
@@ -116,39 +169,29 @@ pub fn move_files_to_target_dir(
         // The existing destination is replaced by the final rename, never removed up front,
         // so a failed move leaves it in place.
         if overwrite && new_path.is_dir() {
-            progress_bar.suspend(|| {
-                print_error(&format!(
-                    "Cannot replace existing directory with a file: {}",
-                    new_path.display()
-                ));
-            });
-            progress_bar.inc(expected_size);
+            observer.on_event(MoveEvent::DirectoryInTheWay(&new_path));
+            observer.on_progress(expected_size);
             report.failed_files.push(file_path.clone());
             continue;
         }
 
-        match move_single_file(file_path, &new_path, expected_size, &progress_bar, verbose) {
+        match move_single_file(file_path, &new_path, expected_size, observer) {
             Ok(()) => {
-                if verbose {
-                    progress_bar.suspend(|| {
-                        println!("  Moved: {file_name}");
-                    });
-                }
+                observer.on_event(MoveEvent::Moved(&file_name));
                 report.moved_files.push(file_path.clone());
             }
             Err(error) => {
-                progress_bar.suspend(|| {
-                    print_error(&format!("Failed to move {}: {error}", file_path.display()));
+                observer.on_event(MoveEvent::Failed {
+                    source: file_path,
+                    error: &error,
                 });
                 if expected_size > 0 {
-                    progress_bar.inc(expected_size);
+                    observer.on_progress(expected_size);
                 }
                 report.failed_files.push(file_path.clone());
             }
         }
     }
-    progress_bar.finish_and_clear();
-    println!("  Moved {} files", report.moved_count());
 
     Ok(report)
 }
@@ -158,13 +201,12 @@ fn move_single_file(
     source: &Path,
     destination: &Path,
     expected_size: u64,
-    progress_bar: &ProgressBar,
-    verbose: bool,
+    observer: &mut impl MoveObserver,
 ) -> anyhow::Result<()> {
     // This returns an error for cross-drive moves, which then fall back to the custom copy path.
     match fs::rename(source, destination) {
         Ok(()) => {
-            progress_bar.inc(expected_size);
+            observer.on_progress(expected_size);
             return Ok(());
         }
         Err(rename_error) => {
@@ -173,7 +215,7 @@ fn move_single_file(
                     && let Ok(metadata) = fs::metadata(destination)
                     && metadata.len() == expected_size
                 {
-                    progress_bar.inc(expected_size);
+                    observer.on_progress(expected_size);
                     return Ok(());
                 }
                 anyhow::bail!(
@@ -184,12 +226,10 @@ fn move_single_file(
             }
 
             if !is_cross_device_error(&rename_error) {
-                progress_bar.suspend(|| {
-                    print_yellow(&format!(
-                        "Rename failed for {} -> {} ({rename_error}), falling back to copy",
-                        source.display(),
-                        destination.display()
-                    ));
+                observer.on_event(MoveEvent::RenameFailed {
+                    source,
+                    destination,
+                    error: &rename_error,
                 });
             }
         }
@@ -197,18 +237,14 @@ fn move_single_file(
 
     // Copy to a temporary name first so an existing destination is only replaced by a verified copy.
     let temporary = unique_sibling_path(destination, "dirmove-tmp");
-    let source_hash = copy_file_with_progress(source, &temporary, expected_size, progress_bar)?;
-    finish_progress_if_complete(progress_bar);
+    let source_hash = copy_file_with_progress(source, &temporary, expected_size, observer)?;
+    observer.on_event(MoveEvent::Copied);
 
     if let Err(error) = verify_copied_file(source, &temporary, expected_size, &source_hash) {
         let _ = remove_failed_destination(&temporary);
         return Err(error);
     }
-    if verbose {
-        progress_bar.suspend(|| {
-            println!("  Hash verified: BLAKE3 {}", short_hash(&source_hash));
-        });
-    }
+    observer.on_event(MoveEvent::HashVerified(&source_hash));
     if let Err(error) = fs::rename(&temporary, destination) {
         let _ = remove_failed_destination(&temporary);
         return Err(anyhow::Error::new(error).context(format!(
@@ -227,14 +263,14 @@ fn move_single_file(
     Ok(())
 }
 
-/// Copy a file in chunks while updating the progress bar.
+/// Copy a file in chunks while reporting the copied bytes.
 fn copy_file_with_progress(
     source: &Path,
     destination: &Path,
     expected_size: u64,
-    progress_bar: &ProgressBar,
+    observer: &mut impl MoveObserver,
 ) -> anyhow::Result<blake3::Hash> {
-    match copy_file_inner(source, destination, expected_size, progress_bar) {
+    match copy_file_inner(source, destination, expected_size, observer) {
         Ok(hash) => Ok(hash),
         Err(copy_error) => {
             if let Err(cleanup_error) = remove_failed_destination(destination) {
@@ -253,7 +289,7 @@ fn copy_file_inner(
     source: &Path,
     destination: &Path,
     expected_size: u64,
-    progress_bar: &ProgressBar,
+    observer: &mut impl MoveObserver,
 ) -> anyhow::Result<blake3::Hash> {
     let mut source_file = File::open(source)?;
     let mut destination_file = File::create(destination)?;
@@ -275,7 +311,7 @@ fn copy_file_inner(
         source_hasher.update(chunk);
         destination_file.write_all(chunk)?;
         bytes_copied += bytes_read as u64;
-        progress_bar.inc(bytes_read as u64);
+        observer.on_progress(bytes_read as u64);
     }
 
     destination_file.flush()?;
@@ -347,21 +383,6 @@ fn verify_copied_file(
     Ok(())
 }
 
-/// Finish the progress bar once its tracked byte count is complete.
-fn finish_progress_if_complete(progress_bar: &ProgressBar) {
-    if progress_bar
-        .length()
-        .is_some_and(|length| progress_bar.position() >= length)
-    {
-        progress_bar.finish();
-    }
-}
-
-/// Format a BLAKE3 hash for compact verbose output.
-fn short_hash(hash: &blake3::Hash) -> String {
-    hash.to_string().chars().take(12).collect()
-}
-
 /// Remove a destination file after a failed copy or verification step.
 fn remove_failed_destination(destination: &Path) -> anyhow::Result<()> {
     match fs::remove_file(destination) {
@@ -376,6 +397,7 @@ fn is_cross_device_error(error: &io::Error) -> bool {
     error.raw_os_error() == Some(17) || error.raw_os_error() == Some(18)
 }
 
+/// Collect the size of each file that has readable metadata.
 fn collect_file_sizes(files: &[PathBuf]) -> HashMap<PathBuf, u64> {
     files
         .iter()
@@ -387,24 +409,27 @@ fn collect_file_sizes(files: &[PathBuf]) -> HashMap<PathBuf, u64> {
         .collect()
 }
 
-/// Create a progress bar for moving file bytes.
-fn create_move_progress_bar(length: u64, hide_progress: bool) -> ProgressBar {
-    if hide_progress {
-        return ProgressBar::hidden();
+#[cfg(test)]
+mod test_observer {
+    use super::*;
+
+    /// Observer that counts the reported bytes.
+    #[derive(Default)]
+    pub struct ByteCounter {
+        /// Total bytes reported so far.
+        pub bytes: u64,
     }
 
-    let progress_bar = ProgressBar::new(length);
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("█▓░"),
-    );
-    progress_bar
+    impl MoveObserver for ByteCounter {
+        fn on_progress(&mut self, bytes: u64) {
+            self.bytes += bytes;
+        }
+    }
 }
 
 #[cfg(test)]
 mod test_copy_verification {
+    use super::test_observer::ByteCounter;
     use super::*;
 
     #[test]
@@ -414,9 +439,9 @@ mod test_copy_verification {
         let destination = tmp.path().join("destination.bin");
         let contents = vec![42; COPY_BUFFER_SIZE + 13];
         fs::write(&source, &contents)?;
-        let progress_bar = ProgressBar::hidden();
+        let mut progress = ByteCounter::default();
 
-        copy_file_with_progress(&source, &destination, contents.len() as u64, &progress_bar)?;
+        copy_file_with_progress(&source, &destination, contents.len() as u64, &mut progress)?;
 
         assert_eq!(fs::read(destination)?, contents);
         assert!(source.exists());
@@ -435,7 +460,7 @@ mod test_copy_verification {
         permissions.set_readonly(true);
         fs::set_permissions(&source, permissions)?;
 
-        copy_file_with_progress(&source, &destination, 8, &ProgressBar::hidden())?;
+        copy_file_with_progress(&source, &destination, 8, &mut ByteCounter::default())?;
 
         let copied = fs::metadata(&destination)?;
         assert_eq!(copied.modified()?, old_time);
@@ -465,9 +490,9 @@ mod test_copy_verification {
         let source = temp_directory.path().join("source.bin");
         let destination = temp_directory.path().join("destination.bin");
         fs::write(&source, b"source")?;
-        let progress_bar = ProgressBar::hidden();
+        let mut progress = ByteCounter::default();
 
-        let result = copy_file_with_progress(&source, &destination, 10, &progress_bar);
+        let result = copy_file_with_progress(&source, &destination, 10, &mut progress);
 
         assert!(result.is_err());
         assert!(source.exists());
@@ -513,9 +538,9 @@ mod test_copy_verification {
         let destination = temp_directory.path().join("destination");
         fs::write(&source, b"source")?;
         fs::create_dir(&destination)?;
-        let progress_bar = ProgressBar::hidden();
+        let mut progress = ByteCounter::default();
 
-        let error = copy_file_with_progress(&source, &destination, 6, &progress_bar)
+        let error = copy_file_with_progress(&source, &destination, 6, &mut progress)
             .expect_err("directory destination should fail creation and cleanup");
 
         assert!(error.to_string().contains("Also failed to remove partial destination"));
@@ -527,6 +552,7 @@ mod test_copy_verification {
 
 #[cfg(test)]
 mod test_move_helpers {
+    use super::test_observer::ByteCounter;
     use super::*;
 
     #[test]
@@ -535,11 +561,11 @@ mod test_move_helpers {
         let source = temp_directory.path().join("missing.bin");
         let destination = temp_directory.path().join("destination.bin");
         fs::write(&destination, b"existing")?;
-        let progress_bar = ProgressBar::with_draw_target(Some(8), indicatif::ProgressDrawTarget::hidden());
+        let mut progress = ByteCounter::default();
 
-        move_single_file(&source, &destination, 8, &progress_bar, false)?;
+        move_single_file(&source, &destination, 8, &mut progress)?;
 
-        assert_eq!(progress_bar.position(), 8);
+        assert_eq!(progress.bytes, 8);
         assert_eq!(fs::read(&destination)?, b"existing");
         Ok(())
     }
@@ -550,9 +576,9 @@ mod test_move_helpers {
         let source = temp_directory.path().join("missing.bin");
         let destination = temp_directory.path().join("destination.bin");
         fs::write(&destination, b"short")?;
-        let progress_bar = ProgressBar::hidden();
+        let mut progress = ByteCounter::default();
 
-        let error = move_single_file(&source, &destination, 8, &progress_bar, false)
+        let error = move_single_file(&source, &destination, 8, &mut progress)
             .expect_err("mismatched destination should not be treated as completed move");
 
         assert!(error.to_string().contains("source is gone"));
@@ -589,27 +615,6 @@ mod test_move_helpers {
         assert!(!sizes.contains_key(&missing));
         Ok(())
     }
-
-    #[test]
-    fn finish_progress_only_marks_complete_bar_finished() {
-        let incomplete = ProgressBar::with_draw_target(Some(10), indicatif::ProgressDrawTarget::hidden());
-        incomplete.set_position(9);
-        finish_progress_if_complete(&incomplete);
-        assert!(!incomplete.is_finished());
-
-        let complete = ProgressBar::with_draw_target(Some(10), indicatif::ProgressDrawTarget::hidden());
-        complete.set_position(10);
-        finish_progress_if_complete(&complete);
-        assert!(complete.is_finished());
-    }
-
-    #[test]
-    fn short_hash_uses_first_twelve_hex_characters() {
-        let hash = blake3::hash(b"contents");
-        let hash_string = hash.to_string();
-        let expected = hash_string.get(..12).expect("BLAKE3 hash should contain 12 characters");
-        assert_eq!(short_hash(&hash), expected);
-    }
 }
 
 #[cfg(test)]
@@ -627,7 +632,7 @@ mod test_move_files {
         fs::write(input.join("two.txt"), "two")?;
 
         let files = vec![input.join("one.txt"), input.join("two.txt")];
-        let report = move_files_to_target_dir(&output, &files, false, false, true)?;
+        let report = move_files_to_target_dir(&output, &files, false, &mut ())?;
 
         assert_eq!(report.moved_count(), 2);
         assert_eq!(report.moved_files, files);
@@ -651,7 +656,7 @@ mod test_move_files {
         fs::write(output.join("one.txt"), "old")?;
 
         let source = input.join("one.txt");
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, &mut ())?;
 
         assert_eq!(report.moved_count(), 0);
         assert_eq!(report.moved_files, [] as [PathBuf; 0]);
@@ -669,7 +674,7 @@ mod test_move_files {
         let output = temp_directory.path().join("nested/output");
         fs::write(&source, "contents")?;
 
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, &mut ())?;
 
         assert_eq!(report.moved_files, vec![source.clone()]);
         assert!(!source.exists());
@@ -685,7 +690,7 @@ mod test_move_files {
         fs::write(&source, "source")?;
         fs::write(&target_file, "target")?;
 
-        let error = move_files_to_target_dir(&target_file, &[source], false, false, true)
+        let error = move_files_to_target_dir(&target_file, &[source], false, &mut ())
             .expect_err("regular file should not be accepted as target directory");
 
         assert!(error.to_string().contains("Target path exists but is not a directory"));
@@ -703,7 +708,7 @@ mod test_move_files {
         fs::write(&source, "new")?;
         fs::write(output.join("one.txt"), "old")?;
 
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, &mut ())?;
 
         assert_eq!(report.moved_files, vec![source.clone()]);
         assert!(!source.exists());
@@ -719,7 +724,7 @@ mod test_move_files {
         let source = output.join("Show.S01E01.mkv");
         fs::write(&source, "episode")?;
 
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, &mut ())?;
 
         assert_eq!(fs::read_to_string(&source)?, "episode");
         assert_eq!(report.failed_files, [] as [PathBuf; 0]);
@@ -736,7 +741,7 @@ mod test_move_files {
         fs::write(&source, "episode")?;
         let alias = temp_directory.path().join(".").join("Show");
 
-        let report = move_files_to_target_dir(&alias, std::slice::from_ref(&source), true, false, true)?;
+        let report = move_files_to_target_dir(&alias, std::slice::from_ref(&source), true, &mut ())?;
 
         assert_eq!(fs::read_to_string(&source)?, "episode");
         assert_eq!(report.failed_files, [] as [PathBuf; 0]);
@@ -759,7 +764,7 @@ mod test_move_files {
             return Ok(());
         }
 
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, &mut ())?;
 
         assert_eq!(report.moved_files, vec![source]);
         assert_eq!(fs::read_to_string(output.join("Show.E01.mkv"))?, "episode");
@@ -783,7 +788,7 @@ mod test_move_files {
         }
         fs::write(&second, "second")?;
 
-        let report = move_files_to_target_dir(&output, &[first.clone(), second.clone()], true, false, true)?;
+        let report = move_files_to_target_dir(&output, &[first.clone(), second.clone()], true, &mut ())?;
 
         assert_eq!(report.moved_files, vec![first]);
         assert_eq!(report.skipped_files, vec![second.clone()]);
@@ -798,7 +803,7 @@ mod test_move_files {
         let output = temp_directory.path().join("output");
         let source = temp_directory.path().join("missing.txt");
 
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, &mut ())?;
 
         assert_eq!(report.moved_files, [] as [PathBuf; 0]);
         assert_eq!(report.failed_files, vec![source]);
@@ -811,7 +816,7 @@ mod test_move_files {
         let output = temp_directory.path().join("output");
         let source = PathBuf::new();
 
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), false, &mut ())?;
 
         assert_eq!(report.failed_files, vec![source]);
         Ok(())
@@ -828,7 +833,7 @@ mod test_move_files {
         fs::write(&source, "source")?;
         fs::create_dir(output.join("one.txt"))?;
 
-        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, false, true)?;
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, &mut ())?;
 
         assert_eq!(report.failed_files, vec![source.clone()]);
         assert!(source.exists());
@@ -839,26 +844,22 @@ mod test_move_files {
 
 #[cfg(test)]
 mod test_move_single_file {
+    use super::test_observer::ByteCounter;
     use super::*;
 
-    /// Hidden progress bar, so a test prints no bar.
-    fn progress_bar() -> ProgressBar {
-        ProgressBar::hidden()
-    }
-
     #[test]
-    fn a_plain_rename_advances_the_progress_bar() {
+    fn a_plain_rename_reports_the_moved_bytes() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let source = directory.path().join("source.txt");
         let destination = directory.path().join("destination.txt");
         std::fs::write(&source, b"content").expect("file should be written");
-        let bar = progress_bar();
+        let mut bar = ByteCounter::default();
 
-        move_single_file(&source, &destination, 7, &bar, true).expect("the move should succeed");
+        move_single_file(&source, &destination, 7, &mut bar).expect("the move should succeed");
 
         assert!(destination.is_file());
         assert!(!source.exists());
-        assert_eq!(bar.position(), 7);
+        assert_eq!(bar.bytes, 7);
     }
 
     #[test]
@@ -867,11 +868,11 @@ mod test_move_single_file {
         let source = directory.path().join("gone.txt");
         let destination = directory.path().join("already.txt");
         std::fs::write(&destination, b"content").expect("file should be written");
-        let bar = progress_bar();
+        let mut bar = ByteCounter::default();
 
-        move_single_file(&source, &destination, 7, &bar, false).expect("an already moved file should succeed");
+        move_single_file(&source, &destination, 7, &mut bar).expect("an already moved file should succeed");
 
-        assert_eq!(bar.position(), 7, "the bar should still account for the bytes");
+        assert_eq!(bar.bytes, 7, "the observer should still account for the bytes");
     }
 
     #[test]
@@ -880,7 +881,7 @@ mod test_move_single_file {
         let source = directory.path().join("gone.txt");
         let destination = directory.path().join("missing.txt");
 
-        let error = move_single_file(&source, &destination, 7, &progress_bar(), false)
+        let error = move_single_file(&source, &destination, 7, &mut ByteCounter::default())
             .expect_err("a missing source should fail");
 
         assert!(error.to_string().contains("source is gone"), "{error}");
@@ -893,29 +894,9 @@ mod test_move_single_file {
         let destination = directory.path().join("partial.txt");
         std::fs::write(&destination, b"short").expect("file should be written");
 
-        let error = move_single_file(&source, &destination, 7, &progress_bar(), false)
+        let error = move_single_file(&source, &destination, 7, &mut ByteCounter::default())
             .expect_err("a partial destination should fail");
 
         assert!(error.to_string().contains("source is gone"), "{error}");
-    }
-}
-
-#[cfg(test)]
-mod test_create_move_progress_bar {
-    use super::*;
-
-    #[test]
-    fn a_hidden_bar_reports_no_length() {
-        let bar = create_move_progress_bar(1024, true);
-
-        assert!(bar.is_hidden());
-    }
-
-    #[test]
-    fn a_visible_bar_carries_the_given_length() {
-        let bar = create_move_progress_bar(1024, false);
-
-        assert_eq!(bar.length(), Some(1024));
-        bar.finish_and_clear();
     }
 }

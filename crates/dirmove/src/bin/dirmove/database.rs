@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
-use cli_tools_dirmove::{Config, utils};
+use cli_tools_common::print_yellow;
+use cli_tools_dirmove::utils;
+
+use crate::config::Config;
 
 /// Default database filename.
 const DATABASE_FILENAME: &str = "dirmove.db";
@@ -225,11 +228,32 @@ impl std::fmt::Display for DirectoryEntry {
 ///
 /// Hidden names, ignored prefixes, ignored group names, and names with an ignored group part are not stored.
 pub fn should_store_name(name: &str, config: &Config) -> bool {
-    let name_filter = config.name_filter();
     !name.starts_with('.')
-        && !name_filter.is_ignored_prefix(name)
-        && !name_filter.matches_ignored_group_name(&utils::normalize_name(name))
-        && !config.has_ignored_group_part(name.split([' ', '.']))
+        && !config.name_filter.is_ignored_prefix(name)
+        && !config
+            .name_filter
+            .matches_ignored_group_name(&utils::normalize_name(name))
+        && !config.grouping.has_ignored_group_part(name.split([' ', '.']))
+}
+
+/// Print the number of directory names in the default database and every stored name.
+///
+/// # Errors
+/// Returns an error if the entries cannot be read from an opened database.
+pub fn print_entries() -> Result<()> {
+    let database = match Database::open_default() {
+        Ok(database) => database,
+        Err(error) => {
+            print_yellow!("Database not available: {error}");
+            return Ok(());
+        }
+    };
+    let entries = database.get_all_entries()?;
+    println!("Database entries: {}", entries.len());
+    for entry in entries {
+        println!("  {}", entry.display_name);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

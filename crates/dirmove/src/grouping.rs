@@ -8,28 +8,144 @@ use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::path::PathBuf;
 
-use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
-use crate::config::Config;
+use crate::name_filter::NameFilter;
 use crate::prefix_index::PrefixIndex;
 use crate::types::{FileInfo, PrefixGroup, PrefixGroupBuilder, ValidCandidate};
 use crate::utils;
 
+/// Default minimum number of files in a group.
+pub const DEFAULT_MIN_GROUP_SIZE: usize = 3;
+
+/// Default minimum number of characters in a single word group prefix.
+pub const DEFAULT_MIN_PREFIX_CHARS: usize = 5;
+
+/// Stage of grouping that reports progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupingStage {
+    /// Collecting prefix candidates from each file.
+    CollectingPrefixes,
+    /// Adding files whose names start with a group prefix to that group.
+    MatchingFilesToGroups,
+}
+
+/// Group size, prefix length, ignored part, and prefix override rules for grouping.
+#[derive(Debug, Clone)]
+pub struct GroupingOptions {
+    /// Minimum number of files in a group.
+    min_group_size: usize,
+    /// Minimum number of characters in a single word group prefix.
+    min_prefix_chars: usize,
+    /// Lowercase name parts that disqualify a group.
+    ignored_group_parts: Vec<String>,
+    /// Prefixes that replace any group prefix they overlap with.
+    prefix_overrides: Vec<String>,
+}
+
 /// Groups files by shared name prefixes.
 #[derive(Debug, Clone, Copy)]
 pub struct PrefixGrouper<'a> {
-    /// Options for group size, prefix length, ignored names and parts, and prefix overrides.
-    config: &'a Config,
-    /// Whether to hide the progress bars.
-    hide_progress: bool,
+    /// Group size, prefix length, ignored part, and prefix override rules.
+    options: &'a GroupingOptions,
+    /// Ignored prefix and ignored group name rules.
+    name_filter: &'a NameFilter,
+}
+
+/// Receives progress while files are grouped.
+///
+/// Grouping runs in parallel, so `advance` can be called from several threads at once.
+/// Every method does nothing by default, and `()` reports nothing.
+pub trait GroupingProgress: Sync {
+    /// A stage started and will advance `length` times.
+    fn start_stage(&self, _stage: GroupingStage, _length: u64) {}
+
+    /// One item of the current stage finished.
+    fn advance(&self) {}
+
+    /// The current stage finished.
+    fn finish_stage(&self) {}
+}
+
+impl GroupingProgress for () {}
+
+impl GroupingOptions {
+    /// Create grouping options.
+    ///
+    /// Ignored group parts are trimmed and lowercased, and duplicates are removed from both lists.
+    #[must_use]
+    pub fn new<P, O>(
+        min_group_size: usize,
+        min_prefix_chars: usize,
+        ignored_group_parts: P,
+        prefix_overrides: O,
+    ) -> Self
+    where
+        P: IntoIterator,
+        P::Item: AsRef<str>,
+        O: IntoIterator,
+        O::Item: Into<String>,
+    {
+        let mut seen = HashSet::new();
+        let ignored_group_parts = ignored_group_parts
+            .into_iter()
+            .map(|part| part.as_ref().trim().to_lowercase())
+            .filter(|part| seen.insert(part.clone()))
+            .collect();
+        let mut seen = HashSet::new();
+        let prefix_overrides = prefix_overrides
+            .into_iter()
+            .map(Into::into)
+            .filter(|prefix: &String| seen.insert(prefix.clone()))
+            .collect();
+        Self {
+            min_group_size,
+            min_prefix_chars,
+            ignored_group_parts,
+            prefix_overrides,
+        }
+    }
+
+    /// Return the minimum number of files in a group.
+    #[must_use]
+    pub const fn min_group_size(&self) -> usize {
+        self.min_group_size
+    }
+
+    /// Return the minimum number of characters in a single word group prefix.
+    #[must_use]
+    pub const fn min_prefix_chars(&self) -> usize {
+        self.min_prefix_chars
+    }
+
+    /// Return whether any part of a name matches an ignored group part, ignoring ASCII case.
+    #[must_use]
+    pub fn has_ignored_group_part<'part>(&self, mut parts: impl Iterator<Item = &'part str>) -> bool {
+        parts.any(|part| {
+            self.ignored_group_parts
+                .iter()
+                .any(|ignored| part.eq_ignore_ascii_case(ignored))
+        })
+    }
+}
+
+impl Default for GroupingOptions {
+    /// Create options with the default group size and prefix length and no ignored parts or overrides.
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MIN_GROUP_SIZE,
+            DEFAULT_MIN_PREFIX_CHARS,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+    }
 }
 
 impl<'a> PrefixGrouper<'a> {
-    /// Create a grouper, optionally hiding the progress bars shown while grouping.
+    /// Create a grouper from grouping options and name filter rules.
     #[must_use]
-    pub const fn new(config: &'a Config, hide_progress: bool) -> Self {
-        Self { config, hide_progress }
+    pub const fn new(options: &'a GroupingOptions, name_filter: &'a NameFilter) -> Self {
+        Self { options, name_filter }
     }
 
     /// Collect all possible prefix groups for files.
@@ -38,9 +154,19 @@ impl<'a> PrefixGrouper<'a> {
     /// Returns a map from display prefix to its group, where the part count indicates specificity.
     #[must_use]
     pub fn collect_all_prefix_groups(&self, files_with_names: &[FileInfo<'_>]) -> HashMap<String, PrefixGroup> {
+        self.collect_all_prefix_groups_with_progress(files_with_names, &())
+    }
+
+    /// Collect all possible prefix groups for files, reporting progress of each grouping stage.
+    #[must_use]
+    pub fn collect_all_prefix_groups_with_progress(
+        &self,
+        files_with_names: &[FileInfo<'_>],
+        progress: &impl GroupingProgress,
+    ) -> HashMap<String, PrefixGroup> {
         let prefix_index = PrefixIndex::new(files_with_names);
-        let mut prefix_groups = self.first_pass(files_with_names, &prefix_index);
-        self.second_pass(files_with_names, &prefix_index, &mut prefix_groups);
+        let mut prefix_groups = self.first_pass(files_with_names, &prefix_index, progress);
+        Self::second_pass(files_with_names, &prefix_index, &mut prefix_groups, progress);
 
         let display_groups: HashMap<String, PrefixGroup> = prefix_groups
             .into_values()
@@ -57,7 +183,7 @@ impl<'a> PrefixGrouper<'a> {
     /// Groups that end up under the same prefix are merged.
     #[must_use]
     pub fn apply_prefix_overrides(&self, groups: HashMap<String, PrefixGroup>) -> HashMap<String, PrefixGroup> {
-        if self.config.prefix_overrides.is_empty() {
+        if self.options.prefix_overrides.is_empty() {
             return groups;
         }
 
@@ -65,7 +191,7 @@ impl<'a> PrefixGrouper<'a> {
 
         for (prefix, group) in groups {
             let target_prefix = self
-                .config
+                .options
                 .prefix_overrides
                 .iter()
                 .find(|&override_prefix| {
@@ -99,7 +225,7 @@ impl<'a> PrefixGrouper<'a> {
     pub fn groups_in_processing_order(&self, groups: HashMap<String, PrefixGroup>) -> Vec<(String, PrefixGroup)> {
         let mut groups: Vec<_> = groups
             .into_iter()
-            .filter(|(_, group)| group.files.len() >= self.config.min_group_size)
+            .filter(|(_, group)| group.files.len() >= self.options.min_group_size)
             .collect();
         groups.sort_by(|(prefix_a, group_a), (prefix_b, group_b)| {
             group_a
@@ -117,10 +243,7 @@ impl<'a> PrefixGrouper<'a> {
     #[must_use]
     pub fn directory_name_for_prefix(&self, prefix: &str) -> String {
         let directory_name = prefix.replace('.', " ");
-        self.config
-            .name_filter()
-            .strip_ignored_prefixes(&directory_name)
-            .into_owned()
+        self.name_filter.strip_ignored_prefixes(&directory_name).into_owned()
     }
 
     /// Check whether a proposed directory name should be skipped.
@@ -138,7 +261,7 @@ impl<'a> PrefixGrouper<'a> {
             return true;
         }
 
-        let name_filter = self.config.name_filter();
+        let name_filter = self.name_filter;
         let directory_name_normalized = utils::normalize_name(directory_name);
         name_filter.should_skip_destination_directory(directory_name, &directory_name_normalized)
             || runtime_ignored.contains(&directory_name_normalized)
@@ -154,10 +277,11 @@ impl<'a> PrefixGrouper<'a> {
         &self,
         files_with_names: &[FileInfo<'_>],
         prefix_index: &PrefixIndex<'_>,
+        progress: &impl GroupingProgress,
     ) -> HashMap<String, PrefixGroupBuilder> {
-        let min_group_size = self.config.min_group_size;
-        let min_prefix_chars = self.config.min_prefix_chars;
-        let progress_bar = self.progress_bar(files_with_names.len() as u64, "Collecting prefixes");
+        let min_group_size = self.options.min_group_size;
+        let min_prefix_chars = self.options.min_prefix_chars;
+        progress.start_stage(GroupingStage::CollectingPrefixes, files_with_names.len() as u64);
 
         let first_pass_results: Vec<Vec<ValidCandidate>> = files_with_names
             .par_iter()
@@ -178,8 +302,8 @@ impl<'a> PrefixGrouper<'a> {
                     let candidate_parts: Vec<&str> = candidate.prefix.split('.').collect();
                     let candidate_combined = candidate_parts.join("").to_lowercase();
 
-                    if self.config.ignored_group_names.contains(&key)
-                        || self.config.has_ignored_group_part(candidate_parts.iter().copied())
+                    if self.name_filter.matches_ignored_group_name(&key)
+                        || self.options.has_ignored_group_part(candidate_parts.iter().copied())
                     {
                         continue;
                     }
@@ -205,7 +329,7 @@ impl<'a> PrefixGrouper<'a> {
                         prefix: candidate.prefix.into_owned(),
                     });
                 }
-                progress_bar.inc(1);
+                progress.advance();
                 valid_candidates
             })
             .collect();
@@ -233,7 +357,7 @@ impl<'a> PrefixGrouper<'a> {
                 );
             }
         }
-        progress_bar.finish_and_clear();
+        progress.finish_stage();
 
         prefix_groups
     }
@@ -243,10 +367,10 @@ impl<'a> PrefixGrouper<'a> {
     /// This handles cases like `JosephExampleTV` joining the `JosephExample` group,
     /// using the prefix index instead of checking every group against every file.
     fn second_pass(
-        &self,
         files_with_names: &[FileInfo<'_>],
         prefix_index: &PrefixIndex<'_>,
         prefix_groups: &mut HashMap<String, PrefixGroupBuilder>,
+        progress: &impl GroupingProgress,
     ) {
         let group_keys_with_combined: Vec<(String, String, HashSet<PathBuf>)> = prefix_groups
             .iter()
@@ -256,7 +380,10 @@ impl<'a> PrefixGrouper<'a> {
             })
             .collect();
 
-        let progress_bar = self.progress_bar(group_keys_with_combined.len() as u64, "Matching files to groups");
+        progress.start_stage(
+            GroupingStage::MatchingFilesToGroups,
+            group_keys_with_combined.len() as u64,
+        );
         let second_pass_results: Vec<Vec<(String, PathBuf)>> = group_keys_with_combined
             .par_iter()
             .map(|(group_key, group_combined, existing_files)| {
@@ -279,7 +406,7 @@ impl<'a> PrefixGrouper<'a> {
                         matches.push((group_key.clone(), file_path));
                     }
                 }
-                progress_bar.inc(1);
+                progress.advance();
                 matches
             })
             .collect();
@@ -289,30 +416,12 @@ impl<'a> PrefixGrouper<'a> {
                 builder.files.push(file_path);
             }
         }
-        progress_bar.finish_and_clear();
-    }
-
-    /// Create a progress bar, hidden when progress output is disabled.
-    fn progress_bar(&self, length: u64, message: &str) -> ProgressBar {
-        if self.hide_progress {
-            return ProgressBar::hidden();
-        }
-
-        let progress_bar = ProgressBar::new(length);
-        progress_bar.set_style(
-            ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-                .expect("Failed to set progress bar template")
-                .progress_chars("=> "),
-        );
-        progress_bar.set_message(message.to_string());
-        progress_bar
+        progress.finish_stage();
     }
 }
 
 #[cfg(test)]
 mod test_prefix_groups {
-    use super::*;
     use crate::test_helpers::*;
 
     #[test]
@@ -326,7 +435,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Other.S01E01.mp4"), "").unwrap();
         std::fs::write(root.join("Show.Other.S01E02.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -351,7 +460,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Alpha.Beta.Delta.part1.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.Beta.Delta.part2.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -372,7 +481,7 @@ mod test_prefix_groups {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -388,7 +497,7 @@ mod test_prefix_groups {
 
         std::fs::write(root.join("Lonely.File.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -406,7 +515,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Beta.Two.mp4"), "").unwrap();
         std::fs::write(root.join("Gamma.Three.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -430,7 +539,7 @@ mod test_prefix_groups {
             std::fs::write(root.join(format!("SeriesB.Season1.E{episode:02}.mp4")), "").unwrap();
         }
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -456,7 +565,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("Show.Episode.02.mp4"), "").unwrap();
 
-        let config_low = Config::test_with_group_size(2);
+        let config_low = TestConfig::test_with_group_size(2);
 
         let fixture_low = Fixture::new(root.clone(), config_low);
         let files_with_names = fixture_low.scanner().collect_files_with_names().unwrap();
@@ -464,7 +573,7 @@ mod test_prefix_groups {
         assert!(groups_low.contains_key("Show.Episode"));
         assert!(groups_low.contains_key("Show"));
 
-        let config_high = Config::test_with_group_size(5);
+        let config_high = TestConfig::test_with_group_size(5);
 
         let fixture_high = Fixture::new(root, config_high);
         let files_with_names = fixture_high.scanner().collect_files_with_names().unwrap();
@@ -483,7 +592,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("myshow.Episode.03.mp4"), "").unwrap();
         std::fs::write(root.join("Myshow.Episode.04.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -509,7 +618,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Photolab.Image.03.jpg"), "").unwrap();
         std::fs::write(root.join("PHOTOLAB.Image.04.jpg"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -538,7 +647,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("DarkkoTV.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Darkko.TV.Episode.03.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -569,7 +678,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("SUMMER.VACATION.Photo3.jpg"), "").unwrap();
         std::fs::write(root.join("summer.vacation.Photo4.jpg"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -596,7 +705,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("Gallery.Photos.Img5.jpg"), "").unwrap();
 
         // With min_group_size=6, all prefixes with 5 files are excluded
-        let config_6 = Config::test_with_group_size(6);
+        let config_6 = TestConfig::test_with_group_size(6);
 
         let dirmove_6 = Fixture::new(root.clone(), config_6);
         let files_with_names = dirmove_6.scanner().collect_files_with_names().unwrap();
@@ -608,7 +717,7 @@ mod test_prefix_groups {
         );
 
         // With min_group_size=5, should find the group
-        let config_5 = Config::test_with_group_size(5);
+        let config_5 = TestConfig::test_with_group_size(5);
 
         let dirmove_5 = Fixture::new(root.clone(), config_5);
         let files_with_names = dirmove_5.scanner().collect_files_with_names().unwrap();
@@ -621,7 +730,7 @@ mod test_prefix_groups {
         assert_eq!(groups_5.get("Gallery.Photos").unwrap().files.len(), 5);
 
         // With min_group_size=3, should still find the same group
-        let config_3 = Config::test_with_group_size(3);
+        let config_3 = TestConfig::test_with_group_size(3);
 
         let dirmove_3 = Fixture::new(root, config_3);
         let files_with_names = dirmove_3.scanner().collect_files_with_names().unwrap();
@@ -643,9 +752,9 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Name.Season2.Episode01.mp4"), "").unwrap();
         std::fs::write(root.join("Show.Name.Season2.Episode02.mp4"), "").unwrap();
 
-        let config = Config {
+        let config = TestConfig {
             prefix_overrides: vec!["Show.Name".to_string()],
-            ..Config::test_with_group_size(2)
+            ..TestConfig::test_with_group_size(2)
         };
 
         let fixture = Fixture::new(root, config);
@@ -687,9 +796,9 @@ mod test_prefix_groups {
         std::fs::write(root.join("ShowC.Season1.Ep01.mp4"), "").unwrap();
         std::fs::write(root.join("ShowC.Season1.Ep02.mp4"), "").unwrap();
 
-        let config = Config {
+        let config = TestConfig {
             prefix_overrides: vec!["SeriesA".to_string(), "SeriesB".to_string()],
-            ..Config::test_with_group_size(2)
+            ..TestConfig::test_with_group_size(2)
         };
 
         let fixture = Fixture::new(root, config);
@@ -722,9 +831,9 @@ mod test_prefix_groups {
         std::fs::write(root.join("MyShow.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("MyShow.Episode.03.mp4"), "").unwrap();
 
-        let config = Config {
+        let config = TestConfig {
             prefix_overrides: vec!["NoMatch".to_string()],
-            ..Config::test_with_group_size(2)
+            ..TestConfig::test_with_group_size(2)
         };
 
         let fixture = Fixture::new(root, config);
@@ -750,7 +859,7 @@ mod test_prefix_groups {
         std::fs::write(root.join("www.Example.Show.Ep02.mp4"), "").unwrap();
         std::fs::write(root.join("Example.Show.Ep03.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["www"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["www"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -771,10 +880,10 @@ mod test_prefix_groups {
         std::fs::write(root.join("Show.Name.Season2.Ep01.mp4"), "").unwrap();
         std::fs::write(root.join("Show.Name.Season2.Ep02.mp4"), "").unwrap();
 
-        let config = Config {
+        let config = TestConfig {
             prefix_ignores: vec!["dl".to_string()],
             prefix_overrides: vec!["Show.Name".to_string()],
-            ..Config::test_with_group_size(2)
+            ..TestConfig::test_with_group_size(2)
         };
 
         let fixture = Fixture::new(root, config);
@@ -803,7 +912,7 @@ mod test_prefix_groups {
 
 #[cfg(test)]
 mod test_ignored_group_names {
-    use super::*;
+
     use crate::test_helpers::*;
 
     #[test]
@@ -815,7 +924,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_names(vec!["episode"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["episode"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -842,7 +951,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Video.Part.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Video.Part.03.mp4"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_names(vec!["video", "part"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["video", "part"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -874,7 +983,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.episode.03.mp4"), "").unwrap();
 
         // Config helper automatically lowercases
-        let config = Config::test_with_ignored_group_names(vec!["episode"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["episode"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -905,7 +1014,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
 
         // normalized form (no dots)
-        let config = Config::test_with_ignored_group_names(vec!["seasonone"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["seasonone"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -933,7 +1042,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
 
         // Space-separated form should be normalized and still match
-        let config = Config::test_with_ignored_group_names(vec!["Season One"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["Season One"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -959,7 +1068,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Season.One.03.mp4"), "").unwrap();
 
         // Dot-separated form should be normalized and still match
-        let config = Config::test_with_ignored_group_names(vec!["Season.One"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["Season.One"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -988,7 +1097,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Big.Show.03.mp4"), "").unwrap();
 
         // Mix of space, dot, and concatenated forms should all normalize the same way
-        let config = Config::test_with_ignored_group_names(vec!["Season One", "Big.Show"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["Season One", "Big.Show"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1017,7 +1126,7 @@ mod test_ignored_group_names {
         std::fs::write(root.join("Studio.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1044,9 +1153,9 @@ mod test_ignored_group_names {
         std::fs::write(root.join("StudioName.Scene.02.Chapter.02.mp4"), "").unwrap();
         std::fs::write(root.join("StudioName.Scene.03.Chapter.03.mp4"), "").unwrap();
 
-        let config = Config {
+        let config = TestConfig {
             min_prefix_chars: 5,
-            ..Config::test_with_ignored_group_names(vec!["scene", "chapter"])
+            ..TestConfig::test_with_ignored_group_names(vec!["scene", "chapter"])
         };
 
         let fixture = Fixture::new(root, config);
@@ -1087,7 +1196,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("My.Series.S01E02.mp4"), "").unwrap();
         std::fs::write(root.join("My.Series.S01E03.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root.clone(), config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1125,7 +1234,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
         std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root.clone(), config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1154,7 +1263,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
         std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root.clone(), config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1183,7 +1292,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("My.Series.ep2.mp4"), "").unwrap();
         std::fs::write(root.join("My.Series.ep3.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root.clone(), config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1213,7 +1322,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("MySeries.ep2.mp4"), "").unwrap();
         std::fs::write(root.join("MySeries.ep3.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1237,7 +1346,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("DL.MySeries.ep2.mp4"), "").unwrap();
         std::fs::write(root.join("DL.MySeries.ep3.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["dl"]);
 
         let fixture = Fixture::new(root, config);
 
@@ -1253,7 +1362,7 @@ mod test_parent_directory_skipped {
         let root = tmp.path().join("Downloads");
         std::fs::create_dir(&root).unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["dl", "web"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["dl", "web"]);
 
         let fixture = Fixture::new(root, config);
 
@@ -1269,7 +1378,7 @@ mod test_parent_directory_skipped {
         let root = tmp.path().join("Downloads");
         std::fs::create_dir(&root).unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["dl"]);
 
         let fixture = Fixture::new(root, config);
 
@@ -1296,7 +1405,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("DL.Studio.ep2.mp4"), "").unwrap();
         std::fs::write(root.join("DL.Studio.ep3.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores_and_ignored_group_names(vec!["dl"], vec!["studio"]);
+        let config = TestConfig::test_with_prefix_ignores_and_ignored_group_names(vec!["dl"], vec!["studio"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1322,7 +1431,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("WEB.DL.ep2.mp4"), "").unwrap();
         std::fs::write(root.join("WEB.DL.ep3.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["web", "dl"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["web", "dl"]);
 
         let fixture = Fixture::new(root, config);
 
@@ -1352,7 +1461,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("Studio.AlphaCharlie.Video1.1080p.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.AlphaCharlie.Video2.1080p.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["studio"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["studio"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1396,7 +1505,7 @@ mod test_parent_directory_skipped {
         std::fs::write(root.join("Studio.AlphaCharlie.Video1.1080p.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.AlphaCharlie.Video2.1080p.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["studio"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["studio"]);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -1432,7 +1541,7 @@ mod test_stripped_name_filtering_integration {
     ) -> Fixture {
         Fixture::new(
             root,
-            Config::test_with_prefix_ignores_and_ignored_group_names(prefix_ignores, ignored_group_names),
+            TestConfig::test_with_prefix_ignores_and_ignored_group_names(prefix_ignores, ignored_group_names),
         )
     }
 
@@ -1485,7 +1594,7 @@ mod test_stripped_name_filtering_integration {
         std::fs::write(root.join("WEB.DL.Content.02.mp4"), "").unwrap();
         std::fs::write(root.join("WEB.DL.Content.03.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["web", "dl"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["web", "dl"]);
         let fixture = Fixture::new(root, config);
 
         // When processing "WEB DL" group:
@@ -1625,7 +1734,7 @@ mod test_stripped_name_filtering_integration {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
-        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["dl"]);
         let fixture = Fixture::new(root, config);
 
         // Various cases should all be recognized as ignored prefix
@@ -1645,7 +1754,7 @@ mod test_stripped_name_filtering_integration {
         std::fs::write(root.join("WEB.DL.02.mp4"), "").unwrap();
         std::fs::write(root.join("WEB.DL.03.mp4"), "").unwrap();
 
-        let config = Config::test_with_prefix_ignores(vec!["web", "dl"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["web", "dl"]);
         let fixture = Fixture::new(root, config);
 
         // "WEB DL" -> strip "WEB " -> "DL" -> strip "DL " would need trailing space
@@ -1691,7 +1800,7 @@ mod test_stripped_name_filtering_integration {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
 
-        let config = Config::test_with_prefix_ignores(vec!["dl"]);
+        let config = TestConfig::test_with_prefix_ignores(vec!["dl"]);
         let fixture = Fixture::new(root, config);
 
         assert!(!fixture.name_filter().is_ignored_prefix("dla"));
@@ -1747,7 +1856,6 @@ mod test_stripped_name_filtering_integration {
 
 #[cfg(test)]
 mod test_ignored_group_parts {
-    use super::*;
     use crate::test_helpers::*;
 
     #[test]
@@ -1760,7 +1868,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Show.S01E02.1080p.DL.x265.TEST.mkv"), "").unwrap();
         std::fs::write(root.join("Show.S01E03.1080p.DL.x265.TEST.mkv"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_parts(vec!["x265"]);
+        let config = TestConfig::test_with_ignored_group_parts(vec!["x265"]);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -1791,7 +1899,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Studio.Video.x265.HEVC.002.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Video.x265.HEVC.003.mp4"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_parts(vec!["x265", "hevc"]);
+        let config = TestConfig::test_with_ignored_group_parts(vec!["x265", "hevc"]);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -1818,7 +1926,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Name.X265.Thing.003.mp4"), "").unwrap();
 
         // lowercase in config
-        let config = Config::test_with_ignored_group_parts(vec!["x265"]);
+        let config = TestConfig::test_with_ignored_group_parts(vec!["x265"]);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -1843,7 +1951,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("DL.x265.TEST.Video.003.mp4"), "").unwrap();
 
         // empty list
-        let config = Config::test_with_ignored_group_parts(vec![]);
+        let config = TestConfig::test_with_ignored_group_parts(vec![]);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -1867,7 +1975,7 @@ mod test_ignored_group_parts {
         std::fs::write(root.join("Studio.x265.Video.003.mp4"), "").unwrap();
 
         // partial match
-        let config = Config::test_with_ignored_group_parts(vec!["x26"]);
+        let config = TestConfig::test_with_ignored_group_parts(vec!["x26"]);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -2046,7 +2154,6 @@ mod test_prefix_overrides {
 /// - Both dotted and concatenated naming styles
 #[cfg(test)]
 mod test_realistic_grouping {
-    use super::*;
     use crate::test_helpers::*;
 
     #[test]
@@ -2082,7 +2189,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("BlueSky.Entertainment.Comedy.720p.x265.mp4"), "").unwrap();
         std::fs::write(root.join("BlueSky.Media.Documentary.1080p.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2151,7 +2258,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("DifferentShow.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("SomeOther.Content.Video.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2201,7 +2308,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Completely.Different.Content.mp4"), "").unwrap();
         std::fs::write(root.join("Random.Other.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2258,7 +2365,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Short.Video.mp4"), "").unwrap();
         std::fs::write(root.join("Another.Short.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2298,7 +2405,7 @@ mod test_realistic_grouping {
         // Unrelated
         std::fs::write(root.join("RandomContent.Video.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["Premium"], 2));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["Premium"], 2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2337,7 +2444,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("ThunderBolt.Action.Movie1.mp4"), "").unwrap();
         std::fs::write(root.join("ThunderBolt.Action.Movie2.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2379,7 +2486,7 @@ mod test_realistic_grouping {
         // Unrelated
         std::fs::write(root.join("Random.2020.Content.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2423,7 +2530,7 @@ mod test_realistic_grouping {
         // Completely unrelated
         std::fs::write(root.join("Independent.Film.Festival.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2468,7 +2575,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Galaxy.Quest.Movie.mp4"), "").unwrap();
         std::fs::write(root.join("Galaxy.Quest.Special.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2518,7 +2625,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Studio.Ghibli.Shorts.One.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Ghibli.Shorts.Two.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(2);
+        let config = TestConfig::test_with_group_size(2);
 
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
@@ -2575,7 +2682,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Marvel.Television.Daredevil.S01.mp4"), "").unwrap();
         std::fs::write(root.join("Marvel.Television.Daredevil.S02.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2625,7 +2732,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Series.Season.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Series.Season.Special.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2662,7 +2769,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("ThirdUnique.Content.mp4"), "").unwrap();
 
         // With min_group_size=5, neither group qualifies (2 and 3 files < 5)
-        let fixture = Fixture::new(root.clone(), Config::test_with_group_size(5));
+        let fixture = Fixture::new(root.clone(), TestConfig::test_with_group_size(5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2672,7 +2779,7 @@ mod test_realistic_grouping {
         );
 
         // With min_group_size=3, only TripleGroup qualifies
-        let fixture = Fixture::new(root.clone(), Config::test_with_group_size(3));
+        let fixture = Fixture::new(root.clone(), TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2687,7 +2794,7 @@ mod test_realistic_grouping {
         assert_eq!(groups.get("TripleGroup").unwrap().files.len(), 3);
 
         // With min_group_size=2, both groups qualify
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2729,7 +2836,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("MoonGlow.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("Moon.Glow.Episode.02.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2769,7 +2876,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("One.Two.Three.Four.File2.mp4"), "").unwrap();
         std::fs::write(root.join("One.Two.Three.Different.File3.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2789,7 +2896,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Show24.Hours.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Show24.Hours.Episode.03.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2810,7 +2917,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("X.Files.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("X.Files.Episode.03.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2831,7 +2938,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Spider-Man.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("Spider-Man.Movie.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2849,7 +2956,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("My_Show.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("My_Show.Episode.02.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2866,7 +2973,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Show..Name.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("Show..Name.Episode.02.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2884,7 +2991,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join(format!("{long_name}.Part.01.mp4")), "").unwrap();
         std::fs::write(root.join(format!("{long_name}.Part.02.mp4")), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2904,7 +3011,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Unique.Name.File.mp4"), "").unwrap();
         std::fs::write(root.join("Another.Unique.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(1));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(1));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2924,7 +3031,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join(".mp4"), "").unwrap();
         std::fs::write(root.join("a.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
 
         // Should not panic, may or may not find groups
@@ -2941,7 +3048,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Movie.Name.2024.srt"), "").unwrap();
         std::fs::write(root.join("Movie.Name.2024.nfo"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -2976,7 +3083,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Studio.Gamma.Another.Thing.720p.x265.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Delta.Yet.Another.Item.1080p.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3023,7 +3130,7 @@ mod test_realistic_grouping {
         // This one has Site.Person adjacent
         std::fs::write(root.join("Site.Person.Fourth.1080p.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3064,7 +3171,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("photolab.Project.Eta.720p.mp4"), "").unwrap();
         std::fs::write(root.join("Photolab.Project.Theta.1080p.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3102,7 +3209,7 @@ mod test_realistic_grouping {
         // Other partial: "Dark.StarMedia"
         std::fs::write(root.join("Dark.StarMedia.Video.08.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3138,7 +3245,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Creator.Name.Video.05.mp4"), "").unwrap();
         std::fs::write(root.join("Creator.Name.Video.06.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3175,7 +3282,7 @@ mod test_realistic_grouping {
         // "Beauty.Beast" contiguous (no glue word)
         std::fs::write(root.join("Beauty.Beast.Special.01.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3217,7 +3324,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Alpha.2023.Beta.Content.09.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.2024.Beta.Content.10.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3266,7 +3373,7 @@ mod test_realistic_grouping {
         // Contiguous version
         std::fs::write(root.join("Studio.Actor.Scene.Direct.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3309,7 +3416,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("PhotoLabPro.Image.02.jpg"), "").unwrap();
         std::fs::write(root.join("PhotoLabPro.Image.03.jpg"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3355,7 +3462,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Studio.Production.2160p.Episode.03.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Production.480p.Episode.04.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3382,7 +3489,7 @@ mod test_realistic_grouping {
         std::fs::write(root.join("Alpha.Beta.Another.File.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.Beta.Third.Entry.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3404,7 +3511,6 @@ mod test_realistic_grouping {
 
 #[cfg(test)]
 mod test_word_boundary_grouping {
-    use super::*;
     use crate::test_helpers::*;
 
     #[test]
@@ -3422,7 +3528,7 @@ mod test_word_boundary_grouping {
         std::fs::write(root.join("Intensely.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("Intensely.Video.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3458,7 +3564,7 @@ mod test_word_boundary_grouping {
         std::fs::write(root.join("StudioPro.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("StudioPro.Video.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3486,7 +3592,7 @@ mod test_word_boundary_grouping {
         std::fs::write(root.join("Photos.Image.002.jpg"), "").unwrap();
         std::fs::write(root.join("Photos.Image.003.jpg"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3519,7 +3625,7 @@ mod test_word_boundary_grouping {
         std::fs::write(root.join("Alpha2.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha2.Video.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3539,7 +3645,6 @@ mod test_word_boundary_grouping {
 /// 3. Completely different files are never incorrectly included
 #[cfg(test)]
 mod test_varied_prefix_grouping {
-    use super::*;
     use crate::test_helpers::*;
 
     // ===== Tests for prefix ignore functionality =====
@@ -3566,7 +3671,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("RandomVideo.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("UnrelatedContent.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["Site"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["Site"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3613,7 +3718,10 @@ mod test_varied_prefix_grouping {
         // Different name entirely
         std::fs::write(root.join("MyContentMaker.Video.001.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["Premium", "HD"], 3));
+        let fixture = Fixture::new(
+            root,
+            TestConfig::test_with_ignores_and_group_size(vec!["Premium", "HD"], 3),
+        );
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3655,7 +3763,7 @@ mod test_varied_prefix_grouping {
         // Different studio
         std::fs::write(root.join("Premium.StudioGamma.Movie.01.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["PREMIUM"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["PREMIUM"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3680,7 +3788,7 @@ mod test_varied_prefix_grouping {
         // Completely different
         std::fs::write(root.join("OtherChannel.Video.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["Site"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["Site"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3712,7 +3820,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("OtherProduction.Episode.01.mp4"), "").unwrap();
         std::fs::write(root.join("RandomFile.txt"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3754,7 +3862,7 @@ mod test_varied_prefix_grouping {
         // Completely unrelated
         std::fs::write(root.join("Documentary.Nature.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3794,7 +3902,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("LightStar.Content.mp4"), "").unwrap();
         std::fs::write(root.join("BrightStorm.Content.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3834,7 +3942,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Beta.Different.File.mp4"), "").unwrap();
         std::fs::write(root.join("Gamma.Another.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3890,7 +3998,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("config.json"), "").unwrap();
         std::fs::write(root.join("SingleFile.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3945,7 +4053,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("notes.txt"), "").unwrap();
         std::fs::write(root.join("backup.zip"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -3989,7 +4097,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Unrelated.Random.File.mp4"), "").unwrap();
         std::fs::write(root.join("Another.Completely.Different.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["Web"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["Web"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4028,7 +4136,10 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("NoMatch.AtAll.mp4"), "").unwrap();
         std::fs::write(root.join("random_file_123.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["AAA", "BBB"], 3));
+        let fixture = Fixture::new(
+            root,
+            TestConfig::test_with_ignores_and_group_size(vec!["AAA", "BBB"], 3),
+        );
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4069,7 +4180,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("SilverEagle.Other.01.mp4"), "").unwrap();
         std::fs::write(root.join("GoldenHawk.Similar.01.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["HD"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["HD"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4111,7 +4222,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Unrelated.Content.File.mp4"), "").unwrap();
         std::fs::write(root.join("Random.Video.Here.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["Premium"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["Premium"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4153,7 +4264,7 @@ mod test_varied_prefix_grouping {
         // Noise
         std::fs::write(root.join("OtherStuff.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["X"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["X"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4191,7 +4302,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Ver2StudioName.Wrong.01.mp4"), "").unwrap();
         std::fs::write(root.join("Random.Other.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_ignores_and_group_size(vec!["Ver2"], 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_ignores_and_group_size(vec!["Ver2"], 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4216,7 +4327,7 @@ mod test_varied_prefix_grouping {
         std::fs::write(root.join("Target.File.04.mp4"), "").unwrap();
 
         // With empty ignore list, "Prefix.Target" files should group separately
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4410,7 +4521,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("Alexander.Movie.002.mp4"), "").unwrap();
         std::fs::write(root.join("Alexander.Movie.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4451,7 +4562,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("Test.Case.002.rs"), "").unwrap();
         std::fs::write(root.join("Test.Case.003.rs"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4478,7 +4589,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("ABC.Video.003.mp4"), "").unwrap();
 
         // With min_prefix_chars=3, "ABC" should be allowed
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4507,7 +4618,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("VeryLongPrefix.Video.003.mp4"), "").unwrap();
 
         // With min_prefix_chars=10, only "VeryLongPrefix" (14 chars) qualifies
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 10));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 10));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4545,7 +4656,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("Series.Drama.002.mp4"), "").unwrap();
         std::fs::write(root.join("Series.Drama.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4570,7 +4681,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("🎬🎥.Video.003.mp4"), "").unwrap();
 
         // With min=2, emoji prefix should work
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4666,7 +4777,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("AB.CD.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("AB.CD.Video.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4686,7 +4797,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("Alpha.Beta.Video.002.mp4"), "").unwrap();
         std::fs::write(root.join("Alpha.Beta.Video.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4720,7 +4831,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("Studio.Movie.002.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Movie.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4746,7 +4857,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("X.Y.Content.002.mp4"), "").unwrap();
         std::fs::write(root.join("X.Y.Content.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 0));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 0));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4774,7 +4885,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("Ab.Cd.Other.002.mp4"), "").unwrap();
         std::fs::write(root.join("Ab.Cd.Other.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 5));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 5));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4810,7 +4921,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("Super.Long.Prefix.Content.002.mp4"), "").unwrap();
         std::fs::write(root.join("Super.Long.Prefix.Content.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 15));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 15));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4847,7 +4958,7 @@ mod test_min_prefix_chars {
         std::fs::write(root.join("日本語.映画.Content.002.mp4"), "").unwrap();
         std::fs::write(root.join("日本語.映画.Content.003.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size_and_min_chars(3, 3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size_and_min_chars(3, 3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4866,7 +4977,6 @@ mod test_min_prefix_chars {
 /// Tests for broader grouping behavior, where a group prefix is the start of longer names.
 #[cfg(test)]
 mod test_broader_prefix_grouping {
-    use super::*;
     use crate::test_helpers::*;
 
     #[test]
@@ -4891,7 +5001,7 @@ mod test_broader_prefix_grouping {
         // "Studio" not at start
         std::fs::write(root.join("MyStudio.Different.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4931,7 +5041,7 @@ mod test_broader_prefix_grouping {
         std::fs::write(root.join("GammaProduction.Film.001.mp4"), "").unwrap();
         std::fs::write(root.join("GammaProduction.Film.002.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(2));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(2));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -4984,7 +5094,7 @@ mod test_broader_prefix_grouping {
         // Completely different
         std::fs::write(root.join("Unrelated.Other.File.mp4"), "").unwrap();
 
-        let fixture = Fixture::new(root, Config::test_with_group_size(3));
+        let fixture = Fixture::new(root, TestConfig::test_with_group_size(3));
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
 
@@ -5009,7 +5119,6 @@ mod test_broader_prefix_grouping {
 
 #[cfg(test)]
 mod test_second_pass_starts_with_matching {
-    use super::*;
     use crate::test_helpers::*;
 
     #[test]
@@ -5026,7 +5135,7 @@ mod test_second_pass_starts_with_matching {
         // This file has "JosephExampleTV" which starts with the group prefix
         std::fs::write(root.join("JosephExampleTV.Episode.04.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5057,7 +5166,7 @@ mod test_second_pass_starts_with_matching {
         // "BetaStudio" does NOT start with "alphastudio"
         std::fs::write(root.join("BetaStudio.Video.04.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5088,7 +5197,7 @@ mod test_second_pass_starts_with_matching {
         std::fs::write(root.join("ShowName.Episode.02.mp4"), "").unwrap();
         std::fs::write(root.join("ShowName.Episode.03.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5121,7 +5230,7 @@ mod test_second_pass_starts_with_matching {
         std::fs::write(root.join("MyShowSpecial.Bonus.01.mp4"), "").unwrap();
         std::fs::write(root.join("MyShowExtra.Behind.Scenes.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5159,7 +5268,7 @@ mod test_second_pass_starts_with_matching {
         // The normalized key "studioalpha" should not match because the parts are not adjacent
         std::fs::write(root.join("Other.Studio.Stuff.Alpha.mp4"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5180,7 +5289,6 @@ mod test_second_pass_starts_with_matching {
 
 #[cfg(test)]
 mod test_parallel_grouping_consistency {
-    use super::*;
     use crate::test_helpers::*;
 
     #[test]
@@ -5206,7 +5314,7 @@ mod test_parallel_grouping_consistency {
         std::fs::write(root.join("RandomFile.txt"), "").unwrap();
         std::fs::write(root.join("AnotherRandom.doc"), "").unwrap();
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
 
@@ -5267,7 +5375,7 @@ mod test_parallel_grouping_consistency {
         std::fs::write(root.join("Studio.Episode.03.mp4"), "").unwrap();
         std::fs::write(root.join("Studio.Episode.04.mp4"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_names(vec!["episode"]);
+        let config = TestConfig::test_with_ignored_group_names(vec!["episode"]);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5295,7 +5403,7 @@ mod test_parallel_grouping_consistency {
         std::fs::write(root.join("Show.S01E02.1080p.DL.x265.TEST.mkv"), "").unwrap();
         std::fs::write(root.join("Show.S01E03.1080p.DL.x265.TEST.mkv"), "").unwrap();
 
-        let config = Config::test_with_ignored_group_parts(vec!["x265"]);
+        let config = TestConfig::test_with_ignored_group_parts(vec!["x265"]);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5330,7 +5438,7 @@ mod test_parallel_grouping_consistency {
             std::fs::write(root.join(format!("Group{group_index:02}Extra.Bonus.Content.mp4")), "").unwrap();
         }
 
-        let config = Config::test_with_group_size(3);
+        let config = TestConfig::test_with_group_size(3);
         let fixture = Fixture::new(root, config);
         let files_with_names = fixture.scanner().collect_files_with_names().unwrap();
         let groups = fixture.grouper().collect_all_prefix_groups(&files_with_names);
@@ -5346,5 +5454,24 @@ mod test_parallel_grouping_consistency {
                 group.unwrap().1.files.len()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test_grouping_options {
+    use super::*;
+
+    #[test]
+    fn ignored_group_parts_match_ignoring_case() {
+        let options = GroupingOptions::new(3, 5, [" X265 "], Vec::<String>::new());
+        assert!(options.has_ignored_group_part(["DL", "x265"].into_iter()));
+        assert!(!options.has_ignored_group_part(["DL", "x264"].into_iter()));
+    }
+
+    #[test]
+    fn default_uses_the_default_group_size_and_prefix_length() {
+        let options = GroupingOptions::default();
+        assert_eq!(options.min_group_size(), DEFAULT_MIN_GROUP_SIZE);
+        assert_eq!(options.min_prefix_chars(), DEFAULT_MIN_PREFIX_CHARS);
     }
 }
