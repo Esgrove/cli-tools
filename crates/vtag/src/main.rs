@@ -231,7 +231,12 @@ fn version_tag(
             if !from_project_path && !root_fallback.accepts(content) {
                 continue;
             }
-            let Some(version_number) = parse_version(content, project_type) else {
+            let version_number = parse_version(content, project_type).or_else(|| {
+                (project_type == ProjectType::Rust && inherits_workspace_version(content))
+                    .then(|| workspace_version_in_tree(&repo, &tree, &manifest_path))
+                    .flatten()
+            });
+            let Some(version_number) = version_number else {
                 if verbose {
                     println!(
                         "{}",
@@ -473,6 +478,35 @@ fn parse_cargo_toml_version(content: &str) -> Option<String> {
         .get("version")?
         .as_str()
         .map(ToString::to_string)
+}
+
+/// Whether a member `Cargo.toml` takes its version from the workspace with `version.workspace = true`.
+fn inherits_workspace_version(content: &str) -> bool {
+    toml::from_str::<toml::Value>(content).is_ok_and(|value| {
+        value
+            .get("package")
+            .and_then(|package| package.get("version"))
+            .and_then(|version| version.get("workspace"))
+            .and_then(toml::Value::as_bool)
+            == Some(true)
+    })
+}
+
+/// Read the workspace version for a member manifest from the nearest workspace manifest above it in a commit.
+fn workspace_version_in_tree(repo: &Repository, tree: &git2::Tree<'_>, manifest_path: &Path) -> Option<String> {
+    let file_name = manifest_path.file_name()?;
+    manifest_path.parent()?.ancestors().skip(1).find_map(|directory| {
+        let entry = tree.get_path(&directory.join(file_name)).ok()?;
+        let blob = entry.to_object(repo).ok()?.into_blob().ok()?;
+        let content = std::str::from_utf8(blob.content()).ok()?;
+        let value: toml::Value = toml::from_str(content).ok()?;
+        value
+            .get("workspace")?
+            .get("package")?
+            .get("version")?
+            .as_str()
+            .map(ToString::to_string)
+    })
 }
 
 /// Parse version from CMakeLists.txt `project()` declaration.
@@ -1060,6 +1094,26 @@ mod test_subdirectory_projects {
         );
 
         version_tag(&root.join("app"), false, false, true, false, false, "").expect("tagging should succeed");
+
+        assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0"]);
+    }
+
+    #[test]
+    fn a_member_with_an_inherited_version_uses_the_workspace_version() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        let member = "[package]\nname = \"member\"\nversion.workspace = true\n";
+        commit_changes(
+            &repository,
+            root,
+            &[
+                ("Cargo.toml", Some(&workspace_manifest("1.0.0"))),
+                ("crates/member/Cargo.toml", Some(member)),
+            ],
+        );
+        commit_changes(&repository, root, &[("Cargo.toml", Some(&workspace_manifest("1.1.0")))]);
+
+        version_tag(&root.join("crates/member"), false, false, true, false, false, "").expect("tagging should succeed");
 
         assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0"]);
     }
