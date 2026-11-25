@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-use cli_tools_common::{path_to_filename_string, print_error, print_yellow};
+use cli_tools_common::{
+    path_to_filename_string, paths_refer_to_same_file, print_error, print_yellow, unique_sibling_path,
+};
 use cli_tools_media::file_hash::hash_file;
 
 /// Size of chunks used when copying files across devices.
@@ -84,13 +86,23 @@ pub fn move_files_to_target_dir(
             continue;
         }
 
-        if overwrite
-            && new_path.exists()
-            && let Err(error) = fs::remove_file(&new_path)
-        {
+        if paths_refer_to_same_file(file_path, &new_path) {
+            if verbose {
+                progress_bar.suspend(|| {
+                    println!("  Already in place: {}", new_path.display());
+                });
+            }
+            progress_bar.inc(expected_size);
+            report.skipped_files.push(file_path.clone());
+            continue;
+        }
+
+        // The existing destination is replaced by the final rename, never removed up front,
+        // so a failed move leaves it in place.
+        if overwrite && new_path.is_dir() {
             progress_bar.suspend(|| {
                 print_error(&format!(
-                    "Failed to remove existing file {}: {error}",
+                    "Cannot replace existing directory with a file: {}",
                     new_path.display()
                 ));
             });
@@ -167,14 +179,26 @@ fn move_single_file(
         }
     }
 
-    let source_hash = copy_file_with_progress(source, destination, expected_size, progress_bar)?;
+    // Copy to a temporary name first so an existing destination is only replaced by a verified copy.
+    let temporary = unique_sibling_path(destination, "dirmove-tmp");
+    let source_hash = copy_file_with_progress(source, &temporary, expected_size, progress_bar)?;
     finish_progress_if_complete(progress_bar);
 
-    verify_copied_file(source, destination, expected_size, &source_hash)?;
+    if let Err(error) = verify_copied_file(source, &temporary, expected_size, &source_hash) {
+        let _ = remove_failed_destination(&temporary);
+        return Err(error);
+    }
     if verbose {
         progress_bar.suspend(|| {
             println!("  Hash verified: BLAKE3 {}", short_hash(&source_hash));
         });
+    }
+    if let Err(error) = fs::rename(&temporary, destination) {
+        let _ = remove_failed_destination(&temporary);
+        return Err(anyhow::Error::new(error).context(format!(
+            "Failed to move verified copy into place at {}. Original file preserved.",
+            destination.display()
+        )));
     }
 
     fs::remove_file(source).map_err(|error| {
@@ -642,6 +666,38 @@ mod test_move_files {
         assert_eq!(report.moved_files, vec![source.clone()]);
         assert!(!source.exists());
         assert_eq!(fs::read_to_string(output.join("one.txt"))?, "new");
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_never_deletes_a_file_already_in_the_target_directory() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let output = temp_directory.path().join("Show");
+        fs::create_dir(&output)?;
+        let source = output.join("Show.S01E01.mkv");
+        fs::write(&source, "episode")?;
+
+        let report = move_files_to_target_dir(&output, std::slice::from_ref(&source), true, false, true)?;
+
+        assert_eq!(fs::read_to_string(&source)?, "episode");
+        assert_eq!(report.failed_files, [] as [PathBuf; 0]);
+        assert_eq!(report.skipped_files, vec![source]);
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_never_deletes_a_file_reached_through_a_differently_spelled_directory() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let output = temp_directory.path().join("Show");
+        fs::create_dir(&output)?;
+        let source = output.join("Show.S01E01.mkv");
+        fs::write(&source, "episode")?;
+        let alias = temp_directory.path().join(".").join("Show");
+
+        let report = move_files_to_target_dir(&alias, std::slice::from_ref(&source), true, false, true)?;
+
+        assert_eq!(fs::read_to_string(&source)?, "episode");
+        assert_eq!(report.failed_files, [] as [PathBuf; 0]);
         Ok(())
     }
 

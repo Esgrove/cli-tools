@@ -283,7 +283,10 @@ fn rename_through_temporary(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 /// Return a path next to `path` with the given extension appended that does not exist yet.
-fn unique_sibling_path(path: &Path, extension: &str) -> PathBuf {
+///
+/// Useful for temporary files that are renamed over the final path once complete.
+#[must_use]
+pub fn unique_sibling_path(path: &Path, extension: &str) -> PathBuf {
     let mut candidate = append_extension_to_path(path, extension);
     let mut counter = 1_u32;
     while fs::symlink_metadata(&candidate).is_ok() {
