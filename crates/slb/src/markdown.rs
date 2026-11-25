@@ -320,8 +320,21 @@ fn list_item_paragraph(
     } = context;
     let item_lines = lines.get(index..end).unwrap_or_default();
     let first_line = item_lines.first().copied().unwrap_or_default();
+    // A lazy continuation carries the item on without lining up under it,
+    // and a line the author did not indent may well be a note of its own,
+    // so only an item written with its continuation lines indented is treated as one unit of prose.
+    let indented = item_lines
+        .iter()
+        .skip(1)
+        .all(|item_line| leading_width(item_line) >= content_start);
     let first_prefix = format!("{base_prefix}{}", take_chars(first_line, content_start));
-    let rest_prefix = format!("{base_prefix}{}", " ".repeat(content_start));
+    // A lazy item keeps its continuation lines unindented when it is reflowed,
+    // since indenting them would turn it into an item the next run treats as one unit.
+    let rest_prefix = if indented {
+        format!("{base_prefix}{}", " ".repeat(content_start))
+    } else {
+        base_prefix.to_string()
+    };
     let contents: Vec<&str> = item_lines
         .iter()
         .enumerate()
@@ -333,13 +346,6 @@ fn list_item_paragraph(
             }
         })
         .collect();
-    // A lazy continuation carries the item on without lining up under it,
-    // and a line the author did not indent may well be a note of its own,
-    // so only an item written with its continuation lines indented is treated as one unit of prose.
-    let indented = item_lines
-        .iter()
-        .skip(1)
-        .all(|item_line| leading_width(item_line) >= content_start);
     let region = make_paragraph(
         &contents,
         first_prefix,
@@ -994,6 +1000,14 @@ mod test_markdown_lists {
         let item = paragraph(&regions[0]);
         assert_eq!(item.lines, vec!["foo", "bar"]);
         assert!(!item.list_item);
+    }
+
+    #[test]
+    fn an_item_continued_by_a_lazy_line_keeps_its_continuation_lines_unindented() {
+        let regions = split_comment(&["- foo", "bar"]);
+        let item = paragraph(&regions[0]);
+        assert_eq!(item.first_prefix, "- ");
+        assert_eq!(item.rest_prefix, "");
     }
 
     #[test]

@@ -59,10 +59,13 @@ pub(super) fn build_segments<'text>(
     let mut segments = Vec::new();
     let mut violations = Vec::new();
     let mut current: Option<Segment> = None;
-    let pack_sentences = options.join_sentences || list_item_fits_on_one_line(paragraph, options);
+    let pack_sentences = options.packs_sentences() || list_item_fits_on_one_line(paragraph, options);
     let inside_brackets = lines_ending_inside(&line_tokens, collect_bracket_events);
     let inside_emphasis = lines_ending_inside(&line_tokens, collect_emphasis_events);
     let inside_quotes = lines_ending_inside(&line_tokens, collect_quote_events);
+    let rest_budget = options
+        .max_width
+        .saturating_sub(prefix_width(&paragraph.rest_prefix, options.tab_width));
     for (index, tokens) in line_tokens.into_iter().enumerate() {
         let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
         let Some(mut segment) = current.take() else {
@@ -80,7 +83,11 @@ pub(super) fn build_segments<'text>(
         let unclosed_quote = inside_quotes.get(index - 1).copied().unwrap_or_default();
         let inside_group =
             previous_break == HardBreak::None && (unclosed_bracket || unclosed_emphasis || unclosed_quote);
+        // A token wider than any line has to start a line of its own,
+        // so the break in front of it is the only one there is and joining across it changes nothing.
+        let before_unbreakable = tokens.first().is_some_and(|first| first.width() > rest_budget);
         let mid_clause = options.rules.mid_clause_break
+            && !before_unbreakable
             && (inside_group || is_mid_clause_break(&segment.tokens, &tokens, previous_break, options));
         if mid_clause {
             let message = if unclosed_bracket && inside_group {
@@ -181,6 +188,7 @@ pub(super) fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &For
                 && !next.tokens.is_empty()
                 && previous.tokens.last().is_some_and(|last| !ends_sentence(last, options))
                 && (previous.modified || next.modified)
+                && !dash_at_line_edge(previous, &next)
         });
         if should_merge {
             let previous = merged
@@ -195,6 +203,16 @@ pub(super) fn merge_changed_sentences(segments: &mut Vec<Segment>, options: &For
         }
     }
     *segments = merged;
+}
+
+/// Whether a dash ends the first segment or starts the second.
+///
+/// A dash at the edge of a line is left for a person to reword,
+/// and merging would move it into the middle of a line where the next run rewrites it,
+/// so the line break next to it is kept.
+fn dash_at_line_edge(previous: &Segment<'_>, next: &Segment<'_>) -> bool {
+    let is_dash = |token: &Token<'_>| token.kind == TokenKind::Dash;
+    previous.tokens.last().is_some_and(is_dash) || next.tokens.first().is_some_and(is_dash)
 }
 
 /// Replace standalone dashes with the punctuation that reads best in their place.
@@ -220,6 +238,27 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
     let mut removed = vec![false; count];
     for index in dashes {
         let line = line_offset + segment.tokens.get(index).map_or(0, |token| token.origin_line);
+        // Rewriting one of two dashes in a row leaves the other beside new punctuation,
+        // which the next run would rewrite again, so a run of dashes is left as written.
+        let beside_dash = [index.checked_sub(1), Some(index + 1)]
+            .into_iter()
+            .flatten()
+            .any(|neighbour| {
+                segment
+                    .tokens
+                    .get(neighbour)
+                    .is_some_and(|token| token.kind == TokenKind::Dash)
+            });
+        if beside_dash {
+            violations.push(Violation {
+                line,
+                column: None,
+                kind: ViolationKind::EmDash,
+                message: "repeated dashes cannot be rewritten automatically".into(),
+                fixable: false,
+            });
+            continue;
+        }
         if index == 0 || index + 1 == count {
             violations.push(Violation {
                 line,
@@ -245,7 +284,7 @@ fn reword_dashes(segment: &mut Segment, options: &FormatOptions, line_offset: us
             if let Some(punctuation) = rewrite.punctuation {
                 previous.push_trailing(punctuation);
             }
-            previous.force_break_after |= rewrite.starts_new_sentence;
+            previous.force_break_after |= rewrite.starts_new_sentence && !options.packs_sentences();
         }
         if let Some(core) = rewrite.capitalized_core
             && let Some(next) = segment.tokens.get_mut(index + 1)
@@ -464,7 +503,7 @@ fn reword_semicolons(
                 && let Some(token) = segment.tokens.get_mut(token_index)
             {
                 token.replace_trailing_end('.');
-                token.force_break_after = within_segment;
+                token.force_break_after = within_segment && !options.packs_sentences();
                 segment.modified = true;
             }
             let (next_segment, next_index) = if within_segment {

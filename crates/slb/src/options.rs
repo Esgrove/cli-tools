@@ -197,6 +197,18 @@ impl FormatOptions {
             ..Self::default()
         }
     }
+
+    /// Whether consecutive sentences share a line while they fit.
+    ///
+    /// Packing joins lines, which is the change the mid-clause rule owns,
+    /// so `join_sentences` only takes effect while that rule is enabled
+    /// and a run with the rule disabled leaves the line breaks as they are.
+    /// Rewrites that start a new sentence and the line planner follow the same layout,
+    /// so the result is already final and a second run does not pack it again.
+    #[must_use]
+    pub const fn packs_sentences(&self) -> bool {
+        self.join_sentences && self.rules.mid_clause_break
+    }
 }
 
 impl Default for FormatOptions {

@@ -637,6 +637,7 @@ dependencies = [
  "colored",
  "criterion",
  "ignore",
+ "proptest",
  "rayon",
  "regex",
  "serde",

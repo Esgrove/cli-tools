@@ -441,6 +441,52 @@ mod test_format {
     }
 
     #[test]
+    fn a_break_before_a_token_wider_than_the_line_is_final_after_one_run() {
+        let path = "crates/slb/a/very/long/path/that/keeps/going/and/going/and/going/and/going/and/going/and/going/and/to/the/end.rs";
+        assert!(path.len() > 107);
+        let options = FormatOptions {
+            rules: RuleSet::from_kinds(&[ViolationKind::LineTooLong, ViolationKind::MidClauseBreak]),
+            ..FormatOptions::with_width(107)
+        };
+        let text = format!("# but\n# {path}\n# fox\n# which colon: — x\n# {path} 2)\n");
+        let once = format(&text, FileKind::Makefile, &options).fixed_text.unwrap_or(text);
+        assert_eq!(format(&once, FileKind::Makefile, &options).fixed_text, None, "{once:?}");
+    }
+
+    #[test]
+    fn dashes_packed_onto_one_line_stay_as_written() {
+        let options = FormatOptions {
+            join_sentences: true,
+            rules: RuleSet::from_kinds(&[ViolationKind::EmDash, ViolationKind::MidClauseBreak]),
+            ..FormatOptions::with_width(40)
+        };
+        let text = "-- the —\n-- the";
+        let once = format(text, FileKind::Markdown, &options)
+            .fixed_text
+            .unwrap_or_else(|| text.to_string());
+        assert_eq!(format(&once, FileKind::Markdown, &options).fixed_text, None, "{once:?}");
+        assert!(
+            check(&once, FileKind::Markdown, &options)
+                .violations
+                .iter()
+                .all(|violation| !violation.fixable)
+        );
+    }
+
+    #[test]
+    fn a_reworded_list_item_with_lazy_lines_is_final_after_one_run() {
+        let options = FormatOptions {
+            rules: RuleSet::from_kinds(&[ViolationKind::EmDash, ViolationKind::MidClauseBreak]),
+            ..FormatOptions::with_width(40)
+        };
+        let text = "- the — the\n/*\n/*";
+        let once = format(text, FileKind::Markdown, &options)
+            .fixed_text
+            .expect("the dash should be reworded");
+        assert_eq!(format(&once, FileKind::Markdown, &options).fixed_text, None, "{once:?}");
+    }
+
+    #[test]
     fn check_matches_format_violations() {
         let text = "/// the quick brown fox\n/// jumps over; it is fast — really.\nfn f() {}\n";
         let options = FormatOptions::default();

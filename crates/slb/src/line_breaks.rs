@@ -325,7 +325,7 @@ fn plan_line_breaks(tokens: &[Token<'_>], budgets: Budgets, options: &FormatOpti
             count,
             line_widths,
             table,
-            options.allow_word_break,
+            options,
             &mut candidates,
             &mut ranked_ends,
         );
@@ -380,7 +380,7 @@ fn collect_line_candidates(
     count: usize,
     line_widths: LineWidths,
     table: BreakTable<'_>,
-    allow_word_break: bool,
+    options: &FormatOptions,
     candidates: &mut Vec<usize>,
     ranked_ends: &mut Vec<(usize, Rank)>,
 ) {
@@ -391,11 +391,22 @@ fn collect_line_candidates(
     } = table;
     let LineWidths { budget, overflow, .. } = line_widths;
     candidates.clear();
+    // A forced break marks a sentence the formatter created itself, such as a rewritten semicolon,
+    // so no line may run past the first one, and the run is treated as ending there.
+    let run_end = (start + 1..count)
+        .find(|end| rank_at(ranks, *end) == Some(Rank::Forced))
+        .unwrap_or(count);
+
+    // Packed sentences share a line while they fit, so a rest that fits is one line
+    // unless the formatter itself forced a break inside it.
+    if options.packs_sentences() && span_width(widths, start, run_end) <= budget {
+        candidates.push(run_end);
+        return;
+    }
 
     // A sentence end is the best place to break, whatever the line is filled to.
-    // A forced break marks a sentence the formatter created itself, such as a rewritten semicolon,
-    // and counts the same.
-    let sentence_end = (start + 1..count)
+    let sentence_end = (start + 1..=run_end)
+        .filter(|end| *end < count)
         .filter(|end| rank_at(ranks, *end).is_some_and(|rank| rank >= Rank::Sentence))
         .take_while(|end| span_width(widths, start, *end) <= budget)
         .last();
@@ -406,7 +417,7 @@ fn collect_line_candidates(
 
     // An introduction that ends in a colon reads best on its own line,
     // however little of the line it fills, as long as the clause it introduces carries on past it.
-    let colon = (start + 1..count)
+    let colon = (start + 1..run_end)
         .filter(|end| rank_at(ranks, *end) == Some(Rank::Colon))
         .take_while(|end| span_width(widths, start, *end) <= budget)
         .last();
@@ -427,7 +438,7 @@ fn collect_line_candidates(
     let soft_limit = budget + overflow;
     ranked_ends.clear();
     let mut has_semantic_break_in_range = false;
-    for end in start + 1..count {
+    for end in start + 1..run_end {
         let Some(rank) = rank_at(ranks, end) else {
             continue;
         };
@@ -445,14 +456,14 @@ fn collect_line_candidates(
             break;
         }
     }
-    let keep_word_breaks = allow_word_break || !has_semantic_break_in_range;
+    let keep_word_breaks = options.allow_word_break || !has_semantic_break_in_range;
     for &(end, rank) in ranked_ends.iter() {
         if rank == Rank::Word && !keep_word_breaks {
             continue;
         }
         candidates.push(end);
     }
-    candidates.push(count);
+    candidates.push(run_end);
 }
 
 /// Whether the text after the boundary holds another boundary a line may end at.
@@ -737,6 +748,57 @@ mod test_break_choice {
             ["First sentence.", "Second sentence."]
         );
         assert_eq!(violations, [] as [Violation; 0]);
+    }
+
+    #[test]
+    fn a_forced_break_is_kept_when_a_later_sentence_end_also_fits_on_the_line() {
+        let mut tokens = tokens("First one. Second one. Third one.");
+        tokens[1].force_break_after = true;
+        let mut is_first_line = true;
+        let mut violations = Vec::new();
+        let pieces = split_tokens(
+            tokens,
+            Budgets {
+                first: 120,
+                rest: 120,
+                hard_cap: false,
+            },
+            true,
+            &mut is_first_line,
+            &FormatOptions::with_width(120),
+            1,
+            &mut violations,
+        );
+        assert_eq!(
+            pieces.iter().map(|piece| join_tokens(piece)).collect::<Vec<_>>(),
+            ["First one.", "Second one.", "Third one."]
+        );
+    }
+
+    #[test]
+    fn a_forced_break_after_an_unbreakable_token_is_kept() {
+        let url =
+            "https://example.com/a/very/long/path/that/keeps/going/and/going/and/going/and/going/and/going/and/end";
+        let text = format!("the the {url} ends. semi. The 1. `code`");
+        let mut tokens = tokens(&text);
+        tokens[4].force_break_after = true;
+        let mut is_first_line = true;
+        let mut violations = Vec::new();
+        let pieces = split_tokens(
+            tokens,
+            Budgets {
+                first: 119,
+                rest: 119,
+                hard_cap: false,
+            },
+            true,
+            &mut is_first_line,
+            &FormatOptions::with_width(122),
+            1,
+            &mut violations,
+        );
+        let lines: Vec<String> = pieces.iter().map(|piece| join_tokens(piece)).collect();
+        assert!(lines.iter().any(|line| line.ends_with("semi.")), "{lines:?}");
     }
 
     #[test]

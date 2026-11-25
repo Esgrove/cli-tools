@@ -1045,3 +1045,174 @@ mod test_weak_clause_breaks {
         assert!(outcome.violations.is_empty(), "{:?}", outcome.violations);
     }
 }
+
+#[cfg(test)]
+mod test_join_sentences_rules {
+    use super::*;
+    use crate::options::RuleSet;
+    use crate::test_helpers::*;
+
+    /// Reflow the lines twice with the same options and return both outcomes' lines.
+    fn reflow_twice(lines: &[&str], options: &FormatOptions) -> (Vec<String>, Option<Vec<String>>) {
+        let first = reflow_paragraph(&paragraph(lines, ""), options, true)
+            .lines
+            .unwrap_or_else(|| lines.iter().map(ToString::to_string).collect());
+        let borrowed: Vec<&str> = first.iter().map(String::as_str).collect();
+        let second = reflow_paragraph(&paragraph(&borrowed, ""), options, true).lines;
+        (first, second)
+    }
+
+    #[test]
+    fn join_sentences_changes_nothing_when_no_rule_is_enabled() {
+        let options = FormatOptions {
+            join_sentences: true,
+            rules: RuleSet::NONE,
+            ..FormatOptions::with_width(120)
+        };
+        let outcome = reflow_paragraph(&paragraph(&["A short one.", "Another short one."], ""), &options, true);
+        assert_eq!(outcome.lines, None);
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
+    }
+
+    #[test]
+    fn join_sentences_needs_the_mid_clause_rule() {
+        let options = FormatOptions {
+            join_sentences: true,
+            rules: RuleSet {
+                mid_clause_break: false,
+                ..RuleSet::ALL
+            },
+            ..FormatOptions::with_width(120)
+        };
+        let outcome = reflow_paragraph(&paragraph(&["A short one.", "Another short one."], ""), &options, true);
+        assert_eq!(outcome.lines, None);
+    }
+
+    #[test]
+    fn semicolon_rewrite_is_final_with_only_the_semicolon_rule() {
+        let options = FormatOptions {
+            join_sentences: true,
+            rules: RuleSet::from_kinds(&[ViolationKind::Semicolon]),
+            ..FormatOptions::with_width(20)
+        };
+        let (first, second) = reflow_twice(&["the semi; the"], &options);
+        assert_eq!(second, None, "{first:?}");
+    }
+
+    #[test]
+    fn semicolon_rewrite_packs_the_new_sentence_when_joining_sentences() {
+        let options = FormatOptions {
+            join_sentences: true,
+            ..FormatOptions::with_width(120)
+        };
+        let (first, second) = reflow_twice(&["the first part; the second part"], &options);
+        assert_eq!(first, vec!["the first part. The second part".to_string()]);
+        assert_eq!(second, None);
+    }
+
+    /// A token wider than any line, which forces the run around it to split.
+    const LONG_URL: &str = "https://example.com/a/very/long/path/that/keeps/going/and/going/and/going/and/end";
+
+    #[test]
+    fn sentences_after_an_unbreakable_token_are_packed_when_joining_sentences() {
+        let options = FormatOptions {
+            join_sentences: true,
+            ..FormatOptions::with_width(40)
+        };
+        let text = format!("{LONG_URL} semi; the");
+        let (first, second) = reflow_twice(&[text.as_str()], &options);
+        assert_eq!(first, vec![LONG_URL.to_string(), "semi. The".to_string()]);
+        assert_eq!(second, None);
+    }
+
+    #[test]
+    fn a_short_sentence_after_a_split_is_packed_when_joining_sentences() {
+        let options = FormatOptions {
+            join_sentences: true,
+            ..FormatOptions::with_width(40)
+        };
+        let text = format!("the {LONG_URL} question? Rust");
+        let (first, second) = reflow_twice(&[text.as_str()], &options);
+        assert_eq!(second, None, "{first:?}");
+    }
+
+    #[test]
+    fn sentences_after_a_split_keep_their_own_lines_without_joining_sentences() {
+        let text = format!("{LONG_URL} semi. The");
+        let (first, second) = reflow_twice(&[text.as_str()], &FormatOptions::with_width(40));
+        assert_eq!(
+            first,
+            vec![LONG_URL.to_string(), "semi.".to_string(), "The".to_string()]
+        );
+        assert_eq!(second, None);
+    }
+
+    #[test]
+    fn dash_rewrite_packs_the_new_sentence_when_joining_sentences() {
+        let options = FormatOptions {
+            join_sentences: true,
+            ..FormatOptions::with_width(120)
+        };
+        let (first, second) = reflow_twice(&["The build is slow — it compiles every crate."], &options);
+        assert_eq!(second, None, "{first:?}");
+    }
+}
+
+#[cfg(test)]
+mod test_repeated_dashes {
+    use super::*;
+    use crate::options::RuleSet;
+    use crate::test_helpers::*;
+
+    #[test]
+    fn adjacent_dashes_are_left_for_a_person() {
+        let options = FormatOptions {
+            rules: RuleSet::from_kinds(&[ViolationKind::EmDash]),
+            ..FormatOptions::with_width(120)
+        };
+        let outcome = reflow_paragraph(&paragraph(&["the — — the"], ""), &options, true);
+        assert_eq!(outcome.lines, None);
+        assert!(
+            outcome.violations.iter().all(|violation| !violation.fixable),
+            "{:?}",
+            outcome.violations
+        );
+        assert_ne!(outcome.violations, [] as [Violation; 0]);
+    }
+
+    #[test]
+    fn a_dash_ending_a_line_stays_there_when_the_next_line_is_reworded() {
+        let options = FormatOptions {
+            rules: RuleSet::from_kinds(&[ViolationKind::EmDash]),
+            ..FormatOptions::with_width(40)
+        };
+        let lines = ["SELECT 1; --", "the — the"];
+        let first = reflow_paragraph(&paragraph(&lines, ""), &options, true)
+            .lines
+            .expect("the second line should be reworded");
+        assert_eq!(first, vec!["SELECT 1; --".to_string(), "the, the".to_string()]);
+    }
+
+    #[test]
+    fn a_dash_starting_a_line_stays_there_when_the_previous_line_is_reworded() {
+        let options = FormatOptions {
+            rules: RuleSet::from_kinds(&[ViolationKind::EmDash]),
+            ..FormatOptions::with_width(40)
+        };
+        let lines = ["the — the", "— the end"];
+        let first = reflow_paragraph(&paragraph(&lines, ""), &options, true)
+            .lines
+            .expect("the first line should be reworded");
+        assert_eq!(first, vec!["the, the".to_string(), "— the end".to_string()]);
+    }
+
+    #[test]
+    fn adjacent_dashes_across_lines_are_left_for_a_person() {
+        let options = FormatOptions {
+            rules: RuleSet::from_kinds(&[ViolationKind::EmDash]),
+            ..FormatOptions::with_width(20)
+        };
+        let outcome = reflow_paragraph(&paragraph(&["the", "— — the"], ""), &options, true);
+        assert_eq!(outcome.lines, None);
+    }
+}

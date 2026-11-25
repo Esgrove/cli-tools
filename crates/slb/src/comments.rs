@@ -343,6 +343,16 @@ fn comment_content<'a>(trimmed: &'a str, marker: &str) -> &'a str {
     rest.strip_prefix(' ').unwrap_or(rest)
 }
 
+/// Whether a block comment line starts with the continuation marker as a marker of its own.
+///
+/// The marker has to stand alone, followed by whitespace or the end of the line,
+/// since a line such as "*emphasis* text" starts with Markdown emphasis rather than a marker.
+fn starts_with_continuation_marker(line: &str, continuation: &str) -> bool {
+    line.trim_start()
+        .strip_prefix(continuation)
+        .is_some_and(|rest| rest.chars().next().is_none_or(char::is_whitespace))
+}
+
 /// Add regions for a block comment starting at `index` and return the index after it.
 fn block_comment_regions(
     lines: &[&str],
@@ -381,7 +391,7 @@ fn block_comment_regions(
             break;
         };
         let indent = leading_whitespace(line);
-        let has_marker = line.trim_start().starts_with(continuation);
+        let has_marker = starts_with_continuation_marker(line, continuation);
         let group_end = lines
             .iter()
             .enumerate()
@@ -389,7 +399,7 @@ fn block_comment_regions(
             .take_while(|(position, candidate)| {
                 *position < close_index
                     && leading_whitespace(candidate) == indent
-                    && candidate.trim_start().starts_with(continuation) == has_marker
+                    && starts_with_continuation_marker(candidate, continuation) == has_marker
             })
             .last()
             .map_or(inner + 1, |(position, _)| position + 1);
@@ -665,6 +675,22 @@ mod test_comment_blocks {
         assert_eq!(body.first_prefix, "   ");
         assert_eq!(body.lines, vec!["plain text"]);
         assert_eq!(regions[2], verbatim_region(2, 3));
+    }
+
+    #[test]
+    fn emphasis_at_the_start_of_a_block_comment_line_is_not_a_continuation_marker() {
+        let regions = split_source_regions(&["/*", "    *emphasis* text", "*/"], FileKind::Rust);
+        let body = paragraph(&regions[1]);
+        assert_eq!(body.first_prefix, "    ");
+        assert_eq!(body.lines, vec!["*emphasis* text"]);
+    }
+
+    #[test]
+    fn bare_continuation_marker_line_keeps_its_marker() {
+        let regions = split_source_regions(&["/*", " * text", " *", " * more", " */"], FileKind::Rust);
+        let body = paragraph(&regions[1]);
+        assert_eq!(body.first_prefix, " * ");
+        assert_eq!(body.lines, vec!["text"]);
     }
 
     #[test]

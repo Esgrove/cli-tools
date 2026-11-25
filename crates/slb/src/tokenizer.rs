@@ -122,9 +122,11 @@ pub(super) fn starts_markdown_structure(token: &Token<'_>) -> bool {
 /// so rewriting it as a dash would corrupt the command.
 fn demote_command_separators(tokens: &mut [Token<'_>]) {
     for index in 0..tokens.len() {
-        let next_is_flag = tokens
-            .get(index + 1)
-            .is_some_and(|next| next.core.starts_with('-') || next.leading.starts_with('-'));
+        // A bare double hyphen is a dash of its own rather than a flag,
+        // so a dash in front of it stays a dash whether the two share a line or not.
+        let next_is_flag = tokens.get(index + 1).is_some_and(|next| {
+            next.kind != TokenKind::Dash && (next.core.starts_with('-') || next.leading.starts_with('-'))
+        });
         if !next_is_flag {
             continue;
         }
@@ -485,6 +487,25 @@ mod test_tokenizer {
         assert_eq!(kinds("a -- b"), vec![TokenKind::Word, TokenKind::Dash, TokenKind::Word]);
         assert_eq!(kinds("--flag"), vec![TokenKind::Word]);
         assert_eq!(kinds("pages 1–5"), vec![TokenKind::Word, TokenKind::Word]);
+    }
+
+    #[test]
+    fn a_dash_before_another_dash_stays_a_dash() {
+        assert_eq!(
+            kinds("a — -- b"),
+            vec![TokenKind::Word, TokenKind::Dash, TokenKind::Dash, TokenKind::Word]
+        );
+        assert_eq!(
+            kinds("pnpm run migrate -- --env dev"),
+            vec![
+                TokenKind::Word,
+                TokenKind::Word,
+                TokenKind::Word,
+                TokenKind::Word,
+                TokenKind::Word,
+                TokenKind::Word
+            ]
+        );
     }
 
     #[test]
