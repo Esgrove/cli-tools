@@ -192,3 +192,44 @@ fn hands_the_run_over_to_the_project_runner() {
         "delegated 1 --output plain --color never -a fmt"
     );
 }
+
+/// Task file where `docs` should only run after `lint` when both run, and `lint` always fails.
+const AFTER_TASK_FILE: &str = r#"
+[[tasks]]
+id = "lint"
+label = "Lint"
+command = ["sh", "-c", "sleep 0.2; exit 1"]
+
+[[tasks]]
+id = "docs"
+label = "Docs"
+after = ["lint"]
+command = ["sh", "-c", "test ! -e started-docs && touch started-docs"]
+"#;
+
+/// Temporary git repository with the `after` task file.
+fn after_repository() -> TempDir {
+    let temp = tempfile::tempdir().expect("should create temp dir");
+    std::fs::create_dir(temp.path().join(".git")).expect("should create .git");
+    std::fs::write(temp.path().join("xtask.toml"), AFTER_TASK_FILE).expect("should write task file");
+    temp
+}
+
+#[test]
+fn selecting_a_task_does_not_pull_in_its_after_tasks() {
+    let repository = after_repository();
+    let output = run_xtask(repository.path(), &["docs"]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("PASS  docs"), "{text}");
+    assert!(!text.contains("lint"), "{text}");
+}
+
+#[test]
+fn a_failed_after_task_does_not_block_the_task_waiting_for_it() {
+    let repository = after_repository();
+    let output = run_xtask(repository.path(), &[]);
+    let text = stdout(&output);
+    assert!(text.contains("FAIL  lint"), "{text}");
+    assert!(text.contains("PASS  docs"), "{text}");
+}

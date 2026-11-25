@@ -191,12 +191,12 @@ fn build_tasks(
                 );
             }
         }
-        let mut dependencies = task.deps.clone();
-        for soft_dependency in &task.after {
-            if active_ids.contains(soft_dependency.as_str()) && !dependencies.contains(soft_dependency) {
-                dependencies.push(soft_dependency.clone());
-            }
-        }
+        let after: Vec<String> = task
+            .after
+            .iter()
+            .filter(|id| active_ids.contains(id.as_str()) && !task.deps.contains(id))
+            .cloned()
+            .collect();
 
         let steps = task.resolved_steps()?;
         let action = build_action(task, steps.clone(), task_file, conditions.flags, root, builtins)?;
@@ -210,7 +210,8 @@ fn build_tasks(
             id: task.id.clone(),
             label: task.label.clone(),
             priority: task.priority,
-            deps: dependencies,
+            deps: task.deps.clone(),
+            after,
             resources: task.locks.clone(),
             scopes: task.scopes.clone(),
             dry_run_summary,

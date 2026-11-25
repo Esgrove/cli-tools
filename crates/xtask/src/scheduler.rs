@@ -66,6 +66,10 @@ pub struct TaskSpec {
     pub priority: u32,
     /// IDs of prerequisite tasks that must pass before this task starts.
     pub deps: Vec<String>,
+    /// IDs of tasks that must finish first when they run too, whatever their outcome.
+    ///
+    /// Unlike `deps`, these never add a task to the run and never block this one when they fail.
+    pub after: Vec<String>,
     /// Shared resources exclusively locked while this task runs.
     pub resources: Vec<Resource>,
     /// Scope tags this task belongs to.
@@ -251,12 +255,21 @@ pub fn validate_graph(tasks: &[TaskSpec]) -> Result<()> {
     let mut in_degree: BTreeMap<&str, usize> = BTreeMap::new();
     let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for task in tasks {
-        in_degree.insert(task.id.as_str(), task.deps.len());
         for dep in &task.deps {
             if !ids.contains(dep.as_str()) {
                 bail!("Task '{}' depends on unknown task '{dep}'.", task.id);
             }
-            dependents.entry(dep.as_str()).or_default().push(task.id.as_str());
+        }
+        // An ordering only applies to tasks in the run, so one naming a task outside it is left out.
+        let predecessors: Vec<&str> = task
+            .deps
+            .iter()
+            .chain(task.after.iter().filter(|id| ids.contains(id.as_str())))
+            .map(String::as_str)
+            .collect();
+        in_degree.insert(task.id.as_str(), predecessors.len());
+        for predecessor in predecessors {
+            dependents.entry(predecessor).or_default().push(task.id.as_str());
         }
     }
 
@@ -367,9 +380,11 @@ pub fn run_schedule(
     let wall_start = Instant::now();
     ctx.reporter.on_plan(tasks.len(), max_workers, scope_label);
 
+    let scheduled: BTreeSet<String> = tasks.iter().map(|task| task.id.clone()).collect();
     let mut order = Vec::with_capacity(tasks.len());
     let mut pending = BTreeMap::new();
-    for task in tasks {
+    for mut task in tasks {
+        task.after.retain(|id| scheduled.contains(id));
         order.push(task.id.clone());
         pending.insert(task.id.clone(), task);
     }
@@ -617,7 +632,8 @@ fn pick_ready_task(guard: &SchedulerState) -> Option<String> {
                 .get(dep)
                 .is_some_and(|report| report.outcome.unblocks_dependents())
         });
-        if !deps_ready {
+        let earlier_tasks_finished = task.after.iter().all(|id| guard.completed.contains_key(id));
+        if !deps_ready || !earlier_tasks_finished {
             continue;
         }
         let resources_free = task.resources.iter().all(|res| !guard.held_resources.contains(res));
@@ -673,11 +689,52 @@ mod test_scheduler {
             label: id.to_owned(),
             priority,
             deps: deps.iter().map(|d| (*d).to_owned()).collect(),
+            after: Vec::new(),
             resources: resources.iter().map(|r| (*r).to_owned()).collect(),
             scopes: Vec::new(),
             dry_run_summary: id.to_owned(),
             action: Box::new(|_, _| Ok(TaskActionResult::Passed)),
         }
+    }
+
+    #[test]
+    fn an_after_task_runs_once_the_earlier_task_finished_even_when_it_failed() {
+        let ctx = test_context("after-order");
+        let earlier_finished = Arc::new(AtomicUsize::new(0));
+        let seen_when_started = Arc::new(AtomicUsize::new(usize::MAX));
+        let finished = Arc::clone(&earlier_finished);
+        let mut earlier = noop_task("earlier", 1, &[], &[]);
+        earlier.action = Box::new(move |_, _| {
+            std::thread::sleep(Duration::from_millis(50));
+            finished.store(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("earlier fails"))
+        });
+        let finished = Arc::clone(&earlier_finished);
+        let seen = Arc::clone(&seen_when_started);
+        let mut later = noop_task("later", 1, &[], &[]);
+        later.after = vec!["earlier".to_owned(), "not-in-this-run".to_owned()];
+        later.action = Box::new(move |_, _| {
+            seen.store(finished.load(Ordering::SeqCst), Ordering::SeqCst);
+            Ok(TaskActionResult::Passed)
+        });
+
+        let summary = run_schedule(vec![later, earlier], &ctx, 4, false, "all").expect("schedule should run");
+
+        assert_eq!(
+            seen_when_started.load(Ordering::SeqCst),
+            1,
+            "later started before earlier finished"
+        );
+        let later_report = summary
+            .reports
+            .iter()
+            .find(|report| report.id == "later")
+            .expect("later report");
+        assert!(
+            matches!(later_report.outcome, TaskOutcome::Passed),
+            "{:?}",
+            later_report.outcome
+        );
     }
 
     #[test]
@@ -743,6 +800,7 @@ mod test_scheduler {
                 label: id.to_owned(),
                 priority: 10,
                 deps: Vec::new(),
+                after: Vec::new(),
                 resources,
                 scopes: Vec::new(),
                 dry_run_summary: id.to_owned(),
@@ -805,6 +863,7 @@ mod test_scheduler {
                 label: "fail".to_owned(),
                 priority: 10,
                 deps: Vec::new(),
+                after: Vec::new(),
                 resources: Vec::new(),
                 scopes: Vec::new(),
                 dry_run_summary: "fail".to_owned(),
@@ -858,6 +917,7 @@ mod test_scheduler {
                 label: id_owned.clone(),
                 priority,
                 deps: Vec::new(),
+                after: Vec::new(),
                 resources: vec!["single-lock".to_owned()],
                 scopes: Vec::new(),
                 dry_run_summary: id_owned.clone(),
