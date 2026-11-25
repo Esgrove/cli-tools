@@ -393,8 +393,10 @@ fn remove_failed_destination(destination: &Path) -> anyhow::Result<()> {
 }
 
 /// Check if an I/O error indicates a cross-device move attempt.
+///
+/// The standard library maps `EXDEV` on Unix and `ERROR_NOT_SAME_DEVICE` on Windows to this kind.
 fn is_cross_device_error(error: &io::Error) -> bool {
-    error.raw_os_error() == Some(17) || error.raw_os_error() == Some(18)
+    error.kind() == io::ErrorKind::CrossesDevices
 }
 
 /// Collect the size of each file that has readable metadata.
@@ -593,10 +595,27 @@ mod test_move_helpers {
     }
 
     #[test]
-    fn recognizes_cross_device_error_codes() {
-        assert!(is_cross_device_error(&io::Error::from_raw_os_error(17)));
+    fn recognizes_cross_device_error_kind() {
+        assert!(is_cross_device_error(&io::Error::from(io::ErrorKind::CrossesDevices)));
+        assert!(!is_cross_device_error(&io::Error::from(io::ErrorKind::AlreadyExists)));
+        assert!(!is_cross_device_error(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recognizes_unix_cross_device_error_code() {
+        // EXDEV is 18 and EEXIST is 17 on Linux and macOS.
         assert!(is_cross_device_error(&io::Error::from_raw_os_error(18)));
-        assert!(!is_cross_device_error(&io::Error::from_raw_os_error(5)));
+        assert!(!is_cross_device_error(&io::Error::from_raw_os_error(17)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recognizes_windows_cross_device_error_code() {
+        // ERROR_NOT_SAME_DEVICE is 17 on Windows.
+        assert!(is_cross_device_error(&io::Error::from_raw_os_error(17)));
     }
 
     #[test]
