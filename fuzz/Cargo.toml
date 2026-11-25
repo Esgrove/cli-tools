@@ -1,0 +1,49 @@
+[package]
+name = "cli-tools-fuzz"
+description = "Coverage guided fuzz targets for the cli-tools libraries"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# The fuzz crate needs the nightly toolchain and sanitizer flags,
+# so it is its own workspace and stays out of the stable workspace builds.
+[workspace]
+members = ["."]
+
+[dependencies]
+clap = "4.6.10"
+cli-tools-common = { path = "../crates/common" }
+cli-tools-dots = { path = "../crates/dots" }
+cli-tools-slb = { path = "../crates/slb" }
+libfuzzer-sys = "0.4.10"
+
+[[bin]]
+name = "slb_format"
+path = "fuzz_targets/slb_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dots_format_name"
+path = "fuzz_targets/dots_format_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "common_date"
+path = "fuzz_targets/common_date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "common_simd"
+path = "fuzz_targets/common_simd.rs"
+test = false
+doc = false
+bench = false
