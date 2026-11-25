@@ -663,9 +663,10 @@ pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
 /// - Path canonicalization fails
 #[inline]
 pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
-    let input_path = path.map(|p| p.to_str().unwrap_or(""));
-
-    resolve_input_path_str(input_path)
+    match path.map(trim_path) {
+        Some(input_path) if !input_path.as_os_str().is_empty() => resolve_existing_path(input_path),
+        _ => resolve_existing_path(env::current_dir().context("Failed to get current working directory")?),
+    }
 }
 
 /// Resolves the provided input path to a directory or file to an absolute path.
@@ -688,27 +689,7 @@ pub fn resolve_input_path(path: Option<&Path>) -> Result<PathBuf> {
 /// - Path canonicalization fails
 #[inline]
 pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
-    let input_path = path.unwrap_or_default().trim();
-    let filepath = if input_path.is_empty() {
-        env::current_dir().context("Failed to get current working directory")?
-    } else {
-        PathBuf::from(input_path)
-    };
-    if !filepath.exists() {
-        anyhow::bail!(
-            "Input path does not exist or is not accessible: '{}'",
-            filepath.display()
-        );
-    }
-
-    let absolute_input_path = dunce::canonicalize(&filepath)?;
-
-    // Canonicalize fails for network drives on Windows :(
-    if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
-        Ok(filepath)
-    } else {
-        Ok(absolute_input_path)
-    }
+    resolve_input_path(path.map(Path::new))
 }
 
 /// Resolves a required input path to an absolute path.
@@ -729,9 +710,13 @@ pub fn resolve_input_path_str(path: Option<&str>) -> Result<PathBuf> {
 /// - The path does not exist or is not accessible
 /// - Path canonicalization fails
 pub fn resolve_required_input_path(path: &Path) -> Result<PathBuf> {
-    let input_path = path.to_str().unwrap_or("");
+    let input_path = trim_path(path);
 
-    resolve_required_input_path_str(input_path)
+    if input_path.as_os_str().is_empty() {
+        anyhow::bail!("Input path cannot be empty");
+    }
+
+    resolve_existing_path(input_path)
 }
 
 /// Resolves a required input path to an absolute path.
@@ -751,13 +736,20 @@ pub fn resolve_required_input_path(path: &Path) -> Result<PathBuf> {
 /// - The path does not exist or is not accessible
 /// - Path canonicalization fails
 pub fn resolve_required_input_path_str(path: &str) -> Result<PathBuf> {
-    let input_path = path.trim();
+    resolve_required_input_path(Path::new(path))
+}
 
-    if input_path.is_empty() {
-        anyhow::bail!("Input path cannot be empty");
-    }
+/// Trim surrounding whitespace from a path that is valid UTF-8.
+///
+/// Paths that are not valid UTF-8 are returned unchanged,
+/// so they are resolved as given instead of being treated as empty.
+fn trim_path(path: &Path) -> PathBuf {
+    path.to_str()
+        .map_or_else(|| path.to_path_buf(), |text| PathBuf::from(text.trim()))
+}
 
-    let filepath = PathBuf::from(input_path);
+/// Check that a path exists and return its absolute form.
+fn resolve_existing_path(filepath: PathBuf) -> Result<PathBuf> {
     if !filepath.exists() {
         anyhow::bail!(
             "Input path does not exist or is not accessible: '{}'",
@@ -1097,6 +1089,31 @@ mod resolve_path_tests {
         let output_path = resolve_output_path(None, dir.path());
         assert!(output_path.is_ok());
         assert_eq!(output_path.unwrap(), dunce::simplified(dir.path()));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod test_resolve_non_utf8_path {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn missing_non_utf8_path_is_an_error_not_the_current_directory() {
+        let path = Path::new(OsStr::from_bytes(b"/nonexistent-cli-tools-test/\xff\xfe"));
+
+        let resolved = resolve_input_path(Some(path));
+
+        assert!(resolved.is_err(), "resolved to {resolved:?}");
+    }
+
+    #[test]
+    fn missing_non_utf8_required_path_reports_missing_path() {
+        let path = Path::new(OsStr::from_bytes(b"/nonexistent-cli-tools-test/\xff\xfe"));
+
+        let error = resolve_required_input_path(path).expect_err("should fail");
+
+        assert!(error.to_string().contains("does not exist"), "{error}");
     }
 }
 
