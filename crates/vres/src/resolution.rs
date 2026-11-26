@@ -11,9 +11,10 @@ use regex::Regex;
 use cli_tools_dots::remove_extra_dots;
 use cli_tools_media::Resolution;
 
-/// Regex pattern for detecting video codec labels in filenames.
-static RE_CODEC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(x265|x264|av1|hevc)\b").expect("Failed to create codec regex"));
+/// Regex pattern for detecting video codec and bit-depth labels in filenames.
+static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(10[.\-_\s]*bit|x265|x264|h\.?264|h\.?265|av1|hevc)\b").expect("Failed to create codec regex")
+});
 
 /// Result from running ffprobe on a video file.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -88,8 +89,9 @@ impl FFProbeResult {
         let re = self.resolution.dimension_regex()?;
         let cleaned_name = re.replace_all(&name, "").into_owned();
 
-        if cleaned_name.to_lowercase().contains(&label.to_lowercase()) {
-            // Label already present in the cleaned name
+        let label_regex = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&label)))?;
+        if label_regex.is_match(&cleaned_name) {
+            // Label already present at a word boundary in the cleaned name
             if cleaned_name == name {
                 // No full resolution was removed, file is already correct
                 Ok(None)
@@ -103,8 +105,21 @@ impl FFProbeResult {
                 }
                 Ok(Some(new_path))
             }
+        } else if let Some(bare_label) = label.strip_prefix("Vertical.")
+            && let Ok(bare_regex) = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(bare_label)))
+            && bare_regex.is_match(&cleaned_name)
+        {
+            // Vertical video already had a bare p-label (for example `clip.1080p.mp4`): upgrade it to `Vertical.1080p`.
+            let upgraded = bare_regex.replace(&cleaned_name, label.as_ref()).into_owned();
+            let mut new_file_name = format!("{upgraded}.{extension}");
+            remove_extra_dots(&mut new_file_name);
+            let new_path = self.file.with_file_name(&new_file_name);
+            if new_path == self.file {
+                return Ok(None);
+            }
+            Ok(Some(new_path))
         } else {
-            // Label not present, add it (before codec if present)
+            // Label not present, add it (before codec or 10bit label if present)
             let new_name = Self::insert_label_before_codec(&cleaned_name, &label);
             let mut new_file_name = format!("{new_name}.{extension}");
             remove_extra_dots(&mut new_file_name);
@@ -1540,5 +1555,51 @@ mod ffprobe_result_tests {
             new_path.is_none(),
             "File already has correct non-standard vertical resolution label, should not need renaming"
         );
+    }
+
+    #[test]
+    fn new_path_inserts_resolution_before_10bit_and_upgrades_bare_vertical_label() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let ten_bit = temp_dir.path().join("movie.10bit.x265.mkv");
+        std::fs::File::create(&ten_bit).expect("create");
+        let result = FFProbeResult {
+            file: ten_bit,
+            resolution: Resolution::new(1920, 1080),
+        };
+        assert_eq!(
+            result
+                .new_path_if_needed()
+                .unwrap()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "movie.1080p.10bit.x265.mkv"
+        );
+
+        let vertical_bare = temp_dir.path().join("clip.1080p.mp4");
+        std::fs::File::create(&vertical_bare).expect("create");
+        let vertical_result = FFProbeResult {
+            file: vertical_bare,
+            resolution: Resolution::new(1080, 1920),
+        };
+        assert_eq!(
+            vertical_result
+                .new_path_if_needed()
+                .unwrap()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "clip.Vertical.1080p.mp4"
+        );
+
+        let partial = temp_dir.path().join("episode_1080part2.mp4");
+        std::fs::File::create(&partial).expect("create");
+        let partial_result = FFProbeResult {
+            file: partial,
+            resolution: Resolution::new(1920, 1080),
+        };
+        assert!(partial_result.new_path_if_needed().unwrap().is_some());
     }
 }

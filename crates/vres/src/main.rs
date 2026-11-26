@@ -1,6 +1,6 @@
 //! Video resolution command-line entrypoint.
 //!
-//! Parses rename and deletion options, builds configuration, and runs asynchronous processing.
+//! Parses rename and deletion options, builds configuration, and runs parallel processing.
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
@@ -10,8 +10,8 @@ mod resolution;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
 
 use config::Config;
 
@@ -20,15 +20,7 @@ use config::Config;
 enum VideoResolutionCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -54,6 +46,10 @@ pub struct Args {
     #[arg(short = 'f', long)]
     force: bool,
 
+    /// Skip the shared scan cache and re-probe every file
+    #[arg(short = 'C', long)]
+    no_cache: bool,
+
     /// Only print file names without renaming or deleting
     #[arg(short = 'p', long)]
     print: bool,
@@ -67,25 +63,20 @@ pub struct Args {
     verbose: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(VideoResolutionCommand::Completion { shell, install }) = &args.command {
-        return cli_tools_common::generate_shell_completion(
-            *shell,
-            Args::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        );
+    if let Some(VideoResolutionCommand::Completion(completion)) = &args.command {
+        return completion.generate::<Args>(args.verbose, env!("CARGO_BIN_NAME"));
     }
     let config = Config::try_from_args(&args)?;
-    cli::run(config).await
+    cli::run(&config)
 }
 
 #[cfg(test)]
 mod test_args {
     use super::*;
+    use clap::CommandFactory;
+    use clap_complete::Shell;
 
     #[test]
     fn parses_defaults_and_operational_flags() {
@@ -95,15 +86,17 @@ mod test_args {
         assert!(defaults.delete.is_none());
         assert!(!defaults.debug);
         assert!(!defaults.force);
+        assert!(!defaults.no_cache);
         assert!(!defaults.print);
         assert!(!defaults.recurse);
         assert!(!defaults.verbose);
 
-        let configured = Args::try_parse_from(["vres", "videos", "-D", "-f", "-p", "-r", "-v"])
+        let configured = Args::try_parse_from(["vres", "videos", "-D", "-f", "-C", "-p", "-r", "-v"])
             .expect("operational flags should parse");
         assert_eq!(configured.path, Some(PathBuf::from("videos")));
         assert!(configured.debug);
         assert!(configured.force);
+        assert!(configured.no_cache);
         assert!(configured.print);
         assert!(configured.recurse);
         assert!(configured.verbose);
@@ -125,10 +118,10 @@ mod test_args {
             Args::try_parse_from(["vres", "completion", "bash", "--install"]).expect("completion command should parse");
         assert!(matches!(
             args.command,
-            Some(VideoResolutionCommand::Completion {
+            Some(VideoResolutionCommand::Completion(CompletionArgs {
                 shell: Shell::Bash,
                 install: true
-            })
+            }))
         ));
         Args::command().debug_assert();
     }

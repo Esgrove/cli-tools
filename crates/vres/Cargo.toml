@@ -18,17 +18,16 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 cli-tools-dots = { workspace = true }
-cli-tools-media = { workspace = true }
+cli-tools-media = { workspace = true, features = ["scan-cache"] }
 colored = { workspace = true }
 dunce = { workspace = true }
-futures = { workspace = true }
 indicatif = { workspace = true }
+rayon = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
-cli-tools-common = { workspace = true, features = ["async", "completion", "diff"] }
-tokio = { workspace = true, features = ["full"] }
+cli-tools-common = { workspace = true, features = ["completion", "config", "diff", "sqlite"] }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }

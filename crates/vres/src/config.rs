@@ -15,10 +15,9 @@
 //! verbose = false
 //! ```
 
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::Args;
@@ -27,10 +26,9 @@ use crate::Args;
 /// Files with width or height smaller than this value will be deleted.
 const DEFAULT_DELETE_LIMIT: u32 = 500;
 
-/// User configuration from the config file.
-///
-/// These settings can be overridden by CLI arguments.
+/// User configuration from the `[resolution]` config file section.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ResolutionConfig {
     /// Enable debug output including fuzzy resolution range information.
     #[serde(default)]
@@ -72,6 +70,9 @@ pub struct Config {
     /// `None` means delete mode is disabled.
     pub delete_limit: Option<u32>,
 
+    /// Skip reading or writing the shared scan cache.
+    pub no_cache: bool,
+
     /// Only print operations without actually performing them.
     pub dryrun: bool,
 
@@ -88,42 +89,22 @@ pub struct Config {
     pub verbose: bool,
 }
 
-/// Wrapper struct for parsing the `[resolution]` section from the config file.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    resolution: ResolutionConfig,
-}
-
 impl ResolutionConfig {
     /// Read user configuration from the config file.
-    ///
-    /// Attempts to read from `~/.config/cli-tools.toml`. If the file doesn't exist,
-    /// returns default configuration.
     ///
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
-        }
+        cli_tools_common::load_user_config_section("resolution")
     }
 
     /// Parse configuration from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.resolution)
-            .map_err(|e| anyhow!("Failed to parse config: {e}"))
+        cli_tools_common::parse_user_config_section(toml_str, "resolution")
     }
 }
 
@@ -153,6 +134,7 @@ impl Config {
         Ok(Self {
             debug: args.debug || user_config.debug,
             delete_limit,
+            no_cache: args.no_cache,
             dryrun: args.print || user_config.dryrun,
             overwrite: args.force || user_config.overwrite,
             path,
