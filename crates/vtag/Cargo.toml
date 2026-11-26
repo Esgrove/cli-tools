@@ -25,6 +25,7 @@ regex = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+cli-tools-common = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [lints]
