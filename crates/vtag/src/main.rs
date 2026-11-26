@@ -15,11 +15,17 @@ use colored::Colorize;
 use git2::{Oid, Repository};
 use regex::Regex;
 
-/// Matches VERSION number inside a `CMake` `project()` declaration.
-/// Supports 2-4 component versions: `1.0`, `1.0.0`, and `1.0.0.0`.
-static CMAKE_VERSION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bproject\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+(?:\.[0-9]+){0,2})").expect("Invalid regex")
-});
+/// Captures the arguments of a `CMake` `project()` call, including parentheses inside quoted strings.
+static CMAKE_PROJECT_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)\bproject\s*\(((?:[^"()]|"(?:[^"\\]|\\.)*")*)\)"#).expect("Invalid regex"));
+
+/// Matches one quoted or unquoted `CMake` project argument.
+static CMAKE_ARGUMENT_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?s)"((?:[^"\\]|\\.)*)"|([^"\s]+)"#).expect("Invalid regex"));
+
+/// Matches a complete `CMake` version with one to four numeric components.
+static CMAKE_VERSION_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\A[0-9]+(?:\.[0-9]+){0,3}\z").expect("Invalid regex"));
 
 /// Matches the project name (e.g. `project("AudioBatch" ...)` or `project(AudioBatch ...)`).
 static CMAKE_NAME_REGEX: LazyLock<Regex> =
@@ -596,27 +602,46 @@ fn resolve_workspace_path(package_directory: &Path, explicit_workspace: &Path) -
     Some(directory)
 }
 
-/// Parse version from CMakeLists.txt `project()` declaration.
+/// Parse the literal `VERSION` argument from a `CMake` `project()` declaration.
 fn parse_cmake_version(content: &str) -> Option<String> {
-    // Match VERSION followed by a version number inside an uncommented project() call.
-    // The regex handles both single-line and multi-line project() declarations.
     let stripped = strip_cmake_comments(content);
-    CMAKE_VERSION_REGEX
-        .captures(&stripped)
-        .and_then(|captures| captures.get(1))
-        .map(|m| m.as_str().to_string())
+    CMAKE_PROJECT_REGEX
+        .captures_iter(&stripped)
+        .filter_map(|project| project.get(1))
+        .find_map(|project| cmake_project_version(project.as_str()))
 }
 
-/// Parse version from pyproject.toml content.
+/// Find the version among the project arguments without treating other option values as keywords.
+fn cmake_project_version(project: &str) -> Option<String> {
+    let mut arguments = CMAKE_ARGUMENT_REGEX
+        .captures_iter(project)
+        .filter_map(|argument| argument.get(1).or_else(|| argument.get(2)))
+        .map(|argument| argument.as_str())
+        .skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument.eq_ignore_ascii_case("VERSION") {
+            let version = arguments.next()?;
+            return CMAKE_VERSION_REGEX.is_match(version).then(|| version.to_owned());
+        }
+        if ["COMPAT_VERSION", "DESCRIPTION", "HOMEPAGE_URL", "SPDX_LICENSE"]
+            .iter()
+            .any(|keyword| argument.eq_ignore_ascii_case(keyword))
+        {
+            arguments.next();
+        }
+    }
+    None
+}
+
+/// Prefer a static PEP 621 version, then try the Poetry version if it is missing or not a string.
 fn parse_pyproject_toml_version(content: &str) -> Option<String> {
     let toml_value: toml::Value = toml::from_str(content).ok()?;
-    // Standard pyproject.toml uses [project].version; Poetry uses [tool.poetry].version.
     toml_value
         .get("project")
-        .or_else(|| toml_value.get("tool")?.get("poetry"))?
-        .get("version")?
-        .as_str()
-        .map(ToString::to_string)
+        .and_then(|project| project.get("version"))
+        .and_then(toml::Value::as_str)
+        .or_else(|| toml_value.get("tool")?.get("poetry")?.get("version")?.as_str())
+        .map(str::to_owned)
 }
 
 /// Check if the tag already exists locally.
@@ -756,6 +781,45 @@ mod test_version_parsing {
     fn cmake_parser_requires_project_version() {
         assert_eq!(parse_cmake_version("project(Demo)"), None);
         assert_eq!(parse_cmake_version("set(VERSION 1.2.3)"), None);
+    }
+
+    /// A compatibility version is not a project version, regardless of argument order.
+    #[test]
+    fn cmake_uses_version_instead_of_compat_version() {
+        assert_eq!(
+            parse_cmake_version("project(Demo VERSION 2.4.0 COMPAT_VERSION 1.0)").as_deref(),
+            Some("2.4.0")
+        );
+        assert_eq!(
+            parse_cmake_version("project(Demo COMPAT_VERSION 1.0 VERSION 2.4.0)").as_deref(),
+            Some("2.4.0")
+        );
+        assert_eq!(parse_cmake_version("project(Demo COMPAT_VERSION 1.0)"), None);
+    }
+
+    /// A project version is one numeric argument, not text inside a description or a numeric prefix.
+    #[test]
+    fn cmake_requires_a_complete_literal_version_argument() {
+        assert_eq!(
+            parse_cmake_version(r#"project(Demo DESCRIPTION "VERSION 9.0" VERSION "2")"#).as_deref(),
+            Some("2")
+        );
+        assert_eq!(parse_cmake_version("project(Demo VERSION 1.2.3.4.5)"), None);
+        assert_eq!(parse_cmake_version("project(Demo VERSION 1.2beta)"), None);
+    }
+
+    /// A static PEP 621 version takes precedence over conflicting Poetry metadata.
+    #[test]
+    fn python_prefers_a_static_project_version_to_poetry() {
+        let content = "[project]\nname = \"demo\"\nversion = \"2.0\"\n[tool.poetry]\nversion = \"9.0\"\n";
+        assert_eq!(parse_pyproject_toml_version(content).as_deref(), Some("2.0"));
+    }
+
+    /// Poetry can supply the version even if another section provides the project metadata.
+    #[test]
+    fn python_falls_back_to_poetry_when_project_version_is_dynamic() {
+        let content = "[project]\nname = \"demo\"\ndynamic = [\"version\"]\n[tool.poetry]\nversion = \"1.0\"\n";
+        assert_eq!(parse_pyproject_toml_version(content).as_deref(), Some("1.0"));
     }
 }
 
