@@ -310,14 +310,44 @@ fn copy_dir_contents(source: &Path, target: &Path) -> io::Result<()> {
 /// Any partially created target file is removed if the copy fails.
 ///
 /// # Errors
-/// Returns an error if the copy fails or the metadata cannot be read or applied.
+/// Returns `InvalidInput` if the source and target refer to the same file.
+/// Also returns an error if the copy fails or the metadata cannot be read or applied.
 pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
     let mut source_file = fs::File::open(source)?;
     let metadata = source_file.metadata()?;
     let modified = metadata.modified()?;
     let permissions = metadata.permissions();
 
-    let mut target_file = fs::File::create(target)?;
+    // Compare the open files before truncating, so a path change cannot invalidate the check.
+    let mut target_file = fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(target)?;
+    #[cfg(unix)]
+    let same_file = same_unix_file_identity(&metadata, &target_file.metadata()?);
+    #[cfg(windows)]
+    let same_file = {
+        use std::os::windows::io::AsRawHandle;
+
+        let (source_id, _) = windows_file_information(source_file.as_raw_handle())?;
+        let (target_id, _) = windows_file_information(target_file.as_raw_handle())?;
+        source_id == target_id
+    };
+    #[cfg(not(any(unix, windows)))]
+    let same_file = paths_refer_to_same_file(source, target);
+    if same_file {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Cannot copy {} onto the same file at {}",
+                source.display(),
+                target.display()
+            ),
+        ));
+    }
+    target_file.set_len(0)?;
+
     let copy_result = (|| -> io::Result<u64> {
         let bytes = io::copy(&mut source_file, &mut target_file)?;
         target_file.set_modified(modified)?;
@@ -501,7 +531,7 @@ fn same_entry_metadata_without_following(left: &Path, right: &Path) -> Option<(b
 
     let left_meta = fs::symlink_metadata(left).ok()?;
     let right_meta = fs::symlink_metadata(right).ok()?;
-    if left_meta.dev() == right_meta.dev() && left_meta.ino() == right_meta.ino() {
+    if same_unix_file_identity(&left_meta, &right_meta) {
         Some((left_meta.is_dir(), left_meta.nlink()))
     } else {
         None
@@ -529,13 +559,19 @@ const fn same_entry_metadata_without_following(_left: &Path, _right: &Path) -> O
     None
 }
 
+/// Compare device and inode numbers for two sets of Unix file metadata.
+#[cfg(unix)]
+fn same_unix_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
 /// Compare device and inode numbers, following symbolic links.
 #[cfg(unix)]
 fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
     match (fs::metadata(left), fs::metadata(right)) {
-        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        (Ok(left), Ok(right)) => same_unix_file_identity(&left, &right),
         _ => false,
     }
 }
@@ -560,8 +596,8 @@ fn windows_file_identity(path: &Path, follow_symlinks: bool) -> Option<((u32, u3
 
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
     let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
@@ -588,19 +624,34 @@ fn windows_file_identity(path: &Path, follow_symlinks: bool) -> Option<((u32, u3
             return None;
         }
 
-        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
-        let result = GetFileInformationByHandle(handle, &raw mut information);
+        let information = windows_file_information(handle);
         _ = CloseHandle(handle);
-
-        (result != 0).then_some((
-            (
-                information.dwVolumeSerialNumber,
-                information.nFileIndexHigh,
-                information.nFileIndexLow,
-            ),
-            information.nNumberOfLinks,
-        ))
+        information.ok()
     }
+}
+
+/// Read the Windows file identity and link count from an open handle.
+#[cfg(windows)]
+fn windows_file_information(handle: std::os::windows::io::RawHandle) -> io::Result<((u32, u32, u32), u32)> {
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+
+    // SAFETY: Callers keep the handle open for the call, and the output points to a writable structure.
+    #[allow(unsafe_code)]
+    let information = unsafe {
+        let mut information = std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
+        if GetFileInformationByHandle(handle, &raw mut information) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        information
+    };
+    Ok((
+        (
+            information.dwVolumeSerialNumber,
+            information.nFileIndexHigh,
+            information.nFileIndexLow,
+        ),
+        information.nNumberOfLinks,
+    ))
 }
 
 /// Fallback when neither Unix nor Windows file identity metadata is available.
@@ -902,10 +953,82 @@ mod test_target_reservations {
 }
 
 #[cfg(test)]
+mod test_copy_file_with_times {
+    use super::*;
+
+    use crate::test_support::TempTree;
+
+    #[test]
+    fn refuses_to_copy_a_file_onto_itself() {
+        let tree = TempTree::new();
+        let source = tree.file_with("file.txt", "original");
+
+        let result = copy_file_with_times(&source, &source);
+
+        assert_eq!(tree.read("file.txt"), "original");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn refuses_to_copy_onto_a_hard_link_to_the_source() {
+        let tree = TempTree::new();
+        let source = tree.file_with("file.txt", "original");
+        let target = tree.join("hardlink.txt");
+        fs::hard_link(&source, &target).unwrap();
+
+        let result = copy_file_with_times(&source, &target);
+
+        assert_eq!(tree.read("file.txt"), "original");
+        assert_eq!(tree.read("hardlink.txt"), "original");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_copy_through_a_symlink_to_the_source() {
+        let tree = TempTree::new();
+        let source = tree.file_with("file.txt", "original");
+        let target = tree.symlink("file.txt", "symlink.txt");
+
+        let result = copy_file_with_times(&source, &target);
+
+        assert_eq!(tree.read("file.txt"), "original");
+        assert!(fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn truncates_a_distinct_existing_target() {
+        let tree = TempTree::new();
+        let source = tree.file_with("source.txt", "new");
+        let target = tree.file_with("target.txt", "old and longer");
+
+        assert_eq!(copy_file_with_times(&source, &target).unwrap(), 3);
+        assert_eq!(tree.read("source.txt"), "new");
+        assert_eq!(tree.read("target.txt"), "new");
+    }
+}
+
+#[cfg(test)]
 mod test_copy_dir_recursive {
     use super::*;
 
+    use crate::test_support::TempTree;
     use tempfile::TempDir;
+
+    #[test]
+    fn refuses_to_copy_onto_a_nested_hard_link_to_the_source() {
+        let tree = TempTree::new();
+        let source_file = tree.file_with("source/nested/file.txt", "original");
+        let target_file = tree.dir("target/nested").join("file.txt");
+        fs::hard_link(&source_file, &target_file).unwrap();
+
+        let result = copy_dir_recursive(&tree.join("source"), &tree.join("target"));
+
+        assert_eq!(tree.read("source/nested/file.txt"), "original");
+        assert_eq!(tree.read("target/nested/file.txt"), "original");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
 
     #[test]
     fn copies_nested_contents_and_modification_times() {

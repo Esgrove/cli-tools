@@ -13,7 +13,7 @@ pub mod date;
 pub mod diff;
 pub mod file_handling;
 pub mod simd;
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod utils;
 
