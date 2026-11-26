@@ -698,6 +698,36 @@ mod test_rewording {
     }
 
     #[test]
+    fn inline_atom_midword_backticks_keeps_content() {
+        let source = "Use pre`foo; bar`post in the example.\n";
+        let formatted = crate::format(source, crate::FileKind::Markdown, &FormatOptions::default());
+        assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source);
+        assert!(formatted.violations.is_empty());
+    }
+
+    #[test]
+    fn inline_atom_code_span_crossing_a_line_break_keeps_content() {
+        let source = "Use `foo;\nbar` in the example.\n";
+        let formatted = crate::format(source, crate::FileKind::Markdown, &FormatOptions::default());
+        assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source);
+        assert!(formatted.violations.is_empty());
+    }
+
+    #[test]
+    fn inline_atom_html_character_references_keep_their_semicolon() {
+        for reference in ["&amp;", "&#38;", "&#x26;", "&#X26;", "A&amp;"] {
+            let source = format!("The label contains {reference} beside another label.\n");
+            let formatted = crate::format(&source, crate::FileKind::Markdown, &FormatOptions::default());
+            assert_eq!(
+                formatted.fixed_text.as_deref().unwrap_or(&source),
+                source,
+                "{reference}"
+            );
+            assert!(formatted.violations.is_empty());
+        }
+    }
+
+    #[test]
     fn semicolon_inside_code_span_is_ignored() {
         let outcome = reflow(&["run `a; b` now"], 120);
         assert_eq!(outcome.lines, None);
@@ -705,12 +735,10 @@ mod test_rewording {
     }
 
     #[test]
-    fn semicolon_inside_quotes_is_refused() {
-        // "&amp;" holds a literal semicolon, and rewording it would corrupt the entity into
-        // "&amp." followed by a capitalized word that was never a new sentence.
+    fn an_html_reference_inside_quotes_is_not_reported_as_a_semicolon() {
         let outcome = reflow(&["the key is \"Tietokoneet &amp; tabletit\" in the source data"], 120);
         assert_eq!(outcome.lines, None);
-        assert_eq!(summary(&outcome), vec![(ViolationKind::Semicolon, false)]);
+        assert!(outcome.violations.is_empty());
     }
 
     #[test]
