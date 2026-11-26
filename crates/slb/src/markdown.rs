@@ -23,6 +23,8 @@ enum LineClass {
     Blank,
     /// Opens a fenced code block with the given marker character and length.
     FenceOpen(char, usize),
+    /// Opens a fence inside a list item, with indentation measured through its marker and spacing.
+    ListFence(char, usize, usize),
     /// Opens a math block.
     MathFence,
     /// Opens an HTML comment.
@@ -237,7 +239,10 @@ fn split_paragraphs_with(
         {
             ignore_next = true;
         }
-        if !matches!(class, LineClass::Blank | LineClass::ListItem(_)) {
+        if !matches!(
+            class,
+            LineClass::Blank | LineClass::ListItem(_) | LineClass::ListFence(..)
+        ) {
             in_list_context = false;
         }
         let end = match class {
@@ -250,7 +255,11 @@ fn split_paragraphs_with(
                 index = table_end;
                 continue;
             }
-            LineClass::FenceOpen(marker, length) => find_fence_close(lines, index, marker, length),
+            LineClass::FenceOpen(marker, length) => find_fence_close(lines, index, marker, length, 0),
+            LineClass::ListFence(marker, length, indent) => {
+                in_list_context = true;
+                find_fence_close(lines, index, marker, length, indent)
+            }
             LineClass::MathFence => find_math_fence_end(lines, index, line),
             LineClass::HtmlComment => find_html_comment_end(lines, index, line),
             LineClass::HtmlBlock => lines
@@ -456,16 +465,9 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
     }
     let first = trimmed.as_bytes().first().copied().unwrap_or(b' ');
     if matches!(first, b'`' | b'~')
-        && leading_width(line) <= MAX_FENCE_INDENT
-        && let Some(captures) = RE_FENCE.captures(line)
-        && let Some(fence) = captures.get(1)
+        && let Some((marker, length)) = opening_fence(line)
     {
-        let marker = fence.as_str().chars().next().unwrap_or('`');
-        let info = line.get(fence.end()..).unwrap_or_default();
-        // CommonMark forbids backticks in backtick fence info strings, so ` ```foo``` bar` is an inline code span.
-        if marker != '`' || !info.contains('`') {
-            return LineClass::FenceOpen(marker, fence.as_str().chars().count());
-        }
+        return LineClass::FenceOpen(marker, length);
     }
     if first == b'$' && trimmed.starts_with("$$") {
         return LineClass::MathFence;
@@ -497,12 +499,20 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
     if (matches!(first, b'-' | b'*' | b'+') || first.is_ascii_digit())
         && let Some(captures) = RE_LIST_ITEM.captures(line)
     {
-        if captures.get(5).is_none() {
+        let Some(content) = captures.get(5) else {
             return LineClass::Verbatim;
+        };
+        let prefix = line.get(..content.start()).unwrap_or_default();
+        let content_start = prefix.chars().count();
+        if captures.get(4).is_none()
+            && let Some((marker, length)) = opening_fence(content.as_str())
+        {
+            let indent = prefix
+                .chars()
+                .map(|character| if character == '\t' { CODE_INDENT } else { 1 })
+                .sum();
+            return LineClass::ListFence(marker, length, indent);
         }
-        let content_start = captures.get(5).map_or(0, |content| {
-            line.get(..content.start()).unwrap_or_default().chars().count()
-        });
         return LineClass::ListItem(content_start);
     }
     // Every alternative of the standalone link pattern needs a bracket or a scheme separator.
@@ -549,24 +559,41 @@ fn find_table_end(lines: &[&str], header_index: usize) -> usize {
     end
 }
 
-/// Index one past the closing fence, or the end of the lines when unterminated.
+/// The marker and length of a valid fence opening, relative to its container.
+fn opening_fence(line: &str) -> Option<(char, usize)> {
+    if leading_width(line) > MAX_FENCE_INDENT {
+        return None;
+    }
+    let fence = RE_FENCE.captures(line)?.get(1)?;
+    let marker = fence.as_str().chars().next()?;
+    let info = line.get(fence.end()..)?;
+    // CommonMark forbids backticks in the info string of a backtick fence.
+    (marker != '`' || !info.contains('`')).then_some((marker, fence.as_str().len()))
+}
+
+/// Index one past the closing fence, or the end of its container when unterminated.
 ///
-/// Like an opening fence, a closing fence has at most three columns of indentation.
-/// A fence line indented further (including by a tab) is part of the code.
-fn find_fence_close(lines: &[&str], open_index: usize, marker: char, length: usize) -> usize {
+/// A closing fence can be indented up to three columns past its container's indentation.
+fn find_fence_close(lines: &[&str], open_index: usize, marker: char, length: usize, indent: usize) -> usize {
     lines
         .iter()
         .enumerate()
         .skip(open_index + 1)
-        .find(|(_, line)| {
-            let unindented = line.trim_start();
-            let trimmed = unindented.trim_end();
-            leading_width(line) <= MAX_FENCE_INDENT
-                && !trimmed.is_empty()
+        .find_map(|(position, line)| {
+            let trimmed = line.trim();
+            let width = leading_width(line);
+            if width < indent && !trimmed.is_empty() {
+                Some(position)
+            } else if width <= indent + MAX_FENCE_INDENT
+                && trimmed.len() >= length
                 && trimmed.chars().all(|character| character == marker)
-                && trimmed.chars().count() >= length
+            {
+                Some(position + 1)
+            } else {
+                None
+            }
         })
-        .map_or(lines.len(), |(position, _)| position + 1)
+        .unwrap_or(lines.len())
 }
 
 /// Index one past a `$$` math block starting at `index`, recognizing single-line `$$...$$` blocks.
@@ -1067,6 +1094,19 @@ mod test_markdown_verbatim {
 mod test_markdown_lists {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn a_fence_at_the_start_of_a_list_item_is_verbatim() {
+        for source in [
+            "- ```text\n  Keep this; keep it unchanged.\n  ```\n\nAfter this; format the prose.\n",
+            "10. ~~~~text\n    Keep this; keep it unchanged.\n    ~~~\n    Still code; do not format it.\n    ~~~~\n\nAfter this; format the prose.\n",
+            "- ```text\n  Keep this; keep it unchanged.\n\nAfter this; format the prose.\n",
+        ] {
+            let expected = source.replace("After this; format", "After this.\nFormat");
+            let formatted = crate::format(source, crate::FileKind::Markdown, &crate::FormatOptions::default());
+            assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), expected);
+        }
+    }
 
     #[test]
     fn bullet_item_with_indented_continuation() {
