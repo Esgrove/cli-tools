@@ -28,9 +28,8 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
             .collect::<Result<Vec<_>>>()?
     };
 
-    let excludes_have_separator = config.exclude.iter().any(|pattern| pattern.contains('/'));
-    // The filter runs on the walker's own threads, so it needs an owned handle on the excludes.
-    let excludes = Arc::new(config.exclude.clone());
+    // Parse exclude patterns into non-empty component sequences once before walking.
+    let exclude_patterns: Arc<Vec<Vec<String>>> = Arc::new(parse_exclude_patterns(&config.exclude));
     let mut files = Vec::new();
     for root in roots {
         if root.is_file() {
@@ -48,7 +47,8 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
         // where it can exempt the root and let an explicitly given directory such as ".github" through.
         // Gitignore rules only apply inside a git repository,
         // so the exclude list stays as the safety net everywhere else.
-        let filter_excludes = Arc::clone(&excludes);
+        let filter_excludes = Arc::clone(&exclude_patterns);
+        let root_for_filter = root.clone();
         let walker = WalkBuilder::new(&root)
             .standard_filters(false)
             .git_ignore(config.use_gitignore)
@@ -57,8 +57,17 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
             .ignore(config.use_gitignore)
             .parents(config.use_gitignore)
             .filter_entry(move |entry| {
-                (entry.depth() == 0 || !cli_tools_common::should_skip_path(entry.path()))
-                    && !is_excluded(entry.path(), &filter_excludes, excludes_have_separator)
+                if entry.depth() == 0 {
+                    return true;
+                }
+                if cli_tools_common::should_skip_path(entry.path()) {
+                    return false;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(&root_for_filter)
+                    .unwrap_or_else(|_| entry.path());
+                !is_excluded(relative, &filter_excludes)
             })
             .build();
         for entry in walker.filter_map(Result::ok) {
@@ -79,22 +88,38 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
     Ok(files)
 }
 
-/// Whether the path has a component equal to an exclude pattern, or contains a pattern with a separator.
-///
-/// The whole path is only rendered as text when some pattern holds a separator,
-/// since that rendering costs an allocation for every entry of the walk.
-fn is_excluded(path: &Path, excludes: &[String], any_pattern_has_separator: bool) -> bool {
-    let path_string = if any_pattern_has_separator {
-        path.to_string_lossy().replace('\\', "/")
-    } else {
-        String::new()
-    };
-    excludes.iter().any(|pattern| {
-        if pattern.contains('/') {
-            path_string.contains(pattern.trim_matches('/'))
+/// Parse exclude patterns into normalized, non-empty path component sequences.
+fn parse_exclude_patterns(patterns: &[String]) -> Vec<Vec<String>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            pattern
+                .replace('\\', "/")
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|parts| !parts.is_empty())
+        .collect()
+}
+
+/// Whether a root-relative path contains any excluded component sequence on component boundaries.
+fn is_excluded(relative_path: &Path, exclude_patterns: &[Vec<String>]) -> bool {
+    if exclude_patterns.is_empty() {
+        return false;
+    }
+    let components: Vec<String> = relative_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    exclude_patterns.iter().any(|pattern| {
+        if let [single] = pattern.as_slice() {
+            components.iter().any(|component| component == single)
         } else {
-            path.components()
-                .any(|component| component.as_os_str().to_string_lossy() == *pattern)
+            components
+                .windows(pattern.len())
+                .any(|window| window == pattern.as_slice())
         }
     })
 }
@@ -126,10 +151,10 @@ mod test_helpers {
     use super::*;
     use crate::Args;
 
-    /// Whether the path is excluded, working out the separator flag the way the walk does.
+    /// Whether the path is excluded, working out the normalized component patterns the way the walk does.
     pub fn excluded(path: &Path, config: &Config) -> bool {
-        let any_pattern_has_separator = config.exclude.iter().any(|pattern| pattern.contains('/'));
-        super::is_excluded(path, &config.exclude, any_pattern_has_separator)
+        let patterns = super::parse_exclude_patterns(&config.exclude);
+        super::is_excluded(path, &patterns)
     }
 
     /// Build a config from command line arguments as the binary would.
@@ -290,6 +315,25 @@ mod test_collect_files {
         .expect("collecting should succeed");
 
         assert_eq!(collected_names(&files), vec!["lib.rs"]);
+    }
+
+    #[test]
+    fn excludes_apply_relative_to_root_and_on_component_boundaries() {
+        let directory = temporary_directory();
+        // Root lives under an ancestor named "build", which is in excludes.
+        let project_root = directory.path().join("build").join("project");
+        std::fs::create_dir_all(project_root.join("src/gen")).expect("create gen");
+        std::fs::write(project_root.join("src/general.rs"), "// keep\n").expect("write general");
+        std::fs::write(project_root.join("src/gen/skip.rs"), "// skip\n").expect("write gen");
+
+        let files = collect_files(&[project_root], &config_with(vec!["build", "src/gen", "/"], vec![]))
+            .expect("collecting should succeed");
+
+        assert_eq!(
+            collected_names(&files),
+            vec!["general.rs"],
+            "ancestor 'build', '/' exclude, and 'src/gen' prefix must not exclude src/general.rs"
+        );
     }
 
     #[test]
