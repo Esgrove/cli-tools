@@ -26,6 +26,8 @@ pub struct StringSyntax {
     pub(super) backtick: Backtick,
     /// Whether triple quotes delimit multi-line strings.
     pub(super) triple_quotes: bool,
+    /// Whether to track bracketed expressions to distinguish Python values from docstrings.
+    pub(super) python_expressions: bool,
     /// Whether Rust style raw strings exist.
     pub(super) rust_raw_strings: bool,
     /// Whether C++11 raw strings (`R"delim(...)delim"`) exist.
@@ -64,7 +66,7 @@ impl StringSyntax {
     ///
     /// A line in code without any of them is code to its end, so the scanner can skip it.
     /// Bytes a language does not use are replaced with a slash, which is always part of the set.
-    pub(super) const fn trigger_bytes(&self) -> [u8; 9] {
+    pub(super) const fn trigger_bytes(&self) -> [u8; 14] {
         let block_open = match self.block_comment {
             Some((open, _)) => first_byte_or_slash(open),
             None => b'/',
@@ -81,7 +83,16 @@ impl StringSyntax {
             },
             if self.heredoc { b'<' } else { b'/' },
             if self.dollar_quotes { b'$' } else { b'/' },
-            if self.bracket_strings { b'[' } else { b'/' },
+            if self.bracket_strings || self.python_expressions {
+                b'['
+            } else {
+                b'/'
+            },
+            if self.python_expressions { b']' } else { b'/' },
+            if self.python_expressions { b'(' } else { b'/' },
+            if self.python_expressions { b')' } else { b'/' },
+            if self.python_expressions { b'{' } else { b'/' },
+            if self.python_expressions { b'}' } else { b'/' },
             b'/',
         ]
     }
@@ -89,14 +100,15 @@ impl StringSyntax {
     /// The syntax with its byte sets computed from the other fields.
     const fn with_byte_sets(self) -> Self {
         let triggers = self.trigger_bytes();
-        let [marker, block, double, single, backtick, heredoc, dollar, bracket, slash] = triggers;
+        let mut normal = triggers;
         let raw = if self.rust_raw_strings {
             b'r'
         } else if self.cpp_raw_strings {
             b'R'
         } else {
-            slash
+            b'/'
         };
+        normal[triggers.len() - 1] = raw;
         let block_comment_set = match self.block_comment {
             Some((open, close)) => {
                 let close = first_byte_or_slash(close);
@@ -111,9 +123,7 @@ impl StringSyntax {
         };
         Self {
             trigger_set: ByteSet::new(&triggers),
-            normal_set: ByteSet::new(&[
-                marker, block, double, single, backtick, heredoc, dollar, bracket, slash, raw,
-            ]),
+            normal_set: ByteSet::new(&normal),
             block_comment_set,
             ..self
         }
@@ -137,6 +147,7 @@ const BASE_STRING_SYNTAX: StringSyntax = StringSyntax {
     single_quote: SingleQuote::CharLiteral,
     backtick: Backtick::None,
     triple_quotes: false,
+    python_expressions: false,
     rust_raw_strings: false,
     cpp_raw_strings: false,
     dollar_quotes: false,
@@ -194,6 +205,7 @@ pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
         },
         FileKind::Python => StringSyntax {
             triple_quotes: true,
+            python_expressions: true,
             ..hash
         },
         FileKind::Shell => StringSyntax {

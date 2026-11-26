@@ -183,7 +183,7 @@ impl<'a> LineChars<'a> {
 #[must_use]
 pub fn scan_line(line: &str, state: ScanState, syntax: &StringSyntax) -> ScanResult {
     let mut characters = Vec::new();
-    scan_line_buffered(line, state, syntax, &mut characters)
+    scan_line_buffered(line, state, syntax, &mut characters, &mut 0)
 }
 
 /// Scan one line, reusing the given character buffer.
@@ -195,6 +195,7 @@ pub(super) fn scan_line_buffered(
     state: ScanState,
     syntax: &StringSyntax,
     characters: &mut Vec<(usize, char)>,
+    expression_depth: &mut usize,
 ) -> ScanResult {
     let mut state = state;
     if let Some(result) = line_level_state(line, &mut state) {
@@ -207,7 +208,7 @@ pub(super) fn scan_line_buffered(
             uncertain: false,
         };
     }
-    scan_characters(line, state, syntax, characters, true)
+    scan_characters(line, state, syntax, characters, true, expression_depth)
 }
 
 /// Scan the line character by character, starting in a state the line level checks left in place.
@@ -220,6 +221,7 @@ fn scan_characters(
     syntax: &StringSyntax,
     characters: &mut Vec<(usize, char)>,
     skip_ahead: bool,
+    expression_depth: &mut usize,
 ) -> ScanResult {
     let chars = LineChars::new(line, characters);
     let mut cursor = Cursor::default();
@@ -231,7 +233,7 @@ fn scan_characters(
             }
         }
         match state {
-            ScanState::Normal => match scan_normal(line, chars, &mut cursor, syntax) {
+            ScanState::Normal => match scan_normal(line, chars, &mut cursor, syntax, expression_depth) {
                 NormalStep::Continue(next_state) => state = next_state,
                 NormalStep::Comment(byte) => {
                     let next_state = cursor.pending_heredoc.map_or_else(
@@ -452,7 +454,13 @@ fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syn
 }
 
 /// Scan one character in the normal state.
-fn scan_normal(line: &str, chars: LineChars<'_>, cursor: &mut Cursor, syntax: &StringSyntax) -> NormalStep {
+fn scan_normal(
+    line: &str,
+    chars: LineChars<'_>,
+    cursor: &mut Cursor,
+    syntax: &StringSyntax,
+    expression_depth: &mut usize,
+) -> NormalStep {
     let index = cursor.index;
     let Some((byte, character)) = chars.get(index) else {
         return NormalStep::Continue(ScanState::Normal);
@@ -534,8 +542,15 @@ fn scan_normal(line: &str, chars: LineChars<'_>, cursor: &mut Cursor, syntax: &S
         cursor.index += 2;
         return NormalStep::Continue(ScanState::Normal);
     }
-    if character == '/' {
+    if character == '/' && !syntax.python_expressions {
         return scan_slash(line, chars, cursor, syntax);
+    }
+    if syntax.python_expressions {
+        match character {
+            '(' | '[' | '{' => *expression_depth += 1,
+            ')' | ']' | '}' => *expression_depth = expression_depth.saturating_sub(1),
+            _ => {}
+        }
     }
     cursor.index += 1;
     NormalStep::Continue(ScanState::Normal)
@@ -907,7 +922,7 @@ mod test_trigger_prefilter {
         if let Some(result) = line_level_state(line, &mut state) {
             return result;
         }
-        scan_characters(line, state, syntax, characters, false)
+        scan_characters(line, state, syntax, characters, false, &mut 0)
     }
 
     /// Assert that both scans agree on every line of the text, carrying the state between lines.
@@ -919,7 +934,7 @@ mod test_trigger_prefilter {
         let mut filtered_state = ScanState::Normal;
         let mut unfiltered_state = ScanState::Normal;
         for (index, line) in text.lines().enumerate() {
-            let filtered = scan_line_buffered(line, filtered_state, &syntax, &mut characters);
+            let filtered = scan_line_buffered(line, filtered_state, &syntax, &mut characters, &mut 0);
             let unfiltered = scan_line_unfiltered(line, unfiltered_state, &syntax, &mut characters);
             assert_eq!(filtered, unfiltered, "{label}:{} {line:?}", index + 1);
             filtered_state = filtered.state;
