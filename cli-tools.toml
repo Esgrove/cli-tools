@@ -68,6 +68,9 @@
 # Include files that match the given pattern
 # include = []
 
+# Exclude files that match the given pattern
+# exclude = []
+
 # Overwrite existing files
 # overwrite = false
 
@@ -324,6 +327,9 @@ replace = [
 
 # Skip confirmation prompts
 # yes = false
+
+# Automatically apply the suggested rename in non-interactive (--yes) runs
+# auto_rename = false
 
 # Skip rename prompts for existing/duplicate torrents
 # skip_existing = false

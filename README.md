@@ -97,7 +97,11 @@ dots completion powershell -I
 ```console
 Print divider comment with centered text
 
-Usage: div [OPTIONS] [TEXT]...
+Usage: div [OPTIONS] [TEXT]... [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [TEXT]...  Optional divider texts
@@ -106,6 +110,7 @@ Options:
   -l, --length <LENGTH>   Divider length in number of characters [default: 120]
   -c, --char <CHARACTER>  Divider character to use [default: %]
   -a, --align             Align multiple divider texts to same start position
+  -v, --verbose           Print verbose output
   -h, --help              Print help
   -V, --version           Print version
 ```
@@ -119,7 +124,7 @@ Usage: dirmove [OPTIONS] [PATH]... [COMMAND]
 
 Commands:
   completion  Generate shell completion script
-  database    Print the directory names stored in the database [alias: db]
+  database    Inspect or manage directory names stored in the database [alias: db]
   help        Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -211,10 +216,13 @@ Arguments:
 
 Options:
   -g, --pattern <PATTERN>      Identifier patterns to search for (regex)
-  -e, --extension <EXTENSION>  File extensions to include
+  -e, --extension <EXTENSION>  File extensions to include (overrides extensions from config when specified)
   -m, --move                   Move every duplicate except the best file of each group to a "Duplicates" directory
   -i, --ignore <IGNORE>        Ignore prefix when matching filenames
   -H, --hash                   Compare file contents using BLAKE3 hashes
+  -O, --hash-only              Group duplicates exclusively by exact BLAKE3 content hash (ignores filename/pattern matches)
+  -C, --no-cache               Skip the shared scan and hash caches
+  -X, --clean-cache            Remove stale entries from the shared scan and hash caches
   -p, --print                  Only print changes without moving files
   -r, --recurse                Recurse into subdirectories
   -d, --default                Use default paths from config file
@@ -256,14 +264,15 @@ Options:
 
 ## Vconvert
 
-Convert video files to HEVC (H.265) format using ffmpeg and NVENC.
-Tracks files needing conversion in a local SQLite database for efficient processing.
+Convert video files to HEVC (H.265) format using ffmpeg hardware acceleration
+(`hevc_videotoolbox` on Apple Silicon, `hevc_nvenc` elsewhere).
+Tracks files needing conversion in the shared local SQLite database (`cli-tools.db`) for safe concurrent processing.
 Accepts multiple file and directory paths in one run, for example `vconvert clip.mkv movies series -r`.
 Overlapping inputs are processed only once.
 Without paths, scans the current directory.
 
 ```console
-Convert video files to HEVC (H.265) format using ffmpeg and NVENC
+Convert video files to HEVC (H.265) format using ffmpeg hardware acceleration
 
 Usage: vconvert [OPTIONS] [PATH]... [COMMAND]
 
@@ -302,6 +311,7 @@ Options:
   -U, --max-duration <MAX_DURATION>  Maximum duration in seconds
   -R, --min-resolution <PIXELS>      Skip files where either width or height is smaller than PIXELS
   -L, --display-limit <LIMIT>        Maximum number of files to display
+  -g, --encoder <ENCODER>            Hardware HEVC encoder (auto uses `VideoToolbox` on Apple Silicon and requires NVENC elsewhere) [possible values: auto, nvenc, videotoolbox]
   -h, --help                         Print help (see more with '--help')
   -V, --version                      Print version
 ```
@@ -384,7 +394,11 @@ Add video resolution labels to filenames based on actual video dimensions.
 ```console
 Add video resolution to filenames
 
-Usage: vres [OPTIONS] [PATH]
+Usage: vres [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file path
@@ -393,6 +407,7 @@ Options:
   -D, --debug              Enable debug prints
   -x, --delete [<DELETE>]  Delete files with width or height smaller than limit (default: 500)
   -f, --force              Overwrite existing files
+  -C, --no-cache           Skip the shared scan cache and re-probe every file
   -p, --print              Only print file names without renaming or deleting
   -r, --recurse            Recurse into subdirectories
   -v, --verbose            Print verbose output
@@ -420,10 +435,11 @@ Arguments:
   [PATH]  Optional input directory or file
 
 Options:
-  -r, --recurse  Recurse into subdirectories
-  -v, --verbose  Print verbose per-file output
-  -h, --help     Print help
-  -V, --version  Print version
+  -r, --recurse   Recurse into subdirectories
+  -C, --no-cache  Skip the shared scan cache and re-probe every file
+  -v, --verbose   Print verbose per-file output
+  -h, --help      Print help
+  -V, --version   Print version
 ```
 
 ## Thumbs
@@ -451,6 +467,9 @@ Options:
   -s, --scale <WIDTH>      Thumbnail width in pixels
   -a, --padding <PIXELS>   Padding between tiles in pixels
   -t, --fontsize <SIZE>    Font size for timestamp overlay
+  -F, --font <FONT>        Custom font file path for timestamp and header overlays
+  -j, --jobs <JOBS>        Number of concurrent thumbnail jobs
+  -C, --no-cache           Skip the shared scan cache and re-probe every file
   -q, --quality <QUALITY>  JPEG quality (1-31, lower is better)
   -v, --verbose            Print verbose output
   -h, --help               Print help
@@ -466,7 +485,11 @@ or pass `report.csv` or `report.xlsx` to write those two files side by side.
 ```console
 Parse Finvoice XML credit card statement files
 
-Usage: visaparse [OPTIONS] [PATH]
+Usage: visaparse [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or XML file path
@@ -513,6 +536,7 @@ Options:
   -p, --dryrun               Print what would be done without actually adding torrents
   -o, --offline              Offline mode: skip qBittorrent connection entirely (implies dryrun)
   -y, --yes                  Skip confirmation prompts
+  -A, --auto-rename          Automatically apply the suggested rename in non-interactive (`--yes`) runs
   -e, --skip-ext <EXT>       File extensions to skip (e.g., nfo, txt)
   -k, --skip-dir <NAME>      Directory names to skip (case-insensitive full name match)
   -m, --min-size <MB>        Minimum file size in MB (files smaller than this will be skipped)
@@ -595,13 +619,14 @@ Options:
 
 ## Rxrename
 
-Recursively remove a trailing `_1` from file names, for example `clip_1.mp4` becomes `clip.mp4`.
-When the unsuffixed file already exists, it is deleted before the rename,
-or moved to the trash with `--trash`.
+Remove a trailing `_1` from file names, for example `clip_1.mp4` becomes `clip.mp4`.
+Operates on the given directory only unless `--recurse` is passed.
+When the unsuffixed file already exists, it is moved to the system trash by default,
+or permanently deleted with `--delete`.
 Files that cannot be processed are reported, and the run exits with an error at the end.
 
 ```console
-Recursively remove a trailing '_1' from filenames
+Remove a trailing '_1' from filenames
 
 Usage: rxrename [OPTIONS] [ROOT] [COMMAND]
 
@@ -613,8 +638,10 @@ Arguments:
   [ROOT]  Root directory to scan. Defaults to current directory
 
 Options:
+  -D, --delete   Permanently delete conflicting files instead of moving them to system trash
   -d, --dryrun   Only print what would be done without making changes
-  -t, --trash    Move conflicting files to system trash instead of permanently deleting them
+  -r, --recurse  Recurse into subdirectories
+  -t, --trash    Move conflicting files to system trash (default behavior)
   -v, --verbose  Print verbose output
   -h, --help     Print help
   -V, --version  Print version
@@ -825,6 +852,9 @@ Options:
   -p, --push                 Push tags to remote
   -n, --new                  Only push new tags that did not exist locally
   -s, --single               Use a single push to push all tags
+  -m, --all-branches         Walk merged side branches as well instead of only first-parent history
+  -R, --remote <REMOTE>      Git remote name to push tags to [default: origin]
+  -T, --type <TYPE>          Override project type detection [possible values: cmake, python, rust]
   -v, --verbose              Print verbose output
   -t, --tag-prefix <PREFIX>  Prefix for the tag names, for example "rust-" for tags like rust-v1.2.3 [default: ""]
   -h, --help                 Print help

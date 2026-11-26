@@ -44,6 +44,8 @@ fn sample_config_has_all_sections() {
         "thumbnail",
         "slb",
         "rsbump",
+        "visaparse",
+        "xtask",
     ];
 
     for section in expected_sections {
