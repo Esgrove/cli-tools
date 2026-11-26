@@ -76,13 +76,15 @@ impl VideoConvert<'_> {
             results
         };
 
-        // Phase 3: write new ffprobe results back to the scan cache in a single transaction.
-        let cache_entries: Vec<(&Path, &VideoInfo)> = probe_results
-            .iter()
-            .filter_map(|entry| entry.info.as_ref().map(|info| (entry.path.as_path(), info)))
-            .collect();
-        if let Err(error) = database.batch_upsert_scanned_files(&cache_entries) {
-            self.observer.scan_cache_write_failed(&error);
+        // Phase 3: write new ffprobe results back to the scan cache in a single transaction unless dry-run.
+        if !self.options.dry_run {
+            let cache_entries: Vec<(&Path, &VideoInfo)> = probe_results
+                .iter()
+                .filter_map(|entry| entry.info.as_ref().map(|info| (entry.path.as_path(), info)))
+                .collect();
+            if let Err(error) = database.batch_upsert_scanned_files(&cache_entries) {
+                self.observer.scan_cache_write_failed(&error);
+            }
         }
 
         // Combine cache hits (Phase 1) with ffprobe results (Phase 2)

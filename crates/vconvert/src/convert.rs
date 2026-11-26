@@ -108,10 +108,12 @@ impl<'a> VideoConvert<'a> {
             analysis_output.conversions,
         );
 
-        // Store every file that needs processing in a single transaction
-        match database.batch_upsert_pending_files(&plan.pending_entries()) {
-            Ok(updated_count) => self.observer.pending_files_saved(updated_count),
-            Err(error) => self.observer.pending_files_save_failed(&error),
+        // Store every file that needs processing in a single transaction unless this is a dry run.
+        if !self.options.dry_run {
+            match database.batch_upsert_pending_files(&plan.pending_entries()) {
+                Ok(updated_count) => self.observer.pending_files_saved(updated_count),
+                Err(error) => self.observer.pending_files_save_failed(&error),
+            }
         }
 
         plan.skip(self.options.skip_remux, self.options.skip_convert);
@@ -135,9 +137,11 @@ impl<'a> VideoConvert<'a> {
     /// # Errors
     /// Returns an error if the database cannot be read or updated.
     pub fn run_from_database(&self, database: &mut Database, abort_flag: &AtomicBool) -> Result<Option<RunSummary>> {
-        let missing_count = database.remove_missing_files()?;
-        let changed_count = database.remove_changed_files()?;
-        self.observer.database_cleaned(missing_count, changed_count);
+        if !self.options.dry_run {
+            let missing_count = database.remove_missing_files()?;
+            let changed_count = database.remove_changed_files()?;
+            self.observer.database_cleaned(missing_count, changed_count);
+        }
 
         let pending_files = database.get_pending_files(&self.options.pending_file_filter())?;
         if pending_files.is_empty() {
@@ -173,7 +177,9 @@ impl<'a> VideoConvert<'a> {
             // A blocked row is dropped from the database and a new scan classifies the file again.
             if let Some(reason) = database_output_conflict(&processable, self.options.overwrite, &mut reservations) {
                 self.observer.pending_file_blocked(&processable.file.path, &reason);
-                if let Err(error) = database.remove_pending_file(&pending_file.full_path) {
+                if !self.options.dry_run
+                    && let Err(error) = database.remove_pending_file(&pending_file.full_path)
+                {
                     self.observer.database_removal_failed(&pending_file.full_path, &error);
                 }
                 continue;
@@ -274,7 +280,9 @@ impl<'a> VideoConvert<'a> {
 
             if !file.file.path.exists() {
                 self.observer.file_missing(&file.file.path);
-                if let Err(error) = database.remove_pending_file(&file.file.path) {
+                if !self.options.dry_run
+                    && let Err(error) = database.remove_pending_file(&file.file.path)
+                {
                     self.observer.database_removal_failed(&file.file.path, &error);
                 }
                 continue;
@@ -297,7 +305,9 @@ impl<'a> VideoConvert<'a> {
 
             if !matches!(result, ProcessResult::Failed { .. }) {
                 *processed_count += 1;
-                if let Err(error) = database.remove_pending_file(&file.file.path) {
+                if !self.options.dry_run
+                    && let Err(error) = database.remove_pending_file(&file.file.path)
+                {
                     self.observer.database_removal_failed(&file.file.path, &error);
                 }
             }
@@ -509,5 +519,30 @@ mod test_process_files_with_db_cleanup {
         assert_eq!(outcome, ProcessingOutcome::Aborted);
         assert_eq!(stats.files_converted, 0);
         assert_eq!(pending_paths(&database).len(), 1);
+    }
+
+    #[test]
+    fn dryrun_run_from_database_keeps_all_pending_rows_unchanged() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut database = Database::open_in_memory().expect("open db");
+        let _files = pending_files(directory.path(), &database, &["first.mkv", "gone.mkv"]);
+        std::fs::remove_file(directory.path().join("gone.mkv")).expect("remove gone");
+
+        let options = ConvertOptions {
+            dry_run: true,
+            ..ConvertOptions::default()
+        };
+        let video_convert = converter(options);
+        let summary = video_convert
+            .run_from_database(&mut database, &AtomicBool::new(false))
+            .expect("dryrun from db")
+            .expect("should return summary");
+
+        assert_eq!(summary.stats.files_converted, 1);
+        assert_eq!(
+            pending_paths(&database).len(),
+            2,
+            "dry-run must not remove pending rows from the database"
+        );
     }
 }
