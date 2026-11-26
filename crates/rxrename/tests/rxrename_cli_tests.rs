@@ -87,6 +87,28 @@ fn real_run_renames_every_level_and_a_second_run_changes_nothing() {
 }
 
 #[test]
+fn blocked_suffix_chain_keeps_both_sources() {
+    let tree = TempTree::with_entries(&["downloads/x.txt/"]);
+    tree.file_with("downloads/x_1.txt", "newer");
+    tree.file_with("downloads/x_1_1.txt", "newest");
+    let before = tree.snapshot();
+
+    let preview = run_rxrename(&tree, &["downloads", "--dryrun"]);
+    assert!(preview.status.success(), "{preview:?}");
+    let printed = stdout(&preview);
+    assert!(printed.contains("0 files would be renamed"), "{printed}");
+    assert!(printed.contains("0 files would be deleted"), "{printed}");
+
+    let output = run_rxrename(&tree, &["downloads"]);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(tree.snapshot(), before);
+    let printed = stdout(&output);
+    assert!(printed.contains("0 files renamed"), "{printed}");
+    assert!(printed.contains("0 files deleted"), "{printed}");
+}
+
+#[test]
 fn missing_path_is_an_error() {
     let tree = TempTree::new();
 
