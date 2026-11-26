@@ -17,6 +17,10 @@ name = "rsbump"
 path = "src/bin/rsbump/main.rs"
 required-features = ["cli"]
 
+[[test]]
+name = "git_diagnostics"
+required-features = ["cli"]
+
 [features]
 default = ["cli"]
 # Dependencies of the rsbump binary, left out by library users with `default-features = false`.
@@ -46,6 +50,7 @@ colored = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 
 [dev-dependencies]
+cli-tools-common = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [lints]
