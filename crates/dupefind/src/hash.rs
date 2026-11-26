@@ -77,7 +77,7 @@ impl CalculatedFileHash {
     }
 }
 
-/// Find files that need hashing, skipping sizes represented by only one file.
+/// Find files that need hashing, skipping empty files and sizes represented by only one file.
 #[must_use]
 pub fn collect_hash_candidates(files: &[DupeFileInfo]) -> HashCandidateCollection {
     let mut candidates_by_size: HashMap<u64, Vec<HashCandidate>> = HashMap::new();
@@ -85,6 +85,7 @@ pub fn collect_hash_candidates(files: &[DupeFileInfo]) -> HashCandidateCollectio
 
     for (index, file) in files.iter().enumerate() {
         match fingerprint_file(&file.path) {
+            Ok(fingerprint) if fingerprint.size_bytes == 0 => {}
             Ok(fingerprint) => candidates_by_size
                 .entry(fingerprint.size_bytes)
                 .or_default()
@@ -129,11 +130,12 @@ pub fn calculate_file_hash_with_progress(
     Ok(CalculatedFileHash::from_candidate(candidate, hash))
 }
 
-/// Group file indices by equal size and BLAKE3 hash.
+/// Group non-empty file indices by equal size and BLAKE3 hash.
 #[must_use]
 pub fn group_hash_matches(hash_values: &[IndexedFileHash]) -> Vec<Vec<usize>> {
     hash_values
         .iter()
+        .filter(|value| value.size_bytes > 0)
         .map(|value| ((value.size_bytes, value.blake3_hash.as_str()), value.index))
         .into_group_map()
         .into_values()
@@ -241,6 +243,27 @@ mod test_hash_candidates {
         assert_eq!(reported_bytes, candidate.fingerprint.size_bytes);
         assert_eq!(calculated.hash, blake3::hash(b"same bytes"));
     }
+
+    #[test]
+    fn skips_zero_byte_files() {
+        let temp_directory = tempfile::TempDir::new().expect("temp dir");
+        let first_empty = temp_directory.path().join("movie_a.mp4");
+        let second_empty = temp_directory.path().join("movie_b.mp4");
+        std::fs::write(&first_empty, b"").expect("write empty 1");
+        std::fs::write(&second_empty, b"").expect("write empty 2");
+
+        let files = vec![
+            DupeFileInfo::new(first_empty, "mp4".to_string()),
+            DupeFileInfo::new(second_empty, "mp4".to_string()),
+        ];
+
+        let collection = collect_hash_candidates(&files);
+        assert!(
+            collection.candidates.is_empty(),
+            "0-byte files must not become hash candidates"
+        );
+        assert!(collection.errors.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +311,12 @@ mod test_group_hash_matches {
         groups.sort();
 
         assert_eq!(groups, vec![vec![0, 2], vec![3, 4]]);
+    }
+
+    #[test]
+    fn skips_zero_byte_hash_entries() {
+        let values = vec![indexed_hash(0, 0, "empty_hash"), indexed_hash(1, 0, "empty_hash")];
+
+        assert_eq!(group_hash_matches(&values), [] as [Vec<usize>; 0]);
     }
 }
