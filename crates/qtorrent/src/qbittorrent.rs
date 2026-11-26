@@ -379,6 +379,10 @@ impl QBittorrentClient {
             bail!("Authentication required or session expired");
         }
 
+        if status != StatusCode::OK {
+            bail!("Failed to get torrent list: HTTP {status}");
+        }
+
         let body = response.text().await.context("Failed to read torrent list response")?;
 
         let torrents: Vec<TorrentListItem> =
