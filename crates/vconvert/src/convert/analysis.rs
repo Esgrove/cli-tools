@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -28,6 +29,7 @@ impl VideoConvert<'_> {
         files: Vec<VideoFile>,
         database: &mut Database,
         mut subtitle_matches: HashMap<PathBuf, Vec<SubtitleFile>>,
+        abort_flag: &AtomicBool,
     ) -> AnalysisOutput {
         let start = Instant::now();
         let total_files = files.len();
@@ -77,7 +79,7 @@ impl VideoConvert<'_> {
         };
 
         // Phase 3: write new ffprobe results back to the scan cache in a single transaction unless dry-run.
-        if !self.options.dry_run {
+        if !self.options.dry_run && !abort_flag.load(Ordering::SeqCst) {
             let cache_entries: Vec<(&Path, &VideoInfo)> = probe_results
                 .iter()
                 .filter_map(|entry| entry.info.as_ref().map(|info| (entry.path.as_path(), info)))
@@ -96,6 +98,9 @@ impl VideoConvert<'_> {
         let mut analysis_stats = AnalysisStats::default();
 
         for result in results {
+            if abort_flag.load(Ordering::SeqCst) {
+                break;
+            }
             match result {
                 AnalysisResult::NeedsConversion(processable) => {
                     analysis_stats.to_convert += 1;
