@@ -514,7 +514,9 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
     let directory = if path.is_dir() {
         path
     } else {
-        path.parent().unwrap_or(path)
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
     };
 
     let mut wide: Vec<u16> = directory.as_os_str().encode_wide().collect();
@@ -599,14 +601,14 @@ pub fn is_directory_empty(dir: &Path) -> bool {
 #[must_use]
 pub fn insert_suffix_before_extension(path: &Path, suffix: &str) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-
-    let new_name = if extension.is_empty() {
-        format!("{stem}{suffix}")
-    } else {
-        format!("{stem}{suffix}.{extension}")
-    };
+    let mut new_name = path.file_stem().map_or_default(OsStr::to_os_string);
+    new_name.push(suffix);
+    if let Some(extension) = path.extension()
+        && !extension.is_empty()
+    {
+        new_name.push(".");
+        new_name.push(extension);
+    }
 
     if parent.as_os_str().is_empty() {
         PathBuf::from(new_name)
@@ -732,7 +734,11 @@ fn resolve_existing_path(filepath: PathBuf) -> Result<PathBuf> {
 
     // Canonicalize fails for network drives on Windows :(
     if path_to_string(&absolute_input_path).starts_with(r"\\?") && !path_to_string(&filepath).starts_with(r"\\?") {
-        Ok(filepath)
+        if filepath.is_absolute() {
+            Ok(filepath)
+        } else {
+            Ok(env::current_dir()?.join(filepath))
+        }
     } else {
         Ok(absolute_input_path)
     }
@@ -803,12 +809,12 @@ pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Re
 pub fn get_unique_path(dir: &Path, filename: &str, stem: &str, extension: &str) -> PathBuf {
     let mut path = dir.join(filename);
 
-    if !path.exists() {
+    if std::fs::symlink_metadata(&path).is_err() {
         return path;
     }
 
     let mut counter = 1;
-    while path.exists() {
+    while std::fs::symlink_metadata(&path).is_ok() {
         let new_name = if extension.is_empty() {
             format!("{stem}.{counter}")
         } else {
@@ -1973,6 +1979,27 @@ mod additional_path_utility_tests {
 
         let result = get_unique_path(dir.path(), "file.txt", "file", "txt");
         assert_eq!(result, dir.path().join("file.3.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_unique_path_does_not_collide_with_dangling_symlink() {
+        let dir = tempdir().unwrap();
+        let dangling = dir.path().join("report.pdf");
+        std::os::unix::fs::symlink(dir.path().join("missing.pdf"), &dangling).unwrap();
+
+        let result = get_unique_path(dir.path(), "report.pdf", "report", "pdf");
+        assert_eq!(result, dir.path().join("report.1.pdf"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn insert_suffix_before_extension_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"dir/movie\xff.mp4"));
+        let result = insert_suffix_before_extension(path, ".x265");
+        assert_eq!(result.as_os_str().as_bytes(), b"dir/movie\xff.x265.mp4");
     }
 
     #[test]

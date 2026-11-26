@@ -192,23 +192,69 @@ pub fn safe_rename(source: &Path, target: &Path, policy: OverwritePolicy) -> io:
 /// # Errors
 /// Returns an error if the temporary file cannot be written or renamed over the target.
 pub fn write_atomically(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    use std::io::Write;
+
     let target = if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         fs::canonicalize(path)?
     } else {
         path.to_path_buf()
     };
-    let temporary = unique_sibling_path(&target, "tmp");
+    let target_permissions = fs::metadata(&target).ok().map(|metadata| metadata.permissions());
+
+    let (mut temp_file, temporary) = create_unique_sibling_file(&target, "tmp", target_permissions.as_ref())?;
     let result = (|| {
-        fs::write(&temporary, contents)?;
-        if let Ok(metadata) = fs::metadata(&target) {
-            fs::set_permissions(&temporary, metadata.permissions())?;
+        temp_file.write_all(contents.as_ref())?;
+        drop(temp_file);
+        if let Some(permissions) = target_permissions {
+            fs::set_permissions(&temporary, permissions)?;
         }
         fs::rename(&temporary, &target)
     })();
     if result.is_err() {
+        if let Ok(metadata) = fs::metadata(&temporary) {
+            let mut permissions = metadata.permissions();
+            if permissions.readonly() {
+                #[allow(clippy::permissions_set_readonly_false)]
+                permissions.set_readonly(false);
+                let _ = fs::set_permissions(&temporary, permissions);
+            }
+        }
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Create a brand-new sibling temporary file with `O_EXCL` semantics so concurrent writers cannot collide.
+fn create_unique_sibling_file(
+    target: &Path,
+    extension: &str,
+    target_permissions: Option<&fs::Permissions>,
+) -> io::Result<(fs::File, PathBuf)> {
+    let mut counter: u32 = 0;
+    loop {
+        let candidate = if counter == 0 {
+            append_extension_to_path(target, extension)
+        } else {
+            append_extension_to_path(target, format!("{counter}.{extension}"))
+        };
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(permissions) = target_permissions {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            // Ensure the file starts at least as restrictive as the target while remaining writable during staging.
+            options.mode(permissions.mode() | 0o200);
+        }
+        #[cfg(not(unix))]
+        let _ = target_permissions;
+        match options.open(&candidate) {
+            Ok(file) => return Ok((file, candidate)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                counter = counter.checked_add(1).ok_or(error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Recursively copy a directory and its contents, keeping file modification times.
