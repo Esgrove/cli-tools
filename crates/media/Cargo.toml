@@ -16,12 +16,13 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 cli-tools-common = { workspace = true }
+cli-tools-db = { workspace = true, optional = true }
 colored = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 
 [features]
-scan-cache = ["cli-tools-common/sqlite", "dep:rusqlite"]
+scan-cache = ["dep:cli-tools-db", "dep:rusqlite"]
 
 [dev-dependencies]
 proptest = { workspace = true }

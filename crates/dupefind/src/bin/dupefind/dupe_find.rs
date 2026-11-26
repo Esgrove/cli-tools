@@ -16,8 +16,8 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use walkdir::WalkDir;
 
-use cli_tools_common::locks::ActiveLockStore;
 use cli_tools_common::{MoveResult, OverwritePolicy, TargetReservations, print_error, print_yellow};
+use cli_tools_db::locks::ActiveLockStore;
 use cli_tools_dupefind::{
     DupeFileInfo, DuplicateGroup, DuplicateMatchOptions, filter_ignored_groups, find_duplicates,
     find_hash_only_duplicates, format_filename_with_highlight, group_matches_ignore,

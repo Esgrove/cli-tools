@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use cli_tools_common::TargetReservations;
-use cli_tools_common::locks::{AcquireOutcome, ActiveLockStore, DEFAULT_LOCK_TTL_SECS};
+use cli_tools_db::locks::{AcquireOutcome, ActiveLockStore, DEFAULT_LOCK_TTL_SECS};
 
 use crate::classification::database_output_conflict_with_mode;
 use crate::database::{Database, PendingAction};

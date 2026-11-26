@@ -23,10 +23,10 @@ default = ["cli"]
 cli = [
     "cli-tools-common/completion",
     "cli-tools-common/config",
-    "cli-tools-common/sqlite",
     "cli-tools-media/scan-cache",
     "dep:clap",
     "dep:clap_complete",
+    "dep:cli-tools-db",
     "dep:colored",
     "dep:indicatif",
     "dep:rusqlite",
@@ -45,6 +45,7 @@ walkdir = { workspace = true }
 
 clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
+cli-tools-db = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }

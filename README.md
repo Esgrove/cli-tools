@@ -2,7 +2,7 @@
 
 Various CLI helper tools in one Rust workspace.
 Each tool is its own crate under [`crates/`](./crates) that produces a separate binary.
-Shared helpers live in the [`cli-tools-common`](./crates/common)
+Shared helpers live in the [`cli-tools-common`](./crates/common), [`cli-tools-db`](./crates/db),
 and [`cli-tools-media`](./crates/media) library crates.
 
 ```shell
@@ -45,6 +45,7 @@ cli-tools-dirmove = { git = "https://github.com/Esgrove/cli-tools", default-feat
 | Crate                                     | Binary     | Library contents                                           |
 | ----------------------------------------- | ---------- | ---------------------------------------------------------- |
 | [`cli-tools-common`](./crates/common)     |            | Path, formatting, printing, config, and completion helpers |
+| [`cli-tools-db`](./crates/db)             |            | Shared SQLite database, migrations, and active file locks  |
 | [`cli-tools-media`](./crates/media)       |            | Resolution parsing, video metadata, hashing, scan cache    |
 | [`cli-tools-dirmove`](./crates/dirmove)   | `dirmove`  | Scanning, matching, prefix grouping, unpacking, merging    |
 | [`cli-tools-dots`](./crates/dots)         | `dots`     | Dot formatting and renaming                                |

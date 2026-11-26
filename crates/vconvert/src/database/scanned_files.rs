@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cli_tools_common::sqlite;
+use cli_tools_db::sqlite;
 use cli_tools_media::scan_cache::is_definitively_missing;
 use rayon::prelude::*;
 use rusqlite::params;

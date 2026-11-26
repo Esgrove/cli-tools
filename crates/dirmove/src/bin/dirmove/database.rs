@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use cli_tools_common::sqlite;
+use cli_tools_db::sqlite;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use cli_tools_dirmove::utils;

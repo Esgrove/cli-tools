@@ -37,7 +37,8 @@ cli = [
 
 [dependencies]
 anyhow = { workspace = true }
-cli-tools-common = { workspace = true, features = ["sqlite"] }
+cli-tools-common = { workspace = true }
+cli-tools-db = { workspace = true }
 cli-tools-media = { workspace = true, features = ["scan-cache"] }
 rayon = { workspace = true }
 regex = { workspace = true }

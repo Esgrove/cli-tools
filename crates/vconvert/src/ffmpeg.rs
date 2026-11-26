@@ -358,8 +358,8 @@ pub fn cleanup_registered_resources() {
         std::mem::take(&mut *list)
     };
     for (db_path, owner_id) in owners {
-        if let Ok(mut conn) = cli_tools_common::sqlite::open_at(&db_path)
-            && let Ok(tx) = cli_tools_common::sqlite::immediate_transaction(&mut conn)
+        if let Ok(mut conn) = cli_tools_db::sqlite::open_at(&db_path)
+            && let Ok(tx) = cli_tools_db::sqlite::immediate_transaction(&mut conn)
         {
             let _ = tx.execute(
                 "DELETE FROM active_locks WHERE owner_id = ?1",

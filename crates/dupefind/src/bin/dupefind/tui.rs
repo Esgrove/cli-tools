@@ -606,7 +606,7 @@ fn apply_actions_with(
     let lock_store = if cfg!(test) {
         None
     } else {
-        cli_tools_common::locks::ActiveLockStore::open_default("dupefind").ok()
+        cli_tools_db::locks::ActiveLockStore::open_default("dupefind").ok()
     };
     let mut scan_cache = if cfg!(test) {
         None
@@ -656,7 +656,7 @@ fn apply_single_group_action(
     sorted_files: &[&DupeFileInfo],
     action: &DuplicateAction,
     delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
-    lock_store: Option<&cli_tools_common::locks::ActiveLockStore>,
+    lock_store: Option<&cli_tools_db::locks::ActiveLockStore>,
     mut scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
 ) -> anyhow::Result<()> {
     match action {
@@ -781,7 +781,7 @@ fn rename_file(source: &Path, target: &Path) -> anyhow::Result<bool> {
 fn delete_all(
     files: &[&DupeFileInfo],
     delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
-    lock_store: Option<&cli_tools_common::locks::ActiveLockStore>,
+    lock_store: Option<&cli_tools_db::locks::ActiveLockStore>,
     mut scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
 ) {
     for file in files {
@@ -793,7 +793,7 @@ fn delete_all(
 fn delete_duplicate(
     path: &Path,
     delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
-    lock_store: Option<&cli_tools_common::locks::ActiveLockStore>,
+    lock_store: Option<&cli_tools_db::locks::ActiveLockStore>,
     scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
 ) -> bool {
     if let Some(store) = lock_store

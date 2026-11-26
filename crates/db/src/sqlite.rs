@@ -36,7 +36,7 @@ pub fn database_path() -> Result<PathBuf> {
     {
         return Ok(PathBuf::from(override_path));
     }
-    crate::data_file_path(DATABASE_FILENAME)
+    cli_tools_common::data_file_path(DATABASE_FILENAME)
 }
 
 /// Return a sibling legacy database path (such as `vconvert.db` or `dirmove.db`)

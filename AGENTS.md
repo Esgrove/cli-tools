@@ -4,7 +4,7 @@
 
 This is a Rust workspace containing multiple CLI utility tools.
 Each tool is its own crate under `crates/` with a package name prefixed by `cli-tools-`.
-Shared helpers live in the `cli-tools-common` and `cli-tools-media` library crates.
+Shared helpers live in the `cli-tools-common`, `cli-tools-db`, and `cli-tools-media` library crates.
 Tools with reusable logic expose it as a library from the same crate,
 so other projects can depend on just that crate and extend it.
 Such a crate puts the dependencies only its binary uses behind a default `cli` feature,
@@ -166,6 +166,9 @@ A binary only crate keeps its binary in `src/main.rs`.
     - The `diff` feature adds `diff.rs`, so crates that do not render diffs avoid the `difference` dependency
     - The `test-support` feature adds `test_support.rs` with `TempTree`,
       which builds nested temporary trees and snapshots them for tests
+- `crates/db/` → `cli-tools-db` - Shared `SQLite` database and concurrency primitives:
+    - `sqlite.rs` - Unified `cli-tools.db` opener, WAL pragmas, per-component migrations, and legacy DB import
+    - `locks.rs` - Cross-tool `active_locks` lease store with background heartbeats and PID liveness checks
 - `crates/media/` → `cli-tools-media` - Media helpers:
     - `resolution.rs` - Video resolution parsing and labelling
     - `video_info.rs` - Video metadata from ffprobe

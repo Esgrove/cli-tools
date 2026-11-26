@@ -13,8 +13,8 @@ use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use cli_tools_common::file_handling::TargetReservations;
-use cli_tools_common::locks::{AcquireOutcome, ActiveLockStore};
 use cli_tools_common::{print_bold, print_green, print_yellow};
+use cli_tools_db::locks::{AcquireOutcome, ActiveLockStore};
 use cli_tools_media::Resolution;
 use cli_tools_media::file_hash::{FileFingerprint, fingerprint_file};
 use cli_tools_media::resolution::print_fuzzy_resolution_ranges;

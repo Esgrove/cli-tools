@@ -27,7 +27,8 @@ regex = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
-cli-tools-common = { workspace = true, features = ["completion", "config", "diff", "sqlite"] }
+cli-tools-common = { workspace = true, features = ["completion", "config", "diff"] }
+cli-tools-db = { workspace = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }

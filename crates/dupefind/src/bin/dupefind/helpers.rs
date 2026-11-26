@@ -46,7 +46,7 @@ pub fn clean_cache(verbose: bool) -> Result<()> {
             "{}",
             format!(
                 "Database: {}",
-                cli_tools_common::sqlite::database_path()
+                cli_tools_db::sqlite::database_path()
                     .map_or_else(|_| "cli-tools.db".to_string(), |path| path.display().to_string())
             )
             .bold()

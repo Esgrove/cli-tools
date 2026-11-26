@@ -15,11 +15,7 @@ pub mod date;
 #[cfg(feature = "diff")]
 pub mod diff;
 pub mod file_handling;
-#[cfg(feature = "sqlite")]
-pub mod locks;
 pub mod simd;
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod utils;
@@ -37,8 +33,6 @@ pub use file_handling::{
     paths_refer_to_same_entry, paths_refer_to_same_file, remove_empty_directories, safe_move_file, safe_rename,
     unique_sibling_path, write_atomically,
 };
-#[cfg(feature = "sqlite")]
-pub use locks::{AcquireOutcome, ActiveLockStore, FileLockGuard, LockInfo};
 pub use utils::{
     NameFilter, WalkOptions, collect_entries, command_exists, count_files, data_dir, data_file_path, find_command,
     get_relative_path_from_current_working_directory, get_relative_path_or_filename, glob_to_regex, leading_whitespace,

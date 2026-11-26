@@ -6,8 +6,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use cli_tools_common::locks::{AcquireOutcome, ActiveLockStore};
 use cli_tools_common::{OverwritePolicy, RenameOutcome};
+use cli_tools_db::locks::{AcquireOutcome, ActiveLockStore};
 
 use super::VideoConvert;
 use crate::database::Database;

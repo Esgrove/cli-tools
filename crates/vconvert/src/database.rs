@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use cli_tools_common::sqlite;
+use cli_tools_db::sqlite;
 use cli_tools_media::scan_cache::{ensure_schema as ensure_media_cache_schema, is_definitively_missing};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -794,7 +794,7 @@ impl Database {
 
     /// Initialize shared media cache, active locks, and `pending_files` schemas via versioned migrations.
     fn initialize_with_legacy(&mut self, legacy_vconvert_db: Option<&Path>) -> Result<()> {
-        cli_tools_common::locks::ensure_schema(&mut self.connection)?;
+        cli_tools_db::locks::ensure_schema(&mut self.connection)?;
         ensure_media_cache_schema(&mut self.connection, legacy_vconvert_db)?;
 
         let was_uninitialized = sqlite::current_component_version(&self.connection, PENDING_COMPONENT)? == 0;

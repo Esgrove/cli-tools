@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 
-use cli_tools_common::locks::ActiveLockStore;
 use cli_tools_common::{
     TargetReservations, count_label, format_text_with_highlight, path_to_filename_string, print_bold, print_error,
     print_yellow,
 };
+use cli_tools_db::locks::ActiveLockStore;
 use cli_tools_dirmove::{
     DirectoryInfo, DirectoryMatcher, DirectoryMerger, FileInfo, FileMatch, PrefixGrouper, Roots, Scanner, Unpacker,
     matcher, merge, mover, utils,

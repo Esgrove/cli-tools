@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use cli_tools_common::locks::{AcquireOutcome, ActiveLockStore};
 use cli_tools_common::{print_error, print_yellow};
+use cli_tools_db::locks::{AcquireOutcome, ActiveLockStore};
 use cli_tools_media::file_hash::{FileFingerprint, fingerprint_file};
 use cli_tools_media::scan_cache::{CachedVideoInfo, ScanCache};
 use cli_tools_media::video_info::{VideoInfo, VideoStats, ffmpeg_input_path};
