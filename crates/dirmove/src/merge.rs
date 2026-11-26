@@ -214,6 +214,7 @@ fn collect_merge_parent_directories(output_roots: &[PathBuf], recurse: bool) -> 
     if recurse {
         for output_root in output_roots.iter().filter(|output_root| output_root.is_dir()) {
             for entry in WalkDir::new(output_root)
+                .min_depth(1)
                 .into_iter()
                 .filter_entry(|entry| !cli_tools_common::should_skip_entry(entry))
                 .filter_map(Result::ok)
@@ -1171,6 +1172,18 @@ mod test_find_prefix_merge_pairs {
                 ("shows/drama/studio beta".to_string(), "shows/drama/beta".to_string()),
                 ("studio alpha".to_string(), "alpha".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn recursive_prefix_merge_never_scans_parent_of_output_root() {
+        let tree = TempTree::with_entries(&["target/", "studio sibling/", "sibling/"]);
+        let filter = NameFilter::new(["studio"], std::iter::empty::<&str>());
+
+        let found = find_prefix_merge_pairs(&[tree.join("target")], true, &filter).expect("find pairs");
+        assert!(
+            found.is_empty(),
+            "recursive prefix merge must never scan output_root.parent(): {found:?}"
         );
     }
 }
