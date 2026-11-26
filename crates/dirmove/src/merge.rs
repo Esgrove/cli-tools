@@ -93,6 +93,7 @@ impl DirectoryMerger {
         observer.on_merge_event(MergeEvent::Started { source, target });
 
         let mut skipped_files = Vec::new();
+        let mut kept_in_source = false;
         let mut moved_count = 0;
         let mut file_entries = Vec::new();
         let mut directory_entries = Vec::new();
@@ -100,36 +101,50 @@ impl DirectoryMerger {
         let entries: Vec<_> = std::fs::read_dir(source)?.filter_map(Result::ok).collect();
         for entry in entries {
             let entry_path = entry.path();
-            let Some(entry_name) = entry_path.file_name() else {
+            let Some(raw_entry_name) = entry_path.file_name() else {
                 continue;
             };
 
             // Moving the entry holding the target would move a directory into itself.
             if target.starts_with(&entry_path) || cli_tools_common::paths_refer_to_same_file(&entry_path, target) {
-                continue;
-            }
-
-            let target_path = target.join(entry_name);
-            let entry_name = entry_name.to_string_lossy();
-
-            if std::fs::symlink_metadata(&target_path).is_ok() {
-                if self.overwrite {
-                    observer.on_merge_event(MergeEvent::Overwriting(&entry_name));
-                } else {
-                    skipped_files.push(entry_name.into_owned());
-                    continue;
-                }
-            }
-
-            if self.dry_run {
-                observer.on_merge_event(MergeEvent::WouldMove(&entry_name));
-                moved_count += 1;
+                kept_in_source = true;
                 continue;
             }
 
             // The entry's own type is used so a symlink to a directory moves as a link,
             // instead of merging the files out of the directory it points to.
-            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            let is_real_directory = entry.file_type().is_ok_and(|file_type| file_type.is_dir());
+            let (target_path, display_name) = if is_real_directory {
+                (
+                    target.join(raw_entry_name),
+                    raw_entry_name.to_string_lossy().into_owned(),
+                )
+            } else {
+                // Match mover::move_files_to_target_dir, which writes files under their sanitized UTF-8 name.
+                let sanitized = path_to_filename_string(&entry_path);
+                if sanitized.is_empty() {
+                    kept_in_source = true;
+                    continue;
+                }
+                (target.join(&sanitized), sanitized)
+            };
+
+            if std::fs::symlink_metadata(&target_path).is_ok() {
+                if self.overwrite {
+                    observer.on_merge_event(MergeEvent::Overwriting(&display_name));
+                } else {
+                    skipped_files.push(display_name);
+                    continue;
+                }
+            }
+
+            if self.dry_run {
+                observer.on_merge_event(MergeEvent::WouldMove(&display_name));
+                moved_count += 1;
+                continue;
+            }
+
+            if is_real_directory {
                 directory_entries.push((entry_path, target_path));
             } else {
                 file_entries.push(entry_path);
@@ -161,7 +176,9 @@ impl DirectoryMerger {
         }
 
         if self.dry_run {
-            observer.on_merge_event(MergeEvent::WouldRemoveSource(source));
+            if skipped_files.is_empty() && !kept_in_source {
+                observer.on_merge_event(MergeEvent::WouldRemoveSource(source));
+            }
         } else if std::fs::read_dir(source).is_ok_and(|mut entries| entries.next().is_none()) {
             match std::fs::remove_dir(source) {
                 Ok(()) => observer.on_merge_event(MergeEvent::SourceRemoved(source)),
@@ -1110,6 +1127,19 @@ mod test_merge_events {
                 "target/nested/two.txt: two",
                 "target/one.txt: one"
             ]
+        );
+    }
+
+    #[test]
+    fn dry_run_does_not_report_removing_source_when_entries_are_skipped() {
+        let tree = TempTree::new();
+        tree.file_with("source/conflict.txt", "new");
+        tree.file_with("target/conflict.txt", "existing");
+
+        let events = merge_recorded(&tree, false, true);
+        assert!(
+            !events.iter().any(|event| event.contains("would remove")),
+            "dry-run must not report WouldRemoveSource when entries were skipped: {events:?}"
         );
     }
 
