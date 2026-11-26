@@ -319,6 +319,7 @@ impl DotRename {
             let source_file = entry.path();
             let relative_path = source_file.strip_prefix(source_dir)?;
             let target_file = target_dir.join(relative_path);
+            cli_tools_common::check_destination_parents(target_dir, &target_file)?;
 
             // Create parent directories if they don't exist
             if let Some(parent) = target_file.parent() {
@@ -2815,6 +2816,26 @@ mod test_symlinks {
             "must not move files through a destination symlink outside root"
         );
         assert!(tree.exists("root/some_dir/a.txt"));
+    }
+
+    #[test]
+    fn merge_refuses_intermediate_destination_symlink() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real/deep/track.txt", "original");
+        tree.file_with("root/some_dir/languages/deep/track.txt", "local");
+        tree.symlink("outside/real", "root/Some Dir/languages");
+        let before = tree.snapshot();
+
+        run(
+            &tree,
+            DotRenameConfig {
+                rename_directories: true,
+                overwrite: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(tree.snapshot(), before);
     }
 
     #[test]

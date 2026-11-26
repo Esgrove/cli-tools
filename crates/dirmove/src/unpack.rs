@@ -185,7 +185,7 @@ impl Unpacker {
                     observer.on_unpack_event(UnpackEvent::DuplicateTarget(source));
                     continue;
                 }
-                match self.move_directory(source, target, &mut touched_directories) {
+                match self.move_directory(source, target, &parent, &mut touched_directories) {
                     Ok(EntryMove::Moved) => {}
                     Ok(EntryMove::SkippedExisting) => {
                         observer.on_unpack_event(UnpackEvent::SkippedExistingDirectory(target));
@@ -198,7 +198,7 @@ impl Unpacker {
                     observer.on_unpack_event(UnpackEvent::DuplicateTarget(source));
                     continue;
                 }
-                match self.move_file(source, target, &mut touched_directories) {
+                match self.move_file(source, target, &parent, &mut touched_directories) {
                     Ok(EntryMove::Moved) => {}
                     Ok(EntryMove::SkippedExisting) => {
                         observer.on_unpack_event(UnpackEvent::SkippedExistingFile(target));
@@ -362,8 +362,10 @@ impl Unpacker {
         &self,
         source: &Path,
         target: &Path,
+        destination_root: &Path,
         touched_directories: &mut HashSet<PathBuf>,
     ) -> Result<EntryMove> {
+        cli_tools_common::check_destination_parents(destination_root, target)?;
         if std::fs::symlink_metadata(target).is_ok() && !self.overwrite {
             return Ok(EntryMove::SkippedExisting);
         }
@@ -381,7 +383,14 @@ impl Unpacker {
     ///
     /// Tries a rename first, and falls back to a copy and removal for cross-device moves.
     /// The source and target parents are recorded in `touched_directories`.
-    fn move_file(&self, source: &Path, target: &Path, touched_directories: &mut HashSet<PathBuf>) -> Result<EntryMove> {
+    fn move_file(
+        &self,
+        source: &Path,
+        target: &Path,
+        destination_root: &Path,
+        touched_directories: &mut HashSet<PathBuf>,
+    ) -> Result<EntryMove> {
+        cli_tools_common::check_destination_parents(destination_root, target)?;
         if std::fs::symlink_metadata(target).is_ok() && !self.overwrite {
             return Ok(EntryMove::SkippedExisting);
         }
@@ -1594,6 +1603,29 @@ mod test_unpack_events {
             ["unwanted .unwanted", "planned 1 files 0 directories into Movie"]
         );
         assert_eq!(tree.snapshot(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_unpack_refuses_intermediate_destination_symlink() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real/deep/english.srt", "original");
+        tree.file_with("Library/Movie/subs/languages/deep/subs/english.srt", "local");
+        tree.file_with("Library/Movie/subs/languages/deep/subs/extra/info.txt", "local info");
+        tree.symlink("outside/real", "Library/Movie/languages");
+        let before = tree.snapshot();
+
+        let events = unpack_recorded(&tree, true, false);
+
+        assert_eq!(tree.snapshot(), before);
+        assert_eq!(
+            events,
+            [
+                "planned 1 files 1 directories into Movie",
+                "failed extra",
+                "failed english.srt"
+            ]
+        );
     }
 
     #[test]
