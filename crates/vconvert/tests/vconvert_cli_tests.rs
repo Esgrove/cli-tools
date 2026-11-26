@@ -18,7 +18,9 @@ for argument; do last="$argument"; done
 codec=h264; /usr/bin/grep -q hevc "$last" && codec=hevc
 case "$*" in *csv=p=0*) exit 0;; esac
 echo "codec_name=$codec"; echo "width=1920"; echo "height=1080"; echo "r_frame_rate=24/1"; echo "pix_fmt=yuv420p"
-echo "bit_rate=99000000"; echo "duration=100.0"
+echo "bit_rate=99000000"
+duration=$(/usr/bin/awk -F= '/^duration=/ {print $2; exit}' "$last")
+echo "duration=${duration:-100.0}"
 "#;
 
 /// Fake `ffmpeg` that exits successfully but writes an empty output file.
@@ -265,6 +267,19 @@ fn movie_remux_keeps_compatible_embedded_subtitles() {
     assert!(final_output.exists());
     assert!(!original.exists());
     assert_eq!(fs::read_to_string(final_output).unwrap(), "hevc\nsubtitle=eng\n");
+}
+
+#[test]
+fn opt_in_duplicate_deletion_accepts_an_approximately_matching_duration() {
+    let sandbox = Sandbox::new(FAKE_FFMPEG);
+    let original = sandbox.videos().join("Interview.mkv");
+    let output = sandbox.videos().join("Interview.x265.mp4");
+    fs::write(&original, b"h264\nduration=3600\n").unwrap();
+    fs::write(&output, b"hevc\nduration=3300\n").unwrap();
+
+    sandbox.run(&["--delete-duplicates", "--delete"]);
+    assert!(!original.exists());
+    assert_eq!(fs::read(output).unwrap(), b"hevc\nduration=3300\n");
 }
 
 #[test]
