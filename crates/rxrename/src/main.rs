@@ -8,14 +8,14 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use walkdir::WalkDir;
 
 use cli_tools_common::{
-    TargetReservations, count_label, os_str_to_string, print_error, print_magenta_bold, print_yellow,
-    resolve_input_path, should_skip_entry, trash_or_delete,
+    OverwritePolicy, TargetReservations, count_label, os_str_to_string, print_error, print_magenta_bold, print_yellow,
+    resolve_input_path, safe_rename, should_skip_entry, trash_or_delete,
 };
 
 /// Action to take when a conflicting unsuffixed file already exists.
@@ -147,7 +147,7 @@ fn main() -> Result<()> {
 
 /// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
 ///
-/// When a matching unsuffixed file already exists, it is deleted (or trashed) before renaming.
+/// An existing unsuffixed file is replaced directly in delete mode, or staged for disposal in trash mode.
 /// Errors for individual files are printed and counted without aborting.
 /// Prints a summary of renamed and removed file counts when finished.
 fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSummary {
@@ -168,7 +168,7 @@ fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSumm
             Ok(Outcome::Skipped) => {}
             Err(e) => {
                 summary.failed += 1;
-                print_error!("{}: {e}", file.display());
+                print_error!("{}: {e:#}", file.display());
             }
         }
     }
@@ -238,7 +238,7 @@ fn process_file(
 
 /// Process a single file ending in `_1` without replacing other sources or earlier destinations in the batch.
 ///
-/// If a matching unsuffixed file already exists, delete or trash it first, then rename.
+/// Keep an existing unsuffixed file recoverable until the replacement succeeds.
 #[allow(clippy::too_many_arguments)]
 fn process_file_in_batch(
     root: &Path,
@@ -303,7 +303,7 @@ fn process_file_in_batch(
         return Ok(Outcome::Skipped);
     }
 
-    let needs_trash = if !batch.previewed_sources.contains(&file_without_suffix)
+    let has_conflict = if !batch.previewed_sources.contains(&file_without_suffix)
         && let Ok(metadata) = std::fs::symlink_metadata(&file_without_suffix)
     {
         if metadata.is_dir() || file_without_suffix.is_dir() {
@@ -334,20 +334,70 @@ fn process_file_in_batch(
 
     if dryrun {
         batch.previewed_sources.insert(file_with_suffix.to_path_buf());
-    } else {
-        if needs_trash {
-            match action {
-                ConflictAction::Delete => std::fs::remove_file(&file_without_suffix)?,
-                ConflictAction::Trash => trash_or_delete(&file_without_suffix)?,
+    } else if has_conflict {
+        match action {
+            ConflictAction::Delete => {
+                safe_rename(file_with_suffix, &file_without_suffix, OverwritePolicy::Overwrite)?;
             }
+            ConflictAction::Trash => replace_with_trash(file_with_suffix, &file_without_suffix, trash_or_delete)?,
         }
+    } else {
         std::fs::rename(file_with_suffix, &file_without_suffix)?;
     }
 
-    Ok(if needs_trash {
+    Ok(if has_conflict {
         Outcome::RenamedAndRemoved
     } else {
         Outcome::Renamed
+    })
+}
+
+/// Stage the old destination on the same volume, then trash it only after the replacement is installed.
+fn replace_with_trash(
+    source: &Path,
+    target: &Path,
+    trash_file: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    let parent = target
+        .parent()
+        .context("Replacement destination has no parent directory")?;
+    let file_name = target.file_name().context("Replacement destination has no file name")?;
+    let backup_directory = tempfile::Builder::new()
+        .prefix(".rxrename-backup-")
+        .tempdir_in(parent)?
+        .keep();
+    let backup = backup_directory.join(file_name);
+    let result = replace_and_trash_backup(source, target, &backup, trash_file);
+    // Never recursively clean up the backup directory, because it may still hold the old destination.
+    let _ = std::fs::remove_dir(backup_directory);
+    result
+}
+
+/// Install the replacement, restoring the backup if the rename fails and keeping it if trash fails.
+fn replace_and_trash_backup(
+    source: &Path,
+    target: &Path,
+    backup: &Path,
+    trash_file: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    std::fs::rename(target, backup).context("Could not stage old destination")?;
+
+    if let Err(error) = std::fs::rename(source, target) {
+        if let Err(restore_error) = safe_rename(backup, target, OverwritePolicy::Error) {
+            anyhow::bail!(
+                "Could not install replacement: {error}. Could not restore old destination: {restore_error}. \
+                 Check the backup at {}",
+                backup.display()
+            );
+        }
+        return Err(error).context("Could not install replacement");
+    }
+
+    trash_file(backup).with_context(|| {
+        format!(
+            "Installed replacement, but could not trash old destination. Check the backup at {}",
+            backup.display()
+        )
     })
 }
 
@@ -652,6 +702,92 @@ mod test_process_file {
 
         assert!(error.to_string().contains("does not end with '_1'"));
         Ok(())
+    }
+
+    #[test]
+    fn delete_mode_keeps_destination_when_source_rename_fails() {
+        use cli_tools_common::test_support::TempTree;
+
+        let tree = TempTree::new();
+        tree.file_with("clip.txt", "old destination");
+        let before = tree.snapshot();
+
+        // Simulate a source that vanished after scanning, so the real rename fails on any platform.
+        let result = process_file(
+            tree.path(),
+            &tree.join("clip_1.txt"),
+            1,
+            1,
+            1,
+            false,
+            ConflictAction::Delete,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(tree.snapshot(), before);
+    }
+
+    #[test]
+    fn trash_mode_keeps_destination_when_source_rename_fails() {
+        use cli_tools_common::test_support::TempTree;
+
+        let tree = TempTree::new();
+        tree.file_with("clip.txt", "old destination");
+        let before = tree.snapshot();
+
+        let result = replace_with_trash(&tree.join("clip_1.txt"), &tree.join("clip.txt"), |path| {
+            std::fs::remove_file(path)
+        });
+
+        assert!(result.is_err());
+        assert_eq!(tree.snapshot(), before);
+    }
+
+    #[test]
+    fn trash_mode_disposes_of_old_destination_only_after_installing_replacement() -> anyhow::Result<()> {
+        use cli_tools_common::test_support::TempTree;
+
+        let tree = TempTree::new();
+        tree.file_with("clip.txt", "old destination");
+        tree.file_with("clip_1.txt", "replacement");
+        let target = tree.join("clip.txt");
+
+        replace_with_trash(&tree.join("clip_1.txt"), &target, |backup| {
+            assert_eq!(std::fs::read(backup)?, b"old destination");
+            assert_eq!(std::fs::read(&target)?, b"replacement");
+            std::fs::remove_file(backup)
+        })?;
+
+        assert_eq!(tree.snapshot(), ["clip.txt: replacement"]);
+        Ok(())
+    }
+
+    #[test]
+    fn trash_failure_leaves_old_destination_in_recovery_directory() {
+        use cli_tools_common::test_support::TempTree;
+
+        let tree = TempTree::new();
+        tree.file_with("clip.txt", "old destination");
+        tree.file_with("clip_1.txt", "replacement");
+        let mut backup_path = None;
+
+        let result = replace_with_trash(&tree.join("clip_1.txt"), &tree.join("clip.txt"), |backup| {
+            backup_path = Some(backup.to_path_buf());
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "trash unavailable",
+            ))
+        });
+
+        let backup_path = backup_path.unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&*backup_path.to_string_lossy())
+        );
+        assert_eq!(std::fs::read(backup_path).unwrap(), b"old destination");
+        assert_eq!(tree.read("clip.txt"), "replacement");
     }
 
     #[test]
