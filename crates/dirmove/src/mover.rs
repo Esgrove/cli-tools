@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use cli_tools_common::{TargetReservations, path_to_filename_string, paths_refer_to_same_file, unique_sibling_path};
+use cli_tools_common::{TargetReservations, path_to_filename_string, unique_sibling_path};
 use cli_tools_media::file_hash::hash_file;
 
 /// Size of chunks used when copying files across devices.
@@ -191,7 +191,7 @@ fn process_file_moves(
             continue;
         }
 
-        if paths_refer_to_same_file(file_path, &new_path) {
+        if cli_tools_common::paths_refer_to_same_entry(file_path, &new_path) {
             observer.on_event(MoveEvent::AlreadyInPlace(&new_path));
             observer.on_progress(expected_size);
             report.skipped_files.push(file_path.clone());
@@ -212,7 +212,7 @@ fn process_file_moves(
             continue;
         }
 
-        match move_single_file(file_path, &new_path, expected_size, observer) {
+        match move_single_file(file_path, &new_path, expected_size, overwrite, observer) {
             Ok(()) => {
                 observer.on_event(MoveEvent::Moved(&file_name));
                 report.moved_files.push(file_path.clone());
@@ -234,11 +234,12 @@ fn process_file_moves(
     Ok(report)
 }
 
-/// Move a single file, falling back to copy-verify-delete when rename cannot cross devices.
+/// Move a single file, falling back to copy-verify-delete only when rename cannot cross devices.
 fn move_single_file(
     source: &Path,
     destination: &Path,
     expected_size: u64,
+    overwrite: bool,
     observer: &mut impl MoveObserver,
 ) -> anyhow::Result<()> {
     // This returns an error for cross-drive moves, which then fall back to the custom copy path.
@@ -249,9 +250,13 @@ fn move_single_file(
         }
         Err(rename_error) => {
             if fs::symlink_metadata(source).is_err() {
-                if destination.exists()
-                    && let Ok(metadata) = fs::metadata(destination)
-                    && metadata.len() == expected_size
+                // On some network filesystems, rename succeeds remotely while returning an error locally.
+                // Only treat as moved when not overwriting a pre-existing file
+                // and the destination is a regular file matching the non-zero source size.
+                if !overwrite
+                    && expected_size > 0
+                    && fs::symlink_metadata(destination)
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == expected_size)
                 {
                     observer.on_progress(expected_size);
                     return Ok(());
@@ -269,6 +274,11 @@ fn move_single_file(
                     destination,
                     error: &rename_error,
                 });
+                return Err(anyhow::Error::new(rename_error).context(format!(
+                    "Failed to rename {} -> {}",
+                    source.display(),
+                    destination.display()
+                )));
             }
         }
     }
@@ -650,7 +660,7 @@ mod test_move_helpers {
         fs::write(&destination, b"existing")?;
         let mut progress = ByteCounter::default();
 
-        move_single_file(&source, &destination, 8, &mut progress)?;
+        move_single_file(&source, &destination, 8, false, &mut progress)?;
 
         assert_eq!(progress.bytes, 8);
         assert_eq!(fs::read(&destination)?, b"existing");
@@ -665,7 +675,7 @@ mod test_move_helpers {
         fs::write(&destination, b"short")?;
         let mut progress = ByteCounter::default();
 
-        let error = move_single_file(&source, &destination, 8, &mut progress)
+        let error = move_single_file(&source, &destination, 8, false, &mut progress)
             .expect_err("mismatched destination should not be treated as completed move");
 
         assert!(error.to_string().contains("source is gone"));
@@ -1023,7 +1033,7 @@ mod test_move_single_file {
         std::fs::write(&source, b"content").expect("file should be written");
         let mut bar = ByteCounter::default();
 
-        move_single_file(&source, &destination, 7, &mut bar).expect("the move should succeed");
+        move_single_file(&source, &destination, 7, false, &mut bar).expect("the move should succeed");
 
         assert!(destination.is_file());
         assert!(!source.exists());
@@ -1038,7 +1048,7 @@ mod test_move_single_file {
         std::fs::write(&destination, b"content").expect("file should be written");
         let mut bar = ByteCounter::default();
 
-        move_single_file(&source, &destination, 7, &mut bar).expect("an already moved file should succeed");
+        move_single_file(&source, &destination, 7, false, &mut bar).expect("an already moved file should succeed");
 
         assert_eq!(bar.bytes, 7, "the observer should still account for the bytes");
     }
@@ -1049,7 +1059,7 @@ mod test_move_single_file {
         let source = directory.path().join("gone.txt");
         let destination = directory.path().join("missing.txt");
 
-        let error = move_single_file(&source, &destination, 7, &mut ByteCounter::default())
+        let error = move_single_file(&source, &destination, 7, false, &mut ByteCounter::default())
             .expect_err("a missing source should fail");
 
         assert!(error.to_string().contains("source is gone"), "{error}");
@@ -1062,7 +1072,7 @@ mod test_move_single_file {
         let destination = directory.path().join("partial.txt");
         std::fs::write(&destination, b"short").expect("file should be written");
 
-        let error = move_single_file(&source, &destination, 7, &mut ByteCounter::default())
+        let error = move_single_file(&source, &destination, 7, false, &mut ByteCounter::default())
             .expect_err("a partial destination should fail");
 
         assert!(error.to_string().contains("source is gone"), "{error}");

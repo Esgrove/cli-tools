@@ -137,12 +137,14 @@ impl Unpacker {
 
     /// Delete unwanted directories and unpack configured directory names under every input root.
     ///
-    /// For each directory to unpack, its entire contents move to its parent directory,
-    /// preserving the structure below it.
-    /// For example, `Example/Videos/Name/file2.txt` moves to `Example/Name/file2.txt` when unpacking "videos".
-    /// A failed deletion or move is reported and the remaining entries are still handled.
-    /// Empty directories left behind by the moves are pruned.
-    /// Without `recurse`, only direct children of each input root are inspected.
+    /// Count unwanted directories and unpack candidate directories under `input_roots`.
+    #[must_use]
+    pub fn count_candidates(&self, input_roots: &[PathBuf], recurse: bool) -> (usize, usize) {
+        let candidates = self.collect_candidates(input_roots, recurse);
+        (candidates.unwanted.len(), candidates.unpack.len())
+    }
+
+    /// Delete unwanted directories (moving them to trash when possible) and unpack configured directory names.
     pub fn unpack(&self, input_roots: &[PathBuf], recurse: bool, observer: &mut impl UnpackObserver) {
         let candidates = self.collect_candidates(input_roots, recurse);
 
@@ -151,7 +153,12 @@ impl Unpacker {
                 observer.on_unpack_event(UnpackEvent::UnwantedDeleted(directory));
                 continue;
             }
-            match std::fs::remove_dir_all(directory) {
+            let remove_result = if cli_tools_common::is_network_path(directory) {
+                std::fs::remove_dir_all(directory)
+            } else {
+                cli_tools_common::trash_or_delete(directory)
+            };
+            match remove_result {
                 Ok(()) => observer.on_unpack_event(UnpackEvent::UnwantedDeleted(directory)),
                 Err(error) => observer.on_unpack_event(UnpackEvent::UnwantedDeleteFailed {
                     directory,
@@ -400,6 +407,13 @@ impl Unpacker {
         cli_tools_common::check_destination_parents(destination_root, target)?;
         if std::fs::symlink_metadata(target).is_ok() && !self.overwrite {
             return Ok(EntryMove::SkippedExisting);
+        }
+
+        if let Some(target_parent) = target.parent()
+            && !target_parent.exists()
+        {
+            std::fs::create_dir_all(target_parent)?;
+            touched_directories.insert(target_parent.to_path_buf());
         }
 
         if let Some(parent) = source.parent() {

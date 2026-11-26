@@ -58,8 +58,8 @@ impl Roots {
                 .collect::<Result<Vec<_>>>()?
         };
 
+        let mut seen = std::collections::HashSet::new();
         let output = if outputs.is_empty() {
-            let mut seen = std::collections::HashSet::new();
             input
                 .iter()
                 .map(|path| {
@@ -72,10 +72,17 @@ impl Roots {
                 .filter(|path| seen.insert(path.clone()))
                 .collect()
         } else {
-            outputs
-                .iter()
-                .map(|path| cli_tools_common::resolve_input_path(Some(path)))
-                .collect::<Result<Vec<_>>>()?
+            let mut resolved_outputs = Vec::with_capacity(outputs.len());
+            for path in outputs {
+                let resolved = cli_tools_common::resolve_required_input_path(path)?;
+                if !resolved.is_dir() {
+                    anyhow::bail!("Output path must be a directory: {}", resolved.display());
+                }
+                if seen.insert(resolved.clone()) {
+                    resolved_outputs.push(resolved);
+                }
+            }
+            resolved_outputs
         };
 
         Ok(Self::new(input, output))

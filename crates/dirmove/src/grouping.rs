@@ -591,9 +591,9 @@ impl PrefixGroupBuilder {
             return 0;
         };
 
-        let starts_upper = first.is_ascii_uppercase();
-        let has_upper = starts_upper || chars.clone().any(|character| character.is_ascii_uppercase());
-        let has_lower = first.is_ascii_lowercase() || chars.any(|character| character.is_ascii_lowercase());
+        let starts_upper = first.is_uppercase();
+        let has_upper = starts_upper || chars.clone().any(char::is_uppercase);
+        let has_lower = first.is_lowercase() || chars.any(char::is_lowercase);
 
         match (starts_upper, has_upper, has_lower) {
             // CamelCase: starts uppercase, has both upper and lower (e.g., "PhotoLab")

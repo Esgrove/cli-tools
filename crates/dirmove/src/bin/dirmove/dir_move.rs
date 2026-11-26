@@ -90,7 +90,7 @@ impl DirMove {
     /// Create mode runs last and uses the first output root for newly-created directories.
     pub fn run(&mut self) -> anyhow::Result<()> {
         // Unwanted directories are deleted and unpack directories unpacked in a single directory walk.
-        self.unpack_directories();
+        self.unpack_directories()?;
         self.merge_prefixed_directories()?;
         let directories = self.collect_directories()?;
         self.update_database_with_directories(&directories);
@@ -148,37 +148,68 @@ impl DirMove {
 
     /// Delete unwanted directories and unpack configured directory names across every input root.
     ///
-    /// This pass runs before file matching
-    /// so cleaned and unpacked input trees are reflected in later file and directory merge offers.
-    fn unpack_directories(&self) {
+    /// Prompts for confirmation unless `--auto` or `--print` (dry-run) is enabled.
+    fn unpack_directories(&self) -> anyhow::Result<()> {
         let unpacker = Unpacker::new(
             &self.config.unpack_directory_names,
             self.config.overwrite,
             self.config.dryrun,
         );
+        if !self.config.auto && !self.config.dryrun {
+            let (unwanted_count, unpack_count) =
+                unpacker.count_candidates(self.roots.input(), self.config.scan.recurse());
+            if unwanted_count == 0 && unpack_count == 0 {
+                return Ok(());
+            }
+            let summary = match (unwanted_count, unpack_count) {
+                (u, 0) => format!("Trash {}", count_label(u, "unwanted directory", "unwanted directories")),
+                (0, p) => format!("Unpack {}", count_label(p, "directory", "directories")),
+                (u, p) => format!(
+                    "Trash {} and unpack {}",
+                    count_label(u, "unwanted directory", "unwanted directories"),
+                    count_label(p, "directory", "directories")
+                ),
+            };
+            if !cli_tools_common::get_user_confirmation(&format!("{summary}?"), true)? {
+                return Ok(());
+            }
+        }
         unpacker.unpack(self.roots.input(), self.config.scan.recurse(), &mut self.reporter());
+        Ok(())
     }
 
     /// Merge directories that have a `prefix_ignore` prefix into matching directories without the prefix.
     ///
-    /// For example, if `prefix_ignore` contains "studio" and there are directories "studio alpha beta"
-    /// and "alpha beta", the contents of "studio alpha beta" will be merged into "alpha beta".
+    /// Prompts for confirmation unless `--auto` or `--print` (dry-run) is enabled,
+    /// and shares destination reservations across all pairs so overwriting never clobbers earlier moves.
     fn merge_prefixed_directories(&self) -> anyhow::Result<()> {
         let name_filter = &self.config.name_filter;
         if !name_filter.has_prefix_ignores() {
             return Ok(());
         }
 
-        for pair in merge::find_prefix_merge_pairs(self.roots.output(), self.config.scan.recurse(), name_filter)? {
-            self.merge_directory_contents(&pair.source, &pair.target)?;
+        let pairs = merge::find_prefix_merge_pairs(self.roots.output(), self.config.scan.recurse(), name_filter)?;
+        if pairs.is_empty() {
+            return Ok(());
+        }
+
+        let mut reservations = TargetReservations::new();
+        let merger = DirectoryMerger::new(self.config.overwrite, self.config.dryrun);
+        for pair in pairs {
+            if !self.config.auto && !self.config.dryrun {
+                let message = format!(
+                    "Merge '{}' into '{}'?",
+                    self.roots.merge_display_path(&pair.source),
+                    self.roots.merge_display_path(&pair.target),
+                );
+                if !cli_tools_common::get_user_confirmation(&message, true)? {
+                    continue;
+                }
+            }
+            merger.merge_with_reservations(&pair.source, &pair.target, &mut reservations, &mut self.reporter())?;
         }
 
         Ok(())
-    }
-
-    /// Merge contents from the source directory into the target directory and print each step.
-    fn merge_directory_contents(&self, source: &Path, target: &Path) -> anyhow::Result<()> {
-        DirectoryMerger::new(self.config.overwrite, self.config.dryrun).merge(source, target, &mut self.reporter())
     }
 
     /// Print debug information about the database contents.
@@ -606,6 +637,8 @@ impl DirMove {
         report::print_file_group(&format!("{progress} {}", dir_name.cyan().bold()), &highlighted_names);
 
         let Some(prompt_result) = self.offer_new_directory(dir_name, database_suggestion.as_deref())? else {
+            // In dry-run mode, mark files as consumed so overlapping lower-priority groups match real runs.
+            moved_files.extend(available_files.iter().cloned());
             return Ok(());
         };
         match prompt_result {
@@ -691,8 +724,9 @@ impl DirMove {
         dir_name: &str,
         database_suggestion: Option<&str>,
     ) -> anyhow::Result<Option<PromptResult>> {
-        let dir_path = self.roots.first_output().join(dir_name);
-        report::print_target_directory_status(dir_path.exists(), dir_name);
+        let effective_name = database_suggestion.unwrap_or(dir_name);
+        let dir_path = self.roots.first_output().join(effective_name);
+        report::print_target_directory_status(dir_path.exists(), effective_name);
 
         if self.config.dryrun {
             println!();

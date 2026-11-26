@@ -87,16 +87,36 @@ impl ScanOptions {
         self.recurse
     }
 
-    /// Return whether a lowercase name contains any include pattern, or there are no include patterns.
+    /// Return whether a name matches any include glob or substring pattern, or there are no include patterns.
     #[must_use]
-    fn is_included(&self, name_lowercase: &str) -> bool {
-        self.include.is_empty() || self.include.iter().any(|pattern| name_lowercase.contains(pattern))
+    fn is_included(&self, name: &str) -> bool {
+        if self.include.is_empty() {
+            return true;
+        }
+        if let Ok(filter) = cli_tools_common::NameFilter::new(&self.include, &[]) {
+            return filter.matches_name(name);
+        }
+        let lower = name.to_lowercase();
+        self.include.iter().any(|pattern| lower.contains(pattern))
     }
 
-    /// Return whether a lowercase name contains any exclude pattern.
+    /// Return whether a name matches any exclude glob or substring pattern.
     #[must_use]
-    fn is_excluded(&self, name_lowercase: &str) -> bool {
-        self.exclude.iter().any(|pattern| name_lowercase.contains(pattern))
+    fn is_excluded(&self, name: &str) -> bool {
+        if self.exclude.is_empty() {
+            return false;
+        }
+        if let Ok(filter) = cli_tools_common::NameFilter::new(&[], &self.exclude) {
+            return !filter.matches_name(name);
+        }
+        let lower = name.to_lowercase();
+        self.exclude.iter().any(|pattern| lower.contains(pattern))
+    }
+
+    /// Return whether a filename matches the configured include and exclude glob/substring patterns.
+    #[must_use]
+    fn matches_name_filters(&self, filename: &str) -> bool {
+        self.is_included(filename) && !self.is_excluded(filename)
     }
 }
 
@@ -124,11 +144,8 @@ impl<'a> Scanner<'a> {
         let mut files = Vec::new();
         let mut seen_paths = HashSet::new();
         self.for_each_input_file(|mut file_path| {
-            let file_name = cli_tools_common::path_to_filename_string(&file_path).to_lowercase();
-            if self.options.is_included(&file_name)
-                && !self.options.is_excluded(&file_name)
-                && seen_paths.insert(file_path.clone())
-            {
+            let file_name = cli_tools_common::path_to_filename_string(&file_path);
+            if self.options.matches_name_filters(&file_name) && seen_paths.insert(file_path.clone()) {
                 file_path.shrink_to_fit();
                 files.push(file_path);
             }
@@ -160,8 +177,7 @@ impl<'a> Scanner<'a> {
                 return;
             }
 
-            let file_name_lowercase = file_name.to_lowercase();
-            if !self.options.is_included(&file_name_lowercase) || self.options.is_excluded(&file_name_lowercase) {
+            if !self.options.matches_name_filters(&file_name) {
                 return;
             }
 

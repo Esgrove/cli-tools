@@ -74,6 +74,12 @@ pub fn prompt_for_directory_name(
         }
         Answer::SaveToIgnored => Ok(PromptResult::SaveToIgnored),
         Answer::CustomName(custom_name) => {
+            if !is_safe_directory_name(custom_name) {
+                cli_tools_common::print_error!(
+                    "Invalid directory name '{custom_name}': must be a single directory name without path separators"
+                );
+                return Ok(PromptResult::Skipped);
+            }
             let custom_path = output_root.join(custom_name);
             report::print_target_directory_status(custom_path.exists(), custom_name);
             if cli_tools_common::get_user_confirmation(&format!("Confirm using '{custom_name}'?"), true)? {
@@ -111,6 +117,15 @@ fn parse_answer(input: &str) -> Answer<'_> {
     } else {
         Answer::CustomName(input)
     }
+}
+
+/// Return whether `name` is a safe single relative directory component without path traversal.
+fn is_safe_directory_name(name: &str) -> bool {
+    if name.is_empty() || name.contains(['/', '\\', '\0']) {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_))) && components.next().is_none()
 }
 
 /// Read one prompt answer, or `None` when the input has ended without one.
@@ -168,5 +183,16 @@ mod test_parse_answer {
         assert_eq!(parse_answer("  Jane Doe \n"), Answer::CustomName("Jane Doe"));
         assert_eq!(parse_answer("nope"), Answer::CustomName("nope"));
         assert_eq!(parse_answer("save"), Answer::CustomName("save"));
+    }
+
+    #[test]
+    fn safe_directory_name_rejects_traversal_and_separators() {
+        assert!(is_safe_directory_name("My Show"));
+        assert!(!is_safe_directory_name(""));
+        assert!(!is_safe_directory_name("."));
+        assert!(!is_safe_directory_name(".."));
+        assert!(!is_safe_directory_name("../escape"));
+        assert!(!is_safe_directory_name("/tmp/abs"));
+        assert!(!is_safe_directory_name(r"a\b"));
     }
 }

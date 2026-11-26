@@ -280,8 +280,17 @@ fn move_directory_with(
     };
 
     if rename_source(source, target).is_err() {
-        if let Err(error) = cli_tools_common::copy_dir_recursive(source, target) {
-            let _ = std::fs::remove_dir_all(target);
+        // Copy into a fresh temporary sibling directory so a failed copy never deletes an existing target.
+        let temp_target = cli_tools_common::unique_sibling_path(target, "dirmove-copy-tmp");
+        if let Err(error) = cli_tools_common::copy_dir_recursive(source, &temp_target) {
+            let _ = std::fs::remove_dir_all(&temp_target);
+            if let Some(backup_path) = backup {
+                let _ = std::fs::rename(&backup_path, target);
+            }
+            return Err(error.into());
+        }
+        if let Err(error) = std::fs::rename(&temp_target, target) {
+            let _ = std::fs::remove_dir_all(&temp_target);
             if let Some(backup_path) = backup {
                 let _ = std::fs::rename(&backup_path, target);
             }
@@ -326,7 +335,14 @@ pub fn find_prefix_merge_pairs(
     for parent_directory in collect_merge_parent_directories(output_roots, recurse) {
         all_pairs.extend(find_prefix_merge_pairs_in_directory(&parent_directory, name_filter)?);
     }
-    all_pairs.sort_by_key(|pair| std::cmp::Reverse(pair.source.components().count()));
+    all_pairs.sort_by(|left, right| {
+        right
+            .source
+            .components()
+            .count()
+            .cmp(&left.source.components().count())
+            .then_with(|| left.source.cmp(&right.source))
+    });
     Ok(all_pairs)
 }
 
@@ -358,7 +374,9 @@ fn collect_merge_parent_directories(output_roots: &[PathBuf], recurse: bool) -> 
         }
     }
 
-    parent_directories.into_iter().collect()
+    let mut sorted: Vec<PathBuf> = parent_directories.into_iter().collect();
+    sorted.sort();
+    sorted
 }
 
 /// Find merge pairs within a single directory.

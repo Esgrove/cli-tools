@@ -54,8 +54,14 @@ impl NameFilter {
                 .into_iter()
                 .map(|name| utils::normalize_name(name.as_ref())),
         );
-        let prefixes_with_space = prefix_ignores.iter().map(|prefix| format!("{prefix} ")).collect();
-        let prefixes_with_dot = prefix_ignores.iter().map(|prefix| format!("{prefix}.")).collect();
+        let prefixes_with_space = unique_in_order(prefix_ignores.iter().flat_map(|prefix| {
+            let spaced = prefix.replace('.', " ");
+            [format!("{prefix} "), format!("{spaced} ")]
+        }));
+        let prefixes_with_dot = unique_in_order(prefix_ignores.iter().flat_map(|prefix| {
+            let dotted = prefix.replace(' ', ".");
+            [format!("{prefix}."), format!("{dotted}.")]
+        }));
         Self {
             prefix_ignores,
             prefixes_with_space,
@@ -179,13 +185,13 @@ fn strip_prefixes<'name>(name: &'name str, patterns: &[String]) -> Cow<'name, st
         changed = false;
         let result_lower = result.to_lowercase();
         for pattern in patterns {
-            if result_lower.starts_with(pattern.as_str())
-                && let Some(prefix_end) = original_end_for_lowercase_prefix(result, pattern)
-                && let Some(stripped) = result.get(prefix_end..)
-            {
-                result = stripped;
-                changed = true;
-                break;
+            if result_lower.starts_with(pattern.as_str()) {
+                let prefix_end = cli_tools_common::original_end_for_lowercase_prefix(result, pattern.len());
+                if let Some(stripped) = result.get(prefix_end..) {
+                    result = stripped;
+                    changed = true;
+                    break;
+                }
             }
         }
     }
@@ -195,22 +201,6 @@ fn strip_prefixes<'name>(name: &'name str, patterns: &[String]) -> Cow<'name, st
     } else {
         Cow::Owned(result.to_string())
     }
-}
-
-/// Map a lowercase prefix length to its ending byte boundary in the original string.
-fn original_end_for_lowercase_prefix(text: &str, lowercase_prefix: &str) -> Option<usize> {
-    let mut lowercase_length = 0;
-
-    for (start, character) in text.char_indices() {
-        lowercase_length += character.to_lowercase().map(char::len_utf8).sum::<usize>();
-        match lowercase_length.cmp(&lowercase_prefix.len()) {
-            std::cmp::Ordering::Less => {}
-            std::cmp::Ordering::Equal => return Some(start + character.len_utf8()),
-            std::cmp::Ordering::Greater => return None,
-        }
-    }
-
-    lowercase_prefix.is_empty().then_some(0)
 }
 
 #[cfg(test)]
