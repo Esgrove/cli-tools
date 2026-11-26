@@ -48,6 +48,8 @@ pub struct StringSyntax {
     pub(super) marker_needs_leading_space: bool,
     /// Whether shell heredocs exist.
     pub(super) heredoc: bool,
+    /// Whether Ruby percent literals and indented heredocs exist.
+    pub(super) ruby_literals: bool,
     /// Whether YAML block scalars exist.
     pub(super) block_scalars: bool,
     /// Whether trailing comment relocation is supported for this language.
@@ -66,7 +68,7 @@ impl StringSyntax {
     ///
     /// A line in code without any of them is code to its end, so the scanner can skip it.
     /// Bytes a language does not use are replaced with a slash, which is always part of the set.
-    pub(super) const fn trigger_bytes(&self) -> [u8; 14] {
+    pub(super) const fn trigger_bytes(&self) -> [u8; 15] {
         let block_open = match self.block_comment {
             Some((open, _)) => first_byte_or_slash(open),
             None => b'/',
@@ -93,6 +95,7 @@ impl StringSyntax {
             if self.python_expressions { b')' } else { b'/' },
             if self.python_expressions { b'{' } else { b'/' },
             if self.python_expressions { b'}' } else { b'/' },
+            if self.ruby_literals { b'%' } else { b'/' },
             b'/',
         ]
     }
@@ -158,6 +161,7 @@ const BASE_STRING_SYNTAX: StringSyntax = StringSyntax {
     multiline_strings: false,
     marker_needs_leading_space: false,
     heredoc: false,
+    ruby_literals: false,
     block_scalars: false,
     supports_trailing_comments: true,
     trigger_set: ByteSet::new(b""),
@@ -247,7 +251,14 @@ pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
             supports_trailing_comments: false,
             ..base
         },
-        FileKind::Ruby | FileKind::Dockerfile => StringSyntax {
+        FileKind::Ruby => StringSyntax {
+            multiline_strings: true,
+            heredoc: true,
+            ruby_literals: true,
+            supports_trailing_comments: false,
+            ..hash
+        },
+        FileKind::Dockerfile => StringSyntax {
             multiline_strings: true,
             heredoc: true,
             supports_trailing_comments: false,

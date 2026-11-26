@@ -9,6 +9,7 @@
 
 use super::docstrings::{Docstring, docstring_contents};
 use super::file_kind::{CommentStyle, FileKind};
+use super::literal_syntax::inside_make_definition;
 use super::markdown;
 use super::markdown::SkipNotice;
 use super::options::FormatOptions;
@@ -80,8 +81,12 @@ impl LineScan {
 pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
     let count = lines.len();
     let Some(syntax) = string_syntax(kind) else {
+        let mut make_depth = 0;
         return LineScan {
-            inside_string: vec![false; count],
+            inside_string: lines
+                .iter()
+                .map(|line| kind == FileKind::Makefile && inside_make_definition(line, &mut make_depth))
+                .collect(),
             inside_block_comment: vec![false; count],
             comment_start: vec![None; count],
             inside_expression: Vec::new(),
@@ -122,6 +127,8 @@ pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
                         | ScanState::InRawString(_)
                         | ScanState::InDelimitedString(_)
                         | ScanState::InTemplate
+                        | ScanState::InTemplateFrames(_)
+                        | ScanState::InRubyPercent(..)
                         | ScanState::InBacktickRaw
                         | ScanState::InHeredoc(_)
                         | ScanState::Uncertain
@@ -1437,6 +1444,83 @@ mod test_trailing_other_languages {
 mod test_strings_are_not_comments {
     use super::*;
     use crate::paragraph::Paragraph;
+
+    /// Check that the formatter preserves literal data while still rewording a subsequent real comment.
+    fn assert_literal_is_verbatim(source: &str, kind: FileKind) {
+        let marker = kind.comment_style().line_markers.last().unwrap();
+        let comment = "This is a comment; format this prose.";
+        let source = format!("{source}{marker} {comment}\n");
+        let expected = source.replace(comment, &format!("This is a comment.\n{marker} Format this prose."));
+        let formatted = crate::format(&source, kind, &FormatOptions::default());
+        assert_eq!(formatted.fixed_text.as_deref().unwrap_or(&source), expected);
+    }
+
+    #[test]
+    fn literal_guard_shell_quoted_delimiter_with_punctuation() {
+        for opening in ["cat <<'END-TEXT'", "cat <<\"END-TEXT\"", "cat <<END-TEXT"] {
+            let source = format!("{opening}\n# Keep this; it is data.\nEND-TEXT\n");
+            assert_literal_is_verbatim(&source, FileKind::Shell);
+        }
+    }
+
+    #[test]
+    fn literal_guard_shell_false_terminators() {
+        assert_literal_is_verbatim(
+            "cat <<END\n  END\nEND \n# Keep this; it is data.\nEND\n",
+            FileKind::Shell,
+        );
+        assert_literal_is_verbatim("cat <<-END\n\t END\n# Keep this; it is data.\n\tEND\n", FileKind::Shell);
+    }
+
+    #[test]
+    fn literal_guard_javascript_nested_templates() {
+        assert_literal_is_verbatim(
+            "const text = `outer ${\n  `inner ${'value'}`\n} tail\n// Keep this; it is data.\n`;\n",
+            FileKind::JavaScript,
+        );
+        assert_literal_is_verbatim(
+            "const text = `outer ${`inner } text`} tail\n// Keep this; it is data.\n`;\n",
+            FileKind::JavaScript,
+        );
+    }
+
+    #[test]
+    fn literal_guard_cpp_raw_string_prefixes() {
+        for prefix in ["u8", "u", "U", "L"] {
+            let source =
+                format!("auto text = {prefix}R\"END(ordinary \"quotes\"\n// Keep this; it is data.\n)END\";\n");
+            assert_literal_is_verbatim(&source, FileKind::CLike);
+        }
+    }
+
+    #[test]
+    fn literal_guard_yaml_tagged_block_scalar() {
+        assert_literal_is_verbatim(
+            "message: &text !!str |-\n  # Keep this; it is data.\nother: true\n",
+            FileKind::Yaml,
+        );
+        assert_literal_is_verbatim(
+            "- !<tag:yaml.org,2002:str> >-\n  # Keep this; it is data.\n",
+            FileKind::Yaml,
+        );
+    }
+
+    #[test]
+    fn literal_guard_ruby_percent_quotes() {
+        assert_literal_is_verbatim(
+            "text = %q{Outer {\n# Keep this; it is data.\n} still open.\n# Keep this; it is also data.\n}\n",
+            FileKind::Ruby,
+        );
+        assert_literal_is_verbatim("text = %q!Escaped \\!\n# Keep this; it is data.\n!\n", FileKind::Ruby);
+    }
+
+    #[test]
+    fn literal_guard_make_define_blocks() {
+        assert_literal_is_verbatim(
+            "override define message\n# Keep this; it is data.\ndefine nested\n# Keep this; it is data.\nendef\n\tendef\n# Still data; leave it alone.\nendef\n",
+            FileKind::Makefile,
+        );
+    }
 
     #[test]
     fn comment_like_lines_inside_raw_string_are_verbatim() {
