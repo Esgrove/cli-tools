@@ -176,8 +176,10 @@ pub struct Report {
 struct CommandResult {
     /// The command exited successfully.
     success: bool,
-    /// Combined stdout and stderr.
-    output: String,
+    /// Standard output, used alone for machine readable responses.
+    stdout: String,
+    /// Standard error, used for diagnostics.
+    stderr: String,
 }
 
 /// Receives each project report as soon as the project is done.
@@ -195,18 +197,29 @@ impl GitState {
     /// Read the git state of a project.
     ///
     /// Nested project roots are excluded, so their changes do not count for this one.
-    #[must_use]
-    pub fn read(root: &Path, roots: &[PathBuf]) -> Self {
-        let is_repository = run_command(root, "git", &["rev-parse", "--is-inside-work-tree"])
-            .is_ok_and(|result| result.success && result.output.trim() == "true");
-        if !is_repository {
-            return Self::default();
+    ///
+    /// # Errors
+    /// Returns an error if Git cannot determine whether the project is in a clean work tree.
+    pub fn read(root: &Path, roots: &[PathBuf]) -> Result<Self> {
+        let probe = run_command(root, "git", &["rev-parse", "--is-inside-work-tree"])?;
+        if !probe.success
+            && probe.stderr.lines().any(|line| {
+                line.starts_with("fatal: not a git repository (or any of the parent directories)")
+                    || line.starts_with("fatal: not a git repository (or any parent up to mount point")
+            })
+        {
+            return Ok(Self::default());
         }
-        let is_dirty = has_changes(root, roots).unwrap_or(true);
-        Self {
-            is_repository,
-            is_dirty,
+        if !probe.success || probe.stdout.trim() != "true" {
+            anyhow::bail!(
+                "Could not determine Git work tree status: {}",
+                probe.combined_output().trim()
+            );
         }
+        Ok(Self {
+            is_repository: true,
+            is_dirty: has_changes(root, roots, "--untracked-files=normal")?,
+        })
     }
 }
 
@@ -249,7 +262,7 @@ impl Report {
             Ok(result) if result.success => {
                 self.push(ReportEntry::StepSucceeded {
                     label,
-                    output: result.output,
+                    output: result.combined_output(),
                     output_is_result,
                 });
                 true
@@ -258,7 +271,7 @@ impl Report {
                 self.outcome = Outcome::Failed(format!("{label} failed"));
                 self.push(ReportEntry::StepFailed {
                     label,
-                    output: result.output,
+                    output: result.combined_output(),
                 });
                 false
             }
@@ -267,6 +280,13 @@ impl Report {
                 false
             }
         }
+    }
+}
+
+impl CommandResult {
+    /// Combine both streams for display, never for parsing.
+    fn combined_output(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
     }
 }
 
@@ -303,7 +323,8 @@ pub fn bump_projects(
         .build()
         .context("Failed to build thread pool")?;
 
-    let git_states: Vec<GitState> = pool.install(|| roots.par_iter().map(|root| GitState::read(root, roots)).collect());
+    let git_states: Vec<Result<GitState>> =
+        pool.install(|| roots.par_iter().map(|root| GitState::read(root, roots)).collect());
 
     let resolver = DigestResolver::new()?;
     let commit_lock = Mutex::new(());
@@ -320,7 +341,14 @@ pub fn bump_projects(
             .par_iter()
             .zip(git_states.par_iter())
             .map(|(root, git)| {
-                let report = process_project(root, *git, &context);
+                let report = match git {
+                    Ok(git) => process_project(root, *git, &context),
+                    Err(error) => {
+                        let mut report = Report::new(root.clone());
+                        report.fail(format!("{error:#}"));
+                        report
+                    }
+                };
                 observer.on_project_finished(&report);
                 report
             })
@@ -595,7 +623,7 @@ fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, contex
         return;
     };
     let root = report.root.clone();
-    match has_tracked_changes(&root, context.roots) {
+    match has_changes(&root, context.roots, "--untracked-files=no") {
         Ok(false) => {
             report.push(ReportEntry::NothingToCommit);
             return;
@@ -630,28 +658,16 @@ fn commit_message(target: RustVersion, rust_changed: bool, updated_dependencies:
     }
 }
 
-/// Check if the project has any uncommitted changes (including untracked files), ignoring nested projects.
-fn has_changes(root: &Path, roots: &[PathBuf]) -> Result<bool> {
+/// Check for changes reported by Git, excluding nested projects.
+fn has_changes(root: &Path, roots: &[PathBuf], untracked_mode: &str) -> Result<bool> {
     let pathspecs = pathspecs(root, roots);
-    let mut args = vec!["status", "--porcelain", "--"];
+    let mut args = vec!["status", "--porcelain", untracked_mode, "--"];
     args.extend(pathspecs.iter().map(String::as_str));
     let result = run_command(root, "git", &args)?;
     if !result.success {
-        anyhow::bail!("git status failed: {}", result.output.trim());
+        anyhow::bail!("git status failed: {}", result.combined_output().trim());
     }
-    Ok(!result.output.trim().is_empty())
-}
-
-/// Check if the project has modifications to tracked files, ignoring untracked files and nested projects.
-fn has_tracked_changes(root: &Path, roots: &[PathBuf]) -> Result<bool> {
-    let pathspecs = pathspecs(root, roots);
-    let mut args = vec!["status", "--porcelain", "--untracked-files=no", "--"];
-    args.extend(pathspecs.iter().map(String::as_str));
-    let result = run_command(root, "git", &args)?;
-    if !result.success {
-        anyhow::bail!("git status failed: {}", result.output.trim());
-    }
-    Ok(!result.output.trim().is_empty())
+    Ok(!result.stdout.is_empty())
 }
 
 /// Git pathspecs covering the project directory without the nested project roots.
@@ -667,21 +683,24 @@ fn pathspecs(root: &Path, roots: &[PathBuf]) -> Vec<String> {
     specs
 }
 
-/// Run a command in the given directory, capturing stdout and stderr together.
+/// Run a command in the given directory, capturing stdout and stderr separately.
 fn run_command(directory: &Path, program: &str, args: &[&str]) -> Result<CommandResult> {
     let mut command = Command::new(program);
     command.args(args).current_dir(directory);
+    if program == "git" {
+        // Recognize Git's ordinary nonrepository diagnostic independently of the user's locale.
+        command.env("LC_ALL", "C");
+    }
     if program == "cargo" && std::io::stdout().is_terminal() {
         command.env("CARGO_TERM_COLOR", "always");
     }
     let output = command
         .output()
         .with_context(|| format!("Failed to run {program} {}", args.join(" ")))?;
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
     Ok(CommandResult {
         success: output.status.success(),
-        output: text,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
 }
 
@@ -728,7 +747,7 @@ mod test_git_state {
     #[test]
     fn plain_directory_is_not_a_repository() {
         let temp = TempDir::new().expect("temp dir");
-        let state = GitState::read(temp.path(), &[]);
+        let state = GitState::read(temp.path(), &[]).unwrap();
         assert_eq!(state, GitState::default());
     }
 
@@ -795,7 +814,7 @@ mod test_git_state {
 
         let committed_files = run_command(&root, "git", &["show", "--name-only", "--pretty=format:", "HEAD"])
             .expect("git show")
-            .output;
+            .stdout;
         assert!(committed_files.contains("Cargo.toml"), "{committed_files}");
         assert!(
             !committed_files.contains("untracked.env"),
