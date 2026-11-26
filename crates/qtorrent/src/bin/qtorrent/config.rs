@@ -3,9 +3,7 @@
 //! Reads the `[qtorrent]` section of the user config file
 //! and merges it with the command line arguments into the library option structs.
 
-use std::fs;
-
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Deserialize;
 
 use cli_tools_qtorrent::{AddOptions, ConnectionSettings, FileFilter, NamingOptions, TagRules, TorrentPathCollector};
@@ -15,8 +13,9 @@ use crate::QtorrentArgs;
 /// Default minimum number of image files required before including images.
 const DEFAULT_MIN_IMAGE_FILE_COUNT: usize = 10;
 
-/// User configuration from the config file.
+/// User configuration from the `[qtorrent]` section of the config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QtorrentConfig {
     /// qBittorrent `WebUI` host.
     #[serde(default)]
@@ -54,6 +53,9 @@ pub struct QtorrentConfig {
     /// Skip confirmation prompts by default.
     #[serde(default)]
     yes: bool,
+    /// Automatically apply suggested renames when `--yes` is set.
+    #[serde(default)]
+    auto_rename: bool,
     /// Skip rename prompts for existing/duplicate torrents.
     #[serde(default)]
     skip_existing: bool,
@@ -78,7 +80,7 @@ pub struct QtorrentConfig {
     min_image_file_count: Option<usize>,
     /// Minimum image file size in KB. Files smaller than this will be skipped.
     #[serde(default)]
-    min_image_size_kb: Option<u64>,
+    min_image_size_kb: Option<f64>,
     /// Substrings to remove from torrent filename when generating suggested name.
     #[serde(default)]
     remove_from_name: Vec<String>,
@@ -131,15 +133,10 @@ pub struct Config {
     pub offline: bool,
     /// Skip confirmation prompts.
     pub yes: bool,
+    /// Automatically apply suggested renames when `--yes` is set.
+    pub auto_rename: bool,
     /// Skip rename prompts for existing/duplicate torrents.
     pub skip_existing: bool,
-}
-
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    qtorrent: QtorrentConfig,
 }
 
 impl QtorrentConfig {
@@ -149,26 +146,16 @@ impl QtorrentConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     pub fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
-        }
+        cli_tools_common::load_user_config_section("qtorrent")
     }
 
     /// Parse configuration from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.qtorrent)
-            .map_err(|e| anyhow!("Failed to parse config: {e}"))
+        cli_tools_common::parse_user_config_section(toml_str, "qtorrent")
     }
 }
 
@@ -240,9 +227,7 @@ impl Config {
             .or(user_config.min_file_size_mb)
             .and_then(mb_to_bytes);
 
-        let min_image_size_kb = args
-            .min_image_size_kb
-            .or_else(|| user_config.min_image_size_kb.map(|kb| kb as f64));
+        let min_image_size_kb = args.min_image_size_kb.or(user_config.min_image_size_kb);
 
         let min_image_size_bytes = min_image_size_kb.and_then(kb_to_bytes);
         let min_image_file_count =
@@ -276,6 +261,7 @@ impl Config {
             dryrun: args.dryrun || user_config.dryrun || offline,
             offline,
             yes: args.yes || user_config.yes,
+            auto_rename: args.auto_rename || user_config.auto_rename,
             skip_existing: args.skip_existing || user_config.skip_existing,
         }
     }
@@ -408,7 +394,7 @@ min_image_size_kb = 500
         assert_eq!(config.min_file_size_mb, Some(50.0));
         assert!(config.include_images);
         assert_eq!(config.min_image_file_count, Some(12));
-        assert_eq!(config.min_image_size_kb, Some(500));
+        assert_eq!(config.min_image_size_kb, Some(500.0));
     }
 
     #[test]
@@ -422,7 +408,7 @@ min_image_size_kb = 500
         let config = QtorrentConfig::from_toml_str(toml).expect("should parse config");
         assert!(config.include_images);
         assert_eq!(config.min_image_file_count, Some(3));
-        assert_eq!(config.min_image_size_kb, Some(500));
+        assert_eq!(config.min_image_size_kb, Some(500.0));
     }
 
     #[test]

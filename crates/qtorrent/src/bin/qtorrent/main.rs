@@ -19,8 +19,8 @@ mod test_server;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand, ValueEnum};
+use cli_tools_common::CompletionArgs;
 
 use cli_tools_qtorrent::SortOrder;
 
@@ -43,15 +43,7 @@ enum Command {
 
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 /// Sort order for the info subcommand torrent listing.
@@ -132,6 +124,10 @@ pub struct QtorrentArgs {
     #[arg(short = 'y', long)]
     yes: bool,
 
+    /// Automatically apply the suggested rename in non-interactive (`--yes`) runs
+    #[arg(short = 'A', long)]
+    auto_rename: bool,
+
     /// File extensions to skip (e.g., nfo, txt)
     #[arg(short = 'e', long = "skip-ext", name = "EXT", value_delimiter = ',')]
     skip_extensions: Vec<String>,
@@ -189,13 +185,9 @@ async fn main() -> Result<()> {
     let command = args.command.take();
 
     match command {
-        Some(Command::Completion { shell, install }) => cli_tools_common::generate_shell_completion(
-            shell,
-            QtorrentArgs::command(),
-            install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        ),
+        Some(Command::Completion(completion)) => {
+            completion.generate::<QtorrentArgs>(args.verbose, env!("CARGO_BIN_NAME"))
+        }
         Some(Command::Info { sort, list }) => info::run(args, sort.into(), list).await,
         None => QTorrent::new(args)?.run().await,
     }
@@ -207,6 +199,7 @@ mod cli_args_tests {
 
     #[test]
     fn the_command_definition_is_valid() {
+        use clap::CommandFactory;
         QtorrentArgs::command().debug_assert();
     }
 
@@ -523,9 +516,11 @@ mod cli_args_tests {
 
     #[test]
     fn parses_completion_with_install() {
+        use clap_complete::Shell;
+
         let args = QtorrentArgs::try_parse_from(["test", "completion", "bash", "-I"]).expect("should parse");
         match args.command {
-            Some(Command::Completion { shell, install }) => {
+            Some(Command::Completion(CompletionArgs { shell, install })) => {
                 assert_eq!(shell, Shell::Bash);
                 assert!(install);
             }

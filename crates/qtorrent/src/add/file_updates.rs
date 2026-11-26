@@ -37,12 +37,14 @@ pub(super) async fn rename_torrent_files(
     client: &QBittorrentClient,
     info_hash: &str,
     dot_rename: &DotFormat<'_>,
+    excluded_indices: &[usize],
     observer: &mut impl AddObserver,
 ) {
     observer.on_event(AddEvent::RenamingFiles);
     let mut total_renamed: usize = 0;
     // Indices that still need renaming, `None` before the first attempt
     let mut pending_indices: Option<Vec<usize>> = None;
+    let mut last_list_error: Option<anyhow::Error> = None;
 
     for attempt in 0..FILE_RENAME_ATTEMPTS {
         if attempt > 0 {
@@ -50,16 +52,23 @@ pub(super) async fn rename_torrent_files(
         }
 
         let api_files = match client.get_torrent_files(info_hash).await {
-            Ok(files) => files,
+            Ok(files) => {
+                last_list_error = None;
+                files
+            }
             Err(error) => {
-                observer.on_event(AddEvent::FileListFailed(&error));
-                return;
+                last_list_error = Some(error);
+                continue;
             }
         };
 
         let mut failed_indices: Vec<usize> = Vec::new();
 
         for file in &api_files {
+            if excluded_indices.contains(&file.index) {
+                continue;
+            }
+
             // On retries, only process previously failed indices
             if let Some(ref pending) = pending_indices
                 && !pending.contains(&file.index)
@@ -109,6 +118,11 @@ pub(super) async fn rename_torrent_files(
         if pending_indices.as_ref().is_some_and(Vec::is_empty) {
             break;
         }
+    }
+
+    if let Some(error) = last_list_error {
+        observer.on_event(AddEvent::FileListFailed(&error));
+        return;
     }
 
     if total_renamed > 0 {

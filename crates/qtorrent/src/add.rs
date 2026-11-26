@@ -207,17 +207,20 @@ impl<'a> TorrentAdder<'a> {
                 .await;
         }
 
-        if effective_is_multi_file && let Some(dot_rename) = self.names.dot_formatter() {
+        let renamed_files = if effective_is_multi_file && let Some(dot_rename) = self.names.dot_formatter() {
             // Wait for the torrent to be ready when no folder rename already waited for it
             if folder_rename.is_none() {
                 tokio::time::sleep(FILE_RENAME_DELAY).await;
             }
 
-            file_updates::rename_torrent_files(self.client, &info_hash, &dot_rename, observer).await;
-        }
+            file_updates::rename_torrent_files(self.client, &info_hash, &dot_rename, &excluded_indices, observer).await;
+            true
+        } else {
+            false
+        };
 
         if !excluded_indices.is_empty() {
-            let wait_for_metadata = rename_to.is_none() || original_name.is_none();
+            let wait_for_metadata = folder_rename.is_none() && !renamed_files;
             file_updates::apply_excluded_file_priorities(
                 self.client,
                 &info_hash,
@@ -590,7 +593,7 @@ mod test_torrent_adder {
                     priority_changed = true;
                     ("set priority", 200, "")
                 } else if path.ends_with("/start") {
-                    assert!(request.ends_with("hash=test_hash"));
+                    assert!(request.ends_with("hashes=test_hash"));
                     ("start", 200, "")
                 } else {
                     return None;

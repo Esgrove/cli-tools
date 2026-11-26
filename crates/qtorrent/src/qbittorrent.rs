@@ -7,11 +7,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+
+/// Default timeout for qBittorrent `WebUI` HTTP requests.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// qBittorrent `WebUI` API client.
 #[derive(Debug)]
@@ -83,25 +87,37 @@ pub struct TorrentFileItem {
 impl QBittorrentClient {
     /// Create a new qBittorrent client.
     ///
+    /// Supports bare hostnames, IPv4, IPv6, and full `http://`
+    /// or `https://` base URLs with optional path prefixes.
+    ///
     /// # Arguments
-    /// * `host` - The host address (e.g., "localhost" or "192.168.1.100")
+    /// * `host` - The host address or base URL (e.g., "localhost", "`::1`", or "<https://qbit.example.com/qbit>")
     /// * `port` - The `WebUI` port (default is usually 8080)
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn try_new(host: &str, port: u16) -> Result<Self> {
+        let base_url = build_base_url(host, port);
+        let client = Client::builder()
+            .cookie_store(true)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .build()
+            .context("Failed to build HTTP client")?;
+
+        Ok(Self {
+            client,
+            base_url,
+            authenticated: false,
+        })
+    }
+
+    /// Create a new qBittorrent client.
     ///
     /// # Panics
     /// Panics if the HTTP client cannot be built, which only happens when the TLS backend fails to initialize.
     #[must_use]
     pub fn new(host: &str, port: u16) -> Self {
-        let base_url = format!("http://{host}:{port}");
-        let client = Client::builder()
-            .cookie_store(true)
-            .build()
-            .expect("Failed to build HTTP client");
-
-        Self {
-            client,
-            base_url,
-            authenticated: false,
-        }
+        Self::try_new(host, port).expect("Failed to build HTTP client")
     }
 
     /// Authenticate with the qBittorrent `WebUI`.
@@ -121,8 +137,9 @@ impl QBittorrentClient {
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let trimmed = body.trim();
 
-        if status == StatusCode::NO_CONTENT || (status == StatusCode::OK && body == "Ok.") {
+        if status == StatusCode::NO_CONTENT || (status == StatusCode::OK && trimmed == "Ok.") {
             self.authenticated = true;
             Ok(())
         } else if status == StatusCode::FORBIDDEN {
@@ -131,10 +148,10 @@ impl QBittorrentClient {
             )
         } else if status == StatusCode::UNAUTHORIZED {
             bail!("Authentication failed: HTTP {status}. Check credentials and WebUI host or origin validation")
-        } else if body == "Fails." {
+        } else if trimmed == "Fails." {
             bail!("Authentication failed: Invalid username or password")
         } else {
-            bail!("Authentication failed: HTTP {status} - {body}")
+            bail!("Authentication failed: HTTP {status} - {trimmed}")
         }
     }
 
@@ -262,7 +279,11 @@ impl QBittorrentClient {
             bail!("Not authenticated. Call login() first.");
         }
 
-        let request = |endpoint| self.client.post(self.build_url(endpoint)).form(&[("hash", info_hash)]);
+        let request = |endpoint| {
+            self.client
+                .post(self.build_url(endpoint))
+                .form(&[("hashes", info_hash)])
+        };
         let mut response = request("torrents/start")
             .send()
             .await
@@ -282,7 +303,7 @@ impl QBittorrentClient {
     /// Get the API version from qBittorrent.
     ///
     /// # Errors
-    /// Returns an error if the request fails.
+    /// Returns an error if the request fails or returns a non-OK HTTP status.
     pub async fn get_api_version(&self) -> Result<String> {
         let url = self.build_url("app/webapiVersion");
 
@@ -293,14 +314,18 @@ impl QBittorrentClient {
             .await
             .context("Failed to get API version")?;
 
+        let status = response.status();
         let version = response.text().await.context("Failed to read API version")?;
-        Ok(version)
+        if status != StatusCode::OK {
+            bail!("Failed to get API version: HTTP {status} - {}", version.trim());
+        }
+        Ok(version.trim().to_string())
     }
 
     /// Get the qBittorrent application version.
     ///
     /// # Errors
-    /// Returns an error if the request fails.
+    /// Returns an error if the request fails or returns a non-OK HTTP status.
     pub async fn get_app_version(&self) -> Result<String> {
         let url = self.build_url("app/version");
 
@@ -311,8 +336,12 @@ impl QBittorrentClient {
             .await
             .context("Failed to get app version")?;
 
+        let status = response.status();
         let version = response.text().await.context("Failed to read app version")?;
-        Ok(version)
+        if status != StatusCode::OK {
+            bail!("Failed to get app version: HTTP {status} - {}", version.trim());
+        }
+        Ok(version.trim().to_string())
     }
 
     /// Set file priorities for a torrent.
@@ -620,6 +649,39 @@ impl TorrentListItem {
     }
 }
 
+/// Build the qBittorrent base URL from a host or URL string and port.
+///
+/// Accepts:
+/// - Bare hostnames or IPv4 addresses (`localhost`, `192.168.1.10`)
+/// - Raw or bracketed IPv6 addresses (`::1`, `[::1]`)
+/// - Full `http://` or `https://` URLs with optional port and path prefix (`https://qbit.example.com/qbit`)
+fn build_base_url(host: &str, port: u16) -> String {
+    let trimmed = host.trim().trim_end_matches('/');
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        let (authority, path_suffix) = rest.find('/').map_or((rest, ""), |slash| rest.split_at(slash));
+        let has_explicit_port = if authority.starts_with('[') {
+            authority
+                .rsplit_once("]:")
+                .is_some_and(|(_, port_str)| !port_str.is_empty() && port_str.bytes().all(|b| b.is_ascii_digit()))
+        } else {
+            authority
+                .rsplit_once(':')
+                .is_some_and(|(_, port_str)| !port_str.is_empty() && port_str.bytes().all(|b| b.is_ascii_digit()))
+        };
+        if has_explicit_port {
+            format!("{scheme}://{authority}{path_suffix}")
+        } else if authority.contains(':') && !authority.starts_with('[') {
+            format!("{scheme}://[{authority}]:{port}{path_suffix}")
+        } else {
+            format!("{scheme}://{authority}{path_suffix}")
+        }
+    } else if trimmed.contains(':') && !trimmed.starts_with('[') {
+        format!("http://[{trimmed}]:{port}")
+    } else {
+        format!("http://{trimmed}:{port}")
+    }
+}
+
 /// Deserialize a Unix timestamp into `Option<i64>`, treating negative values as `None`.
 ///
 /// The qBittorrent API returns `-1` for `completion_on` when a torrent has not yet completed.
@@ -693,6 +755,15 @@ mod test_client_without_network {
             client.build_url("auth/login"),
             "http://localhost:8080/api/v2/auth/login"
         );
+        assert_eq!(
+            build_base_url("https://qbit.example.com/qbit/", 8080),
+            "https://qbit.example.com/qbit"
+        );
+        assert_eq!(
+            build_base_url("https://qbit.example.com:8443/sub/", 8080),
+            "https://qbit.example.com:8443/sub"
+        );
+        assert_eq!(build_base_url("::1", 8080), "http://[::1]:8080");
     }
 
     #[tokio::test]

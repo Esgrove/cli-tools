@@ -32,17 +32,17 @@ impl QTorrent {
 
     /// Prompt user to rename an existing torrent in qBittorrent.
     ///
-    /// Returns `true` if the torrent was renamed, `false` if skipped.
+    /// Returns `Some(new_name)` if the torrent was renamed, `None` if skipped.
     pub(super) async fn prompt_rename_existing(
         &self,
         info: &TorrentInfo,
         existing_name: &str,
         adder: &TorrentAdder<'_>,
         printer: &mut EventPrinter,
-    ) -> Result<bool> {
+    ) -> Result<Option<String>> {
         if self.config.yes || self.config.skip_existing {
             // With --yes or --skip-existing flag, skip rename prompt for existing torrents
-            return Ok(false);
+            return Ok(None);
         }
 
         let suggested = self.names.clean_suggested_name(info);
@@ -53,8 +53,12 @@ impl QTorrent {
         let matches_internal = internal_formatted.as_ref().is_some_and(|name| existing_name == name);
         if matches_suggested || matches_internal {
             println!("  {}", "Name already matches suggestion.".dimmed());
-            return Ok(false);
+            return Ok(None);
         }
+
+        let show_internal = internal_formatted
+            .as_ref()
+            .is_some_and(|internal| internal != &suggested);
 
         println!(
             "  {} [{}]",
@@ -63,26 +67,31 @@ impl QTorrent {
         );
         println!("  {} {}", "1:".dimmed(), suggested.green());
         if let Some(ref internal) = internal_formatted
-            && internal != &suggested
+            && show_internal
         {
             println!("  {} {}", "2:".dimmed(), internal.green());
         }
         let input = read_choice()?;
         if input.is_empty() {
             println!("  {}", "Skipped.".dimmed());
-            return Ok(false);
+            return Ok(None);
         }
 
         // Check if user entered a number to select an option
         let new_name = match input.as_str() {
             "1" => suggested,
-            "2" if internal_formatted.is_some() => internal_formatted.expect("internal_formatted checked above"),
-            _ => self.names.format_custom_name(&input, info.effective_is_multi_file),
+            "2" if show_internal => internal_formatted.unwrap_or(suggested),
+            _ => self.names.custom_output_name(&input, info, &suggested),
         };
+
+        if new_name.is_empty() {
+            println!("  {}", "Empty name after sanitization, skipped.".yellow());
+            return Ok(None);
+        }
 
         adder.rename_existing(info, existing_name, &new_name, printer).await?;
 
-        Ok(true)
+        Ok(Some(new_name))
     }
 
     /// Prompt user to rename the output name for a torrent.
@@ -92,7 +101,12 @@ impl QTorrent {
     /// Returns `Some(new_name)` if the user wants to rename, `None` to keep original.
     pub(super) fn prompt_rename(&self, info: &TorrentInfo) -> Result<Option<String>> {
         if self.config.yes {
-            // With --yes flag, skip rename prompt
+            if self.config.auto_rename {
+                let suggested = self.names.clean_suggested_name(info);
+                if !suggested.is_empty() {
+                    return Ok(Some(suggested));
+                }
+            }
             return Ok(None);
         }
 
@@ -132,11 +146,14 @@ impl QTorrent {
         // Check if user entered a number to select an option
         let selected_name = match input.as_str() {
             "1" => normalized_suggested,
-            "2" if show_internal && normalized_internal.is_some() => {
-                normalized_internal.expect("normalized_internal checked above")
-            }
+            "2" if show_internal => normalized_internal.unwrap_or(normalized_suggested),
             _ => self.names.custom_output_name(&input, info, &normalized_suggested),
         };
+
+        if selected_name.is_empty() {
+            println!("  {}", "Empty name after sanitization, keeping original.".yellow());
+            return Ok(None);
+        }
 
         let new_name_label = if info.effective_is_multi_file {
             "New folder name:"

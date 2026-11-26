@@ -186,8 +186,13 @@ impl Torrent {
     #[must_use]
     pub fn total_size(&self) -> u64 {
         self.info.files.as_ref().map_or_else(
-            || self.info.length.unwrap_or(0) as u64,
-            |files| files.iter().map(|file| file.length as u64).sum(),
+            || u64::try_from(self.info.length.unwrap_or(0)).unwrap_or(0),
+            |files| {
+                files
+                    .iter()
+                    .map(|file| u64::try_from(file.length).unwrap_or(0))
+                    .fold(0_u64, u64::saturating_add)
+            },
         )
     }
 
@@ -200,7 +205,7 @@ impl Torrent {
                 vec![FileInfo {
                     index: 0,
                     path: Cow::Borrowed(self.name().unwrap_or_default()),
-                    size: self.info.length.unwrap_or(0) as u64,
+                    size: u64::try_from(self.info.length.unwrap_or(0)).unwrap_or(0),
                     exclusion_reason: None,
                 }]
             },
@@ -211,7 +216,7 @@ impl Torrent {
                     .map(|(index, file)| FileInfo {
                         index,
                         path: Cow::Owned(file.path.join("/")),
-                        size: file.length as u64,
+                        size: u64::try_from(file.length).unwrap_or(0),
                         exclusion_reason: None,
                     })
                     .collect()
@@ -658,11 +663,16 @@ fn size_exclusion_reason(
     is_image: bool,
 ) -> Option<String> {
     if let Some(min_size) = min_size_bytes
-        && let Some(min_size_mb) = min_size_mb
         && file_size < min_size
     {
         let label = if is_image { "image size" } else { "size" };
-        return Some(format!("{label} < {min_size_mb} MB"));
+        if let Some(mb) = min_size_mb
+            && mb > 0
+            && mb * BYTES_PER_MB == min_size
+        {
+            return Some(format!("{label} < {mb} MB"));
+        }
+        return Some(format!("{label} < {}", cli_tools_common::format_size(min_size)));
     }
 
     None
@@ -689,10 +699,15 @@ fn image_size_exclusion_reason(
     min_size_kb: Option<u64>,
 ) -> Option<String> {
     if let Some(min_size) = min_size_bytes
-        && let Some(min_size_kb) = min_size_kb
         && file_size < min_size
     {
-        return Some(format!("image size < {min_size_kb} KB"));
+        if let Some(kb) = min_size_kb
+            && kb > 0
+            && kb * BYTES_PER_KB == min_size
+        {
+            return Some(format!("image size < {kb} KB"));
+        }
+        return Some(format!("image size < {}", cli_tools_common::format_size(min_size)));
     }
 
     None

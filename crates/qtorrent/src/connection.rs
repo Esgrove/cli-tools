@@ -64,7 +64,7 @@ impl ConnectionSettings {
             bail!("qBittorrent credentials not configured");
         }
 
-        let mut client = QBittorrentClient::new(&self.host, self.port);
+        let mut client = QBittorrentClient::try_new(&self.host, self.port)?;
         client.login(&self.username, &self.password).await?;
 
         let application_version = client.get_app_version().await?;

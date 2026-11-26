@@ -184,17 +184,16 @@ pub fn extract_file_extension(name: &str) -> Option<String> {
     }
 }
 
-/// Insert a date before the file extension, or at the end if no extension.
+/// Insert a date before a known media file extension, or at the end if there is none.
 #[must_use]
 pub fn insert_date_before_extension(name: &str, date: &str) -> String {
-    let path = Path::new(name);
-    path.extension().map_or_else(
-        || format!("{name}.{date}"),
-        |ext| {
-            let stem = path.file_stem().map_or(name, |s| s.to_str().unwrap_or(name));
-            format!("{stem}.{date}.{}", ext.to_string_lossy())
-        },
-    )
+    if extract_file_extension(name).is_some()
+        && let Some((stem, extension)) = name.rsplit_once('.')
+        && !stem.is_empty()
+    {
+        return format!("{stem}.{date}.{extension}");
+    }
+    format!("{name}.{date}")
 }
 
 /// Format a torrent name, removing a trailing single-digit part suffix before dot formatting.
@@ -203,8 +202,13 @@ pub fn insert_date_before_extension(name: &str, date: &str) -> String {
 pub fn format_torrent_name(dot_rename: &DotFormat, name: &str, is_multi_file: bool) -> String {
     let (stem, extension_suffix) = if is_multi_file {
         (name, "")
+    } else if extract_file_extension(name).is_some()
+        && let Some(dot_index) = name.rfind('.')
+        && dot_index > 0
+    {
+        name.split_at(dot_index)
     } else {
-        extract_file_extension(name).map_or((name, ""), |extension| name.split_at(name.len() - extension.len() - 1))
+        (name, "")
     };
     let cleaned_stem = RE_TRAILING_PART.replace(stem, "");
 
@@ -386,29 +390,14 @@ pub fn move_torrent_to_downloaded(torrent_path: &Path, downloaded_directory: &Pa
         let extension = cli_tools_common::path_to_file_extension_string(torrent_path);
         destination = cli_tools_common::get_unique_path(downloaded_directory, &name, &stem, &extension);
     }
-    match std::fs::rename(torrent_path, &destination) {
-        Ok(()) => Ok(destination),
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            let temporary = cli_tools_common::unique_sibling_path(&destination, "move-tmp");
-            if let Err(copy_error) = cli_tools_common::copy_file_with_times(torrent_path, &temporary) {
-                let _ = std::fs::remove_file(&temporary);
-                return Err(copy_error).with_context(|| {
-                    format!("Failed to copy {} to {}", torrent_path.display(), destination.display())
-                });
-            }
-            if let Err(rename_error) = std::fs::rename(&temporary, &destination) {
-                let _ = std::fs::remove_file(&temporary);
-                return Err(rename_error).with_context(|| {
-                    format!("Failed to move {} to {}", torrent_path.display(), destination.display())
-                });
-            }
-            std::fs::remove_file(torrent_path)
-                .with_context(|| format!("Failed to remove original torrent {}", torrent_path.display()))?;
-            Ok(destination)
-        }
-        Err(error) => Err(error)
-            .with_context(|| format!("Failed to move {} to {}", torrent_path.display(), destination.display())),
-    }
+    cli_tools_common::safe_move_file(
+        torrent_path,
+        &destination,
+        cli_tools_common::OverwritePolicy::Overwrite,
+        None,
+    )
+    .with_context(|| format!("Failed to move {} to {}", torrent_path.display(), destination.display()))?;
+    Ok(destination)
 }
 
 #[cfg(test)]
@@ -861,6 +850,12 @@ mod test_insert_date_before_extension {
     fn handles_multiple_dots_in_name() {
         let result = insert_date_before_extension("Some.Name.Here.mp4", "2024.01.15");
         assert_eq!(result, "Some.Name.Here.2024.01.15.mp4");
+    }
+
+    #[test]
+    fn appends_date_for_dotted_directory_without_known_extension() {
+        let result = insert_date_before_extension("Show.Name", "2024.01.15");
+        assert_eq!(result, "Show.Name.2024.01.15");
     }
 }
 

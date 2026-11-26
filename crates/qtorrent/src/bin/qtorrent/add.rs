@@ -73,13 +73,14 @@ impl QTorrent {
             bail!("All input torrents failed to parse");
         }
 
-        let (failed, succeeded) = if self.config.dryrun {
-            (parse_failed, self.run_dryrun(torrents).await?)
+        let failed = if self.config.dryrun {
+            let _ = self.run_dryrun(torrents).await?;
+            parse_failed
         } else {
             let stats = self.add_torrents_individually(torrents).await?;
-            (parse_failed || stats.error > 0, stats.success + stats.renamed > 0)
+            parse_failed || stats.error > 0
         };
-        anyhow::ensure!(!failed || succeeded, "No requested torrent work succeeded");
+        anyhow::ensure!(!failed, "One or more torrent operations failed");
         Ok(())
     }
 
@@ -173,8 +174,11 @@ impl QTorrent {
                     .prompt_rename_existing(&info, existing_name, &adder, &mut printer)
                     .await
                 {
-                    Ok(true) => stats.inc_renamed(),
-                    Ok(false) => stats.inc_duplicate(),
+                    Ok(Some(new_name)) => {
+                        existing_torrents.insert(info_hash.clone(), Some(new_name));
+                        stats.inc_renamed();
+                    }
+                    Ok(None) => stats.inc_duplicate(),
                     Err(error) => {
                         cli_tools_common::print_error!("Failed to rename: {error}");
                         stats.inc_error();
@@ -278,7 +282,7 @@ impl QTorrent {
 
     /// Prepare names for the dry run without asking interactive questions.
     fn preview_torrents(&self, torrents: Vec<TorrentInfo>) -> Vec<TorrentInfo> {
-        if self.config.yes {
+        if self.config.yes && !self.config.auto_rename {
             return torrents;
         }
 

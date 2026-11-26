@@ -106,17 +106,30 @@ impl TorrentPathCollector {
 
 /// Collect all `.torrent` files from the given directory.
 ///
-/// If `recurse` is true, subdirectories are searched recursively.
+/// If `recurse` is true, subdirectories are searched recursively, skipping hidden entries
+/// and the `downloaded` archive directory.
 fn collect_torrents_from_directory(directory: &Path, torrent_paths: &mut Vec<PathBuf>, recurse: bool) -> Result<()> {
     if recurse {
         for entry in WalkDir::new(directory)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
+                if cli_tools_common::should_skip_entry(entry) {
+                    return false;
+                }
+                !(entry.file_type().is_dir()
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(crate::utils::DOWNLOADED_DIRECTORY_NAME)))
+            })
             .filter_map(Result::ok)
         {
-            let path = entry.path();
-            if path.is_file() && is_torrent_file(path) {
-                torrent_paths.push(path.to_path_buf());
+            if entry.file_type().is_file() && is_torrent_file(entry.path()) {
+                torrent_paths.push(entry.into_path());
             }
         }
     } else {
@@ -124,8 +137,9 @@ fn collect_torrents_from_directory(directory: &Path, torrent_paths: &mut Vec<Pat
             fs::read_dir(directory).with_context(|| format!("Failed to read directory: {}", directory.display()))?
         {
             let entry = entry?;
+            let file_type = entry.file_type()?;
             let path = entry.path();
-            if path.is_file() && is_torrent_file(&path) {
+            if file_type.is_file() && is_torrent_file(&path) {
                 torrent_paths.push(path);
             }
         }
@@ -216,6 +230,26 @@ mod test_torrent_path_collector {
         };
         assert_eq!(names(&flat), vec!["a.TORRENT", "b.torrent"]);
         assert_eq!(names(&recursive), vec!["a.TORRENT", "b.torrent", "c.torrent"]);
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_collect_skips_downloaded_and_hidden_directories() -> Result<()> {
+        let temp_directory = TempDir::new()?;
+        let root = temp_directory.path();
+        fs::create_dir_all(root.join("downloaded"))?;
+        fs::create_dir_all(root.join(".hidden"))?;
+        fs::create_dir_all(root.join("nested"))?;
+        fs::write(root.join("downloaded").join("old.torrent"), b"")?;
+        fs::write(root.join(".hidden").join("secret.torrent"), b"")?;
+        fs::write(root.join("nested").join("new.torrent"), b"")?;
+
+        let found = TorrentPathCollector::new(vec![root.to_path_buf()], true, &[], &[]).collect()?;
+        let names: Vec<_> = found
+            .iter()
+            .map(|path| cli_tools_common::path_to_filename_string(path))
+            .collect();
+        assert_eq!(names, vec!["new.torrent"]);
         Ok(())
     }
 }

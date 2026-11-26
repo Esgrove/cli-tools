@@ -20,6 +20,7 @@ async fn run(tree: &TempTree, arguments: &[&str]) -> Output {
         .env("USERPROFILE", tree.join("home"))
         .env("NO_PROXY", "127.0.0.1")
         .env("no_proxy", "127.0.0.1")
+        .env("CLI_TOOLS_CONFIG", "")
         .env_remove("CARGO_MANIFEST_DIR")
         .env_remove("XDG_CONFIG_HOME")
         .output()
@@ -87,7 +88,7 @@ async fn a_rejected_add_exits_unsuccessfully() {
 }
 
 #[tokio::test]
-async fn a_successful_add_keeps_a_mixed_run_successful() {
+async fn a_mixed_run_with_failures_exits_unsuccessfully() {
     let tree = TempTree::new();
     write_torrent(&tree, "Accepted");
     write_torrent(&tree, "Rejected");
@@ -98,7 +99,7 @@ async fn a_successful_add_keeps_a_mixed_run_successful() {
     .await;
     let output = run_connected(&tree, port).await;
 
-    assert!(output.status.success(), "{output:?}");
+    assert!(!output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Added:") && stdout.contains("Failed:"), "{stdout}");
 }
