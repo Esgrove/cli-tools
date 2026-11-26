@@ -109,6 +109,28 @@ fn blocked_suffix_chain_keeps_both_sources() {
 }
 
 #[test]
+fn preview_reuses_a_vacated_suffix_chain_name_with_different_case() {
+    let tree = TempTree::new();
+    tree.file_with("downloads/Clip_1.txt", "newer");
+    tree.file_with("downloads/clip_1_1.txt", "newest");
+    let before = tree.snapshot();
+
+    let preview = run_rxrename(&tree, &["downloads", "--dryrun"]);
+
+    assert!(preview.status.success(), "{preview:?}");
+    let printed = stdout(&preview);
+    assert!(printed.contains("2 files would be renamed"), "{printed}");
+    assert!(printed.contains("0 files would be deleted"), "{printed}");
+    assert_eq!(tree.snapshot(), before);
+
+    let run = run_rxrename(&tree, &["downloads"]);
+
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(tree.read("downloads/Clip.txt"), "newer");
+    assert_eq!(tree.read("downloads/clip_1.txt"), "newest");
+}
+
+#[test]
 fn missing_path_is_an_error() {
     let tree = TempTree::new();
 

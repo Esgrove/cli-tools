@@ -37,8 +37,7 @@ pub enum UnpackEvent<'a> {
         /// Why the deletion failed.
         error: &'a io::Error,
     },
-    /// The moves that unpack a directory into its parent were planned.
-    /// In a dry run nothing more happens for the directory.
+    /// The moves that passed collision checks and would unpack a directory into its parent.
     Planned {
         /// Directory receiving the contents.
         parent: &'a Path,
@@ -171,20 +170,22 @@ impl Unpacker {
                 continue;
             };
 
-            let plan = self.plan(&directory, &parent);
-            observer.on_unpack_event(UnpackEvent::Planned {
-                parent: &parent,
-                plan: &plan,
-            });
+            let mut plan = self.plan(&directory, &parent);
+            plan.directory_moves
+                .retain(|entry| self.reserve_move(entry, true, &mut reservations, observer));
+            plan.file_moves
+                .retain(|entry| self.reserve_move(entry, false, &mut reservations, observer));
+            if !plan.directory_moves.is_empty() || !plan.file_moves.is_empty() {
+                observer.on_unpack_event(UnpackEvent::Planned {
+                    parent: &parent,
+                    plan: &plan,
+                });
+            }
             if self.dry_run {
                 continue;
             }
 
             for PlannedMove { source, target } in &plan.directory_moves {
-                if !reservations.reserve(target) {
-                    observer.on_unpack_event(UnpackEvent::DuplicateTarget(source));
-                    continue;
-                }
                 match self.move_directory(source, target, &parent, &mut touched_directories) {
                     Ok(EntryMove::Moved) => {}
                     Ok(EntryMove::SkippedExisting) => {
@@ -194,10 +195,6 @@ impl Unpacker {
                 }
             }
             for PlannedMove { source, target } in &plan.file_moves {
-                if !reservations.reserve(target) {
-                    observer.on_unpack_event(UnpackEvent::DuplicateTarget(source));
-                    continue;
-                }
                 match self.move_file(source, target, &parent, &mut touched_directories) {
                     Ok(EntryMove::Moved) => {}
                     Ok(EntryMove::SkippedExisting) => {
@@ -332,6 +329,41 @@ impl Unpacker {
         }
 
         info
+    }
+
+    /// Reserve an unpack destination and report a collision before listing it as a move.
+    fn reserve_move(
+        &self,
+        entry: &PlannedMove,
+        is_directory: bool,
+        reservations: &mut TargetReservations,
+        observer: &mut impl UnpackObserver,
+    ) -> bool {
+        if !reservations.reserve(&entry.target) {
+            observer.on_unpack_event(UnpackEvent::DuplicateTarget(&entry.source));
+            return false;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&entry.target) else {
+            return true;
+        };
+        if !self.overwrite {
+            let event = if is_directory {
+                UnpackEvent::SkippedExistingDirectory(&entry.target)
+            } else {
+                UnpackEvent::SkippedExistingFile(&entry.target)
+            };
+            observer.on_unpack_event(event);
+            return false;
+        }
+        if metadata.is_dir() {
+            let error = anyhow::anyhow!("Refusing to replace existing directory: {}", entry.target.display());
+            observer.on_unpack_event(UnpackEvent::MoveFailed {
+                source: &entry.source,
+                error: &error,
+            });
+            return false;
+        }
+        true
     }
 
     /// Check if a directory contains any subdirectories matching unpack names, recursively.
@@ -1638,14 +1670,7 @@ mod test_unpack_events {
 
         let events = unpack_recorded(&tree, false, false);
 
-        assert_eq!(
-            events,
-            [
-                "planned 1 files 1 directories into Movie",
-                "skipped directory extra",
-                "skipped file english.srt"
-            ]
-        );
+        assert_eq!(events, ["skipped directory extra", "skipped file english.srt"]);
         assert_eq!(tree.read("Library/Movie/english.srt"), "existing");
         assert_eq!(tree.read("Library/Movie/subs/english.srt"), "new");
         assert_eq!(tree.read("Library/Movie/subs/extra/new.txt"), "new");

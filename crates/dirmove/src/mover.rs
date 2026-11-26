@@ -115,9 +115,36 @@ pub fn move_files_to_target_dir(
     overwrite: bool,
     observer: &mut impl MoveObserver,
 ) -> anyhow::Result<MoveReport> {
+    process_file_moves(target_directory, files, overwrite, false, observer)
+}
+
+/// Preview file moves without creating a directory or moving files.
+/// The report records eligible sources in `moved_files` and reports the same collisions as a real move.
+///
+/// # Errors
+/// Returns an error if the target path exists but is not a directory.
+pub fn preview_file_moves(
+    target_directory: &Path,
+    files: &[PathBuf],
+    overwrite: bool,
+    observer: &mut impl MoveObserver,
+) -> anyhow::Result<MoveReport> {
+    process_file_moves(target_directory, files, overwrite, true, observer)
+}
+
+/// Check each destination in order and move eligible files unless this is a preview.
+fn process_file_moves(
+    target_directory: &Path,
+    files: &[PathBuf],
+    overwrite: bool,
+    dry_run: bool,
+    observer: &mut impl MoveObserver,
+) -> anyhow::Result<MoveReport> {
     if !target_directory.exists() {
-        fs::create_dir_all(target_directory)?;
-        observer.on_event(MoveEvent::CreatedDirectory(target_directory));
+        if !dry_run {
+            fs::create_dir_all(target_directory)?;
+            observer.on_event(MoveEvent::CreatedDirectory(target_directory));
+        }
     } else if !target_directory.is_dir() {
         anyhow::bail!(
             "Target path exists but is not a directory: {}",
@@ -177,6 +204,11 @@ pub fn move_files_to_target_dir(
             observer.on_event(MoveEvent::DirectoryInTheWay(&new_path));
             observer.on_progress(expected_size);
             report.failed_files.push(file_path.clone());
+            continue;
+        }
+
+        if dry_run {
+            report.moved_files.push(file_path.clone());
             continue;
         }
 

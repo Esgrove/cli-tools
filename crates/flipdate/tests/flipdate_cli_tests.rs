@@ -64,6 +64,31 @@ fn dryrun_lists_planned_renames_and_changes_nothing() {
 }
 
 #[test]
+fn print_mode_omits_a_rename_blocked_by_the_canonical_file() {
+    let tree = TempTree::new();
+    tree.file_with("media/Report 31.12.2020.txt", "incoming report");
+    tree.file_with("media/Report 2020.12.31.txt", "existing report");
+    tree.file_with("media/Song 01.05.2021.mp3", "song");
+    let before = tree.snapshot();
+
+    let preview = run_flipdate(&tree, &["media", "--print"]);
+
+    assert!(preview.status.success(), "{preview:?}");
+    let printed = stdout(&preview);
+    assert!(printed.contains("Song 2021.05.01.mp3"), "{printed}");
+    assert!(!printed.contains("Report"), "{printed}");
+    assert!(String::from_utf8_lossy(&preview.stderr).contains("File already exists"));
+    assert_eq!(tree.snapshot(), before);
+
+    let run = run_flipdate(&tree, &["media"]);
+
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(tree.read("media/Report 31.12.2020.txt"), "incoming report");
+    assert_eq!(tree.read("media/Report 2020.12.31.txt"), "existing report");
+    assert_eq!(tree.read("media/Song 2021.05.01.mp3"), "song");
+}
+
+#[test]
 fn recursive_run_renames_every_level_and_a_second_run_changes_nothing() {
     let tree = library();
 

@@ -111,6 +111,40 @@ fn moving_keeps_the_best_copy_in_place_and_loses_nothing() {
 }
 
 #[test]
+fn move_preview_numbers_repeated_destinations() {
+    let tree = TempTree::new();
+    tree.file_with("keeper/Some.Show.1080p.mp4", "keeper");
+    tree.file_with("archive/Some.Show.mp4", "archive");
+    tree.file_with("shows/Some.Show.mp4", "show");
+    let before = tree.snapshot();
+    let root = tree.path().to_string_lossy();
+
+    let preview = dupefind(&[&root, "--recurse", "--move", "--print"]);
+
+    let text = output_text(&preview);
+    assert!(preview.status.success(), "{text}");
+    let destinations: Vec<_> = text.lines().filter_map(|line| line.split_once("Move: ")).collect();
+    assert_eq!(destinations.len(), 2, "{text}");
+    assert!(destinations[0].1.ends_with("Some.Show.mp4"), "{text}");
+    assert!(destinations[1].1.ends_with("Some.Show.1.mp4"), "{text}");
+    assert_eq!(tree.snapshot(), before);
+
+    let run = dupefind(&[&root, "--recurse", "--move"]);
+
+    let text = output_text(&run);
+    assert!(run.status.success(), "{text}");
+    let moved = text.lines().filter_map(|line| line.split_once("Move: "));
+    assert!(
+        destinations
+            .into_iter()
+            .map(|(_, path)| path)
+            .eq(moved.map(|(_, path)| path))
+    );
+    assert_eq!(files_outside_duplicates(&tree), ["keeper/Some.Show.1080p.mp4"]);
+    assert_eq!(contents(&tree), ["archive", "keeper", "show"]);
+}
+
+#[test]
 fn a_second_move_run_changes_nothing() {
     let tree = tree_with_duplicates();
     let root = tree.path().to_string_lossy().into_owned();
