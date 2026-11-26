@@ -275,16 +275,14 @@ impl DotRename {
             .into_par_iter()
             .filter_map(|path| {
                 let result = {
-                    // Filter based on include list
-                    let matches_filter = if self.config.include.is_empty() {
-                        true
-                    } else {
-                        let path_str = cli_tools_common::path_to_string(&path);
-                        let include = self.config.include.iter().all(|name| path_str.contains(name));
-                        let include_any = self.config.include_any.is_empty()
-                            || self.config.include_any.iter().any(|name| path_str.contains(name));
-                        include && include_any
-                    };
+                    // Filter based on include, include_any, and exclude lists
+                    let path_str = cli_tools_common::path_to_string(&path);
+                    let include = self.config.include.is_empty()
+                        || self.config.include.iter().all(|name| path_str.contains(name));
+                    let include_any = self.config.include_any.is_empty()
+                        || self.config.include_any.iter().any(|name| path_str.contains(name));
+                    let exclude = self.config.exclude.iter().any(|name| path_str.contains(name));
+                    let matches_filter = include && include_any && !exclude;
                     if matches_filter {
                         self.formatted_directory_path(&path)
                             .ok()
@@ -598,24 +596,20 @@ impl DotRename {
         let escaped_name = regex::escape(name);
 
         let prefix_regex_start_full_date = Regex::new(&format!(
-            "^({escaped_name}\\.)(.{{1,32}}?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
+            "^({escaped_name}\\.)(.{{1,32}}?\\.)((20[0-9]{{2}})\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
         ))
         .context("Failed to compile prefix dir full date regex")?;
 
-        let prefix_regex_start_year = Regex::new(&format!(
-            "^({escaped_name}\\.)(.{{1,32}}?\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
-        ))
-        .context("Failed to compile prefix dir year regex")?;
+        let prefix_regex_start_year = Regex::new(&format!("^({escaped_name}\\.)(.{{1,32}}?\\.)((20[0-9]{{2}})\\.)"))
+            .context("Failed to compile prefix dir year regex")?;
 
         let prefix_regex_middle_full_date = Regex::new(&format!(
-            "^(.{{1,32}}?\\.)({escaped_name}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)",
+            "^(.{{1,32}}?\\.)({escaped_name}\\.)((20[0-9]{{2}})\\.(?:1[0-2]|0?[1-9])\\.(?:[12]\\d|3[01]|0?[1-9])\\.)"
         ))
         .context("Failed to compile prefix dir middle full date regex")?;
 
-        let prefix_regex_middle_year = Regex::new(&format!(
-            "^(.{{1,32}}?\\.)({escaped_name}\\.)((20(?:0[0-9]|1[0-9]|2[0-5]))\\.)",
-        ))
-        .context("Failed to compile prefix dir middle year regex")?;
+        let prefix_regex_middle_year = Regex::new(&format!("^(.{{1,32}}?\\.)({escaped_name}\\.)((20[0-9]{{2}})\\.)"))
+            .context("Failed to compile prefix dir middle year regex")?;
 
         Ok([
             (prefix_regex_start_full_date, "$2.$3.$1.".to_string()),
@@ -1864,6 +1858,51 @@ mod test_run_directories {
         .expect("the run should succeed");
 
         assert_eq!(entries(temporary.path()), vec!["Keep This", "skip that"]);
+    }
+
+    #[test]
+    fn directory_mode_applies_exclude_and_include_any_without_include() {
+        let temporary = temporary_directory();
+        directory(temporary.path(), "match alpha");
+        directory(temporary.path(), "match skip");
+        directory(temporary.path(), "other dir");
+
+        dots(
+            temporary.path(),
+            DotRenameConfig {
+                include_any: vec!["match".to_string()],
+                exclude: vec!["skip".to_string()],
+                ..config()
+            },
+            false,
+        )
+        .run()
+        .expect("run");
+
+        assert_eq!(
+            entries(temporary.path()),
+            vec!["Match Alpha", "match skip", "other dir"]
+        );
+    }
+
+    #[test]
+    fn prefix_dir_reorders_dates_in_2026_and_later() {
+        let temporary = temporary_directory();
+        let show_dir = directory(temporary.path(), "Show");
+        std::fs::write(show_dir.join("episode title 2026.06.15 extra.mp4"), b"video").expect("write");
+
+        DotRename::new(
+            show_dir.clone(),
+            DotRenameConfig {
+                prefix_dir: true,
+                ..Default::default()
+            },
+            true,
+        )
+        .run()
+        .expect("run");
+
+        assert_eq!(entries(&show_dir), vec!["Episode.Title.2026.06.15.Show.Extra.mp4"]);
     }
 
     #[test]

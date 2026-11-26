@@ -275,7 +275,7 @@ impl DotRenameConfig {
     /// Returns an error if the config file cannot be read or parsed.
     pub fn from_user_config() -> anyhow::Result<Self> {
         let user_config = DotsConfig::get_user_config()?;
-        let config_regex = DotsConfig::compile_regex_patterns(user_config.regex_replace).unwrap_or_default();
+        let config_regex = DotsConfig::compile_regex_patterns(user_config.regex_replace)?;
 
         let move_date_after_prefix = user_config
             .move_date_after_prefix

@@ -391,8 +391,7 @@ impl DotFormat<'_> {
                 new_name.insert_str(insert_pos, &format!(".{date}."));
 
                 *name = new_name;
-            }
-            if let Some(date_match) = RE_YEAR.find_at(name, insert_pos)
+            } else if let Some(date_match) = RE_YEAR.find_at(name, insert_pos)
                 && let Ok(date) = date_match.as_str().parse::<i32>()
                 && date <= *CURRENT_YEAR
             {
@@ -1595,6 +1594,19 @@ mod test_idempotent_formatting {
         let config = DotRenameConfig::default();
         let formatter = DotFormat::new(&config);
         assert_eq!(formatter.format_name("Tom & & Jerry"), "Tom.and.and.Jerry");
+    }
+
+    #[test]
+    fn move_date_after_prefix_does_not_move_second_year_ahead_of_full_date() {
+        let config = DotRenameConfig {
+            move_date_after_prefix: vec!["Test.".to_string()],
+            ..Default::default()
+        };
+        let formatter = DotFormat::new(&config);
+        assert_eq!(
+            formatter.format_name("Test something 1998.05.06 2020"),
+            "Test.1998.05.06.Something.2020"
+        );
     }
 
     #[test]
