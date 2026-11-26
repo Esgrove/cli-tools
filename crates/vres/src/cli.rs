@@ -34,10 +34,6 @@ static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Failed to create regex pattern for valid resolutions")
 });
 
-static RE_HIGH_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(720p|1080p|1440p|2160p)").expect("Failed to create regex pattern for high resolutions")
-});
-
 /// Matches full resolution patterns like `1920x1080` or `1080x1920` in filenames.
 /// Used to detect files that have both a resolution label and a full resolution pattern (duplicates).
 static RE_FULL_RESOLUTION: LazyLock<Regex> =
@@ -196,30 +192,12 @@ fn is_supported_extension(extension: &str) -> bool {
 
 /// Return whether a filename's existing resolution label allows skipping probing during discovery.
 fn should_skip_labeled_filename(filename: &str, delete_limit: Option<u32>) -> bool {
-    if RE_FULL_RESOLUTION.is_match(filename) {
-        return false;
-    }
-    if let Some(limit) = delete_limit {
-        let mut matched_any = false;
-        for captures in RE_HIGH_RESOLUTIONS.captures_iter(filename) {
-            let Some(label) = captures.get(1).map(|matched| matched.as_str()) else {
-                continue;
-            };
-            let height = label.trim_end_matches(['p', 'P']).parse::<u32>().unwrap_or(0);
-            matched_any = true;
-            if height < limit {
-                return false;
-            }
-        }
-        matched_any
-    } else {
-        RE_RESOLUTIONS.is_match(filename)
-    }
+    delete_limit.is_none() && !RE_FULL_RESOLUTION.is_match(filename) && RE_RESOLUTIONS.is_match(filename)
 }
 
 /// Gathers video files for processing.
-/// When `delete_limit` is set, only skips files whose high-resolution label is at least `limit`.
-/// Otherwise, excludes files with any resolution label.
+/// In delete mode, filename labels are not bounds on the actual dimensions, so they cannot skip probing.
+/// In rename-only mode, skips files that already have a resolution label but no full dimensions.
 async fn gather_video_files(path: &Path, recurse: bool, delete_limit: Option<u32>) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
@@ -446,22 +424,6 @@ mod regex_tests {
     }
 
     #[test]
-    fn regex_high_resolutions_matches() {
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.720p.mp4"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.1080p.mp4"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.1440p.mp4"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.2160p.mp4"));
-    }
-
-    #[test]
-    fn regex_high_resolutions_no_match_low_res() {
-        assert!(!RE_HIGH_RESOLUTIONS.is_match("video.480p.mp4"));
-        assert!(!RE_HIGH_RESOLUTIONS.is_match("video.540p.mp4"));
-        assert!(!RE_HIGH_RESOLUTIONS.is_match("video.576p.mp4"));
-        assert!(!RE_HIGH_RESOLUTIONS.is_match("video.600p.mp4"));
-    }
-
-    #[test]
     fn regex_resolutions_matches_600p() {
         assert!(RE_RESOLUTIONS.is_match("video.600p.mp4"));
     }
@@ -469,26 +431,23 @@ mod regex_tests {
     #[test]
     fn regex_resolutions_at_start_of_filename() {
         assert!(RE_RESOLUTIONS.is_match("1080p.video.mp4"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("720p.video.mp4"));
     }
 
     #[test]
     fn regex_resolutions_at_end_of_filename() {
         assert!(RE_RESOLUTIONS.is_match("video.1080p"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.2160p"));
     }
 
     #[test]
     fn regex_resolutions_in_middle_of_filename() {
         assert!(RE_RESOLUTIONS.is_match("my.video.1080p.2024.mp4"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("movie.720p.bluray.mp4"));
     }
 
     #[test]
     fn regex_resolutions_mixed_case() {
         assert!(RE_RESOLUTIONS.is_match("video.1080P.mp4"));
         assert!(RE_RESOLUTIONS.is_match("video.720P.mp4"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.1440P.mp4"));
+        assert!(RE_RESOLUTIONS.is_match("video.1440P.mp4"));
     }
 
     #[test]
@@ -512,19 +471,8 @@ mod regex_tests {
     }
 
     #[test]
-    fn regex_high_resolutions_no_match_544p() {
-        assert!(!RE_HIGH_RESOLUTIONS.is_match("video.544p.mp4"));
-    }
-
-    #[test]
     fn regex_resolutions_matches_544p() {
         assert!(RE_RESOLUTIONS.is_match("video.544p.mp4"));
-    }
-
-    #[test]
-    fn regex_high_resolutions_case_insensitive() {
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.1080P.mp4"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("video.2160P.mp4"));
     }
 
     #[test]
@@ -534,16 +482,10 @@ mod regex_tests {
     }
 
     #[test]
-    fn regex_high_resolutions_empty_string() {
-        assert!(!RE_HIGH_RESOLUTIONS.is_match(""));
-        assert!(!RE_RESOLUTIONS.is_match(""));
-    }
-
-    #[test]
     fn regex_resolutions_only_resolution() {
         assert!(RE_RESOLUTIONS.is_match("1080p"));
         assert!(RE_RESOLUTIONS.is_match("720p"));
-        assert!(RE_HIGH_RESOLUTIONS.is_match("2160p"));
+        assert!(RE_RESOLUTIONS.is_match("2160p"));
     }
 }
 
@@ -922,7 +864,7 @@ mod test_gather_video_files {
     }
 
     #[tokio::test]
-    async fn delete_mode_keeps_files_whose_label_is_below_the_high_resolutions() {
+    async fn delete_mode_ignores_filename_labels_even_at_the_default_threshold() {
         let directory = temporary_directory();
         write(directory.path(), "small.480p.mp4");
         write(directory.path(), "large.1080p.mp4");
@@ -931,15 +873,11 @@ mod test_gather_video_files {
             .await
             .expect("gathering should succeed");
 
-        assert_eq!(
-            names(&files),
-            vec!["small.480p.mp4"],
-            "delete mode only skips the high resolution labels"
-        );
+        assert_eq!(names(&files), vec!["large.1080p.mp4", "small.480p.mp4"]);
     }
 
     #[tokio::test]
-    async fn delete_mode_keeps_720p_files_when_limit_is_above_720_and_matches_uppercase_extensions() {
+    async fn delete_mode_matches_uppercase_extensions() {
         let directory = temporary_directory();
         write(directory.path(), "clip.720p.MP4");
         write(directory.path(), "movie.1080p.MOV");
@@ -947,7 +885,7 @@ mod test_gather_video_files {
         let files = gather_video_files(directory.path(), false, Some(1080))
             .await
             .expect("gathering should succeed");
-        assert_eq!(names(&files), vec!["clip.720p.MP4"]);
+        assert_eq!(names(&files), vec!["clip.720p.MP4", "movie.1080p.MOV"]);
 
         let single = gather_video_files(&directory.path().join("movie.1080p.MOV"), false, None)
             .await
@@ -1246,6 +1184,42 @@ mod test_gather_nested_trees {
         let (_, deep) = gather_both(&tree).await;
 
         assert_eq!(deep, vec!["movie.mp4", "nested/kept.mp4"]);
+    }
+
+    #[tokio::test]
+    async fn delete_mode_probes_fuzzy_720p_files_from_directories() {
+        if !cli_tools_common::command_exists("ffmpeg") || !cli_tools_common::command_exists("ffprobe") {
+            return;
+        }
+        let tree = TempTree::with_entries(&["nested/"]);
+        let video = tree.join("nested/clip.720p.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=1270x710:r=1:d=1",
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(&video)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success(), "ffmpeg should generate a fuzzy 720p video");
+
+        let measured = run_ffprobe(video.clone()).await.unwrap().resolution;
+        assert_eq!(measured.label(), "720p");
+        assert!(measured.is_smaller_than(720));
+
+        for (root, recurse) in [(tree.join("nested"), false), (tree.path().to_path_buf(), true)] {
+            assert_eq!(
+                gather_video_files(&root, recurse, Some(720)).await.unwrap(),
+                std::slice::from_ref(&video)
+            );
+        }
     }
 
     #[tokio::test]
