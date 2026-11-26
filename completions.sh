@@ -133,7 +133,7 @@ if [ "$SILENT" = false ]; then
                 print_yellow "Note: For bash completions, ensure your .bashrc sources files from ~/.bash_completion.d/"
                 echo "Add to your .bashrc if not already present:"
                 echo '  for file in ~/.bash_completion.d/*; do'
-                echo '      [ -f "$file" ] && source "$file"'
+                echo "      [ -f \"\$file\" ] && source \"\$file\""
                 echo '  done'
                 ;;
             zsh)
@@ -144,7 +144,7 @@ if [ "$SILENT" = false ]; then
                 else
                     echo ""
                     print_yellow "Note: For zsh completions, ensure your .zshrc includes the completions directory in fpath:"
-                    echo '  fpath=(~/.zsh/completions $fpath)'
+                    echo "  fpath=(~/.zsh/completions \$fpath)"
                     echo '  autoload -Uz compinit && compinit'
                 fi
                 ;;
@@ -152,8 +152,8 @@ if [ "$SILENT" = false ]; then
                 echo ""
                 print_yellow "Note: PowerShell completions are installed to ~/Documents/PowerShell/completions/"
                 echo "Ensure your PowerShell profile loads completions from that directory."
-                echo 'Add to your $PROFILE if not already present:'
-                echo '  Get-ChildItem "$HOME\Documents\PowerShell\completions\*.ps1" | ForEach-Object { . $_ }'
+                echo "Add to your \$PROFILE if not already present:"
+                echo "  Get-ChildItem \"\$HOME\Documents\PowerShell\completions\*.ps1\" | ForEach-Object { . \$_ }"
                 ;;
         esac
     done

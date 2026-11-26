@@ -64,12 +64,16 @@ print_usage_and_exit() {
 
 # Get all Rust executable names from the workspace crate manifests
 get_rust_executable_names() {
-    local executables
-    executables=$(awk -F'=' '/\[\[bin\]\]/,/name/ {if($1 ~ /name/) print $2}' "$REPO_ROOT"/crates/*/Cargo.toml | tr -d ' "\r')
+    local suffix=""
     if [ "$BASH_PLATFORM" = "windows" ]; then
-        executables=$(echo "$executables" | sed 's/$/.exe/')
+        suffix=".exe"
     fi
-    echo "$executables"
+    awk -F'=' -v suffix="$suffix" '/\[\[bin\]\]/,/name/ {
+        if ($1 ~ /name/) {
+            gsub(/[ "\r]/, "", $2)
+            print $2 suffix
+        }
+    }' "$REPO_ROOT"/crates/*/Cargo.toml
 }
 
 # Get the directories of the workspace crates that define at least one binary
