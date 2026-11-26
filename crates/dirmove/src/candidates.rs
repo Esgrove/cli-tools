@@ -170,7 +170,7 @@ impl FilteredParts {
         for (part, original) in self.parts_lower.iter().zip(self.parts_original.iter()) {
             if *part == target_normalized
                 || (part.starts_with(target_normalized)
-                    && Self::has_word_boundary_at(original, target_normalized.len()))
+                    && Self::has_word_boundary_after_lowercase_prefix(original, target_normalized.len()))
             {
                 return true;
             }
@@ -180,7 +180,7 @@ impl FilteredParts {
         for (combined, original) in self.two_parts_lower.iter().zip(self.two_parts_original.iter()) {
             if *combined == target_normalized
                 || (combined.starts_with(target_normalized)
-                    && Self::has_word_boundary_at(original, target_normalized.len()))
+                    && Self::has_word_boundary_after_lowercase_prefix(original, target_normalized.len()))
             {
                 return true;
             }
@@ -190,13 +190,26 @@ impl FilteredParts {
         for (combined, original) in self.three_parts_lower.iter().zip(self.three_parts_original.iter()) {
             if *combined == target_normalized
                 || (combined.starts_with(target_normalized)
-                    && Self::has_word_boundary_at(original, target_normalized.len()))
+                    && Self::has_word_boundary_after_lowercase_prefix(original, target_normalized.len()))
             {
                 return true;
             }
         }
 
         false
+    }
+
+    /// Check if there is a valid word boundary in `original_text` right after a lowercased prefix
+    /// of byte length `lowercase_prefix_len`.
+    ///
+    /// Maps lowercased byte length back to the corresponding UTF-8 byte offset in `original_text`,
+    /// handling case-expanding Unicode characters such as `'İ'` (2 bytes -> 3 bytes).
+    #[must_use]
+    pub(crate) fn has_word_boundary_after_lowercase_prefix(original_text: &str, lowercase_prefix_len: usize) -> bool {
+        let Some(original_offset) = original_offset_for_lowercase_prefix(original_text, lowercase_prefix_len) else {
+            return false;
+        };
+        Self::has_word_boundary_at(original_text, original_offset)
     }
 
     /// Check if there is a valid word boundary at byte position `boundary` in the **original-cased** text.
@@ -436,7 +449,7 @@ pub fn parts_are_contiguous_lowered(
     for (original_part, original_lower) in original_parts.iter().zip(original_parts_lower) {
         if *original_lower == prefix_combined
             || (original_lower.starts_with(prefix_combined)
-                && FilteredParts::has_word_boundary_at(original_part, prefix_combined.len()))
+                && FilteredParts::has_word_boundary_after_lowercase_prefix(original_part, prefix_combined.len()))
         {
             return true;
         }
@@ -459,18 +472,37 @@ pub fn parts_are_contiguous_lowered(
             combined_lower.push_str(part_lower);
             if combined_lower == prefix_combined
                 || (combined_lower.starts_with(prefix_combined)
-                    && FilteredParts::has_word_boundary_at(&combined, prefix_combined.len()))
+                    && FilteredParts::has_word_boundary_after_lowercase_prefix(&combined, prefix_combined.len()))
             {
                 return true;
             }
             // Stop if we've exceeded the target length (but allow starts_with)
-            if combined.len() > prefix_combined.len() + 20 {
+            if combined_lower.len() > prefix_combined.len() + 20 {
                 break;
             }
         }
     }
 
     false
+}
+
+/// Map a UTF-8 byte length in `original_text.to_lowercase()` back to the corresponding byte offset in `original_text`.
+fn original_offset_for_lowercase_prefix(original_text: &str, lowercase_prefix_len: usize) -> Option<usize> {
+    if original_text.is_ascii() {
+        return (lowercase_prefix_len <= original_text.len()).then_some(lowercase_prefix_len);
+    }
+
+    let mut lowered_bytes = 0;
+    for (byte_offset, character) in original_text.char_indices() {
+        if lowered_bytes == lowercase_prefix_len {
+            return Some(byte_offset);
+        }
+        if lowered_bytes > lowercase_prefix_len {
+            return None;
+        }
+        lowered_bytes += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    (lowered_bytes == lowercase_prefix_len).then_some(original_text.len())
 }
 
 /// Extract all N-part sequences from a filename as string slices.

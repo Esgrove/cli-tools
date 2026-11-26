@@ -64,7 +64,9 @@ impl<'a> PrefixIndex<'a> {
             .iter()
             .take_while(|entry| entry.lower.starts_with(target));
         for entry in candidates {
-            if entry.lower.len() == target.len() || FilteredParts::has_word_boundary_at(entry.original, target.len()) {
+            if entry.lower.len() == target.len()
+                || FilteredParts::has_word_boundary_after_lowercase_prefix(entry.original, target.len())
+            {
                 matches.push(entry.file_index);
             }
         }
@@ -146,5 +148,26 @@ mod test_prefix_index {
         let mut matches = vec![1, 2];
         index.matching_files("anything", &mut matches);
         assert_eq!(matches, [] as [usize; 0]);
+    }
+
+    #[test]
+    fn handles_case_expanding_unicode_word_boundaries() {
+        let files = files(&["İstanbul.01.mp4", "İstanbuls.01.mp4", "İstanbulAbc.01.mp4"]);
+        let index = PrefixIndex::new(&files);
+        let target = "İstanbul".to_lowercase();
+
+        assert!(files[0].filtered_parts().prefix_matches_normalized(&target));
+        assert!(
+            !files[1].filtered_parts().prefix_matches_normalized(&target),
+            "İstanbuls must not match İstanbul"
+        );
+        assert!(
+            files[2].filtered_parts().prefix_matches_normalized(&target),
+            "İstanbulAbc must match İstanbul at CamelCase boundary"
+        );
+
+        let mut matches = Vec::new();
+        index.matching_files(&target, &mut matches);
+        assert_eq!(matches, vec![0, 2]);
     }
 }
