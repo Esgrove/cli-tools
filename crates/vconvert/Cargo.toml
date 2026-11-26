@@ -22,11 +22,13 @@ default = ["cli"]
 # Dependencies of the vconvert binary, left out by library users with `default-features = false`.
 cli = [
     "cli-tools-common/completion",
+    "cli-tools-common/config",
     "cli-tools-common/diff",
     "dep:clap",
     "dep:clap_complete",
     "dep:colored",
     "dep:ctrlc",
+    "dep:dirs",
     "dep:indicatif",
     "dep:itertools",
     "dep:jiff",
@@ -35,8 +37,8 @@ cli = [
 
 [dependencies]
 anyhow = { workspace = true }
-cli-tools-common = { workspace = true }
-dirs = { workspace = true }
+cli-tools-common = { workspace = true, features = ["sqlite"] }
+cli-tools-media = { workspace = true, features = ["scan-cache"] }
 rayon = { workspace = true }
 regex = { workspace = true }
 rusqlite = { workspace = true }
@@ -49,6 +51,7 @@ clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
 ctrlc = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
 itertools = { workspace = true, optional = true }
 jiff = { workspace = true, optional = true }

@@ -8,17 +8,23 @@
 mod scanned_files;
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use cli_tools_common::sqlite;
+use cli_tools_media::scan_cache::{ensure_schema as ensure_media_cache_schema, is_definitively_missing};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::bitrate_limit::MinimumBitrate;
 use crate::options::SortOrder;
 use crate::types::VideoInfo;
 
-/// Default database filename.
-const DATABASE_FILENAME: &str = "vconvert.db";
+/// Schema migration component name for `pending_files`.
+const PENDING_COMPONENT: &str = "vconvert_pending";
+/// Current schema version for `pending_files`.
+const PENDING_SCHEMA_VERSION: i64 = 2;
+/// Legacy database filename imported on first migration into `cli-tools.db`.
+const LEGACY_VCONVERT_DB: &str = "vconvert.db";
 
 /// Action type for a pending file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,9 +37,10 @@ pub enum PendingAction {
     SubtitleMux,
 }
 
-/// Database wrapper for pending file operations.
+/// Database wrapper for pending file and shared scan cache operations on `cli-tools.db`.
 pub struct Database {
     connection: Connection,
+    db_path: Option<PathBuf>,
 }
 
 /// A pending file entry from the database.
@@ -43,9 +50,9 @@ pub struct PendingFile {
     pub id: i64,
     /// Full path to the video file.
     pub full_path: PathBuf,
-    /// File extension (e.g., "mp4", "mkv").
+    /// File extension (for example "mp4", "mkv").
     pub extension: String,
-    /// Video codec name (e.g., "hevc", "h264").
+    /// Video codec name (for example "hevc", "h264").
     pub codec: String,
     /// Video bitrate in kbps.
     pub bitrate_kbps: u64,
@@ -61,12 +68,17 @@ pub struct PendingFile {
     pub frames_per_second: f64,
     /// Video bit depth per color channel.
     pub bit_depth: u8,
-    /// Action to perform: "convert" or "remux".
+    /// Action to perform: `"convert"`, `"remux"`, or `"subtitle_mux"`.
     pub action: PendingAction,
+    /// Whether this pending item was queued in movie mode.
+    pub movie_mode: bool,
+    /// Worker owner identifier currently leasing this row, if any.
+    pub claimed_by: Option<String>,
+    /// Unix timestamp (seconds) when the current lease was taken or refreshed.
+    pub claimed_at: Option<i64>,
     /// When the entry was added to the database.
     #[allow(dead_code)]
     pub created_time: i64,
-    /// File's modification time when scanned, used to detect later changes.
     /// File modification time in whole seconds since the Unix epoch, if recorded.
     pub modified_time: Option<i64>,
     /// File modification time in nanoseconds since the Unix epoch (0 if unrecorded).
@@ -101,6 +113,17 @@ pub struct ExtensionStats {
     pub total_size: u64,
 }
 
+/// Pre-stat entry ready to write inside an `IMMEDIATE` transaction.
+struct PreparedPendingEntry<'a> {
+    path_str: &'a str,
+    extension: String,
+    info: &'a VideoInfo,
+    action: PendingAction,
+    modified_time: Option<i64>,
+    modified_time_ns: i64,
+    disk_size_bytes: Option<u64>,
+}
+
 /// Filter options for querying pending files.
 #[derive(Debug, Default, Clone)]
 pub struct PendingFileFilter {
@@ -108,6 +131,8 @@ pub struct PendingFileFilter {
     pub action: Option<PendingAction>,
     /// Filter by file extensions.
     pub extensions: Vec<String>,
+    /// Optional path prefixes restricting matched rows to specific directories or files.
+    pub path_prefixes: Vec<PathBuf>,
     /// Minimum bitrate.
     pub min_bitrate: Option<MinimumBitrate>,
     /// Maximum bitrate in kbps.
@@ -116,11 +141,11 @@ pub struct PendingFileFilter {
     pub min_duration: Option<f64>,
     /// Maximum duration in seconds.
     pub max_duration: Option<f64>,
-    /// Minimum width and height in pixels (conversions only).
+    /// Minimum equivalent 16:9 resolution height in pixels (conversions only).
     pub min_resolution: Option<u32>,
-    /// Include files whose stem contains at least one of these patterns.
+    /// Include files whose name matches at least one of these glob or substring patterns.
     pub include: Vec<String>,
-    /// Exclude files whose stem contains any of these patterns.
+    /// Exclude files whose name matches any of these glob or substring patterns.
     pub exclude: Vec<String>,
     /// Limit number of results.
     pub limit: Option<usize>,
@@ -156,32 +181,55 @@ impl std::fmt::Display for PendingAction {
 }
 
 impl Database {
-    /// Open or create the database at the default path.
+    /// Open or create the unified `cli-tools.db` database at the default path.
     ///
     /// # Errors
     /// Returns an error if the database cannot be opened or initialized.
     pub fn open_default() -> Result<Self> {
-        let path = Self::database_path();
+        let path = sqlite::database_path()?;
+        Self::open_at(&path)
+    }
 
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
-        }
-
-        let connection =
-            Connection::open(&path).with_context(|| format!("Failed to open database: {}", path.display()))?;
-
-        // Set busy timeout for concurrent access (5 seconds)
-        // WAL mode allows concurrent reads, but writes need to wait for each other
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .context("Failed to set busy timeout")?;
-
-        let database = Self { connection };
-        database.initialize()?;
-
+    /// Open or create the database at a specific path.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened or initialized.
+    pub fn open_at(path: &Path) -> Result<Self> {
+        let connection = sqlite::open_at(path)?;
+        let legacy = if path.file_name().and_then(|name| name.to_str()) == Some(sqlite::DATABASE_FILENAME) {
+            sqlite::legacy_database_path(path, LEGACY_VCONVERT_DB)
+        } else {
+            None
+        };
+        let mut database = Self {
+            connection,
+            db_path: Some(path.to_path_buf()),
+        };
+        database.initialize_with_legacy(legacy.as_deref())?;
         Ok(database)
+    }
+
+    /// Open the default unified database in read-only mode, returning `Ok(None)` if it does not exist yet.
+    ///
+    /// # Errors
+    /// Returns an error if an existing database cannot be opened.
+    pub fn open_read_only() -> Result<Option<Self>> {
+        let path = sqlite::database_path()?;
+        Self::open_read_only_at(&path)
+    }
+
+    /// Open a database at `path` in read-only mode, returning `Ok(None)` if `path` does not exist.
+    ///
+    /// # Errors
+    /// Returns an error if an existing database cannot be opened.
+    pub fn open_read_only_at(path: &Path) -> Result<Option<Self>> {
+        let Some(connection) = sqlite::open_read_only_at(path)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            connection,
+            db_path: Some(path.to_path_buf()),
+        }))
     }
 
     /// Open an empty in-memory database, for tests and for runs that keep no state.
@@ -189,21 +237,28 @@ impl Database {
     /// # Errors
     /// Returns an error if the database cannot be created.
     pub fn open_in_memory() -> Result<Self> {
-        let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
-
-        let database = Self { connection };
-        database.initialize()?;
-
+        let connection = sqlite::open_in_memory()?;
+        let mut database = Self {
+            connection,
+            db_path: None,
+        };
+        database.initialize_with_legacy(None)?;
         Ok(database)
     }
 
     /// Get the database path for display purposes.
     #[must_use]
     pub fn path() -> PathBuf {
-        Self::database_path()
+        sqlite::database_path().unwrap_or_else(|_| PathBuf::from(sqlite::DATABASE_FILENAME))
     }
 
-    /// Insert or update a pending file entry.
+    /// Return the on-disk path of this open database, or `None` for an in-memory database.
+    #[must_use]
+    pub fn db_path(&self) -> Option<&Path> {
+        self.db_path.as_deref()
+    }
+
+    /// Insert or update a pending file entry (defaulting `movie_mode` to `false`).
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
@@ -214,22 +269,36 @@ impl Database {
         info: &VideoInfo,
         action: PendingAction,
     ) -> Result<i64> {
+        self.upsert_pending_file_with_mode(path, extension, info, action, false)
+    }
+
+    /// Insert or update a pending file entry with explicit movie-mode state.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn upsert_pending_file_with_mode(
+        &self,
+        path: &Path,
+        extension: &str,
+        info: &VideoInfo,
+        action: PendingAction,
+        movie_mode: bool,
+    ) -> Result<i64> {
         let Some(path_str) = path.to_str() else {
             return Ok(0);
         };
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
-
-        let modified_time = file_modified_time(path);
-        let modified_time_ns = file_modified_time_ns(path);
-        let disk_size_bytes = file_disk_size(path);
+        let now = unix_now_secs();
+        let (modified_time, modified_time_ns, disk_size_bytes) = read_file_disk_metadata(path);
 
         self.connection
             .execute(
                 r"
-                INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                INSERT INTO pending_files (
+                    full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height,
+                    frames_per_second, bit_depth, action, movie_mode, created_time,
+                    modified_time, modified_time_ns, disk_size_bytes
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 ON CONFLICT(full_path) DO UPDATE SET
                     extension = excluded.extension,
                     codec = excluded.codec,
@@ -241,6 +310,7 @@ impl Database {
                     frames_per_second = excluded.frames_per_second,
                     bit_depth = excluded.bit_depth,
                     action = excluded.action,
+                    movie_mode = excluded.movie_mode,
                     modified_time = excluded.modified_time,
                     modified_time_ns = excluded.modified_time_ns,
                     disk_size_bytes = excluded.disk_size_bytes
@@ -257,6 +327,7 @@ impl Database {
                     info.frames_per_second,
                     i64::from(info.bit_depth),
                     action.as_str(),
+                    i64::from(movie_mode),
                     now,
                     modified_time,
                     modified_time_ns,
@@ -268,11 +339,9 @@ impl Database {
         Ok(self.connection.last_insert_rowid())
     }
 
-    /// Insert or update multiple pending files in a single transaction.
+    /// Insert or update multiple pending files in a single `IMMEDIATE` transaction.
     ///
-    /// Wrapping all writes in one transaction reduces disk syncs from O(N) to O(1).
-    ///
-    /// Returns the number of entries successfully written.
+    /// All filesystem metadata reads happen before opening the write transaction.
     ///
     /// # Errors
     /// Returns an error if the transaction cannot be started or committed.
@@ -280,30 +349,59 @@ impl Database {
         &mut self,
         entries: &[(&Path, &str, &VideoInfo, PendingAction)],
     ) -> Result<usize> {
+        self.batch_upsert_pending_files_with_mode(entries, false)
+    }
+
+    /// Insert or update multiple pending files with explicit movie-mode state in a single `IMMEDIATE` transaction.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be started or committed.
+    pub fn batch_upsert_pending_files_with_mode(
+        &mut self,
+        entries: &[(&Path, &str, &VideoInfo, PendingAction)],
+        movie_mode: bool,
+    ) -> Result<usize> {
         if entries.is_empty() {
             return Ok(0);
         }
 
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
+        // Collect all filesystem stat calls before taking the SQLite write lock.
+        let prepared: Vec<PreparedPendingEntry<'_>> = entries
+            .iter()
+            .filter_map(|&(path, extension, info, action)| {
+                let path_str = path.to_str()?;
+                let (modified_time, modified_time_ns, disk_size_bytes) = read_file_disk_metadata(path);
+                Some(PreparedPendingEntry {
+                    path_str,
+                    extension: extension.to_lowercase(),
+                    info,
+                    action,
+                    modified_time,
+                    modified_time_ns,
+                    disk_size_bytes,
+                })
+            })
+            .collect();
 
-        let transaction = self.connection.transaction()?;
+        if prepared.is_empty() {
+            return Ok(0);
+        }
+
+        let now = unix_now_secs();
+        let transaction = sqlite::immediate_transaction(&mut self.connection)?;
         let mut count = 0;
 
-        for (path, extension, info, action) in entries {
-            let Some(path_str) = path.to_str() else {
-                continue;
-            };
-            let modified_time = file_modified_time(path);
-            let modified_time_ns = file_modified_time_ns(path);
-            let disk_size_bytes = file_disk_size(path);
-
+        for entry in prepared {
+            let entry_movie_mode = movie_mode || entry.action == PendingAction::SubtitleMux;
             transaction
                 .execute(
                     r"
-                    INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    INSERT INTO pending_files (
+                        full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height,
+                        frames_per_second, bit_depth, action, movie_mode, created_time,
+                        modified_time, modified_time_ns, disk_size_bytes
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                     ON CONFLICT(full_path) DO UPDATE SET
                         extension = excluded.extension,
                         codec = excluded.codec,
@@ -315,26 +413,28 @@ impl Database {
                         frames_per_second = excluded.frames_per_second,
                         bit_depth = excluded.bit_depth,
                         action = excluded.action,
+                        movie_mode = excluded.movie_mode,
                         modified_time = excluded.modified_time,
                         modified_time_ns = excluded.modified_time_ns,
                         disk_size_bytes = excluded.disk_size_bytes
                     ",
                     params![
-                        path_str,
-                        extension.to_lowercase(),
-                        info.codec,
-                        info.bitrate_kbps as i64,
-                        info.size_bytes as i64,
-                        info.duration,
-                        info.width,
-                        info.height,
-                        info.frames_per_second,
-                        i64::from(info.bit_depth),
-                        action.as_str(),
+                        entry.path_str,
+                        entry.extension,
+                        entry.info.codec,
+                        entry.info.bitrate_kbps as i64,
+                        entry.info.size_bytes as i64,
+                        entry.info.duration,
+                        entry.info.width,
+                        entry.info.height,
+                        entry.info.frames_per_second,
+                        i64::from(entry.info.bit_depth),
+                        entry.action.as_str(),
+                        i64::from(entry_movie_mode),
                         now,
-                        modified_time,
-                        modified_time_ns,
-                        disk_size_bytes.map(|size| size as i64),
+                        entry.modified_time,
+                        entry.modified_time_ns,
+                        entry.disk_size_bytes.map(|size| size as i64),
                     ],
                 )
                 .context("Failed to insert pending file")?;
@@ -345,85 +445,77 @@ impl Database {
         Ok(count)
     }
 
+    /// Atomically claim a specific pending file row for `owner_id` if unclaimed or lease-expired.
+    ///
+    /// Returns `Ok(true)` if the claim succeeded or is already held by `owner_id`,
+    /// and `Ok(false)` if another worker holds a live claim or the row no longer exists.
+    ///
+    /// # Errors
+    /// Returns an error if the database transaction fails.
+    pub fn claim_pending_file(&mut self, path: &Path, owner_id: &str, lease_ttl_secs: i64) -> Result<bool> {
+        let Some(path_str) = path.to_str() else {
+            return Ok(false);
+        };
+        let now = unix_now_secs();
+        let stale_before = now.saturating_sub(lease_ttl_secs);
+        let tx = sqlite::immediate_transaction(&mut self.connection)?;
+        let updated = tx.execute(
+            r"
+            UPDATE pending_files
+            SET claimed_by = ?1, claimed_at = ?2
+            WHERE full_path = ?3
+              AND (claimed_by IS NULL OR claimed_by = ?1 OR COALESCE(claimed_at, 0) <= ?4)
+            ",
+            params![owner_id, now, path_str, stale_before],
+        )?;
+        tx.commit()?;
+        Ok(updated > 0)
+    }
+
+    /// Release a pending-file claim owned by `owner_id`.
+    ///
+    /// # Errors
+    /// Returns an error if the update fails.
+    pub fn release_pending_claim(&mut self, path: &Path, owner_id: &str) -> Result<()> {
+        let Some(path_str) = path.to_str() else {
+            return Ok(());
+        };
+        let tx = sqlite::immediate_transaction(&mut self.connection)?;
+        tx.execute(
+            "UPDATE pending_files SET claimed_by = NULL, claimed_at = NULL WHERE full_path = ?1 AND claimed_by = ?2",
+            params![path_str, owner_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Release every pending-file claim owned by `owner_id`.
+    ///
+    /// # Errors
+    /// Returns an error if the update fails.
+    pub fn release_all_pending_claims(&mut self, owner_id: &str) -> Result<usize> {
+        let tx = sqlite::immediate_transaction(&mut self.connection)?;
+        let count = tx.execute(
+            "UPDATE pending_files SET claimed_by = NULL, claimed_at = NULL WHERE claimed_by = ?1",
+            params![owner_id],
+        )?;
+        tx.commit()?;
+        Ok(count)
+    }
+
     /// Get pending files with optional filtering.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn get_pending_files(&self, filter: &PendingFileFilter) -> Result<Vec<PendingFile>> {
-        let mut conditions = Vec::new();
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if let Some(action) = filter.action {
-            params_vec.push(Box::new(action.as_str().to_string()));
-            conditions.push(format!("action = ?{}", params_vec.len()));
+        if !sqlite::table_exists(&self.connection, "main", "pending_files")? {
+            return Ok(Vec::new());
         }
+        let (where_clause, params_vec) = build_pending_where_clause(filter);
 
-        if !filter.extensions.is_empty() {
-            let placeholders: Vec<String> = filter
-                .extensions
-                .iter()
-                .map(|ext| {
-                    params_vec.push(Box::new(ext.to_lowercase()));
-                    format!("?{}", params_vec.len())
-                })
-                .collect();
-            conditions.push(format!("extension IN ({})", placeholders.join(", ")));
-        }
-
-        // Bitrate limits only apply to conversions, not remuxes
-        if let Some(min_bitrate) = filter.min_bitrate {
-            let threshold = min_bitrate.sql_threshold(&mut params_vec);
-            conditions.push(format!(
-                "(action != '{}' OR bitrate_kbps >= {threshold})",
-                PendingAction::Convert.as_str(),
-            ));
-        }
-
-        if let Some(max_bitrate) = filter.max_bitrate {
-            params_vec.push(Box::new(max_bitrate as i64));
-            conditions.push(format!(
-                "(action != '{}' OR bitrate_kbps <= ?{})",
-                PendingAction::Convert.as_str(),
-                params_vec.len()
-            ));
-        }
-
-        // Duration limits only apply to conversions, not remuxes
-        if let Some(min_duration) = filter.min_duration {
-            params_vec.push(Box::new(min_duration));
-            conditions.push(format!(
-                "(action != '{}' OR duration >= ?{})",
-                PendingAction::Convert.as_str(),
-                params_vec.len()
-            ));
-        }
-
-        if let Some(max_duration) = filter.max_duration {
-            params_vec.push(Box::new(max_duration));
-            conditions.push(format!(
-                "(action != '{}' OR duration <= ?{})",
-                PendingAction::Convert.as_str(),
-                params_vec.len()
-            ));
-        }
-
-        if let Some(min_resolution) = filter.min_resolution {
-            params_vec.push(Box::new(i64::from(min_resolution)));
-            let param_index = params_vec.len();
-            conditions.push(format!(
-                "(action != '{}' OR (width >= ?{param_index} AND height >= ?{param_index}))",
-                PendingAction::Convert.as_str(),
-            ));
-        }
-
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
-
-        let has_name_filters = !filter.include.is_empty() || !filter.exclude.is_empty();
-        let limit_clause = if has_name_filters {
+        let has_post_filters =
+            !filter.include.is_empty() || !filter.exclude.is_empty() || !filter.path_prefixes.is_empty();
+        let limit_clause = if has_post_filters {
             String::new()
         } else {
             filter.limit.map_or_default(|limit| format!("LIMIT {limit}"))
@@ -436,7 +528,9 @@ impl Database {
 
         let sql = format!(
             r"
-            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height,
+                   frames_per_second, bit_depth, action, movie_mode, claimed_by, claimed_at,
+                   created_time, modified_time, modified_time_ns, disk_size_bytes
             FROM pending_files
             {where_clause}
             {order_clause}
@@ -445,25 +539,29 @@ impl Database {
         );
 
         let mut statement = self.connection.prepare(&sql)?;
-
         let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(std::convert::AsRef::as_ref).collect();
-
         let rows = statement.query_map(params_refs.as_slice(), row_to_pending_file)?;
 
         let mut files = rows
             .collect::<Result<Vec<_>, _>>()
             .context("Failed to query pending files")?;
 
-        if has_name_filters {
+        if !filter.path_prefixes.is_empty() {
             files.retain(|file| {
-                let stem = cli_tools_common::path_to_file_stem_string(&file.full_path);
-                let excluded = filter.exclude.iter().any(|pattern| stem.contains(pattern));
-                let included = filter.include.is_empty() || filter.include.iter().any(|pattern| stem.contains(pattern));
-                !excluded && included
+                filter
+                    .path_prefixes
+                    .iter()
+                    .any(|prefix| file.full_path.starts_with(prefix))
             });
-            if let Some(limit) = filter.limit {
-                files.truncate(limit);
-            }
+        }
+
+        if !filter.include.is_empty() || !filter.exclude.is_empty() {
+            let name_filter = cli_tools_common::NameFilter::new(&filter.include, &filter.exclude)?;
+            files.retain(|file| name_filter.matches_path(&file.full_path));
+        }
+
+        if has_post_filters && let Some(limit) = filter.limit {
+            files.truncate(limit);
         }
 
         Ok(files)
@@ -474,13 +572,18 @@ impl Database {
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn get_pending_file(&self, path: &Path) -> Result<Option<PendingFile>> {
+        if !sqlite::table_exists(&self.connection, "main", "pending_files")? {
+            return Ok(None);
+        }
         let Some(path_str) = path.to_str() else {
             return Ok(None);
         };
 
         let mut statement = self.connection.prepare(
             r"
-            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height,
+                   frames_per_second, bit_depth, action, movie_mode, claimed_by, claimed_at,
+                   created_time, modified_time, modified_time_ns, disk_size_bytes
             FROM pending_files
             WHERE full_path = ?1
             ",
@@ -528,47 +631,57 @@ impl Database {
         Ok(rows_affected > 0)
     }
 
-    /// Remove all pending files that no longer exist on disk.
+    /// Remove all pending files that no longer exist on mounted volumes.
     ///
-    /// Returns the number of files removed.
+    /// Existence checks happen outside the `SQLite` write transaction,
+    /// and paths on offline/unmounted drives are preserved.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn remove_missing_files(&mut self) -> Result<usize> {
         let files = self.get_pending_files(&PendingFileFilter::default())?;
-        let mut removed_count = 0;
+        let missing_ids: Vec<i64> = files
+            .into_iter()
+            .filter(|file| is_definitively_missing(&file.full_path))
+            .map(|file| file.id)
+            .collect();
 
-        let transaction = self.connection.transaction()?;
-
-        for file in files {
-            if !file.full_path.exists() {
-                transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![file.id])?;
-                removed_count += 1;
-            }
+        if missing_ids.is_empty() {
+            return Ok(0);
         }
 
+        let transaction = sqlite::immediate_transaction(&mut self.connection)?;
+        let mut removed_count = 0;
+        for id in missing_ids {
+            removed_count += transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![id])?;
+        }
         transaction.commit()?;
         Ok(removed_count)
     }
 
     /// Remove all pending files that were modified on disk after they were scanned.
     ///
-    /// Their stored metadata no longer describes the file, so they need a rescan.
-    /// Returns the number of files removed.
+    /// Filesystem `stat()` checks happen outside the `SQLite` write transaction.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn remove_changed_files(&mut self) -> Result<usize> {
         let files = self.get_pending_files(&PendingFileFilter::default())?;
-        let mut removed_count = 0;
+        let changed_ids: Vec<i64> = files
+            .into_iter()
+            .filter(PendingFile::is_changed_on_disk)
+            .map(|file| file.id)
+            .collect();
 
-        let transaction = self.connection.transaction()?;
-
-        for file in files.iter().filter(|file| file.is_changed_on_disk()) {
-            transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![file.id])?;
-            removed_count += 1;
+        if changed_ids.is_empty() {
+            return Ok(0);
         }
 
+        let transaction = sqlite::immediate_transaction(&mut self.connection)?;
+        let mut removed_count = 0;
+        for id in changed_ids {
+            removed_count += transaction.execute("DELETE FROM pending_files WHERE id = ?1", params![id])?;
+        }
         transaction.commit()?;
         Ok(removed_count)
     }
@@ -594,6 +707,9 @@ impl Database {
     /// Returns an error if the database operation fails.
     pub fn get_stats(&self) -> Result<DatabaseStats> {
         let mut stats = DatabaseStats::default();
+        if !sqlite::table_exists(&self.connection, "main", "pending_files")? {
+            return Ok(stats);
+        }
 
         // Get total count and size
         let mut statement = self
@@ -627,6 +743,9 @@ impl Database {
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn get_extension_stats(&self) -> Result<Vec<ExtensionStats>> {
+        if !sqlite::table_exists(&self.connection, "main", "pending_files")? {
+            return Ok(Vec::new());
+        }
         let mut statement = self.connection.prepare(
             r"
             SELECT extension, COUNT(*), COALESCE(SUM(size_bytes), 0)
@@ -657,6 +776,9 @@ impl Database {
     /// Returns an error if the database operation fails.
     #[cfg(test)]
     pub fn get_extensions(&self) -> Result<Vec<String>> {
+        if !sqlite::table_exists(&self.connection, "main", "pending_files")? {
+            return Ok(Vec::new());
+        }
         let mut statement = self
             .connection
             .prepare("SELECT DISTINCT extension FROM pending_files ORDER BY extension")?;
@@ -670,114 +792,81 @@ impl Database {
         Ok(extensions)
     }
 
-    /// Get the database path.
-    ///
-    /// Uses the platform-specific local data directory:
-    /// - Windows: `%LOCALAPPDATA%\cli-tools\vconvert.db`
-    /// - macOS: `~/Library/Application Support/cli-tools/vconvert.db`
-    /// - Linux: `~/.local/share/cli-tools/vconvert.db`
-    fn database_path() -> PathBuf {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cli-tools");
-        data_dir.join(DATABASE_FILENAME)
-    }
+    /// Initialize shared media cache, active locks, and `pending_files` schemas via versioned migrations.
+    fn initialize_with_legacy(&mut self, legacy_vconvert_db: Option<&Path>) -> Result<()> {
+        cli_tools_common::locks::ensure_schema(&mut self.connection)?;
+        ensure_media_cache_schema(&mut self.connection, legacy_vconvert_db)?;
 
-    /// Initialize the database schema.
-    fn initialize(&self) -> Result<()> {
-        self.connection
-            .execute_batch(
-                r"
-                -- Pending video files to process
-                CREATE TABLE IF NOT EXISTS pending_files (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    extension TEXT NOT NULL,
-                    codec TEXT NOT NULL,
-                    bitrate_kbps INTEGER NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    duration REAL NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    frames_per_second REAL NOT NULL,
-                    bit_depth INTEGER NOT NULL DEFAULT 0,
-                    action TEXT NOT NULL,
-                    created_time INTEGER NOT NULL,
-                    modified_time INTEGER
-                );
+        let was_uninitialized = sqlite::current_component_version(&self.connection, PENDING_COMPONENT)? == 0;
+        sqlite::migrate_component(
+            &mut self.connection,
+            PENDING_COMPONENT,
+            PENDING_SCHEMA_VERSION,
+            |tx, current_version| {
+                if current_version < 1 {
+                    tx.execute_batch(
+                        r"
+                        CREATE TABLE IF NOT EXISTS pending_files (
+                            id INTEGER PRIMARY KEY,
+                            full_path TEXT NOT NULL UNIQUE,
+                            extension TEXT NOT NULL,
+                            codec TEXT NOT NULL,
+                            bitrate_kbps INTEGER NOT NULL,
+                            size_bytes INTEGER NOT NULL,
+                            duration REAL NOT NULL,
+                            width INTEGER NOT NULL,
+                            height INTEGER NOT NULL,
+                            frames_per_second REAL NOT NULL,
+                            bit_depth INTEGER NOT NULL DEFAULT 0,
+                            action TEXT NOT NULL,
+                            movie_mode INTEGER NOT NULL DEFAULT 0,
+                            claimed_by TEXT,
+                            claimed_at INTEGER,
+                            created_time INTEGER NOT NULL,
+                            modified_time INTEGER,
+                            modified_time_ns INTEGER NOT NULL DEFAULT 0,
+                            disk_size_bytes INTEGER
+                        );
 
-                -- Indexes for fast querying
-                CREATE INDEX IF NOT EXISTS idx_pending_action ON pending_files(action);
-                CREATE INDEX IF NOT EXISTS idx_pending_extension ON pending_files(extension);
-                CREATE INDEX IF NOT EXISTS idx_pending_bitrate ON pending_files(bitrate_kbps);
-                CREATE INDEX IF NOT EXISTS idx_pending_duration ON pending_files(duration);
-
-                -- Cache of all files that have been scanned with ffprobe.
-                -- Stores results for both pending and skipped files so ffprobe is not
-                -- re-run on unchanged files (identified by path + size_bytes).
-                CREATE TABLE IF NOT EXISTS scanned_files (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL,
-                    codec TEXT NOT NULL,
-                    bitrate_kbps INTEGER NOT NULL,
-                    duration REAL NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    frames_per_second REAL NOT NULL,
-                    bit_depth INTEGER NOT NULL DEFAULT 0,
-                    scanned_time INTEGER NOT NULL,
-                    modified_time_ns INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
-
-                -- Remove entries with corrupted fps while keeping 0.0 rows shared with dupefind.
-                DELETE FROM scanned_files WHERE (frames_per_second > 0.0 AND frames_per_second < 1.0) OR frames_per_second > 240.0;
-                DELETE FROM pending_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
-
-                -- Performance optimizations
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA cache_size = -8000;
-                ",
-            )
-            .context("Failed to initialize database schema")?;
-
-        self.add_column_if_missing("pending_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("pending_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("pending_files", "disk_size_bytes", "INTEGER")?;
-        self.add_column_if_missing("scanned_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("scanned_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
-
-        Ok(())
-    }
-
-    /// Add a column to `table_name` unless it already exists.
-    fn add_column_if_missing(&self, table_name: &str, column_name: &str, column_definition: &str) -> Result<()> {
-        let mut statement = self
-            .connection
-            .prepare(&format!("PRAGMA table_info({table_name})"))
-            .with_context(|| format!("Failed to inspect table schema: {table_name}"))?;
-        let column_exists = statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(std::result::Result::ok)
-            .any(|name| name == column_name);
-
-        if !column_exists {
-            match self.connection.execute(
-                &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
-                [],
-            ) {
-                Ok(_) => {}
-                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
-                    if message.contains("duplicate column name") => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("Failed to add {column_name} column to {table_name}"));
+                        CREATE INDEX IF NOT EXISTS idx_pending_action ON pending_files(action);
+                        CREATE INDEX IF NOT EXISTS idx_pending_extension ON pending_files(extension);
+                        CREATE INDEX IF NOT EXISTS idx_pending_bitrate ON pending_files(bitrate_kbps);
+                        CREATE INDEX IF NOT EXISTS idx_pending_duration ON pending_files(duration);
+                        ",
+                    )
+                    .context("Failed to create pending_files table")?;
                 }
-            }
+                if current_version < 2 {
+                    sqlite::add_column_if_missing(tx, "pending_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+                    sqlite::add_column_if_missing(
+                        tx,
+                        "pending_files",
+                        "modified_time_ns",
+                        "INTEGER NOT NULL DEFAULT 0",
+                    )?;
+                    sqlite::add_column_if_missing(tx, "pending_files", "disk_size_bytes", "INTEGER")?;
+                    sqlite::add_column_if_missing(tx, "pending_files", "movie_mode", "INTEGER NOT NULL DEFAULT 0")?;
+                    sqlite::add_column_if_missing(tx, "pending_files", "claimed_by", "TEXT")?;
+                    sqlite::add_column_if_missing(tx, "pending_files", "claimed_at", "INTEGER")?;
+                    tx.execute_batch(
+                        "DELETE FROM pending_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;",
+                    )
+                    .context("Failed to prune invalid fps rows from pending_files")?;
+                }
+                Ok(())
+            },
+        )?;
+
+        if was_uninitialized && let Some(legacy_path) = legacy_vconvert_db {
+            import_legacy_pending_files(&mut self.connection, legacy_path)?;
         }
+
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn initialize(&mut self) -> Result<()> {
+        self.initialize_with_legacy(None)
     }
 }
 
@@ -853,6 +942,80 @@ impl std::fmt::Display for ExtensionStats {
     }
 }
 
+/// Build the SQL `WHERE` clause and bound parameter list for [`PendingFileFilter`].
+fn build_pending_where_clause(filter: &PendingFileFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut conditions = Vec::new();
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(action) = filter.action {
+        params_vec.push(Box::new(action.as_str().to_string()));
+        conditions.push(format!("action = ?{}", params_vec.len()));
+    }
+
+    if !filter.extensions.is_empty() {
+        let placeholders: Vec<String> = filter
+            .extensions
+            .iter()
+            .map(|ext| {
+                params_vec.push(Box::new(ext.to_lowercase()));
+                format!("?{}", params_vec.len())
+            })
+            .collect();
+        conditions.push(format!("extension IN ({})", placeholders.join(", ")));
+    }
+
+    if let Some(min_bitrate) = filter.min_bitrate {
+        let threshold = min_bitrate.sql_threshold(&mut params_vec);
+        conditions.push(format!(
+            "(action != '{}' OR bitrate_kbps >= {threshold})",
+            PendingAction::Convert.as_str(),
+        ));
+    }
+
+    if let Some(max_bitrate) = filter.max_bitrate {
+        params_vec.push(Box::new(max_bitrate as i64));
+        conditions.push(format!(
+            "(action != '{}' OR bitrate_kbps <= ?{})",
+            PendingAction::Convert.as_str(),
+            params_vec.len()
+        ));
+    }
+
+    if let Some(min_duration) = filter.min_duration {
+        params_vec.push(Box::new(min_duration));
+        conditions.push(format!(
+            "(action != '{}' OR duration >= ?{})",
+            PendingAction::Convert.as_str(),
+            params_vec.len()
+        ));
+    }
+
+    if let Some(max_duration) = filter.max_duration {
+        params_vec.push(Box::new(max_duration));
+        conditions.push(format!(
+            "(action != '{}' OR duration <= ?{})",
+            PendingAction::Convert.as_str(),
+            params_vec.len()
+        ));
+    }
+
+    if let Some(min_resolution) = filter.min_resolution {
+        params_vec.push(Box::new(i64::from(min_resolution)));
+        let param_index = params_vec.len();
+        conditions.push(format!(
+            "(action != '{}' OR MAX(MIN(width, height), (MAX(width, height) * 9) / 16) >= ?{param_index})",
+            PendingAction::Convert.as_str(),
+        ));
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    (where_clause, params_vec)
+}
+
 /// Convert a database row to a `PendingFile`.
 fn row_to_pending_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingFile> {
     Ok(PendingFile {
@@ -868,25 +1031,73 @@ fn row_to_pending_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingFile>
         frames_per_second: row.get(9)?,
         bit_depth: row.get::<_, i64>(10)? as u8,
         action: PendingAction::from_str(&row.get::<_, String>(11)?),
-        created_time: row.get(12)?,
-        modified_time: row.get(13)?,
-        modified_time_ns: row.get(14)?,
-        disk_size_bytes: row.get::<_, Option<i64>>(15)?.map(|size| size as u64),
+        movie_mode: row.get::<_, i64>(12)? != 0,
+        claimed_by: row.get(13)?,
+        claimed_at: row.get(14)?,
+        created_time: row.get(15)?,
+        modified_time: row.get(16)?,
+        modified_time_ns: row.get(17)?,
+        disk_size_bytes: row.get::<_, Option<i64>>(18)?.map(|size| size as u64),
     })
 }
 
-/// On-disk size of `path` in bytes, or `None` if it cannot be read.
-fn file_disk_size(path: &Path) -> Option<u64> {
-    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+/// Copy `pending_files` rows from a legacy `vconvert.db` into `cli-tools.db`.
+fn import_legacy_pending_files(connection: &mut Connection, legacy_path: &Path) -> Result<()> {
+    sqlite::import_from_legacy_database(connection, legacy_path, |tx| {
+        if !sqlite::table_exists(tx, "legacy", "pending_files")? {
+            return Ok(());
+        }
+        let has_bit_depth = sqlite::column_exists(tx, "legacy", "pending_files", "bit_depth")?;
+        let has_mtime_ns = sqlite::column_exists(tx, "legacy", "pending_files", "modified_time_ns")?;
+        let has_disk_size = sqlite::column_exists(tx, "legacy", "pending_files", "disk_size_bytes")?;
+        let bit_depth_expr = if has_bit_depth { "bit_depth" } else { "0" };
+        let mtime_ns_expr = if has_mtime_ns { "modified_time_ns" } else { "0" };
+        let disk_size_expr = if has_disk_size { "disk_size_bytes" } else { "NULL" };
+        tx.execute(
+            &format!(
+                r"
+                INSERT OR IGNORE INTO main.pending_files (
+                    full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height,
+                    frames_per_second, bit_depth, action, movie_mode, created_time,
+                    modified_time, modified_time_ns, disk_size_bytes
+                )
+                SELECT full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height,
+                       frames_per_second, {bit_depth_expr}, action,
+                       CASE WHEN action = 'subtitle_mux' THEN 1 ELSE 0 END,
+                       created_time, modified_time, {mtime_ns_expr}, {disk_size_expr}
+                FROM legacy.pending_files
+                WHERE frames_per_second >= 1.0 AND frames_per_second <= 240.0
+                "
+            ),
+            [],
+        )
+        .context("Failed to import legacy pending_files rows")?;
+        Ok(())
+    })
 }
 
-/// File modification time in whole seconds since the Unix epoch, or `None` if it cannot be read.
-fn file_modified_time(path: &Path) -> Option<i64> {
-    std::fs::metadata(path)
+/// Read modified time (seconds and nanoseconds) and disk size in a single `stat()` call.
+fn read_file_disk_metadata(path: &Path) -> (Option<i64>, i64, Option<u64>) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return (None, 0, None);
+    };
+    let disk_size = Some(metadata.len());
+    let Ok(modified) = metadata.modified() else {
+        return (None, 0, disk_size);
+    };
+    let modified_secs = modified
+        .duration_since(UNIX_EPOCH)
         .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64)
+        .map(|duration| duration.as_secs() as i64);
+    let modified_ns = system_time_to_unix_nanos(modified);
+    (modified_secs, modified_ns, disk_size)
+}
+
+/// Current Unix timestamp in seconds.
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64)
 }
 
 /// File modification time in signed nanoseconds relative to the Unix epoch, or `0` if unavailable.
@@ -934,7 +1145,7 @@ mod test_database {
 
     #[test]
     fn initialize_preserves_shared_scan_cache_rows_written_by_dupefind() {
-        let database = Database::open_in_memory().expect("open initial");
+        let mut database = Database::open_in_memory().expect("open initial");
         database
             .connection
             .execute(
@@ -1384,6 +1595,9 @@ mod test_database {
             frames_per_second: 24.0,
             bit_depth: 10,
             action: PendingAction::Convert,
+            movie_mode: false,
+            claimed_by: None,
+            claimed_at: None,
             created_time: 0,
             modified_time: None,
             modified_time_ns: 0,
@@ -2407,23 +2621,19 @@ mod test_schema_updates {
 
     #[test]
     fn add_column_if_missing_adds_column_only_once() {
-        let database = Database {
-            connection: Connection::open_in_memory().expect("Failed to open in-memory database"),
-        };
-        database
-            .connection
+        let mut connection = sqlite::open_in_memory().expect("Failed to open in-memory database");
+        connection
             .execute("CREATE TABLE legacy_files (id INTEGER PRIMARY KEY)", [])
             .expect("Failed to create legacy table");
 
-        database
-            .add_column_if_missing("legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
+        let tx = sqlite::immediate_transaction(&mut connection).expect("begin tx");
+        sqlite::add_column_if_missing(&tx, "legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
             .expect("Failed to add missing column");
-        database
-            .add_column_if_missing("legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
+        sqlite::add_column_if_missing(&tx, "legacy_files", "bit_depth", "INTEGER NOT NULL DEFAULT 8")
             .expect("Existing column should be left unchanged");
+        tx.commit().expect("commit tx");
 
-        let mut statement = database
-            .connection
+        let mut statement = connection
             .prepare("PRAGMA table_info(legacy_files)")
             .expect("Failed to inspect legacy table");
         let bit_depth_columns = statement
@@ -2437,8 +2647,8 @@ mod test_schema_updates {
     }
 
     #[test]
-    fn initialize_removes_entries_with_invalid_frame_rates() {
-        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+    fn migration_v2_removes_entries_with_invalid_frame_rates() {
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
         let invalid_info = VideoInfo {
             codec: "h264".to_string(),
             bitrate_kbps: 8_000,
@@ -2459,6 +2669,11 @@ mod test_schema_updates {
             .upsert_scanned_file(&scanned_path, &invalid_info)
             .expect("Failed to insert invalid scanned entry");
 
+        // Reset migration versions to 1 to exercise the v1 -> v2 cleanup migration.
+        database
+            .connection
+            .execute("UPDATE schema_migrations SET version = 1", [])
+            .expect("reset schema version");
         database.initialize().expect("Failed to reinitialize database");
 
         assert!(
@@ -2788,6 +3003,9 @@ mod test_database_statistics_display {
             frames_per_second: 24.0,
             bit_depth: 0,
             action: PendingAction::Convert,
+            movie_mode: false,
+            claimed_by: None,
+            claimed_at: None,
             created_time: 0,
             modified_time: None,
             modified_time_ns: 0,
@@ -2795,5 +3013,110 @@ mod test_database_statistics_display {
         };
 
         assert_eq!(pending.to_video_info().bit_depth, 8);
+    }
+}
+
+#[cfg(test)]
+mod test_unified_db_and_leasing {
+    use super::*;
+
+    fn sample_info() -> VideoInfo {
+        VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 12_000,
+            size_bytes: 2_000_000,
+            duration: 120.0,
+            width: 1920,
+            height: 800,
+            frames_per_second: 24.0,
+            bit_depth: 8,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn claims_block_other_workers_until_released_or_expired() {
+        let mut db = Database::open_in_memory().unwrap();
+        let path = PathBuf::from("/videos/movie.mkv");
+        db.upsert_pending_file_with_mode(&path, "mkv", &sample_info(), PendingAction::Convert, true)
+            .unwrap();
+
+        assert!(db.claim_pending_file(&path, "worker-a", 120).unwrap());
+        assert!(!db.claim_pending_file(&path, "worker-b", 120).unwrap());
+        assert!(db.claim_pending_file(&path, "worker-a", 120).unwrap());
+
+        db.release_pending_claim(&path, "worker-a").unwrap();
+        assert!(db.claim_pending_file(&path, "worker-b", 120).unwrap());
+
+        let row = db.get_pending_file(&path).unwrap().expect("row exists");
+        assert!(row.movie_mode);
+        assert_eq!(row.claimed_by.as_deref(), Some("worker-b"));
+    }
+
+    #[test]
+    fn filters_by_path_prefix_globs_and_ultrawide_equivalent_height() {
+        let db = Database::open_in_memory().unwrap();
+        let movie_a = PathBuf::from("/media/movies/Scope.Movie.mkv");
+        let movie_b = PathBuf::from("/media/tv/Episode.mkv");
+        let info = sample_info(); // 1920x800 -> equivalent height 1080
+        db.upsert_pending_file(&movie_a, "mkv", &info, PendingAction::Convert)
+            .unwrap();
+        db.upsert_pending_file(&movie_b, "mkv", &info, PendingAction::Convert)
+            .unwrap();
+
+        let filter = PendingFileFilter {
+            path_prefixes: vec![PathBuf::from("/media/movies")],
+            min_resolution: Some(1000),
+            include: vec!["*.mkv".to_string()],
+            ..PendingFileFilter::default()
+        };
+        let results = db.get_pending_files(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].full_path, movie_a);
+    }
+
+    #[test]
+    fn migrates_legacy_vconvert_db_into_cli_tools_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("vconvert.db");
+        let unified_path = dir.path().join("cli-tools.db");
+
+        let legacy_conn = sqlite::open_at(&legacy_path).unwrap();
+        legacy_conn
+            .execute_batch(
+                r"
+                CREATE TABLE pending_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    extension TEXT NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 10,
+                    action TEXT NOT NULL,
+                    created_time INTEGER NOT NULL,
+                    modified_time INTEGER
+                );
+                INSERT INTO pending_files (
+                    full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height,
+                    frames_per_second, bit_depth, action, created_time
+                ) VALUES ('/legacy/clip.mkv', 'mkv', 'h264', 9000, 1000, 60.0, 1920, 1080, 24.0, 10, 'convert', 100);
+                ",
+            )
+            .unwrap();
+        drop(legacy_conn);
+
+        let db = Database::open_at(&unified_path).unwrap();
+        let row = db
+            .get_pending_file(Path::new("/legacy/clip.mkv"))
+            .unwrap()
+            .expect("legacy pending row imported");
+        assert_eq!(row.bit_depth, 10);
+        assert_eq!(row.action, PendingAction::Convert);
+        assert!(legacy_path.is_file());
     }
 }

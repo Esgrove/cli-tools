@@ -67,6 +67,8 @@ pub struct Config {
     pub(crate) options: ConvertOptions,
     pub(crate) convert_all: bool,
     pub(crate) convert_other: bool,
+    pub(crate) explicit_extensions: bool,
+    pub(crate) explicit_paths: bool,
     pub(crate) database_mode: Option<DatabaseMode>,
     pub(crate) display_limit: Option<usize>,
     pub(crate) verbose: bool,
@@ -121,17 +123,15 @@ impl Config {
         let include: Vec<String> = args.include.into_iter().chain(user_config.include).unique().collect();
         let exclude: Vec<String> = args.exclude.into_iter().chain(user_config.exclude).unique().collect();
 
-        let paths = if args.paths.is_empty() {
-            vec![cli_tools_common::resolve_input_path(None)?]
-        } else {
-            args.paths
-                .iter()
-                .map(|path| cli_tools_common::resolve_input_path(Some(path)))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .unique()
-                .collect()
-        };
+        let explicit_paths = !args.paths.is_empty();
+        let explicit_extensions = args.all
+            || args.other
+            || !args.extension.is_empty()
+            || !user_config.extensions.is_empty()
+            || user_config.convert_all_types
+            || user_config.convert_other_types;
+
+        let paths = cli_tools_common::resolve_input_paths(&args.paths)?;
 
         let convert_all = args.all || (!args.other && args.extension.is_empty() && user_config.convert_all_types);
         let convert_other = args.other || (!args.all && args.extension.is_empty() && user_config.convert_other_types);
@@ -195,6 +195,8 @@ impl Config {
             },
             convert_all,
             convert_other,
+            explicit_extensions,
+            explicit_paths,
             database_mode,
             display_limit,
             verbose: args.verbose || user_config.verbose,

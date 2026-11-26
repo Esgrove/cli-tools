@@ -30,25 +30,35 @@ pub struct FileLogger {
 
 /// The log file and whether writing to it has failed.
 struct LogState {
-    writer: BufWriter<File>,
+    writer: Option<BufWriter<File>>,
     /// Set after the first failed write, so the warning is printed only once.
     write_failed: bool,
 }
 
 impl FileLogger {
-    /// Create a new log file to ~/logs/cli-tools/video_convert_<timestamp>.log
+    /// Create a no-op logger that writes nothing to disk (used for dry runs).
+    pub(crate) const fn noop() -> Self {
+        Self {
+            state: Mutex::new(LogState {
+                writer: None,
+                write_failed: false,
+            }),
+        }
+    }
+
+    /// Create a new log file at `~/logs/cli-tools/video_convert_<timestamp>_pid<pid>.log`.
     pub(crate) fn new() -> Result<Self> {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let log_dir = home_dir.join("logs").join("cli-tools");
 
-        // Create log directory if it doesn't exist
         if !log_dir.exists() {
             fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
         }
 
         let log_path = log_dir.join(format!(
-            "video_convert_{}.log",
-            ZonedDateTime::now().strftime("%Y-%m-%d_%H-%M-%S")
+            "video_convert_{}_pid{}.log",
+            ZonedDateTime::now().strftime("%Y-%m-%d_%H-%M-%S"),
+            std::process::id(),
         ));
 
         let file = OpenOptions::new()
@@ -72,7 +82,7 @@ impl FileLogger {
     const fn from_writer(writer: BufWriter<File>) -> Self {
         Self {
             state: Mutex::new(LogState {
-                writer,
+                writer: Some(writer),
                 write_failed: false,
             }),
         }
@@ -281,7 +291,10 @@ impl FileLogger {
     /// Write one log entry and flush it, warning once if the log file cannot be written.
     fn write_entry(&self, write: impl FnOnce(&mut BufWriter<File>) -> io::Result<()>) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let result = write(&mut state.writer).and_then(|()| state.writer.flush());
+        let Some(ref mut writer) = state.writer else {
+            return;
+        };
+        let result = write(writer).and_then(|()| writer.flush());
         let first_failure = result.is_err() && !state.write_failed;
         if first_failure {
             state.write_failed = true;

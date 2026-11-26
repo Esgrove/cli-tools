@@ -163,10 +163,14 @@ mod test_disk_space_shortage {
         let file = file_of_size(&directory.path().join("huge.mkv"), u64::MAX / 4);
         let required = u64::MAX / 4 * MIN_DISK_SPACE_FACTOR;
 
-        let expected = cli_tools_common::available_disk_space(&file.output_path)
-            .map(|available| DiskSpaceShortage { required, available });
-
-        assert_eq!(disk_space_shortage(&file), expected);
+        let shortage = disk_space_shortage(&file);
+        if cli_tools_common::available_disk_space(&file.output_path).is_some() {
+            let shortage = shortage.expect("shortage should be reported when free space is known");
+            assert_eq!(shortage.required, required);
+            assert!(shortage.available < required);
+        } else {
+            assert_eq!(shortage, None);
+        }
     }
 }
 

@@ -124,6 +124,7 @@ impl ConvertOptions {
         PendingFileFilter {
             action: None,
             extensions: self.extensions.clone(),
+            path_prefixes: Vec::new(),
             min_bitrate: Some(self.min_bitrate),
             max_bitrate: self.max_bitrate,
             min_duration: self.min_duration,

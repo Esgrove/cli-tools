@@ -64,26 +64,29 @@ impl From<SortOrderArgument> for SortOrder {
     }
 }
 
-/// Remove stale entries from the scan cache whose files no longer exist on disk.
+/// Remove stale entries from the scan and file-hash caches whose files no longer exist on disk.
 pub fn clean_scan_cache(database: &mut Database, verbose: bool) -> Result<()> {
     if verbose {
         println!("{}", format!("Database: {}", Database::path().display()).bold());
     }
 
-    let total = database.scanned_file_count()?;
-    if total == 0 {
+    let total_scanned = database.scanned_file_count()?;
+    let total_hashes = database.file_hash_count()?;
+    if total_scanned == 0 && total_hashes == 0 {
         println!("Scan cache is empty");
         return Ok(());
     }
 
-    println!("Checking {total} cached scan entries...");
-    let removed = database.remove_missing_scanned_files()?;
-    if removed > 0 {
+    println!("Checking {total_scanned} cached scan entries and {total_hashes} file hashes...");
+    let removed_scanned = database.remove_missing_scanned_files()?;
+    let removed_hashes = database.remove_missing_file_hashes()?;
+    if removed_scanned > 0 || removed_hashes > 0 {
+        let remaining_scanned = total_scanned.saturating_sub(removed_scanned as u64);
+        let remaining_hashes = total_hashes.saturating_sub(removed_hashes as u64);
         println!(
             "{}",
             format!(
-                "Removed {removed} stale entries from scan cache ({} remaining)",
-                total - removed as u64
+                "Removed {removed_scanned} stale scan entries ({remaining_scanned} remaining) and {removed_hashes} stale hash entries ({remaining_hashes} remaining)"
             )
             .green()
         );
@@ -101,11 +104,16 @@ pub fn clear_database(database: &Database) -> Result<()> {
 }
 
 /// List file extension counts in the database.
-pub fn list_extensions(database: &Database, verbose: bool) -> Result<()> {
+pub fn list_extensions(database: Option<&Database>, verbose: bool) -> Result<()> {
     if verbose {
         println!("{}", format!("Database: {}", Database::path().display()).bold());
         println!();
     }
+
+    let Some(database) = database else {
+        println!("No files in database");
+        return Ok(());
+    };
 
     let ext_stats = database.get_extension_stats()?;
     if ext_stats.is_empty() {
@@ -143,11 +151,16 @@ pub fn list_extensions(database: &Database, verbose: bool) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error if the database cannot be opened or queried.
-pub fn show_database_contents(database: &Database, config: &Config) -> Result<()> {
+pub fn show_database_contents(database: Option<&Database>, config: &Config) -> Result<()> {
     if config.verbose {
         println!("{}", format!("Database: {}", Database::path().display()).bold());
         println!();
     }
+
+    let Some(database) = database else {
+        println!("{}", cli_tools_vconvert::database::DatabaseStats::default());
+        return Ok(());
+    };
 
     let stats = database.get_stats()?;
     println!("{stats}");
@@ -175,7 +188,14 @@ pub fn show_database_contents(database: &Database, config: &Config) -> Result<()
         println!();
         println!("{}", "Pending files:".bold());
 
-        let files = database.get_pending_files(&config.options.pending_file_filter())?;
+        let mut filter = config.options.pending_file_filter();
+        if !config.explicit_extensions {
+            filter.extensions.clear();
+        }
+        if !config.explicit_paths {
+            filter.path_prefixes.clear();
+        }
+        let files = database.get_pending_files(&filter)?;
         let total_matching = files.len();
         let display_count = config
             .display_limit
@@ -303,7 +323,7 @@ mod test_database_reporting {
     fn listing_extensions_of_an_empty_database_reports_nothing_found() {
         let database = Database::open_in_memory().expect("the database should open");
 
-        list_extensions(&database, true).expect("listing should succeed");
+        list_extensions(Some(&database), true).expect("listing should succeed");
     }
 
     #[test]
@@ -321,21 +341,18 @@ mod test_database_reporting {
             .expect("insert");
         let config = Config {
             options: ConvertOptions::default(),
-            convert_all: false,
-            convert_other: false,
-            display_limit: None,
             database_mode: Some(DatabaseMode::Show),
-            verbose: false,
+            ..Config::default()
         };
-        show_database_contents(&database, &config).expect("show-db should handle negative duration safely");
+        show_database_contents(Some(&database), &config).expect("show-db should handle negative duration safely");
     }
 
     #[test]
     fn listing_extensions_reports_every_extension_and_the_total() {
         let database = database_with(&["mp4", "mkv", "mkv"]);
 
-        list_extensions(&database, false).expect("listing should succeed");
-        list_extensions(&database, true).expect("listing should succeed");
+        list_extensions(Some(&database), false).expect("listing should succeed");
+        list_extensions(Some(&database), true).expect("listing should succeed");
 
         let stats = database.get_extension_stats().expect("stats should be available");
         assert_eq!(stats.len(), 2, "each extension should be counted once: {stats:?}");
@@ -347,7 +364,7 @@ mod test_database_reporting {
     fn showing_an_empty_database_stops_after_the_statistics() {
         let database = Database::open_in_memory().expect("the database should open");
 
-        show_database_contents(&database, &Config::default()).expect("showing should succeed");
+        show_database_contents(Some(&database), &Config::default()).expect("showing should succeed");
     }
 
     #[test]
@@ -355,7 +372,7 @@ mod test_database_reporting {
         let database = database_with(&["mp4", "mkv"]);
 
         show_database_contents(
-            &database,
+            Some(&database),
             &Config {
                 verbose: true,
                 ..Config::default()
@@ -369,7 +386,7 @@ mod test_database_reporting {
         let database = database_with(&["mp4", "mkv", "avi"]);
 
         show_database_contents(
-            &database,
+            Some(&database),
             &Config {
                 display_limit: Some(1),
                 ..Config::default()
@@ -383,12 +400,13 @@ mod test_database_reporting {
         let database = database_with(&["mp4"]);
 
         show_database_contents(
-            &database,
+            Some(&database),
             &Config {
                 options: ConvertOptions {
                     extensions: vec!["webm".to_string()],
                     ..ConvertOptions::default()
                 },
+                explicit_extensions: true,
                 ..Config::default()
             },
         )
@@ -412,7 +430,7 @@ mod test_database_reporting {
                 .expect("the file should be recorded");
         }
 
-        show_database_contents(&database, &Config::default()).expect("showing should succeed");
+        show_database_contents(Some(&database), &Config::default()).expect("showing should succeed");
     }
 
     #[test]

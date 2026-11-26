@@ -1,24 +1,23 @@
-//! Scanned file cache for video convert.
+//! Scanned file and hash cache operations for `vconvert` on the unified `cli-tools.db`.
 //!
-//! Stores ffprobe results by path and size so later scans can skip probing unchanged files,
-//! and prunes entries for files that no longer exist, checking each drive in parallel.
+//! Stores ffprobe results by path, size, and nanosecond modification timestamp so later scans
+//! and sibling media tools (`dupefind`, `vstats`, `vres`, `thumbs`) reuse cached metadata
+//! without re-running ffprobe.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use cli_tools_common::sqlite;
+use cli_tools_media::scan_cache::is_definitively_missing;
 use rayon::prelude::*;
 use rusqlite::params;
 
-use super::{Database, file_modified_time_ns};
+use super::{Database, file_modified_time_ns, unix_now_secs};
 use crate::types::VideoInfo;
 
 impl Database {
-    /// Insert or update a scanned file cache entry.
-    ///
-    /// Called after every ffprobe run so the result can be reused on subsequent scans without re-running ffprobe,
-    /// as long as the file size and modification time have not changed.
+    /// Insert or update a single scanned file cache entry.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
@@ -26,16 +25,18 @@ impl Database {
         let Some(path_str) = path.to_str() else {
             return Ok(());
         };
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
+        let now = unix_now_secs();
         let modified_time_ns = file_modified_time_ns(path);
 
         self.connection
             .execute(
                 r"
-                INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                INSERT INTO scanned_files (
+                    full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                    coded_width, coded_height, rotation, frames_per_second, bit_depth,
+                    scanned_time, modified_time_ns
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13)
                 ON CONFLICT(full_path) DO UPDATE SET
                     size_bytes = excluded.size_bytes,
                     codec = excluded.codec,
@@ -43,6 +44,8 @@ impl Database {
                     duration = excluded.duration,
                     width = excluded.width,
                     height = excluded.height,
+                    coded_width = excluded.coded_width,
+                    coded_height = excluded.coded_height,
                     frames_per_second = excluded.frames_per_second,
                     bit_depth = excluded.bit_depth,
                     scanned_time = excluded.scanned_time,
@@ -56,6 +59,8 @@ impl Database {
                     info.duration,
                     info.width,
                     info.height,
+                    info.width,
+                    info.height,
                     info.frames_per_second,
                     i64::from(info.bit_depth),
                     now,
@@ -67,12 +72,9 @@ impl Database {
         Ok(())
     }
 
-    /// Insert or update multiple scanned file cache entries in a single transaction.
+    /// Insert or update multiple scanned file cache entries in a single `IMMEDIATE` transaction.
     ///
-    /// Wrapping all writes in one transaction reduces disk syncs from O(N) to O(1),
-    /// which is significantly faster for large batches.
-    ///
-    /// Returns the number of entries successfully written.
+    /// All filesystem `stat()` calls run before taking the `SQLite` write lock.
     ///
     /// # Errors
     /// Returns an error if the transaction cannot be started or committed.
@@ -81,23 +83,33 @@ impl Database {
             return Ok(0);
         }
 
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
+        let prepared: Vec<(&str, &VideoInfo, i64)> = entries
+            .iter()
+            .filter_map(|&(path, info)| {
+                let path_str = path.to_str()?;
+                let modified_time_ns = file_modified_time_ns(path);
+                Some((path_str, info, modified_time_ns))
+            })
+            .collect();
 
-        let transaction = self.connection.transaction()?;
+        if prepared.is_empty() {
+            return Ok(0);
+        }
+
+        let now = unix_now_secs();
+        let transaction = sqlite::immediate_transaction(&mut self.connection)?;
         let mut count = 0;
 
-        for (path, info) in entries {
-            let Some(path_str) = path.to_str() else {
-                continue;
-            };
-            let modified_time_ns = file_modified_time_ns(path);
+        for (path_str, info, modified_time_ns) in prepared {
             transaction
                 .execute(
                     r"
-                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    INSERT INTO scanned_files (
+                        full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                        coded_width, coded_height, rotation, frames_per_second, bit_depth,
+                        scanned_time, modified_time_ns
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13)
                     ON CONFLICT(full_path) DO UPDATE SET
                         size_bytes = excluded.size_bytes,
                         codec = excluded.codec,
@@ -105,6 +117,8 @@ impl Database {
                         duration = excluded.duration,
                         width = excluded.width,
                         height = excluded.height,
+                        coded_width = excluded.coded_width,
+                        coded_height = excluded.coded_height,
                         frames_per_second = excluded.frames_per_second,
                         bit_depth = excluded.bit_depth,
                         scanned_time = excluded.scanned_time,
@@ -116,6 +130,8 @@ impl Database {
                         info.codec,
                         info.bitrate_kbps as i64,
                         info.duration,
+                        info.width,
+                        info.height,
                         info.width,
                         info.height,
                         info.frames_per_second,
@@ -132,10 +148,51 @@ impl Database {
         Ok(count)
     }
 
-    /// Look up a previously scanned file by path and size.
+    /// Update cached path keys in `scanned_files`, `file_hashes`, and `pending_files` after a rename.
     ///
-    /// Returns the cached `VideoInfo` only when both the path and size match,
-    /// ensuring stale entries for modified files are never used.
+    /// # Errors
+    /// Returns an error if the update transaction fails.
+    pub fn move_cached_path(&mut self, old_path: &Path, new_path: &Path) -> Result<()> {
+        let (Some(old_str), Some(new_str)) = (old_path.to_str(), new_path.to_str()) else {
+            return Ok(());
+        };
+        if old_str == new_str {
+            return Ok(());
+        }
+        let tx = sqlite::immediate_transaction(&mut self.connection)?;
+        for table in ["scanned_files", "file_hashes", "pending_files"] {
+            if sqlite::table_exists(&tx, "main", table)? {
+                tx.execute(&format!("DELETE FROM {table} WHERE full_path = ?1"), params![new_str])?;
+                tx.execute(
+                    &format!("UPDATE {table} SET full_path = ?1 WHERE full_path = ?2"),
+                    params![new_str, old_str],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove cached scan and hash rows for a deleted or replaced file path.
+    ///
+    /// # Errors
+    /// Returns an error if the delete fails.
+    pub fn remove_cached_path(&self, path: &Path) -> Result<()> {
+        let Some(path_str) = path.to_str() else {
+            return Ok(());
+        };
+        if sqlite::table_exists(&self.connection, "main", "scanned_files")? {
+            self.connection
+                .execute("DELETE FROM scanned_files WHERE full_path = ?1", params![path_str])?;
+        }
+        if sqlite::table_exists(&self.connection, "main", "file_hashes")? {
+            self.connection
+                .execute("DELETE FROM file_hashes WHERE full_path = ?1", params![path_str])?;
+        }
+        Ok(())
+    }
+
+    /// Look up a previously scanned file by path and size.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
@@ -175,11 +232,12 @@ impl Database {
 
     /// Load all scanned file cache entries into a `HashMap` keyed by full path.
     ///
-    /// This allows O(1) lookups during the analysis phase instead of issuing individual SQL queries per file.
-    ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn get_all_scanned_files(&self) -> Result<HashMap<String, VideoInfo>> {
+        if !sqlite::table_exists(&self.connection, "main", "scanned_files")? {
+            return Ok(HashMap::new());
+        }
         let mut statement = self.connection.prepare(
             r"
             SELECT full_path, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth
@@ -187,24 +245,23 @@ impl Database {
             ",
         )?;
 
-        let entries = statement
-            .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let info = VideoInfo {
-                    codec: row.get(1)?,
-                    bitrate_kbps: row.get::<_, i64>(2)? as u64,
-                    size_bytes: row.get::<_, i64>(3)? as u64,
-                    duration: row.get(4)?,
-                    width: row.get::<_, i64>(5)? as u32,
-                    height: row.get::<_, i64>(6)? as u32,
-                    frames_per_second: row.get(7)?,
-                    bit_depth: row.get::<_, i64>(8)? as u8,
-                    warning: None,
-                };
-                Ok((path, info))
-            })?
-            .filter_map(std::result::Result::ok)
-            .collect();
+        let mut rows = statement.query([])?;
+        let mut entries = HashMap::new();
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let info = VideoInfo {
+                codec: row.get(1)?,
+                bitrate_kbps: row.get::<_, i64>(2)? as u64,
+                size_bytes: row.get::<_, i64>(3)? as u64,
+                duration: row.get(4)?,
+                width: row.get::<_, i64>(5)? as u32,
+                height: row.get::<_, i64>(6)? as u32,
+                frames_per_second: row.get(7)?,
+                bit_depth: row.get::<_, i64>(8)? as u8,
+                warning: None,
+            };
+            entries.insert(path, info);
+        }
 
         Ok(entries)
     }
@@ -214,6 +271,9 @@ impl Database {
     /// # Errors
     /// Returns an error if the database query fails.
     pub(crate) fn get_all_scanned_files_with_mtime(&self) -> Result<HashMap<String, (VideoInfo, i64)>> {
+        if !sqlite::table_exists(&self.connection, "main", "scanned_files")? {
+            return Ok(HashMap::new());
+        }
         let mut statement = self.connection.prepare(
             r"
             SELECT full_path, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, modified_time_ns
@@ -221,76 +281,45 @@ impl Database {
             ",
         )?;
 
-        let entries = statement
-            .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let info = VideoInfo {
-                    codec: row.get(1)?,
-                    bitrate_kbps: row.get::<_, i64>(2)? as u64,
-                    size_bytes: row.get::<_, i64>(3)? as u64,
-                    duration: row.get(4)?,
-                    width: row.get::<_, i64>(5)? as u32,
-                    height: row.get::<_, i64>(6)? as u32,
-                    frames_per_second: row.get(7)?,
-                    bit_depth: row.get::<_, i64>(8)? as u8,
-                    warning: None,
-                };
-                let modified_time_ns: i64 = row.get(9)?;
-                Ok((path, (info, modified_time_ns)))
-            })?
-            .filter_map(std::result::Result::ok)
-            .collect();
+        let mut rows = statement.query([])?;
+        let mut entries = HashMap::new();
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let info = VideoInfo {
+                codec: row.get(1)?,
+                bitrate_kbps: row.get::<_, i64>(2)? as u64,
+                size_bytes: row.get::<_, i64>(3)? as u64,
+                duration: row.get(4)?,
+                width: row.get::<_, i64>(5)? as u32,
+                height: row.get::<_, i64>(6)? as u32,
+                frames_per_second: row.get(7)?,
+                bit_depth: row.get::<_, i64>(8)? as u8,
+                warning: None,
+            };
+            let modified_time_ns: i64 = row.get(9)?;
+            entries.insert(path, (info, modified_time_ns));
+        }
 
         Ok(entries)
     }
 
-    /// Remove scanned cache entries for files that no longer exist on disk.
+    /// Remove scanned cache entries for files confirmed missing on mounted volumes.
     ///
-    /// Groups paths by drive letter (on Windows) or mount-point prefix
-    /// so that filesystem `exists()` checks for different drives run in parallel via Rayon,
-    /// avoiding head-of-line blocking when one drive is slow or offline.
-    /// The resulting list of missing paths is then deleted in a single database transaction.
-    ///
-    /// Returns the number of entries removed.
+    /// Groups paths by drive root so checks run in parallel via Rayon without holding a write lock,
+    /// and skips paths on unmounted/offline volumes.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn remove_missing_scanned_files(&mut self) -> Result<usize> {
-        let all_paths: Vec<PathBuf> = {
-            let mut statement = self.connection.prepare("SELECT full_path FROM scanned_files")?;
-            statement
-                .query_map([], |row| row.get::<_, String>(0))?
-                .filter_map(std::result::Result::ok)
-                .map(PathBuf::from)
-                .collect()
-        };
+        self.remove_missing_cache_table("scanned_files")
+    }
 
-        if all_paths.is_empty() {
-            return Ok(0);
-        }
-
-        // Group paths by drive root so each drive can be checked in parallel.
-        let drive_groups = group_paths_by_drive(&all_paths);
-
-        // Check existence in parallel, one thread per drive group.
-        let missing_paths: Vec<PathBuf> = drive_groups
-            .into_par_iter()
-            .flat_map(|(_drive, paths)| paths.into_iter().filter(|path| !path.exists()).collect::<Vec<_>>())
-            .collect();
-
-        if missing_paths.is_empty() {
-            return Ok(0);
-        }
-
-        // Batch-delete in a single transaction.
-        let transaction = self.connection.transaction()?;
-        for path in &missing_paths {
-            let path_str = path.to_string_lossy();
-            transaction.execute("DELETE FROM scanned_files WHERE full_path = ?1", params![path_str])?;
-        }
-        transaction.commit()?;
-
-        Ok(missing_paths.len())
+    /// Remove `file_hashes` entries for files confirmed missing on mounted volumes.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn remove_missing_file_hashes(&mut self) -> Result<usize> {
+        self.remove_missing_cache_table("file_hashes")
     }
 
     /// Return the total number of entries in the scanned files cache.
@@ -298,23 +327,84 @@ impl Database {
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn scanned_file_count(&self) -> Result<u64> {
+        if !sqlite::table_exists(&self.connection, "main", "scanned_files")? {
+            return Ok(0);
+        }
         let count: i64 = self
             .connection
             .query_row("SELECT COUNT(*) FROM scanned_files", [], |row| row.get(0))?;
-        Ok(count as u64)
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Return the total number of entries in the shared file hashes cache.
+    ///
+    /// # Errors
+    /// Returns an error if the database operation fails.
+    pub fn file_hash_count(&self) -> Result<u64> {
+        if !sqlite::table_exists(&self.connection, "main", "file_hashes")? {
+            return Ok(0);
+        }
+        let count: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row.get(0))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Prune definitively missing file rows from a cache table keyed by `full_path`.
+    fn remove_missing_cache_table(&mut self, table_name: &str) -> Result<usize> {
+        if !sqlite::table_exists(&self.connection, "main", table_name)? {
+            return Ok(0);
+        }
+        let all_paths: Vec<PathBuf> = {
+            let mut statement = self
+                .connection
+                .prepare(&format!("SELECT full_path FROM {table_name}"))?;
+            let mut rows = statement.query([])?;
+            let mut collected = Vec::new();
+            while let Some(row) = rows.next()? {
+                collected.push(PathBuf::from(row.get::<_, String>(0)?));
+            }
+            collected
+        };
+
+        if all_paths.is_empty() {
+            return Ok(0);
+        }
+
+        let drive_groups = group_paths_by_drive(&all_paths);
+        let missing_paths: Vec<PathBuf> = drive_groups
+            .into_par_iter()
+            .flat_map(|(_drive, paths)| {
+                paths
+                    .into_iter()
+                    .filter(|path| is_definitively_missing(path))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        if missing_paths.is_empty() {
+            return Ok(0);
+        }
+
+        let transaction = sqlite::immediate_transaction(&mut self.connection)?;
+        let delete_sql = format!("DELETE FROM {table_name} WHERE full_path = ?1");
+        let mut removed = 0usize;
+        for path in &missing_paths {
+            if let Some(path_str) = path.to_str() {
+                removed += transaction.execute(&delete_sql, params![path_str])?;
+            }
+        }
+        transaction.commit()?;
+
+        Ok(removed)
     }
 }
 
 /// Extract a drive or mount-point key from a path for grouping.
-///
-/// On Windows this returns the drive prefix (e.g. `C:` or `\\server\share`).
-/// On other platforms it returns `"/"` since all local paths share one root.
 fn drive_key(path: &Path) -> String {
     let path_str = path.to_string_lossy();
 
-    // UNC paths: \\server\share\...
     if let Some(without_prefix) = path_str.strip_prefix(r"\\") {
-        // Take server\share as the key
         let mut parts = without_prefix.splitn(3, '\\');
         return match (parts.next(), parts.next()) {
             (Some(server), Some(share)) => format!(r"\\{server}\{share}"),
@@ -322,18 +412,14 @@ fn drive_key(path: &Path) -> String {
         };
     }
 
-    // Drive letter paths: C:\...
     if let Some(drive) = path_str.get(..2).filter(|drive| drive.ends_with(':')) {
         return drive.to_uppercase();
     }
 
-    // Unix / fallback. Everything is on one root
     "/".to_string()
 }
 
 /// Group a slice of paths by their drive or mount-point key.
-///
-/// Returns a `Vec` of (key, paths) pairs suitable for parallel iteration.
 fn group_paths_by_drive(paths: &[PathBuf]) -> Vec<(String, Vec<PathBuf>)> {
     let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for path in paths {

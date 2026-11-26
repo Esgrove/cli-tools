@@ -18,28 +18,50 @@ use crate::reporter::Reporter;
 ///
 /// Setting the abort flag stops a conversion run after the current file.
 pub fn run(config: &Config, abort_flag: &AtomicBool) -> Result<()> {
-    let logger = FileLogger::new()?;
-    logger.log_init(config);
-
     match config.database_mode {
         Some(DatabaseMode::Clear) => Database::open_default().and_then(|database| clear_database(&database)),
         Some(DatabaseMode::Show) => {
-            Database::open_default().and_then(|database| show_database_contents(&database, config))
+            let database = Database::open_read_only()?;
+            show_database_contents(database.as_ref(), config)
         }
         Some(DatabaseMode::ListExtensions) => {
-            Database::open_default().and_then(|database| list_extensions(&database, config.verbose))
+            let database = Database::open_read_only()?;
+            list_extensions(database.as_ref(), config.verbose)
         }
         Some(DatabaseMode::CleanScanCache) => {
             Database::open_default().and_then(|mut database| clean_scan_cache(&mut database, config.verbose))
         }
-        Some(DatabaseMode::Process) => run_from_database(config, logger, abort_flag),
-        None => run_scan(config, logger, abort_flag),
+        Some(DatabaseMode::Process) => {
+            let logger = create_logger(config)?;
+            run_from_database(config, logger, abort_flag)
+        }
+        None => {
+            let logger = create_logger(config)?;
+            run_scan(config, logger, abort_flag)
+        }
     }
+}
+
+/// Create a file logger for real runs, or a no-op logger for dry-run previews.
+fn create_logger(config: &Config) -> Result<FileLogger> {
+    if config.options.dry_run {
+        return Ok(FileLogger::noop());
+    }
+    let logger = FileLogger::new()?;
+    logger.log_init(config);
+    Ok(logger)
 }
 
 /// Scan the input paths and process the files found.
 fn run_scan(config: &Config, logger: FileLogger, abort_flag: &AtomicBool) -> Result<()> {
-    let mut database = Database::open_default()?;
+    let mut database = if config.options.dry_run {
+        match Database::open_read_only()? {
+            Some(existing) => existing,
+            None => Database::open_in_memory()?,
+        }
+    } else {
+        Database::open_default()?
+    };
     if config.verbose {
         println!("Database: {}", Database::path().display());
     }
@@ -57,7 +79,15 @@ fn run_scan(config: &Config, logger: FileLogger, abort_flag: &AtomicBool) -> Res
 
 /// Process the pending files stored in the database, then show what remains there.
 fn run_from_database(config: &Config, logger: FileLogger, abort_flag: &AtomicBool) -> Result<()> {
-    let mut database = Database::open_default()?;
+    let mut database = if config.options.dry_run {
+        let Some(existing) = Database::open_read_only()? else {
+            println!("No pending files in database matching filters");
+            return Ok(());
+        };
+        existing
+    } else {
+        Database::open_default()?
+    };
 
     let reporter = Reporter::new(config, logger);
     let converter = VideoConvert::new(config.options.clone(), &reporter);
