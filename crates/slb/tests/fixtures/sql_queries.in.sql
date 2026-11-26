@@ -21,5 +21,29 @@ FROM (
 ) AS totals
 WHERE rank <= 10;
 
+-- Multiline single-quoted strings and dollar-quoted function bodies must stay untouched,
+-- even when lines inside them start with a SQL comment marker.
+INSERT INTO audit_templates (name, body) VALUES (
+    'monthly',
+    'Header line
+-- inside a single-quoted SQL string; must not be rewritten
+-- wrapped line stays verbatim
+Footer line'
+);
+
+CREATE OR REPLACE FUNCTION format_note() RETURNS text LANGUAGE sql AS $$
+    SELECT '
+-- inside a dollar-quoted SQL body; must not be rewritten
+';
+$$;
+
+CREATE OR REPLACE FUNCTION tagged_note() RETURNS text LANGUAGE sql AS $body$
+    -- inside a tagged dollar-quoted body; stays verbatim
+    SELECT 1;
+$body$;
+
+/* Mid-line or multi-line block comment ending on a line starting with dashes
+-- closes block */ SELECT 1; SELECT 2;
+
 -- See https://example.com/schema/transactions for the full column reference and constraints.
 COMMENT ON TABLE transactions IS 'One row per completed payment; refunds are separate rows.';

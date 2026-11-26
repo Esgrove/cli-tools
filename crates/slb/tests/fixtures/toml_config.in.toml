@@ -14,3 +14,19 @@ join_sentences = false
 min_size = 4096
 # The scanner walks every configured root in turn, and it reports duplicates as it finds them.
 roots = ["~/Downloads", "~/Pictures"]
+
+[paths]
+# Multiline literal strings do not treat backslashes as escapes, so a trailing backslash closes cleanly.
+windows_prefix = '''
+C:\Users\example\dir\'''
+
+# Comments immediately after a literal string ending in a backslash are still formatted;
+# otherwise the scanner would think the rest of the file stayed inside the string.
+basic_template = """
+# Literal hash inside a multiline basic string; must remain untouched.
+# Second wrapped line inside the string
+# stays untouched too.
+"""
+
+# Regular comment after the basic string — it should be rewritten cleanly.
+enabled = true # toggle path matching

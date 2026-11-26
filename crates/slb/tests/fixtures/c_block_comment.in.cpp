@@ -22,3 +22,31 @@ std::vector<Frame> readFrames(Socket& socket, std::chrono::milliseconds deadline
     std::vector<Frame> frames; // collected frames
     return frames;
 }
+
+/**
+ * Configuration values for the parser; Doxygen post-member doc comments stay trailing on the
+ * same line so they continue documenting the field right before them.
+ */
+struct ParserConfig {
+    int max_depth = 32; ///< Maximum recursion depth; stays on the member line.
+    bool strict = false; //!< Reject ambiguous tokens; stays on the member line.
+};
+
+// Raw string literals and mid-line block comments must never be rewritten; a trailing comment
+// containing a block-comment closer also stays in place rather than moving inside the block.
+const char* sample_raw_strings(int value) {
+    const char* plain = R"(
+// Inside a C++ raw string; semicolons stay untouched.
+// Wrapped lines stay verbatim.
+)";
+    const char* custom = R"SQL(
+// Inside a custom-delimited raw string; stays verbatim.
+const char* nested = ")";
+)SQL";
+    int acc = value; /* mid-line block comment
+    // closes mid-line block */ acc += 1; return plain;
+    /* block comment before a trailing comment that contains a closing marker
+    inside block
+    */ int guarded = acc; // handles glob /*/foo
+    return custom ? plain : nullptr;
+}

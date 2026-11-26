@@ -119,3 +119,16 @@ The cache is small; it is rebuilt every night.
 An introduction of several words that ends in a colon gets a line of its own when the text after it is long.
 
 Skip objects without a hierarchy path: they share every other field with a sibling but have no way to tell themselves apart from it.
+
+## Atom-attached em dashes and combined rewrites
+
+An em dash attached directly after an inline code span or link is rewritten in a single pass.
+
+Use `cargo nextest`—it runs every test binary in parallel.
+
+Read [the guide](https://example.com/guide)—it explains every configuration flag.
+
+A sentence containing both dashes and semicolons converges in one formatting pass.
+
+First clause — alpha; second clause — beta.
+

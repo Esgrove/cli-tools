@@ -1,0 +1,69 @@
+# Release workflow.
+# Runs verification, packaging, and artifact uploads for every tagged build.
+# Comments outside block scalars are formatted normally.
+# Comments inside block scalars stay verbatim.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  # Plain scalar containing a semicolon and hash.
+  # In YAML a hash without leading whitespace is data.
+  CONNECTION_TAG: primary;#release-channel
+  # Multiline double-quoted string.
+  # Hash-prefixed lines inside quotes are part of the value.
+  RELEASE_BANNER: "Release pipeline
+    # inside double-quoted YAML value; semicolons stay untouched
+    # wrapped lines stay untouched too
+    ready"
+  # Multiline single-quoted string.
+  # Hash-prefixed lines are equally verbatim.
+  SIGNATURE_NOTE: 'Signed artifact
+    # inside single-quoted YAML value; must not change'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      # Check out the repository with full history.
+      # Version tagging needs the previous tag reachable.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run full check suite
+        # Literal block scalar with explicit indent indicator and strip chomping plus inline comment.
+        run: |2- # execute verification script
+          # Check formatting and lints; semicolons and em dashes — stay verbatim inside run blocks.
+          # This comment is wrapped across lines
+          # in the middle of a clause.
+          cargo clippy --workspace --all-targets -- -Dwarnings
+          cargo test --workspace
+
+      - name: Run folded release notes script
+        # Folded block scalar with keep chomping.
+        # Hash lines inside stay untouched.
+        run: >+
+          # Folded block scalar line; semicolons stay untouched.
+          echo "generating notes"
+
+      - name: Run sequence of inline shell scripts
+        # Sequence-item block scalars introduced directly by "- |" or "- >" must also be tracked.
+        scripts:
+          - |
+            # First sequence block scalar; must not be rewritten.
+            # Wrapped lines
+            # stay untouched.
+            echo "step one"
+          - >-
+            # Second sequence block scalar; semicolons stay verbatim.
+            echo "step two"
+
+      # Real YAML comment after all block scalars.
+      # It should be formatted into clean sentences.
+      - name: Upload release artifacts
+        # attach binaries for the draft release
+        uses: actions/upload-artifact@v4

@@ -1,9 +1,12 @@
 # Top level comment that wraps in the middle.
 key: value # trailing note
 url: http://example.com/#anchor
+semicolon_value: foo;#bar-is-part-of-the-scalar
 script: |
   echo "# not a comment"
-  # also not a comment
+  # also not a comment; semicolons stay untouched
+  # wrapped line inside a block scalar
+  # must never be joined together.
 other: 1
 
 # Every job below runs on its own runner.
@@ -19,3 +22,27 @@ jobs:
       - uses: actions/checkout@v4
       # build once per matrix entry
       - run: cargo build --release
+      - name: Run checks with explicit indent and chomp
+        # inline comment on block scalar header
+        run: |2-
+          # This shell comment sits inside a block scalar; it must stay unchanged.
+          # Even when wrapped across two lines
+          # in the middle of a clause.
+          cargo test --workspace
+      - name: Sequence block scalar list
+        commands:
+          - |
+            # Sequence item block scalar; semicolons and em dashes — stay verbatim.
+            echo "ok"
+      - name: Folded scalar with comment afterwards
+        description: >-
+          # Folded text; never treated as a YAML comment.
+          # Another line inside the folded scalar.
+        # Real YAML comment after the folded scalar.
+        # It should be formatted cleanly.
+        env:
+          MULTILINE_NOTE: "First line of a quoted YAML string
+            # not a comment; stays verbatim inside double quotes
+            final line"
+          SINGLE_QUOTED: 'First line of a single quoted string
+            # also not a comment; stays verbatim inside single quotes'

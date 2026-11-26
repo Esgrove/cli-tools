@@ -14,5 +14,20 @@ FROM debian:bookworm-slim
 # which keeps the final image small and avoids shipping a compiler to production hosts.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/project /usr/local/bin/project
+
+# BuildKit heredocs may contain hash comments for generated configuration files; they are file
+# contents rather than Dockerfile comments and must remain untouched.
+COPY <<EOF /etc/project/default.conf
+# Generated runtime configuration; do not rewrite semicolons.
+# Wrapped lines inside the heredoc
+# stay exactly as written.
+mode=production
+EOF
+
+# Multiline quoted environment values can also hold hash lines; leave them verbatim.
+ENV BANNER="Welcome
+# literal hash inside ENV; stays verbatim
+End"
+
 # See https://example.com/cli-tools/deploy for the full deployment checklist and rollback steps.
 ENTRYPOINT ["project"]

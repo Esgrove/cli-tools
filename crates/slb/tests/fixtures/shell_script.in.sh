@@ -16,8 +16,30 @@ cat <<'NOTES' > notes.txt
 value = 1 # still not a comment
 NOTES
 
+# A heredoc header can carry a trailing comment; the body still has to stay protected.
+cat <<EOF > config.env # write runtime defaults
+# Inside heredoc after trailing comment; semicolons stay verbatim.
+# Wrapped lines inside the heredoc
+# are never reflowed.
+EOF
+
+# Multiline double and single quoted strings may contain leading hashes that are literal data.
+DOUBLE_QUOTED="header line
+# inside double quotes; must not be formatted
+# even when wrapped across lines
+footer line"
+
+SINGLE_QUOTED='header line
+# inside single quotes; must not be formatted
+# even when wrapped across lines
+footer line'
+
 BUILD_DIR="build" # default build directory
 # shellcheck disable=SC2086
 cargo build --release ${FLAGS:-}
+
+# A semicolon immediately followed by a hash starts a real shell comment.
+
+mkdir -p "$BUILD_DIR";# ensure output directory exists
 
 echo "done" # print the result

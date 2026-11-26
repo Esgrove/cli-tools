@@ -261,11 +261,37 @@ fn code_like_comments_fixture() {
 }
 
 #[test]
+fn yaml_block_scalars_fixture() {
+    assert_fixture("yaml_block_scalars.in.yml", "yaml_block_scalars.out.yml");
+}
+
+#[test]
+fn markdown_structures_fixture() {
+    assert_fixture("markdown_structures.in.md", "markdown_structures.out.md");
+}
+
+#[test]
+fn python_literals_and_docstrings_fixture() {
+    assert_fixture(
+        "python_literals_and_docstrings.in.py",
+        "python_literals_and_docstrings.out.py",
+    );
+}
+
+#[test]
+fn cpp_raw_strings_and_doxygen_fixture() {
+    assert_fixture(
+        "cpp_raw_strings_and_doxygen.in.cpp",
+        "cpp_raw_strings_and_doxygen.out.cpp",
+    );
+}
+
+#[test]
 fn every_fixture_pair_formats_to_its_expected_output() {
     let mut pairs = fixture_pairs();
     pairs.sort();
     assert!(
-        pairs.len() >= 40,
+        pairs.len() >= 44,
         "expected every fixture pair to be found, got {pairs:?}"
     );
     for (input, output) in pairs {

@@ -2,9 +2,12 @@
 # in the middle.
 key: value # trailing note
 url: http://example.com/#anchor
+semicolon_value: foo;#bar-is-part-of-the-scalar
 script: |
   echo "# not a comment"
-  # also not a comment
+  # also not a comment; semicolons stay untouched
+  # wrapped line inside a block scalar
+  # must never be joined together.
 other: 1
 
 # Every job below runs on its own runner; the matrix expands to one job per operating system and
@@ -18,3 +21,25 @@ jobs:
       # Checkout the repository, then install the toolchain pinned in rust-toolchain.toml.
       - uses: actions/checkout@v4
       - run: cargo build --release # build once per matrix entry
+      - name: Run checks with explicit indent and chomp
+        run: |2- # inline comment on block scalar header
+          # This shell comment sits inside a block scalar; it must stay unchanged.
+          # Even when wrapped across two lines
+          # in the middle of a clause.
+          cargo test --workspace
+      - name: Sequence block scalar list
+        commands:
+          - |
+            # Sequence item block scalar; semicolons and em dashes — stay verbatim.
+            echo "ok"
+      - name: Folded scalar with comment afterwards
+        description: >-
+          # Folded text; never treated as a YAML comment.
+          # Another line inside the folded scalar.
+        # Real YAML comment after the folded scalar; it should be formatted cleanly.
+        env:
+          MULTILINE_NOTE: "First line of a quoted YAML string
+            # not a comment; stays verbatim inside double quotes
+            final line"
+          SINGLE_QUOTED: 'First line of a single quoted string
+            # also not a comment; stays verbatim inside single quotes'

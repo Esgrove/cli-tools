@@ -47,3 +47,40 @@ def label(value: str) -> str:
     """Return the label
     of the given value."""
     return value
+
+
+def standalone_close(value: str) -> str:
+    """Short summary of the
+    function value.
+    """
+    return value
+
+
+def escaped_quotes_docstring() -> None:
+    """
+    Demonstrate an escaped triple quote \"\"\" inside a docstring.
+    The sentence after it still formats; semicolons are rewritten cleanly.
+    """
+    pass
+
+
+def runtime_literals(name: str) -> tuple[str, bytes, str, str]:
+    # Format strings, byte literals, implicit concatenation, and continuations after string hashes
+    # are runtime values rather than docstrings, so all four must remain completely untouched.
+    formatted = f"""
+    Hello {name}; this f-string is a runtime value, not a docstring.
+    """
+    raw_bytes = b"""
+    Binary payload; this bytes literal is not a docstring.
+    """
+    concatenated = (
+        "header "
+        """
+        Implicitly concatenated; still a runtime string value.
+        """
+    )
+    after_hash_string = "http://example.com#anchor" + \
+        """
+        Continued after a string containing a hash; must not be formatted.
+        """
+    return formatted, raw_bytes, concatenated, after_hash_string

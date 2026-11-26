@@ -5,10 +5,21 @@
 def load_config(path)
   # The heredoc below holds a hash character that is not a comment, so it has to be left alone.
   banner = <<~NOTES
-    # not a comment
+    # not a comment; semicolons stay verbatim
     value = 1 # still not a comment
   NOTES
-  { path: path, banner: banner }
+
+  # Indented dashed heredocs and multiline strings also protect hash-prefixed data lines.
+  footer = <<-END
+    # inside dashed heredoc; stays verbatim
+    # wrapped lines stay untouched
+  END
+
+  multiline = "First line
+# inside double-quoted Ruby string; must not change
+Last line"
+
+  { path: path, banner: banner, footer: footer, multiline: multiline }
 end
 
 # Merges the user options into the defaults and returns a new hash.

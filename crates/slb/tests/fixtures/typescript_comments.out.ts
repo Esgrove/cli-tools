@@ -16,6 +16,23 @@ export function parseConfig(source: string): Config {
 }
 
 /**
+ * Builds a multi-line template literal whose interpolation contains a quoted backtick.
+ * The inner backtick must not close the outer template literal prematurely.
+ */
+export function formatPrompt(flag: boolean, total: number, count: number): string {
+    const snippet = `prefix ${flag ? '`' : '"'}
+// inside template literal after quoted backtick; semicolons stay verbatim
+// wrapped lines inside the template
+// are never reflowed.
+`;
+    const ratio = total / count + `
+// inside template literal after division; must stay untouched
+`;
+    // combine both fragments
+    return snippet + ratio;
+}
+
+/**
  * Short summary.
  *
  * | Option | Meaning |
