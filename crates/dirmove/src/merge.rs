@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
-use cli_tools_common::path_to_filename_string;
+use cli_tools_common::{TargetReservations, path_to_filename_string};
 
 use crate::mover::{self, MoveObserver};
 use crate::name_filter::NameFilter;
@@ -31,6 +31,8 @@ pub enum MergeEvent<'a> {
     WouldMove(&'a str),
     /// Entries with these names were left in the source because the target already has them.
     Skipped(&'a [String]),
+    /// An entry was left in the source because its destination was already reserved by this batch.
+    DuplicateTarget(&'a Path),
     /// Number of entries moved, or that would be moved in a dry run.
     Moved(usize),
     /// The emptied source directory was removed.
@@ -90,6 +92,33 @@ impl DirectoryMerger {
     /// # Errors
     /// Returns an error if the source cannot be read or an entry cannot be moved.
     pub fn merge(&self, source: &Path, target: &Path, observer: &mut impl MergeObserver) -> Result<()> {
+        self.merge_entries(source, target, None, observer)
+    }
+
+    /// Merge one source directory as part of a batch.
+    /// Reuse `reservations` for every source in the batch so overwriting cannot replace an earlier source's entries.
+    /// Real target directories can still be merged into, but colliding entries stay in their source.
+    ///
+    /// # Errors
+    /// Returns an error if the source cannot be read or an entry cannot be moved.
+    pub fn merge_with_reservations(
+        &self,
+        source: &Path,
+        target: &Path,
+        reservations: &mut TargetReservations,
+        observer: &mut impl MergeObserver,
+    ) -> Result<()> {
+        self.merge_entries(source, target, Some(reservations), observer)
+    }
+
+    /// Merge entries, optionally reserving their destinations across multiple source directories.
+    fn merge_entries(
+        self,
+        source: &Path,
+        target: &Path,
+        mut reservations: Option<&mut TargetReservations>,
+        observer: &mut impl MergeObserver,
+    ) -> Result<()> {
         observer.on_merge_event(MergeEvent::Started { source, target });
 
         let mut skipped_files = Vec::new();
@@ -129,7 +158,19 @@ impl DirectoryMerger {
                 (target.join(&sanitized), sanitized)
             };
 
-            if std::fs::symlink_metadata(&target_path).is_ok() {
+            let target_metadata = std::fs::symlink_metadata(&target_path).ok();
+            let merging_subdirectory =
+                is_real_directory && target_metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
+            if let Some(reservations) = reservations.as_deref_mut()
+                && !reservations.reserve(&target_path)
+                && !merging_subdirectory
+            {
+                observer.on_merge_event(MergeEvent::DuplicateTarget(&entry_path));
+                kept_in_source = true;
+                continue;
+            }
+
+            if target_metadata.is_some() {
                 if self.overwrite {
                     observer.on_merge_event(MergeEvent::Overwriting(&display_name));
                 } else {
@@ -160,11 +201,13 @@ impl DirectoryMerger {
 
         for (entry_path, target_path) in directory_entries {
             if std::fs::symlink_metadata(&target_path).is_ok_and(|metadata| metadata.is_dir()) {
-                self.merge(&entry_path, &target_path, observer)?;
-                moved_count += 1;
-                continue;
+                self.merge_entries(&entry_path, &target_path, reservations.as_deref_mut(), observer)?;
+            } else {
+                if let Some(reservations) = reservations.as_deref_mut() {
+                    reserve_directory_contents(&entry_path, &target_path, reservations)?;
+                }
+                move_directory_into_place(&entry_path, &target_path, self.overwrite)?;
             }
-            move_directory_into_place(&entry_path, &target_path, self.overwrite)?;
             moved_count += 1;
         }
 
@@ -188,6 +231,16 @@ impl DirectoryMerger {
 
         Ok(())
     }
+}
+
+/// Reserve the raw destinations under a directory that will move as a whole.
+/// A later source can merge into the new directory without replacing any of its contents.
+fn reserve_directory_contents(source: &Path, target: &Path, reservations: &mut TargetReservations) -> Result<()> {
+    for entry in WalkDir::new(source).min_depth(1) {
+        let entry = entry?;
+        reservations.reserve(&target.join(entry.path().strip_prefix(source)?));
+    }
+    Ok(())
 }
 
 /// Move a directory into place, backing up an existing non-directory target when overwriting.
@@ -1173,6 +1226,7 @@ mod test_merge_events {
                 MergeEvent::Overwriting(name) => format!("overwriting {name}"),
                 MergeEvent::WouldMove(name) => format!("would move {name}"),
                 MergeEvent::Skipped(names) => format!("skipped {}", names.join(", ")),
+                MergeEvent::DuplicateTarget(path) => format!("duplicate target for {}", path.display()),
                 MergeEvent::Moved(count) => format!("moved {count} items"),
                 MergeEvent::SourceRemoved(source) => format!("removed {}", path_to_filename_string(source)),
                 MergeEvent::SourceRemoveFailed(source, _) => {

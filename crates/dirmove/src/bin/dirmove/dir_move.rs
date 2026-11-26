@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use colored::Colorize;
 
 use cli_tools_common::{
-    count_label, format_text_with_highlight, path_to_filename_string, print_bold, print_error, print_yellow,
+    TargetReservations, count_label, format_text_with_highlight, path_to_filename_string, print_bold, print_error,
+    print_yellow,
 };
 use cli_tools_dirmove::{
     DirectoryInfo, DirectoryMatcher, DirectoryMerger, FileInfo, FileMatch, PrefixGrouper, Roots, Scanner, Unpacker,
@@ -444,6 +445,7 @@ impl DirMove {
     /// Confirmed merges move the contents of each source directory into the selected target output directory
     /// and remove the source directory if it becomes empty.
     /// Existing target entries are skipped unless `--force` is enabled.
+    /// A destination reserved by an earlier source cannot be overwritten in the same offer.
     fn process_directory_merge_match(
         &self,
         target_directory: &DirectoryInfo,
@@ -487,9 +489,17 @@ impl DirMove {
                 )?;
 
             if confirmed {
+                let merger = DirectoryMerger::new(self.config.overwrite, false);
+                let mut reservations = TargetReservations::new();
+                let mut reporter = self.reporter();
                 for source_directory in source_directories {
-                    if let Err(e) = self.merge_directory_contents(source_directory, &target_directory.path) {
-                        print_error!("Failed to merge {}: {e}", source_directory.display());
+                    if let Err(error) = merger.merge_with_reservations(
+                        source_directory,
+                        &target_directory.path,
+                        &mut reservations,
+                        &mut reporter,
+                    ) {
+                        print_error!("Failed to merge {}: {error:#}", source_directory.display());
                     }
                 }
             } else {

@@ -158,6 +158,12 @@ impl MergeObserver for ConsoleReporter<'_> {
                     println!("    {name}");
                 }
             }
+            MergeEvent::DuplicateTarget(source) => {
+                print_yellow!(
+                    "Skipping {}, another entry in this merge has the same destination",
+                    source.display()
+                );
+            }
             MergeEvent::Moved(count) => {
                 let action = if self.dryrun { "Would move" } else { "Moved" };
                 println!("  {action} {}", count_label(count, "item", "items"));

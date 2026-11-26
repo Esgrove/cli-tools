@@ -250,6 +250,42 @@ fn files_move_to_the_output_root_that_has_the_matching_directory() {
 }
 
 #[test]
+fn force_merge_leaves_later_episode_in_its_source() {
+    let tree = TempTree::new();
+    tree.file_with("First/Show/episode.mkv", "first episode");
+    tree.file_with("Second/Show/episode.mkv", "second episode");
+    tree.file_with("First/Show/replace.mkv", "replacement");
+    tree.file_with("First/Show/Season/episode.mkv", "first nested episode");
+    tree.file_with("Second/Show/Season/episode.mkv", "second nested episode");
+    tree.file_with("Second/Show/Season/bonus.mkv", "nested bonus");
+    tree.file_with("Library/Show/replace.mkv", "pre-existing destination");
+    let home = TempTree::new();
+
+    let output = dirmove_command(home.path())
+        .args(["--auto", "--force", "--output"])
+        .arg(tree.join("Library"))
+        .args([tree.join("First"), tree.join("Second")])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    assert!(stdout(&output).contains("2 directories"), "{}", stdout(&output));
+    assert_eq!(tree.read("Library/Show/episode.mkv"), "first episode");
+    assert_eq!(tree.read("Second/Show/episode.mkv"), "second episode");
+    assert_eq!(tree.read("Library/Show/replace.mkv"), "replacement");
+    assert_eq!(tree.read("Library/Show/Season/episode.mkv"), "first nested episode");
+    assert_eq!(tree.read("Second/Show/Season/episode.mkv"), "second nested episode");
+    assert_eq!(tree.read("Library/Show/Season/bonus.mkv"), "nested bonus");
+    assert!(!tree.exists("Second/Show/Season/bonus.mkv"));
+    assert!(!tree.exists("First/Show"));
+    let warnings = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        warnings.contains("another entry in this merge has the same destination"),
+        "{warnings}"
+    );
+}
+
+#[test]
 fn files_only_leaves_matching_input_directories_in_place() {
     let tree = TempTree::new();
     tree.file_with("Inbox/Show Alpha/Show.Alpha.S01E01.mkv", "nested");
