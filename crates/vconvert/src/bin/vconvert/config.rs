@@ -3,11 +3,9 @@
 //! Defines the user config file settings,
 //! and combines command-line arguments with the user configuration into the run options.
 
-use std::fs;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cli_tools_vconvert::options::{ALL_EXTENSIONS, DEFAULT_EXTENSIONS, OTHER_EXTENSIONS};
-use cli_tools_vconvert::{BitrateTiersConfig, ConvertOptions, MinimumBitrate, SortOrder};
+use cli_tools_vconvert::{BitrateTiersConfig, ConvertOptions, HardwareEncoder, MinimumBitrate, SortOrder};
 use itertools::Itertools;
 use serde::Deserialize;
 
@@ -17,8 +15,9 @@ use crate::cli::DatabaseMode;
 /// Default display limit for showing pending files.
 const DEFAULT_DISPLAY_LIMIT: usize = 100;
 
-/// User configuration from the config file.
+/// User configuration from the `[video_convert]` config file section.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VideoConvertConfig {
     #[serde(default)]
     convert_all_types: bool,
@@ -43,17 +42,27 @@ pub struct VideoConvertConfig {
     #[serde(default)]
     display_limit: Option<usize>,
     #[serde(default)]
+    dryrun: bool,
+    #[serde(default)]
+    encoder: Option<HardwareEncoder>,
+    #[serde(default)]
     exclude: Vec<String>,
     #[serde(default)]
     extensions: Vec<String>,
     #[serde(default)]
     include: Vec<String>,
     #[serde(default)]
+    movie_mode: bool,
+    #[serde(default)]
     convert_other_types: bool,
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
     recurse: bool,
+    #[serde(default)]
+    skip_convert: bool,
+    #[serde(default)]
+    skip_remux: bool,
     #[serde(default)]
     sort: Option<SortOrder>,
     #[serde(default)]
@@ -74,13 +83,6 @@ pub struct Config {
     pub(crate) verbose: bool,
 }
 
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    video_convert: VideoConvertConfig,
-}
-
 impl VideoConvertConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
@@ -88,29 +90,16 @@ impl VideoConvertConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     pub fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
+        cli_tools_common::load_user_config_section("video_convert")
     }
 
     /// Parse config from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.video_convert)
-            .with_context(|| "Failed to parse video_convert config TOML")
+        cli_tools_common::parse_user_config_section(toml_str, "video_convert")
     }
 }
 
@@ -163,6 +152,11 @@ impl Config {
         let min_resolution = args.min_resolution.or(user_config.min_resolution);
         let count = args.count.or(user_config.count);
         let sort = args.sort.map(SortOrder::from).or(user_config.sort).unwrap_or_default();
+        let encoder = args
+            .encoder
+            .map(HardwareEncoder::from)
+            .or(user_config.encoder)
+            .unwrap_or_default();
 
         // Display limit: CLI overrides config, default is 100, 0 means no limit
         let display_limit = match args.display_limit.or(user_config.display_limit) {
@@ -183,16 +177,17 @@ impl Config {
                 min_duration,
                 max_duration,
                 min_resolution,
-                movie_mode: args.movie,
+                movie_mode: args.movie || user_config.movie_mode,
                 overwrite: args.force || user_config.overwrite,
                 delete: args.delete || user_config.delete,
                 delete_duplicates: args.delete_duplicates || user_config.delete_duplicates,
-                dry_run: args.print,
+                dry_run: args.print || user_config.dryrun,
                 recurse: args.recurse || user_config.recurse,
-                skip_convert: args.skip_convert,
-                skip_remux: args.skip_remux,
+                skip_convert: args.skip_convert || user_config.skip_convert,
+                skip_remux: args.skip_remux || user_config.skip_remux,
                 count,
                 sort,
+                encoder,
             },
             convert_all,
             convert_other,
@@ -354,7 +349,11 @@ overwrite = true
         let error =
             VideoConvertConfig::from_toml_str("this is not valid toml {{{").expect_err("invalid TOML should fail");
 
-        assert!(error.to_string().contains("Failed to parse video_convert config TOML"));
+        assert!(error.to_string().contains("Invalid TOML syntax"), "{error:#}");
+
+        let unknown = VideoConvertConfig::from_toml_str("[video_convert]\nunknown_option = true\n")
+            .expect_err("unknown field should be rejected");
+        assert!(format!("{unknown:#}").contains("unknown_option"), "{unknown:#}");
     }
 
     #[test]

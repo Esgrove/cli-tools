@@ -14,11 +14,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
 use colored::Colorize;
 
-use crate::cli::{DatabaseMode, SortOrderArgument};
+use crate::cli::{DatabaseMode, EncoderArgument, SortOrderArgument};
 use crate::config::{Config, VideoConvertConfig};
 
 /// Subcommands for vconvert.
@@ -26,19 +26,11 @@ use crate::config::{Config, VideoConvertConfig};
 enum VideoConvertCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
-#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg and NVENC")]
+#[command(author, version, name = env!("CARGO_BIN_NAME"), about = "Convert video files to HEVC (H.265) format using ffmpeg hardware acceleration")]
 pub(crate) struct VideoConvertArgs {
     #[command(subcommand)]
     command: Option<VideoConvertCommand>,
@@ -154,6 +146,10 @@ pub(crate) struct VideoConvertArgs {
     /// Maximum number of files to display
     #[arg(short = 'L', long = "display-limit", name = "LIMIT")]
     display_limit: Option<usize>,
+
+    /// Hardware HEVC encoder (auto uses `VideoToolbox` on Apple Silicon and requires NVENC elsewhere)
+    #[arg(short = 'g', long = "encoder", name = "ENCODER")]
+    encoder: Option<EncoderArgument>,
 }
 
 impl VideoConvertArgs {
@@ -177,14 +173,8 @@ impl VideoConvertArgs {
 
 fn main() -> Result<()> {
     let args = VideoConvertArgs::parse();
-    if let Some(VideoConvertCommand::Completion { shell, install }) = &args.command {
-        return cli_tools_common::generate_shell_completion(
-            *shell,
-            VideoConvertArgs::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        );
+    if let Some(VideoConvertCommand::Completion(completion)) = &args.command {
+        return completion.generate::<VideoConvertArgs>(args.verbose, env!("CARGO_BIN_NAME"));
     }
 
     let user_config = VideoConvertConfig::get_user_config()?;
@@ -311,7 +301,10 @@ mod test_video_convert_args_parsing {
 
         assert!(matches!(
             args.command,
-            Some(VideoConvertCommand::Completion { shell: Shell::Bash, .. })
+            Some(VideoConvertCommand::Completion(CompletionArgs {
+                shell: clap_complete::Shell::Bash,
+                ..
+            }))
         ));
         assert_eq!(args.paths, [] as [std::path::PathBuf; 0]);
     }
@@ -372,6 +365,7 @@ mod test_database_mode_selection {
 #[cfg(test)]
 mod test_completion_command_parsing {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn parses_shell_and_install_option() {
@@ -381,10 +375,10 @@ mod test_completion_command_parsing {
         assert!(args.verbose);
         assert!(matches!(
             args.command,
-            Some(VideoConvertCommand::Completion {
-                shell: Shell::Bash,
+            Some(VideoConvertCommand::Completion(CompletionArgs {
+                shell: clap_complete::Shell::Bash,
                 install: true
-            })
+            }))
         ));
     }
 

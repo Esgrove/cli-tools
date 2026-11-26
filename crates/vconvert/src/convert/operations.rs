@@ -13,14 +13,18 @@ use tempfile::TempPath;
 use super::VideoConvert;
 use crate::ffmpeg::{
     ConversionOptions, build_conversion_command, build_movie_mux_command, build_remux_command, probe_video_info,
-    register_staged_path, run_command_isolated, unregister_staged_path, validate_movie_subtitles, validate_mux_output,
+    register_staged_path, run_command_isolated, unregister_staged_path, validate_audio_preserved,
+    validate_movie_subtitles, validate_mux_output,
 };
 use crate::observer::{FilePosition, Operation, Retry};
+use crate::options::ResolvedEncoder;
 use crate::stats::ConversionStats;
 use crate::types::{ProcessResult, ProcessableFile, VideoInfo};
 
-/// Minimum ratio of output duration to input duration for a conversion to be considered successful.
-const MIN_DURATION_RATIO: f64 = 0.85;
+/// Maximum relative duration loss allowed for a conversion output before rejecting it.
+const MIN_DURATION_RATIO: f64 = 0.98;
+/// Small absolute duration allowance in seconds for very short clips.
+const MIN_DURATION_ALLOWANCE_SECS: f64 = 0.5;
 
 /// RAII wrapper around a staged temporary output path that keeps the forced-abort registry in sync.
 struct StagedOutput {
@@ -275,7 +279,7 @@ impl VideoConvert<'_> {
             &[]
         };
         let make_options = |command_output| {
-            ConversionOptions::new(
+            ConversionOptions::with_encoder(
                 input,
                 command_output,
                 quality_level,
@@ -283,6 +287,7 @@ impl VideoConvert<'_> {
                 self.options.movie_mode,
                 subtitle_files,
                 info.bit_depth,
+                self.options.encoder,
             )
         };
         let Some(staged) = staged else {
@@ -313,8 +318,8 @@ impl VideoConvert<'_> {
             Err(error) => return (failed(error), None),
         };
 
-        // Validate output duration
-        if output_info.duration < info.duration * MIN_DURATION_RATIO {
+        // Validate output duration (require within 2% or 0.5s for tiny clips).
+        if output_info.duration + MIN_DURATION_ALLOWANCE_SECS < info.duration * MIN_DURATION_RATIO {
             return (
                 failed(format!(
                     "Output duration {:.1}s is less than {:.0}% of original {:.1}s",
@@ -322,6 +327,13 @@ impl VideoConvert<'_> {
                     MIN_DURATION_RATIO * 100.0,
                     info.duration
                 )),
+                None,
+            );
+        }
+
+        if let Err(error) = validate_audio_preserved(input, staged.path()) {
+            return (
+                failed(format!("Conversion output failed audio validation: {error:#}")),
                 None,
             );
         }
@@ -387,27 +399,41 @@ impl VideoConvert<'_> {
         info: &VideoInfo,
         abort_flag: &AtomicBool,
     ) -> Result<VideoInfo, String> {
-        // First attempt: try with CUDA filters for better performance
-        let status =
+        let mut status =
             run_command_isolated(ffmpeg_command).map_err(|error| format!("Failed to execute ffmpeg: {error}"))?;
 
-        if !status.success() {
+        if !status.success() && matches!(conversion_options.encoder(), ResolvedEncoder::Nvenc) {
             if abort_flag.load(Ordering::SeqCst) {
                 return Err("Conversion aborted".to_string());
             }
             clear_staged_output(output)?;
 
-            // Retry without CUDA filters (fallback for format compatibility issues)
+            // Retry without CUDA filters while still requiring NVENC hardware encoding.
             self.observer.retrying(Retry::CpuFilters);
             conversion_options = conversion_options.without_cuda_filters();
             let mut retry_command = build_conversion_command(&conversion_options)
                 .map_err(|error| format!("Failed to build retry ffmpeg command: {error}"))?;
-            let status = run_command_isolated(&mut retry_command)
+            status = run_command_isolated(&mut retry_command)
                 .map_err(|error| format!("Failed to execute ffmpeg (retry): {error}"))?;
+        }
 
-            if !status.success() {
-                return Err(format!("ffmpeg failed with status: {}", status.code().unwrap_or(-1)));
+        if !status.success() && conversion_options.copy_audio() && !self.options.movie_mode {
+            if abort_flag.load(Ordering::SeqCst) {
+                return Err("Conversion aborted".to_string());
             }
+            clear_staged_output(output)?;
+
+            // Retry transcoding incompatible audio streams to AAC when stream copy fails.
+            self.observer.retrying(Retry::AacAudio { status });
+            conversion_options = conversion_options.without_copy_audio();
+            let mut retry_command = build_conversion_command(&conversion_options)
+                .map_err(|error| format!("Failed to build AAC retry ffmpeg command: {error}"))?;
+            status = run_command_isolated(&mut retry_command)
+                .map_err(|error| format!("Failed to execute ffmpeg (AAC retry): {error}"))?;
+        }
+
+        if !status.success() {
+            return Err(format!("ffmpeg failed with status: {}", status.code().unwrap_or(-1)));
         }
 
         let output_info = probe_video_info(output).map_err(|error| format!("Failed to get output info: {error}"))?;
@@ -420,7 +446,7 @@ impl VideoConvert<'_> {
             return Err("Conversion aborted before lower-quality retry".to_string());
         }
 
-        // The output is larger than the input, so reconvert once with lower quality
+        // The output is larger than the input, so reconvert once with lower quality.
         let quality_level = quality_level + 2;
         self.observer.retrying(Retry::LowerQuality {
             output_size: output_info.size_bytes,
@@ -442,7 +468,16 @@ impl VideoConvert<'_> {
             ));
         }
 
-        probe_video_info(output).map_err(|error| format!("Failed to get reconverted video info: {error}"))
+        let reconverted_info =
+            probe_video_info(output).map_err(|error| format!("Failed to get reconverted video info: {error}"))?;
+        if reconverted_info.size_bytes > info.size_bytes {
+            return Err(format!(
+                "Reconverted output ({}) is still larger than original ({}), keeping original",
+                cli_tools_common::format_size(reconverted_info.size_bytes),
+                cli_tools_common::format_size(info.size_bytes),
+            ));
+        }
+        Ok(reconverted_info)
     }
 }
 

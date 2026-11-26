@@ -5,10 +5,32 @@
 
 use anyhow::Result;
 use clap::ValueEnum;
-use cli_tools_vconvert::{Database, PendingAction, SortOrder};
+use cli_tools_vconvert::{Database, HardwareEncoder, PendingAction, SortOrder};
 use colored::Colorize;
 
 use crate::config::Config;
+
+/// Hardware HEVC encoder CLI argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EncoderArgument {
+    /// Auto-select hardware encoder (`videotoolbox` on Apple Silicon, `nvenc` elsewhere).
+    Auto,
+    /// Require NVIDIA NVENC (`hevc_nvenc`).
+    Nvenc,
+    /// Use Apple Silicon `VideoToolbox` (`hevc_videotoolbox`).
+    #[value(name = "videotoolbox")]
+    VideoToolbox,
+}
+
+impl From<EncoderArgument> for HardwareEncoder {
+    fn from(argument: EncoderArgument) -> Self {
+        match argument {
+            EncoderArgument::Auto => Self::Auto,
+            EncoderArgument::Nvenc => Self::Nvenc,
+            EncoderArgument::VideoToolbox => Self::VideoToolbox,
+        }
+    }
+}
 
 /// Sort order options for video files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

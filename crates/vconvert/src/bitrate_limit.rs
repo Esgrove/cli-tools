@@ -193,7 +193,7 @@ impl fmt::Display for MinimumBitrate {
 }
 
 /// Height of the 16:9 frame the video fits in, so portrait and ultrawide videos land in the expected tier.
-fn equivalent_height(width: u32, height: u32) -> u64 {
+pub(crate) fn equivalent_height(width: u32, height: u32) -> u64 {
     let shorter = u64::from(width.min(height));
     let longer = u64::from(width.max(height));
     shorter.max(longer * 9 / 16)

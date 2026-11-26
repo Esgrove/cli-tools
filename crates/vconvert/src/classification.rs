@@ -192,7 +192,7 @@ impl<'a> ClassificationRequest<'a> {
             });
         }
         if let Some(limit) = filter.min_resolution
-            && info.width.min(info.height) < limit
+            && crate::bitrate_limit::equivalent_height(info.width, info.height) < u64::from(limit)
         {
             return Some(SkipReason::ResolutionBelowLimit {
                 width: info.width,
@@ -369,6 +369,11 @@ pub fn should_include_file(options: &ConvertOptions, file: &VideoFile) -> bool {
 
     if !options.extensions.iter().any(|extension| extension == &file.extension) {
         return false;
+    }
+
+    if let Ok(filter) = cli_tools_common::NameFilter::new(&options.include, &options.exclude) {
+        let filename = cli_tools_common::path_to_filename_string(&file.path);
+        return filter.matches_name(&filename);
     }
 
     if options.exclude.iter().any(|pattern| file.name.contains(pattern)) {

@@ -12,7 +12,7 @@ use crate::bitrate_limit::MinimumBitrate;
 use crate::database::PendingFileFilter;
 
 /// Audio languages preserved by movie mode.
-pub const MOVIE_AUDIO_LANGUAGES: &[&str] = &["eng", "fin", "fra", "fre", "jpn", "swe", "nog", "nor"];
+pub const MOVIE_AUDIO_LANGUAGES: &[&str] = &["eng", "fin", "fra", "fre", "jpn", "swe", "nob", "nor"];
 
 /// Subtitle languages preserved by movie mode.
 pub const MOVIE_SUBTITLE_LANGUAGES: &[&str] = &["eng", "fin", "swe"];
@@ -24,12 +24,36 @@ pub const TARGET_EXTENSION: &str = "mp4";
 pub const DEFAULT_EXTENSIONS: &[&str] = &["mp4", "mkv"];
 
 /// Every known video extension except MP4.
-pub const OTHER_EXTENSIONS: &[&str] = &["mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm", "mpeg"];
+pub const OTHER_EXTENSIONS: &[&str] = &["mkv", "avi", "mov", "wmv", "flv", "m4v", "webm", "ts", "mpg", "mpeg"];
 
-/// Every known video extension.
-pub const ALL_EXTENSIONS: &[&str] = &[
-    "mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm", "mpeg",
-];
+/// Every known video extension, shared with `cli-tools-media`.
+pub const ALL_EXTENSIONS: &[&str] = cli_tools_media::VIDEO_EXTENSIONS;
+
+/// Hardware HEVC encoder selection.
+///
+/// `Auto` selects Apple Silicon `hevc_videotoolbox` on `aarch64` macOS and requires `hevc_nvenc` everywhere else.
+/// Software encoding is never used as a fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HardwareEncoder {
+    /// Auto-select hardware encoder for the host platform (`videotoolbox` on Apple Silicon, `nvenc` elsewhere).
+    #[default]
+    Auto,
+    /// Require NVIDIA NVENC (`hevc_nvenc`).
+    Nvenc,
+    /// Use Apple Silicon `VideoToolbox` (`hevc_videotoolbox`).
+    #[serde(alias = "video_toolbox", alias = "video-toolbox")]
+    VideoToolbox,
+}
+
+/// Concrete hardware encoder chosen for an ffmpeg invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedEncoder {
+    /// NVIDIA NVENC (`hevc_nvenc`).
+    Nvenc,
+    /// Apple Silicon `VideoToolbox` (`hevc_videotoolbox`).
+    VideoToolbox,
+}
 
 /// Sort order options for video files.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -99,6 +123,52 @@ pub struct ConvertOptions {
     pub count: Option<usize>,
     /// Order in which files are processed.
     pub sort: SortOrder,
+    /// Hardware HEVC encoder selection (`auto`, `nvenc`, or `videotoolbox`).
+    pub encoder: HardwareEncoder,
+}
+
+impl HardwareEncoder {
+    /// Resolve `Auto` to the concrete hardware encoder for the current platform.
+    #[must_use]
+    pub const fn resolve(self) -> ResolvedEncoder {
+        match self {
+            Self::Auto => {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    ResolvedEncoder::VideoToolbox
+                }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                {
+                    ResolvedEncoder::Nvenc
+                }
+            }
+            Self::Nvenc => ResolvedEncoder::Nvenc,
+            Self::VideoToolbox => ResolvedEncoder::VideoToolbox,
+        }
+    }
+}
+
+impl FromStr for HardwareEncoder {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "nvenc" => Ok(Self::Nvenc),
+            "videotoolbox" | "video_toolbox" | "video-toolbox" => Ok(Self::VideoToolbox),
+            _ => Err(format!("Unknown encoder: {value}")),
+        }
+    }
+}
+
+impl std::fmt::Display for HardwareEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Nvenc => write!(f, "nvenc"),
+            Self::VideoToolbox => write!(f, "videotoolbox"),
+        }
+    }
 }
 
 impl SortOrder {

@@ -23,6 +23,6 @@ pub use database::{Database, PendingAction, PendingFileFilter};
 pub use observer::{
     ConvertObserver, DeleteMethod, DiskSpaceShortage, FilePosition, Operation, Retry, SubtitleMatchProblem,
 };
-pub use options::{ConvertOptions, SortOrder};
+pub use options::{ConvertOptions, HardwareEncoder, ResolvedEncoder, SortOrder};
 pub use stats::{AnalysisStats, ConversionStats, RunStats};
 pub use types::{ProcessResult, ProcessableFile, ProcessingOutcome, SkipReason, SubtitleFile, VideoInfo};

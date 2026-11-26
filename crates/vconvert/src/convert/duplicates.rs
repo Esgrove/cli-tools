@@ -6,11 +6,11 @@
 use std::path::Path;
 
 use super::VideoConvert;
-use crate::ffmpeg::probe_video_info;
+use crate::ffmpeg::{probe_video_info, validate_audio_preserved};
 use crate::helpers::{duration_difference_ratio, format_duplicate_duration_match};
 
 /// Largest duration difference, relative to the source duration, for the output to count as a duplicate.
-const MAX_DUPLICATE_DURATION_DIFFERENCE: f64 = 0.1;
+const MAX_DUPLICATE_DURATION_DIFFERENCE: f64 = 0.02;
 
 /// What happened to a source file whose converted output already exists.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +69,12 @@ impl VideoConvert<'_> {
                 source_duration,
                 target_duration: target_info.duration,
                 difference_ratio,
+            };
+        }
+
+        if let Err(error) = validate_audio_preserved(source, target) {
+            return DuplicateOutcome::ProbeFailed {
+                error: error.to_string(),
             };
         }
 

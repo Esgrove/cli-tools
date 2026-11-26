@@ -300,7 +300,8 @@ impl VideoInfo {
         let mut height: Option<u32> = None;
         let mut frames_per_second: Option<f64> = None;
         let mut average_frames_per_second: Option<f64> = None;
-        let mut bit_depth: Option<u8> = None;
+        let mut bits_per_raw_sample: Option<u8> = None;
+        let mut pix_fmt_bit_depth: Option<u8> = None;
 
         // Parse key=value pairs from output
         // Example output:
@@ -357,16 +358,16 @@ impl VideoInfo {
                         }
                     }
                     "bits_per_raw_sample" => {
-                        if bit_depth.is_none()
+                        if bits_per_raw_sample.is_none()
                             && let Ok(depth) = value.parse::<u8>()
                             && depth > 0
                         {
-                            bit_depth = Some(depth);
+                            bits_per_raw_sample = Some(depth);
                         }
                     }
                     "pix_fmt" => {
-                        if bit_depth.is_none() {
-                            bit_depth = Self::bit_depth_from_pixel_format(value);
+                        if pix_fmt_bit_depth.is_none() {
+                            pix_fmt_bit_depth = cli_tools_media::video_info::bit_depth_from_pixel_format(value);
                         }
                     }
                     "r_frame_rate" | "avg_frame_rate" => {
@@ -412,7 +413,7 @@ impl VideoInfo {
             anyhow::bail!("failed to detect framerate");
         };
 
-        let bit_depth = bit_depth.unwrap_or(8);
+        let bit_depth = bits_per_raw_sample.or(pix_fmt_bit_depth).unwrap_or(8);
 
         let warning = if stderr.is_empty() {
             None
@@ -436,13 +437,13 @@ impl VideoInfo {
         })
     }
 
-    /// Determine quality level based on resolution and bitrate.
+    /// Determine quality level based on equivalent 16:9 height and bitrate.
     /// Quality level 1 to 51, lower is better quality and bigger file size.
     pub(crate) fn quality_level(&self) -> u8 {
-        let shorter_edge = self.width.min(self.height);
+        let equivalent = crate::bitrate_limit::equivalent_height(self.width, self.height);
         let bitrate_mbps = self.bitrate_kbps as f64 / 1000.0;
 
-        if shorter_edge >= 2160 {
+        if equivalent >= 2160 {
             if bitrate_mbps > 34.0 {
                 28
             } else if bitrate_mbps > 26.0 {
@@ -454,7 +455,7 @@ impl VideoInfo {
             } else {
                 32
             }
-        } else if shorter_edge >= 1080 {
+        } else if equivalent >= 1080 {
             if bitrate_mbps > 20.0 {
                 26
             } else if bitrate_mbps > 16.0 {
@@ -496,25 +497,9 @@ impl VideoInfo {
     }
 
     /// Infer the per-channel bit depth from an ffmpeg pixel format name.
+    #[cfg(test)]
     fn bit_depth_from_pixel_format(pixel_format: &str) -> Option<u8> {
-        if matches!(pixel_format, "nv12" | "nv21" | "nv16" | "yuv410p") {
-            Some(8)
-        } else if pixel_format.contains("10") {
-            Some(10)
-        } else if pixel_format.contains("12") {
-            Some(12)
-        } else if pixel_format.contains("16")
-            || pixel_format.starts_with("rgb48")
-            || pixel_format.starts_with("bgr48")
-            || pixel_format.starts_with("rgba64")
-            || pixel_format.starts_with("bgra64")
-        {
-            Some(16)
-        } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") {
-            Some(8)
-        } else {
-            None
-        }
+        cli_tools_media::video_info::bit_depth_from_pixel_format(pixel_format)
     }
 }
 
@@ -590,8 +575,17 @@ impl VideoFile {
     ) -> PathBuf {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let target_extension = self.target_extension(movie_mode, has_external_subtitles);
+        let other_codec = match suffix {
+            Codec::X265 => Codec::Av1,
+            Codec::Av1 => Codec::X265,
+        };
         let new_stem = if suffix.regex().is_match(&self.name) {
             self.name.clone()
+        } else if other_codec.regex().is_match(&self.name) {
+            other_codec
+                .regex()
+                .replace_all(&self.name, suffix.as_str())
+                .into_owned()
         } else if RE_SOURCE_CODEC.is_match(&self.name) {
             RE_SOURCE_CODEC.replace_all(&self.name, suffix.as_str()).into_owned()
         } else {

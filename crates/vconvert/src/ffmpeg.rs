@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::options::{MOVIE_AUDIO_LANGUAGES, MOVIE_SUBTITLE_LANGUAGES, TARGET_EXTENSION};
+use crate::options::{
+    HardwareEncoder, MOVIE_AUDIO_LANGUAGES, MOVIE_SUBTITLE_LANGUAGES, ResolvedEncoder, TARGET_EXTENSION,
+};
 use crate::types::{Codec, SubtitleFile, VideoInfo};
 
 /// Arguments included in every ffmpeg invocation.
@@ -60,10 +62,12 @@ pub struct ConversionOptions<'a> {
     movie_mode: bool,
     subtitle_files: &'a [SubtitleFile],
     bit_depth: u8,
+    encoder: ResolvedEncoder,
 }
 
 impl<'a> ConversionOptions<'a> {
-    /// Create conversion command options with CUDA filtering enabled.
+    /// Create conversion command options using `Nvenc` with CUDA filtering enabled.
+    #[cfg(test)]
     pub(crate) const fn new(
         input: &'a Path,
         output: &'a Path,
@@ -73,21 +77,63 @@ impl<'a> ConversionOptions<'a> {
         subtitle_files: &'a [SubtitleFile],
         bit_depth: u8,
     ) -> Self {
+        Self::with_encoder(
+            input,
+            output,
+            quality_level,
+            copy_audio,
+            movie_mode,
+            subtitle_files,
+            bit_depth,
+            HardwareEncoder::Nvenc,
+        )
+    }
+
+    /// Create conversion command options for a specific hardware encoder selection.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn with_encoder(
+        input: &'a Path,
+        output: &'a Path,
+        quality_level: u8,
+        copy_audio: bool,
+        movie_mode: bool,
+        subtitle_files: &'a [SubtitleFile],
+        bit_depth: u8,
+        encoder: HardwareEncoder,
+    ) -> Self {
+        let resolved = encoder.resolve();
         Self {
             input,
             output,
             quality_level,
             copy_audio,
-            use_cuda_filters: true,
+            use_cuda_filters: matches!(resolved, ResolvedEncoder::Nvenc),
             movie_mode,
             subtitle_files,
             bit_depth,
+            encoder: resolved,
         }
+    }
+
+    /// Return the resolved hardware encoder for these options.
+    pub(crate) const fn encoder(&self) -> ResolvedEncoder {
+        self.encoder
+    }
+
+    /// Return whether audio stream copy is currently enabled.
+    pub(crate) const fn copy_audio(&self) -> bool {
+        self.copy_audio
     }
 
     /// Return options configured for CPU filtering instead of CUDA filtering.
     pub(crate) const fn without_cuda_filters(mut self) -> Self {
         self.use_cuda_filters = false;
+        self
+    }
+
+    /// Return options transcoding audio to AAC instead of stream-copying.
+    pub(crate) const fn without_copy_audio(mut self) -> Self {
+        self.copy_audio = false;
         self
     }
 
@@ -98,10 +144,10 @@ impl<'a> ConversionOptions<'a> {
     }
 }
 
-/// Build the ffmpeg command for an HEVC conversion.
+/// Build the ffmpeg command for an HEVC hardware-accelerated conversion.
 ///
-/// CUDA filtering uploads frames to the GPU and preserves 10-bit input when required.
-/// Movie mode maps selected internal streams and any external subtitle inputs.
+/// Supports NVIDIA `hevc_nvenc` (with optional CUDA filtering) and Apple Silicon `hevc_videotoolbox`.
+/// Movie mode maps selected internal streams and external subtitles.
 ///
 /// # Errors
 /// Returns an error if the movie mode stream languages cannot be probed.
@@ -111,14 +157,15 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
         .args(FFMPEG_DEFAULT_ARGS)
         .args(["-probesize", "50M", "-analyzeduration", "1M"]);
 
-    if options.use_cuda_filters {
+    let use_cuda = matches!(options.encoder, ResolvedEncoder::Nvenc) && options.use_cuda_filters;
+    if use_cuda {
         command.args(["-extra_hw_frames", CUDA_EXTRA_HARDWARE_FRAMES]);
     }
 
-    command.arg("-i").arg(options.input);
+    command.arg("-i").arg(safe_ffmpeg_path(options.input));
     if options.movie_mode {
         for subtitle_file in options.subtitle_files {
-            command.arg("-i").arg(&subtitle_file.path);
+            command.arg("-i").arg(safe_ffmpeg_path(&subtitle_file.path));
         }
         let audio_languages = probe_stream_languages(options.input, "a")?;
         let subtitle_counts = probe_stream_language_counts(options.input, "s")?;
@@ -129,28 +176,46 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
             options.subtitle_files,
             selected_subtitle_count(&subtitle_counts),
         );
+    } else {
+        command.args(["-map", "0:V:0", "-map", "0:a?", "-sn"]);
     }
 
-    if options.use_cuda_filters {
-        let pixel_format = if options.bit_depth > 8 { "p010le" } else { "nv12" };
-        command.args(["-vf", &format!("hwupload_cuda,scale_cuda=format={pixel_format}")]);
+    match options.encoder {
+        ResolvedEncoder::Nvenc => {
+            if use_cuda {
+                let pixel_format = if options.bit_depth > 8 { "p010le" } else { "nv12" };
+                command.args(["-vf", &format!("hwupload_cuda,scale_cuda=format={pixel_format}")]);
+            }
+            command
+                .args(["-c:v", "hevc_nvenc"])
+                .args(["-rc:v", "vbr"])
+                .args(["-cq:v", &options.quality_level.to_string()])
+                .args(["-preset", NVENC_PRESET])
+                .args(["-b:v", "0"])
+                .args(["-rc-lookahead", NVENC_LOOKAHEAD_FRAMES])
+                .args(["-spatial-aq", "1", "-temporal-aq", "1"]);
+            if options.bit_depth > 8 {
+                command.args(["-profile:v", "main10", "-pix_fmt", "p010le"]);
+            }
+        }
+        ResolvedEncoder::VideoToolbox => {
+            command
+                .args(["-c:v", "hevc_videotoolbox"])
+                .args(["-q:v", &videotoolbox_quality(options.quality_level).to_string()]);
+            if options.bit_depth > 8 {
+                command.args(["-profile:v", "main10", "-pix_fmt", "p010le"]);
+            } else {
+                command.args(["-pix_fmt", "yuv420p"]);
+            }
+        }
     }
 
-    command
-        .args(["-c:v", "hevc_nvenc"])
-        .args(["-rc:v", "vbr"])
-        .args(["-cq:v", &options.quality_level.to_string()])
-        .args(["-preset", NVENC_PRESET])
-        .args(["-b:v", "0"])
-        .args(["-rc-lookahead", NVENC_LOOKAHEAD_FRAMES])
-        .args(["-spatial-aq", "1", "-temporal-aq", "1"]);
-
-    if options.bit_depth > 8 {
-        command.args(["-profile:v", "main10", "-pix_fmt", "p010le"]);
-    }
-
-    if cli_tools_common::path_to_file_extension_string(options.output) == TARGET_EXTENSION {
+    let is_mp4 = cli_tools_common::path_to_file_extension_string(options.output) == TARGET_EXTENSION;
+    if is_mp4 {
         command.args(["-tag:v", "hvc1"]);
+        if !options.movie_mode {
+            command.args(["-movflags", "+faststart"]);
+        }
     }
 
     if options.movie_mode {
@@ -161,8 +226,17 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
         command.args(["-c:a", "aac", "-b:a", "128k"]);
     }
 
-    command.arg(options.output);
+    command.arg(safe_ffmpeg_path(options.output));
     Ok(command)
+}
+
+/// Map NVENC constant-quality value (lower = better, 1..51) to `VideoToolbox` `-q:v` (higher = better, 1..100).
+#[must_use]
+pub fn videotoolbox_quality(cq_level: u8) -> u8 {
+    let mapped = f64::from(cq_level).mul_add(-1.4, 100.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let clamped = mapped.round().clamp(1.0, 100.0) as u8;
+    clamped
 }
 
 /// Build an ffmpeg command that embeds external subtitles without converting video.
@@ -182,9 +256,9 @@ pub(crate) fn build_movie_mux_command(
     codec: Option<Codec>,
 ) -> Result<Command> {
     let mut command = Command::new("ffmpeg");
-    command.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input);
+    command.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(safe_ffmpeg_path(input));
     for subtitle_file in subtitle_files {
-        command.arg("-i").arg(&subtitle_file.path);
+        command.arg("-i").arg(safe_ffmpeg_path(&subtitle_file.path));
     }
 
     let audio_languages = probe_stream_languages(input, "a")?;
@@ -202,7 +276,7 @@ pub(crate) fn build_movie_mux_command(
             command.args(["-tag:v", "hvc1"]);
         }
     }
-    command.arg(output);
+    command.arg(safe_ffmpeg_path(output));
     Ok(command)
 }
 
@@ -210,9 +284,13 @@ pub(crate) fn build_movie_mux_command(
 #[must_use]
 pub fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool, codec: Codec) -> Command {
     let mut command = Command::new("ffmpeg");
-    command.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input).args([
-        "-map", "0:v:0", "-map", "0:a?", "-map", "-0:t", "-map", "-0:d", "-sn", "-c:v", "copy",
-    ]);
+    command
+        .args(FFMPEG_DEFAULT_ARGS)
+        .arg("-i")
+        .arg(safe_ffmpeg_path(input))
+        .args([
+            "-map", "0:v:0", "-map", "0:a?", "-map", "-0:t", "-map", "-0:d", "-sn", "-c:v", "copy",
+        ]);
 
     if transcode_audio {
         command.args(["-c:a", "aac", "-b:a", "128k"]);
@@ -224,7 +302,7 @@ pub fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool, c
     if codec == Codec::X265 {
         command.args(["-tag:v", "hvc1"]);
     }
-    command.arg(output);
+    command.arg(safe_ffmpeg_path(output));
     command
 }
 
@@ -296,16 +374,25 @@ pub fn cleanup_registered_resources() {
     }
 }
 
-/// Normalize a local file path for passing to `ffprobe` as an input argument.
+/// Normalize a local file path for passing to `ffmpeg` or `ffprobe` when it could be misread as an option or protocol.
 ///
-/// Relative paths starting with `-` or containing `:` can be misread as options or URL protocols.
+/// Relative paths starting with `-` or containing `:` get a `./` prefix.
+/// Plain relative and absolute paths stay unchanged.
+#[must_use]
+fn safe_ffmpeg_path(path: &Path) -> PathBuf {
+    if path.is_relative() && !path.starts_with(".") {
+        let text = path.to_string_lossy();
+        if text.starts_with('-') || text.contains(':') {
+            return Path::new(".").join(path);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Normalize a local file path for passing to `ffprobe` as an input argument.
 #[must_use]
 fn ffmpeg_input_path(path: &Path) -> PathBuf {
-    if path.is_relative() && !path.starts_with(".") {
-        Path::new(".").join(path)
-    } else {
-        path.to_path_buf()
-    }
+    cli_tools_media::video_info::ffmpeg_input_path(path)
 }
 
 /// Probe video metadata from the first real video stream in a media file.
@@ -377,7 +464,7 @@ fn probe_stream_language_counts(input: &Path, stream_type: &str) -> Result<BTree
     Ok(parse_stream_language_counts(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// Parse `index,language` lines from ffprobe, using "und" for untagged streams.
+/// Parse `index,language` lines from ffprobe, lowercasing tags and using `"und"` for untagged streams.
 fn parse_stream_language_counts(stdout: &str) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for line in stdout.lines().map(str::trim) {
@@ -386,8 +473,12 @@ fn parse_stream_language_counts(stdout: &str) -> BTreeMap<String, usize> {
             continue;
         }
         let language = language.trim();
-        let language = if language.is_empty() { "und" } else { language };
-        *counts.entry(language.to_owned()).or_default() += 1;
+        let language = if language.is_empty() {
+            "und".to_owned()
+        } else {
+            language.to_ascii_lowercase()
+        };
+        *counts.entry(language).or_default() += 1;
     }
     counts
 }
@@ -474,8 +565,26 @@ pub fn run_command_isolated(command: &mut Command) -> std::io::Result<ExitStatus
     result
 }
 
+/// Verify that if `input` has audio streams, `output` also preserves at least one audio stream.
+///
+/// # Errors
+/// Returns an error if probing fails or if audio streams were lost.
+pub(crate) fn validate_audio_preserved(input: &Path, output: &Path) -> Result<()> {
+    let input_audio_streams = probe_stream_count(input, "a")?;
+    if input_audio_streams > 0 {
+        let output_audio_streams = probe_stream_count(output, "a")?;
+        if output_audio_streams == 0 {
+            anyhow::bail!(
+                "Output has no audio streams, but input has {}",
+                cli_tools_common::count_label(input_audio_streams, "audio stream", "audio streams")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Probe how many streams of one ffmpeg stream type exist in a file.
-fn probe_stream_count(input: &Path, stream_type: &str) -> Result<usize> {
+pub(crate) fn probe_stream_count(input: &Path, stream_type: &str) -> Result<usize> {
     let input_path = ffmpeg_input_path(input);
     let output = Command::new("ffprobe")
         .args([
@@ -568,10 +677,18 @@ fn selected_subtitle_count(subtitle_counts: &BTreeMap<String, usize>) -> usize {
         .sum()
 }
 
-/// Map one required subtitle stream per sidecar and set its inferred output language.
+/// Map external subtitle sidecars and set inferred output languages.
+///
+/// Paired `VobSub` `.idx`/`.sub` files may contain multiple language tracks, so all tracks are mapped with `:s`.
+/// Single-track text subtitles map `:s:0` and tag their inferred language when known.
 fn add_external_subtitle_maps(command: &mut Command, subtitle_files: &[SubtitleFile], first_output_index: usize) {
     for (offset, subtitle_file) in subtitle_files.iter().enumerate() {
-        command.arg("-map").arg(format!("{}:s:0", offset + 1));
+        let is_vobsub = subtitle_file.paired_sub_path.is_some() || subtitle_file.extension == "idx";
+        if is_vobsub {
+            command.arg("-map").arg(format!("{}:s", offset + 1));
+        } else {
+            command.arg("-map").arg(format!("{}:s:0", offset + 1));
+        }
         if let Some(language) = subtitle_file.language() {
             command
                 .arg(format!("-metadata:s:s:{}", first_output_index + offset))
@@ -580,21 +697,32 @@ fn add_external_subtitle_maps(command: &mut Command, subtitle_files: &[SubtitleF
     }
 }
 
-/// Verify the output contains the expected number of subtitle tracks for each retained language.
+/// Verify the output contains the expected retained embedded subtitles and every muxed sidecar.
 pub(crate) fn validate_movie_subtitles(input: &Path, output: &Path, sidecars: &[SubtitleFile]) -> Result<()> {
-    let mut expected = probe_stream_language_counts(input, "s")?;
-    expected.retain(|language, _| MOVIE_SUBTITLE_LANGUAGES.contains(&language.as_str()));
+    let mut expected_named = probe_stream_language_counts(input, "s")?;
+    expected_named.retain(|language, _| MOVIE_SUBTITLE_LANGUAGES.contains(&language.as_str()));
+    let retained_embedded_total: usize = expected_named.values().sum();
+    let mut unnamed_sidecar_count = 0usize;
     for sidecar in sidecars {
-        *expected
-            .entry(sidecar.language().unwrap_or("und").to_owned())
-            .or_default() += 1;
+        if let Some(language) = sidecar.language() {
+            *expected_named.entry(language.to_owned()).or_default() += 1;
+        } else {
+            unnamed_sidecar_count += 1;
+        }
     }
+
     let actual = probe_stream_language_counts(output, "s")?;
-    for (language, count) in expected {
+    let actual_total: usize = actual.values().sum();
+    let expected_min_total = retained_embedded_total + sidecars.len();
+    if actual_total < expected_min_total {
+        anyhow::bail!("Output has {actual_total} subtitle tracks, expected at least {expected_min_total}");
+    }
+    for (language, count) in expected_named {
         if actual.get(&language).copied().unwrap_or_default() < count {
             anyhow::bail!("Output is missing expected {language} subtitle tracks");
         }
     }
+    let _ = unnamed_sidecar_count;
     Ok(())
 }
 
@@ -837,6 +965,11 @@ mod test_conversion_command {
                 "1M",
                 "-i",
                 "input.mkv",
+                "-map",
+                "0:V:0",
+                "-map",
+                "0:a?",
+                "-sn",
                 "-c:v",
                 "hevc_nvenc",
                 "-rc:v",
@@ -855,6 +988,8 @@ mod test_conversion_command {
                 "1",
                 "-tag:v",
                 "hvc1",
+                "-movflags",
+                "+faststart",
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -987,6 +1122,44 @@ mod test_external_subtitle_maps {
                 "language=fin"
             ]
         );
+    }
+
+    #[test]
+    fn videotoolbox_conversion_builds_hardware_accelerated_command() {
+        use super::test_helpers::has_arg_pair;
+
+        let options = ConversionOptions::with_encoder(
+            Path::new("-dash:clip.mkv"),
+            Path::new("output.mp4"),
+            28,
+            true,
+            false,
+            &[],
+            10,
+            HardwareEncoder::VideoToolbox,
+        );
+        let command = build_conversion_command(&options).expect("build videotoolbox command");
+        let args = command_args(&command);
+
+        assert!(has_arg_pair(&args, "-i", "./-dash:clip.mkv"));
+        assert!(has_arg_pair(&args, "-c:v", "hevc_videotoolbox"));
+        assert!(has_arg_pair(&args, "-profile:v", "main10"));
+        assert!(has_arg_pair(&args, "-pix_fmt", "p010le"));
+        assert!(has_arg_pair(&args, "-tag:v", "hvc1"));
+        assert!(has_arg_pair(&args, "-movflags", "+faststart"));
+        assert!(!args.iter().any(|arg| arg.contains("cuda")));
+    }
+
+    #[test]
+    fn uppercase_language_tags_are_lowercased_and_vobsub_maps_all_tracks() {
+        let counts = parse_stream_language_counts("1,ENG\n2,Fin\n");
+        assert_eq!(counts.get("eng"), Some(&1));
+        assert_eq!(counts.get("fin"), Some(&1));
+
+        let vobsub = SubtitleFile::new(Path::new("Movie.idx"), Some(PathBuf::from("Movie.sub")));
+        let mut command = Command::new("ffmpeg");
+        add_external_subtitle_maps(&mut command, &[vobsub], 0);
+        assert_eq!(command_args(&command), ["-map", "1:s"]);
     }
 
     #[test]

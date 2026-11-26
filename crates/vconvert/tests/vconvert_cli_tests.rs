@@ -136,11 +136,27 @@ fn all_analysis_attempts_fail() {
 fn a_failed_probe_does_not_fail_a_partially_successful_scan() {
     let sandbox = Sandbox::new(FAKE_FFMPEG);
     fs::write(sandbox.videos().join("empty.mkv"), []).unwrap();
-    fs::write(sandbox.videos().join("show.mkv"), "h264 video data").unwrap();
+    fs::write(
+        sandbox.videos().join("show.mkv"),
+        "h264 original video payload larger than fake output",
+    )
+    .unwrap();
 
     let output = sandbox.run(&["--delete"]);
     assert!(output.status.success(), "{output:?}");
     assert!(sandbox.videos().join("show.x265.mp4").is_file());
+}
+
+#[test]
+fn a_reconversion_still_larger_than_input_keeps_the_original() {
+    let sandbox = Sandbox::new(FAKE_FFMPEG);
+    let original = sandbox.videos().join("tiny.mkv");
+    fs::write(&original, "h264 tiny").unwrap();
+
+    let output = sandbox.run(&["--delete"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(original.is_file(), "original must be kept when reconversion is larger");
+    assert!(!sandbox.videos().join("tiny.x265.mp4").exists());
 }
 
 #[test]
@@ -311,16 +327,25 @@ fn movie_remux_keeps_compatible_embedded_subtitles() {
 }
 
 #[test]
-fn opt_in_duplicate_deletion_accepts_an_approximately_matching_duration() {
+fn opt_in_duplicate_deletion_accepts_a_closely_matching_duration_and_refuses_truncated() {
     let sandbox = Sandbox::new(FAKE_FFMPEG);
-    let original = sandbox.videos().join("Interview.mkv");
-    let output = sandbox.videos().join("Interview.x265.mp4");
-    fs::write(&original, b"h264\nduration=3600\n").unwrap();
-    fs::write(&output, b"hevc\nduration=3300\n").unwrap();
+    let close_original = sandbox.videos().join("Interview.mkv");
+    let close_output = sandbox.videos().join("Interview.x265.mp4");
+    fs::write(&close_original, b"h264\nduration=3600\n").unwrap();
+    fs::write(&close_output, b"hevc\nduration=3550\n").unwrap();
+
+    let truncated_original = sandbox.videos().join("Truncated.mkv");
+    let truncated_output = sandbox.videos().join("Truncated.x265.mp4");
+    fs::write(&truncated_original, b"h264\nduration=3600\n").unwrap();
+    fs::write(&truncated_output, b"hevc\nduration=3300\n").unwrap();
 
     sandbox.run(&["--delete-duplicates", "--delete"]);
-    assert!(!original.exists());
-    assert_eq!(fs::read(output).unwrap(), b"hevc\nduration=3300\n");
+    assert!(!close_original.exists());
+    assert_eq!(fs::read(close_output).unwrap(), b"hevc\nduration=3550\n");
+    assert!(
+        truncated_original.exists(),
+        "duplicate differing by more than 2% must not delete the original"
+    );
 }
 
 #[test]
