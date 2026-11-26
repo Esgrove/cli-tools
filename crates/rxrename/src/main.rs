@@ -5,6 +5,7 @@
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -92,6 +93,28 @@ struct RenameSummary {
     failed: usize,
 }
 
+/// Paths tracked across a batch of renames.
+#[derive(Default)]
+struct RenameBatch {
+    /// Discovered sources, protected while still present at their original paths.
+    sources: TargetReservations,
+    /// Sources that a dry run would have vacated.
+    previewed_sources: HashSet<PathBuf>,
+    /// Claimed destinations, which must not be overwritten by a later rename.
+    destinations: TargetReservations,
+}
+
+impl RenameBatch {
+    /// Track the sources discovered at the start of the run.
+    fn new(files: &[PathBuf]) -> Self {
+        let mut batch = Self::default();
+        for file in files {
+            batch.sources.reserve(file);
+        }
+        batch
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -133,10 +156,10 @@ fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSumm
     let width = total.to_string().len();
 
     let mut summary = RenameSummary::default();
-    let mut reservations = TargetReservations::new();
+    let mut batch = RenameBatch::new(&files);
 
     for (i, file) in files.iter().enumerate() {
-        match process_file_with_reservations(root, file, i + 1, total, width, dryrun, action, &mut reservations) {
+        match process_file_in_batch(root, file, i + 1, total, width, dryrun, action, &mut batch) {
             Ok(Outcome::RenamedAndRemoved) => {
                 summary.renamed += 1;
                 summary.removed += 1;
@@ -201,8 +224,7 @@ fn process_file(
     dryrun: bool,
     action: ConflictAction,
 ) -> Result<Outcome> {
-    let mut reservations = TargetReservations::new();
-    process_file_with_reservations(
+    process_file_in_batch(
         root,
         file_with_suffix,
         index,
@@ -210,15 +232,15 @@ fn process_file(
         width,
         dryrun,
         action,
-        &mut reservations,
+        &mut RenameBatch::default(),
     )
 }
 
-/// Process a single file ending in `_1`, tracking batch reservations so earlier renamed targets are never overwritten.
+/// Process a single file ending in `_1` without replacing other sources or earlier destinations in the batch.
 ///
 /// If a matching unsuffixed file already exists, delete or trash it first, then rename.
 #[allow(clippy::too_many_arguments)]
-fn process_file_with_reservations(
+fn process_file_in_batch(
     root: &Path,
     file_with_suffix: &Path,
     index: usize,
@@ -226,7 +248,7 @@ fn process_file_with_reservations(
     width: usize,
     dryrun: bool,
     action: ConflictAction,
-    reservations: &mut TargetReservations,
+    batch: &mut RenameBatch,
 ) -> Result<Outcome> {
     let raw_stem = file_with_suffix
         .file_stem()
@@ -273,7 +295,7 @@ fn process_file_with_reservations(
     print_magenta_bold!("[{index:>width$} / {total}]:");
     println!("{}", relative.display());
 
-    if !reservations.reserve(&file_without_suffix) {
+    if !batch.destinations.reserve(&file_without_suffix) {
         print_yellow!(
             "Skipping: {} was already claimed by another rename in this run",
             file_without_suffix.display()
@@ -281,8 +303,17 @@ fn process_file_with_reservations(
         return Ok(Outcome::Skipped);
     }
 
-    let needs_trash = if let Ok(metadata) = std::fs::symlink_metadata(&file_without_suffix) {
+    let needs_trash = if !batch.previewed_sources.contains(&file_without_suffix)
+        && let Ok(metadata) = std::fs::symlink_metadata(&file_without_suffix)
+    {
         if metadata.is_dir() || file_without_suffix.is_dir() {
+            return Ok(Outcome::Skipped);
+        }
+        if batch.sources.contains(&file_without_suffix) {
+            print_yellow!(
+                "Skipping: {} is still a source for another rename in this run",
+                file_without_suffix.display()
+            );
             return Ok(Outcome::Skipped);
         }
         // A sanitized name is not the original spelling, so the existing entry may be unrelated,
@@ -301,7 +332,9 @@ fn process_file_with_reservations(
         false
     };
 
-    if !dryrun {
+    if dryrun {
+        batch.previewed_sources.insert(file_with_suffix.to_path_buf());
+    } else {
         if needs_trash {
             match action {
                 ConflictAction::Delete => std::fs::remove_file(&file_without_suffix)?,
@@ -748,8 +781,12 @@ mod test_nested_trees {
         tree.file_with("x_1_1.txt", "newest");
         tree.file_with("x_1.txt", "newer");
 
-        rename_files(tree.path(), false, ConflictAction::Delete);
+        let preview = rename_files(tree.path(), true, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
 
+        assert_eq!(preview, summary);
+        assert_eq!(summary.renamed, 2);
+        assert_eq!(summary.removed, 0);
         assert_eq!(tree.snapshot(), vec!["x.txt: newer", "x_1.txt: newest"]);
     }
 
