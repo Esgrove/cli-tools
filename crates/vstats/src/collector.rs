@@ -81,7 +81,7 @@ impl StatsCollector {
             stats.add(&probed.info);
         }
 
-        if self.verbose {
+        if should_list_files(self.verbose, probed_files.len()) {
             sort_for_listing(&mut probed_files);
 
             println!();
@@ -149,28 +149,26 @@ impl StatsCollector {
                     "{}",
                     format!("Searching recursively for video files in: {}", self.root.display()).magenta()
                 );
-                for entry in WalkDir::new(&self.root)
-                    .into_iter()
-                    .filter_entry(|e| !cli_tools_common::should_skip_entry(e))
-                    .filter_map(Result::ok)
-                    .filter(|e| e.file_type().is_file())
-                {
-                    let path = entry.path().to_path_buf();
-                    if Self::is_video_file(&path) {
-                        video_files.push(path);
-                    }
-                }
             } else {
                 println!(
                     "{}",
                     format!("Searching for video files in: {}", self.root.display()).magenta()
                 );
-                for entry in std::fs::read_dir(&self.root)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_file() && Self::is_video_file(&path) {
-                        video_files.push(path);
-                    }
+            }
+            let walker = if self.recurse {
+                WalkDir::new(&self.root)
+            } else {
+                WalkDir::new(&self.root).max_depth(1)
+            };
+            for entry in walker
+                .into_iter()
+                .filter_entry(|entry| !cli_tools_common::should_skip_entry(entry))
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+            {
+                let path = entry.path().to_path_buf();
+                if Self::is_video_file(&path) {
+                    video_files.push(path);
                 }
             }
         } else {
@@ -188,6 +186,13 @@ impl StatsCollector {
                 .any(|video_ext| video_ext.eq_ignore_ascii_case(ext))
         })
     }
+}
+
+/// Whether individual file stats lines should be printed.
+///
+/// Aggregate summaries require at least two files, so a single probed video always prints its own line.
+const fn should_list_files(verbose: bool, probed_count: usize) -> bool {
+    verbose || probed_count == 1
 }
 
 /// Sort probed files by duration and then by pixel count, longest and largest first.
@@ -455,6 +460,34 @@ mod test_run {
             verbose: false,
         })
         .run()
+    }
+
+    #[test]
+    fn non_recursive_discovery_skips_hidden_files_and_symlinks() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let visible = temp_directory.path().join("visible.mp4");
+        let hidden = temp_directory.path().join(".hidden.mp4");
+        std::fs::write(&visible, b"visible")?;
+        std::fs::write(&hidden, b"hidden")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&visible, temp_directory.path().join("link.mp4"))?;
+
+        let found = StatsCollector::new(Config {
+            root: temp_directory.path().to_path_buf(),
+            recurse: false,
+            verbose: false,
+        })
+        .gather_video_files()?;
+        assert_eq!(found, vec![visible]);
+        Ok(())
+    }
+
+    #[test]
+    fn single_file_prints_details_without_verbose() {
+        assert!(!should_list_files(false, 0));
+        assert!(should_list_files(false, 1));
+        assert!(!should_list_files(false, 2));
+        assert!(should_list_files(true, 2));
     }
 
     #[tokio::test]
