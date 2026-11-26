@@ -157,7 +157,7 @@ pub fn move_files_to_target_dir(
             continue;
         }
 
-        if new_path.exists() && !overwrite {
+        if fs::symlink_metadata(&new_path).is_ok() && !overwrite {
             observer.on_event(MoveEvent::SkippedExisting(&new_path));
             observer.on_progress(expected_size);
             report.skipped_files.push(file_path.clone());
@@ -173,7 +173,7 @@ pub fn move_files_to_target_dir(
 
         // The existing destination is replaced by the final rename, never removed up front,
         // so a failed move leaves it in place.
-        if overwrite && new_path.is_dir() {
+        if overwrite && fs::symlink_metadata(&new_path).is_ok_and(|metadata| metadata.is_dir()) {
             observer.on_event(MoveEvent::DirectoryInTheWay(&new_path));
             observer.on_progress(expected_size);
             report.failed_files.push(file_path.clone());

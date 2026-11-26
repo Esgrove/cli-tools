@@ -112,7 +112,7 @@ impl DirectoryMerger {
             let target_path = target.join(entry_name);
             let entry_name = entry_name.to_string_lossy();
 
-            if target_path.exists() {
+            if std::fs::symlink_metadata(&target_path).is_ok() {
                 if self.overwrite {
                     observer.on_merge_event(MergeEvent::Overwriting(&entry_name));
                 } else {
@@ -144,18 +144,12 @@ impl DirectoryMerger {
         }
 
         for (entry_path, target_path) in directory_entries {
-            if target_path.is_dir() {
+            if std::fs::symlink_metadata(&target_path).is_ok_and(|metadata| metadata.is_dir()) {
                 self.merge(&entry_path, &target_path, observer)?;
                 moved_count += 1;
                 continue;
             }
-            if target_path.exists() && self.overwrite {
-                std::fs::remove_file(&target_path)?;
-            }
-            if std::fs::rename(&entry_path, &target_path).is_err() {
-                cli_tools_common::copy_dir_recursive(&entry_path, &target_path)?;
-                std::fs::remove_dir_all(&entry_path)?;
-            }
+            move_directory_into_place(&entry_path, &target_path, self.overwrite)?;
             moved_count += 1;
         }
 
@@ -176,6 +170,47 @@ impl DirectoryMerger {
         }
 
         Ok(())
+    }
+}
+
+/// Move a directory into `target_path`, backing up any existing non-directory target (such as a file or symlink)
+/// when `overwrite` is true so a failed cross-device copy never loses the pre-existing entry or follows a symlink.
+pub(crate) fn move_directory_into_place(source: &Path, target: &Path, overwrite: bool) -> Result<()> {
+    let target_meta = std::fs::symlink_metadata(target).ok();
+    let backup = if let Some(metadata) = target_meta {
+        if !overwrite {
+            anyhow::bail!("Target already exists: {}", target.display());
+        }
+        if metadata.is_dir() {
+            anyhow::bail!("Refusing to replace existing directory: {}", target.display());
+        }
+        let backup_path = cli_tools_common::unique_sibling_path(target, "dirmove-backup");
+        std::fs::rename(target, &backup_path)?;
+        Some(backup_path)
+    } else {
+        None
+    };
+
+    let move_result = if std::fs::rename(source, target).is_ok() {
+        Ok(())
+    } else {
+        cli_tools_common::copy_dir_recursive(source, target).and_then(|()| std::fs::remove_dir_all(source))
+    };
+
+    match move_result {
+        Ok(()) => {
+            if let Some(backup_path) = backup {
+                let _ = std::fs::remove_file(backup_path);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(target);
+            if let Some(backup_path) = backup {
+                let _ = std::fs::rename(&backup_path, target);
+            }
+            Err(error.into())
+        }
     }
 }
 
@@ -944,6 +979,52 @@ mod test_merge_trees {
             .expect("the link should be moved into the merge target");
         assert!(link.file_type().is_symlink());
         assert!(!tree.exists("Root/studio alpha beta"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_does_not_follow_destination_symlink_or_overwrite_broken_symlink() {
+        let tree = TempTree::new();
+        tree.dir("outside/real");
+        tree.file_with("Root/studio alpha beta/extras/a.txt", "from source");
+        tree.file_with("Root/studio alpha beta/broken.mkv", "new file");
+        tree.symlink("outside/real", "Root/alpha beta/extras");
+        tree.symlink("outside/nonexistent.mkv", "Root/alpha beta/broken.mkv");
+
+        // With overwrite = true, destination symlink must NOT be traversed into outside/real.
+        super::DirectoryMerger::new(true, false)
+            .merge(
+                &tree.join("Root/studio alpha beta"),
+                &tree.join("Root/alpha beta"),
+                &mut (),
+            )
+            .expect("merge");
+        assert!(
+            !tree.exists("outside/real/a.txt"),
+            "destination symlink must not be traversed outside root"
+        );
+
+        // With overwrite = false, broken symlink at target must not be overwritten.
+        let tree2 = TempTree::new();
+        tree2.file_with("Root/studio alpha beta/broken.mkv", "new file");
+        tree2.symlink("outside/nonexistent.mkv", "Root/alpha beta/broken.mkv");
+        super::DirectoryMerger::new(false, false)
+            .merge(
+                &tree2.join("Root/studio alpha beta"),
+                &tree2.join("Root/alpha beta"),
+                &mut (),
+            )
+            .expect("merge without overwrite");
+        assert!(
+            tree2
+                .join("Root/alpha beta/broken.mkv")
+                .symlink_metadata()
+                .expect("broken link")
+                .file_type()
+                .is_symlink(),
+            "broken symlink at destination must be preserved when overwrite is false"
+        );
+        assert!(tree2.exists("Root/studio alpha beta/broken.mkv"));
     }
 }
 

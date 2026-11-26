@@ -361,7 +361,7 @@ impl Unpacker {
         target: &Path,
         touched_directories: &mut HashSet<PathBuf>,
     ) -> Result<EntryMove> {
-        if target.exists() && !self.overwrite {
+        if std::fs::symlink_metadata(target).is_ok() && !self.overwrite {
             return Ok(EntryMove::SkippedExisting);
         }
 
@@ -369,10 +369,7 @@ impl Unpacker {
             touched_directories.insert(parent.to_path_buf());
         }
 
-        if std::fs::rename(source, target).is_err() {
-            cli_tools_common::copy_dir_recursive(source, target)?;
-            std::fs::remove_dir_all(source)?;
-        }
+        crate::merge::move_directory_into_place(source, target, self.overwrite)?;
 
         Ok(EntryMove::Moved)
     }
@@ -382,7 +379,7 @@ impl Unpacker {
     /// Tries a rename first, and falls back to a copy and removal for cross-device moves.
     /// The source and target parents are recorded in `touched_directories`.
     fn move_file(&self, source: &Path, target: &Path, touched_directories: &mut HashSet<PathBuf>) -> Result<EntryMove> {
-        if target.exists() && !self.overwrite {
+        if std::fs::symlink_metadata(target).is_ok() && !self.overwrite {
             return Ok(EntryMove::SkippedExisting);
         }
 
@@ -1354,6 +1351,39 @@ mod test_unpack_trees {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpack_does_not_follow_destination_symlink_or_overwrite_broken_symlink() {
+        let tree = TempTree::new();
+        tree.dir("outside/real");
+        tree.file_with("Library/Movie/subs/Sub/a.txt", "from unpack");
+        tree.symlink("outside/real", "Library/Movie/Sub");
+
+        // With overwrite = true, unpacking Sub must replace the symlink, not copy into outside/real.
+        let names = vec!["subs".to_string()];
+        super::Unpacker::new(&names, true, false).unpack(&[tree.join("Library")], true, &mut ());
+        assert!(
+            !tree.exists("outside/real/a.txt"),
+            "unpack must not follow a destination symlink into outside/real"
+        );
+
+        // With overwrite = false, a broken symlink at target must not be overwritten.
+        let tree2 = TempTree::new();
+        tree2.file_with("Library/Movie/subs/broken.srt", "new sub");
+        tree2.symlink("outside/missing.srt", "Library/Movie/broken.srt");
+        super::Unpacker::new(&names, false, false).unpack(&[tree2.join("Library")], true, &mut ());
+        assert!(
+            tree2
+                .join("Library/Movie/broken.srt")
+                .symlink_metadata()
+                .expect("broken symlink")
+                .file_type()
+                .is_symlink(),
+            "broken symlink at unpack target must be preserved when overwrite is false"
+        );
+        assert!(tree2.exists("Library/Movie/subs/broken.srt"));
     }
 }
 
