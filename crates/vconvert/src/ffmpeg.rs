@@ -109,11 +109,10 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
     }
 
     command.arg("-i").arg(options.input);
-    for subtitle_file in options.subtitle_files {
-        command.arg("-i").arg(&subtitle_file.path);
-    }
-
     if options.movie_mode {
+        for subtitle_file in options.subtitle_files {
+            command.arg("-i").arg(&subtitle_file.path);
+        }
         let audio_languages = probe_stream_languages(options.input, "a")?;
         let subtitle_counts = probe_stream_language_counts(options.input, "s")?;
         let subtitle_languages = subtitle_counts.keys().cloned().collect();

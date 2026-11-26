@@ -154,18 +154,15 @@ impl<'a> VideoConvert<'a> {
 
         let video_files: Vec<VideoFile> = pending_files
             .iter()
+            .filter(|file| {
+                file.action == PendingAction::SubtitleMux
+                    || (file.action == PendingAction::Convert && self.options.movie_mode)
+            })
             .filter(|file| file.full_path.exists())
             .map(|file| VideoFile::new_with_metadata(&file.full_path))
             .collect();
-        let has_subtitle_mux = pending_files
-            .iter()
-            .any(|file| file.action == PendingAction::SubtitleMux);
-        let mut subtitle_matches = if self.options.movie_mode || has_subtitle_mux {
-            let subtitle_files = Self::gather_subtitle_files_for_video_files(&video_files);
-            self.match_subtitle_files(&video_files, subtitle_files)
-        } else {
-            HashMap::new()
-        };
+        let subtitle_files = Self::gather_subtitle_files_for_video_files(&video_files);
+        let mut subtitle_matches = self.match_subtitle_files(&video_files, subtitle_files);
 
         let mut plan = ProcessingPlan::default();
         let mut reservations = TargetReservations::new();
