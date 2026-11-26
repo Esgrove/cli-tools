@@ -106,6 +106,7 @@ fn divider_lines(texts: &[String], length: usize, character: char, align: bool) 
         .collect()
 }
 
+/// Format a divider line with `text` centered inside `count` characters.
 fn format_centered_divider(text: &str, count: usize, character: char) -> String {
     let text = text.trim().to_uppercase();
     let div = format!("{character}");
@@ -123,6 +124,7 @@ fn format_centered_divider(text: &str, count: usize, character: char) -> String 
     }
 }
 
+/// Format a divider line with `text` aligned at `padding_left` divider characters from the left.
 fn format_aligned_divider(text: &str, count: usize, character: char, padding_left: usize) -> String {
     let text = text.trim().to_uppercase();
     let div = format!("{character}");
@@ -141,6 +143,7 @@ fn format_aligned_divider(text: &str, count: usize, character: char, padding_lef
     }
 }
 
+/// Join left and right divider padding around uppercase `text`.
 fn format_div_with_text(num_left: usize, text: &str, num_right: usize, divider: &str) -> String {
     format!("{} {} {}", divider.repeat(num_left), text, divider.repeat(num_right))
 }
