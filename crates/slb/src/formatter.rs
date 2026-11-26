@@ -1059,6 +1059,64 @@ mod test_format {
     }
 
     #[test]
+    fn line_too_long_respects_rule_toggle_per_line_fixability_and_last_suffix() {
+        let only_semicolons = FormatOptions {
+            max_width: 30,
+            rules: RuleSet {
+                semicolon: true,
+                line_too_long: false,
+                mid_clause_break: false,
+                em_dash: false,
+                trailing_comment: false,
+                docstring_quotes: false,
+            },
+            ..FormatOptions::default()
+        };
+        let text = "First clause; see https://example.com/very/long/unbreakable/url/path.\n";
+        let checked = check(text, FileKind::Markdown, &only_semicolons);
+        assert!(
+            !checked
+                .violations
+                .iter()
+                .any(|violation| violation.kind == ViolationKind::LineTooLong),
+            "LineTooLong must not be emitted when rules.line_too_long is false: {checked:?}"
+        );
+
+        let all = FormatOptions {
+            max_width: 30,
+            strict: true,
+            ..FormatOptions::default()
+        };
+        let mixed = "First clause; second clause.\nSupercalifragilisticexpialidocious123.\n";
+        let mixed_checked = check(mixed, FileKind::Markdown, &all);
+        let url_violation = mixed_checked
+            .violations
+            .iter()
+            .find(|violation| violation.line == 2 && violation.kind == ViolationKind::LineTooLong)
+            .expect("URL line should report LineTooLong");
+        assert!(
+            !url_violation.fixable,
+            "unchanged unbreakable URL line must report fixable = false even when another line changed: {url_violation:?}"
+        );
+
+        let docstring = "def f():\n    \"\"\"\n    12345678901234567890123\"\"\"\n";
+        let doc_opts = FormatOptions {
+            max_width: 28,
+            strict: true,
+            ..FormatOptions::default()
+        };
+        // Line 3 is 4 indent + 23 chars + 3 closing quotes = 30 chars (> 28).
+        let doc_checked = check(docstring, FileKind::Python, &doc_opts);
+        assert!(
+            doc_checked
+                .violations
+                .iter()
+                .any(|violation| violation.kind == ViolationKind::LineTooLong),
+            "closing docstring quotes width must count toward max_width: {doc_checked:?}"
+        );
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",

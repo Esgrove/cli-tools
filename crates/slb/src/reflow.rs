@@ -118,7 +118,7 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
 
     if budgets.first.min(budgets.rest) <= MIN_BUDGET {
         let violations = if options.rules.line_too_long {
-            over_long_line_violations(paragraph, options, hard_limit, false)
+            over_long_line_violations(paragraph, options, hard_limit, &[])
         } else {
             Vec::new()
         };
@@ -199,7 +199,8 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     }
 
     if options.rules.line_too_long {
-        violations.extend(over_long_line_violations(paragraph, options, hard_limit, changed));
+        let line_changed = per_line_changed(&output, paragraph, changed);
+        violations.extend(over_long_line_violations(paragraph, options, hard_limit, &line_changed));
     }
     sort_violations(&mut violations);
 
@@ -355,6 +356,22 @@ fn output_differs(output: &[(OutputContent, HardBreak)], paragraph: &Paragraph) 
         })
 }
 
+/// For each original line, return whether the reflow actually modified or broke it.
+///
+/// An original line whose exact text appears verbatim in `output` (for example an unbreakable URL
+/// on line 2 while line 1 was rewritten) did not change and must not be marked fixable.
+fn per_line_changed(output: &[(OutputContent<'_>, HardBreak)], paragraph: &Paragraph, changed: bool) -> Vec<bool> {
+    if !changed {
+        return vec![false; paragraph.lines.len()];
+    }
+    paragraph
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(index, _)| !output.iter().any(|(content, _)| content.matches_line(paragraph, index)))
+        .collect()
+}
+
 /// Why the reflowed lines are not worth writing, or `None` when they are.
 ///
 /// A line may use the soft overflow, but reflowing must never push a line past the hard limit
@@ -371,9 +388,17 @@ fn reflow_refusal(
     old_max: usize,
     reworded: bool,
 ) -> Option<Refusal> {
+    let last_output = output.len().saturating_sub(1);
     let new_widths = || {
         output.iter().enumerate().map(|(index, (content, hard_break))| {
-            rendered_width(paragraph, options, index, content.width(paragraph), *hard_break)
+            rendered_width(
+                paragraph,
+                options,
+                index,
+                content.width(paragraph),
+                *hard_break,
+                index == last_output,
+            )
         })
     };
     let new_max = new_widths().max().unwrap_or_default();
@@ -420,21 +445,35 @@ fn descent(widths: &[usize]) -> usize {
 
 /// Widths of the lines of the paragraph as it stands, measured the way `rendered_width` measures them.
 fn original_line_widths(paragraph: &Paragraph, options: &FormatOptions) -> impl Iterator<Item = usize> {
+    let last_index = paragraph.lines.len().saturating_sub(1);
     paragraph.lines.iter().enumerate().map(move |(index, line)| {
         let hard_break = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
-        rendered_width(paragraph, options, index, line.chars().count(), hard_break)
+        rendered_width(
+            paragraph,
+            options,
+            index,
+            line.chars().count(),
+            hard_break,
+            index == last_index,
+        )
     })
 }
 
-/// Width a line of the paragraph takes on the page, with its prefix and hard break marker included.
+/// Width a line of the paragraph takes on the page, with its prefix, hard break marker, and final suffix included.
 fn rendered_width(
     paragraph: &Paragraph,
     options: &FormatOptions,
     index: usize,
     width: usize,
     hard_break: HardBreak,
+    is_last: bool,
 ) -> usize {
-    prefix_width(paragraph.prefix_for(index), options.tab_width) + width + hard_break.marker().len()
+    let suffix = if is_last {
+        paragraph.last_suffix.chars().count()
+    } else {
+        0
+    };
+    prefix_width(paragraph.prefix_for(index), options.tab_width) + width + hard_break.marker().len() + suffix
 }
 
 /// Width of a prefix in characters, counting tabs as `tab_width`.

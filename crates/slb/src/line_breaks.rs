@@ -205,29 +205,36 @@ pub(super) fn split_tokens<'text>(
     }
     pieces.push(rest);
 
-    for (index, piece) in pieces.iter().enumerate() {
-        let budget = if index == 0 { run.first } else { run.rest };
-        if tokens_width(piece) > budget + soft_overflow(options.max_width, options.strict) {
-            let reason = if piece.len() > 1 {
-                "no clause boundary fits within the line limit"
-            } else {
-                "no break point available"
-            };
-            report_too_long(piece, line_offset, reason, violations);
+    if options.rules.line_too_long {
+        for (index, piece) in pieces.iter().enumerate() {
+            let budget = if index == 0 { run.first } else { run.rest };
+            if tokens_width(piece) > budget + soft_overflow(options.max_width, options.strict) {
+                let reason = if piece.len() > 1 {
+                    "no clause boundary fits within the line limit"
+                } else {
+                    "no break point available"
+                };
+                report_too_long(piece, line_offset, reason, violations);
+            }
         }
     }
     pieces
 }
 
 /// Violations for original lines that exceed the width limits.
+///
+/// `line_changed` tells whether the reflow changed each original line, so an unbreakable line
+/// that survives intact while a sibling line changes is still reported as non-fixable.
 pub(super) fn over_long_line_violations(
     paragraph: &Paragraph,
     options: &FormatOptions,
     hard_limit: usize,
-    changed: bool,
+    line_changed: &[bool],
 ) -> Vec<Violation> {
     let first_prefix = prefix_width(&paragraph.first_prefix, options.tab_width);
     let rest_prefix = prefix_width(&paragraph.rest_prefix, options.tab_width);
+    let last_index = paragraph.lines.len().saturating_sub(1);
+    let last_suffix_width = paragraph.last_suffix.chars().count();
     paragraph
         .lines
         .iter()
@@ -235,13 +242,15 @@ pub(super) fn over_long_line_violations(
         .filter_map(|(index, line)| {
             let marker = paragraph.hard_breaks.get(index).copied().unwrap_or_default();
             let prefix = if index == 0 { first_prefix } else { rest_prefix };
+            let suffix = if index == last_index { last_suffix_width } else { 0 };
             // A character count is never larger than a byte count,
             // so a line that is short in bytes cannot reach the limit and needs no counting.
-            if prefix + line.len() + marker.marker().len() <= options.max_width {
+            if prefix + line.len() + marker.marker().len() + suffix <= options.max_width {
                 return None;
             }
-            let width = prefix + line.chars().count() + marker.marker().len();
-            let fixable = changed && width > options.max_width;
+            let width = prefix + line.chars().count() + marker.marker().len() + suffix;
+            let this_line_changed = line_changed.get(index).copied().unwrap_or(false);
+            let fixable = this_line_changed && width > options.max_width;
             if !fixable && width <= hard_limit {
                 return None;
             }
