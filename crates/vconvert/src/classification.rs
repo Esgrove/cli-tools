@@ -211,7 +211,7 @@ impl<'a> ClassificationRequest<'a> {
             !self.subtitle_files.is_empty(),
             self.info.bit_depth,
         );
-        if output_path == file.path {
+        if cli_tools_common::paths_refer_to_same_file(&output_path, &file.path) {
             return AnalysisResult::analysis_failed(
                 file,
                 "Output path resolves to the input file, refusing in-place conversion/remux".to_string(),
@@ -240,7 +240,9 @@ impl<'a> ClassificationRequest<'a> {
 
     /// Return whether an output path blocks processing.
     fn output_exists(&self, file: &VideoFile, output_path: &Path) -> bool {
-        output_path.exists() && output_path != file.path && !self.filter.overwrite
+        output_path.exists()
+            && !cli_tools_common::paths_refer_to_same_file(output_path, &file.path)
+            && !self.filter.overwrite
     }
 
     /// Build an output-exists result.

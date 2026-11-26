@@ -50,12 +50,17 @@ impl VideoConvert<'_> {
         }
     }
 
-    /// Move an output over the input it was made from, keeping the input until the output is in place.
-    pub(super) fn replace_input_with_output(&self, input: &Path, output: &Path) -> Result<()> {
+    /// Move a staged output into `final_output` while keeping `input` backed up until the new file is in place.
+    pub(super) fn replace_input_with_output(
+        &self,
+        input: &Path,
+        final_output: &Path,
+        staged_output: &Path,
+    ) -> Result<()> {
         let backup = backup_output_path(input);
         std::fs::rename(input, &backup).context("Failed to move original file aside before replacement")?;
 
-        if let Err(error) = std::fs::rename(output, input) {
+        if let Err(error) = std::fs::rename(staged_output, final_output) {
             if let Err(restore_error) = std::fs::rename(&backup, input) {
                 anyhow::bail!(
                     "Failed to move muxed subtitle output into place: {error}, failed to restore original file: {restore_error}"

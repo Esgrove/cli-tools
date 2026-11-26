@@ -84,7 +84,8 @@ impl VideoConvert<'_> {
     pub(super) fn mux_subtitles(&self, file: &ProcessableFile, position: FilePosition) -> ProcessResult {
         let input = &file.file.path;
         let final_output = &file.output_path;
-        let command_output = if input == final_output {
+        let in_place = cli_tools_common::paths_refer_to_same_file(input, final_output);
+        let command_output = if in_place {
             temporary_output_path(final_output)
         } else {
             final_output.clone()
@@ -121,8 +122,8 @@ impl VideoConvert<'_> {
             return failed(error.to_string());
         }
 
-        if input == final_output {
-            if let Err(error) = self.replace_input_with_output(input, &command_output) {
+        if in_place {
+            if let Err(error) = self.replace_input_with_output(input, final_output, &command_output) {
                 return failed(error.to_string());
             }
         } else {
@@ -332,5 +333,111 @@ mod test_dryrun_operations {
         assert!(matches!(result, ProcessResult::Converted { .. }));
         assert!(path.is_file());
         assert!(!file.output_path.exists());
+    }
+}
+
+#[cfg(test)]
+mod test_in_place_case_insensitive {
+    use super::super::test_helpers::converter;
+    use super::*;
+    use crate::classification::ClassificationRequest;
+    use crate::options::ConvertOptions;
+    use crate::types::{AnalysisFilter, AnalysisResult, SubtitleFile, VideoFile};
+
+    #[test]
+    fn refuses_in_place_conversion_when_only_extension_case_differs() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        if cli_tools_common::directory_is_case_sensitive(directory.path()).expect("probe") {
+            return;
+        }
+        let path = directory.path().join("x265.MP4");
+        std::fs::write(&path, b"video").expect("write");
+
+        let file = VideoFile::new_with_metadata(&path);
+        let info = VideoInfo {
+            codec: "h264".to_string(),
+            bitrate_kbps: 20_000,
+            size_bytes: 5,
+            duration: 60.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 30.0,
+            bit_depth: 8,
+            warning: None,
+        };
+        let options = ConvertOptions {
+            overwrite: true,
+            ..ConvertOptions::default()
+        };
+        let filter = AnalysisFilter::from(&options);
+        let result = ClassificationRequest::new(&filter, &info, false, Vec::new()).classify(file);
+        assert!(
+            matches!(result, AnalysisResult::Skip { .. }),
+            "in-place conversion with differing extension case must be refused, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn uppercase_mkv_subtitle_mux_preserves_video_on_case_insensitive_fs() {
+        if !cli_tools_common::command_exists("ffmpeg") || !cli_tools_common::command_exists("ffprobe") {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temp dir");
+        if cli_tools_common::directory_is_case_sensitive(directory.path()).expect("probe") {
+            return;
+        }
+        let input_path = directory.path().join("Movie.x265.MKV");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-c:v",
+                "libx265",
+                "-tag:v",
+                "hvc1",
+                "-y",
+            ])
+            .arg(&input_path)
+            .status()
+            .expect("generate mkv");
+        if !status.success() {
+            return;
+        }
+        let subtitle_path = directory.path().join("Movie.x265.srt");
+        std::fs::write(&subtitle_path, "1\n00:00:00,000 --> 00:00:00,500\nHello\n").expect("write srt");
+
+        let video_file = VideoFile::new_with_metadata(&input_path);
+        let info = probe_video_info(&input_path).expect("probe");
+        let output_path = directory.path().join("Movie.x265.mkv");
+        let processable = ProcessableFile::new(
+            video_file,
+            info,
+            output_path.clone(),
+            vec![SubtitleFile::new(&subtitle_path, None)],
+        );
+        let options = ConvertOptions {
+            movie_mode: true,
+            overwrite: true,
+            delete: true,
+            ..ConvertOptions::default()
+        };
+        let video_convert = converter(options);
+
+        let result = video_convert.mux_subtitles(&processable, FilePosition { index: 1, total: 1 });
+        assert!(matches!(result, ProcessResult::SubtitlesMuxed {}), "got {result:?}");
+        assert!(
+            output_path.is_file(),
+            "muxed video must exist after in-place subtitle mux"
+        );
+        assert!(
+            std::fs::metadata(&output_path).expect("meta").len() > 0,
+            "muxed video must be non-empty"
+        );
+        assert!(!subtitle_path.exists(), "muxed subtitle sidecar should be removed");
     }
 }
