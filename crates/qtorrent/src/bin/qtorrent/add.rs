@@ -80,8 +80,23 @@ impl QTorrent {
     }
 
     /// Connect to qBittorrent and add torrents one by one with individual confirmation.
-    #[allow(clippy::too_many_lines)]
     async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<()> {
+        self.add_torrents_with_collision_handlers(
+            torrents,
+            |existing, prompt| self.confirm_downloaded_collision(existing, prompt),
+            trash_duplicate_torrent_file,
+        )
+        .await
+    }
+
+    /// Run the add workflow with the supplied confirmation and trash handlers for archive collisions.
+    #[allow(clippy::too_many_lines)]
+    async fn add_torrents_with_collision_handlers(
+        &self,
+        torrents: Vec<TorrentInfo>,
+        confirm_collision: impl Fn(&Path, &str) -> Result<bool>,
+        mut trash_duplicate: impl FnMut(&Path),
+    ) -> Result<()> {
         let mut client = client::connect(&self.config.connection, self.config.verbose).await?;
         let adder = TorrentAdder::new(&client, &self.config.add_options, &self.names);
         let mut printer = EventPrinter::new(self.config.verbose);
@@ -127,11 +142,13 @@ impl QTorrent {
                 );
 
                 if let Some(existing) = downloaded_collision.as_deref()
-                    && !self.confirm_downloaded_collision(existing, "Continue anyway?")?
+                    && !confirm_collision(existing, "Continue anyway?")?
                 {
                     println!("{}", "Skipped.".yellow());
                     stats.inc_skipped();
-                    trash_duplicate_torrent_file(&torrent_path);
+                    if utils::is_duplicate_torrent_file(&torrent_path, existing) {
+                        trash_duplicate(&torrent_path);
+                    }
                     continue;
                 }
 
@@ -155,13 +172,13 @@ impl QTorrent {
             }
 
             let add_confirmed_by_collision = if let Some(existing) = downloaded_collision.as_deref() {
-                if !self.confirm_downloaded_collision(existing, "Add anyway?")? {
+                if !confirm_collision(existing, "Add anyway?")? {
                     println!("{}", "Skipped.".yellow());
                     stats.inc_skipped();
                     // Only an identical copy of the downloaded torrent is a duplicate.
                     // A different torrent that happens to share the file name was never added, so it stays.
                     if utils::is_duplicate_torrent_file(&torrent_path, existing) {
-                        trash_duplicate_torrent_file(&torrent_path);
+                        trash_duplicate(&torrent_path);
                     }
                     continue;
                 }
@@ -445,6 +462,51 @@ mod test_add_workflow {
 
         assert!(directory.torrent_path.is_file());
         assert!(!directory.moved_torrent_path().exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn declined_archive_collision_trashes_only_identical_bytes() -> Result<()> {
+        for identical in [true, false] {
+            let directory = TorrentDirectory::new();
+            let source_bytes = std::fs::read(&directory.torrent_path)?;
+            let archive = directory.moved_torrent_path();
+            if identical {
+                std::fs::write(&archive, &source_bytes)?;
+            } else {
+                let mut archived_torrent = Torrent::from_buffer(&source_bytes)?;
+                archived_torrent.announce = Some("http://other.example.com/announce".to_owned());
+                std::fs::write(&archive, serde_bencode::to_bytes(&archived_torrent)?)?;
+            }
+            for already_added in [false, true] {
+                let listing = if already_added {
+                    torrent_list_with(&directory.info_hash())
+                } else {
+                    "[]".to_owned()
+                };
+                let port = serve(session_routes(listing)).await;
+                let application = connected_qtorrent(&directory, port, &[]);
+                let torrents = application.parse_torrents(std::slice::from_ref(&directory.torrent_path));
+                let mut trash_requested = Vec::new();
+                application
+                    .add_torrents_with_collision_handlers(
+                        torrents,
+                        |path, _| {
+                            assert_eq!(path, archive);
+                            Ok(false)
+                        },
+                        |path| trash_requested.push(path.to_path_buf()),
+                    )
+                    .await?;
+
+                assert_eq!(
+                    trash_requested.len(),
+                    usize::from(identical),
+                    "already added: {already_added}"
+                );
+                assert_eq!(std::fs::read(&directory.torrent_path)?, source_bytes);
+            }
+        }
         Ok(())
     }
 
