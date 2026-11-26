@@ -320,6 +320,11 @@ impl<'a> PrefixGrouper<'a> {
             entry.min_start_position = entry.min_start_position.min(group.min_start_position);
         }
 
+        for group in result.values_mut() {
+            group.files.sort();
+            group.files.dedup();
+        }
+
         result
     }
 
@@ -958,12 +963,11 @@ mod test_prefix_groups {
             !groups.contains_key("Show.Name.Season2"),
             "Season2 should be merged into Show.Name"
         );
-        // The Show.Name group should contain entries for all 4 files
-        // (files may appear multiple times due to multiple prefix matches)
         let show_name_files = groups.get("Show.Name").unwrap();
-        assert!(
-            show_name_files.files.len() >= 4,
-            "Show.Name group should have at least 4 entries"
+        assert_eq!(
+            show_name_files.files.len(),
+            4,
+            "Show.Name group should contain each file exactly once without duplicates"
         );
     }
 

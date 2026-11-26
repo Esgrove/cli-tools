@@ -512,7 +512,9 @@ impl DirMove {
         }
 
         let mut moved_files: HashSet<PathBuf> = HashSet::new();
-        self.process_custom_mappings_create_mode(&files_with_names, &mut moved_files)?;
+        // Group names ignored during this session with the "s" answer, shared across custom mappings and prefix groups.
+        let mut runtime_ignored: HashSet<String> = HashSet::new();
+        self.process_custom_mappings_create_mode(&files_with_names, &mut moved_files, &mut runtime_ignored)?;
 
         if self.config.debug {
             report::print_prefix_ignores_debug(self.config.name_filter.prefix_ignores(), &files_with_names);
@@ -539,8 +541,6 @@ impl DirMove {
         );
 
         let parent_dir_normalized = self.roots.first_output_normalized_name();
-        // Group names ignored during this session with the "s" answer.
-        let mut runtime_ignored: HashSet<String> = HashSet::new();
         let mut group_number: usize = 0;
 
         for (prefix, group) in groups_to_process {
@@ -609,11 +609,12 @@ impl DirMove {
     }
 
     /// Process custom mappings in create mode, offering to create directories for matching files.
-    /// Updates `moved_files` with files that were successfully moved.
+    /// Updates `moved_files` with files that were successfully moved and records saved ignores in `runtime_ignored`.
     fn process_custom_mappings_create_mode(
         &self,
         files_with_names: &[FileInfo],
         moved_files: &mut HashSet<PathBuf>,
+        runtime_ignored: &mut HashSet<String>,
     ) -> anyhow::Result<()> {
         if self.config.custom_mappings.is_empty() {
             return Ok(());
@@ -631,11 +632,10 @@ impl DirMove {
 
         let grouper = self.grouper();
         let parent_dir_normalized = self.roots.first_output_normalized_name();
-        let mut runtime_ignored = HashSet::new();
 
         for (dir_name, files) in mapping_groups {
             if files.is_empty()
-                || grouper.should_skip_group(&dir_name, parent_dir_normalized.as_deref(), &runtime_ignored)
+                || grouper.should_skip_group(&dir_name, parent_dir_normalized.as_deref(), runtime_ignored)
             {
                 continue;
             }
@@ -655,7 +655,7 @@ impl DirMove {
                         let file_paths: Vec<_> = files.iter().map(|file| file.path.clone()).collect();
                         self.move_group(&target_path, &file_paths, moved_files);
                     }
-                    PromptResult::SaveToIgnored => Self::save_ignored_group_name(&dir_name, &mut runtime_ignored),
+                    PromptResult::SaveToIgnored => Self::save_ignored_group_name(&dir_name, runtime_ignored),
                     PromptResult::Skipped => {}
                 }
                 println!();
