@@ -230,12 +230,12 @@ impl VideoStats {
 
         let mut lines = vec![format!("  {}: {smallest} — {biggest}", "Resolutions".bold())];
 
-        // Aggregate counts by fuzzy resolution label, tracking max width for proper sorting
+        // Aggregate counts by fuzzy resolution label, tracking the longest edge for sorting.
         let mut label_counts: HashMap<Cow<'static, str>, (usize, u32)> = HashMap::new();
         for (resolution, count) in &self.resolutions {
-            let label = resolution.to_string();
+            let label = resolution.label();
             let max_dimension = resolution.width.max(resolution.height);
-            let entry = label_counts.entry(Cow::from(label)).or_insert((0, max_dimension));
+            let entry = label_counts.entry(label).or_insert((0, max_dimension));
             entry.0 += count;
             // Track maximum width (prefer landscape) for sorting
             entry.1 = entry.1.max(max_dimension);
@@ -1119,6 +1119,21 @@ mod test_summary_lines {
         let text = summary(&stats, false);
 
         assert!(text.contains("1920x1080 — 3840x2160"), "{text}");
+    }
+
+    #[test]
+    fn groups_close_dimensions_by_fuzzy_label_without_changing_the_exact_range() {
+        let stats = stats(&[
+            info(1920, 1080, 60.0, "h264", 4000, 1_000_000),
+            info(1918, 1078, 60.0, "h264", 4000, 1_000_000),
+            info(1080, 1920, 60.0, "h264", 4000, 1_000_000),
+        ]);
+
+        let text = summary(&stats, false);
+
+        assert!(text.contains("Resolutions: 1918x1078 — "), "{text}");
+        assert!(text.lines().any(|line| line.trim() == "1080p: 2"), "{text}");
+        assert!(text.lines().any(|line| line.trim() == "Vertical.1080p: 1"), "{text}");
     }
 
     #[test]
