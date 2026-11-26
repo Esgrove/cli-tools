@@ -111,7 +111,7 @@ fn run(config: &Config) -> Result<()> {
     let toolchain = RustVersion::from_local_toolchain()?;
     if let Some(version) = &toolchain.prerelease {
         println!(
-            "Local toolchain is a pre-release ({version}), targeting the latest stable release {}",
+            "Local toolchain is a pre-release ({version}), targeting the installed stable release {}",
             toolchain.target
         );
     }

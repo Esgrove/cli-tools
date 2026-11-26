@@ -70,39 +70,19 @@ impl RustVersion {
     /// Read the version of the local `rustc` and return the stable release it targets.
     ///
     /// # Errors
-    /// Returns an error if `rustc` cannot be run or its output cannot be parsed.
+    /// Returns an error if a required compiler is unavailable or its output cannot be parsed.
     pub fn from_local_toolchain() -> Result<LocalToolchain> {
-        let output = Command::new("rustc")
-            .arg("--version")
-            .output()
-            .context("Failed to run rustc --version")?;
-        if !output.status.success() {
-            return Err(anyhow!("rustc --version failed"));
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let target = Self::from_rustc_output(&text)
-            .ok_or_else(|| anyhow!("Unexpected rustc --version output: {}", text.trim()))?;
-        let prerelease = Self::is_prerelease_rustc_output(&text).then(|| text.trim().to_string());
-        Ok(LocalToolchain { target, prerelease })
+        let active = command_stdout("rustc", &["--version"])?;
+        Self::resolve_toolchain(&active, || {
+            command_stdout("rustup", &["run", "stable", "rustc", "--version"])
+                .context("Could not query the installed stable toolchain")
+        })
     }
 
-    /// Parse the output of `rustc --version`, for example "rustc 1.100.0 (0ef1bc386 2026-11-09)".
-    ///
-    /// A nightly or beta toolchain such as "rustc 1.101.0-nightly" is ahead of the newest stable release,
-    /// and a manifest or Docker image cannot use a version that is not released yet,
-    /// so it gives the stable release before it, here 1.100.0.
+    /// Parse the output of a stable `rustc --version`, returning `None` for prereleases.
     #[must_use]
     pub fn from_rustc_output(output: &str) -> Option<Self> {
-        let version = output.split_whitespace().nth(1)?;
-        let (numeric, prerelease) = version
-            .split_once('-')
-            .map_or((version, false), |(numeric, _)| (numeric, true));
-        let parsed = Self::parse(numeric)?;
-        if prerelease && parsed.minor > 0 {
-            Some(Self::new(parsed.major, parsed.minor - 1, 0))
-        } else {
-            Some(parsed)
-        }
+        Self::parse(rustc_version_token(output)?)
     }
 
     /// Parse a version with one to three numeric components, such as "1", "1.94", or "1.94.0".
@@ -135,12 +115,27 @@ impl RustVersion {
         format!("{}.{}", self.major, self.minor)
     }
 
-    /// Whether `rustc --version` output is from a nightly or beta toolchain.
-    fn is_prerelease_rustc_output(output: &str) -> bool {
-        output
-            .split_whitespace()
-            .nth(1)
-            .is_some_and(|version| version.contains('-'))
+    /// Use the active compiler directly unless it is a prerelease.
+    fn resolve_toolchain(active: &str, stable: impl FnOnce() -> Result<String>) -> Result<LocalToolchain> {
+        if let Some(target) = Self::from_rustc_output(active) {
+            return Ok(LocalToolchain {
+                target,
+                prerelease: None,
+            });
+        }
+        let is_prerelease = rustc_version_token(active)
+            .and_then(|version| version.split_once('-'))
+            .is_some_and(|(numeric, suffix)| Self::parse(numeric).is_some() && !suffix.is_empty());
+        if !is_prerelease {
+            anyhow::bail!("Unexpected rustc --version output: {}", active.trim());
+        }
+        let stable = stable()?;
+        let target = Self::from_rustc_output(&stable)
+            .ok_or_else(|| anyhow!("Expected a stable rustc version, got: {}", stable.trim()))?;
+        Ok(LocalToolchain {
+            target,
+            prerelease: Some(active.trim().to_string()),
+        })
     }
 }
 
@@ -148,6 +143,26 @@ impl fmt::Display for RustVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
     }
+}
+
+/// Read the version token from a `rustc --version` response.
+fn rustc_version_token(output: &str) -> Option<&str> {
+    let mut fields = output.split_whitespace();
+    (fields.next()? == "rustc").then_some(())?;
+    fields.next()
+}
+
+/// Run a compiler version query and preserve any error diagnostic.
+fn command_stdout(program: &str, args: &[&str]) -> Result<String> {
+    let label = format!("{program} {}", args.join(" "));
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("Failed to run {label}"))?;
+    if !output.status.success() {
+        anyhow::bail!("{label} failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    String::from_utf8(output.stdout).with_context(|| format!("Invalid UTF-8 from {label}"))
 }
 
 /// Set the `rust-version` field in the manifest content to the target version.
@@ -237,11 +252,38 @@ mod test_rust_version {
     }
 
     #[test]
-    fn a_nightly_or_beta_toolchain_targets_the_latest_stable_release() {
-        let nightly = RustVersion::from_rustc_output("rustc 1.101.0-nightly (abcdef123 2026-11-20)");
-        let beta = RustVersion::from_rustc_output("rustc 1.101.0-beta.3 (abcdef123 2026-11-20)");
-        assert_eq!(nightly, Some(RustVersion::new(1, 100, 0)));
-        assert_eq!(beta, Some(RustVersion::new(1, 100, 0)));
+    fn a_nightly_or_beta_toolchain_targets_the_installed_stable_release() {
+        for active in ["rustc 1.102.0-nightly", "rustc 1.101.0-beta.3"] {
+            let toolchain = RustVersion::resolve_toolchain(active, || Ok("rustc 1.100.2".to_string())).unwrap();
+            assert_eq!(toolchain.target, RustVersion::new(1, 100, 2));
+            assert_eq!(toolchain.prerelease.as_deref(), Some(active));
+        }
+    }
+
+    #[test]
+    fn prerelease_requires_an_available_stable_compiler() {
+        let active = "rustc 1.102.0-nightly";
+        assert!(RustVersion::resolve_toolchain(active, || Err(anyhow!("stable not installed"))).is_err());
+        assert!(RustVersion::resolve_toolchain(active, || Ok("rustc 1.101.0-beta.1".to_string())).is_err());
+    }
+
+    #[test]
+    fn an_active_stable_compiler_needs_no_rustup() {
+        let toolchain = RustVersion::resolve_toolchain("rustc 1.100.2", || panic!("unneeded stable query")).unwrap();
+        assert_eq!(toolchain.target, RustVersion::new(1, 100, 2));
+        assert_eq!(toolchain.prerelease, None);
+    }
+
+    #[test]
+    fn prerelease_output_never_guesses_a_stable_version() {
+        assert_eq!(
+            RustVersion::from_rustc_output("rustc 1.102.0-nightly (abcdef123 2026-11-20)"),
+            None
+        );
+        assert_eq!(
+            RustVersion::from_rustc_output("rustc 1.101.0-beta.2 (abcdef123 2026-11-20)"),
+            None
+        );
     }
 
     #[test]
