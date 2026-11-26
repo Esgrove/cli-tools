@@ -36,90 +36,6 @@ pub struct DuplicateMatchOptions<'a> {
     pub additional_match_groups: &'a [Vec<usize>],
 }
 
-/// Return whether a file's final path component contains non-UTF-8 bytes.
-fn has_non_utf8_filename(file: &DupeFileInfo) -> bool {
-    file.path.file_name().is_some_and(|name| name.to_str().is_none())
-}
-
-/// Find duplicate groups using filename, pattern, normalization, and matches supplied by the caller.
-#[must_use]
-#[allow(
-    clippy::indexing_slicing,
-    reason = "group indices are created from this file slice and caller indices are bounds-checked"
-)]
-pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'_>) -> Vec<DuplicateGroup> {
-    let normalized_keys: Vec<String> = files
-        .par_iter()
-        .enumerate()
-        .map(|(index, file)| {
-            if has_non_utf8_filename(file) {
-                format!("\0nonutf8:{index}")
-            } else {
-                let stem = strip_ignored_prefixes(&file.stem, options.prefix_ignores);
-                normalize_stem(&stem)
-            }
-        })
-        .collect();
-
-    let mut groups = GroupSet::new(normalized_keys);
-
-    let mut filename_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    for (index, file) in files.iter().enumerate() {
-        if has_non_utf8_filename(file) {
-            continue;
-        }
-        let filename = strip_ignored_prefixes(&file.filename, options.prefix_ignores).to_lowercase();
-        filename_to_indices.entry(filename).or_default().push(index);
-    }
-    groups.merge_all(filename_to_indices.values());
-
-    let mut pattern_matches: HashMap<usize, MatchRange> = HashMap::new();
-    let mut pattern_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    for (index, file) in files.iter().enumerate() {
-        if has_non_utf8_filename(file) {
-            continue;
-        }
-        for pattern in options.patterns {
-            if let Some(pattern_match) = pattern.find(&file.filename) {
-                pattern_to_indices
-                    .entry(pattern_match.as_str().to_lowercase())
-                    .or_default()
-                    .push(index);
-                pattern_matches.insert(
-                    index,
-                    MatchRange {
-                        start: pattern_match.start(),
-                        end: pattern_match.end(),
-                    },
-                );
-                break;
-            }
-        }
-    }
-    groups.merge_all(pattern_to_indices.values());
-
-    for indices in options.additional_match_groups {
-        let valid_indices: Vec<usize> = indices.iter().copied().filter(|index| *index < files.len()).collect();
-        groups.merge(&valid_indices);
-    }
-
-    groups
-        .into_duplicates()
-        .map(|(key, indices)| {
-            let group_files = indices
-                .into_iter()
-                .map(|index| {
-                    let mut file = files[index].clone();
-                    file.pattern_match = pattern_matches.get(&index).copied();
-                    file
-                })
-                .collect();
-            DuplicateGroup::new(key, group_files)
-        })
-        .sorted_by(|left, right| left.key.cmp(&right.key))
-        .collect()
-}
-
 #[allow(
     clippy::indexing_slicing,
     reason = "group numbers index `keys` and `members`, which always have an entry for every number handed out"
@@ -202,6 +118,90 @@ impl GroupSet {
                 (key, members)
             })
     }
+}
+
+/// Return whether a file's final path component contains non-UTF-8 bytes.
+fn has_non_utf8_filename(file: &DupeFileInfo) -> bool {
+    file.path.file_name().is_some_and(|name| name.to_str().is_none())
+}
+
+/// Find duplicate groups using filename, pattern, normalization, and matches supplied by the caller.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "group indices are created from this file slice and caller indices are bounds-checked"
+)]
+pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'_>) -> Vec<DuplicateGroup> {
+    let normalized_keys: Vec<String> = files
+        .par_iter()
+        .enumerate()
+        .map(|(index, file)| {
+            if has_non_utf8_filename(file) {
+                format!("\0nonutf8:{index}")
+            } else {
+                let stem = strip_ignored_prefixes(&file.stem, options.prefix_ignores);
+                normalize_stem(&stem)
+            }
+        })
+        .collect();
+
+    let mut groups = GroupSet::new(normalized_keys);
+
+    let mut filename_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, file) in files.iter().enumerate() {
+        if has_non_utf8_filename(file) {
+            continue;
+        }
+        let filename = strip_ignored_prefixes(&file.filename, options.prefix_ignores).to_lowercase();
+        filename_to_indices.entry(filename).or_default().push(index);
+    }
+    groups.merge_all(filename_to_indices.values());
+
+    let mut pattern_matches: HashMap<usize, MatchRange> = HashMap::new();
+    let mut pattern_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, file) in files.iter().enumerate() {
+        if has_non_utf8_filename(file) {
+            continue;
+        }
+        for pattern in options.patterns {
+            if let Some(pattern_match) = pattern.find(&file.filename) {
+                pattern_to_indices
+                    .entry(pattern_match.as_str().to_lowercase())
+                    .or_default()
+                    .push(index);
+                pattern_matches.insert(
+                    index,
+                    MatchRange {
+                        start: pattern_match.start(),
+                        end: pattern_match.end(),
+                    },
+                );
+                break;
+            }
+        }
+    }
+    groups.merge_all(pattern_to_indices.values());
+
+    for indices in options.additional_match_groups {
+        let valid_indices: Vec<usize> = indices.iter().copied().filter(|index| *index < files.len()).collect();
+        groups.merge(&valid_indices);
+    }
+
+    groups
+        .into_duplicates()
+        .map(|(key, indices)| {
+            let group_files = indices
+                .into_iter()
+                .map(|index| {
+                    let mut file = files[index].clone();
+                    file.pattern_match = pattern_matches.get(&index).copied();
+                    file
+                })
+                .collect();
+            DuplicateGroup::new(key, group_files)
+        })
+        .sorted_by(|left, right| left.key.cmp(&right.key))
+        .collect()
 }
 
 /// Return whether a duplicate group matches one of the configured ignore values.
