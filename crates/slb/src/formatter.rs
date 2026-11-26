@@ -869,6 +869,62 @@ mod test_format {
     }
 
     #[test]
+    fn yaml_block_scalars_preserve_hash_lines_verbatim() {
+        let options = FormatOptions::default();
+        for text in [
+            "steps:\n  - name: Build\n    run: |\n      # First clause; second clause\n      # continues on next line\n      echo ok\n",
+            "items:\n  - |\n    # First clause; second clause\n",
+            "script: |2-\n  # First clause; second clause\n",
+            "run: | # comment\n  # First clause; second clause\n",
+        ] {
+            assert_eq!(
+                format(text, FileKind::Yaml, &options),
+                FormatResult::default(),
+                "YAML block scalar must stay untouched:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn escaped_quote_char_literal_preserves_subsequent_multiline_string() {
+        let text = concat!(
+            "fn demo(c: char) {\n",
+            "    let is_quote = matches!(c, '\\''|'\"');\n",
+            "    let msg = \"\n",
+            "// This string literal has a semicolon; it must never be changed.\n",
+            "\";\n",
+            "}\n",
+        );
+        assert_eq!(
+            format(text, FileKind::Rust, &FormatOptions::default()),
+            FormatResult::default()
+        );
+    }
+
+    #[test]
+    fn block_comment_lines_and_nested_comments_do_not_rewrite_live_code() {
+        let c_text = "int x = 1; /* block comment\n// close block */ continue; break;\n";
+        assert_eq!(
+            format(c_text, FileKind::CLike, &FormatOptions::default()),
+            FormatResult::default()
+        );
+
+        let rust_nested = "/* outer /* inner */\n// close outer */ continue; break;\n";
+        assert_eq!(
+            format(rust_nested, FileKind::Rust, &FormatOptions::default()),
+            FormatResult::default()
+        );
+
+        let trailing_after_block = "/* block\ninside block\n*/ int x = 1; // handles glob /*/foo\n";
+        let result = format(trailing_after_block, FileKind::CLike, &all_rules());
+        assert!(
+            result.fixed_text.is_none(),
+            "trailing comment after closing block comment must not be moved inside block comment: {:?}",
+            result.fixed_text
+        );
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",

@@ -32,8 +32,10 @@ pub struct TrailingComment {
 /// What one pass of the scanner found about every line of a file.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LineScan {
-    /// Whether the line starts inside a multi line string, template, heredoc, or an uncertain region.
+    /// Whether the line starts inside a multi line string, template, heredoc, block scalar, block comment, or uncertain region.
     inside_string: Vec<bool>,
+    /// Whether the line starts inside an open block comment.
+    inside_block_comment: Vec<bool>,
     /// Byte offset where a trailing comment starts, for the lines that have one.
     comment_start: Vec<Option<usize>>,
 }
@@ -43,6 +45,12 @@ impl LineScan {
     #[must_use]
     pub(super) fn starts_inside_string(&self, index: usize) -> bool {
         self.inside_string.get(index).copied().unwrap_or(false)
+    }
+
+    /// Whether the given zero based line starts inside an open block comment.
+    #[must_use]
+    pub(super) fn starts_inside_block_comment(&self, index: usize) -> bool {
+        self.inside_block_comment.get(index).copied().unwrap_or(false)
     }
 }
 
@@ -59,26 +67,40 @@ pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
     let Some(syntax) = string_syntax(kind) else {
         return LineScan {
             inside_string: vec![false; count],
+            inside_block_comment: vec![false; count],
             comment_start: vec![None; count],
         };
     };
     let mut scan = LineScan {
         inside_string: Vec::with_capacity(count),
+        inside_block_comment: Vec::with_capacity(count),
         comment_start: Vec::with_capacity(count),
     };
     let mut state = ScanState::Normal;
     let mut characters = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        scan.inside_string.push(matches!(
-            state,
-            ScanState::InString(_)
-                | ScanState::InTripleQuote(_)
-                | ScanState::InRawString(_)
-                | ScanState::InTemplate
-                | ScanState::InBacktickRaw
-                | ScanState::InHeredoc(_)
-                | ScanState::Uncertain
-        ));
+        let in_block_scalar = match state {
+            ScanState::InBlockScalar(indent) => {
+                line.trim().is_empty() || leading_whitespace(line).chars().count() > indent
+            }
+            _ => false,
+        };
+        let in_block_comment = matches!(state, ScanState::InBlockComment(_));
+        scan.inside_block_comment.push(in_block_comment);
+        scan.inside_string.push(
+            in_block_comment
+                || in_block_scalar
+                || matches!(
+                    state,
+                    ScanState::InString(_)
+                        | ScanState::InTripleQuote(_)
+                        | ScanState::InRawString(_)
+                        | ScanState::InTemplate
+                        | ScanState::InBacktickRaw
+                        | ScanState::InHeredoc(_)
+                        | ScanState::Uncertain
+                ),
+        );
         // A shebang is a comment line of its own, so it holds neither code nor the start of a string.
         if index == 0 && line.starts_with("#!") {
             scan.comment_start.push(None);
@@ -146,12 +168,14 @@ pub fn split_source_regions_scanned_with_notices(
         if let Some(block) = style.block
             && trimmed.starts_with(block.open)
         {
+            let nested = string_syntax(kind).is_some_and(|syntax| syntax.nested_block_comments);
             let end = block_comment_regions(
                 lines,
                 index,
                 block.open,
                 block.close,
                 block.continuation,
+                nested,
                 &mut regions,
                 &mut notices,
             );
@@ -248,10 +272,23 @@ pub fn fix_trailing_comments_scanned(
             });
             continue;
         }
+        if scan.starts_inside_block_comment(index)
+            && style.block.is_some_and(|block| trailing.text.contains(block.close))
+        {
+            violations.push(Violation {
+                line: index + 1,
+                column: Some(trailing.column),
+                kind: ViolationKind::TrailingComment,
+                message: "comment shares a line with code ending a block comment and contains its closing marker"
+                    .into(),
+                fixable: false,
+            });
+            continue;
+        }
         // A comment moved above a line that already has a comment above it joins that comment block,
         // and the reflow then merges two separate notes into one sentence.
         // The move is reported so the line can be fixed by hand, but it is not made automatically.
-        if has_comment_line_above(lines, index, &style, &scan.inside_string) {
+        if has_comment_line_above(lines, index, &style, scan) {
             violations.push(Violation {
                 line: index + 1,
                 column: Some(trailing.column),
@@ -298,11 +335,11 @@ pub(super) fn line_marker<'a>(trimmed: &str, markers: &[&'a str]) -> Option<&'a 
 ///
 /// A comment moved above such a line would be reflowed together with the comment above it,
 /// which merges two separate notes into one sentence, so those lines are reported but not fixed.
-fn has_comment_line_above(lines: &[&str], index: usize, style: &CommentStyle, inside_string: &[bool]) -> bool {
+fn has_comment_line_above(lines: &[&str], index: usize, style: &CommentStyle, scan: &LineScan) -> bool {
     let Some(previous) = index.checked_sub(1) else {
         return false;
     };
-    if inside_string.get(previous).copied().unwrap_or(false) {
+    if scan.starts_inside_string(previous) && !scan.starts_inside_block_comment(previous) {
         return false;
     }
     lines
@@ -354,12 +391,14 @@ fn starts_with_continuation_marker(line: &str, continuation: &str) -> bool {
 }
 
 /// Add regions for a block comment starting at `index` and return the index after it.
+#[allow(clippy::too_many_arguments)]
 fn block_comment_regions(
     lines: &[&str],
     index: usize,
     open: &str,
     close: &str,
     continuation: &str,
+    nested: bool,
     regions: &mut Vec<Region>,
     notices: &mut Vec<SkipNotice>,
 ) -> usize {
@@ -367,7 +406,10 @@ fn block_comment_regions(
         return index + 1;
     };
     let after_open = first.trim_start().get(open.len()..).unwrap_or_default();
-    if after_open.contains(close) {
+    let depth_after_first = advance_block_comment_depth(after_open, 1, open, close, nested);
+    if depth_after_first == 0 || after_open.contains(close) {
+        // Either closed on the opening line, or closed and reopened mid-line;
+        // leave the opening line verbatim and let the line scanner protect any reopened block.
         regions.push(Region::Verbatim {
             start: index,
             end: index + 1,
@@ -378,12 +420,15 @@ fn block_comment_regions(
         start: index,
         end: index + 1,
     });
-    let close_index = lines
-        .iter()
-        .enumerate()
-        .skip(index + 1)
-        .find(|(_, line)| line.contains(close))
-        .map_or(lines.len(), |(position, _)| position);
+    let mut depth = depth_after_first;
+    let mut close_index = lines.len();
+    for (position, candidate) in lines.iter().enumerate().skip(index + 1) {
+        depth = advance_block_comment_depth(candidate, depth, open, close, nested);
+        if depth == 0 {
+            close_index = position;
+            break;
+        }
+    }
 
     let mut inner = index + 1;
     while inner < close_index {
@@ -434,6 +479,26 @@ fn block_comment_regions(
         });
     }
     (close_index + 1).min(lines.len().max(index + 1))
+}
+
+/// Update block comment nesting depth across a slice of text.
+fn advance_block_comment_depth(text: &str, mut depth: usize, open: &str, close: &str, nested: bool) -> usize {
+    let mut offset = 0;
+    while offset < text.len() && depth > 0 {
+        let rest = text.get(offset..).unwrap_or_default();
+        if rest.starts_with(close) {
+            depth -= 1;
+            offset += close.len();
+        } else if nested && rest.starts_with(open) {
+            depth += 1;
+            offset += open.len();
+        } else if let Some(character) = rest.chars().next() {
+            offset += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    depth
 }
 
 /// Add regions for a Python docstring starting at `index`, returning the index after it when one was found.

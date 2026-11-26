@@ -38,9 +38,9 @@ const BACKTICK_RAW_SET: ByteSet = ByteSet::new(b"`");
 static RE_HEREDOC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"<<-?\s*(?:'(\w+)'|"(\w+)"|(\w+))"#).expect("Invalid heredoc regex"));
 
-/// Matches a YAML block scalar indicator at the end of a key line.
+/// Matches a YAML block scalar indicator at the end of a key or sequence-item line.
 pub(super) static RE_BLOCK_SCALAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|:)\s*[|>][-+]?\d*\s*$").expect("Invalid block scalar regex"));
+    LazyLock::new(|| Regex::new(r"(?:^|:|^\s*-)\s*[|>](?:[-+]?\d*|\d*[-+]?)\s*$").expect("Invalid block scalar regex"));
 
 /// How single quotes behave in a language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,8 +232,12 @@ fn scan_characters(
             ScanState::Normal => match scan_normal(line, chars, &mut cursor, syntax) {
                 NormalStep::Continue(next_state) => state = next_state,
                 NormalStep::Comment(byte) => {
+                    let next_state = cursor.pending_heredoc.map_or_else(
+                        || normal_line_end_state(line.get(..byte).unwrap_or_default(), syntax),
+                        ScanState::InHeredoc,
+                    );
                     return ScanResult {
-                        state: ScanState::Normal,
+                        state: next_state,
                         comment_start: (!cursor.uncertain).then_some(byte),
                         uncertain: cursor.uncertain,
                     };
@@ -619,7 +623,7 @@ fn find_string_end(
 /// Index after a character literal starting at `start`, or `start + 1` for a lifetime.
 fn skip_char_literal(chars: LineChars<'_>, start: usize) -> usize {
     if char_at(chars, start + 1) == Some('\\') {
-        let mut index = start + 2;
+        let mut index = start + 3;
         while index < chars.len() && index < start + 12 {
             if char_at(chars, index) == Some('\'') {
                 return index + 1;
