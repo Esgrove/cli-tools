@@ -69,9 +69,21 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         })
         .collect::<Vec<_>>();
 
+    let explicit_prefix = cli.prefix.is_some();
+    let explicit_suffix = cli.suffix.is_some();
+    let prefix_dir = !explicit_prefix
+        && (cli.prefix_dir
+            || cli.prefix_dir_start
+            || cli.prefix_dir_recursive
+            || user_config.prefix_dir
+            || user_config.prefix_dir_start
+            || user_config.prefix_dir_recursive);
+    let suffix_dir = !explicit_suffix
+        && (cli.suffix_dir || cli.suffix_dir_recursive || user_config.suffix_dir || user_config.suffix_dir_recursive);
+
     Ok(DotRenameConfig {
         convert_case: cli.case,
-        date_starts_with_year: !cli.year || user_config.date_starts_with_year,
+        date_starts_with_year: !cli.year && user_config.date_starts_with_year,
         debug: cli.debug || user_config.debug,
         deduplicate_patterns,
         dryrun: cli.print || user_config.dryrun,
@@ -85,13 +97,8 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         overwrite: cli.force || user_config.overwrite,
         pre_replace: user_config.pre_replace,
         prefix: cli.prefix.clone(),
-        prefix_dir: cli.prefix_dir
-            || cli.prefix_dir_start
-            || cli.prefix_dir_recursive
-            || user_config.prefix_dir
-            || user_config.prefix_dir_start
-            || user_config.prefix_dir_recursive,
-        prefix_dir_recursive: cli.prefix_dir_recursive || user_config.prefix_dir_recursive,
+        prefix_dir,
+        prefix_dir_recursive: !explicit_prefix && (cli.prefix_dir_recursive || user_config.prefix_dir_recursive),
         prefix_dir_start: cli.prefix_dir_start || user_config.prefix_dir_start,
         recurse: cli.recurse
             || cli.prefix_dir_recursive
@@ -106,11 +113,8 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         rename_directories: cli.directory || user_config.directory,
         replace,
         suffix: cli.suffix.clone(),
-        suffix_dir: cli.suffix_dir
-            || cli.suffix_dir_recursive
-            || user_config.suffix_dir
-            || user_config.suffix_dir_recursive,
-        suffix_dir_recursive: cli.suffix_dir_recursive || user_config.suffix_dir_recursive,
+        suffix_dir,
+        suffix_dir_recursive: !explicit_suffix && (cli.suffix_dir_recursive || user_config.suffix_dir_recursive),
         verbose: cli.verbose || user_config.verbose,
     })
 }
@@ -192,5 +196,23 @@ mod test_build_config {
         let error = build_config(&cli).expect_err("invalid regex should fail config construction");
 
         assert!(error.to_string().contains("Invalid regex"));
+    }
+
+    #[test]
+    fn year_flag_overrides_user_config_and_named_prefix_with_start_disables_prefix_dir() {
+        let cli_year = DotsCli::try_parse_from(["dots", "-y"]).expect("parse -y");
+        let year_config = build_config(&cli_year).expect("build -y config");
+        assert!(
+            !year_config.date_starts_with_year,
+            "-y must set date_starts_with_year to false even when fixture config has [dots]"
+        );
+
+        let mut cli_prefix = DotsCli::try_parse_from(["dots", "prefix", "my_folder", "--name", "Series", "--start"])
+            .expect("parse prefix --name --start");
+        cli_prefix.apply_subcommand();
+        let prefix_config = build_config(&cli_prefix).expect("build prefix config");
+        assert_eq!(prefix_config.prefix.as_deref(), Some("Series"));
+        assert!(prefix_config.prefix_dir_start);
+        assert!(!prefix_config.prefix_dir, "explicit --name must not enable prefix_dir");
     }
 }

@@ -8,7 +8,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 /// Config from the user config file.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct DotsConfig {
     #[serde(default = "default_true")]
     pub date_starts_with_year: bool,
@@ -95,6 +95,35 @@ pub struct DotRenameConfig {
     pub suffix_dir: bool,
     pub suffix_dir_recursive: bool,
     pub verbose: bool,
+}
+
+impl Default for DotsConfig {
+    fn default() -> Self {
+        Self {
+            date_starts_with_year: true,
+            debug: false,
+            directory: false,
+            dryrun: false,
+            increment: false,
+            include: Vec::new(),
+            move_date_after_prefix: Vec::new(),
+            move_to_end: Vec::new(),
+            move_to_start: Vec::new(),
+            overwrite: false,
+            prefix_dir: false,
+            prefix_dir_recursive: false,
+            prefix_dir_start: false,
+            suffix_dir: false,
+            suffix_dir_recursive: false,
+            pre_replace: Vec::new(),
+            recurse: false,
+            regex_replace: Vec::new(),
+            remove_random: false,
+            replace: Vec::new(),
+            remove_from_start: Vec::new(),
+            verbose: false,
+        }
+    }
 }
 
 impl DotsConfig {

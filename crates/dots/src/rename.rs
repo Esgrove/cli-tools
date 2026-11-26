@@ -557,7 +557,7 @@ impl DotRename {
             cli_tools_common::get_normalized_dir_name(parent_dir)?
         };
         let name = self.format_name(&formatted_dir);
-        if self.config.prefix_dir {
+        if self.config.prefix_dir && self.config.prefix.is_none() {
             if self.config.verbose {
                 println!("Using directory prefix: {name}");
             }
@@ -584,7 +584,7 @@ impl DotRename {
                 }
             }
             self.config.prefix = Some(name);
-        } else if self.config.suffix_dir {
+        } else if self.config.suffix_dir && self.config.suffix.is_none() {
             if self.config.verbose {
                 println!("Using directory suffix: {name}");
             }
