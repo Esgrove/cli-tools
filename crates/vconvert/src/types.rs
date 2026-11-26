@@ -436,27 +436,6 @@ impl VideoInfo {
         })
     }
 
-    fn bit_depth_from_pixel_format(pixel_format: &str) -> Option<u8> {
-        if matches!(pixel_format, "nv12" | "nv21" | "nv16" | "yuv410p") {
-            Some(8)
-        } else if pixel_format.contains("10") {
-            Some(10)
-        } else if pixel_format.contains("12") {
-            Some(12)
-        } else if pixel_format.contains("16")
-            || pixel_format.starts_with("rgb48")
-            || pixel_format.starts_with("bgr48")
-            || pixel_format.starts_with("rgba64")
-            || pixel_format.starts_with("bgra64")
-        {
-            Some(16)
-        } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") {
-            Some(8)
-        } else {
-            None
-        }
-    }
-
     /// Determine quality level based on resolution and bitrate.
     /// Quality level 1 to 51, lower is better quality and bigger file size.
     pub(crate) fn quality_level(&self) -> u8 {
@@ -513,6 +492,28 @@ impl VideoInfo {
         match self.codec.as_str() {
             "av1" => Codec::Av1,
             _ => Codec::X265,
+        }
+    }
+
+    /// Infer the per-channel bit depth from an ffmpeg pixel format name.
+    fn bit_depth_from_pixel_format(pixel_format: &str) -> Option<u8> {
+        if matches!(pixel_format, "nv12" | "nv21" | "nv16" | "yuv410p") {
+            Some(8)
+        } else if pixel_format.contains("10") {
+            Some(10)
+        } else if pixel_format.contains("12") {
+            Some(12)
+        } else if pixel_format.contains("16")
+            || pixel_format.starts_with("rgb48")
+            || pixel_format.starts_with("bgr48")
+            || pixel_format.starts_with("rgba64")
+            || pixel_format.starts_with("bgra64")
+        {
+            Some(16)
+        } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") {
+            Some(8)
+        } else {
+            None
         }
     }
 }
@@ -682,18 +683,6 @@ impl From<walkdir::DirEntry> for VideoFile {
 }
 
 impl ProcessableFile {
-    /// Create a processable file using the output path rules for the selected mode.
-    #[must_use]
-    pub fn for_mode(file: VideoFile, info: VideoInfo, subtitle_files: Vec<SubtitleFile>, movie_mode: bool) -> Self {
-        let output_path = file.get_output_path_for_mode_and_bit_depth(
-            info.codec_suffix(),
-            movie_mode,
-            !subtitle_files.is_empty(),
-            info.bit_depth,
-        );
-        Self::new(file, info, output_path, subtitle_files)
-    }
-
     /// Create a new `ProcessableFile` with its resolved output path.
     pub(crate) const fn new(
         file: VideoFile,
@@ -707,6 +696,18 @@ impl ProcessableFile {
             output_path,
             subtitle_files,
         }
+    }
+
+    /// Create a processable file using the output path rules for the selected mode.
+    #[must_use]
+    pub fn for_mode(file: VideoFile, info: VideoInfo, subtitle_files: Vec<SubtitleFile>, movie_mode: bool) -> Self {
+        let output_path = file.get_output_path_for_mode_and_bit_depth(
+            info.codec_suffix(),
+            movie_mode,
+            !subtitle_files.is_empty(),
+            info.bit_depth,
+        );
+        Self::new(file, info, output_path, subtitle_files)
     }
 }
 
@@ -822,6 +823,7 @@ pub fn movie_subtitle_match_score(video_stem: &str, subtitle_stem: &str) -> Opti
     None
 }
 
+/// Split a movie filename stem into lowercase alphanumeric tokens, dropping release metadata tokens.
 fn normalized_movie_tokens(stem: &str) -> Vec<String> {
     stem.to_lowercase()
         .replace("h.264", "h264")
@@ -833,10 +835,12 @@ fn normalized_movie_tokens(stem: &str) -> Vec<String> {
         .collect()
 }
 
+/// Return whether `haystack` contains `needle` as a contiguous slice of tokens.
 fn contains_tokens(haystack: &[String], needle: &[String]) -> bool {
     haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
+/// Return whether a token is release or encoding metadata that should not affect subtitle matching.
 fn is_ignored_movie_token(token: &str) -> bool {
     matches!(
         token,

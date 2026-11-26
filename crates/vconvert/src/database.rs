@@ -129,15 +129,6 @@ pub struct PendingFileFilter {
 }
 
 impl PendingAction {
-    /// Convert action to string for database storage.
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Convert => "convert",
-            Self::Remux => "remux",
-            Self::SubtitleMux => "subtitle_mux",
-        }
-    }
-
     /// Parse action from string.
     fn from_str(value: &str) -> Self {
         match value {
@@ -145,6 +136,15 @@ impl PendingAction {
             "subtitle_mux" => Self::SubtitleMux,
             // Default to Convert for unknown values
             _ => Self::Convert,
+        }
+    }
+
+    /// Convert action to string for database storage.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Convert => "convert",
+            Self::Remux => "remux",
+            Self::SubtitleMux => "subtitle_mux",
         }
     }
 }
@@ -156,25 +156,6 @@ impl std::fmt::Display for PendingAction {
 }
 
 impl Database {
-    /// Get the database path.
-    ///
-    /// Uses the platform-specific local data directory:
-    /// - Windows: `%LOCALAPPDATA%\cli-tools\vconvert.db`
-    /// - macOS: `~/Library/Application Support/cli-tools/vconvert.db`
-    /// - Linux: `~/.local/share/cli-tools/vconvert.db`
-    fn database_path() -> PathBuf {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cli-tools");
-        data_dir.join(DATABASE_FILENAME)
-    }
-
-    /// Get the database path for display purposes.
-    #[must_use]
-    pub fn path() -> PathBuf {
-        Self::database_path()
-    }
-
     /// Open or create the database at the default path.
     ///
     /// # Errors
@@ -216,100 +197,10 @@ impl Database {
         Ok(database)
     }
 
-    /// Initialize the database schema.
-    fn initialize(&self) -> Result<()> {
-        self.connection
-            .execute_batch(
-                r"
-                -- Pending video files to process
-                CREATE TABLE IF NOT EXISTS pending_files (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    extension TEXT NOT NULL,
-                    codec TEXT NOT NULL,
-                    bitrate_kbps INTEGER NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    duration REAL NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    frames_per_second REAL NOT NULL,
-                    bit_depth INTEGER NOT NULL DEFAULT 0,
-                    action TEXT NOT NULL,
-                    created_time INTEGER NOT NULL,
-                    modified_time INTEGER
-                );
-
-                -- Indexes for fast querying
-                CREATE INDEX IF NOT EXISTS idx_pending_action ON pending_files(action);
-                CREATE INDEX IF NOT EXISTS idx_pending_extension ON pending_files(extension);
-                CREATE INDEX IF NOT EXISTS idx_pending_bitrate ON pending_files(bitrate_kbps);
-                CREATE INDEX IF NOT EXISTS idx_pending_duration ON pending_files(duration);
-
-                -- Cache of all files that have been scanned with ffprobe.
-                -- Stores results for both pending and skipped files so ffprobe is not
-                -- re-run on unchanged files (identified by path + size_bytes).
-                CREATE TABLE IF NOT EXISTS scanned_files (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL,
-                    codec TEXT NOT NULL,
-                    bitrate_kbps INTEGER NOT NULL,
-                    duration REAL NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    frames_per_second REAL NOT NULL,
-                    bit_depth INTEGER NOT NULL DEFAULT 0,
-                    scanned_time INTEGER NOT NULL,
-                    modified_time_ns INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
-
-                -- Remove entries with corrupted fps while keeping 0.0 rows shared with dupefind.
-                DELETE FROM scanned_files WHERE (frames_per_second > 0.0 AND frames_per_second < 1.0) OR frames_per_second > 240.0;
-                DELETE FROM pending_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
-
-                -- Performance optimizations
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA cache_size = -8000;
-                ",
-            )
-            .context("Failed to initialize database schema")?;
-
-        self.add_column_if_missing("pending_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("pending_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("pending_files", "disk_size_bytes", "INTEGER")?;
-        self.add_column_if_missing("scanned_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("scanned_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
-
-        Ok(())
-    }
-
-    fn add_column_if_missing(&self, table_name: &str, column_name: &str, column_definition: &str) -> Result<()> {
-        let mut statement = self
-            .connection
-            .prepare(&format!("PRAGMA table_info({table_name})"))
-            .with_context(|| format!("Failed to inspect table schema: {table_name}"))?;
-        let column_exists = statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(std::result::Result::ok)
-            .any(|name| name == column_name);
-
-        if !column_exists {
-            match self.connection.execute(
-                &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
-                [],
-            ) {
-                Ok(_) => {}
-                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
-                    if message.contains("duplicate column name") => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("Failed to add {column_name} column to {table_name}"));
-                }
-            }
-        }
-        Ok(())
+    /// Get the database path for display purposes.
+    #[must_use]
+    pub fn path() -> PathBuf {
+        Self::database_path()
     }
 
     /// Insert or update a pending file entry.
@@ -773,6 +664,116 @@ impl Database {
             .context("Failed to query extensions")?;
 
         Ok(extensions)
+    }
+
+    /// Get the database path.
+    ///
+    /// Uses the platform-specific local data directory:
+    /// - Windows: `%LOCALAPPDATA%\cli-tools\vconvert.db`
+    /// - macOS: `~/Library/Application Support/cli-tools/vconvert.db`
+    /// - Linux: `~/.local/share/cli-tools/vconvert.db`
+    fn database_path() -> PathBuf {
+        let data_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("cli-tools");
+        data_dir.join(DATABASE_FILENAME)
+    }
+
+    /// Initialize the database schema.
+    fn initialize(&self) -> Result<()> {
+        self.connection
+            .execute_batch(
+                r"
+                -- Pending video files to process
+                CREATE TABLE IF NOT EXISTS pending_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    extension TEXT NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 0,
+                    action TEXT NOT NULL,
+                    created_time INTEGER NOT NULL,
+                    modified_time INTEGER
+                );
+
+                -- Indexes for fast querying
+                CREATE INDEX IF NOT EXISTS idx_pending_action ON pending_files(action);
+                CREATE INDEX IF NOT EXISTS idx_pending_extension ON pending_files(extension);
+                CREATE INDEX IF NOT EXISTS idx_pending_bitrate ON pending_files(bitrate_kbps);
+                CREATE INDEX IF NOT EXISTS idx_pending_duration ON pending_files(duration);
+
+                -- Cache of all files that have been scanned with ffprobe.
+                -- Stores results for both pending and skipped files so ffprobe is not
+                -- re-run on unchanged files (identified by path + size_bytes).
+                CREATE TABLE IF NOT EXISTS scanned_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 0,
+                    scanned_time INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
+
+                -- Remove entries with corrupted fps while keeping 0.0 rows shared with dupefind.
+                DELETE FROM scanned_files WHERE (frames_per_second > 0.0 AND frames_per_second < 1.0) OR frames_per_second > 240.0;
+                DELETE FROM pending_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
+
+                -- Performance optimizations
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA cache_size = -8000;
+                ",
+            )
+            .context("Failed to initialize database schema")?;
+
+        self.add_column_if_missing("pending_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("pending_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("pending_files", "disk_size_bytes", "INTEGER")?;
+        self.add_column_if_missing("scanned_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("scanned_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
+
+        Ok(())
+    }
+
+    /// Add a column to `table_name` unless it already exists.
+    fn add_column_if_missing(&self, table_name: &str, column_name: &str, column_definition: &str) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("PRAGMA table_info({table_name})"))
+            .with_context(|| format!("Failed to inspect table schema: {table_name}"))?;
+        let column_exists = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|name| name == column_name);
+
+        if !column_exists {
+            match self.connection.execute(
+                &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
+                [],
+            ) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
+                    if message.contains("duplicate column name") => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("Failed to add {column_name} column to {table_name}"));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

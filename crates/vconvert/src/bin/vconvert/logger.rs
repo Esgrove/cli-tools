@@ -78,10 +78,6 @@ impl FileLogger {
         }
     }
 
-    fn timestamp() -> String {
-        ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S").to_string()
-    }
-
     /// Log when starting the program
     pub(crate) fn log_init(&self, config: &Config) {
         self.write_entry(|writer| {
@@ -275,6 +271,11 @@ impl FileLogger {
             )?;
             writeln!(writer, "[{}] END", Self::timestamp())
         });
+    }
+
+    /// Format the current local time for log entries.
+    fn timestamp() -> String {
+        ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S").to_string()
     }
 
     /// Write one log entry and flush it, warning once if the log file cannot be written.

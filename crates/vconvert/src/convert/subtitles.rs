@@ -32,49 +32,6 @@ impl VideoConvert<'_> {
         subtitle_files
     }
 
-    /// Gather supported subtitle sidecar files below a root path.
-    fn gather_subtitle_files_from_root(root: &Path, max_depth: usize) -> Vec<SubtitleFile> {
-        let subtitle_paths: Vec<PathBuf> = WalkDir::new(root)
-            .max_depth(max_depth)
-            .into_iter()
-            .filter_entry(|entry| !cli_tools_common::should_skip_entry(entry))
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .map(walkdir::DirEntry::into_path)
-            .filter(|path| SubtitleFile::is_supported_extension(&cli_tools_common::path_to_file_extension_string(path)))
-            .collect();
-
-        let idx_stems: HashSet<PathBuf> = subtitle_paths
-            .iter()
-            .filter(|path| cli_tools_common::path_to_file_extension_string(path) == "idx")
-            .map(|path| path_without_extension(path))
-            .collect();
-
-        let sub_by_stem: HashMap<PathBuf, PathBuf> = subtitle_paths
-            .iter()
-            .filter(|path| cli_tools_common::path_to_file_extension_string(path) == "sub")
-            .map(|path| (path_without_extension(path), path.clone()))
-            .collect();
-
-        let mut subtitle_files: Vec<SubtitleFile> = subtitle_paths
-            .into_iter()
-            .filter_map(|path| {
-                let extension = cli_tools_common::path_to_file_extension_string(&path);
-                if extension == "sub" && idx_stems.contains(&path_without_extension(&path)) {
-                    return None;
-                }
-                let paired_sub_path = if extension == "idx" {
-                    sub_by_stem.get(&path_without_extension(&path)).cloned()
-                } else {
-                    None
-                };
-                Some(SubtitleFile::new(&path, paired_sub_path))
-            })
-            .collect();
-        subtitle_files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-        subtitle_files
-    }
-
     /// Match subtitle sidecars to video files in the same directory using normalized title tokens.
     ///
     /// Scoring considers every known video file present in the same directory, not only the active batch,
@@ -118,6 +75,49 @@ impl VideoConvert<'_> {
         }
 
         matches
+    }
+
+    /// Gather supported subtitle sidecar files below a root path.
+    fn gather_subtitle_files_from_root(root: &Path, max_depth: usize) -> Vec<SubtitleFile> {
+        let subtitle_paths: Vec<PathBuf> = WalkDir::new(root)
+            .max_depth(max_depth)
+            .into_iter()
+            .filter_entry(|entry| !cli_tools_common::should_skip_entry(entry))
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(walkdir::DirEntry::into_path)
+            .filter(|path| SubtitleFile::is_supported_extension(&cli_tools_common::path_to_file_extension_string(path)))
+            .collect();
+
+        let idx_stems: HashSet<PathBuf> = subtitle_paths
+            .iter()
+            .filter(|path| cli_tools_common::path_to_file_extension_string(path) == "idx")
+            .map(|path| path_without_extension(path))
+            .collect();
+
+        let sub_by_stem: HashMap<PathBuf, PathBuf> = subtitle_paths
+            .iter()
+            .filter(|path| cli_tools_common::path_to_file_extension_string(path) == "sub")
+            .map(|path| (path_without_extension(path), path.clone()))
+            .collect();
+
+        let mut subtitle_files: Vec<SubtitleFile> = subtitle_paths
+            .into_iter()
+            .filter_map(|path| {
+                let extension = cli_tools_common::path_to_file_extension_string(&path);
+                if extension == "sub" && idx_stems.contains(&path_without_extension(&path)) {
+                    return None;
+                }
+                let paired_sub_path = if extension == "idx" {
+                    sub_by_stem.get(&path_without_extension(&path)).cloned()
+                } else {
+                    None
+                };
+                Some(SubtitleFile::new(&path, paired_sub_path))
+            })
+            .collect();
+        subtitle_files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        subtitle_files
     }
 
     /// Combine the active batch with all other known video files sitting in the same directories.
