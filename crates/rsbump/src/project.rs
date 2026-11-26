@@ -18,7 +18,7 @@ use cli_tools_common::{command_exists, count_label, get_relative_path_or_filenam
 
 use crate::discovery::{find_dockerfiles, find_member_manifests};
 use crate::dockerfile::update_dockerfile;
-use crate::manifest::{ManifestUpdate, RustVersion, has_workspace_table, update_rust_version};
+use crate::manifest::{FieldLocation, ManifestUpdate, RustVersion, has_workspace_table, update_rust_version};
 use crate::registry::DigestResolver;
 
 /// Final state of one project.
@@ -43,6 +43,8 @@ pub enum ReportEntry {
     RustVersionBumped {
         /// Manifest path relative to the project root.
         manifest: String,
+        /// Manifest table containing the field.
+        location: FieldLocation,
         /// Version before the bump.
         old: String,
         /// Version after the bump.
@@ -445,15 +447,17 @@ fn bump_root_manifest(
 ) -> Result<bool> {
     match update_rust_version(original, context.target)? {
         ManifestUpdate::Updated {
-            old,
-            new,
+            changes,
             content: updated,
         } => {
-            report.push(ReportEntry::RustVersionBumped {
-                manifest: "Cargo.toml".to_string(),
-                old,
-                new,
-            });
+            for change in changes {
+                report.push(ReportEntry::RustVersionBumped {
+                    manifest: "Cargo.toml".to_string(),
+                    location: change.location,
+                    old: change.old,
+                    new: change.new,
+                });
+            }
             write_or_record_diff(report, context.options, path, "Cargo.toml", original, updated)?;
             Ok(true)
         }
@@ -477,15 +481,17 @@ fn bump_member_manifest(report: &mut Report, context: &RunContext, path: &Path) 
     let relative = path.strip_prefix(&report.root).unwrap_or(path).display().to_string();
     match update_rust_version(&original, context.target)? {
         ManifestUpdate::Updated {
-            old,
-            new,
+            changes,
             content: updated,
         } => {
-            report.push(ReportEntry::RustVersionBumped {
-                manifest: relative.clone(),
-                old,
-                new,
-            });
+            for change in changes {
+                report.push(ReportEntry::RustVersionBumped {
+                    manifest: relative.clone(),
+                    location: change.location,
+                    old: change.old,
+                    new: change.new,
+                });
+            }
             write_or_record_diff(report, context.options, path, &relative, &original, updated)?;
             Ok(MemberUpdate::Updated)
         }
@@ -862,6 +868,7 @@ mod test_bump_manifest {
         assert_eq!(report.outcome, Outcome::Updated);
         assert!(report.entries.contains(&ReportEntry::RustVersionBumped {
             manifest: "crates/own/Cargo.toml".to_string(),
+            location: FieldLocation::Package,
             old: "1.90".to_string(),
             new: "1.100".to_string(),
         }));

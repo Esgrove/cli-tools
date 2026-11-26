@@ -10,16 +10,14 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use toml_edit::{DocumentMut, Item, Value};
 
-/// Result of updating the `rust-version` field of one manifest.
+/// Result of updating the explicit `rust-version` fields of one manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManifestUpdate {
-    /// The field was changed, with the new manifest content.
+    /// At least one field was changed, with the new manifest content.
     Updated {
-        /// Version string before the change.
-        old: String,
-        /// Version string after the change.
-        new: String,
-        /// Full manifest content after the change.
+        /// The fields that changed.
+        changes: Vec<VersionChange>,
+        /// Full manifest content after the changes.
         content: String,
     },
     /// The field already matches the target, or is newer than it.
@@ -30,11 +28,22 @@ pub enum ManifestUpdate {
 
 /// Location of the `rust-version` field inside a manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FieldLocation {
+pub enum FieldLocation {
     /// `[workspace.package]`
     WorkspacePackage,
     /// `[package]`
     Package,
+}
+
+/// One explicit `rust-version` that was raised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionChange {
+    /// Location of the field in the manifest.
+    pub location: FieldLocation,
+    /// Version before the change.
+    pub old: String,
+    /// Version after the change.
+    pub new: String,
 }
 
 /// The local `rustc` version and the stable release it targets.
@@ -167,7 +176,7 @@ fn command_stdout(program: &str, args: &[&str]) -> Result<String> {
 
 /// Set the `rust-version` field in the manifest content to the target version.
 ///
-/// Uses `[workspace.package]` when it has the field, and `[package]` otherwise.
+/// Updates both `[workspace.package]` and `[package]` when they set explicit versions.
 /// A field inherited with `rust-version.workspace = true` counts as missing,
 /// since the workspace root owns the value.
 /// A field that is already newer than the target is left alone.
@@ -176,31 +185,31 @@ fn command_stdout(program: &str, args: &[&str]) -> Result<String> {
 /// Returns an error if the manifest is not valid TOML.
 pub fn update_rust_version(content: &str, target: RustVersion) -> Result<ManifestUpdate> {
     let mut document: DocumentMut = content.parse().context("Failed to parse Cargo.toml")?;
-    let Some(location) = find_field(&document) else {
-        return Ok(ManifestUpdate::NoField);
-    };
-    let Some(value) = field_mut(&mut document, location).and_then(Item::as_value_mut) else {
-        return Ok(ManifestUpdate::NoField);
-    };
-    let Some(old) = value.as_str().map(ToString::to_string) else {
-        return Ok(ManifestUpdate::NoField);
-    };
-
-    if RustVersion::parse(&old).is_some_and(|current| current >= target) {
-        return Ok(ManifestUpdate::Current(old));
+    let mut changes = Vec::new();
+    let mut current = None;
+    for location in [FieldLocation::WorkspacePackage, FieldLocation::Package] {
+        let Some(value) = field_mut(&mut document, location).and_then(Item::as_value_mut) else {
+            continue;
+        };
+        let Some(old) = value.as_str().map(ToString::to_string) else {
+            continue;
+        };
+        let new = target.format_like(&old);
+        if new == old || RustVersion::parse(&old).is_some_and(|version| version >= target) {
+            current.get_or_insert(old);
+            continue;
+        }
+        let decor = value.decor().clone();
+        *value = Value::from(new.as_str());
+        *value.decor_mut() = decor;
+        changes.push(VersionChange { location, old, new });
     }
 
-    let new = target.format_like(&old);
-    if new == old {
-        return Ok(ManifestUpdate::Current(old));
+    if changes.is_empty() {
+        return Ok(current.map_or(ManifestUpdate::NoField, ManifestUpdate::Current));
     }
-    let decor = value.decor().clone();
-    *value = Value::from(new.as_str());
-    *value.decor_mut() = decor;
-
     Ok(ManifestUpdate::Updated {
-        old,
-        new,
+        changes,
         content: document.to_string(),
     })
 }
@@ -211,23 +220,6 @@ pub fn has_workspace_table(content: &str) -> bool {
     content
         .parse::<DocumentMut>()
         .is_ok_and(|document| document.contains_key("workspace"))
-}
-
-/// Find which table holds a string `rust-version` field.
-fn find_field(document: &DocumentMut) -> Option<FieldLocation> {
-    let is_string = |item: Option<&Item>| item.and_then(Item::as_str).is_some();
-    if is_string(
-        document
-            .get("workspace")
-            .and_then(|workspace| workspace.get("package"))
-            .and_then(|package| package.get("rust-version")),
-    ) {
-        return Some(FieldLocation::WorkspacePackage);
-    }
-    if is_string(document.get("package").and_then(|package| package.get("rust-version"))) {
-        return Some(FieldLocation::Package);
-    }
-    None
 }
 
 /// Mutable access to the `rust-version` field at the given location.
@@ -327,8 +319,11 @@ mod test_update_rust_version {
         assert_eq!(
             update,
             ManifestUpdate::Updated {
-                old: "1.94".to_string(),
-                new: "1.100".to_string(),
+                changes: vec![VersionChange {
+                    location: FieldLocation::Package,
+                    old: "1.94".to_string(),
+                    new: "1.100".to_string(),
+                }],
                 content: "[package]\nname = \"demo\"\nedition = \"2024\"\nrust-version = \"1.100\"\n".to_string(),
             }
         );
@@ -345,12 +340,35 @@ mod test_update_rust_version {
     }
 
     #[test]
+    fn bumps_both_explicit_root_versions_without_changing_formatting() {
+        let original = "[workspace.package]\nrust-version = \"1.93.0\" # default\n\n[package]\nrust-version  =  \"1.94\" # root override\n";
+        let ManifestUpdate::Updated { content, .. } = update_rust_version(original, TARGET).unwrap() else {
+            panic!("expected an update");
+        };
+        assert_eq!(
+            content,
+            "[workspace.package]\nrust-version = \"1.100.0\" # default\n\n[package]\nrust-version  =  \"1.100\" # root override\n"
+        );
+    }
+
+    #[test]
+    fn a_current_workspace_default_does_not_hide_an_older_root_version() {
+        let original = "[workspace.package]\nrust-version = \"1.101\"\n\n[package]\nrust-version = \"1.94\"\n";
+        let ManifestUpdate::Updated { content, .. } = update_rust_version(original, TARGET).unwrap() else {
+            panic!("expected an update");
+        };
+        assert!(content.contains("[workspace.package]\nrust-version = \"1.101\""));
+        assert!(content.contains("[package]\nrust-version = \"1.100\""));
+    }
+
+    #[test]
     fn keeps_three_components() {
         let content = "[package]\nname = \"demo\"\nrust-version = \"1.93.0\"\n";
-        let ManifestUpdate::Updated { new, .. } = update_rust_version(content, TARGET).expect("valid manifest") else {
+        let ManifestUpdate::Updated { changes, .. } = update_rust_version(content, TARGET).expect("valid manifest")
+        else {
             unreachable!("expected an update");
         };
-        assert_eq!(new, "1.100.0");
+        assert_eq!(changes[0].new, "1.100.0");
     }
 
     #[test]
