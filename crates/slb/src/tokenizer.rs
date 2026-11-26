@@ -23,9 +23,18 @@ const CHUNK_END_CANDIDATES: ByteSet = ByteSet::new(b" \t\n\x0b\x0c\r\xc2\xe1\xe2
 /// The backtick that delimits a code span.
 const BACKTICK: ByteSet = ByteSet::new(b"`");
 
+/// Bytes that can begin a code span or an HTML character reference in the middle of a chunk.
+const EMBEDDED_ATOM_STARTS: ByteSet = ByteSet::new(b"`&");
+
 /// Matches a URL such as `https://example.com/path` or `www.example.com`.
 static RE_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:[a-z][a-z0-9+.-]*://\S+|www\.\S+)$").expect("Invalid URL regex"));
+
+/// Matches the syntax of a named, decimal, or hexadecimal HTML character reference.
+static RE_HTML_REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^&(?:[A-Za-z][A-Za-z0-9]{1,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});")
+        .expect("Invalid HTML character reference regex")
+});
 
 /// Matches a file name with an extension such as `lib.rs`.
 static RE_FILE_NAME: LazyLock<Regex> =
@@ -204,29 +213,19 @@ fn read_token<'a>(
     }
     let leading = text.get(start..leading_end).unwrap_or_default();
 
-    if let Some((atom_end, kind)) = atom_at(text, leading_end) {
-        // The atom and the punctuation after it are one run of the line, so the core is one slice of it.
-        let tail_end = chunk_end(text, candidates, atom_end, normalize_dashes);
-        let tail = text.get(atom_end..tail_end).unwrap_or_default();
-        let trailing_start = atom_end + trailing_punctuation_start(tail, 0);
-        let core = text.get(leading_end..trailing_start).unwrap_or_default();
-        let trailing = text.get(trailing_start..tail_end).unwrap_or_default();
-        let token = Token::new(
-            Cow::Borrowed(leading),
-            Cow::Borrowed(core),
-            Cow::Borrowed(trailing),
-            kind,
-            origin_line,
-        );
-        return (token, tail_end);
-    }
-
+    let (search_from, word_end, initial_kind) = atom_at(text, leading_end)
+        .map_or((leading_end, word_end, None), |(end, kind)| {
+            (end, chunk_end(text, candidates, end, normalize_dashes), Some(kind))
+        });
+    let (word_end, protected_end, embedded_kind) =
+        embedded_atoms(text, candidates, search_from, word_end, normalize_dashes);
+    let protected_kind = initial_kind.or(embedded_kind);
     let chunk = text.get(leading_end..word_end).unwrap_or_default();
-    let keep = chunk.chars().next().map_or(0, char::len_utf8);
+    let keep = (protected_end - leading_end).max(chunk.chars().next().map_or(0, char::len_utf8));
     let core_end = trailing_punctuation_start(chunk, keep);
     let core = chunk.get(..core_end).unwrap_or_default();
     let trailing = chunk.get(core_end..).unwrap_or_default();
-    let kind = classify_core(core, leading.is_empty() && trailing.is_empty());
+    let kind = protected_kind.unwrap_or_else(|| classify_core(core, leading.is_empty() && trailing.is_empty()));
     let token = Token::new(
         Cow::Borrowed(leading),
         Cow::Borrowed(core),
@@ -235,6 +234,68 @@ fn read_token<'a>(
         origin_line,
     );
     (token, word_end)
+}
+
+/// Extend a chunk through any embedded atoms, including their original whitespace and punctuation.
+fn embedded_atoms(
+    text: &str,
+    candidates: &ByteBitmap,
+    mut position: usize,
+    mut word_end: usize,
+    normalize_dashes: bool,
+) -> (usize, usize, Option<TokenKind>) {
+    let mut protected_end = position;
+    let mut kind = None;
+    while let Some(offset) = text
+        .as_bytes()
+        .get(position..word_end)
+        .and_then(|chunk| cli_tools_common::simd::find_byte_in(chunk, &EMBEDDED_ATOM_STARTS))
+    {
+        position += offset;
+        let rest = text.get(position..).unwrap_or_default();
+        let matched = if rest.starts_with('`') {
+            backtick_span_end(text, position).map(|end| (end, TokenKind::Code))
+        } else {
+            RE_HTML_REFERENCE
+                .find(rest)
+                .map(|reference| (position + reference.end(), TokenKind::Html))
+        };
+        if let Some((end, atom_kind)) = matched {
+            protected_end = end;
+            kind = Some(atom_kind);
+            position = end;
+            if word_end < end {
+                word_end = chunk_end(text, candidates, end, normalize_dashes);
+            }
+        } else {
+            position += backtick_run(text.as_bytes(), position).max(1);
+        }
+    }
+    (word_end, protected_end, kind)
+}
+
+/// Whether a paragraph contains a backtick code span with delimiters on different lines.
+pub(super) fn has_multiline_code_span(lines: &[&str]) -> bool {
+    for (line_index, line) in lines.iter().enumerate() {
+        let mut position = 0;
+        while let Some(offset) = line.get(position..).and_then(|rest| rest.find('`')) {
+            position += offset;
+            if let Some(end) = backtick_span_end(line, position) {
+                position = end;
+                continue;
+            }
+            let opening_run = backtick_run(line.as_bytes(), position);
+            if lines.iter().skip(line_index + 1).any(|later| {
+                later
+                    .split(|character| character != '`')
+                    .any(|run| run.len() == opening_run)
+            }) {
+                return true;
+            }
+            position += opening_run;
+        }
+    }
+    false
 }
 
 /// Byte offset where the closing punctuation at the end of the chunk starts.

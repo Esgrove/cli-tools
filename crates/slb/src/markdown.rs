@@ -12,6 +12,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::paragraph::{HardBreak, Paragraph, Region};
+use super::tokenizer::has_multiline_code_span;
 use cli_tools_common::leading_whitespace;
 
 pub use super::looks_like_code::looks_like_code;
@@ -696,7 +697,7 @@ fn make_paragraph(
             message: Cow::Borrowed(message),
         })
     });
-    if ignored || heuristic_skip.is_some() {
+    if ignored || heuristic_skip.is_some() || has_multiline_code_span(contents) {
         if let Some(notice) = heuristic_skip {
             notices.push(notice);
         }
