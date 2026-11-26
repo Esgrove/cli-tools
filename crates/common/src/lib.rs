@@ -6,6 +6,7 @@
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
+pub mod batch_rename;
 #[cfg(feature = "completion")]
 pub mod completion;
 #[cfg(feature = "config")]
@@ -19,6 +20,7 @@ pub mod simd;
 pub mod test_support;
 pub mod utils;
 
+pub use batch_rename::{BatchRenameEntry, BatchRenameOutcome, BatchRenameStatus, BatchRenamer};
 #[cfg(feature = "completion")]
 pub use completion::{CompletionArgs, generate_shell_completion};
 #[cfg(feature = "config")]
@@ -26,9 +28,10 @@ pub use config::{load_user_config_section, load_user_config_section_at, parse_us
 #[cfg(feature = "diff")]
 pub use diff::{color_diff, diff_lines, show_diff};
 pub use file_handling::{
-    OverwritePolicy, RenameOutcome, TargetReservations, check_destination_parents, copy_dir_recursive,
-    copy_file_with_times, directory_is_case_sensitive, is_case_only_change, paths_refer_to_same_entry,
-    paths_refer_to_same_file, safe_rename, unique_sibling_path, write_atomically,
+    CopyVerifier, MoveResult, OverwritePolicy, RenameOutcome, TargetReservations, check_destination_parents,
+    copy_dir_recursive, copy_file_with_times, directory_is_case_sensitive, is_case_only_change,
+    paths_refer_to_same_entry, paths_refer_to_same_file, remove_empty_directories, safe_move_file, safe_rename,
+    unique_sibling_path, write_atomically,
 };
 pub use utils::{
     NameFilter, WalkOptions, collect_entries, command_exists, count_files, data_dir, data_file_path, find_command,
@@ -888,8 +891,21 @@ pub fn get_unique_path_with_reservations(
     extension: &str,
     reservations: &TargetReservations,
 ) -> PathBuf {
+    get_unique_path_with_reservations_from(dir, filename, stem, extension, 1, reservations)
+}
+
+/// Find a numbered destination starting at `start_index` that is free on disk and not claimed in `reservations`.
+#[must_use]
+pub fn get_unique_path_with_reservations_from(
+    dir: &Path,
+    filename: &str,
+    stem: &str,
+    extension: &str,
+    start_index: u32,
+    reservations: &TargetReservations,
+) -> PathBuf {
     let mut path = dir.join(filename);
-    let mut counter = 1;
+    let mut counter = start_index;
     while std::fs::symlink_metadata(&path).is_ok() || reservations.contains(&path) {
         let new_name = if extension.is_empty() {
             format!("{stem}.{counter}")
@@ -897,7 +913,10 @@ pub fn get_unique_path_with_reservations(
             format!("{stem}.{counter}.{extension}")
         };
         path = dir.join(new_name);
-        counter += 1;
+        let Some(next) = counter.checked_add(1) else {
+            break;
+        };
+        counter = next;
     }
 
     path

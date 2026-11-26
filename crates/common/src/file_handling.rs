@@ -37,6 +37,19 @@ pub enum RenameOutcome {
     SkippedExisting,
 }
 
+/// Result of a [`safe_move_file`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveResult {
+    /// Source and destination were the same entry with the same name.
+    Unchanged,
+    /// Source was moved via same-filesystem rename.
+    Renamed,
+    /// Source was copied across devices, verified, atomically published, and removed.
+    CopiedAndRemoved,
+    /// Destination already existed and the policy was [`OverwritePolicy::Skip`].
+    SkippedExisting,
+}
+
 /// Planned destination paths for one batch of renames or moves.
 ///
 /// Paths are compared case-insensitively and normalized to Unicode NFC.
@@ -204,6 +217,131 @@ pub fn safe_rename(source: &Path, target: &Path, policy: OverwritePolicy) -> io:
 
     fs::rename(source, target)?;
     Ok(RenameOutcome::Renamed)
+}
+
+/// Callback invoked after a cross-device copy completes to verify `copied` matches `source`.
+pub type CopyVerifier<'a> = &'a dyn Fn(&Path, &Path) -> io::Result<()>;
+
+/// Move a file to `destination`, falling back to verified copy-and-remove only on `CrossesDevices`.
+///
+/// Non-cross-device errors such as `PermissionDenied`, `NotFound`, or `AlreadyExists` fail fast
+/// instead of triggering an unnecessary multi-gigabyte copy.
+/// When a cross-device copy is required, contents are staged to an `O_EXCL` sibling file,
+/// validated with `verify_copy` when provided, published respecting `policy`, and only then is `source` removed.
+///
+/// # Errors
+/// Returns an error if moving, copying, verifying, or removing the source file fails.
+pub fn safe_move_file(
+    source: &Path,
+    destination: &Path,
+    policy: OverwritePolicy,
+    verify_copy: Option<CopyVerifier<'_>>,
+) -> io::Result<MoveResult> {
+    match safe_rename(source, destination, policy) {
+        Ok(RenameOutcome::Unchanged) => Ok(MoveResult::Unchanged),
+        Ok(RenameOutcome::SkippedExisting) => Ok(MoveResult::SkippedExisting),
+        Ok(RenameOutcome::Renamed | RenameOutcome::CaseRenamed) => Ok(MoveResult::Renamed),
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            move_file_across_devices(source, destination, policy, verify_copy)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Copy `source` to a sibling temp file next to `destination`, verify, publish, and remove `source`.
+fn move_file_across_devices(
+    source: &Path,
+    destination: &Path,
+    policy: OverwritePolicy,
+    verify_copy: Option<CopyVerifier<'_>>,
+) -> io::Result<MoveResult> {
+    if let Ok(target_meta) = fs::symlink_metadata(destination) {
+        match policy {
+            OverwritePolicy::Skip => return Ok(MoveResult::SkippedExisting),
+            OverwritePolicy::Error => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("Target already exists: {}", destination.display()),
+                ));
+            }
+            OverwritePolicy::Overwrite => {
+                if target_meta.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::IsADirectory,
+                        format!("Refusing to replace existing directory: {}", destination.display()),
+                    ));
+                }
+            }
+        }
+    }
+
+    let source_meta = fs::symlink_metadata(source)?;
+    if source_meta.file_type().is_symlink() {
+        let (temp_file, temp_path) = create_unique_sibling_file(destination, "move-tmp", None)?;
+        drop(temp_file);
+        let _ = fs::remove_file(&temp_path);
+        let mut visited = HashSet::new();
+        copy_symlink(source, &temp_path, &mut visited)?;
+        if let Err(error) = safe_rename(&temp_path, destination, policy) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+        fs::remove_file(source)?;
+        return Ok(MoveResult::CopiedAndRemoved);
+    }
+
+    let (temp_file, temp_path) = create_unique_sibling_file(destination, "move-tmp", None)?;
+    drop(temp_file);
+    let copy_result = (|| -> io::Result<MoveResult> {
+        copy_file_with_times(source, &temp_path)?;
+        if let Some(verify) = verify_copy {
+            verify(source, &temp_path)?;
+        }
+        match safe_rename(&temp_path, destination, policy)? {
+            RenameOutcome::SkippedExisting => {
+                let _ = fs::remove_file(&temp_path);
+                Ok(MoveResult::SkippedExisting)
+            }
+            RenameOutcome::Renamed | RenameOutcome::CaseRenamed | RenameOutcome::Unchanged => {
+                fs::remove_file(source)?;
+                Ok(MoveResult::CopiedAndRemoved)
+            }
+        }
+    })();
+    if copy_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    copy_result
+}
+
+/// Recursively remove empty subdirectories beneath `root` without following symlinks or deleting `root`.
+///
+/// Returns the number of removed empty directories.
+///
+/// # Errors
+/// Returns an error if a directory
+/// that appeared empty cannot be removed for a reason other than becoming non-empty concurrently.
+pub fn remove_empty_directories(root: &Path) -> io::Result<usize> {
+    let mut removed = 0usize;
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .min_depth(1)
+        .contents_first(true)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        if crate::is_directory_empty(entry.path()) {
+            match fs::remove_dir(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Replace the contents of a file without ever leaving it partly written.
@@ -841,6 +979,40 @@ mod test_file_handling_bugfixes {
 
         let actual = directory_is_case_sensitive(directory.path()).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn safe_move_file_moves_and_respects_skip_policy() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src.txt");
+        let dst = dir.path().join("dst.txt");
+        fs::write(&src, "payload").unwrap();
+
+        let outcome = safe_move_file(&src, &dst, OverwritePolicy::Skip, None).unwrap();
+        assert_eq!(outcome, MoveResult::Renamed);
+        assert!(!src.exists());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "payload");
+
+        let other = dir.path().join("other.txt");
+        fs::write(&other, "other").unwrap();
+        let skipped = safe_move_file(&other, &dst, OverwritePolicy::Skip, None).unwrap();
+        assert_eq!(skipped, MoveResult::SkippedExisting);
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "payload");
+    }
+
+    #[test]
+    fn remove_empty_directories_prunes_nested_empties_only() {
+        let dir = TempDir::new().unwrap();
+        let empty_nested = dir.path().join("a").join("b");
+        let kept = dir.path().join("kept");
+        fs::create_dir_all(&empty_nested).unwrap();
+        fs::create_dir_all(&kept).unwrap();
+        fs::write(kept.join("file.txt"), b"x").unwrap();
+
+        let removed = remove_empty_directories(dir.path()).unwrap();
+        assert_eq!(removed, 2);
+        assert!(!dir.path().join("a").exists());
+        assert!(kept.join("file.txt").exists());
     }
 }
 
