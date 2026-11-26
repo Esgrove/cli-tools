@@ -449,6 +449,21 @@ mod test_add_workflow {
     }
 
     #[tokio::test]
+    async fn unacknowledged_add_keeps_the_torrent_file_in_place() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let mut routes = session_routes("[]".to_string());
+        routes.retain(|route| route.path() != "/api/v2/torrents/add");
+        routes.push(route("/api/v2/torrents/add", 200, "<html>Sign in</html>"));
+        let port = serve(routes).await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        assert!(!directory.moved_torrent_path().exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn dryrun_with_connection_reports_existing_torrents_without_changes() -> Result<()> {
         let directory = TorrentDirectory::new();
         let port = serve(session_routes(torrent_list_with(&directory.info_hash()))).await;
