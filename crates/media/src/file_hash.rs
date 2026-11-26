@@ -31,14 +31,25 @@ pub fn fingerprint_file(path: &Path) -> anyhow::Result<FileFingerprint> {
     let modified = metadata
         .modified()
         .with_context(|| format!("Failed to read modification time for {}", path.display()))?;
-    let modified_time_ns = modified
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX));
+    let modified_time_ns = system_time_to_unix_nanos(modified);
 
     Ok(FileFingerprint {
         size_bytes: metadata.len(),
         modified_time_ns,
     })
+}
+
+/// Convert a [`std::time::SystemTime`] to signed nanoseconds relative to the Unix epoch.
+///
+/// Pre-1970 timestamps map to negative nanoseconds instead of collapsing to zero.
+fn system_time_to_unix_nanos(time: std::time::SystemTime) -> i64 {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX),
+        Err(error) => {
+            let before_epoch = error.duration().as_nanos();
+            i64::try_from(before_epoch).map_or(i64::MIN, |nanos| -nanos)
+        }
+    }
 }
 
 /// Calculate the BLAKE3 hash for a file.

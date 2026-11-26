@@ -81,10 +81,7 @@ impl ScanCache {
     /// # Errors
     /// Returns an error if the database cannot be opened or initialised.
     pub fn open_at(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
-        }
+        ensure_parent_directory(path)?;
 
         let connection =
             Connection::open(path).with_context(|| format!("Failed to open database: {}", path.display()))?;
@@ -170,6 +167,8 @@ impl ScanCache {
     }
 
     /// Add a column to `scanned_files` unless it already exists.
+    ///
+    /// Ignores SQLite's duplicate-column error so concurrent processes migrating the same database do not race.
     fn add_column_if_missing(&self, column_name: &str, column_definition: &str) -> Result<()> {
         let mut statement = self.connection.prepare("PRAGMA table_info(scanned_files)")?;
         let column_exists = statement
@@ -177,12 +176,17 @@ impl ScanCache {
             .filter_map(std::result::Result::ok)
             .any(|name| name == column_name);
         if !column_exists {
-            self.connection
-                .execute(
-                    &format!("ALTER TABLE scanned_files ADD COLUMN {column_name} {column_definition}"),
-                    [],
-                )
-                .with_context(|| format!("Failed to add column {column_name} to scanned_files"))?;
+            match self.connection.execute(
+                &format!("ALTER TABLE scanned_files ADD COLUMN {column_name} {column_definition}"),
+                [],
+            ) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
+                    if message.contains("duplicate column name") => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("Failed to add column {column_name} to scanned_files"));
+                }
+            }
         }
         Ok(())
     }
@@ -266,7 +270,11 @@ impl ScanCache {
             .map_or(0, |duration| duration.as_secs() as i64);
 
         let transaction = self.connection.transaction()?;
+        let mut count = 0;
         for (path, hash) in entries {
+            let Some(path_str) = path.to_str() else {
+                continue;
+            };
             transaction
                 .execute(
                     r"
@@ -279,7 +287,7 @@ impl ScanCache {
                         hashed_time = excluded.hashed_time
                     ",
                     params![
-                        path.to_string_lossy(),
+                        path_str,
                         hash.size_bytes as i64,
                         hash.modified_time_ns,
                         hash.blake3_hash,
@@ -287,10 +295,11 @@ impl ScanCache {
                     ],
                 )
                 .context("Failed to upsert file hash")?;
+            count += 1;
         }
 
         transaction.commit()?;
-        Ok(entries.len())
+        Ok(count)
     }
 
     /// Insert or update multiple scanned file entries in a single transaction.
@@ -312,7 +321,9 @@ impl ScanCache {
         let mut count = 0;
 
         for (path, info) in entries {
-            let path_str = path.to_string_lossy();
+            let Some(path_str) = path.to_str() else {
+                continue;
+            };
 
             let Some(size_bytes) = info.size_bytes else {
                 continue;
@@ -334,11 +345,17 @@ impl ScanCache {
                     ON CONFLICT(full_path) DO UPDATE SET
                         frames_per_second = CASE
                             WHEN excluded.frames_per_second > 0 THEN excluded.frames_per_second
-                            WHEN scanned_files.size_bytes = excluded.size_bytes THEN scanned_files.frames_per_second
+                            WHEN scanned_files.size_bytes = excluded.size_bytes
+                                AND (scanned_files.modified_time_ns = 0
+                                    OR scanned_files.modified_time_ns = excluded.modified_time_ns)
+                            THEN scanned_files.frames_per_second
                             ELSE 0
                         END,
                         bit_depth = CASE
-                            WHEN scanned_files.size_bytes = excluded.size_bytes THEN scanned_files.bit_depth
+                            WHEN scanned_files.size_bytes = excluded.size_bytes
+                                AND (scanned_files.modified_time_ns = 0
+                                    OR scanned_files.modified_time_ns = excluded.modified_time_ns)
+                            THEN scanned_files.bit_depth
                             ELSE 0
                         END,
                         size_bytes = excluded.size_bytes,
@@ -387,7 +404,9 @@ impl CachedVideoInfo {
     /// and an entry stored without a modification time is never current.
     #[must_use]
     pub const fn is_current(&self, fingerprint: &FileFingerprint) -> bool {
-        self.size_bytes == fingerprint.size_bytes && self.modified_time_ns == fingerprint.modified_time_ns
+        self.modified_time_ns != 0
+            && self.size_bytes == fingerprint.size_bytes
+            && self.modified_time_ns == fingerprint.modified_time_ns
     }
 
     /// Convert to the shared `VideoInfo` type used by the rest of the library.
@@ -395,7 +414,11 @@ impl CachedVideoInfo {
     pub fn to_video_info(&self) -> VideoInfo {
         VideoInfo {
             size_bytes: Some(self.size_bytes),
-            resolution: Resolution::from_options(Some(self.width), Some(self.height)),
+            resolution: if self.width > 0 && self.height > 0 {
+                Resolution::from_options(Some(self.width), Some(self.height))
+            } else {
+                None
+            },
             duration: if self.duration > 0.0 { Some(self.duration) } else { None },
             codec: if self.codec.is_empty() {
                 None
@@ -411,6 +434,17 @@ impl CachedVideoInfo {
     }
 }
 
+/// Create parent directories for a database path when it has a non-empty parent directory.
+fn ensure_parent_directory(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod test_scan_cache_open {
     use super::*;
@@ -419,6 +453,11 @@ mod test_scan_cache_open {
     fn opens_in_memory_database() {
         let cache = ScanCache::open_in_memory();
         assert!(cache.is_ok());
+    }
+
+    #[test]
+    fn ensure_parent_directory_ignores_empty_parent_for_single_component_path() {
+        ensure_parent_directory(Path::new("cache.db")).expect("single component relative path should succeed");
     }
 
     #[test]
@@ -797,5 +836,116 @@ mod test_cached_video_info_conversion {
         assert_eq!(restored.bitrate_kbps, original.bitrate_kbps);
         assert_eq!(restored.duration, original.duration);
         assert_eq!(restored.resolution, original.resolution);
+    }
+
+    #[test]
+    fn zero_resolution_becomes_none() {
+        let cached = CachedVideoInfo {
+            size_bytes: 1_000,
+            codec: "h264".to_string(),
+            bitrate_kbps: 5000,
+            duration: 10.0,
+            width: 0,
+            height: 0,
+            frames_per_second: 24.0,
+            modified_time_ns: 1_000,
+        };
+
+        let video_info = cached.to_video_info();
+        assert_eq!(video_info.resolution, None);
+    }
+
+    #[test]
+    fn zero_modified_time_entry_is_never_current() {
+        let cached = CachedVideoInfo {
+            size_bytes: 1_000,
+            codec: "h264".to_string(),
+            bitrate_kbps: 5000,
+            duration: 10.0,
+            width: 1920,
+            height: 1080,
+            frames_per_second: 24.0,
+            modified_time_ns: 0,
+        };
+        let fingerprint = FileFingerprint {
+            size_bytes: 1_000,
+            modified_time_ns: 0,
+        };
+
+        assert!(!cached.is_current(&fingerprint));
+    }
+
+    #[test]
+    fn batch_upsert_clears_fps_and_bit_depth_when_same_size_file_changes_mtime() {
+        let mut cache = ScanCache::open_in_memory().expect("open in-memory database");
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let file_path = temp_dir.path().join("clip.mkv");
+        std::fs::write(&file_path, b"1234567890").expect("write initial");
+
+        // Seed row as vconvert would with fps = 60.0, bit_depth = 10, and an older mtime.
+        cache
+            .connection
+            .execute(
+                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
+                 VALUES (?1, 10, 'h264', 5000, 10.0, 1920, 1080, 60.0, 10, 100, 123456)",
+                params![file_path.to_string_lossy()],
+            )
+            .expect("seed row");
+
+        // Upsert new metadata for the same path and exact same byte size, but newer on-disk mtime.
+        let updated = VideoInfo {
+            size_bytes: Some(10),
+            resolution: Resolution::from_options(Some(1280), Some(720)),
+            duration: Some(5.0),
+            codec: Some("hevc".to_string()),
+            bitrate_kbps: Some(2000),
+        };
+        cache.batch_upsert(&[(file_path.as_path(), &updated)]).expect("upsert");
+
+        let (fps, bit_depth): (f64, i64) = cache
+            .connection
+            .query_row(
+                "SELECT frames_per_second, bit_depth FROM scanned_files WHERE full_path = ?1",
+                params![file_path.to_string_lossy()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query row");
+        assert!(fps.abs() < f64::EPSILON, "stale fps should be cleared, got {fps}");
+        assert_eq!(bit_depth, 0, "stale bit_depth should be cleared");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_non_utf8_paths_to_avoid_cache_key_collisions() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut cache = ScanCache::open_in_memory().expect("open in-memory database");
+        let first = Path::new(OsStr::from_bytes(b"/videos/clip_\xff.mp4"));
+        let second = Path::new(OsStr::from_bytes(b"/videos/clip_\xfe.mp4"));
+        let info = VideoInfo {
+            size_bytes: Some(100),
+            resolution: None,
+            duration: None,
+            codec: Some("h264".to_string()),
+            bitrate_kbps: None,
+        };
+
+        let written = cache
+            .batch_upsert(&[(first, &info), (second, &info)])
+            .expect("upsert non-utf8");
+        assert_eq!(written, 0);
+        assert!(cache.get_all().expect("get_all").is_empty());
+
+        let hash_entry = CachedFileHash {
+            size_bytes: 100,
+            modified_time_ns: 1_000,
+            blake3_hash: "abc".to_string(),
+        };
+        let hashes_written = cache
+            .batch_upsert_hashes(&[(first, &hash_entry), (second, &hash_entry)])
+            .expect("upsert hashes");
+        assert_eq!(hashes_written, 0);
+        assert!(cache.get_all_hashes().expect("get_all_hashes").is_empty());
     }
 }
