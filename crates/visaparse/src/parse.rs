@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -264,7 +264,7 @@ impl Ord for VisaItem {
         self.date
             .cmp(&other.date)
             .then_with(|| self.name.cmp(&other.name))
-            .then_with(|| self.sum.partial_cmp(&other.sum).unwrap_or(Ordering::Equal))
+            .then_with(|| self.sum.total_cmp(&other.sum))
     }
 }
 
@@ -297,17 +297,26 @@ pub fn visa_parse(config: &Config) -> Result<()> {
 
     if !config.print {
         write_to_csv(&items, &config.output_path)?;
-        write_to_excel(&items, &totals, &config.filter_prefixes, &config.output_path)?;
+        if !items.is_empty() {
+            write_to_excel(&items, &totals, &config.filter_prefixes, &config.output_path)?;
+        }
     }
 
     Ok(())
+}
+
+/// Check whether `path` has an `.xml` extension, ignoring ASCII case.
+fn is_xml_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
 }
 
 /// Return file root and list of files from the input path that can be either a directory or single file.
 fn get_xml_file_list(input: &PathBuf) -> Result<(PathBuf, Vec<PathBuf>)> {
     if input.is_file() {
         println!("{}", format!("Parsing file: {}", input.display()).bold().magenta());
-        if input.extension() == Some(OsStr::new("xml")) {
+        if is_xml_path(input) {
             let parent = input.parent().context("Failed to get parent directory")?.to_path_buf();
             Ok((parent, vec![input.clone()]))
         } else {
@@ -329,7 +338,7 @@ fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
         .filter_entry(|e| !cli_tools_common::is_hidden(e))
         .filter_map(std::result::Result::ok)
         .map(|e| e.path().to_owned())
-        .filter(|path| path.is_file() && path.extension() == Some(OsStr::new("xml")))
+        .filter(|path| path.is_file() && is_xml_path(path))
         .collect();
 
     files.sort_by(|a, b| {
@@ -502,8 +511,8 @@ fn calculate_totals_for_each_name(items: &[VisaItem]) -> Vec<(String, f64)> {
         *totals.entry(item.name.clone()).or_insert(0.0) += item.sum;
     }
     let mut totals_vec: Vec<(String, f64)> = totals.into_iter().collect();
-    // Sort the vector in descending order based on the sum
-    totals_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    // Sort the vector in descending order based on the sum, with deterministic name tie-breaker.
+    totals_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     totals_vec
 }
 
@@ -552,14 +561,18 @@ fn format_name(text: &str) -> String {
     name
 }
 
-/// Convert Finnish currency value strings using a comma as the decimal separator to float.
+/// Convert Finnish currency value strings using a comma as the decimal separator to a finite float.
 fn format_sum(value: &str) -> Result<f64> {
-    value
+    let parsed = value
         .trim()
         .replace(',', ".")
-        .replace(' ', "")
+        .replace([' ', '\u{00a0}'], "")
         .parse::<f64>()
-        .context(format!("Failed to parse sum as float: {value}"))
+        .with_context(|| format!("Failed to parse sum as float: {value}"))?;
+    if !parsed.is_finite() {
+        anyhow::bail!("Non-finite sum value: {value}");
+    }
+    Ok(parsed)
 }
 
 /// Print item totals and some statistics.
@@ -614,7 +627,16 @@ fn split_from_last_whitespaces(s: &str) -> (&str, &str) {
     (before, after)
 }
 
-/// Save parsed data to a CSV file
+/// Format one CSV field according to RFC 4180, quoting when it contains `,`, `"`, `\r`, or `\n`.
+fn escape_csv_field(field: &str) -> std::borrow::Cow<'_, str> {
+    if field.contains([',', '"', '\n', '\r']) {
+        std::borrow::Cow::Owned(format!("\"{}\"", field.replace('"', "\"\"")))
+    } else {
+        std::borrow::Cow::Borrowed(field)
+    }
+}
+
+/// Save parsed data to a CSV file atomically.
 fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
     let output_file = if output_path
         .extension()
@@ -629,16 +651,14 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
         "{}",
         format!("Writing data to CSV:   {}", output_file.display()).green()
     );
-    if output_file.exists()
-        && let Err(e) = std::fs::remove_file(&output_file)
-    {
-        eprintln!("{}", format!("Failed to remove existing csv file: {e}").red());
-    }
-    let mut file = File::create(output_file)?;
-    writeln!(file, "Date,Sum,Name")?;
+    let mut content = String::from("Date,Sum,Name\n");
     for item in items {
-        writeln!(file, "{},{:.2},{}", item.finnish_date(), item.sum, item.name)?;
+        use std::fmt::Write as _;
+        let name = escape_csv_field(&item.name);
+        writeln!(content, "{},{:.2},{name}", item.finnish_date(), item.sum)?;
     }
+    cli_tools_common::write_atomically(&output_file, content)
+        .with_context(|| format!("Failed to write CSV file: {}", output_file.display()))?;
     Ok(())
 }
 
@@ -733,6 +753,9 @@ mod test_format_sum {
     #[test]
     fn test_invalid_format() {
         assert!(format_sum("invalid").is_err());
+        assert!(format_sum("NaN").is_err());
+        assert!(format_sum("inf").is_err());
+        assert_f64_eq(format_sum("1\u{00a0}234,50").unwrap(), 1234.50);
     }
 
     #[test]
@@ -2110,6 +2133,19 @@ mod test_write_to_csv {
 
         let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
         assert_eq!(content, "Date,Sum,Name\n");
+    }
+
+    #[test]
+    fn quotes_csv_names_containing_commas_or_quotes() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let item = VisaItem {
+            date: Date::constant(2024, 2, 5),
+            name: "CAFE, \"HELSINKI\"".to_string(),
+            sum: 12.5,
+        };
+        write_to_csv(&[item], directory.path()).expect("csv should be written");
+        let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("read csv");
+        assert_eq!(content, "Date,Sum,Name\n2024.02.05,12.50,\"CAFE, \"\"HELSINKI\"\"\"\n");
     }
 }
 
