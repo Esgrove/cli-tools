@@ -261,7 +261,8 @@ pub fn validate_graph(tasks: &[TaskSpec]) -> Result<()> {
             }
         }
         // An ordering only applies to tasks in the run, so one naming a task outside it is left out.
-        let predecessors: Vec<&str> = task
+        // Deduplicate predecessors so a repeated entry in `deps` or `after` is counted once.
+        let predecessors: BTreeSet<&str> = task
             .deps
             .iter()
             .chain(task.after.iter().filter(|id| ids.contains(id.as_str())))
@@ -534,14 +535,26 @@ fn worker_loop(state: &Arc<(Mutex<SchedulerState>, Condvar)>, ctx: &TaskContext,
 
         let started = Instant::now();
         let outcome = if ctx.dry_run {
-            let _ = (next_task.action)(&task_ctx, &log_path);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (next_task.action)(&task_ctx, &log_path)
+            }));
             TaskOutcome::DryRun
         } else {
-            match (next_task.action)(&task_ctx, &log_path) {
-                Ok(TaskActionResult::Passed) => TaskOutcome::Passed,
-                Ok(TaskActionResult::Skipped(reason)) => TaskOutcome::Skipped(reason),
-                Ok(TaskActionResult::DryRun) => TaskOutcome::DryRun,
-                Err(err) => TaskOutcome::Failed(format!("{err:#}")),
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (next_task.action)(&task_ctx, &log_path)
+            })) {
+                Ok(Ok(TaskActionResult::Passed)) => TaskOutcome::Passed,
+                Ok(Ok(TaskActionResult::Skipped(reason))) => TaskOutcome::Skipped(reason),
+                Ok(Ok(TaskActionResult::DryRun)) => TaskOutcome::DryRun,
+                Ok(Err(err)) => TaskOutcome::Failed(format!("{err:#}")),
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("unknown panic");
+                    TaskOutcome::Failed(format!("Task panicked: {message}"))
+                }
             }
         };
         let duration = started.elapsed();
@@ -932,6 +945,40 @@ mod test_scheduler {
         let summary = run_schedule(tasks, &ctx, 1, false, "all").unwrap();
         assert!(summary.is_success());
         assert_eq!(*order.lock().unwrap(), vec!["high", "mid", "low"]);
+        let _ = std::fs::remove_dir_all(&ctx.log_dir);
+    }
+
+    #[test]
+    fn panicking_task_fails_cleanly_and_blocks_dependents_without_deadlock() {
+        let ctx = test_context("panic-no-deadlock");
+        let panicker = TaskSpec {
+            id: "boom".to_owned(),
+            label: "Boom".to_owned(),
+            priority: 1,
+            deps: Vec::new(),
+            after: Vec::new(),
+            resources: vec!["shared-lock".to_owned()],
+            scopes: Vec::new(),
+            dry_run_summary: "boom".to_owned(),
+            action: Box::new(|_, _| panic!("builtin exploded")),
+        };
+        let dependent = noop_task("child", 2, &["boom"], &[]);
+        let independent = noop_task("other", 3, &[], &["shared-lock"]);
+
+        let summary = run_schedule(vec![panicker, dependent, independent], &ctx, 2, false, "all").unwrap();
+        assert!(!summary.is_success());
+        assert!(matches!(
+            summary.reports.iter().find(|r| r.id == "boom").unwrap().outcome,
+            TaskOutcome::Failed(ref msg) if msg.contains("builtin exploded")
+        ));
+        assert!(matches!(
+            summary.reports.iter().find(|r| r.id == "child").unwrap().outcome,
+            TaskOutcome::Blocked(_)
+        ));
+        assert_eq!(
+            summary.reports.iter().find(|r| r.id == "other").unwrap().outcome,
+            TaskOutcome::Passed
+        );
         let _ = std::fs::remove_dir_all(&ctx.log_dir);
     }
 }
