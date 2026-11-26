@@ -325,7 +325,7 @@ impl DotRename {
                 fs::create_dir_all(parent)?;
             }
 
-            if target_file.exists() {
+            if fs::symlink_metadata(&target_file).is_ok() {
                 if self.config.overwrite {
                     if self.config.verbose {
                         println!("Overwriting existing file: {}", target_file.display());
@@ -397,15 +397,17 @@ impl DotRename {
 
             // On a case-insensitive file system a capitalization only change finds the source itself at the target.
             // Only a different existing entry counts as a conflict.
-            let target_is_other_entry = fs::symlink_metadata(&new_path).is_ok()
-                && !cli_tools_common::paths_refer_to_same_file(&path, &new_path);
+            let target_metadata = fs::symlink_metadata(&new_path).ok();
+            let target_is_other_entry =
+                target_metadata.is_some() && !cli_tools_common::paths_refer_to_same_entry(&path, &new_path);
 
             // Handle directory renaming when target already exists
             // Copy files from source to target directory and remove source directory if empty.
-            // A symlink to a directory is never merged,
-            // since that would move the files out of the directory it points to.
+            // Neither a source nor a target symlink to a directory is ever merged,
+            // since that would move files out of or into an outside directory it points to.
             let source_is_real_directory = fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir());
-            let is_directory_merge = source_is_real_directory && new_path.is_dir() && target_is_other_entry;
+            let target_is_real_directory = target_metadata.is_some_and(|metadata| metadata.is_dir());
+            let is_directory_merge = source_is_real_directory && target_is_real_directory && target_is_other_entry;
             let reserved_by_batch = !is_directory_merge && reservations.contains(&new_path);
             let mut skip_rename = false;
 
@@ -2586,6 +2588,55 @@ mod test_symlinks {
 
         assert_eq!(tree.read("outside/real/data.txt"), "outside data");
         assert_eq!(tree.read("root/Some Dir/existing.txt"), "existing");
+    }
+
+    #[test]
+    fn a_real_directory_is_not_merged_into_a_destination_symlink() {
+        let tree = TempTree::new();
+        tree.dir("outside/real");
+        tree.file_with("root/some_dir/a.txt", "local");
+        tree.symlink("outside/real", "root/Some Dir");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                rename_directories: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            !tree.exists("outside/real/a.txt"),
+            "must not move files through a destination symlink outside root"
+        );
+        assert!(tree.exists("root/some_dir/a.txt"));
+    }
+
+    #[test]
+    fn broken_symlink_inside_target_directory_is_kept_without_overwrite() {
+        let tree = TempTree::new();
+        tree.file_with("root/some_dir/item.txt", "new");
+        tree.dir("root/Some Dir");
+        tree.symlink("outside/missing.txt", "root/Some Dir/item.txt");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                rename_directories: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            tree.join("root/Some Dir/item.txt")
+                .symlink_metadata()
+                .expect("broken link")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(tree.exists("root/some_dir/item.txt"));
     }
 }
 
