@@ -16,17 +16,17 @@ pub static RE_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(20[0-9]{2})\b").expect("Failed to create regex pattern for yyyy year"));
 
 pub static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?P<year>[12][0-9]{3})\.(?P<month>[12][0-9]|3[01]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9])\b")
+    Regex::new(r"\b(?P<year>[12][0-9]{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9])\b")
         .expect("Failed to create regex pattern for correct date")
 });
 
 static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?P<day>[12][0-9]|3[01]|0?[1-9])\.(?P<month>1[0-2]|0?[1-9])\.(?P<year>[0-9]{4})")
+    Regex::new(r"(?:^|[^0-9])(?P<date>(?P<day>[12][0-9]|3[01]|0?[1-9])\.(?P<month>1[0-2]|0?[1-9])\.(?P<year>[0-9]{4}))(?:$|[^0-9])")
         .expect("Failed to create regex pattern for dd.mm.yyyy")
 });
 
 static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?P<year>[12][0-9]{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9])")
+    Regex::new(r"(?:^|[^0-9])(?P<date>(?P<year>[12][0-9]{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9]))(?:$|[^0-9])")
         .expect("Failed to create regex pattern for yyyy.mm.dd")
 });
 
@@ -51,7 +51,7 @@ static RE_SHORT_DATE_DAY_FIRST: LazyLock<Regex> = LazyLock::new(|| {
 
 static RE_SHORT_DATE_YEAR_FIRST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?:\b|[^a-zA-Z0-9])(?P<date>([0-9]{2})\.(?:0?[1-9]|[12][0-9]|3[01])\.(?:0?[1-9]|1[0-2]))(?:\b|[^a-zA-Z0-9])",
+        r"(?:\b|[^a-zA-Z0-9])(?P<date>([0-9]{2})\.(?:0?[1-9]|1[0-2])\.(?:0?[1-9]|[12][0-9]|3[01]))(?:\b|[^a-zA-Z0-9])",
     )
     .expect("Failed to create regex pattern for short date")
 });
@@ -121,12 +121,16 @@ impl Date {
 
     /// Check if filename contains a matching date and reorder it.
     pub fn reorder_filename_date(filename: &str, year_first: bool, swap_year: bool, verbose: bool) -> Option<String> {
-        if RE_CORRECT_DATE_FORMAT.is_match(filename) {
-            if swap_year {
-                let captures = RE_CORRECT_DATE_FORMAT.captures(filename)?;
+        if let Some((original_range, valid_date)) =
+            RE_CORRECT_DATE_FORMAT.captures_iter(filename).find_map(|captures| {
                 let original_date = captures.get(0)?;
-                let swapped_date = Self::parse_date_from_match(filename, &captures)?.swap_year()?;
-                return replace_range(filename, original_date.range(), &swapped_date.dot_format());
+                let parsed = Self::parse_date_from_match(filename, &captures)?;
+                Some((original_date.range(), parsed))
+            })
+        {
+            if swap_year {
+                let swapped_date = valid_date.swap_year()?;
+                return replace_range(filename, original_range, &swapped_date.dot_format());
             }
             // Correctly formatted, skip...
             if verbose {
@@ -206,26 +210,28 @@ impl Date {
             return replace_range(filename, date_range, &flip_date);
         }
 
-        // Check for short dates
-        let mut best_match = None;
-        for caps in RE_SHORT_DATE_YEAR_FIRST.captures_iter(filename) {
-            if let Some(date_match) = caps.name("date") {
-                let date_str = date_match.as_str();
+        // Check for short dates in YY.MM.DD order (for example 00.12.25) when year_first is set
+        if year_first {
+            let mut best_match = None;
+            for caps in RE_SHORT_DATE_YEAR_FIRST.captures_iter(filename) {
+                if let Some(date_match) = caps.name("date") {
+                    let date_str = date_match.as_str();
 
-                let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
-                let [year, month, day] = numbers.as_slice() else {
-                    continue;
-                };
+                    let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
+                    let [year, month, day] = numbers.as_slice() else {
+                        continue;
+                    };
 
-                if let Some(date) = Self::parse_from_short(year, month, day) {
-                    best_match = Some((date_match.range(), date.to_string()));
+                    if let Some(date) = Self::parse_from_short(year, month, day) {
+                        best_match = Some((date_match.range(), date.to_string()));
+                    }
                 }
             }
-        }
 
-        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
-        if let Some((date_range, flip_date)) = best_match {
-            return replace_range(filename, date_range, &flip_date);
+            // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
+            if let Some((date_range, flip_date)) = best_match {
+                return replace_range(filename, date_range, &flip_date);
+            }
         }
 
         None
@@ -234,20 +240,24 @@ impl Date {
     /// Check if directory name contains a matching date and reorder it.
     pub fn reorder_directory_date(name: &str) -> Option<String> {
         // Handle dd.mm.yyyy format
-        if let Some(caps) = RE_DD_MM_YYYY.captures(name)
-            && let Some(date) = Self::parse_date_from_match(name, &caps)
-        {
-            let name_part = RE_DD_MM_YYYY.replace(name, "").to_string();
-            let name = Self::get_directory_separator(&name_part);
-            return Some(format!("{}{name}", date.dash_format()));
+        for caps in RE_DD_MM_YYYY.captures_iter(name) {
+            if let Some(date_match) = caps.name("date")
+                && let Some(date) = Self::parse_date_from_match(name, &caps)
+            {
+                let name_part = replace_range(name, date_match.range(), "")?;
+                let name = Self::get_directory_separator(&name_part);
+                return Some(format!("{}{name}", date.dash_format()));
+            }
         }
         // Handle yyyy.mm.dd format
-        if let Some(caps) = RE_YYYY_MM_DD.captures(name)
-            && let Some(date) = Self::parse_date_from_match(name, &caps)
-        {
-            let name_part = RE_YYYY_MM_DD.replace(name, "").to_string();
-            let name = Self::get_directory_separator(&name_part);
-            return Some(format!("{}{name}", date.dash_format()));
+        for caps in RE_YYYY_MM_DD.captures_iter(name) {
+            if let Some(date_match) = caps.name("date")
+                && let Some(date) = Self::parse_date_from_match(name, &caps)
+            {
+                let name_part = replace_range(name, date_match.range(), "")?;
+                let name = Self::get_directory_separator(&name_part);
+                return Some(format!("{}{name}", date.dash_format()));
+            }
         }
         None
     }
@@ -326,13 +336,15 @@ impl Date {
     ///
     /// For example: `Name.2025.12.24` -> `Name.2025-12-24`
     pub fn replace_file_date_with_directory_date(name: &str) -> Cow<'_, str> {
-        if let Some(caps) = RE_YYYY_MM_DD.captures(name)
-            && let Some(date) = Self::parse_date_from_match(name, &caps)
-        {
-            RE_YYYY_MM_DD.replace(name, date.dash_format())
-        } else {
-            Cow::Borrowed(name)
+        for caps in RE_YYYY_MM_DD.captures_iter(name) {
+            if let Some(date_match) = caps.name("date")
+                && let Some(date) = Self::parse_date_from_match(name, &caps)
+                && let Some(replaced) = replace_range(name, date_match.range(), &date.dash_format())
+            {
+                return Cow::Owned(replaced);
+            }
         }
+        Cow::Borrowed(name)
     }
 
     fn get_directory_separator(input: &str) -> String {
@@ -383,6 +395,39 @@ mod regex_tests {
         assert!(!RE_CORRECT_DATE_FORMAT.is_match("0000.00.30"));
         assert!(!RE_CORRECT_DATE_FORMAT.is_match("0100.1.2"));
         assert!(!RE_CORRECT_DATE_FORMAT.is_match("2000.1.0"));
+        assert!(!RE_CORRECT_DATE_FORMAT.is_match("2024.25.06"));
+        assert!(!RE_CORRECT_DATE_FORMAT.is_match("2024.13.01"));
+    }
+
+    #[test]
+    fn resolution_prefix_or_invalid_month_does_not_block_real_date() {
+        assert_eq!(
+            Date::reorder_filename_date("video.1080.05.12.2023.mp4", false, false, false),
+            Some("video.1080.2023.12.05.mp4".to_string())
+        );
+        assert_eq!(
+            Date::reorder_filename_date("build.2024.25.06.05.12.2023.mp4", false, false, false),
+            Some("build.2024.25.06.2023.12.05.mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn short_date_year_first_handles_year_2000_with_day_above_12() {
+        assert_eq!(
+            Date::reorder_filename_date("clip.00.12.25.mp4", true, false, false),
+            Some("clip.2000.12.25.mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn directory_date_does_not_slice_adjacent_digits() {
+        assert_eq!(Date::reorder_directory_date("Project 123.05.2024"), None);
+        assert_eq!(Date::reorder_directory_date("Archive 01.02.20245"), None);
+        assert_eq!(Date::reorder_directory_date("Build 2024.05.123"), None);
+        assert_eq!(
+            Date::replace_file_date_with_directory_date("Build.12024.05.123"),
+            "Build.12024.05.123"
+        );
     }
 
     #[test]
@@ -631,6 +676,12 @@ mod date_format_detection_tests {
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
         let filename = "00.11.22.txt";
+        assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
+        assert_eq!(
+            Date::reorder_filename_date(filename, true, false, false),
+            Some("2000.11.22.txt".to_string())
+        );
+        let filename = "00.13.22.txt";
         assert_eq!(Date::reorder_filename_date(filename, false, false, false), None);
         assert_eq!(Date::reorder_filename_date(filename, true, false, false), None);
         let filename = "name1000.5.22.txt";
