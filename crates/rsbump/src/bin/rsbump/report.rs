@@ -10,6 +10,7 @@ use std::path::Path;
 use colored::Colorize;
 
 use cli_tools_common::{diff_lines, path_to_string_relative_to, print_bold};
+use cli_tools_rsbump::manifest::FieldLocation;
 use cli_tools_rsbump::{BumpObserver, Outcome, Report, ReportEntry};
 
 /// Prints each project report when its project finishes.
@@ -102,8 +103,17 @@ fn report_lines(report: &Report, verbose: bool) -> Vec<String> {
             ReportEntry::SkippedDirty => {
                 push("Skipped, git repository has uncommitted changes".yellow().to_string());
             }
-            ReportEntry::RustVersionBumped { manifest, old, new } => {
-                let change = format!("rust-version {} -> {}", old.yellow(), new.green());
+            ReportEntry::RustVersionBumped {
+                manifest,
+                location,
+                old,
+                new,
+            } => {
+                let field = match location {
+                    FieldLocation::WorkspacePackage => "[workspace.package] rust-version",
+                    FieldLocation::Package => "rust-version",
+                };
+                let change = format!("{field} {} -> {}", old.yellow(), new.green());
                 if manifest == "Cargo.toml" {
                     push(change);
                 } else {
@@ -267,11 +277,13 @@ mod test_report_lines {
         let report = report_with(vec![
             ReportEntry::RustVersionBumped {
                 manifest: "Cargo.toml".to_string(),
+                location: FieldLocation::Package,
                 old: "1.90".to_string(),
                 new: "1.100".to_string(),
             },
             ReportEntry::RustVersionBumped {
                 manifest: "crates/own/Cargo.toml".to_string(),
+                location: FieldLocation::Package,
                 old: "1.90".to_string(),
                 new: "1.100".to_string(),
             },
