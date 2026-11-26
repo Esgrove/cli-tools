@@ -52,6 +52,12 @@ impl LineScan {
     pub(super) fn starts_inside_block_comment(&self, index: usize) -> bool {
         self.inside_block_comment.get(index).copied().unwrap_or(false)
     }
+
+    /// Byte offset of a trailing comment on the given zero based line, when present.
+    #[must_use]
+    pub(super) fn comment_start_at(&self, index: usize) -> Option<usize> {
+        self.comment_start.get(index).copied().flatten()
+    }
 }
 
 /// Scan every line once, recording what both the region split and the trailing comment fix need.
@@ -160,7 +166,7 @@ pub fn split_source_regions_scanned_with_notices(
         let trimmed = line.trim_start();
 
         if style.docstrings
-            && let Some(end) = docstring_regions(lines, index, &mut regions, &mut notices)
+            && let Some(end) = docstring_regions(lines, index, scan, &mut regions, &mut notices)
         {
             index = end;
             continue;
@@ -506,10 +512,11 @@ fn advance_block_comment_depth(text: &str, mut depth: usize, open: &str, close: 
 fn docstring_regions(
     lines: &[&str],
     index: usize,
+    scan: &LineScan,
     regions: &mut Vec<Region>,
     notices: &mut Vec<SkipNotice>,
 ) -> Option<usize> {
-    let docstring = Docstring::at(lines, index)?;
+    let docstring = Docstring::at_scanned(lines, index, Some(scan))?;
     let indent = docstring.indent;
     let quote = docstring.quote;
     let close_index = docstring.close_line;
@@ -530,7 +537,11 @@ fn docstring_regions(
     for region in &mut inner {
         if let Region::Paragraph(paragraph) = region {
             if paragraph.start_line == index && docstring.opening_shares_line() {
-                paragraph.first_prefix = format!("{indent}{}{quote}", docstring.string_prefix);
+                let extra_prefix = paragraph
+                    .first_prefix
+                    .strip_prefix(indent)
+                    .unwrap_or(&paragraph.first_prefix);
+                paragraph.first_prefix = format!("{indent}{}{quote}{extra_prefix}", docstring.string_prefix);
             }
             if closing_has_content && paragraph.end_line == close_index + 1 {
                 paragraph.last_suffix = quote.to_string();

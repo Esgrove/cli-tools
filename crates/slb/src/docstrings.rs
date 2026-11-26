@@ -18,8 +18,11 @@ use super::reflow::{prefix_width, reflow_paragraph};
 use super::violation::{Violation, ViolationKind};
 
 /// Matches the opening of a Python docstring and captures indentation, string prefix, quotes, and the rest.
+///
+/// Only plain, raw (`r`/`R`), and legacy unicode (`u`/`U`) prefixes can introduce a Python docstring.
+/// Format strings (`f`/`F`) and byte literals (`b`/`B`) are runtime values, never docstrings.
 static RE_DOCSTRING_OPEN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^(\s*)([rRuUbBfF]{0,2})("""|''')(.*)$"#).expect("Invalid docstring regex"));
+    LazyLock::new(|| Regex::new(r#"^(\s*)([rRuU]?)("""|''')(.*)$"#).expect("Invalid docstring regex"));
 
 /// Characters that leave an expression open at the end of a line,
 /// so a string on the next line is part of that expression.
@@ -54,26 +57,37 @@ impl<'a> Docstring<'a> {
     /// so both of them give `None` and are left verbatim.
     /// A string that continues an expression from the line above is a value rather than a docstring,
     /// so it gives `None` too.
+    #[cfg(test)]
     pub(super) fn at(lines: &[&'a str], index: usize) -> Option<Self> {
+        Self::at_scanned(lines, index, None)
+    }
+
+    /// Parse the docstring opening on line `index`, using `scan` when available to strip comments string-safely.
+    pub(super) fn at_scanned(lines: &[&'a str], index: usize, scan: Option<&LineScan>) -> Option<Self> {
         let line = lines.get(index)?;
         let captures = RE_DOCSTRING_OPEN.captures(line)?;
-        if !starts_statement(lines, index) {
+        if !starts_statement(lines, index, scan) {
             return None;
         }
         let indent = captures.get(1).map_or("", |group| group.as_str());
         let string_prefix = captures.get(2).map_or("", |group| group.as_str());
         let quote = captures.get(3).map_or(r#"""""#, |group| group.as_str());
         let opening_text = captures.get(4).map_or("", |group| group.as_str());
-        if opening_text.contains(quote) {
+        let is_raw = string_prefix.eq_ignore_ascii_case("r");
+        if find_unescaped_triple_quote(opening_text, quote, is_raw).is_some() {
             return None;
         }
-        let close_line = lines
-            .iter()
-            .enumerate()
-            .skip(index + 1)
-            .find(|(_, candidate)| candidate.contains(quote))
-            .map(|(position, _)| position)?;
-        let (closing_text, after_quote) = lines.get(close_line)?.split_once(quote)?;
+        let (close_line, close_offset) =
+            lines
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find_map(|(position, candidate)| {
+                    find_unescaped_triple_quote(candidate, quote, is_raw).map(|offset| (position, offset))
+                })?;
+        let close_source = lines.get(close_line)?;
+        let closing_text = close_source.get(..close_offset)?;
+        let after_quote = close_source.get(close_offset + quote.len()..)?;
         if !after_quote.trim().is_empty() {
             return None;
         }
@@ -99,19 +113,80 @@ impl<'a> Docstring<'a> {
     }
 }
 
+/// Find the first unescaped occurrence of `quote` (three identical quote chars) in `text`.
+///
+/// For non-raw Python strings, an odd run of immediately preceding backslashes escapes the opening quote.
+fn find_unescaped_triple_quote(text: &str, quote: &str, is_raw: bool) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(relative) = text.get(search_from..)?.find(quote) {
+        let offset = search_from + relative;
+        if is_raw || !is_escaped_at(text, offset) {
+            return Some(offset);
+        }
+        search_from = offset + 1;
+    }
+    None
+}
+
+/// Whether the byte at `offset` is preceded by an odd number of backslashes.
+fn is_escaped_at(text: &str, offset: usize) -> bool {
+    let backslashes = text
+        .get(..offset)
+        .unwrap_or_default()
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count();
+    backslashes % 2 == 1
+}
+
+/// Strip a Python `#` comment from `line` without cutting through `#` inside string literals.
+fn strip_python_comment<'a>(line: &'a str, line_index: usize, scan: Option<&LineScan>) -> &'a str {
+    if line.trim_start().starts_with('#') {
+        return "";
+    }
+    if let Some(comment_start) = scan.and_then(|scan| scan.comment_start_at(line_index)) {
+        return line.get(..comment_start).unwrap_or(line).trim_end();
+    }
+    if scan.is_some() {
+        return line.trim_end();
+    }
+    // Fallback without a precomputed LineScan: track single/double quotes on the line.
+    let mut in_quote: Option<char> = None;
+    let mut escaped = false;
+    for (byte_offset, character) in line.char_indices() {
+        if let Some(quote) = in_quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == quote {
+                in_quote = None;
+            }
+        } else if character == '\'' || character == '"' {
+            in_quote = Some(character);
+        } else if character == '#' {
+            return line.get(..byte_offset).unwrap_or(line).trim_end();
+        }
+    }
+    line.trim_end()
+}
+
 /// Whether line `index` starts a statement rather than continuing an expression from the code above it.
 ///
 /// Blank lines and comment lines are passed over.
 /// A file start, a block opener ending in a colon, and a complete statement all start a new statement.
-fn starts_statement(lines: &[&str], index: usize) -> bool {
+/// Implicit string concatenation (previous code ending in `"` or `'`) does not start a docstring.
+fn starts_statement(lines: &[&str], index: usize, scan: Option<&LineScan>) -> bool {
     let previous_code = lines
         .get(..index)
         .unwrap_or_default()
         .iter()
+        .enumerate()
         .rev()
-        .map(|line| line.split_once('#').map_or(*line, |(code, _)| code).trim_end())
+        .map(|(line_index, line)| strip_python_comment(line, line_index, scan))
         .find(|code| !code.trim_start().is_empty());
-    previous_code.is_none_or(|code| !code.ends_with(EXPRESSION_CONTINUATIONS))
+    previous_code.is_none_or(|code| !code.ends_with(EXPRESSION_CONTINUATIONS) && !code.ends_with(['"', '\'']))
 }
 
 /// Build the replacement line pairs that move docstring quotes sharing a line with prose onto their own line.
@@ -139,7 +214,7 @@ pub(super) fn fix_docstring_quotes(
             index += 1;
             continue;
         }
-        let Some(docstring) = Docstring::at(lines, index) else {
+        let Some(docstring) = Docstring::at_scanned(lines, index, Some(scan)) else {
             index += 1;
             continue;
         };
@@ -149,7 +224,10 @@ pub(super) fn fix_docstring_quotes(
             continue;
         }
         // A docstring the reflow turns into a one line docstring keeps its quotes around that one sentence.
-        if docstring.opening_shares_line() && collapses_to_one_line(lines, &docstring, options) {
+        if docstring.opening_shares_line()
+            && docstring.closing_shares_line()
+            && collapses_to_one_line(lines, &docstring, options)
+        {
             continue;
         }
         if docstring.opening_shares_line() {

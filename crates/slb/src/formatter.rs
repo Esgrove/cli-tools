@@ -978,6 +978,66 @@ mod test_format {
     }
 
     #[test]
+    fn python_docstring_edge_cases_preserve_code_and_fix_quotes() {
+        let options = FormatOptions::default();
+
+        // f-strings and bytes literals are never docstrings.
+        for code in [
+            "def f(x):\n    f\"\"\"\n    First clause; second clause {x}.\n    \"\"\"\n",
+            "def f():\n    b\"\"\"\n    First clause; second clause.\n    \"\"\"\n",
+            // Implicit string concatenation.
+            "def f():\n    s = (\n        \"hello \"\n        \"\"\"\n        First clause; second clause.\n        \"\"\"\n    )\n",
+            // Hash inside string on preceding continuation line.
+            "def f():\n    s = \"http://x#frag\" + \\\n        \"\"\"\n        First clause; second clause.\n        \"\"\"\n",
+        ] {
+            assert_eq!(
+                format(code, FileKind::Python, &options),
+                FormatResult::default(),
+                "must not treat Python value literal as docstring:\n{code}"
+            );
+        }
+
+        // Escaped triple quote inside docstring must not end docstring early.
+        let escaped =
+            "def f():\n    \"\"\"\n    Example \\\"\"\" text.\n    Second sentence; another clause.\n    \"\"\"\n";
+        let escaped_result = format(escaped, FileKind::Python, &options);
+        assert!(
+            escaped_result
+                .fixed_text
+                .as_deref()
+                .is_some_and(|text| text.contains("Second sentence.\n    Another clause.")),
+            "escaped triple quote must not truncate docstring parsing: {escaped_result:?}"
+        );
+
+        // Opening-line list marker must not be dropped.
+        let opening_list = "def f():\n    \"\"\"- First item; second part.\n    \"\"\"\n";
+        let opening_result = format(opening_list, FileKind::Python, &options);
+        if let Some(fixed) = opening_result.fixed_text {
+            assert!(
+                fixed.contains("- First item"),
+                "opening-line list marker must be preserved:\n{fixed}"
+            );
+        }
+
+        // Opening shares line but closing is on its own line: --docstring-quotes must still move opening quotes.
+        let quote_options = FormatOptions {
+            rules: RuleSet {
+                docstring_quotes: true,
+                ..RuleSet::default()
+            },
+            ..FormatOptions::default()
+        };
+        let split_opening = "def f():\n    \"\"\"One short\n    sentence.\n    \"\"\"\n";
+        let fixed = format(split_opening, FileKind::Python, &quote_options)
+            .fixed_text
+            .expect("opening quotes should move onto their own line");
+        assert!(
+            fixed.starts_with("def f():\n    \"\"\"\n"),
+            "opening quotes must move to their own line when closing quotes are on their own line:\n{fixed}"
+        );
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",
