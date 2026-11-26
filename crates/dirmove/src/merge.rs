@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
 use cli_tools_common::path_to_filename_string;
@@ -190,9 +190,27 @@ impl DirectoryMerger {
     }
 }
 
-/// Move a directory into `target_path`, backing up any existing non-directory target (such as a file or symlink)
-/// when `overwrite` is true so a failed cross-device copy never loses the pre-existing entry or follows a symlink.
+/// Move a directory into place, backing up an existing non-directory target when overwriting.
+/// A failed copy restores the previous target.
+/// Once the copy is complete, a source cleanup failure leaves both the copy and any backup in place.
 pub(crate) fn move_directory_into_place(source: &Path, target: &Path, overwrite: bool) -> Result<()> {
+    move_directory_with(
+        source,
+        target,
+        overwrite,
+        |source, target| std::fs::rename(source, target),
+        |source| std::fs::remove_dir_all(source),
+    )
+}
+
+/// Move a directory with explicit rename and source removal operations.
+fn move_directory_with(
+    source: &Path,
+    target: &Path,
+    overwrite: bool,
+    rename_source: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    remove_source: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     let target_meta = std::fs::symlink_metadata(target).ok();
     let backup = if let Some(metadata) = target_meta {
         if !overwrite {
@@ -208,27 +226,34 @@ pub(crate) fn move_directory_into_place(source: &Path, target: &Path, overwrite:
         None
     };
 
-    let move_result = if std::fs::rename(source, target).is_ok() {
-        Ok(())
-    } else {
-        cli_tools_common::copy_dir_recursive(source, target).and_then(|()| std::fs::remove_dir_all(source))
-    };
-
-    match move_result {
-        Ok(()) => {
-            if let Some(backup_path) = backup {
-                let _ = std::fs::remove_file(backup_path);
-            }
-            Ok(())
-        }
-        Err(error) => {
+    if rename_source(source, target).is_err() {
+        if let Err(error) = cli_tools_common::copy_dir_recursive(source, target) {
             let _ = std::fs::remove_dir_all(target);
             if let Some(backup_path) = backup {
                 let _ = std::fs::rename(&backup_path, target);
             }
-            Err(error.into())
+            return Err(error.into());
         }
+
+        // Recursive removal can fail after deleting files that now exist only in the copy.
+        remove_source(source).with_context(|| {
+            let mut message = format!(
+                "Failed to remove source {}; destination copy retained at {}",
+                source.display(),
+                target.display()
+            );
+            if let Some(backup_path) = &backup {
+                use std::fmt::Write as _;
+                let _ = write!(message, "; previous destination retained at {}", backup_path.display());
+            }
+            message
+        })?;
     }
+
+    if let Some(backup_path) = backup {
+        let _ = std::fs::remove_file(backup_path);
+    }
+    Ok(())
 }
 
 /// Find output directory merge pairs where one sibling is another with an ignored prefix.
@@ -1042,6 +1067,77 @@ mod test_merge_trees {
             "broken symlink at destination must be preserved when overwrite is false"
         );
         assert!(tree2.exists("Root/studio alpha beta/broken.mkv"));
+    }
+}
+
+#[cfg(test)]
+mod test_directory_move_cleanup {
+    use std::io;
+
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    #[test]
+    fn restores_previous_destination_when_copy_fails_before_cleanup() {
+        let tree = TempTree::new();
+        tree.file_with("target", "previous destination");
+
+        let error = move_directory_with(
+            &tree.join("missing source"),
+            &tree.join("target"),
+            true,
+            |_, _| Err(io::ErrorKind::CrossesDevices.into()),
+            |_| panic!("source cleanup must not run after a failed copy"),
+        )
+        .expect_err("copying a missing source should fail");
+
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(tree.snapshot(), ["target: previous destination"]);
+    }
+
+    #[test]
+    fn keeps_complete_copy_when_source_cleanup_partially_fails() {
+        for overwrite in [false, true] {
+            let tree = TempTree::new();
+            tree.file_with("source/nested/removed.mkv", "only surviving in the copy");
+            tree.file_with("source/remaining.mkv", "still in the source");
+            if overwrite {
+                tree.file_with("target", "previous destination");
+            }
+
+            let error = move_directory_with(
+                &tree.join("source"),
+                &tree.join("target"),
+                overwrite,
+                |_, _| Err(io::ErrorKind::CrossesDevices.into()),
+                |source| {
+                    std::fs::remove_file(source.join("nested/removed.mkv"))?;
+                    Err(io::ErrorKind::PermissionDenied.into())
+                },
+            )
+            .expect_err("source cleanup should be reported as a failure");
+
+            assert!(!tree.exists("source/nested/removed.mkv"));
+            assert_eq!(tree.read("source/remaining.mkv"), "still in the source");
+            assert!(tree.exists("target/nested/removed.mkv"), "lost the only copy");
+            assert_eq!(tree.read("target/nested/removed.mkv"), "only surviving in the copy");
+            assert_eq!(tree.read("target/remaining.mkv"), "still in the source");
+            assert_eq!(
+                error.downcast_ref::<io::Error>().unwrap().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert!(error.to_string().contains("destination copy retained"));
+            if overwrite {
+                let files = tree.files();
+                let backup = files.iter().find(|name| name.contains("dirmove-backup")).unwrap();
+                assert_eq!(tree.read(backup), "previous destination");
+                assert!(error.to_string().contains(backup));
+            }
+        }
     }
 }
 
