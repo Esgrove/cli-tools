@@ -133,16 +133,20 @@ impl Config {
                 .collect()
         };
 
-        let convert_all = args.all || user_config.convert_all_types;
-        let convert_other = args.other || user_config.convert_other_types;
+        let convert_all = args.all || (!args.other && args.extension.is_empty() && user_config.convert_all_types);
+        let convert_other = args.other || (!args.all && args.extension.is_empty() && user_config.convert_other_types);
 
         let extensions = if !args.extension.is_empty() {
-            Self::lowercase_vec(&args.extension)
-        } else if !user_config.extensions.is_empty() {
-            Self::lowercase_vec(&user_config.extensions)
-        } else if convert_all {
+            Self::normalize_extensions(&args.extension)
+        } else if args.all {
             Self::lowercase_vec(ALL_EXTENSIONS)
-        } else if convert_other {
+        } else if args.other {
+            Self::lowercase_vec(OTHER_EXTENSIONS)
+        } else if !user_config.extensions.is_empty() {
+            Self::normalize_extensions(&user_config.extensions)
+        } else if user_config.convert_all_types {
+            Self::lowercase_vec(ALL_EXTENSIONS)
+        } else if user_config.convert_other_types {
             Self::lowercase_vec(OTHER_EXTENSIONS)
         } else {
             Self::lowercase_vec(DEFAULT_EXTENSIONS)
@@ -209,6 +213,15 @@ impl Config {
     /// Convert a slice of strings to lowercase.
     fn lowercase_vec(slice: &[impl AsRef<str>]) -> Vec<String> {
         slice.iter().map(|s| s.as_ref().to_lowercase()).collect()
+    }
+
+    /// Normalize file extensions to lowercase without leading dots.
+    fn normalize_extensions(slice: &[impl AsRef<str>]) -> Vec<String> {
+        slice
+            .iter()
+            .map(|extension| extension.as_ref().trim().trim_start_matches('.').to_lowercase())
+            .filter(|extension| !extension.is_empty())
+            .collect()
     }
 }
 
@@ -784,5 +797,35 @@ mod config_extension_resolution_tests {
         assert!(config.convert_other);
         assert_eq!(config.options.extensions, OTHER_EXTENSIONS);
         assert!(!config.options.extensions.iter().any(|extension| extension == "mp4"));
+    }
+
+    #[test]
+    fn cli_all_and_other_override_user_config_extensions_and_modes() {
+        let with_all = resolve_config(
+            &["--all"],
+            VideoConvertConfig {
+                extensions: vec!["avi".to_string()],
+                convert_other_types: true,
+                ..VideoConvertConfig::default()
+            },
+        );
+        assert_eq!(with_all.options.extensions, ALL_EXTENSIONS);
+
+        let with_other = resolve_config(
+            &["--other"],
+            VideoConvertConfig {
+                extensions: vec!["avi".to_string()],
+                convert_all_types: true,
+                ..VideoConvertConfig::default()
+            },
+        );
+        assert_eq!(with_other.options.extensions, OTHER_EXTENSIONS);
+        assert!(!with_other.options.extensions.iter().any(|extension| extension == "mp4"));
+    }
+
+    #[test]
+    fn leading_dots_are_stripped_from_extensions() {
+        let config = resolve_config(&["-t", ".MP4", "-t", ".mkv"], VideoConvertConfig::default());
+        assert_eq!(config.options.extensions, vec!["mp4", "mkv"]);
     }
 }

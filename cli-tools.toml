@@ -229,8 +229,7 @@ replace = [
 # display_limit = 100
 
 # Sort order for files to convert. Options:
-# - "bitrate" (highest first, default)
-# - "bitrate_asc" (lowest first)
+# - "bitrate" (highest first)
 # - "size" (largest first)
 # - "size_asc" (smallest first)
 # - "duration" (longest first)
@@ -238,8 +237,8 @@ replace = [
 # - "resolution" (highest first)
 # - "resolution_asc" (lowest first)
 # - "impact" (potential savings: bitrate / fps * duration, highest first)
-# - "name" (alphabetical)
-# sort = "bitrate"
+# - "name" (alphabetical, default)
+# sort = "name"
 
 # Minimum bitrate (kbps) by resolution tier, used when bitrate is not set.
 # Keys ending in _high_fps apply above 30 fps. Missing keys use the defaults shown.
