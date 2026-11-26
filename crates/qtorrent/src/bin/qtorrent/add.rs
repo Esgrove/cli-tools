@@ -230,13 +230,7 @@ impl QTorrent {
 
     /// Show what would be added, with the suggested names and the torrents that already exist.
     async fn run_dryrun(self, torrents: Vec<TorrentInfo>) -> Result<()> {
-        let torrents_with_names: Vec<TorrentInfo> = torrents
-            .into_iter()
-            .map(|mut info| {
-                info.rename_to = Some(self.names.clean_suggested_name(&info));
-                info
-            })
-            .collect();
+        let torrents_with_names = self.preview_torrents(torrents);
 
         if self.config.offline {
             self.print_dryrun_summary(&torrents_with_names, None);
@@ -251,9 +245,9 @@ impl QTorrent {
 
         match client::connect(&self.config.connection, self.config.verbose).await {
             Ok(mut client) => {
-                let existing_torrents = client.get_torrent_list().await.ok();
-                self.print_dryrun_summary(&torrents_with_names, existing_torrents.as_ref());
+                let existing_torrents = client.get_torrent_list().await;
                 client::logout(&mut client).await;
+                self.print_dryrun_summary(&torrents_with_names, Some(&existing_torrents?));
             }
             Err(error) => {
                 cli_tools_common::print_yellow!("Failed to connect: {error}");
@@ -262,6 +256,21 @@ impl QTorrent {
         }
 
         Ok(())
+    }
+
+    /// Prepare names for the dry run without asking interactive questions.
+    fn preview_torrents(&self, torrents: Vec<TorrentInfo>) -> Vec<TorrentInfo> {
+        if self.config.yes {
+            return torrents;
+        }
+
+        torrents
+            .into_iter()
+            .map(|mut info| {
+                info.rename_to = Some(self.names.clean_suggested_name(&info));
+                info
+            })
+            .collect()
     }
 
     /// Parse all torrent files and resolve tags for each, printing the files that fail to parse.
@@ -534,6 +543,35 @@ mod test_add_workflow {
 
         assert!(directory.torrent_path.is_file());
         Ok(())
+    }
+
+    #[test]
+    fn yes_preview_keeps_the_same_name_as_execution() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let friendly_path = directory.root.join("Friendly.torrent");
+        std::fs::rename(&directory.torrent_path, &friendly_path)?;
+        let application = connected_qtorrent(&directory, 1, &["--dryrun"]);
+        let torrents = application.parse_torrents(&[friendly_path]);
+        let execution_name = application.prompt_rename(&torrents[0])?;
+        let preview = application.preview_torrents(torrents);
+        assert_eq!(preview[0].rename_to, execution_name);
+        assert_eq!(preview[0].display_name(), "Example.Video.mp4");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connected_dryrun_reports_a_failed_duplicate_lookup() {
+        let directory = TorrentDirectory::new();
+        let mut routes = session_routes("[]".to_owned());
+        routes.retain(|route| route.path() != "/api/v2/torrents/info");
+        routes.push(route("/api/v2/torrents/info", 500, "[]"));
+        let port = serve(routes).await;
+        let error = connected_qtorrent(&directory, port, &["--dryrun"])
+            .run()
+            .await
+            .expect_err("a connected preview must report duplicate lookup failure");
+        assert!(error.to_string().contains("500"), "{error}");
+        assert!(directory.torrent_path.is_file());
     }
 
     #[tokio::test]
