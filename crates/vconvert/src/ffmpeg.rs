@@ -163,6 +163,17 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
 /// # Errors
 /// Returns an error if the stream languages of the input cannot be probed.
 pub fn build_subtitle_mux_command(input: &Path, output: &Path, subtitle_files: &[SubtitleFile]) -> Result<Command> {
+    build_movie_mux_command(input, output, subtitle_files, false, None)
+}
+
+/// Build a movie stream copy, optionally transcoding audio when remuxing to MP4.
+pub(crate) fn build_movie_mux_command(
+    input: &Path,
+    output: &Path,
+    subtitle_files: &[SubtitleFile],
+    transcode_audio: bool,
+    codec: Option<Codec>,
+) -> Result<Command> {
     let mut command = Command::new("ffmpeg");
     command.args(FFMPEG_DEFAULT_ARGS).arg("-i").arg(input);
     for subtitle_file in subtitle_files {
@@ -175,6 +186,15 @@ pub fn build_subtitle_mux_command(input: &Path, output: &Path, subtitle_files: &
     add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
     add_external_subtitle_maps(&mut command, subtitle_files, selected_subtitle_count(&subtitle_counts));
     command.args(["-c", "copy"]);
+    if transcode_audio {
+        command.args(["-c:a", "aac", "-b:a", "128k"]);
+    }
+    if cli_tools_common::path_to_file_extension_string(output) == TARGET_EXTENSION {
+        command.args(["-movflags", "+faststart"]);
+        if codec == Some(Codec::X265) {
+            command.args(["-tag:v", "hvc1"]);
+        }
+    }
     command.arg(output);
     Ok(command)
 }

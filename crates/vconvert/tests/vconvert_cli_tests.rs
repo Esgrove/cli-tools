@@ -254,6 +254,20 @@ fn non_movie_conversion_in_mixed_database_queue_keeps_its_sidecars() {
 }
 
 #[test]
+fn movie_remux_keeps_compatible_embedded_subtitles() {
+    let sandbox = Sandbox::new(MOVIE_FFMPEG);
+    sandbox.write_script("ffprobe", MOVIE_FFPROBE);
+    let original = sandbox.videos().join("Film.x265.m4v");
+    let final_output = sandbox.videos().join("Film.x265.mp4");
+    fs::write(&original, b"hevc original video\nsubtitle=eng\n").unwrap();
+
+    sandbox.run(&["--all", "--movie", "--delete"]);
+    assert!(final_output.exists());
+    assert!(!original.exists());
+    assert_eq!(fs::read_to_string(final_output).unwrap(), "hevc\nsubtitle=eng\n");
+}
+
+#[test]
 fn forced_abort_during_retry_leaves_pending_work_retryable() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
