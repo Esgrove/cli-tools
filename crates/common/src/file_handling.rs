@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::{append_extension_to_path, into_nfc};
 
@@ -255,6 +255,51 @@ fn create_unique_sibling_file(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Check that the existing parent directories of `target` beneath `root` are real directories.
+///
+/// The caller supplies a trusted `root`, which is not checked.
+/// Missing directories are allowed, and the target entry itself is not inspected.
+/// This check does not protect against concurrent changes to the path.
+///
+/// # Errors
+/// Returns an error if `target` is not a descendant of `root`, contains non-normal components below it,
+/// has a symlink or other non-directory parent beneath it, or a parent cannot be inspected.
+pub fn check_destination_parents(root: &Path, target: &Path) -> io::Result<()> {
+    let invalid_target = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Destination {} is not a normal path below {}",
+                target.display(),
+                root.display()
+            ),
+        )
+    };
+    let mut components = target.strip_prefix(root).map_err(|_| invalid_target())?.components();
+    if !matches!(components.next_back(), Some(Component::Normal(_))) {
+        return Err(invalid_target());
+    }
+
+    let mut directory = root.to_path_buf();
+    for component in components {
+        let Component::Normal(name) = component else {
+            return Err(invalid_target());
+        };
+        directory.push(name);
+        match fs::symlink_metadata(&directory) {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    format!("Destination parent is not a real directory: {}", directory.display()),
+                ));
+            }
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Recursively copy a directory and its contents, keeping file modification times.

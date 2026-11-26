@@ -22,9 +22,9 @@ pub use completion::generate_shell_completion;
 #[cfg(feature = "diff")]
 pub use diff::{color_diff, diff_lines, show_diff};
 pub use file_handling::{
-    OverwritePolicy, RenameOutcome, TargetReservations, copy_dir_recursive, copy_file_with_times,
-    directory_is_case_sensitive, is_case_only_change, paths_refer_to_same_entry, paths_refer_to_same_file, safe_rename,
-    unique_sibling_path, write_atomically,
+    OverwritePolicy, RenameOutcome, TargetReservations, check_destination_parents, copy_dir_recursive,
+    copy_file_with_times, directory_is_case_sensitive, is_case_only_change, paths_refer_to_same_entry,
+    paths_refer_to_same_file, safe_rename, unique_sibling_path, write_atomically,
 };
 pub use utils::{
     command_exists, count_files, find_command, get_relative_path_from_current_working_directory,
