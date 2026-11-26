@@ -385,27 +385,27 @@ impl ThumbnailCreator {
         }
     }
 
-    /// Calculate appropriate font size based on video aspect ratio.
+    /// Use the explicit font size, or choose one based on the video aspect ratio.
     fn calculate_font_size(&self, video_info: &VideoInfo) -> u32 {
-        let Some(resolution) = video_info.resolution else {
-            return self.config.font_size;
-        };
+        const DEFAULT_FONT_SIZE: u32 = 20;
 
+        if let Some(font_size) = self.config.font_size {
+            return font_size;
+        }
+        let Some(resolution) = video_info.resolution else {
+            return DEFAULT_FONT_SIZE;
+        };
         if resolution.width == 0 || resolution.height == 0 {
-            return self.config.font_size;
+            return DEFAULT_FONT_SIZE;
         }
 
         let ratio = resolution.aspect_ratio();
-
         if ratio < 0.75 {
-            // Very vertical video
             36
         } else if ratio < 1.25 {
-            // Square-ish video
             28
         } else {
-            // Landscape video
-            self.config.font_size
+            DEFAULT_FONT_SIZE
         }
     }
 
@@ -583,7 +583,7 @@ mod test_thumbnail_helpers {
             cols_landscape: 3,
             cols_portrait: 4,
             dryrun: false,
-            font_size: 20,
+            font_size: None,
             overwrite: false,
             padding_landscape: 8,
             padding_portrait: 16,
@@ -611,6 +611,27 @@ mod test_thumbnail_helpers {
         assert!(ThumbnailCreator::is_video_file(Path::new("video.MKV")));
         assert!(!ThumbnailCreator::is_video_file(Path::new("notes.txt")));
         assert!(!ThumbnailCreator::is_video_file(Path::new("README")));
+    }
+
+    #[test]
+    fn cli_font_size_overrides_portrait_and_square_defaults() {
+        use clap::Parser;
+
+        let args = ThumbnailArgs::try_parse_from(["thumbs", "--fontsize", "12"]).unwrap();
+        let creator = creator(PathBuf::new(), Config::from_args(&args).unwrap());
+        let sizes = [(720, 1280), (1080, 1080), (1920, 1080)].map(|(width, height)| {
+            creator
+                .thumbnail_params(
+                    "clip.mp4",
+                    &VideoInfo {
+                        resolution: Some(Resolution::new(width, height)),
+                        ..VideoInfo::default()
+                    },
+                )
+                .font_size
+        });
+
+        assert_eq!(sizes, [12, 12, 12]);
     }
 
     #[test]
@@ -895,7 +916,7 @@ mod test_thumbnail_run {
                 cols_landscape: 3,
                 cols_portrait: 4,
                 dryrun: true,
-                font_size: 20,
+                font_size: None,
                 overwrite: false,
                 padding_landscape: 8,
                 padding_portrait: 16,
@@ -978,7 +999,7 @@ mod test_thumbnail_file_discovery {
             cols_landscape: 3,
             cols_portrait: 4,
             dryrun: false,
-            font_size: 20,
+            font_size: None,
             overwrite: false,
             padding_landscape: 8,
             padding_portrait: 16,
