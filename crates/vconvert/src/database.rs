@@ -474,7 +474,9 @@ impl Database {
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn get_pending_file(&self, path: &Path) -> Result<Option<PendingFile>> {
-        let path_str = path.to_string_lossy();
+        let Some(path_str) = path.to_str() else {
+            return Ok(None);
+        };
 
         let mut statement = self.connection.prepare(
             r"
@@ -499,7 +501,9 @@ impl Database {
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn remove_pending_file(&self, path: &Path) -> Result<bool> {
-        let path_str = path.to_string_lossy();
+        let Some(path_str) = path.to_str() else {
+            return Ok(false);
+        };
 
         let rows_affected = self
             .connection
@@ -2511,6 +2515,25 @@ mod test_pending_file_lookup_and_removal {
                 .expect("Failed to query unknown path")
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_do_not_match_a_literal_replacement_character_queue_key() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let raw = directory.path().join(OsStr::from_bytes(b"clip_\xff.mkv"));
+        let unicode = directory.path().join("clip_�.mkv");
+        let database = Database::open_in_memory().unwrap();
+        database
+            .upsert_pending_file(&unicode, "mkv", &video_info(), PendingAction::Convert)
+            .unwrap();
+
+        assert!(!database.remove_pending_file(&raw).unwrap());
+        assert!(database.get_pending_file(&unicode).unwrap().is_some());
+        assert!(database.get_pending_file(&raw).unwrap().is_none());
     }
 
     #[test]
