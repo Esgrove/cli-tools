@@ -262,15 +262,15 @@ impl ScanCache {
                         frames_per_second = CASE
                             WHEN excluded.frames_per_second > 0 THEN excluded.frames_per_second
                             WHEN scanned_files.size_bytes = excluded.size_bytes
-                                AND (scanned_files.modified_time_ns = 0
-                                    OR scanned_files.modified_time_ns = excluded.modified_time_ns)
+                                AND scanned_files.modified_time_ns != 0
+                                AND scanned_files.modified_time_ns = excluded.modified_time_ns
                             THEN scanned_files.frames_per_second
                             ELSE 0
                         END,
                         bit_depth = CASE
                             WHEN scanned_files.size_bytes = excluded.size_bytes
-                                AND (scanned_files.modified_time_ns = 0
-                                    OR scanned_files.modified_time_ns = excluded.modified_time_ns)
+                                AND scanned_files.modified_time_ns != 0
+                                AND scanned_files.modified_time_ns = excluded.modified_time_ns
                             THEN scanned_files.bit_depth
                             ELSE 0
                         END,
@@ -543,30 +543,36 @@ mod test_scan_cache_upsert {
     }
 
     #[test]
-    fn upsert_keeps_the_frame_rate_another_tool_stored_for_the_same_file() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
+    fn upsert_keeps_frame_rate_and_bit_depth_when_the_fingerprint_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("clip.mkv");
+        std::fs::write(&path, b"video").unwrap();
+        let fingerprint = fingerprint_file(&path).unwrap();
+        assert_ne!(fingerprint.modified_time_ns, 0);
+        let mut cache = ScanCache::open_in_memory().unwrap();
         cache
             .connection
             .execute(
-                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time) \
-                 VALUES ('/videos/test.mp4', 1000000, 'h264', 5000, 120.5, 1920, 1080, 29.97, 0)",
-                [],
+                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
+                 VALUES (?1, 5, 'h264', 5000, 10.0, 1920, 1080, 29.97, 10, 0, ?2)",
+                params![path.to_str().unwrap(), fingerprint.modified_time_ns],
             )
-            .expect("insert");
+            .unwrap();
 
-        cache
-            .batch_upsert(&[(Path::new("/videos/test.mp4"), &sample_video_info())])
-            .expect("Failed to upsert");
+        let info = VideoInfo {
+            size_bytes: Some(5),
+            ..sample_video_info()
+        };
+        cache.batch_upsert(&[(&path, &info)]).unwrap();
 
-        let frames_per_second: f64 = cache
+        let (frames_per_second, bit_depth): (f64, i64) = cache
             .connection
-            .query_row(
-                "SELECT frames_per_second FROM scanned_files WHERE full_path = '/videos/test.mp4'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("query");
+            .query_row("SELECT frames_per_second, bit_depth FROM scanned_files", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
         assert!((frames_per_second - 29.97).abs() < 0.001, "{frames_per_second}");
+        assert_eq!(bit_depth, 10);
     }
 
     #[test]
@@ -873,6 +879,38 @@ mod test_cached_video_info_conversion {
         };
 
         assert!(!cached.is_current(&fingerprint));
+    }
+
+    #[test]
+    fn batch_upsert_clears_unverified_fps_and_bit_depth_from_a_legacy_row() {
+        let mut cache = ScanCache::open_in_memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("clip.mkv");
+        std::fs::write(&path, b"original").unwrap();
+        cache
+            .connection
+            .execute(
+                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time)
+                 VALUES (?1, 8, 'h264', 9000, 10.0, 1920, 1080, 60.0, 10, 100)",
+                params![path.to_str().unwrap()],
+            )
+            .unwrap();
+        std::fs::write(&path, b"new file").unwrap();
+
+        let info = VideoInfo {
+            size_bytes: Some(8),
+            ..VideoInfo::default()
+        };
+        cache.batch_upsert(&[(&path, &info)]).unwrap();
+
+        let cached = cache.get_all().unwrap();
+        let cached = &cached[path.to_str().unwrap()];
+        assert!(cached.is_current(&fingerprint_file(&path).unwrap()));
+        let bit_depth: i64 = cache
+            .connection
+            .query_row("SELECT bit_depth FROM scanned_files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((cached.frames_per_second, bit_depth), (0.0, 0));
     }
 
     #[test]
