@@ -29,6 +29,8 @@ enum LineClass {
     HtmlComment,
     /// Starts an HTML block.
     HtmlBlock,
+    /// Starts a pipe table (header row followed by a table separator row).
+    Table,
     /// Single verbatim line such as a heading, rule, table row, or link reference.
     Verbatim,
     /// Blockquote line.
@@ -202,7 +204,7 @@ fn split_paragraphs_with(
     notices: &mut Vec<SkipNotice>,
 ) -> Vec<Region> {
     let SplitContext {
-        base_prefix,
+        base_prefix: _,
         start_line,
         is_document,
     } = context;
@@ -224,6 +226,7 @@ fn split_paragraphs_with(
     }
 
     let mut ignore_next = false;
+    let mut in_list_context = false;
     while index < count {
         let Some(line) = lines.get(index) else {
             break;
@@ -234,17 +237,22 @@ fn split_paragraphs_with(
         {
             ignore_next = true;
         }
+        if !matches!(class, LineClass::Blank | LineClass::ListItem(_)) {
+            in_list_context = false;
+        }
         let end = match class {
             LineClass::Blank | LineClass::Verbatim => index + 1,
-            LineClass::FenceOpen(marker, length) => find_fence_close(lines, index, marker, length),
-            LineClass::MathFence => find_line_containing(lines, index + 1, "$$").map_or(count, |close| close + 1),
-            LineClass::HtmlComment => {
-                if line.contains("-->") {
-                    index + 1
-                } else {
-                    find_line_containing(lines, index + 1, "-->").map_or(count, |close| close + 1)
+            LineClass::Table => {
+                let table_end = find_table_end(lines, index);
+                for row in index..table_end {
+                    regions.push(verbatim(start_line, row, row + 1));
                 }
+                index = table_end;
+                continue;
             }
+            LineClass::FenceOpen(marker, length) => find_fence_close(lines, index, marker, length),
+            LineClass::MathFence => find_math_fence_end(lines, index, line),
+            LineClass::HtmlComment => find_html_comment_end(lines, index, line),
             LineClass::HtmlBlock => lines
                 .iter()
                 .enumerate()
@@ -252,35 +260,21 @@ fn split_paragraphs_with(
                 .find(|(_, line)| line.trim().is_empty())
                 .map_or(count, |(position, _)| position),
             LineClass::Blockquote => {
-                let end = lines
-                    .iter()
-                    .enumerate()
-                    .skip(index)
-                    .find(|(_, line)| classify(line, None) != LineClass::Blockquote)
-                    .map_or(count, |(position, _)| position);
-                let inner: Vec<String> = lines
-                    .get(index..end)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|line| RE_BLOCKQUOTE.replace(line, "").into_owned())
-                    .collect();
-                let inner_refs: Vec<&str> = inner.iter().map(String::as_str).collect();
-                let prefix = format!("{base_prefix}> ");
-                let inner_context = SplitContext {
-                    base_prefix: &prefix,
-                    start_line: start_line + index,
-                    is_document: false,
-                };
-                regions.extend(split_paragraphs_with(&inner_refs, inner_context, code_indent, notices));
+                let end = collect_blockquote(lines, index, context, code_indent, &mut regions, notices);
                 index = end;
                 continue;
             }
             LineClass::ListItem(content_start) => {
-                let end = collect_list_item(lines, index, content_start);
-                let region = list_item_paragraph(lines, index, end, content_start, context, notices);
-                regions.push(apply_ignore(region, &mut ignore_next, start_line, index, end));
-                index = end;
-                continue;
+                if is_document && !in_list_context && leading_width(line) >= code_indent {
+                    index + 1
+                } else {
+                    in_list_context = true;
+                    let end = collect_list_item(lines, index, content_start);
+                    let region = list_item_paragraph(lines, index, end, content_start, context, notices);
+                    regions.push(apply_ignore(region, &mut ignore_next, start_line, index, end));
+                    index = end;
+                    continue;
+                }
             }
             LineClass::Field | LineClass::Text => {
                 if leading_width(line) >= code_indent {
@@ -302,6 +296,38 @@ fn split_paragraphs_with(
         index = end.max(index + 1);
     }
     regions
+}
+
+/// Collect a contiguous blockquote starting at `index` and append its inner regions.
+fn collect_blockquote(
+    lines: &[&str],
+    index: usize,
+    context: SplitContext<'_>,
+    code_indent: usize,
+    regions: &mut Vec<Region>,
+    notices: &mut Vec<SkipNotice>,
+) -> usize {
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(index)
+        .find(|(_, line)| classify(line, None) != LineClass::Blockquote)
+        .map_or(lines.len(), |(position, _)| position);
+    let inner: Vec<String> = lines
+        .get(index..end)
+        .unwrap_or_default()
+        .iter()
+        .map(|line| RE_BLOCKQUOTE.replace(line, "").into_owned())
+        .collect();
+    let inner_refs: Vec<&str> = inner.iter().map(String::as_str).collect();
+    let prefix = format!("{}> ", context.base_prefix);
+    let inner_context = SplitContext {
+        base_prefix: &prefix,
+        start_line: context.start_line + index,
+        is_document: false,
+    };
+    regions.extend(split_paragraphs_with(&inner_refs, inner_context, code_indent, notices));
+    end
 }
 
 /// Build the paragraph region for a list item spanning `index..end`.
@@ -412,11 +438,16 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
     }
     let first = trimmed.as_bytes().first().copied().unwrap_or(b' ');
     if matches!(first, b'`' | b'~')
+        && leading_width(line) <= MAX_FENCE_INDENT
         && let Some(captures) = RE_FENCE.captures(line)
         && let Some(fence) = captures.get(1)
     {
         let marker = fence.as_str().chars().next().unwrap_or('`');
-        return LineClass::FenceOpen(marker, fence.as_str().chars().count());
+        let info = line.get(fence.end()..).unwrap_or_default();
+        // CommonMark forbids backticks in backtick fence info strings, so ` ```foo``` bar` is an inline code span.
+        if marker != '`' || !info.contains('`') {
+            return LineClass::FenceOpen(marker, fence.as_str().chars().count());
+        }
     }
     if first == b'$' && trimmed.starts_with("$$") {
         return LineClass::MathFence;
@@ -430,7 +461,10 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
     {
         return LineClass::Verbatim;
     }
-    if first == b'|' || next.is_some_and(|next| line.contains('|') && RE_TABLE_SEPARATOR.is_match(next)) {
+    if next.is_some_and(|next| line.contains('|') && RE_TABLE_SEPARATOR.is_match(next)) {
+        return LineClass::Table;
+    }
+    if first == b'|' {
         return LineClass::Verbatim;
     }
     if matches!(first, b'|' | b':' | b'-') && line.contains('|') && RE_TABLE_SEPARATOR.is_match(line) {
@@ -476,10 +510,31 @@ fn starts_with_inline_html_tag(line: &str) -> bool {
         })
 }
 
+/// Index one past the end of a pipe table starting at `header_index`.
+///
+/// Consumes the header row, separator row, and every consecutive non-blank row containing `|`.
+fn find_table_end(lines: &[&str], header_index: usize) -> usize {
+    let mut end = (header_index + 2).min(lines.len());
+    while let Some(line) = lines.get(end) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.contains('|') {
+            break;
+        }
+        if matches!(
+            classify(line, None),
+            LineClass::FenceOpen(_, _) | LineClass::MathFence | LineClass::HtmlComment | LineClass::Blockquote
+        ) {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
 /// Index one past the closing fence, or the end of the lines when unterminated.
 ///
-/// Like an opening fence, a closing fence has at most three spaces of indentation.
-/// A fence line indented further is part of the code.
+/// Like an opening fence, a closing fence has at most three columns of indentation.
+/// A fence line indented further (including by a tab) is part of the code.
 fn find_fence_close(lines: &[&str], open_index: usize, marker: char, length: usize) -> usize {
     lines
         .iter()
@@ -487,14 +542,32 @@ fn find_fence_close(lines: &[&str], open_index: usize, marker: char, length: usi
         .skip(open_index + 1)
         .find(|(_, line)| {
             let unindented = line.trim_start();
-            let indent = line.len() - unindented.len();
             let trimmed = unindented.trim_end();
-            indent <= MAX_FENCE_INDENT
+            leading_width(line) <= MAX_FENCE_INDENT
                 && !trimmed.is_empty()
                 && trimmed.chars().all(|character| character == marker)
                 && trimmed.chars().count() >= length
         })
         .map_or(lines.len(), |(position, _)| position + 1)
+}
+
+/// Index one past a `$$` math block starting at `index`, recognizing single-line `$$...$$` blocks.
+fn find_math_fence_end(lines: &[&str], index: usize, line: &str) -> usize {
+    let trimmed = line.trim();
+    if trimmed.len() >= 4 && trimmed.ends_with("$$") {
+        index + 1
+    } else {
+        find_line_containing(lines, index + 1, "$$").map_or(lines.len(), |close| close + 1)
+    }
+}
+
+/// Index one past an HTML comment starting at `index`.
+fn find_html_comment_end(lines: &[&str], index: usize, line: &str) -> usize {
+    if line.contains("-->") {
+        index + 1
+    } else {
+        find_line_containing(lines, index + 1, "-->").map_or(lines.len(), |close| close + 1)
+    }
 }
 
 /// Index of the first line at or after `from` that contains `needle`.
@@ -1312,5 +1385,110 @@ mod test_fixture_coverage {
         let openings: Vec<String> = INLINE_HTML_TAGS.iter().map(|tag| format!("<{tag}")).collect();
         let openings: Vec<&str> = openings.iter().map(String::as_str).collect();
         assert_fixture_lines_start_with(&openings, "INLINE_HTML_TAGS");
+    }
+}
+
+#[cfg(test)]
+mod test_markdown_edge_cases {
+    use super::*;
+
+    fn has_any_paragraph(regions: &[Region]) -> bool {
+        regions.iter().any(|region| matches!(region, Region::Paragraph(_)))
+    }
+
+    #[test]
+    fn pipe_table_without_leading_pipes_stays_verbatim() {
+        let lines = ["Name | Value", "--- | ---", "foo | bar; baz", "qux | quux"];
+        let regions = split_paragraphs(&lines, "", 0, true);
+        assert!(
+            !has_any_paragraph(&regions),
+            "pipe table rows without leading | must remain verbatim: {regions:?}"
+        );
+    }
+
+    #[test]
+    fn indented_code_block_with_list_marker_stays_verbatim_while_nested_list_formats() {
+        let code_lines = [
+            "Intro paragraph.",
+            "",
+            "    - code item; not prose",
+            "    1. second line",
+        ];
+        let code_regions = split_paragraphs(&code_lines, "", 0, true);
+        let paragraph_lines: Vec<usize> = code_regions
+            .iter()
+            .filter_map(|region| match region {
+                Region::Paragraph(paragraph) => Some(paragraph.start_line),
+                Region::Verbatim { .. } => None,
+            })
+            .collect();
+        assert_eq!(paragraph_lines, vec![0], "indented code lines must stay verbatim");
+
+        let nested_list = ["- Outer item", "    - Inner item; second clause"];
+        let nested_regions = split_paragraphs(&nested_list, "", 0, true);
+        assert_eq!(
+            nested_regions
+                .iter()
+                .filter(|region| matches!(region, Region::Paragraph(_)))
+                .count(),
+            2,
+            "nested sub-list after list item should still be parsed as list items"
+        );
+    }
+
+    #[test]
+    fn tab_indented_fence_and_inline_triple_backticks_are_not_fences() {
+        let tab_fence = ["\t```", "First sentence. Second sentence."];
+        let tab_regions = split_paragraphs(&tab_fence, "", 0, true);
+        assert!(
+            tab_regions
+                .iter()
+                .any(|region| matches!(region, Region::Paragraph(paragraph) if paragraph.start_line == 1)),
+            "tab-indented ``` is an indented code block, not a fence opener: {tab_regions:?}"
+        );
+
+        let inline_span = [
+            "```foo``` bar. Second sentence.",
+            "",
+            "Third sentence. Fourth sentence.",
+        ];
+        let span_regions = split_paragraphs(&inline_span, "", 0, true);
+        assert_eq!(
+            span_regions
+                .iter()
+                .filter(|region| matches!(region, Region::Paragraph(_)))
+                .count(),
+            2,
+            "inline triple-backtick code span must not swallow the rest of the document: {span_regions:?}"
+        );
+
+        let tab_close_inside_fence = [
+            "```",
+            "\t```",
+            "inside fence. still code.",
+            "```",
+            "Real prose. Second.",
+        ];
+        let close_regions = split_paragraphs(&tab_close_inside_fence, "", 0, true);
+        let para_starts: Vec<usize> = close_regions
+            .iter()
+            .filter_map(|region| match region {
+                Region::Paragraph(paragraph) => Some(paragraph.start_line),
+                Region::Verbatim { .. } => None,
+            })
+            .collect();
+        assert_eq!(para_starts, vec![4], "tab-indented ``` inside fence must not close it");
+    }
+
+    #[test]
+    fn single_line_math_block_does_not_swallow_following_prose() {
+        let lines = ["$$x + y = z$$", "", "First sentence. Second sentence."];
+        let regions = split_paragraphs(&lines, "", 0, true);
+        assert!(
+            regions
+                .iter()
+                .any(|region| matches!(region, Region::Paragraph(paragraph) if paragraph.start_line == 2)),
+            "prose after single-line $$...$$ must still be formatted: {regions:?}"
+        );
     }
 }
