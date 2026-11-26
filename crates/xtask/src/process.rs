@@ -329,6 +329,7 @@ pub fn sanitize_log_line(raw: &str) -> String {
     strip_ansi_codes(last_segment).trim_end().to_owned()
 }
 
+/// Build a `Command` from `spec` with its working directory and environment overrides applied.
 fn build_command(spec: &CommandSpec) -> Command {
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args).current_dir(&spec.cwd);
@@ -440,14 +441,15 @@ fn run_piped(spec: &CommandSpec, log_path: &Path, sink: Option<&OutputSink>) -> 
     Ok(())
 }
 
+/// Read a child output stream into the log file and forward complete lines to `sink`.
 fn tee_stream<R: io::Read>(mut reader: R, log_file: &Mutex<File>, sink: Option<&OutputSink>) {
     let mut buf = [0_u8; STREAM_READ_BUFFER_BYTES];
     let mut splitter = LineSplitter::new();
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if let Some(chunk) = buf.get(..n) {
+            Ok(bytes_read) => {
+                if let Some(chunk) = buf.get(..bytes_read) {
                     if let Ok(mut guard) = log_file.lock() {
                         let _ = guard.write_all(chunk);
                     }
@@ -463,13 +465,14 @@ fn tee_stream<R: io::Read>(mut reader: R, log_file: &Mutex<File>, sink: Option<&
     }
 }
 
+/// Copy all bytes from `reader` into a shared writer until EOF or write error.
 fn forward_stream<R: io::Read, W: Write>(mut reader: R, sink: &Mutex<W>) {
     let mut buf = [0_u8; 8192];
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
-            Ok(n) => {
-                if let Some(chunk) = buf.get(..n)
+            Ok(bytes_read) => {
+                if let Some(chunk) = buf.get(..bytes_read)
                     && let Ok(mut guard) = sink.lock()
                     && guard.write_all(chunk).is_err()
                 {
@@ -480,6 +483,7 @@ fn forward_stream<R: io::Read, W: Write>(mut reader: R, sink: &Mutex<W>) {
     }
 }
 
+/// Return whether `byte` is a UTF-8 continuation byte (`10xxxxxx`).
 const fn is_utf8_continuation(byte: u8) -> bool {
     (byte & 0b1100_0000) == 0b1000_0000
 }

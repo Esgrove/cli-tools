@@ -238,6 +238,7 @@ pub fn compute_effective_tail(active_count: usize, rows: usize, explicit_tail: O
     }
 }
 
+/// Build the `indicatif` progress style for the overall task bar.
 pub(super) fn build_overall_progress_style(colors_enabled: bool) -> ProgressStyle {
     let template = if colors_enabled {
         "[{bar:20.cyan/dim}] {pos}/{len} tasks │ {msg} │ {elapsed_precise}"
@@ -249,6 +250,7 @@ pub(super) fn build_overall_progress_style(colors_enabled: bool) -> ProgressStyl
         .progress_chars("█▓░")
 }
 
+/// Build the `indicatif` spinner style for an individual running task.
 pub(super) fn build_task_spinner_style(colors_enabled: bool) -> ProgressStyle {
     let template = if colors_enabled {
         "  {spinner:.cyan} {prefix} ({elapsed_tenths}){msg}"

@@ -532,6 +532,7 @@ pub fn find_task_file(start: &Path) -> Option<TaskFileLocation> {
     None
 }
 
+/// Default task scheduling priority when omitted from `xtask.toml`.
 const fn default_priority() -> u32 {
     5
 }

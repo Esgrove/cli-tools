@@ -598,6 +598,7 @@ fn project_flag_values(task_file: &TaskFile, matches: &ArgMatches) -> BTreeMap<S
         .collect()
 }
 
+/// Parse a positive `--jobs` integer argument.
 fn parse_positive_jobs(value: &str) -> Result<usize, String> {
     let parsed: usize = value
         .parse()

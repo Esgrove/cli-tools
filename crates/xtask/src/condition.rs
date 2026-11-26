@@ -188,6 +188,7 @@ fn tokenize(expression: &str) -> Result<Vec<Token>> {
     Ok(tokens)
 }
 
+/// Return whether `character` is allowed in a condition identifier.
 const fn is_identifier_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '-' || character == '_'
 }

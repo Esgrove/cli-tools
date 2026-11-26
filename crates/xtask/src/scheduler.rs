@@ -134,6 +134,7 @@ pub struct RunSummary {
     pub notes: Vec<String>,
 }
 
+/// Shared mutable state coordinated across scheduler worker threads.
 struct SchedulerState {
     pending: BTreeMap<String, TaskSpec>,
     running: BTreeSet<String>,
@@ -453,6 +454,7 @@ pub fn run_schedule(
     })
 }
 
+/// Periodically emit CI heartbeat lines until the scheduler signals completion.
 fn heartbeat_loop(stop_pair: &(Mutex<bool>, Condvar), reporter: &Reporter) {
     let (lock, cvar) = stop_pair;
     let mut guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -467,6 +469,7 @@ fn heartbeat_loop(stop_pair: &(Mutex<bool>, Condvar), reporter: &Reporter) {
     }
 }
 
+/// Worker loop that picks ready tasks, runs them, and notifies waiting workers on completion.
 fn worker_loop(state: &Arc<(Mutex<SchedulerState>, Condvar)>, ctx: &TaskContext, fail_fast: bool) {
     let (lock, cvar) = &**state;
 
@@ -588,12 +591,14 @@ fn worker_loop(state: &Arc<(Mutex<SchedulerState>, Condvar)>, ctx: &TaskContext,
     }
 }
 
+/// Forward blocked task notifications to the reporter.
 fn emit_blocked_notifications(reporter: &Reporter, notifications: &[(String, String, String)]) {
     for (id, label, reason) in notifications {
         reporter.on_task_blocked(id, label, reason);
     }
 }
 
+/// Move pending tasks that can no longer run into `completed` as blocked and return notifications for them.
 fn mark_blocked_tasks(guard: &mut SchedulerState, fail_fast: bool) -> Vec<(String, String, String)> {
     let mut all_blocked = Vec::new();
     loop {
@@ -636,6 +641,7 @@ fn mark_blocked_tasks(guard: &mut SchedulerState, fail_fast: bool) -> Vec<(Strin
     all_blocked
 }
 
+/// Pick the highest-priority pending task whose dependencies, ordering, and resources are all satisfied.
 fn pick_ready_task(guard: &SchedulerState) -> Option<String> {
     let mut best: Option<(&str, u32)> = None;
     for task in guard.pending.values() {
@@ -664,6 +670,7 @@ fn pick_ready_task(guard: &SchedulerState) -> Option<String> {
     best.map(|(id, _)| id.to_owned())
 }
 
+/// Recursively collect `id` and all of its transitive dependencies into `keep`.
 fn collect_with_deps(id: &str, by_id: &BTreeMap<String, Vec<String>>, keep: &mut BTreeSet<String>) {
     if !keep.insert(id.to_owned()) {
         return;

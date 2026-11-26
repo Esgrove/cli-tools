@@ -460,6 +460,7 @@ fn lookup_variable(name: &str, context: &TaskContext) -> Result<Vec<String>> {
     )
 }
 
+/// Return whether `character` is allowed in a `${NAME}` variable reference.
 const fn is_variable_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_'
 }
