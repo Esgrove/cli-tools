@@ -21,7 +21,7 @@ pub(super) fn uncertain_regex(
         || syntax.multiline_strings
             && has_unclosed_quote(rest, '"', syntax.backslash_escapes, syntax.doubled_quote_escape)
         || syntax.triple_quotes && (rest.contains("\"\"\"") || rest.contains("'''"))
-        || syntax.heredoc && (rest.contains("<<") || cursor.pending_heredoc.is_some())
+        || syntax.heredoc && (rest.contains("<<") || !cursor.pending_heredocs.is_empty())
         || syntax.block_scalars && RE_BLOCK_SCALAR.is_match(rest)
     {
         cursor.index = line_length;

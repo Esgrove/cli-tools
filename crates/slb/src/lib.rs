@@ -15,6 +15,7 @@ pub mod formatter;
 pub mod line_breaks;
 pub mod line_ranges;
 pub mod list_runs;
+mod literal_syntax;
 pub mod looks_like_code;
 pub mod markdown;
 pub mod options;

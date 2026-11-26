@@ -5,10 +5,12 @@
 //! and carries that state to the next line so multi line strings and comments are followed.
 //! Reports where a comment starts on a line, or that the line cannot be interpreted with certainty.
 
+use std::collections::VecDeque;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
+pub use super::literal_syntax::Heredoc;
 use super::regex_literals::{
     comment_starts_at, division_can_start, find_regex_end, regex_can_start, regex_end_overlaps_comment, uncertain_regex,
 };
@@ -34,13 +36,11 @@ const TEMPLATE_SET: ByteSet = ByteSet::new(b"\\`$");
 /// Bytes that can change the state inside a Go raw string.
 const BACKTICK_RAW_SET: ByteSet = ByteSet::new(b"`");
 
-/// Matches a shell, Dockerfile, or Ruby heredoc start and captures the terminator word.
-static RE_HEREDOC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"<<[-~]?\s*(?:'(\w+)'|"(\w+)"|(\w+))"#).expect("Invalid heredoc regex"));
-
-/// Matches a YAML block scalar indicator at the end of a key or sequence-item line.
-pub(super) static RE_BLOCK_SCALAR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|:|^\s*-)\s*[|>](?:[-+]?\d*|\d*[-+]?)\s*$").expect("Invalid block scalar regex"));
+/// Matches a YAML block scalar header, including tag and anchor properties.
+pub(super) static RE_BLOCK_SCALAR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|:|(?:^|:\s*)\s*-)\s*(?:(?:!<[^>]+>|[!&][^\s]+)\s+)*[|>](?:[-+]?[1-9]?|[1-9][-+]?)\s*$")
+        .expect("Invalid block scalar regex")
+});
 
 /// How single quotes behave in a language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,14 +80,31 @@ pub enum ScanState {
     InDelimitedString(String),
     /// Inside a JavaScript template literal.
     InTemplate,
+    /// Inside nested JavaScript template text or interpolation frames.
+    InTemplateFrames(Vec<TemplateFrame>),
+    /// Inside a Ruby percent literal, with its delimiter and nesting depth.
+    InRubyPercent(char, char, usize),
     /// Inside a Go raw string.
     InBacktickRaw,
-    /// Inside a shell heredoc ending at a line equal to the terminator.
-    InHeredoc(String),
+    /// Inside one or more heredocs, in the order their delimiters appeared.
+    InHeredoc(VecDeque<Heredoc>),
     /// Inside a YAML block scalar with lines indented more than the given width.
     InBlockScalar(usize),
     /// An ambiguous slash may hide a multiline construct, so the remaining source is protected.
     Uncertain,
+}
+
+/// A JavaScript template text or interpolation frame that can span lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateFrame {
+    /// Literal template text.
+    Text,
+    /// Interpolation code with the number of unmatched braces.
+    Expression(usize),
+    /// A block comment inside interpolation code.
+    BlockComment,
+    /// A line-continued quoted string inside interpolation code.
+    Quote(char),
 }
 
 /// Outcome of scanning one character in the normal state.
@@ -131,8 +148,8 @@ pub(super) struct Cursor {
     pub(super) index: usize,
     /// Whether an ambiguous construct prevents safe comment relocation.
     pub(super) uncertain: bool,
-    /// Heredoc terminator to enter after this line.
-    pub(super) pending_heredoc: Option<String>,
+    /// Heredocs to enter after this line.
+    pub(super) pending_heredocs: VecDeque<Heredoc>,
 }
 
 impl<'a> LineChars<'a> {
@@ -236,10 +253,11 @@ fn scan_characters(
             ScanState::Normal => match scan_normal(line, chars, &mut cursor, syntax, expression_depth) {
                 NormalStep::Continue(next_state) => state = next_state,
                 NormalStep::Comment(byte) => {
-                    let next_state = cursor.pending_heredoc.map_or_else(
-                        || normal_line_end_state(line.get(..byte).unwrap_or_default(), syntax),
-                        ScanState::InHeredoc,
-                    );
+                    let next_state = if cursor.pending_heredocs.is_empty() {
+                        normal_line_end_state(line.get(..byte).unwrap_or_default(), syntax)
+                    } else {
+                        ScanState::InHeredoc(cursor.pending_heredocs)
+                    };
                     return ScanResult {
                         state: next_state,
                         comment_start: (!cursor.uncertain).then_some(byte),
@@ -249,15 +267,18 @@ fn scan_characters(
                 NormalStep::Uncertain => return uncertain_result(),
             },
             ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) | ScanState::Uncertain => break,
+            ScanState::InTemplateFrames(frames) => {
+                state = continue_template(frames, line, chars, &mut cursor, syntax);
+            }
             other => state = continue_state(other, chars, &mut cursor.index, syntax),
         }
     }
     if state == ScanState::Normal {
-        if let Some(terminator) = cursor.pending_heredoc {
-            state = ScanState::InHeredoc(terminator);
+        state = if cursor.pending_heredocs.is_empty() {
+            normal_line_end_state(line, syntax)
         } else {
-            state = normal_line_end_state(line, syntax);
-        }
+            ScanState::InHeredoc(cursor.pending_heredocs)
+        };
     }
     ScanResult {
         state,
@@ -311,6 +332,7 @@ const fn significant_set<'a>(state: &ScanState, syntax: &'a StringSyntax) -> Opt
         },
         ScanState::InRawString(_) => Some(&RAW_STRING_SET),
         ScanState::InTemplate => Some(&TEMPLATE_SET),
+        ScanState::InTemplateFrames(_) | ScanState::InRubyPercent(..) => None,
         ScanState::InBacktickRaw => Some(&BACKTICK_RAW_SET),
         ScanState::InDelimitedString(_)
         | ScanState::InHeredoc(_)
@@ -335,12 +357,15 @@ fn line_level_state(line: &str, state: &mut ScanState) -> Option<ScanResult> {
             comment_start: None,
             uncertain: true,
         }),
-        ScanState::InHeredoc(terminator) => {
-            if line.trim() == terminator.as_str() {
+        ScanState::InHeredoc(delimiters) => {
+            if delimiters.front().is_some_and(|delimiter| delimiter.closes(line)) {
+                delimiters.pop_front();
+            }
+            if delimiters.is_empty() {
                 *state = ScanState::Normal;
             }
             Some(ScanResult {
-                state: state.clone(),
+                state: std::mem::take(state),
                 comment_start: None,
                 uncertain: false,
             })
@@ -438,8 +463,8 @@ fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syn
                 *index += 2;
                 state
             } else if character == '$' && char_at(chars, *index + 1) == Some('{') {
-                *index = skip_template_expression(chars, *index + 2);
-                state
+                *index += 2;
+                ScanState::InTemplateFrames(vec![TemplateFrame::Text, TemplateFrame::Expression(1)])
             } else {
                 *index += 1;
                 if character == '`' { ScanState::Normal } else { state }
@@ -449,7 +474,29 @@ fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syn
             *index += 1;
             if character == '`' { ScanState::Normal } else { state }
         }
-        ScanState::Normal | ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) | ScanState::Uncertain => state,
+        ScanState::InRubyPercent(open, close, depth) => {
+            if character == '\\' {
+                *index += 2;
+                return state;
+            }
+            *index += 1;
+            if character == close {
+                if depth == 1 {
+                    ScanState::Normal
+                } else {
+                    ScanState::InRubyPercent(open, close, depth - 1)
+                }
+            } else if character == open {
+                ScanState::InRubyPercent(open, close, depth + 1)
+            } else {
+                state
+            }
+        }
+        ScanState::Normal
+        | ScanState::InTemplateFrames(_)
+        | ScanState::InHeredoc(_)
+        | ScanState::InBlockScalar(_)
+        | ScanState::Uncertain => state,
     }
 }
 
@@ -504,6 +551,21 @@ fn scan_normal(
         cursor.index = after_open;
         return NormalStep::Continue(ScanState::InDelimitedString(closing));
     }
+    if syntax.ruby_literals
+        && character == '%'
+        && char_at(chars, index + 1) == Some('q')
+        && let Some(open) = char_at(chars, index + 2).filter(|character| character.is_ascii_punctuation())
+    {
+        let close = match open {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            '<' => '>',
+            _ => open,
+        };
+        cursor.index += 3;
+        return NormalStep::Continue(ScanState::InRubyPercent(open, close, 1));
+    }
     if character == '"' && syntax.double_quote || character == '\'' {
         return scan_quote(chars, cursor, syntax, character);
     }
@@ -524,25 +586,24 @@ fn scan_normal(
         cursor.index += 2 + hashes;
         return NormalStep::Continue(ScanState::InRawString(hashes));
     }
-    if syntax.heredoc
-        && character == '<'
-        && char_at(chars, index + 1) == Some('<')
-        && char_at(chars, index + 2) != Some('<')
-    {
-        if let Some(rest) = line.get(byte..)
-            && let Some(captures) = RE_HEREDOC.captures(rest)
+    if syntax.heredoc && character == '<' && char_at(chars, index + 1) == Some('<') {
+        if char_at(chars, index + 2) == Some('<') {
+            cursor.index += 3;
+            return NormalStep::Continue(ScanState::Normal);
+        }
+        if let Some(delimiter) = line
+            .get(byte..)
+            .and_then(|rest| Heredoc::parse(rest, syntax.ruby_literals))
         {
-            let word = captures
-                .get(1)
-                .or_else(|| captures.get(2))
-                .or_else(|| captures.get(3))
-                .map(|group| group.as_str().to_string());
-            cursor.pending_heredoc = word;
+            cursor.pending_heredocs.push_back(delimiter);
+        } else if !syntax.ruby_literals {
+            cursor.index = chars.len();
+            return NormalStep::Continue(ScanState::Uncertain);
         }
         cursor.index += 2;
         return NormalStep::Continue(ScanState::Normal);
     }
-    if character == '/' && !syntax.python_expressions {
+    if character == '/' {
         return scan_slash(line, chars, cursor, syntax);
     }
     if syntax.python_expressions {
@@ -655,36 +716,74 @@ fn ends_with_unescaped_backslash(chars: LineChars<'_>) -> bool {
     backslashes % 2 == 1
 }
 
-/// Skip a `${...}` expression inside a JavaScript template literal on the current line.
-///
-/// Quotes and nested braces inside the expression are skipped so backticks inside
-/// `'...'` or `"..."` strings do not prematurely terminate the outer template literal.
-fn skip_template_expression(chars: LineChars<'_>, mut index: usize) -> usize {
-    let mut depth = 1usize;
-    while index < chars.len() && depth > 0 {
-        let Some(character) = char_at(chars, index) else {
-            break;
-        };
-        match character {
-            '{' => {
-                depth += 1;
-                index += 1;
+/// Advance a nested JavaScript template, carrying unfinished interpolations across lines.
+fn continue_template(
+    mut frames: Vec<TemplateFrame>,
+    line: &str,
+    chars: LineChars<'_>,
+    cursor: &mut Cursor,
+    syntax: &StringSyntax,
+) -> ScanState {
+    let index = cursor.index;
+    let Some(character) = char_at(chars, index) else {
+        return ScanState::InTemplateFrames(frames);
+    };
+    cursor.index += 1;
+    match frames.last_mut() {
+        Some(TemplateFrame::Text) => match character {
+            '\\' => cursor.index += 1,
+            '`' => {
+                frames.pop();
             }
+            '$' if char_at(chars, cursor.index) == Some('{') => {
+                cursor.index += 1;
+                frames.push(TemplateFrame::Expression(1));
+            }
+            _ => {}
+        },
+        Some(TemplateFrame::Expression(depth)) => match character {
+            '{' => *depth += 1,
+            '}' if *depth > 1 => *depth -= 1,
             '}' => {
-                depth -= 1;
-                index += 1;
+                frames.pop();
             }
-            '\'' | '"' => {
-                if let Some(end) = find_string_end(chars, index + 1, character, true, false) {
-                    index = end;
-                } else {
-                    return chars.len();
+            '`' => frames.push(TemplateFrame::Text),
+            '\'' | '"' => frames.push(TemplateFrame::Quote(character)),
+            '/' if rest_starts_with(chars, index, "//") => cursor.index = chars.len(),
+            '/' if rest_starts_with(chars, index, "/*") => {
+                cursor.index += 1;
+                frames.push(TemplateFrame::BlockComment);
+            }
+            '/' => {
+                cursor.index = index;
+                let step = scan_slash(line, chars, cursor, syntax);
+                if cursor.uncertain || step != NormalStep::Continue(ScanState::Normal) {
+                    cursor.index = chars.len();
+                    return ScanState::Uncertain;
                 }
             }
-            _ => index += 1,
+            _ => {}
+        },
+        Some(TemplateFrame::BlockComment) => {
+            if rest_starts_with(chars, index, "*/") {
+                cursor.index += 1;
+                frames.pop();
+            }
         }
+        Some(TemplateFrame::Quote(quote)) => {
+            if character == '\\' {
+                cursor.index += 1;
+            } else if character == *quote {
+                frames.pop();
+            }
+        }
+        None => return ScanState::Normal,
     }
-    index
+    if frames.as_slice() == [TemplateFrame::Text] {
+        ScanState::InTemplate
+    } else {
+        ScanState::InTemplateFrames(frames)
+    }
 }
 
 /// Match a C++11 raw string opener `R"delim(` at `index` and return `(index_after_open, ")delim\"")`.
@@ -692,8 +791,14 @@ fn match_cpp_raw_string_start(chars: LineChars<'_>, index: usize) -> Option<(usi
     if char_at(chars, index) != Some('R') || char_at(chars, index + 1) != Some('"') {
         return None;
     }
-    if index > 0
-        && let Some(previous) = char_at(chars, index - 1)
+    let prefix_start = match index.checked_sub(1).and_then(|previous| char_at(chars, previous)) {
+        Some('8') if index >= 2 && char_at(chars, index - 2) == Some('u') => index - 2,
+        Some('u' | 'U' | 'L') => index - 1,
+        _ => index,
+    };
+    if let Some(previous) = prefix_start
+        .checked_sub(1)
+        .and_then(|position| char_at(chars, position))
         && (previous.is_alphanumeric() || previous == '_')
     {
         return None;
