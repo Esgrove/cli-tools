@@ -17,12 +17,12 @@ anyhow = { workspace = true }
 blake3 = { workspace = true }
 cli-tools-common = { workspace = true }
 colored = { workspace = true }
-dirs = { workspace = true }
+dirs = { workspace = true, optional = true }
 regex = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 
 [features]
-scan-cache = ["dep:rusqlite"]
+scan-cache = ["dep:dirs", "dep:rusqlite"]
 
 [dev-dependencies]
 proptest = { workspace = true }
