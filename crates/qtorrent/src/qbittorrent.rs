@@ -224,15 +224,19 @@ impl QBittorrentClient {
             .context("Failed to send add torrent request")?;
 
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
 
         match status {
-            // qBittorrent answers a torrent it did not add,
-            // such as a duplicate, with a success status and "Fails.".
-            StatusCode::OK if body.trim() == "Fails." => {
-                bail!("qBittorrent rejected the torrent, it may already be added")
+            StatusCode::OK => {
+                let body = response
+                    .text()
+                    .await
+                    .context("Failed to read the add torrent acknowledgement")?;
+                match body.trim() {
+                    "Ok." => Ok(()),
+                    "Fails." => bail!("qBittorrent rejected the torrent, it may already be added"),
+                    _ => bail!("qBittorrent did not acknowledge adding the torrent"),
+                }
             }
-            StatusCode::OK => Ok(()),
             StatusCode::UNSUPPORTED_MEDIA_TYPE => {
                 bail!("Torrent file is not valid")
             }
@@ -240,6 +244,10 @@ impl QBittorrentClient {
                 bail!("Authentication required or session expired")
             }
             _ => {
+                let body = response
+                    .text()
+                    .await
+                    .context("Failed to read add torrent error response")?;
                 bail!("Failed to add torrent: HTTP {status} - {body}")
             }
         }
@@ -768,6 +776,13 @@ mod test_client_with_local_server {
         client.logout().await?;
         assert!(!client.authenticated);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_truncated_add_reply_is_an_error() {
+        let client = authenticated_client_for(vec![route("/api/v2/torrents/add", 200, "Ok.").truncated()]).await;
+        let result = client.add_torrent(AddTorrentParams::default()).await;
+        assert!(result.is_err(), "an unreadable response body is not an acknowledgement");
     }
 
     #[tokio::test]

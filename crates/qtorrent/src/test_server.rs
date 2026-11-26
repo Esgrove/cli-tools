@@ -13,9 +13,16 @@ pub struct Route {
     path: &'static str,
     status: u16,
     body: String,
+    extra_content_length: usize,
 }
 
 impl Route {
+    /// Advertise more bytes than the server actually sends.
+    pub const fn truncated(mut self) -> Self {
+        self.extra_content_length = 10;
+        self
+    }
+
     /// The path prefix this route answers.
     pub const fn path(&self) -> &'static str {
         self.path
@@ -28,6 +35,7 @@ pub fn route(path: &'static str, status: u16, body: impl Into<String>) -> Route 
         path,
         status,
         body: body.into(),
+        extra_content_length: 0,
     }
 }
 
@@ -43,13 +51,15 @@ pub async fn serve(routes: Vec<Route>) -> u16 {
         while let Ok((mut stream, _)) = listener.accept().await {
             let request = read_request(&mut stream).await;
             let path = request.split_whitespace().nth(1).unwrap_or_default();
-            let (status, body) = routes
+            let (status, body, extra_content_length) = routes
                 .iter()
                 .find(|route| path.starts_with(route.path))
-                .map_or((404, ""), |route| (route.status, route.body.as_str()));
+                .map_or((404, "", 0), |route| {
+                    (route.status, route.body.as_str(), route.extra_content_length)
+                });
             let response = format!(
                 "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+                body.len() + extra_content_length
             );
             stream.write_all(response.as_bytes()).await.ok();
             stream.shutdown().await.ok();
