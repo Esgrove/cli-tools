@@ -159,8 +159,8 @@ fn list_item_fits_on_one_line(paragraph: &Paragraph, options: &FormatOptions) ->
 
 /// Apply the semicolon and em dash rewrites to all segments.
 ///
-/// Semicolons run before dashes so sentence boundaries introduced by semicolon rewrites
-/// are visible when `reword_dashes` decides whether two dashes belong to the same sentence.
+/// Semicolons run before dashes so sentence boundaries introduced by semicolon rewrites are visible
+/// when `reword_dashes` decides whether two dashes belong to the same sentence.
 pub(super) fn reword_segments(
     segments: &mut [Segment],
     options: &FormatOptions,

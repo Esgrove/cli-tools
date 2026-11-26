@@ -35,7 +35,8 @@ pub struct TrailingComment {
 /// What one pass of the scanner found about every line of a file.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LineScan {
-    /// Whether the line starts inside a multi line string, template, heredoc, block scalar, block comment, or uncertain region.
+    /// Whether the line starts inside a multi line string, template, heredoc, block scalar,
+    /// block comment, or uncertain region.
     inside_string: Vec<bool>,
     /// Whether the line starts inside an open block comment.
     inside_block_comment: Vec<bool>,
@@ -399,7 +400,8 @@ fn has_comment_line_above(lines: &[&str], index: usize, style: &CommentStyle, sc
 /// Split a line at a comment marker byte offset into code, preserved marker, and comment text.
 ///
 /// Doxygen post-member doc comments (`///<` and `//!<`) document the preceding member on the same line,
-/// so moving them above would change what they document; they return `None`.
+/// so moving them above would change what they document.
+/// They return `None`.
 fn trailing_comment(
     line: &str,
     comment_start: usize,
@@ -471,8 +473,8 @@ fn block_comment_regions(
     let after_open = first.trim_start().get(open.len()..).unwrap_or_default();
     let depth_after_first = advance_block_comment_depth(after_open, 1, open, close, nested);
     if depth_after_first == 0 || after_open.contains(close) {
-        // Either closed on the opening line, or closed and reopened mid-line;
-        // leave the opening line verbatim and let the line scanner protect any reopened block.
+        // Either closed on the opening line, or closed and reopened mid-line.
+        // Leave the opening line verbatim and let the line scanner protect any reopened block.
         regions.push(Region::Verbatim {
             start: index,
             end: index + 1,

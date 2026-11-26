@@ -530,8 +530,9 @@ impl ThumbnailCreator {
 
 /// Thumbnail path for each video, in the same order.
 ///
-/// A thumbnail is named after the video stem unless that name collides with another video's thumbnail
-/// in the same directory (case-insensitively), in which case the colliding videos keep their full file names.
+/// A thumbnail is named after the video stem
+/// unless that name collides with another video's thumbnail in the same directory (case-insensitively),
+/// in which case the colliding videos keep their full file names.
 fn thumbnail_paths(video_files: &[PathBuf]) -> Vec<PathBuf> {
     let mut use_full_name = vec![false; video_files.len()];
     loop {

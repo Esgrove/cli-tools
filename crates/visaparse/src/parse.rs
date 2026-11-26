@@ -842,9 +842,7 @@ mod test_split_from_last_whitespaces {
 
     #[test]
     fn trims_whitespace_from_parts() {
-        // Input: "  hello  world  " splits on last "  " (double space)
-        // rsplitn(2, "  ") from right: ["world  ", "  hello"]
-        // After trim: before="hello  world", after="" (splits on trailing double space)
+        // Split at the final pair of spaces and trim whitespace from both parts.
         let (before, after) = split_from_last_whitespaces("hello  world");
         assert_eq!(before, "hello");
         assert_eq!(after, "world");

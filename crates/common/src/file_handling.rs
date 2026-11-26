@@ -500,10 +500,11 @@ pub fn unique_sibling_path(path: &Path, extension: &str) -> PathBuf {
 
 /// Check whether two existing paths name the same directory entry without following a final symbolic link.
 ///
-/// Two hard links to the same inode in different directories or under different names in the same directory
-/// are separate directory entries, so this returns `false` for them.
-/// Two spellings of the same directory entry on a case-insensitive or Unicode-normalizing file system
-/// return `true`.
+/// Two hard links to the same inode in different directories
+/// or under different names in the same directory are separate directory entries,
+/// so this returns `false` for them.
+/// Two spellings of the same directory entry on a case-insensitive
+/// or Unicode-normalizing file system return `true`.
 #[must_use]
 pub fn paths_refer_to_same_entry(left: &Path, right: &Path) -> bool {
     if left == right {

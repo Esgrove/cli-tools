@@ -424,8 +424,8 @@ pub fn is_system_directory_path(path: &Path) -> bool {
 
 /// Classify a Windows path string as a UNC share, a drive letter, or another local path.
 ///
-/// Verbatim local paths (`\\?\C:\...`) and device paths (`\\.\...`) are distinguished from
-/// UNC network shares (`\\server\share`, `//server/share`, and `\\?\UNC\server\share`).
+/// Verbatim local paths (`\\?\C:\...`) and device paths (`\\.\...`)
+/// are distinguished from UNC network shares (`\\server\share`, `//server/share`, and `\\?\UNC\server\share`).
 #[cfg(any(windows, test))]
 fn classify_windows_path_prefix(path_str: &str) -> WindowsPathPrefix {
     let bytes = path_str.as_bytes();
