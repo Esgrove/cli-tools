@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -38,6 +39,12 @@ static FORCE_ABORT: AtomicBool = AtomicBool::new(false);
 
 /// Count of isolated child commands currently running.
 static ACTIVE_COMMANDS: AtomicUsize = AtomicUsize::new(0);
+
+/// Staged temporary output files currently alive in this process, cleaned up on forced abort.
+static ACTIVE_STAGED_PATHS: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Active lock store owners `(db_path, owner_id)` released on forced abort.
+static ACTIVE_LOCK_OWNERS: LazyLock<Mutex<Vec<(PathBuf, String)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Polling interval while waiting on an isolated child process.
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -232,6 +239,63 @@ pub fn has_active_command() -> bool {
     ACTIVE_COMMANDS.load(Ordering::SeqCst) > 0
 }
 
+/// Register a staged temporary output path for removal if a forced abort skips normal `Drop` cleanup.
+pub(crate) fn register_staged_path(path: PathBuf) {
+    let mut paths = ACTIVE_STAGED_PATHS.lock().unwrap_or_else(PoisonError::into_inner);
+    paths.push(path);
+}
+
+/// Unregister a staged temporary output path once it has been published or dropped normally.
+pub(crate) fn unregister_staged_path(path: &Path) {
+    let mut paths = ACTIVE_STAGED_PATHS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(pos) = paths.iter().position(|existing| existing == path) {
+        paths.swap_remove(pos);
+    }
+}
+
+/// Register a lock owner so forced abort releases its `active_locks` rows before exiting.
+pub(crate) fn register_lock_owner(db_path: PathBuf, owner_id: String) {
+    let mut owners = ACTIVE_LOCK_OWNERS.lock().unwrap_or_else(PoisonError::into_inner);
+    owners.push((db_path, owner_id));
+}
+
+/// Unregister a lock owner once its conversion run has exited cleanly.
+pub(crate) fn unregister_lock_owner(owner_id: &str) {
+    let mut owners = ACTIVE_LOCK_OWNERS.lock().unwrap_or_else(PoisonError::into_inner);
+    owners.retain(|(_, existing)| existing != owner_id);
+}
+
+/// Remove any registered staged temporary outputs and release active locks before a forced exit.
+pub fn cleanup_registered_resources() {
+    let staged_paths: Vec<PathBuf> = {
+        let mut paths = ACTIVE_STAGED_PATHS.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *paths)
+    };
+    for path in staged_paths {
+        let _ = std::fs::remove_file(&path);
+    }
+
+    let owners: Vec<(PathBuf, String)> = {
+        let mut list = ACTIVE_LOCK_OWNERS.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *list)
+    };
+    for (db_path, owner_id) in owners {
+        if let Ok(mut conn) = cli_tools_common::sqlite::open_at(&db_path)
+            && let Ok(tx) = cli_tools_common::sqlite::immediate_transaction(&mut conn)
+        {
+            let _ = tx.execute(
+                "DELETE FROM active_locks WHERE owner_id = ?1",
+                rusqlite::params![owner_id],
+            );
+            let _ = tx.execute(
+                "UPDATE pending_files SET claimed_by = NULL, claimed_at = NULL WHERE claimed_by = ?1",
+                rusqlite::params![owner_id],
+            );
+            let _ = tx.commit();
+        }
+    }
+}
+
 /// Normalize a local file path for passing to `ffprobe` as an input argument.
 ///
 /// Relative paths starting with `-` or containing `:` can be misread as options or URL protocols.
@@ -343,9 +407,11 @@ pub fn movie_stream_processing_required(input: &Path) -> Result<bool> {
 
 /// Validate subtitle mux output before deleting or replacing any source files.
 ///
+/// Returns the probed [`VideoInfo`] of the validated output so callers can cache it.
+///
 /// # Errors
 /// Returns an error describing why the output cannot replace the input.
-pub fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) -> Result<()> {
+pub fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) -> Result<VideoInfo> {
     let output_info = probe_video_info(output).context("Failed to get subtitle mux output info")?;
     if output_info.duration < input_info.duration * MIN_MUX_DURATION_RATIO {
         anyhow::bail!(
@@ -367,7 +433,7 @@ pub fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) 
         }
     }
 
-    Ok(())
+    Ok(output_info)
 }
 
 /// Run a command in a new process group so Ctrl+C remains under the parent process's control.

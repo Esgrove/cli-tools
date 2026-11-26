@@ -178,6 +178,9 @@ pub trait ConvertObserver: Sync {
     /// A file disappeared before it was processed, and it was dropped from the database.
     fn file_missing(&self, path: &Path) {}
 
+    /// A file is currently locked by another live process and was skipped.
+    fn file_locked(&self, path: &Path, holder_tool: &str, holder_pid: u32) {}
+
     /// Processing stopped at the file count limit.
     fn limit_reached(&self, limit: usize) {}
 

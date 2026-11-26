@@ -6,19 +6,32 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use cli_tools_common::locks::{AcquireOutcome, ActiveLockStore};
 use cli_tools_common::{OverwritePolicy, RenameOutcome};
 
 use super::VideoConvert;
+use crate::database::Database;
 use crate::observer::FilePosition;
 use crate::types::ProcessableFile;
 
 impl VideoConvert<'_> {
-    /// Process the renames and return the counts of successful and failed attempts.
-    pub(super) fn process_renames(&self, files: &[ProcessableFile], abort_flag: &AtomicBool) -> (usize, usize) {
+    /// Process the renames, updating cached paths in `database` and honoring `overwrite`.
+    pub(super) fn process_renames(
+        &self,
+        files: &[ProcessableFile],
+        abort_flag: &AtomicBool,
+        database: &mut Database,
+        lock_store: Option<&ActiveLockStore>,
+    ) -> (usize, usize) {
         let start = Instant::now();
         let total = files.len();
         let mut renamed_count = 0;
         let mut failed_count = 0;
+        let policy = if self.options.overwrite {
+            OverwritePolicy::Overwrite
+        } else {
+            OverwritePolicy::Skip
+        };
 
         for (index, file) in files.iter().enumerate() {
             if abort_flag.load(Ordering::SeqCst) {
@@ -38,9 +51,30 @@ impl VideoConvert<'_> {
                 renamed_count += 1;
                 continue;
             }
-            match cli_tools_common::safe_rename(&file.file.path, &file.output_path, OverwritePolicy::Skip) {
+
+            let _guard = if let Some(store) = lock_store {
+                match store.try_acquire(&[file.file.path.clone(), file.output_path.clone()], "rename") {
+                    Ok(AcquireOutcome::Acquired(guard)) => Some(guard),
+                    Ok(AcquireOutcome::AlreadyLocked(holder)) => {
+                        self.observer.file_locked(&file.file.path, &holder.tool, holder.pid);
+                        continue;
+                    }
+                    Err(error) => {
+                        failed_count += 1;
+                        self.observer.rename_failed(&file.file.path, &error);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            match cli_tools_common::safe_rename(&file.file.path, &file.output_path, policy) {
                 Ok(RenameOutcome::SkippedExisting) => self.observer.rename_skipped_existing(&file.output_path),
-                Ok(_) => renamed_count += 1,
+                Ok(_) => {
+                    renamed_count += 1;
+                    let _ = database.move_cached_path(&file.file.path, &file.output_path);
+                }
                 Err(error) => {
                     failed_count += 1;
                     self.observer.rename_failed(&file.file.path, &error.into());
@@ -63,13 +97,14 @@ mod test_process_renames {
     #[test]
     fn renames_move_files_to_their_output_names() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let mut database = Database::open_in_memory().expect("open db");
         let path = directory.path().join("Movie.mp4");
         std::fs::write(&path, b"video").expect("Failed to write video file");
         let file = processable(&path, "hevc");
         let output = file.output_path.clone();
         let converter = converter(ConvertOptions::default());
 
-        let renamed = converter.process_renames(&[file], &AtomicBool::new(false));
+        let renamed = converter.process_renames(&[file], &AtomicBool::new(false), &mut database, None);
 
         assert_eq!(renamed, (1, 0));
         assert!(!path.exists());
@@ -79,6 +114,7 @@ mod test_process_renames {
     #[test]
     fn dryrun_renames_count_without_moving_files() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let mut database = Database::open_in_memory().expect("open db");
         let path = directory.path().join("Movie.mp4");
         std::fs::write(&path, b"video").expect("Failed to write video file");
         let converter = converter(ConvertOptions {
@@ -86,15 +122,21 @@ mod test_process_renames {
             ..ConvertOptions::default()
         });
 
-        let renamed = converter.process_renames(&[processable(&path, "hevc")], &AtomicBool::new(false));
+        let renamed = converter.process_renames(
+            &[processable(&path, "hevc")],
+            &AtomicBool::new(false),
+            &mut database,
+            None,
+        );
 
         assert_eq!(renamed, (1, 0));
         assert!(path.is_file());
     }
 
     #[test]
-    fn a_rename_never_replaces_an_existing_file() {
+    fn a_rename_never_replaces_an_existing_file_without_overwrite() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let mut database = Database::open_in_memory().expect("open db");
         let first = directory.path().join("show.x265.mkv");
         let second = directory.path().join("show.av1.mkv");
         let output = directory.path().join("show.mkv");
@@ -110,7 +152,7 @@ mod test_process_renames {
         });
         let converter = converter(ConvertOptions::default());
 
-        let renamed = converter.process_renames(&files, &AtomicBool::new(false));
+        let renamed = converter.process_renames(&files, &AtomicBool::new(false), &mut database, None);
 
         assert_eq!(renamed, (1, 0));
         assert_eq!(std::fs::read(&output).expect("output should exist"), b"FIRST");
@@ -120,11 +162,17 @@ mod test_process_renames {
     #[test]
     fn a_failed_rename_is_counted_separately() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
+        let mut database = Database::open_in_memory().expect("open db");
         let missing = directory.path().join("Missing.mp4");
         let converter = converter(ConvertOptions::default());
 
         assert_eq!(
-            converter.process_renames(&[processable(&missing, "hevc")], &AtomicBool::new(false)),
+            converter.process_renames(
+                &[processable(&missing, "hevc")],
+                &AtomicBool::new(false),
+                &mut database,
+                None
+            ),
             (0, 1)
         );
     }

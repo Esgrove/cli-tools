@@ -62,25 +62,28 @@ impl VideoConvert<'_> {
         self.observer
             .scan_cache_checked(cache_results.len(), cache_misses.len());
 
-        // Phase 2 (parallel): run ffprobe only on cache misses.
+        // Phase 2 (parallel): run ffprobe only on cache misses, stopping early on abort.
         let probe_results: Vec<VideoInfoCache> = if cache_misses.is_empty() {
             Vec::new()
         } else {
             self.observer.probing_started(cache_misses.len());
             let results: Vec<VideoInfoCache> = cache_misses
                 .into_par_iter()
-                .map(|(file, subtitles)| {
+                .filter_map(|(file, subtitles)| {
+                    if abort_flag.load(Ordering::SeqCst) {
+                        return None;
+                    }
                     let result = probe_and_classify(file, subtitles, &filter, movie_mode);
                     self.observer.file_probed();
-                    result
+                    Some(result)
                 })
                 .collect();
             self.observer.probing_finished();
             results
         };
 
-        // Phase 3: write new ffprobe results back to the scan cache in a single transaction unless dry-run.
-        if !self.options.dry_run && !abort_flag.load(Ordering::SeqCst) {
+        // Phase 3: persist completed ffprobe results even if Ctrl+C interrupted remaining probes.
+        if !self.options.dry_run {
             let cache_entries: Vec<(&Path, &VideoInfo)> = probe_results
                 .iter()
                 .filter_map(|entry| entry.info.as_ref().map(|info| (entry.path.as_path(), info)))
@@ -93,13 +96,20 @@ impl VideoConvert<'_> {
         // Combine cache hits (Phase 1) with ffprobe results (Phase 2)
         let mut results = cache_results;
         results.extend(probe_results.into_iter().map(|entry| entry.result));
-        self.collect_analysis_results(resolve_output_collisions(results), abort_flag, total_files, start)
+        self.collect_analysis_results(
+            resolve_output_collisions(results),
+            database,
+            abort_flag,
+            total_files,
+            start,
+        )
     }
 
     /// Group the classified files, handle duplicates, and report the analysis counts.
     fn collect_analysis_results(
         &self,
         results: Vec<AnalysisResult>,
+        database: &Database,
         abort_flag: &AtomicBool,
         total_files: usize,
         start: Instant,
@@ -139,6 +149,9 @@ impl VideoConvert<'_> {
                         let outcome = self.delete_duplicate(&file.path, target_path, *source_duration);
                         if outcome.removes_source() {
                             analysis_stats.duplicates_deleted += 1;
+                            if !self.options.dry_run {
+                                let _ = database.remove_cached_path(&file.path);
+                            }
                         } else {
                             analysis_stats.duplicate_delete_failed += 1;
                         }

@@ -1,14 +1,13 @@
 //! Removing replaced files for video convert.
 //!
 //! Deletes or trashes originals and subtitle sidecars once their output is in place,
-//! and swaps a muxed output over its input when both share the same path.
+//! and swaps a muxed output over its input using a hidden backup sibling when both share the same path.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use super::VideoConvert;
-use crate::helpers::backup_output_path;
 use crate::observer::DeleteMethod;
 use crate::types::SubtitleFile;
 
@@ -42,14 +41,14 @@ impl VideoConvert<'_> {
         }
     }
 
-    /// Move a staged output into `final_output` while keeping `input` backed up until the new file is in place.
+    /// Move a staged output into `final_output` while keeping `input` backed up under a hidden sibling path.
     pub(super) fn replace_input_with_output(
         &self,
         input: &Path,
         final_output: &Path,
         staged_output: &Path,
     ) -> Result<()> {
-        let backup = backup_output_path(input);
+        let backup = hidden_backup_path(input)?;
         std::fs::rename(input, &backup).context("Failed to move original file aside before replacement")?;
 
         if let Err(error) = std::fs::rename(staged_output, final_output) {
@@ -64,4 +63,26 @@ impl VideoConvert<'_> {
         self.delete_file_reporting_failure(&backup);
         Ok(())
     }
+}
+
+/// Reserve a unique hidden backup path beside `input` so concurrent directory scans ignore it.
+fn hidden_backup_path(input: &Path) -> Result<PathBuf> {
+    let parent = input
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let extension = cli_tools_common::path_to_file_extension_string(input);
+    let suffix = if extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{extension}")
+    };
+    let placeholder = tempfile::Builder::new()
+        .prefix(".vconvert-backup-")
+        .suffix(&suffix)
+        .tempfile_in(parent)
+        .context("Failed to reserve hidden backup path")?;
+    let path = placeholder.path().to_path_buf();
+    drop(placeholder);
+    Ok(path)
 }

@@ -245,9 +245,13 @@ impl FileLogger {
     pub(crate) fn log_stats(&self, stats: &RunStats) {
         self.write_entry(|writer| {
             writeln!(writer, "[{}] STATISTICS", Self::timestamp())?;
+            writeln!(writer, "  Files renamed:        {}", stats.files_renamed)?;
             writeln!(writer, "  Files converted: {}", stats.files_converted)?;
             writeln!(writer, "  Files remuxed:        {}", stats.files_remuxed)?;
             writeln!(writer, "  Files subtitle muxed: {}", stats.files_subtitle_muxed)?;
+            if stats.duplicates_deleted > 0 {
+                writeln!(writer, "  Duplicates deleted:   {}", stats.duplicates_deleted)?;
+            }
             writeln!(writer, "  Files failed:         {}", stats.files_failed)?;
 
             if stats.files_converted > 0 {
@@ -341,6 +345,17 @@ impl ConvertObserver for FileLogger {
             &file.info,
             quality_level,
         );
+    }
+
+    fn file_locked(&self, path: &Path, holder_tool: &str, holder_pid: u32) {
+        self.write_entry(|writer| {
+            writeln!(
+                writer,
+                "[{}] SKIPPED LOCKED ({holder_tool} pid {holder_pid}) | {}",
+                Self::timestamp(),
+                path.display()
+            )
+        });
     }
 
     fn file_finished(

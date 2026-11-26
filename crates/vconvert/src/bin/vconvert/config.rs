@@ -174,6 +174,7 @@ impl Config {
         Ok(Self {
             options: ConvertOptions {
                 paths,
+                explicit_paths,
                 extensions,
                 include,
                 exclude,

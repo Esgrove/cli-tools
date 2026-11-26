@@ -61,6 +61,8 @@ pub enum SortOrder {
 pub struct ConvertOptions {
     /// Input files and directories.
     pub paths: Vec<PathBuf>,
+    /// Whether `paths` were explicitly provided on the command line (used to scope `--from-db`).
+    pub explicit_paths: bool,
     /// Lowercase extensions of the files to process.
     pub extensions: Vec<String>,
     /// Only process files whose name contains one of these patterns, when not empty.
@@ -124,7 +126,11 @@ impl ConvertOptions {
         PendingFileFilter {
             action: None,
             extensions: self.extensions.clone(),
-            path_prefixes: Vec::new(),
+            path_prefixes: if self.explicit_paths {
+                self.paths.clone()
+            } else {
+                Vec::new()
+            },
             min_bitrate: Some(self.min_bitrate),
             max_bitrate: self.max_bitrate,
             min_duration: self.min_duration,

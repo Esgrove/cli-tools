@@ -350,6 +350,14 @@ impl ConvertObserver for Reporter {
         print_yellow!("File no longer exists: {}", path.display());
     }
 
+    fn file_locked(&self, path: &Path, holder_tool: &str, holder_pid: u32) {
+        self.logger.file_locked(path, holder_tool, holder_pid);
+        print_yellow!(
+            "Skipping locked file (held by {holder_tool} pid {holder_pid}): {}",
+            path.display()
+        );
+    }
+
     fn limit_reached(&self, limit: usize) {
         println!("{}", format!("\nReached file limit ({limit})").bold());
     }
@@ -505,6 +513,9 @@ fn print_run_summary(stats: &RunStats) {
     println!("Files remuxed:           {}", stats.files_remuxed);
     println!("Files subtitle muxed:    {}", stats.files_subtitle_muxed);
     println!("Files converted:         {}", stats.files_converted);
+    if stats.duplicates_deleted > 0 {
+        println!("Duplicates deleted:      {}", stats.duplicates_deleted);
+    }
     println!(
         "Files failed:            {}",
         if stats.files_failed > 0 {

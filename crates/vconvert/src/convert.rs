@@ -19,21 +19,48 @@ use std::time::Instant;
 
 use anyhow::Result;
 use cli_tools_common::TargetReservations;
+use cli_tools_common::locks::{AcquireOutcome, ActiveLockStore, DEFAULT_LOCK_TTL_SECS};
 
 use crate::classification::database_output_conflict_with_mode;
 use crate::database::{Database, PendingAction};
-use crate::ffmpeg::probe_video_info;
+use crate::ffmpeg::{probe_video_info, register_lock_owner, unregister_lock_owner};
 use crate::helpers::disk_space_shortage;
 use crate::observer::{ConvertObserver, FilePosition, Operation};
 use crate::options::ConvertOptions;
 use crate::stats::RunStats;
-use crate::types::{ProcessResult, ProcessableFile, ProcessableFileSliceExt, ProcessingOutcome, VideoFile};
+use crate::types::{ProcessResult, ProcessableFile, ProcessableFileSliceExt, ProcessingOutcome, VideoFile, VideoInfo};
 
 pub use duplicates::DuplicateOutcome;
 use plan::ProcessingPlan;
 
 /// Per-file operation run for every file of one processing batch.
-type ProcessFunction<'a> = fn(&VideoConvert<'a>, &ProcessableFile, FilePosition) -> ProcessResult;
+type ProcessFunction<'a> =
+    fn(&VideoConvert<'a>, &ProcessableFile, FilePosition, &AtomicBool) -> (ProcessResult, Option<VideoInfo>);
+
+/// Guard that registers a lock store owner for forced-abort cleanup and unregisters it on drop.
+struct RunLockScope {
+    store: ActiveLockStore,
+}
+
+impl RunLockScope {
+    /// Open an [`ActiveLockStore`] for `database` when it is backed by a file on disk and not a dry run.
+    fn open(database: &Database, dry_run: bool) -> Option<Self> {
+        if dry_run {
+            return None;
+        }
+        let db_path = database.db_path()?.to_path_buf();
+        let store = ActiveLockStore::open_at(db_path.clone(), "vconvert").ok()?;
+        register_lock_owner(db_path, store.owner_id().to_string());
+        Some(Self { store })
+    }
+}
+
+impl Drop for RunLockScope {
+    fn drop(&mut self) {
+        unregister_lock_owner(self.store.owner_id());
+        let _ = self.store.release_all_owned();
+    }
+}
 
 /// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert<'a> {
@@ -100,9 +127,12 @@ impl<'a> VideoConvert<'a> {
         };
         self.observer.analysis_started(candidate_files.len());
 
+        let lock_scope = RunLockScope::open(database, self.options.dry_run);
+        let lock_store = lock_scope.as_ref().map(|scope| &scope.store);
+
         let (analysis_output, mut stats) = self.analyze_files(candidate_files, database, subtitle_matches, abort_flag);
         if !analysis_output.renames.is_empty() && !abort_flag.load(Ordering::SeqCst) {
-            let (renamed, failed) = self.process_renames(&analysis_output.renames, abort_flag);
+            let (renamed, failed) = self.process_renames(&analysis_output.renames, abort_flag, database, lock_store);
             stats.files_renamed = renamed;
             stats.files_failed += failed;
         }
@@ -121,7 +151,7 @@ impl<'a> VideoConvert<'a> {
 
         // Store every file that needs processing in a single transaction unless this is a dry run.
         if !self.options.dry_run {
-            match database.batch_upsert_pending_files(&plan.pending_entries()) {
+            match database.batch_upsert_pending_files_with_mode(&plan.pending_entries(), self.options.movie_mode) {
                 Ok(updated_count) => self.observer.pending_files_saved(updated_count),
                 Err(error) => self.observer.pending_files_save_failed(&error),
             }
@@ -132,7 +162,7 @@ impl<'a> VideoConvert<'a> {
             plan.truncate_to(count);
         }
 
-        let (plan_stats, outcome) = self.process_plan(plan, abort_flag, database);
+        let (plan_stats, outcome) = self.process_plan(plan, abort_flag, database, lock_store, false);
         stats += plan_stats;
 
         Ok(Some(RunSummary { stats, outcome }))
@@ -142,8 +172,7 @@ impl<'a> VideoConvert<'a> {
     ///
     /// Rows of files that are missing or changed since the scan are removed first.
     /// The remaining files matching the options are processed without scanning or analysing them again.
-    /// Setting the abort flag stops the run after the current file.
-    /// Returns `None` when no pending file matches the options.
+    /// Concurrent `--from-db` runs claim rows atomically and hold `active_locks` so they never convert the same file.
     ///
     /// # Errors
     /// Returns an error if the database cannot be read or updated.
@@ -154,6 +183,9 @@ impl<'a> VideoConvert<'a> {
                 outcome: ProcessingOutcome::Aborted,
             }));
         }
+        let lock_scope = RunLockScope::open(database, self.options.dry_run);
+        let lock_store = lock_scope.as_ref().map(|scope| &scope.store);
+
         if !self.options.dry_run {
             let missing_count = database.remove_missing_files()?;
             let changed_count = database.remove_changed_files()?;
@@ -164,7 +196,14 @@ impl<'a> VideoConvert<'a> {
         let mut filter = self.options.pending_file_filter();
         filter.limit = None;
         let mut pending_files = database.get_pending_files(&filter)?;
-        pending_files.retain(|file| file.full_path.is_file() && !file.is_changed_on_disk());
+        // Apply --skip-remux / --skip-convert before output-conflict checks so skipped rows never reserve outputs.
+        pending_files.retain(|file| {
+            let skipped = match file.action {
+                PendingAction::Remux | PendingAction::SubtitleMux => self.options.skip_remux,
+                PendingAction::Convert => self.options.skip_convert,
+            };
+            !skipped && file.full_path.is_file() && !file.is_changed_on_disk()
+        });
         if pending_files.is_empty() {
             return Ok(None);
         }
@@ -192,6 +231,7 @@ impl<'a> VideoConvert<'a> {
                 }));
             }
             let is_subtitle_mux = pending_file.action == PendingAction::SubtitleMux;
+            let effective_movie_mode = self.options.movie_mode || is_subtitle_mux;
             let video_file = VideoFile::new_with_metadata(&pending_file.full_path);
             let subtitles = subtitle_matches.remove(&video_file.path).unwrap_or_default();
             let info = if pending_file.bit_depth >= 8 {
@@ -199,8 +239,7 @@ impl<'a> VideoConvert<'a> {
             } else {
                 probe_video_info(&pending_file.full_path).unwrap_or_else(|_| pending_file.to_video_info())
             };
-            let processable =
-                ProcessableFile::for_mode(video_file, info, subtitles, self.options.movie_mode || is_subtitle_mux);
+            let processable = ProcessableFile::for_mode(video_file, info, subtitles, effective_movie_mode);
             // The output may have appeared since the scan, so the scan time checks are repeated here.
             // A blocked row is dropped from the database and a new scan classifies the file again.
             if let Some(reason) = database_output_conflict_with_mode(
@@ -228,24 +267,22 @@ impl<'a> VideoConvert<'a> {
         plan.subtitle_muxes.sort_by_order(self.options.sort);
         plan.conversions.sort_by_order(self.options.sort);
 
-        plan.skip(self.options.skip_remux, self.options.skip_convert);
         if let Some(count) = self.options.count {
             plan.truncate_to(count);
         }
 
-        let (stats, outcome) = self.process_plan(plan, abort_flag, database);
+        let (stats, outcome) = self.process_plan(plan, abort_flag, database, lock_store, true);
         Ok(Some(RunSummary { stats, outcome }))
     }
 
     /// Process the remuxes, subtitle muxes, and conversions of a plan in that order.
-    ///
-    /// A batch only starts when the previous one completed,
-    /// so an abort or a full disk stops the rest of the plan.
     fn process_plan(
         &self,
         plan: ProcessingPlan,
         abort_flag: &AtomicBool,
-        database: &Database,
+        database: &mut Database,
+        lock_store: Option<&ActiveLockStore>,
+        claim_pending_rows: bool,
     ) -> (RunStats, ProcessingOutcome) {
         let total_limit = plan.total();
         let mut stats = RunStats::default();
@@ -273,8 +310,15 @@ impl<'a> VideoConvert<'a> {
             if batch.files.is_empty() || outcome != ProcessingOutcome::Completed {
                 continue;
             }
-            let (batch_stats, batch_outcome) =
-                self.process_files_with_db_cleanup(batch, abort_flag, &mut processed_count, total_limit, database);
+            let (batch_stats, batch_outcome) = self.process_files_with_db_cleanup(
+                batch,
+                abort_flag,
+                &mut processed_count,
+                total_limit,
+                database,
+                lock_store,
+                claim_pending_rows,
+            );
             stats += batch_stats;
             outcome = batch_outcome;
         }
@@ -282,25 +326,22 @@ impl<'a> VideoConvert<'a> {
         (stats, outcome)
     }
 
-    /// Process files and remove them from the database after successful processing.
-    ///
-    /// Before each file the free disk space at the output location is verified:
-    /// at least `MIN_DISK_SPACE_FACTOR` times the original file size must be available,
-    /// otherwise processing stops gracefully with an out-of-disk-space outcome
-    /// so the run statistics can still be reported.
+    /// Process files, coordinating via `active_locks` and `pending_files` claims, and update `database`.
+    #[allow(clippy::too_many_arguments)]
     fn process_files_with_db_cleanup(
         &self,
         batch: Batch<'a>,
         abort_flag: &AtomicBool,
         processed_count: &mut usize,
         total_limit: usize,
-        database: &Database,
+        database: &mut Database,
+        lock_store: Option<&ActiveLockStore>,
+        claim_pending_rows: bool,
     ) -> (RunStats, ProcessingOutcome) {
         let mut stats = RunStats::default();
         let mut outcome = ProcessingOutcome::Completed;
 
         for file in batch.files {
-            // Check abort flag before starting a new file
             if abort_flag.load(Ordering::SeqCst) {
                 outcome = ProcessingOutcome::Aborted;
                 break;
@@ -321,7 +362,41 @@ impl<'a> VideoConvert<'a> {
                 continue;
             }
 
+            // Acquire cross-tool active locks on input and output paths before starting work.
+            let _lock_guard = if let Some(store) = lock_store {
+                match store.try_acquire(
+                    &[file.file.path.clone(), file.output_path.clone()],
+                    batch.operation.as_str(),
+                ) {
+                    Ok(AcquireOutcome::Acquired(guard)) => Some(guard),
+                    Ok(AcquireOutcome::AlreadyLocked(holder)) => {
+                        self.observer.file_locked(&file.file.path, &holder.tool, holder.pid);
+                        continue;
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
+            let claimed_owner = if claim_pending_rows && !self.options.dry_run {
+                let owner_id = lock_store.map_or("vconvert-in-memory", ActiveLockStore::owner_id);
+                match database.claim_pending_file(&file.file.path, owner_id, DEFAULT_LOCK_TTL_SECS) {
+                    Ok(true) => Some(owner_id.to_string()),
+                    Ok(false) => {
+                        self.observer.file_locked(&file.file.path, "vconvert", 0);
+                        continue;
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
             if let Some(shortage) = disk_space_shortage(&file) {
+                if let Some(ref owner_id) = claimed_owner {
+                    let _ = database.release_pending_claim(&file.file.path, owner_id);
+                }
                 self.observer.out_of_disk_space(&file.file.path, shortage);
                 outcome = ProcessingOutcome::OutOfDiskSpace;
                 break;
@@ -333,16 +408,24 @@ impl<'a> VideoConvert<'a> {
             };
 
             let start = Instant::now();
-            let result = (batch.process)(self, &file, position);
+            let (result, output_info) = (batch.process)(self, &file, position, abort_flag);
             let duration = start.elapsed();
 
             if !matches!(result, ProcessResult::Failed { .. }) {
                 *processed_count += 1;
-                if !self.options.dry_run
-                    && let Err(error) = database.remove_pending_file(&file.file.path)
-                {
-                    self.observer.database_removal_failed(&file.file.path, &error);
+                if !self.options.dry_run {
+                    if let Err(error) = database.remove_pending_file(&file.file.path) {
+                        self.observer.database_removal_failed(&file.file.path, &error);
+                    }
+                    if let Some(ref output_info) = output_info {
+                        let _ = database.upsert_scanned_file(&file.output_path, output_info);
+                    }
+                    if !cli_tools_common::paths_refer_to_same_file(&file.file.path, &file.output_path) {
+                        let _ = database.remove_cached_path(&file.file.path);
+                    }
                 }
+            } else if let Some(ref owner_id) = claimed_owner {
+                let _ = database.release_pending_claim(&file.file.path, owner_id);
             }
             self.observer
                 .file_finished(batch.operation, position, &file, &result, duration);
@@ -436,20 +519,33 @@ mod test_process_files_with_db_cleanup {
             .collect()
     }
 
-    fn succeed(_converter: &VideoConvert<'static>, _file: &ProcessableFile, _position: FilePosition) -> ProcessResult {
-        ProcessResult::converted(1_024, 8_000, 512, 4_000)
+    fn succeed(
+        _converter: &VideoConvert<'static>,
+        _file: &ProcessableFile,
+        _position: FilePosition,
+        _abort_flag: &AtomicBool,
+    ) -> (ProcessResult, Option<VideoInfo>) {
+        (ProcessResult::converted(1_024, 8_000, 512, 4_000), None)
     }
 
-    fn fail(_converter: &VideoConvert<'static>, _file: &ProcessableFile, _position: FilePosition) -> ProcessResult {
-        ProcessResult::Failed {
-            error: "ffmpeg failed".to_string(),
-        }
+    fn fail(
+        _converter: &VideoConvert<'static>,
+        _file: &ProcessableFile,
+        _position: FilePosition,
+        _abort_flag: &AtomicBool,
+    ) -> (ProcessResult, Option<VideoInfo>) {
+        (
+            ProcessResult::Failed {
+                error: "ffmpeg failed".to_string(),
+            },
+            None,
+        )
     }
 
     #[test]
     fn successful_files_are_counted_and_removed_from_the_database() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
         let files = pending_files(directory.path(), &database, &["first.mkv", "second.mkv"]);
         let converter = converter(ConvertOptions::default());
         let mut processed_count = 0;
@@ -459,7 +555,9 @@ mod test_process_files_with_db_cleanup {
             &AtomicBool::new(false),
             &mut processed_count,
             2,
-            &database,
+            &mut database,
+            None,
+            false,
         );
 
         assert_eq!(outcome, ProcessingOutcome::Completed);
@@ -471,7 +569,7 @@ mod test_process_files_with_db_cleanup {
     #[test]
     fn failed_files_stay_in_the_database() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
         let files = pending_files(directory.path(), &database, &["broken.mkv"]);
         let converter = converter(ConvertOptions::default());
         let mut processed_count = 0;
@@ -481,7 +579,9 @@ mod test_process_files_with_db_cleanup {
             &AtomicBool::new(false),
             &mut processed_count,
             1,
-            &database,
+            &mut database,
+            None,
+            false,
         );
 
         assert_eq!(outcome, ProcessingOutcome::Completed);
@@ -493,7 +593,7 @@ mod test_process_files_with_db_cleanup {
     #[test]
     fn missing_files_are_dropped_from_the_database_without_processing() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
         let files = pending_files(directory.path(), &database, &["gone.mkv"]);
         std::fs::remove_file(directory.path().join("gone.mkv")).expect("Failed to remove video file");
         let converter = converter(ConvertOptions::default());
@@ -504,7 +604,9 @@ mod test_process_files_with_db_cleanup {
             &AtomicBool::new(false),
             &mut processed_count,
             1,
-            &database,
+            &mut database,
+            None,
+            false,
         );
 
         assert_eq!(processed_count, 0);
@@ -515,7 +617,7 @@ mod test_process_files_with_db_cleanup {
     #[test]
     fn processing_stops_at_the_file_limit() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
         let files = pending_files(directory.path(), &database, &["first.mkv", "second.mkv", "third.mkv"]);
         let converter = converter(ConvertOptions::default());
         let mut processed_count = 0;
@@ -525,7 +627,9 @@ mod test_process_files_with_db_cleanup {
             &AtomicBool::new(false),
             &mut processed_count,
             2,
-            &database,
+            &mut database,
+            None,
+            false,
         );
 
         assert_eq!(outcome, ProcessingOutcome::Completed);
@@ -536,7 +640,7 @@ mod test_process_files_with_db_cleanup {
     #[test]
     fn abort_flag_stops_before_the_next_file() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
-        let database = Database::open_in_memory().expect("Failed to open in-memory database");
+        let mut database = Database::open_in_memory().expect("Failed to open in-memory database");
         let files = pending_files(directory.path(), &database, &["first.mkv"]);
         let converter = converter(ConvertOptions::default());
         let mut processed_count = 0;
@@ -546,12 +650,45 @@ mod test_process_files_with_db_cleanup {
             &AtomicBool::new(true),
             &mut processed_count,
             1,
-            &database,
+            &mut database,
+            None,
+            false,
         );
 
         assert_eq!(outcome, ProcessingOutcome::Aborted);
         assert_eq!(stats.files_converted, 0);
         assert_eq!(pending_paths(&database).len(), 1);
+    }
+
+    #[test]
+    fn skips_file_locked_by_another_concurrent_worker() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let db_path = directory.path().join("cli-tools.db");
+        let mut database = Database::open_at(&db_path).expect("open db");
+        let files = pending_files(directory.path(), &database, &["busy.mkv", "free.mkv"]);
+
+        let other_worker = ActiveLockStore::open_at(db_path.clone(), "vconvert").expect("lock store");
+        let _guard = other_worker
+            .try_acquire(std::slice::from_ref(&files[0].file.path), "convert")
+            .expect("lock busy file");
+
+        let this_worker = ActiveLockStore::open_at(db_path, "vconvert").expect("lock store");
+        let converter = converter(ConvertOptions::default());
+        let mut processed_count = 0;
+
+        let (stats, outcome) = converter.process_files_with_db_cleanup(
+            batch(files, succeed),
+            &AtomicBool::new(false),
+            &mut processed_count,
+            2,
+            &mut database,
+            Some(&this_worker),
+            true,
+        );
+
+        assert_eq!(outcome, ProcessingOutcome::Completed);
+        assert_eq!(stats.files_converted, 1);
+        assert_eq!(pending_paths(&database), vec![directory.path().join("busy.mkv")]);
     }
 
     #[test]
