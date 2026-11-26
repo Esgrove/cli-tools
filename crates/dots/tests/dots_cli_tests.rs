@@ -141,18 +141,18 @@ fn conflicting_targets_keep_every_file() {
 }
 
 #[test]
-fn an_explicit_file_must_match_all_includes() {
+fn an_explicit_file_matches_any_include_glob_or_substring() {
     let tree = TempTree::new();
     tree.file_with("library/selected clip.mkv", "clip");
     let home = TempTree::new();
     let file = tree.join("library/selected clip.mkv");
     let before = tree.snapshot();
 
-    let skipped = run_dots(home.path(), &["--include", "library", "--include", ".mp4"], &file);
+    let skipped = run_dots(home.path(), &["--include", "*.mp4", "--include", "*.avi"], &file);
     assert_success(&skipped);
     assert_eq!(tree.snapshot(), before);
 
-    let matched = run_dots(home.path(), &["--include", "library", "--include", ".mkv"], &file);
+    let matched = run_dots(home.path(), &["--include", "*.mp4", "--include", "*.mkv"], &file);
     assert_success(&matched);
     assert_eq!(tree.snapshot(), ["library/", "library/Selected.Clip.mkv: clip"]);
 }

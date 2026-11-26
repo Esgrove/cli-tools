@@ -81,6 +81,14 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
     let suffix_dir = !explicit_suffix
         && (cli.suffix_dir || cli.suffix_dir_recursive || user_config.suffix_dir || user_config.suffix_dir_recursive);
 
+    let exclude: Vec<String> = cli
+        .exclude
+        .iter()
+        .chain(user_config.exclude.iter())
+        .unique()
+        .cloned()
+        .collect();
+
     Ok(DotRenameConfig {
         convert_case: cli.case,
         date_starts_with_year: !cli.year && user_config.date_starts_with_year,
@@ -89,7 +97,7 @@ pub fn build_config(cli: &DotsCli) -> Result<DotRenameConfig> {
         dryrun: cli.print || user_config.dryrun,
         include,
         include_any,
-        exclude: cli.exclude.clone(),
+        exclude,
         increment_name: cli.increment || user_config.increment,
         move_date_after_prefix,
         move_to_end: DotsConfig::compile_word_boundary_patterns(user_config.move_to_end)?,
@@ -146,7 +154,7 @@ mod test_build_config {
         assert!(config.verbose);
         assert_eq!(config.prefix.as_deref(), Some("PRE"));
         assert_eq!(config.suffix.as_deref(), Some("SUF"));
-        assert_eq!(config.exclude, vec!["skip"]);
+        assert_eq!(config.exclude, vec!["skip", "*.txt", "*.nfo"]);
         assert_eq!(config.include, vec!["*.mkv", "*.mp4", "*.avi"]);
         assert_eq!(config.include_any, vec!["OLD", "REMOVE"]);
         assert_eq!(config.replace[0], ("OLD".to_string(), "new".to_string()));

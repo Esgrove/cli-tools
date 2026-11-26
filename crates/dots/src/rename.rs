@@ -120,13 +120,46 @@ impl DotRename {
         DotFormat::new(&self.config)
     }
 
-    /// Check the configured literal filters against the entire input path.
+    /// Check configured include/exclude globs and substrings against the entry filename or relative path.
+    ///
+    /// Glob patterns match against the filename via [`cli_tools_common::NameFilter`].
+    /// Plain substring patterns match case-insensitively against the relative path beneath `self.root`
+    /// (or the full path for an explicit single file),
+    /// so parent directories outside the scan root do not trigger false matches
+    /// while subdirectories inside the tree still match.
     fn matches_filters(&self, path: &Path) -> bool {
-        let path = cli_tools_common::path_to_string(path);
-        self.config.include.iter().all(|pattern| path.contains(pattern))
-            && (self.config.include_any.is_empty()
-                || self.config.include_any.iter().any(|pattern| path.contains(pattern)))
-            && !self.config.exclude.iter().any(|pattern| path.contains(pattern))
+        let filename = cli_tools_common::path_to_filename_string(path);
+        let relative = if self.root.is_dir() {
+            path.strip_prefix(&self.root)
+                .map_or_else(|_| filename.clone(), cli_tools_common::path_to_string)
+        } else {
+            cli_tools_common::path_to_string(path)
+        };
+        let relative_lower = relative.to_lowercase();
+
+        let matches_pattern = |pattern: &str| -> bool {
+            let trimmed = pattern.trim();
+            if trimmed.is_empty() {
+                return true;
+            }
+            if trimmed.contains(['*', '?', '[', '{']) {
+                cli_tools_common::NameFilter::new(&[trimmed.to_string()], &[])
+                    .is_ok_and(|filter| filter.matches_name(&filename))
+            } else {
+                relative_lower.contains(&trimmed.to_lowercase())
+            }
+        };
+
+        let included = self.config.include.is_empty() || self.config.include.iter().any(|p| matches_pattern(p));
+        let excluded = self.config.exclude.iter().any(|p| matches_pattern(p));
+        let included_any = self.config.include_any.is_empty()
+            || self
+                .config
+                .include_any
+                .iter()
+                .any(|pattern| filename.contains(pattern) || relative.contains(pattern));
+
+        included && !excluded && included_any
     }
 
     /// Get all files that need to be renamed.

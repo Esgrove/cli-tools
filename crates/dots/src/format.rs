@@ -3,7 +3,6 @@
 //! Implements `DotFormat`, the pipeline that normalizes separators, brackets, dates,
 //! and capitalization into the dot separated naming style.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -41,54 +40,10 @@ static RE_RESOLUTION: LazyLock<Regex> =
 static RE_LEADING_DIGITS: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^\d{5,}\b").expect("Invalid leading digits regex"));
 
-static RE_WRITTEN_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i-u)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>[0-9]{1,2})\.(?P<year>[0-9]{4})\b",
-    )
-        .expect("Failed to compile MDY written date regex")
-});
-
-static RE_WRITTEN_DATE_DMY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i-u)\b(?P<day>[0-9]{1,2})\.(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<year>[0-9]{4})\b",
-    )
-        .expect("Failed to compile DMY written date regex")
-});
-
-static WRITTEN_MONTHS_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
-    [
-        ("jan", "01"),
-        ("january", "01"),
-        ("feb", "02"),
-        ("february", "02"),
-        ("mar", "03"),
-        ("march", "03"),
-        ("apr", "04"),
-        ("april", "04"),
-        ("may", "05"),
-        ("jun", "06"),
-        ("june", "06"),
-        ("jul", "07"),
-        ("july", "07"),
-        ("aug", "08"),
-        ("august", "08"),
-        ("sep", "09"),
-        ("september", "09"),
-        ("oct", "10"),
-        ("october", "10"),
-        ("nov", "11"),
-        ("november", "11"),
-        ("dec", "12"),
-        ("december", "12"),
-    ]
-    .into_iter()
-    .collect()
-});
-
 static REPLACE: [(&str, &str); 27] = [
+    (" - ", "."),
+    (", ", "."),
     (" ", "."),
-    (" - ", " "),
-    (", ", " "),
     ("_", "."),
     ("-", "."),
     ("–", "."),
@@ -509,28 +464,7 @@ impl DotFormat<'_> {
     /// "23.May.2016" -> "2016.05.23"
     /// ```
     pub fn convert_written_date_format(name: &mut String) {
-        let replace_written = |caps: &regex::Captures<'_>| -> String {
-            let full_match = caps.get(0).map_or("", |matched| matched.as_str());
-            let (Some(year), Some(month_match), Some(day_match)) =
-                (caps.name("year"), caps.name("month"), caps.name("day"))
-            else {
-                return full_match.to_string();
-            };
-            let month_raw = month_match.as_str().to_ascii_lowercase();
-            let (Some(month), Ok(day)) = (
-                WRITTEN_MONTHS_MAP.get(month_raw.as_str()),
-                day_match.as_str().parse::<u8>(),
-            ) else {
-                return full_match.to_string();
-            };
-            format!("{}.{month}.{day:02}", year.as_str())
-        };
-
-        // Replace Month.Day.Year
-        *name = RE_WRITTEN_DATE_MDY.replace_all(name, &replace_written).into_owned();
-
-        // Replace Day.Month.Year
-        *name = RE_WRITTEN_DATE_DMY.replace_all(name, &replace_written).into_owned();
+        *name = Date::convert_written_dates(name);
     }
 
     /// Remove consecutive duplicate occurrences of patterns from the name.
@@ -599,21 +533,8 @@ impl DotFormat<'_> {
 
 /// Map a lowercase prefix length to its ending byte boundary in the original string.
 fn original_end_for_lowercase_prefix(text: &str, lowercase_prefix_length: usize) -> Option<usize> {
-    if lowercase_prefix_length == 0 {
-        return Some(0);
-    }
-
-    let mut lowercase_length = 0;
-    for (start, character) in text.char_indices() {
-        lowercase_length += character.to_lowercase().map(char::len_utf8).sum::<usize>();
-        match lowercase_length.cmp(&lowercase_prefix_length) {
-            std::cmp::Ordering::Less => {}
-            std::cmp::Ordering::Equal => return Some(start + character.len_utf8()),
-            std::cmp::Ordering::Greater => return None,
-        }
-    }
-
-    None
+    let end = cli_tools_common::original_end_for_lowercase_prefix(text, lowercase_prefix_length);
+    text.is_char_boundary(end).then_some(end)
 }
 
 /// Replace two or more consecutive dots with a single dot in place.

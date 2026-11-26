@@ -1,14 +1,15 @@
 //! Configuration for dot rename operations.
 
-use std::{fmt, fs};
+use std::fmt;
 
 use anyhow::Context;
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
 
-/// Config from the user config file.
+/// Config from the `[dots]` section of the user config file.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DotsConfig {
     #[serde(default = "default_true")]
     pub date_starts_with_year: bool,
@@ -18,6 +19,8 @@ pub struct DotsConfig {
     pub directory: bool,
     #[serde(default)]
     pub dryrun: bool,
+    #[serde(default)]
+    pub exclude: Vec<String>,
     #[serde(default)]
     pub increment: bool,
     #[serde(default)]
@@ -54,13 +57,6 @@ pub struct DotsConfig {
     pub remove_from_start: Vec<String>,
     #[serde(default)]
     pub verbose: bool,
-}
-
-/// Wrapper needed for parsing the config section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    dots: DotsConfig,
 }
 
 /// Final config created from CLI arguments and user config file.
@@ -104,6 +100,7 @@ impl Default for DotsConfig {
             debug: false,
             directory: false,
             dryrun: false,
+            exclude: Vec::new(),
             increment: false,
             include: Vec::new(),
             move_date_after_prefix: Vec::new(),
@@ -133,19 +130,7 @@ impl DotsConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     pub fn get_user_config() -> anyhow::Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
+        cli_tools_common::load_user_config_section("dots")
     }
 
     /// Parse config from a TOML string.
@@ -153,9 +138,7 @@ impl DotsConfig {
     /// # Errors
     /// Returns an error if the TOML string is invalid.
     pub fn from_toml_str(toml_str: &str) -> anyhow::Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.dots)
-            .with_context(|| "Failed to parse config TOML")
+        cli_tools_common::parse_user_config_section(toml_str, "dots")
     }
 
     /// Collect substitutes to replace pairs from a list of pattern-replacement pairs.
@@ -296,7 +279,7 @@ impl DotRenameConfig {
             dryrun: user_config.dryrun,
             include: user_config.include,
             include_any: Vec::new(),
-            exclude: Vec::new(),
+            exclude: user_config.exclude,
             increment_name: user_config.increment,
             move_date_after_prefix,
             move_to_end: DotsConfig::compile_word_boundary_patterns(user_config.move_to_end)?,

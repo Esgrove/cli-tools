@@ -9,8 +9,8 @@ mod config;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
 
 use cli_tools_dots::DotRename;
 
@@ -54,15 +54,7 @@ enum Command {
 
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -217,14 +209,8 @@ impl DotsCli {
 fn main() -> Result<()> {
     let mut cli = DotsCli::parse();
     cli.apply_subcommand();
-    if let Some(Command::Completion { shell, install }) = &cli.command {
-        cli_tools_common::generate_shell_completion(
-            *shell,
-            DotsCli::command(),
-            *install,
-            cli.verbose,
-            env!("CARGO_BIN_NAME"),
-        )
+    if let Some(Command::Completion(completion)) = &cli.command {
+        completion.generate::<DotsCli>(cli.verbose, env!("CARGO_BIN_NAME"))
     } else {
         cli.run()
     }
@@ -233,6 +219,8 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod test_dots_cli_parsing {
     use super::*;
+    use clap::CommandFactory;
+    use clap_complete::Shell;
 
     #[test]
     fn parses_defaults() {
@@ -309,10 +297,10 @@ mod test_dots_cli_parsing {
 
         assert!(matches!(
             cli.command,
-            Some(Command::Completion {
+            Some(Command::Completion(CompletionArgs {
                 shell: Shell::Bash,
                 install: true
-            })
+            }))
         ));
     }
 
