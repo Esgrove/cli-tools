@@ -594,7 +594,7 @@ fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, contex
         return;
     };
     let root = report.root.clone();
-    match has_changes(&root, context.roots) {
+    match has_tracked_changes(&root, context.roots) {
         Ok(false) => {
             report.push(ReportEntry::NothingToCommit);
             return;
@@ -608,9 +608,9 @@ fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, contex
 
     let message = commit_message(context.target, rust_changed, context.options.update);
     let pathspecs = pathspecs(&root, context.roots);
-    let mut add_args = vec!["add", "--all", "--"];
+    let mut add_args = vec!["add", "--update", "--"];
     add_args.extend(pathspecs.iter().map(String::as_str));
-    let mut commit_args = vec!["commit", "--message", message.as_str(), "--"];
+    let mut commit_args = vec!["commit", "--only", "--message", message.as_str(), "--"];
     commit_args.extend(pathspecs.iter().map(String::as_str));
 
     if report.run_step("git", &add_args, false) && report.run_step("git", &commit_args, false) {
@@ -629,10 +629,22 @@ fn commit_message(target: RustVersion, rust_changed: bool, updated_dependencies:
     }
 }
 
-/// Check if the project has uncommitted changes, ignoring nested projects.
+/// Check if the project has any uncommitted changes (including untracked files), ignoring nested projects.
 fn has_changes(root: &Path, roots: &[PathBuf]) -> Result<bool> {
     let pathspecs = pathspecs(root, roots);
     let mut args = vec!["status", "--porcelain", "--"];
+    args.extend(pathspecs.iter().map(String::as_str));
+    let result = run_command(root, "git", &args)?;
+    if !result.success {
+        anyhow::bail!("git status failed: {}", result.output.trim());
+    }
+    Ok(!result.output.trim().is_empty())
+}
+
+/// Check if the project has modifications to tracked files, ignoring untracked files and nested projects.
+fn has_tracked_changes(root: &Path, roots: &[PathBuf]) -> Result<bool> {
+    let pathspecs = pathspecs(root, roots);
+    let mut args = vec!["status", "--porcelain", "--untracked-files=no", "--"];
     args.extend(pathspecs.iter().map(String::as_str));
     let result = run_command(root, "git", &args)?;
     if !result.success {
@@ -649,7 +661,7 @@ fn pathspecs(root: &Path, roots: &[PathBuf]) -> Vec<String> {
             .iter()
             .filter(|other| other.as_path() != root)
             .filter_map(|other| other.strip_prefix(root).ok())
-            .map(|relative| format!(":(exclude){}", relative.display())),
+            .map(|relative| format!(":(exclude){}", relative.to_string_lossy().replace('\\', "/"))),
     );
     specs
 }
@@ -717,6 +729,77 @@ mod test_git_state {
         let temp = TempDir::new().expect("temp dir");
         let state = GitState::read(temp.path(), &[]);
         assert_eq!(state, GitState::default());
+    }
+
+    #[test]
+    fn commit_changes_does_not_stage_untracked_files() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().canonicalize().expect("canonical");
+        let run_git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init", "--quiet"]);
+        run_git(&["config", "user.name", "Test"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "commit.gpgsign", "false"]);
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"a\"\nrust-version = \"1.90\"\n",
+        )
+        .expect("write");
+        run_git(&["add", "Cargo.toml"]);
+        run_git(&["commit", "--quiet", "-m", "initial"]);
+
+        // Modify tracked Cargo.toml and drop an untracked scratch file (as a test run might).
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"a\"\nrust-version = \"1.100\"\n",
+        )
+        .expect("update");
+        fs::write(root.join("untracked.env"), "SECRET=1\n").expect("write untracked");
+
+        let resolver = DigestResolver::new().expect("resolver");
+        let roots = vec![root.clone()];
+        let commit_lock = Mutex::new(());
+        let context = RunContext {
+            target: RustVersion::new(1, 100, 0),
+            options: Options {
+                commit: true,
+                ..Options::default()
+            },
+            resolver: &resolver,
+            roots: &roots,
+            commit_lock: &commit_lock,
+        };
+        let mut report = Report::new(root.clone());
+        commit_changes(
+            &mut report,
+            GitState {
+                is_repository: true,
+                is_dirty: false,
+            },
+            true,
+            &context,
+        );
+        assert!(
+            report.committed,
+            "tracked changes should be committed: {:?}",
+            report.entries
+        );
+
+        let committed_files = run_command(&root, "git", &["show", "--name-only", "--pretty=format:", "HEAD"])
+            .expect("git show")
+            .output;
+        assert!(committed_files.contains("Cargo.toml"), "{committed_files}");
+        assert!(
+            !committed_files.contains("untracked.env"),
+            "untracked files must never be staged or committed: {committed_files}"
+        );
     }
 }
 
