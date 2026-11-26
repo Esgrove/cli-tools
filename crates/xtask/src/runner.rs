@@ -18,7 +18,8 @@ use crate::condition::Condition;
 use crate::config::{CommandStepConfig, EnvProfile, TaskConfig, TaskFile, TaskFileLocation};
 use crate::process::{CommandSpec, command_exists, require_command};
 use crate::scheduler::{
-    SharedState, TaskAction, TaskActionResult, TaskContext, TaskSpec, filter_tasks, print_task_list, run_schedule,
+    SharedState, TaskAction, TaskActionResult, TaskContext, TaskOutcome, TaskSpec, filter_tasks, print_task_list,
+    run_schedule,
 };
 use crate::ui::{Reporter, UiConfig};
 
@@ -129,7 +130,7 @@ impl ExportFiles {
 
 /// Run the task file with the resolved options.
 ///
-/// Returns whether every task passed, was skipped, or was blocked only by `--fail-fast`.
+/// Returns whether no task failed and no explicitly requested task was blocked.
 ///
 /// # Errors
 ///
@@ -174,7 +175,11 @@ pub fn run(
     let scope_label = options.scope.as_deref().unwrap_or("all");
     let summary = run_schedule(tasks, &context, options.jobs, options.fail_fast, scope_label)?;
     reporter.finish_and_print_summary(&summary, root, options.dry_run);
-    Ok(summary.is_success())
+    let requested_task_blocked = summary
+        .reports
+        .iter()
+        .any(|report| matches!(report.outcome, TaskOutcome::Blocked(_)) && options.task_ids.contains(&report.id));
+    Ok(summary.is_success() && !requested_task_blocked)
 }
 
 /// The tasks a run would execute, in task file order, after applying conditions, the scope, and task IDs.

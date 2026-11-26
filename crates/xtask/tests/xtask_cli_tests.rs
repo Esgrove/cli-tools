@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use tempfile::TempDir;
+use cli_tools_common::test_support::TempTree;
 
 const TASK_FILE: &str = r#"
 [settings]
@@ -43,12 +43,17 @@ command = ["true"]
 "#;
 
 /// Temporary git repository with the task file at its root and a nested working directory.
-fn repository() -> TempDir {
-    let temp = tempfile::tempdir().expect("should create temp dir");
-    std::fs::create_dir(temp.path().join(".git")).expect("should create .git");
-    std::fs::write(temp.path().join("xtask.toml"), TASK_FILE).expect("should write task file");
-    std::fs::create_dir_all(temp.path().join("nested").join("dir")).expect("should create nested dirs");
-    temp
+fn repository() -> TempTree {
+    let tree = repository_with_tasks(TASK_FILE);
+    tree.dir("nested/dir");
+    tree
+}
+
+/// Temporary git repository with the given task file at its root.
+fn repository_with_tasks(task_file: &str) -> TempTree {
+    let tree = TempTree::with_entries(&[".git/"]);
+    tree.file_with("xtask.toml", task_file);
+    tree
 }
 
 fn run_xtask(directory: &Path, args: &[&str]) -> Output {
@@ -207,17 +212,9 @@ after = ["lint"]
 command = ["sh", "-c", "test ! -e started-docs && touch started-docs"]
 "#;
 
-/// Temporary git repository with the `after` task file.
-fn after_repository() -> TempDir {
-    let temp = tempfile::tempdir().expect("should create temp dir");
-    std::fs::create_dir(temp.path().join(".git")).expect("should create .git");
-    std::fs::write(temp.path().join("xtask.toml"), AFTER_TASK_FILE).expect("should write task file");
-    temp
-}
-
 #[test]
 fn selecting_a_task_does_not_pull_in_its_after_tasks() {
-    let repository = after_repository();
+    let repository = repository_with_tasks(AFTER_TASK_FILE);
     let output = run_xtask(repository.path(), &["docs"]);
     let text = stdout(&output);
     assert!(output.status.success(), "{text}");
@@ -227,9 +224,79 @@ fn selecting_a_task_does_not_pull_in_its_after_tasks() {
 
 #[test]
 fn a_failed_after_task_does_not_block_the_task_waiting_for_it() {
-    let repository = after_repository();
+    let repository = repository_with_tasks(AFTER_TASK_FILE);
     let output = run_xtask(repository.path(), &[]);
     let text = stdout(&output);
     assert!(text.contains("FAIL  lint"), "{text}");
     assert!(text.contains("PASS  docs"), "{text}");
+}
+
+/// Hard prerequisites and soft ordering after a task that skips itself.
+const SKIPPED_PREREQUISITE_TASK_FILE: &str = r#"
+[[tasks]]
+id = "prepare"
+label = "Prepare"
+priority = 10
+skip_if_missing = "cli-tools-xtask-test-missing-prerequisite-8pkw"
+command = ["sh", "-c", "exit 1"]
+
+[[tasks]]
+id = "hard"
+label = "Hard dependent"
+priority = 1
+deps = ["prepare"]
+command = ["sh", "-c", "exit 0"]
+
+[[tasks]]
+id = "transitive"
+label = "Transitive dependent"
+deps = ["hard"]
+command = ["sh", "-c", "exit 0"]
+
+[[tasks]]
+id = "soft"
+label = "Soft dependent"
+priority = 1
+after = ["prepare"]
+command = ["sh", "-c", "exit 0"]
+"#;
+
+/// Skipping a hard prerequisite blocks its dependents but releases soft ordering.
+#[cfg(unix)]
+#[test]
+fn skipped_prerequisite_blocks_hard_dependents_but_not_soft_ordering() {
+    let repository = repository_with_tasks(SKIPPED_PREREQUISITE_TASK_FILE);
+    let output = run_xtask(repository.path(), &["--jobs", "1"]);
+    let text = stdout(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("BLOCK hard"), "{text}");
+    assert!(text.contains("BLOCK transitive"), "{text}");
+    let skip = text
+        .find("SKIP  prepare")
+        .expect("the optional prerequisite should skip");
+    let soft_start = text
+        .find("START soft")
+        .expect("soft ordering should still allow the task to run");
+    assert!(skip < soft_start, "{text}");
+    assert!(text.contains("PASS  soft"), "{text}");
+}
+
+/// An explicitly requested task blocked by a skip produces a nonzero exit status.
+#[test]
+fn explicitly_requested_blocked_task_fails_the_run() {
+    let repository = repository_with_tasks(SKIPPED_PREREQUISITE_TASK_FILE);
+    let output = run_xtask(repository.path(), &["transitive"]);
+    let text = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    assert!(text.contains("BLOCK transitive"), "{text}");
+    assert!(
+        text.contains("Result: 0 passed, 0 failed, 2 blocked, 1 skipped"),
+        "{text}"
+    );
+
+    let skipped = run_xtask(repository.path(), &["prepare"]);
+    assert!(skipped.status.success(), "{}", stdout(&skipped));
+    let dry_run = run_xtask(repository.path(), &["--dryrun", "transitive"]);
+    assert!(dry_run.status.success(), "{}", stdout(&dry_run));
+    assert!(stdout(&dry_run).contains("Dry-run resolved 3 task(s)."));
 }

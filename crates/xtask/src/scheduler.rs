@@ -42,7 +42,7 @@ pub enum TaskOutcome {
     Passed,
     /// Task failed with an error message.
     Failed(String),
-    /// Task was not started because a prerequisite failed or `--fail-fast` stopped scheduling.
+    /// Task was not started because a prerequisite did not pass or `--fail-fast` stopped scheduling.
     Blocked(String),
     /// Task was skipped with a reason.
     Skipped(String),
@@ -233,10 +233,10 @@ impl TaskOutcome {
         matches!(self, Self::Failed(_))
     }
 
-    /// Return whether dependents are allowed to proceed after this outcome.
+    /// Return whether a hard prerequisite passed, or would run during a dry run.
     #[must_use]
     pub const fn unblocks_dependents(&self) -> bool {
-        matches!(self, Self::Passed | Self::Skipped(_) | Self::DryRun)
+        matches!(self, Self::Passed | Self::DryRun)
     }
 }
 
