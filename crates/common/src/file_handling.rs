@@ -10,7 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::append_extension_to_path;
+use crate::{append_extension_to_path, into_nfc};
 
 /// What to do when a rename target already exists and is a different file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +39,8 @@ pub enum RenameOutcome {
 
 /// Planned destination paths for one batch of renames or moves.
 ///
-/// Paths are compared case-insensitively, so two sources
-/// that would land on names differing only by case count as a collision on every file system.
+/// Paths are compared case-insensitively and normalized to Unicode NFC.
+/// Names that differ only by case or canonical Unicode spelling count as collisions on every file system.
 #[derive(Debug, Default, Clone)]
 pub struct TargetReservations {
     reserved: HashSet<String>,
@@ -55,20 +55,20 @@ impl TargetReservations {
 
     /// Reserve a destination path.
     ///
-    /// Returns `false` when the path, or a path differing only by case, is already reserved.
+    /// Returns `false` when the path or an equivalent spelling is already reserved.
     pub fn reserve(&mut self, path: &Path) -> bool {
         self.reserved.insert(Self::key(path))
     }
 
-    /// Check whether a path, or a path differing only by case, is already reserved.
+    /// Check whether a path or an equivalent spelling is already reserved.
     #[must_use]
     pub fn contains(&self, path: &Path) -> bool {
         self.reserved.contains(&Self::key(path))
     }
 
-    /// Comparison key for a path.
+    /// Comparison key for a path, normalized before applying lowercase mappings.
     fn key(path: &Path) -> String {
-        path.to_string_lossy().to_lowercase()
+        into_nfc(path.to_string_lossy().into_owned()).to_lowercase()
     }
 }
 
@@ -886,6 +886,18 @@ mod test_target_reservations {
         assert!(!reservations.reserve(Path::new("dir/Movie.X265.mp4")));
         assert!(reservations.contains(Path::new("DIR/movie.x265.mp4")));
         assert!(reservations.reserve(Path::new("dir/other.mp4")));
+    }
+
+    #[test]
+    fn detects_canonically_equivalent_targets() {
+        let mut reservations = TargetReservations::new();
+        let composed = Path::new("café/résumé.txt");
+        let decomposed = Path::new("CAFE\u{301}/RE\u{301}SUME\u{301}.txt");
+
+        assert!(reservations.reserve(composed));
+        assert!(reservations.contains(decomposed));
+        assert!(!reservations.reserve(decomposed));
+        assert!(reservations.reserve(Path::new("café/resume.txt")));
     }
 }
 
