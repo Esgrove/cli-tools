@@ -86,11 +86,8 @@ struct Args {
 
 /// Decides which root manifests in the history of a subdirectory project belong to that project.
 ///
-/// A project moved from the repository root into a subdirectory keeps its earlier history in the root manifest.
-/// A root manifest naming another package is a different project, so its versions are not used.
+/// A historical root manifest belongs to the subdirectory project only if their names match.
 struct RootFallback {
-    /// The root manifest no longer exists at `HEAD`, so everything it held moved into the subdirectory.
-    root_manifest_gone: bool,
     /// Package or project name of the subdirectory manifest at `HEAD`.
     project_name: Option<String>,
     /// Project type used to read names from manifests.
@@ -119,20 +116,16 @@ impl fmt::Display for ProjectType {
 }
 
 impl RootFallback {
-    /// Read the root and project manifests at `HEAD`.
+    /// Read the project name from the committed manifest at `HEAD`.
     fn at_head(repo: &Repository, manifest_path: &Path, project_type: ProjectType) -> Self {
-        let head_tree = repo.head().and_then(|head| head.peel_to_tree()).ok();
-        let read = |path: &Path| -> Option<String> {
-            let entry = head_tree.as_ref()?.get_path(path).ok()?;
+        let project_name = (|| {
+            let head_tree = repo.head().ok()?.peel_to_tree().ok()?;
+            let entry = head_tree.get_path(manifest_path).ok()?;
             let blob = entry.to_object(repo).ok()?.into_blob().ok()?;
-            Some(String::from_utf8_lossy(blob.content()).into_owned())
-        };
-        let root_manifest_gone = manifest_path
-            .file_name()
-            .is_some_and(|file_name| read(Path::new(file_name)).is_none());
-        let project_name = read(manifest_path).and_then(|content| parse_project_name(&content, project_type));
+            let content = std::str::from_utf8(blob.content()).ok()?;
+            parse_project_name(content, project_type).filter(|name| !name.trim().is_empty())
+        })();
         Self {
-            root_manifest_gone,
             project_name,
             project_type,
         }
@@ -140,9 +133,7 @@ impl RootFallback {
 
     /// Whether a root manifest from the history belongs to the subdirectory project.
     fn accepts(&self, root_manifest: &str) -> bool {
-        self.root_manifest_gone
-            || (self.project_name.is_some()
-                && parse_project_name(root_manifest, self.project_type) == self.project_name)
+        self.project_name.is_some() && parse_project_name(root_manifest, self.project_type) == self.project_name
     }
 }
 
@@ -176,8 +167,8 @@ fn main() -> Result<()> {
 ///
 /// The project may live in a subdirectory of the repository, such as `rust/` in a repository with several projects.
 /// Its manifest is then read from that subdirectory in each commit,
-/// and commits made before the manifest first appeared there use the manifest at the repository root,
-/// so the history of a project that was moved into a subdirectory is still tagged.
+/// and commits before the manifest first appeared there use the repository root manifest only if the project names match.
+/// This preserves the history of a named project moved into a subdirectory.
 /// Tag names are the version with a `v` and the given prefix in front, for example `rust-v1.2.3`.
 fn version_tag(
     repo_path: &PathBuf,
@@ -821,6 +812,7 @@ mod test_project_names {
 #[cfg(test)]
 mod version_tag_test_helpers {
     use super::*;
+    use cli_tools_common::test_support::TempTree;
     use tempfile::TempDir;
 
     /// Repository with one commit per given version, each changing `Cargo.toml`.
@@ -874,8 +866,8 @@ mod version_tag_test_helpers {
     }
 
     /// Empty repository with a signature in its config.
-    pub fn empty_repository() -> (TempDir, Repository) {
-        let directory = TempDir::new().expect("temporary directory");
+    pub fn empty_repository() -> (TempTree, Repository) {
+        let directory = TempTree::new();
         let repository = Repository::init(directory.path()).expect("the repository should initialize");
         {
             let mut config = repository.config().expect("the config should be readable");
@@ -1108,8 +1100,31 @@ mod test_subdirectory_projects {
         commit_changes(&repository, root, &[("b/Cargo.toml", Some(&package("b", "0.1.0")))]);
 
         version_tag(&root.join("b"), false, false, true, false, false, "b-").expect("tagging should succeed");
-
         assert_eq!(tag_names(&repository), vec!["b-v0.1.0"]);
+
+        commit_changes(&repository, root, &[("Cargo.toml", None)]);
+
+        version_tag(&root.join("b"), false, false, true, false, false, "b-").expect("tagging should succeed");
+        assert_eq!(tag_names(&repository), vec!["b-v0.1.0"]);
+    }
+
+    /// Unnamed virtual workspaces do not provide positive evidence of a move.
+    #[test]
+    fn unnamed_workspace_manifests_are_not_assumed_to_be_the_same_project() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        commit_changes(&repository, root, &[("Cargo.toml", Some(&workspace_manifest("9.0.0")))]);
+        commit_changes(
+            &repository,
+            root,
+            &[
+                ("Cargo.toml", None),
+                ("rust/Cargo.toml", Some(&workspace_manifest("1.0.0"))),
+            ],
+        );
+
+        version_tag(&directory.join("rust"), false, false, true, false, false, "").unwrap();
+        assert_eq!(tag_names(&repository), vec!["v1.0.0"]);
     }
 
     #[test]
