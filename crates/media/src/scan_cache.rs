@@ -1,32 +1,40 @@
-//! Shared SQLite-backed cache for file analysis results.
+//! Shared `SQLite`-backed cache for video analysis results and file content hashes.
 //!
-//! Both `vconvert` and `dupefind` use ffprobe to gather video metadata.
-//! This module caches those results so files already scanned by one tool do not need to be re-analysed by the other.
-//! It also stores BLAKE3 hashes used by `dupefind` for exact-content comparisons.
-//!
-//! The cache lives in the same database file that `vconvert` uses,
-//! `vconvert.db` in the platform-specific local data directory.
-//! It reads and writes the `scanned_files` and `file_hashes` tables.
+//! All media tools (`vconvert`, `dupefind`, `vstats`, `vres`, `thumbs`) share the `scanned_files`
+//! and `file_hashes` tables inside the unified `cli-tools.db` database.
+//! Files already probed or hashed by one tool are reused immediately by every other tool
+//! as long as their file size and modification timestamp remain unchanged.
 
 #![allow(clippy::cast_possible_wrap)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use cli_tools_common::sqlite;
 use rusqlite::{Connection, params};
 
 use crate::Resolution;
 use crate::file_hash::{FileFingerprint, fingerprint_file};
 use crate::video_info::VideoInfo;
 
-/// Default database filename (shared with `vconvert`).
-const DATABASE_FILENAME: &str = "vconvert.db";
+/// Schema migration component name for the media scan and hash cache.
+const COMPONENT_NAME: &str = "media_cache";
+/// Current schema version for `scanned_files` and `file_hashes`.
+const SCHEMA_VERSION: i64 = 2;
+/// Legacy database filename imported on first migration into `cli-tools.db`.
+const LEGACY_VCONVERT_DB: &str = "vconvert.db";
 
-/// Read/write handle to the scanned-files cache table.
-pub struct ScanCache {
-    connection: Connection,
+/// Summary counts and disk size of the shared media cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    /// Number of rows currently in `scanned_files`.
+    pub scanned_files_count: u64,
+    /// Number of rows currently in `file_hashes`.
+    pub file_hashes_count: u64,
+    /// Database file size in bytes (zero for in-memory databases).
+    pub database_size_bytes: u64,
 }
 
 /// A cached BLAKE3 hash and the file metadata used to determine whether it is still valid.
@@ -41,12 +49,9 @@ pub struct CachedFileHash {
 }
 
 /// A row from the `scanned_files` cache with non-optional fields matching the database schema.
-///
-/// This is intentionally separate from `VideoInfo` (which uses `Option` fields)
-/// because the database columns are `NOT NULL`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CachedVideoInfo {
-    /// File size in bytes (used to detect file changes).
+    /// File size in bytes (used with `modified_time_ns` to detect file changes).
     pub size_bytes: u64,
     /// Video codec name.
     pub codec: String,
@@ -54,90 +59,145 @@ pub struct CachedVideoInfo {
     pub bitrate_kbps: u64,
     /// Duration in seconds.
     pub duration: f64,
-    /// Video width in pixels.
+    /// Displayed video width in pixels (after applying stream rotation).
     pub width: u32,
-    /// Video height in pixels.
+    /// Displayed video height in pixels (after applying stream rotation).
     pub height: u32,
-    /// Frames per second.
+    /// Raw coded video width before rotation (0 when not recorded).
+    pub coded_width: u32,
+    /// Raw coded video height before rotation (0 when not recorded).
+    pub coded_height: u32,
+    /// Stream rotation in degrees (0, 90, 180, or 270).
+    pub rotation: i32,
+    /// Video frames per second.
     pub frames_per_second: f64,
-    /// File modification time as nanoseconds since the Unix epoch, zero when it was not recorded.
+    /// Per-channel video bit depth, for example 8 or 10, or 0 when unknown.
+    pub bit_depth: u8,
+    /// File modification time as nanoseconds since the Unix epoch, zero when not recorded.
     pub modified_time_ns: i64,
 }
 
+/// Read/write handle to the shared `scanned_files` and `file_hashes` tables in `cli-tools.db`.
+pub struct ScanCache {
+    connection: Connection,
+    db_path: Option<PathBuf>,
+}
+
 impl ScanCache {
-    /// Open (or create) the shared cache database at the default path.
+    /// Open (or create) the shared cache inside the default `cli-tools.db`.
     ///
-    /// The `scanned_files` table is created if it does not already exist,
-    /// so this is safe to call even when `vconvert` has never been run.
+    /// On first initialization, imports any existing `scanned_files`
+    /// and `file_hashes` rows from a sibling legacy `vconvert.db` without modifying the legacy file.
     ///
     /// # Errors
-    /// Returns an error if the database cannot be opened or initialised.
+    /// Returns an error if the database cannot be opened or initialized.
     pub fn open() -> Result<Self> {
-        Self::open_at(&Self::database_path())
+        let path = sqlite::database_path()?;
+        Self::open_at(&path)
     }
 
     /// Open (or create) the cache database at a specific path.
     ///
     /// # Errors
-    /// Returns an error if the database cannot be opened or initialised.
+    /// Returns an error if the database cannot be opened or initialized.
     pub fn open_at(path: &Path) -> Result<Self> {
-        ensure_parent_directory(path)?;
-
-        let connection =
-            Connection::open(path).with_context(|| format!("Failed to open database: {}", path.display()))?;
-
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .context("Failed to set busy timeout")?;
-
-        let cache = Self { connection };
-        cache.initialise()?;
-        Ok(cache)
+        let mut connection = sqlite::open_at(path)?;
+        let legacy = if path.file_name().and_then(|name| name.to_str()) == Some(sqlite::DATABASE_FILENAME) {
+            sqlite::legacy_database_path(path, LEGACY_VCONVERT_DB)
+        } else {
+            None
+        };
+        ensure_schema(&mut connection, legacy.as_deref())?;
+        Ok(Self {
+            connection,
+            db_path: Some(path.to_path_buf()),
+        })
     }
 
-    /// Open an in-memory database for testing.
+    /// Open the default `cli-tools.db` in read-only mode, returning `Ok(None)` if it does not exist yet.
     ///
     /// # Errors
-    /// Returns an error if the database cannot be created.
-    #[cfg(test)]
-    fn open_in_memory() -> Result<Self> {
-        let connection = Connection::open_in_memory().context("Failed to open in-memory database")?;
-        let cache = Self { connection };
-        cache.initialise()?;
-        Ok(cache)
+    /// Returns an error if an existing database cannot be opened.
+    pub fn open_read_only() -> Result<Option<Self>> {
+        let path = sqlite::database_path()?;
+        Self::open_read_only_at(&path)
     }
 
-    /// Load every cached entry into a `HashMap` keyed by full path string.
+    /// Open a cache database at `path` in read-only mode, returning `Ok(None)` if `path` does not exist.
     ///
-    /// This allows callers to do O(1) lookups and decide which files still need to be probed.
+    /// # Errors
+    /// Returns an error if an existing database cannot be opened.
+    pub fn open_read_only_at(path: &Path) -> Result<Option<Self>> {
+        let Some(connection) = sqlite::open_read_only_at(path)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            connection,
+            db_path: Some(path.to_path_buf()),
+        }))
+    }
+
+    /// Open an in-memory cache database for testing.
+    ///
+    /// # Errors
+    /// Returns an error if the in-memory database cannot be created.
+    pub fn open_in_memory() -> Result<Self> {
+        let mut connection = sqlite::open_in_memory()?;
+        ensure_schema(&mut connection, None)?;
+        Ok(Self {
+            connection,
+            db_path: None,
+        })
+    }
+
+    /// Load every cached video entry into a `HashMap` keyed by full path string.
     ///
     /// # Errors
     /// Returns an error if the database query fails.
     pub fn get_all(&self) -> Result<HashMap<String, CachedVideoInfo>> {
-        let mut statement = self.connection.prepare(
+        if !sqlite::table_exists(&self.connection, "main", "scanned_files")? {
+            return Ok(HashMap::new());
+        }
+        let has_coded_columns = sqlite::column_exists(&self.connection, "main", "scanned_files", "coded_width")?;
+        let query = if has_coded_columns {
             r"
-            SELECT full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, modified_time_ns
+            SELECT full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                   coded_width, coded_height, rotation, frames_per_second, bit_depth, modified_time_ns
             FROM scanned_files
-            ",
-        )?;
+            "
+        } else {
+            r"
+            SELECT full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                   0, 0, 0, frames_per_second, bit_depth, modified_time_ns
+            FROM scanned_files
+            "
+        };
 
-        let entries = statement
-            .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let entry = CachedVideoInfo {
-                    size_bytes: row.get::<_, i64>(1)? as u64,
-                    codec: row.get(2)?,
-                    bitrate_kbps: row.get::<_, i64>(3)? as u64,
-                    duration: row.get(4)?,
-                    width: row.get::<_, i64>(5)? as u32,
-                    height: row.get::<_, i64>(6)? as u32,
-                    frames_per_second: row.get(7)?,
-                    modified_time_ns: row.get(8)?,
-                };
-                Ok((path, entry))
-            })?
-            .filter_map(std::result::Result::ok)
-            .collect();
+        let mut statement = self.connection.prepare(query)?;
+        let mut rows = statement.query([])?;
+        let mut entries = HashMap::new();
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let width = row.get::<_, i64>(5)? as u32;
+            let height = row.get::<_, i64>(6)? as u32;
+            let coded_width = row.get::<_, i64>(7)? as u32;
+            let coded_height = row.get::<_, i64>(8)? as u32;
+            let entry = CachedVideoInfo {
+                size_bytes: row.get::<_, i64>(1)? as u64,
+                codec: row.get(2)?,
+                bitrate_kbps: row.get::<_, i64>(3)? as u64,
+                duration: row.get(4)?,
+                width,
+                height,
+                coded_width: if coded_width > 0 { coded_width } else { width },
+                coded_height: if coded_height > 0 { coded_height } else { height },
+                rotation: row.get::<_, i64>(9)? as i32,
+                frames_per_second: row.get(10)?,
+                bit_depth: row.get::<_, i64>(11)? as u8,
+                modified_time_ns: row.get(12)?,
+            };
+            entries.insert(path, entry);
+        }
 
         Ok(entries)
     }
@@ -147,6 +207,9 @@ impl ScanCache {
     /// # Errors
     /// Returns an error if the database query fails.
     pub fn get_all_hashes(&self) -> Result<HashMap<String, CachedFileHash>> {
+        if !sqlite::table_exists(&self.connection, "main", "file_hashes")? {
+            return Ok(HashMap::new());
+        }
         let mut statement = self.connection.prepare(
             r"
             SELECT full_path, size_bytes, modified_time_ns, blake3_hash
@@ -154,23 +217,22 @@ impl ScanCache {
             ",
         )?;
 
-        let entries = statement
-            .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let entry = CachedFileHash {
-                    size_bytes: row.get::<_, i64>(1)? as u64,
-                    modified_time_ns: row.get(2)?,
-                    blake3_hash: row.get(3)?,
-                };
-                Ok((path, entry))
-            })?
-            .filter_map(std::result::Result::ok)
-            .collect();
+        let mut rows = statement.query([])?;
+        let mut entries = HashMap::new();
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let entry = CachedFileHash {
+                size_bytes: row.get::<_, i64>(1)? as u64,
+                modified_time_ns: row.get(2)?,
+                blake3_hash: row.get(3)?,
+            };
+            entries.insert(path, entry);
+        }
 
         Ok(entries)
     }
 
-    /// Insert or update multiple cached BLAKE3 hashes in a single transaction.
+    /// Insert or update multiple cached BLAKE3 hashes in a single `IMMEDIATE` transaction.
     ///
     /// Returns the number of entries written.
     ///
@@ -181,11 +243,8 @@ impl ScanCache {
             return Ok(0);
         }
 
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
-
-        let transaction = self.connection.transaction()?;
+        let now = unix_now_secs();
+        let transaction = sqlite::immediate_transaction(&mut self.connection)?;
         let mut count = 0;
         for (path, hash) in entries {
             let Some(path_str) = path.to_str() else {
@@ -218,9 +277,10 @@ impl ScanCache {
         Ok(count)
     }
 
-    /// Insert or update multiple scanned file entries in a single transaction.
+    /// Insert or update multiple scanned file entries in a single `IMMEDIATE` transaction.
     ///
-    /// Returns the number of entries written.
+    /// All filesystem `fingerprint_file` calls happen before opening the write transaction
+    /// so slow or network drives never hold the `SQLite` write lock.
     ///
     /// # Errors
     /// Returns an error if the transaction cannot be started or committed.
@@ -228,19 +288,171 @@ impl ScanCache {
         if entries.is_empty() {
             return Ok(0);
         }
+        // Perform all filesystem metadata reads before acquiring the SQLite write lock.
+        let prepared: Vec<(&Path, &VideoInfo, i64)> = entries
+            .iter()
+            .filter_map(|(path, info)| {
+                let _ = path.to_str()?;
+                let _ = info.size_bytes?;
+                let modified_time_ns = fingerprint_file(path).map_or(0, |fp| fp.modified_time_ns);
+                Some((*path, *info, modified_time_ns))
+            })
+            .collect();
+        self.write_scanned_entries(&prepared)
+    }
 
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
+    /// Insert or update multiple scanned entries using pre-probe fingerprints captured before ffprobe ran.
+    ///
+    /// This avoids both filesystem I/O inside the transaction and post-probe mtime races.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be started or committed.
+    pub fn batch_upsert_with_fingerprints(
+        &mut self,
+        entries: &[(&Path, &VideoInfo, FileFingerprint)],
+    ) -> Result<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let prepared: Vec<(&Path, &VideoInfo, i64)> = entries
+            .iter()
+            .filter_map(|(path, info, fingerprint)| {
+                let _ = path.to_str()?;
+                let _ = info.size_bytes?;
+                Some((*path, *info, fingerprint.modified_time_ns))
+            })
+            .collect();
+        self.write_scanned_entries(&prepared)
+    }
 
-        let transaction = self.connection.transaction()?;
+    /// Update cached path keys after a file is renamed or moved on disk.
+    ///
+    /// Keeps `scanned_files`, `file_hashes`, and `pending_files` (when present) synchronized.
+    ///
+    /// # Errors
+    /// Returns an error if the update transaction fails.
+    pub fn move_cached_path(&mut self, old_path: &Path, new_path: &Path) -> Result<()> {
+        let (Some(old_str), Some(new_str)) = (old_path.to_str(), new_path.to_str()) else {
+            return Ok(());
+        };
+        if old_str == new_str {
+            return Ok(());
+        }
+        let has_pending = sqlite::table_exists(&self.connection, "main", "pending_files")?;
+        let tx = sqlite::immediate_transaction(&mut self.connection)?;
+        tx.execute("DELETE FROM scanned_files WHERE full_path = ?1", params![new_str])?;
+        tx.execute(
+            "UPDATE scanned_files SET full_path = ?1 WHERE full_path = ?2",
+            params![new_str, old_str],
+        )?;
+        tx.execute("DELETE FROM file_hashes WHERE full_path = ?1", params![new_str])?;
+        tx.execute(
+            "UPDATE file_hashes SET full_path = ?1 WHERE full_path = ?2",
+            params![new_str, old_str],
+        )?;
+        if has_pending {
+            tx.execute("DELETE FROM pending_files WHERE full_path = ?1", params![new_str])?;
+            tx.execute(
+                "UPDATE pending_files SET full_path = ?1 WHERE full_path = ?2",
+                params![new_str, old_str],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove cached scan and hash rows for a deleted file path.
+    ///
+    /// # Errors
+    /// Returns an error if the delete transaction fails.
+    pub fn remove_cached_path(&mut self, path: &Path) -> Result<()> {
+        let Some(path_str) = path.to_str() else {
+            return Ok(());
+        };
+        let tx = sqlite::immediate_transaction(&mut self.connection)?;
+        tx.execute("DELETE FROM scanned_files WHERE full_path = ?1", params![path_str])?;
+        tx.execute("DELETE FROM file_hashes WHERE full_path = ?1", params![path_str])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove entries from `scanned_files` whose files no longer exist on mounted volumes.
+    ///
+    /// Existence checks happen outside any write transaction, and paths on unmounted drives
+    /// or paths that fail with permission/IO errors are preserved.
+    ///
+    /// # Errors
+    /// Returns an error if querying or deleting fails.
+    pub fn remove_missing_scanned_files(&mut self) -> Result<usize> {
+        self.remove_missing_from_table("scanned_files")
+    }
+
+    /// Remove entries from `file_hashes` whose files no longer exist on mounted volumes.
+    ///
+    /// # Errors
+    /// Returns an error if querying or deleting fails.
+    pub fn remove_missing_file_hashes(&mut self) -> Result<usize> {
+        self.remove_missing_from_table("file_hashes")
+    }
+
+    /// Return the total number of rows in `scanned_files`.
+    ///
+    /// # Errors
+    /// Returns an error if the count query fails.
+    pub fn scanned_file_count(&self) -> Result<u64> {
+        if !sqlite::table_exists(&self.connection, "main", "scanned_files")? {
+            return Ok(0);
+        }
+        let count: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM scanned_files", [], |row| row.get(0))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Return the total number of rows in `file_hashes`.
+    ///
+    /// # Errors
+    /// Returns an error if the count query fails.
+    pub fn file_hash_count(&self) -> Result<u64> {
+        if !sqlite::table_exists(&self.connection, "main", "file_hashes")? {
+            return Ok(0);
+        }
+        let count: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row.get(0))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Return summary statistics for the shared cache tables and database file size.
+    ///
+    /// # Errors
+    /// Returns an error if counting rows fails.
+    pub fn cache_stats(&self) -> Result<CacheStats> {
+        let database_size_bytes = self
+            .db_path
+            .as_deref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map_or(0, |meta| meta.len());
+        Ok(CacheStats {
+            scanned_files_count: self.scanned_file_count()?,
+            file_hashes_count: self.file_hash_count()?,
+            database_size_bytes,
+        })
+    }
+
+    /// Write pre-fingerprinted video rows inside one `IMMEDIATE` transaction.
+    fn write_scanned_entries(&mut self, prepared: &[(&Path, &VideoInfo, i64)]) -> Result<usize> {
+        if prepared.is_empty() {
+            return Ok(0);
+        }
+        let now = unix_now_secs();
+        let transaction = sqlite::immediate_transaction(&mut self.connection)?;
         let mut count = 0;
 
-        for (path, info) in entries {
+        for &(path, info, modified_time_ns) in prepared {
             let Some(path_str) = path.to_str() else {
                 continue;
             };
-
             let Some(size_bytes) = info.size_bytes else {
                 continue;
             };
@@ -248,16 +460,23 @@ impl ScanCache {
             let codec = info.codec.as_deref().unwrap_or("");
             let bitrate_kbps = info.bitrate_kbps.unwrap_or(0);
             let duration = info.duration.unwrap_or(0.0);
-            let (width, height) = info.resolution.map_or((0u32, 0u32), |r| (r.width, r.height));
-            // frames per second not available in shared VideoInfo
-            let frames_per_second = 0.0f64;
-            let modified_time_ns = fingerprint_file(path).map_or(0, |fingerprint| fingerprint.modified_time_ns);
+            let (width, height) = info.resolution.map_or((0u32, 0u32), |res| (res.width, res.height));
+            let (coded_width, coded_height) = info
+                .coded_resolution
+                .map_or((width, height), |res| (res.width, res.height));
+            let rotation = info.rotation.unwrap_or(0);
+            let frames_per_second = info.frames_per_second.unwrap_or(0.0);
+            let bit_depth = i64::from(info.bit_depth.unwrap_or(0));
 
             transaction
                 .execute(
                     r"
-                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, scanned_time, modified_time_ns)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    INSERT INTO scanned_files (
+                        full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                        coded_width, coded_height, rotation, frames_per_second, bit_depth,
+                        scanned_time, modified_time_ns
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                     ON CONFLICT(full_path) DO UPDATE SET
                         frames_per_second = CASE
                             WHEN excluded.frames_per_second > 0 THEN excluded.frames_per_second
@@ -268,6 +487,7 @@ impl ScanCache {
                             ELSE 0
                         END,
                         bit_depth = CASE
+                            WHEN excluded.bit_depth > 0 THEN excluded.bit_depth
                             WHEN scanned_files.size_bytes = excluded.size_bytes
                                 AND scanned_files.modified_time_ns != 0
                                 AND scanned_files.modified_time_ns = excluded.modified_time_ns
@@ -280,6 +500,9 @@ impl ScanCache {
                         duration = excluded.duration,
                         width = excluded.width,
                         height = excluded.height,
+                        coded_width = excluded.coded_width,
+                        coded_height = excluded.coded_height,
+                        rotation = excluded.rotation,
                         scanned_time = excluded.scanned_time,
                         modified_time_ns = excluded.modified_time_ns
                     ",
@@ -291,7 +514,11 @@ impl ScanCache {
                         duration,
                         width,
                         height,
+                        coded_width,
+                        coded_height,
+                        rotation,
                         frames_per_second,
+                        bit_depth,
                         now,
                         modified_time_ns,
                     ],
@@ -304,88 +531,41 @@ impl ScanCache {
         Ok(count)
     }
 
-    /// Platform-specific database path.
-    ///
-    /// - Windows: `%LOCALAPPDATA%\cli-tools\vconvert.db`
-    /// - macOS:   `~/Library/Application Support/cli-tools/vconvert.db`
-    /// - Linux:   `~/.local/share/cli-tools/vconvert.db`
-    fn database_path() -> PathBuf {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cli-tools");
-        data_dir.join(DATABASE_FILENAME)
-    }
-
-    /// Ensure the `scanned_files` table exists.
-    ///
-    /// The schema is identical to the one created by `vconvert` so both tools can read and write the same table.
-    fn initialise(&self) -> Result<()> {
-        self.connection
-            .execute_batch(
-                r"
-                CREATE TABLE IF NOT EXISTS scanned_files (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL,
-                    codec TEXT NOT NULL,
-                    bitrate_kbps INTEGER NOT NULL,
-                    duration REAL NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    frames_per_second REAL NOT NULL,
-                    scanned_time INTEGER NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
-
-                CREATE TABLE IF NOT EXISTS file_hashes (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL,
-                    modified_time_ns INTEGER NOT NULL,
-                    blake3_hash TEXT NOT NULL,
-                    hashed_time INTEGER NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_file_hashes_path ON file_hashes(full_path);
-                CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(blake3_hash);
-
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA cache_size = -8000;
-                ",
-            )
-            .context("Failed to initialise scanned_files table")?;
-        // Columns added after the table first shipped, so a database created earlier gets them too.
-        // `bit_depth` is written by vconvert, which shares the table.
-        self.add_column_if_missing("bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
-        Ok(())
-    }
-
-    /// Add a column to `scanned_files` unless it already exists.
-    ///
-    /// Ignores SQLite's duplicate-column error so concurrent processes migrating the same database do not race.
-    fn add_column_if_missing(&self, column_name: &str, column_definition: &str) -> Result<()> {
-        let mut statement = self.connection.prepare("PRAGMA table_info(scanned_files)")?;
-        let column_exists = statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(std::result::Result::ok)
-            .any(|name| name == column_name);
-        if !column_exists {
-            match self.connection.execute(
-                &format!("ALTER TABLE scanned_files ADD COLUMN {column_name} {column_definition}"),
-                [],
-            ) {
-                Ok(_) => {}
-                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
-                    if message.contains("duplicate column name") => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("Failed to add column {column_name} to scanned_files"));
-                }
-            }
+    /// Remove rows with missing files from `table_name` without holding a write lock during filesystem checks.
+    fn remove_missing_from_table(&mut self, table_name: &str) -> Result<usize> {
+        if !sqlite::table_exists(&self.connection, "main", table_name)? {
+            return Ok(0);
         }
-        Ok(())
+
+        let paths: Vec<String> = {
+            let mut statement = self
+                .connection
+                .prepare(&format!("SELECT full_path FROM {table_name}"))?;
+            let mut rows = statement.query([])?;
+            let mut collected = Vec::new();
+            while let Some(row) = rows.next()? {
+                collected.push(row.get(0)?);
+            }
+            collected
+        };
+
+        let missing: Vec<String> = paths
+            .into_iter()
+            .filter(|path_str| is_definitively_missing(Path::new(path_str)))
+            .collect();
+
+        if missing.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = sqlite::immediate_transaction(&mut self.connection)?;
+        let mut removed = 0usize;
+        let delete_sql = format!("DELETE FROM {table_name} WHERE full_path = ?1");
+        for path_str in &missing {
+            removed += tx.execute(&delete_sql, params![path_str])?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 }
 
@@ -409,46 +589,234 @@ impl CachedVideoInfo {
             && self.modified_time_ns == fingerprint.modified_time_ns
     }
 
-    /// Convert to the shared `VideoInfo` type used by the rest of the library.
+    /// Return whether this cached entry carries complete video metadata usable by `vconvert`.
+    #[must_use]
+    pub fn has_complete_video_metadata(&self) -> bool {
+        !self.codec.is_empty()
+            && self.bitrate_kbps > 0
+            && self.duration > 0.0
+            && self.width > 0
+            && self.height > 0
+            && self.bit_depth >= 8
+            && (1.0..=240.0).contains(&self.frames_per_second)
+    }
+
+    /// Convert to the shared [`VideoInfo`] type used by the rest of the library.
     #[must_use]
     pub fn to_video_info(&self) -> VideoInfo {
+        let display_resolution = if self.width > 0 && self.height > 0 {
+            Resolution::from_options(Some(self.width), Some(self.height))
+        } else {
+            None
+        };
+        let coded_resolution = if self.coded_width > 0 && self.coded_height > 0 {
+            Resolution::from_options(Some(self.coded_width), Some(self.coded_height))
+        } else {
+            display_resolution
+        };
         VideoInfo {
             size_bytes: Some(self.size_bytes),
-            resolution: if self.width > 0 && self.height > 0 {
-                Resolution::from_options(Some(self.width), Some(self.height))
-            } else {
-                None
-            },
-            duration: if self.duration > 0.0 { Some(self.duration) } else { None },
-            codec: if self.codec.is_empty() {
-                None
-            } else {
-                Some(self.codec.clone())
-            },
-            bitrate_kbps: if self.bitrate_kbps > 0 {
-                Some(self.bitrate_kbps)
-            } else {
-                None
-            },
-            frames_per_second: if self.frames_per_second > 0.0 {
-                Some(self.frames_per_second)
-            } else {
-                None
-            },
-            ..Default::default()
+            resolution: display_resolution,
+            coded_resolution,
+            rotation: (self.rotation != 0).then_some(self.rotation),
+            duration: (self.duration > 0.0).then_some(self.duration),
+            codec: (!self.codec.is_empty()).then(|| self.codec.clone()),
+            bitrate_kbps: (self.bitrate_kbps > 0).then_some(self.bitrate_kbps),
+            frames_per_second: (self.frames_per_second > 0.0).then_some(self.frames_per_second),
+            bit_depth: (self.bit_depth > 0).then_some(self.bit_depth),
         }
     }
 }
 
-/// Create parent directories for a database path when it has a non-empty parent directory.
-fn ensure_parent_directory(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create database directory: {}", parent.display()))?;
+/// Ensure the `scanned_files` and `file_hashes` tables exist and migrate from legacy `vconvert.db` once.
+///
+/// # Errors
+/// Returns an error if schema migration or legacy data import fails.
+pub fn ensure_schema(connection: &mut Connection, legacy_vconvert_db: Option<&Path>) -> Result<()> {
+    let was_uninitialized = sqlite::current_component_version(connection, COMPONENT_NAME)? == 0;
+
+    sqlite::migrate_component(connection, COMPONENT_NAME, SCHEMA_VERSION, |tx, current_version| {
+        if current_version < 1 {
+            tx.execute_batch(
+                r"
+                CREATE TABLE IF NOT EXISTS scanned_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    coded_width INTEGER NOT NULL DEFAULT 0,
+                    coded_height INTEGER NOT NULL DEFAULT 0,
+                    rotation INTEGER NOT NULL DEFAULT 0,
+                    frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 0,
+                    scanned_time INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS file_hashes (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL,
+                    blake3_hash TEXT NOT NULL,
+                    hashed_time INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(blake3_hash);
+                ",
+            )
+            .context("Failed to create scanned_files and file_hashes tables")?;
+        }
+
+        if current_version < 2 {
+            sqlite::add_column_if_missing(tx, "scanned_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+            sqlite::add_column_if_missing(tx, "scanned_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
+            sqlite::add_column_if_missing(tx, "scanned_files", "coded_width", "INTEGER NOT NULL DEFAULT 0")?;
+            sqlite::add_column_if_missing(tx, "scanned_files", "coded_height", "INTEGER NOT NULL DEFAULT 0")?;
+            sqlite::add_column_if_missing(tx, "scanned_files", "rotation", "INTEGER NOT NULL DEFAULT 0")?;
+            tx.execute_batch(
+                r"
+                DROP INDEX IF EXISTS idx_scanned_path;
+                DROP INDEX IF EXISTS idx_file_hashes_path;
+                DELETE FROM scanned_files WHERE (frames_per_second > 0.0 AND frames_per_second < 1.0) OR frames_per_second > 240.0;
+                ",
+            )
+            .context("Failed to finalize media_cache v2 migration")?;
+        }
+        Ok(())
+    })?;
+
+    if was_uninitialized && let Some(legacy_path) = legacy_vconvert_db {
+        import_legacy_media_tables(connection, legacy_path)?;
     }
+
     Ok(())
+}
+
+/// Return whether `path` is confirmed missing on a currently mounted volume.
+///
+/// Paths on unmounted external/network volumes
+/// or paths whose existence check fails with a transient permission/IO error return `false`
+/// so valid cache entries are not wiped.
+#[must_use]
+pub fn is_definitively_missing(path: &Path) -> bool {
+    if !mount_root_is_available(path) {
+        return false;
+    }
+    matches!(path.try_exists(), Ok(false))
+}
+
+/// Return whether the drive or mount root containing `path` appears to be online/mounted.
+#[must_use]
+pub fn mount_root_is_available(path: &Path) -> bool {
+    let Some(mount_root) = volume_mount_root(path) else {
+        return true;
+    };
+    matches!(mount_root.try_exists(), Ok(true))
+}
+
+/// Extract the mount root for removable/network volumes so offline mounts can be detected.
+fn volume_mount_root(path: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut components = path.components();
+        if matches!(components.next(), Some(std::path::Component::RootDir))
+            && matches!(components.next(), Some(std::path::Component::Normal(name)) if name == "Volumes")
+            && let Some(std::path::Component::Normal(volume)) = components.next()
+        {
+            return Some(Path::new("/Volumes").join(volume));
+        }
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut components = path.components();
+        if matches!(components.next(), Some(std::path::Component::RootDir))
+            && let Some(std::path::Component::Normal(first)) = components.next()
+        {
+            if first == "mnt"
+                && let Some(std::path::Component::Normal(mount)) = components.next()
+            {
+                return Some(Path::new("/mnt").join(mount));
+            }
+            if first == "media"
+                && let Some(std::path::Component::Normal(user)) = components.next()
+                && let Some(std::path::Component::Normal(mount)) = components.next()
+            {
+                return Some(Path::new("/media").join(user).join(mount));
+            }
+        }
+        None
+    }
+    #[cfg(windows)]
+    {
+        let mut components = path.components();
+        if let Some(std::path::Component::Prefix(prefix)) = components.next() {
+            let mut root = PathBuf::from(prefix.as_os_str());
+            root.push(std::path::MAIN_SEPARATOR_STR);
+            return Some(root);
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Copy `scanned_files` and `file_hashes` rows from a legacy `vconvert.db` into `cli-tools.db`.
+fn import_legacy_media_tables(connection: &mut Connection, legacy_path: &Path) -> Result<()> {
+    sqlite::import_from_legacy_database(connection, legacy_path, |tx| {
+        if sqlite::table_exists(tx, "legacy", "scanned_files")? {
+            let has_bit_depth = sqlite::column_exists(tx, "legacy", "scanned_files", "bit_depth")?;
+            let has_mtime_ns = sqlite::column_exists(tx, "legacy", "scanned_files", "modified_time_ns")?;
+            let bit_depth_expr = if has_bit_depth { "bit_depth" } else { "0" };
+            let mtime_expr = if has_mtime_ns { "modified_time_ns" } else { "0" };
+            tx.execute(
+                &format!(
+                    r"
+                    INSERT OR IGNORE INTO main.scanned_files (
+                        full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                        coded_width, coded_height, rotation, frames_per_second, bit_depth,
+                        scanned_time, modified_time_ns
+                    )
+                    SELECT full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                           width, height, 0, frames_per_second, {bit_depth_expr},
+                           scanned_time, {mtime_expr}
+                    FROM legacy.scanned_files
+                    "
+                ),
+                [],
+            )
+            .context("Failed to import legacy scanned_files rows")?;
+        }
+        if sqlite::table_exists(tx, "legacy", "file_hashes")? {
+            tx.execute(
+                r"
+                INSERT OR IGNORE INTO main.file_hashes (
+                    full_path, size_bytes, modified_time_ns, blake3_hash, hashed_time
+                )
+                SELECT full_path, size_bytes, modified_time_ns, blake3_hash, hashed_time
+                FROM legacy.file_hashes
+                ",
+                [],
+            )
+            .context("Failed to import legacy file_hashes rows")?;
+        }
+        Ok(())
+    })
+}
+
+/// Current Unix timestamp in seconds.
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64)
 }
 
 #[cfg(test)]
@@ -457,27 +825,24 @@ mod test_scan_cache_open {
 
     #[test]
     fn opens_in_memory_database() {
-        let cache = ScanCache::open_in_memory();
-        assert!(cache.is_ok());
+        assert!(ScanCache::open_in_memory().is_ok());
     }
 
     #[test]
-    fn ensure_parent_directory_ignores_empty_parent_for_single_component_path() {
-        ensure_parent_directory(Path::new("cache.db")).expect("single component relative path should succeed");
+    fn open_read_only_returns_none_when_database_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.db");
+        assert!(ScanCache::open_read_only_at(&path).unwrap().is_none());
+        assert!(!path.exists());
     }
 
     #[test]
-    fn empty_cache_returns_empty_map() {
-        let cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let all = cache.get_all().expect("Failed to get entries");
-        assert!(all.is_empty());
-    }
-
-    #[test]
-    fn empty_cache_returns_empty_hash_map() {
-        let cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let hashes = cache.get_all_hashes().expect("Failed to get hashes");
-        assert!(hashes.is_empty());
+    fn empty_cache_returns_empty_maps() {
+        let cache = ScanCache::open_in_memory().unwrap();
+        assert!(cache.get_all().unwrap().is_empty());
+        assert!(cache.get_all_hashes().unwrap().is_empty());
+        assert_eq!(cache.scanned_file_count().unwrap(), 0);
+        assert_eq!(cache.file_hash_count().unwrap(), 0);
     }
 }
 
@@ -485,483 +850,182 @@ mod test_scan_cache_open {
 mod test_scan_cache_upsert {
     use super::*;
 
-    fn sample_video_info() -> VideoInfo {
+    fn full_video_info() -> VideoInfo {
         VideoInfo {
             size_bytes: Some(1_000_000),
             resolution: Resolution::from_options(Some(1920), Some(1080)),
+            coded_resolution: Resolution::from_options(Some(1920), Some(1080)),
+            rotation: None,
             duration: Some(120.5),
             codec: Some("h264".to_string()),
             bitrate_kbps: Some(5000),
-            ..Default::default()
+            frames_per_second: Some(29.97),
+            bit_depth: Some(10),
         }
     }
 
     #[test]
-    fn upsert_and_retrieve_single_entry() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let info = sample_video_info();
-        let path = Path::new("/videos/test.mp4");
+    fn bidirectional_cache_preserves_fps_bit_depth_and_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("portrait.mp4");
+        std::fs::write(&file, b"video").unwrap();
+        let fingerprint = fingerprint_file(&file).unwrap();
 
-        let count = cache.batch_upsert(&[(path, &info)]).expect("Failed to upsert");
-        assert_eq!(count, 1);
-
-        let all = cache.get_all().expect("Failed to get entries");
-        assert_eq!(all.len(), 1);
-
-        let cached = all.get("/videos/test.mp4").expect("Entry not found");
-        assert_eq!(cached.size_bytes, 1_000_000);
-        assert_eq!(cached.codec, "h264");
-        assert_eq!(cached.bitrate_kbps, 5000);
-        assert_eq!(cached.width, 1920);
-        assert_eq!(cached.height, 1080);
-        assert!((cached.duration - 120.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn an_entry_is_stale_once_the_file_changes_with_the_same_size() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let path = directory.path().join("clip.mp4");
-        std::fs::write(&path, b"abc").expect("write");
-        let set_time = |seconds: u64| {
-            std::fs::File::options()
-                .write(true)
-                .open(&path)
-                .expect("open")
-                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
-                .expect("set time");
-        };
-        set_time(1_000_000_000);
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
         let info = VideoInfo {
-            size_bytes: Some(3),
-            ..sample_video_info()
+            size_bytes: Some(fingerprint.size_bytes),
+            resolution: Some(Resolution::new(1080, 1920)),
+            coded_resolution: Some(Resolution::new(1920, 1080)),
+            rotation: Some(270),
+            duration: Some(45.0),
+            codec: Some("hevc".to_string()),
+            bitrate_kbps: Some(8_000),
+            frames_per_second: Some(60.0),
+            bit_depth: Some(10),
         };
-        cache
-            .batch_upsert(&[(path.as_path(), &info)])
-            .expect("Failed to upsert");
-        let key = path.to_string_lossy().into_owned();
 
-        let cached = cache.get_all().expect("entries").remove(&key).expect("entry");
-        assert!(cached.is_current(&fingerprint_file(&path).expect("fingerprint")));
-
-        std::fs::write(&path, b"xyz").expect("write");
-        set_time(1_100_000_000);
-        assert!(!cached.is_current(&fingerprint_file(&path).expect("fingerprint")));
-    }
-
-    #[test]
-    fn upsert_keeps_frame_rate_and_bit_depth_when_the_fingerprint_matches() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("clip.mkv");
-        std::fs::write(&path, b"video").unwrap();
-        let fingerprint = fingerprint_file(&path).unwrap();
-        assert_ne!(fingerprint.modified_time_ns, 0);
         let mut cache = ScanCache::open_in_memory().unwrap();
-        cache
-            .connection
-            .execute(
-                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
-                 VALUES (?1, 5, 'h264', 5000, 10.0, 1920, 1080, 29.97, 10, 0, ?2)",
-                params![path.to_str().unwrap(), fingerprint.modified_time_ns],
-            )
-            .unwrap();
+        assert_eq!(
+            cache
+                .batch_upsert_with_fingerprints(&[(file.as_path(), &info, fingerprint)])
+                .unwrap(),
+            1
+        );
 
-        let info = VideoInfo {
-            size_bytes: Some(5),
-            ..sample_video_info()
-        };
-        cache.batch_upsert(&[(&path, &info)]).unwrap();
+        let all = cache.get_all().unwrap();
+        let cached = all.get(file.to_str().unwrap()).expect("cached row");
+        assert!(cached.is_current(&fingerprint));
+        assert!(cached.has_complete_video_metadata());
+        assert_eq!(cached.bit_depth, 10);
+        assert!((cached.frames_per_second - 60.0).abs() < f64::EPSILON);
+        assert_eq!((cached.width, cached.height), (1080, 1920));
+        assert_eq!((cached.coded_width, cached.coded_height), (1920, 1080));
+        assert_eq!(cached.rotation, 270);
 
-        let (frames_per_second, bit_depth): (f64, i64) = cache
-            .connection
-            .query_row("SELECT frames_per_second, bit_depth FROM scanned_files", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .unwrap();
-        assert!((frames_per_second - 29.97).abs() < 0.001, "{frames_per_second}");
-        assert_eq!(bit_depth, 10);
+        let roundtripped = cached.to_video_info();
+        assert_eq!(roundtripped.resolution, Some(Resolution::new(1080, 1920)));
+        assert_eq!(roundtripped.coded_resolution, Some(Resolution::new(1920, 1080)));
+        assert_eq!(roundtripped.rotation, Some(270));
+        assert_eq!(roundtripped.bit_depth, Some(10));
+        assert_eq!(roundtripped.frames_per_second, Some(60.0));
     }
 
     #[test]
-    fn upsert_updates_existing_entry() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let path = Path::new("/videos/test.mp4");
-
-        let info_v1 = sample_video_info();
-        cache.batch_upsert(&[(path, &info_v1)]).expect("Failed to upsert v1");
-
-        let info_v2 = VideoInfo {
-            size_bytes: Some(2_000_000),
-            resolution: Resolution::from_options(Some(3840), Some(2160)),
-            duration: Some(240.0),
-            codec: Some("hevc".to_string()),
-            bitrate_kbps: Some(10_000),
-            ..Default::default()
-        };
-        cache.batch_upsert(&[(path, &info_v2)]).expect("Failed to upsert v2");
-
-        let all = cache.get_all().expect("Failed to get entries");
-        assert_eq!(all.len(), 1);
-
-        let cached = all.get("/videos/test.mp4").expect("Entry not found");
-        assert_eq!(cached.size_bytes, 2_000_000);
-        assert_eq!(cached.codec, "hevc");
-        assert_eq!(cached.width, 3840);
-        assert_eq!(cached.height, 2160);
-    }
-
-    #[test]
-    fn upsert_multiple_entries() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-
-        let info_a = sample_video_info();
-        let info_b = VideoInfo {
-            size_bytes: Some(500_000),
-            resolution: Resolution::from_options(Some(1280), Some(720)),
-            duration: Some(60.0),
-            codec: Some("hevc".to_string()),
-            bitrate_kbps: Some(3000),
-            ..Default::default()
-        };
-
-        let path_a = Path::new("/videos/a.mp4");
-        let path_b = Path::new("/videos/b.mkv");
-
-        let count = cache
-            .batch_upsert(&[(path_a, &info_a), (path_b, &info_b)])
-            .expect("Failed to upsert");
-        assert_eq!(count, 2);
-
-        let all = cache.get_all().expect("Failed to get entries");
-        assert_eq!(all.len(), 2);
-        assert!(all.contains_key("/videos/a.mp4"));
-        assert!(all.contains_key("/videos/b.mkv"));
-    }
-
-    #[test]
-    fn upsert_skips_entry_without_size() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let info = VideoInfo {
-            size_bytes: None,
-            resolution: Resolution::from_options(Some(1920), Some(1080)),
-            duration: Some(120.5),
-            codec: Some("h264".to_string()),
-            bitrate_kbps: Some(5000),
-            ..Default::default()
-        };
-        let path = Path::new("/videos/test.mp4");
-
-        let count = cache.batch_upsert(&[(path, &info)]).expect("Failed to upsert");
-        assert_eq!(count, 0);
-
-        let all = cache.get_all().expect("Failed to get entries");
-        assert!(all.is_empty());
-    }
-
-    #[test]
-    fn upsert_empty_input_returns_zero() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let count = cache.batch_upsert(&[]).expect("Failed to upsert");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn upsert_mixed_entries_skips_only_entry_without_size() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let valid = sample_video_info();
-        let missing_size = VideoInfo {
-            size_bytes: None,
-            ..valid.clone()
-        };
-        let valid_path = Path::new("/videos/valid.mp4");
-        let skipped_path = Path::new("/videos/skipped.mp4");
-
-        let count = cache
-            .batch_upsert(&[(skipped_path, &missing_size), (valid_path, &valid)])
-            .expect("Failed to upsert mixed entries");
-        let all = cache.get_all().expect("Failed to get entries");
-
-        assert_eq!(count, 1);
-        assert!(all.contains_key("/videos/valid.mp4"));
-        assert!(!all.contains_key("/videos/skipped.mp4"));
-    }
-}
-
-#[cfg(test)]
-mod test_file_hash_cache {
-    use super::*;
-
-    #[test]
-    fn upserts_and_retrieves_hashes() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let path = Path::new("/videos/test.mp4");
+    fn move_and_remove_cached_paths_keep_tables_synchronized() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old.mkv");
+        let new_path = dir.path().join("new.mkv");
+        let info = full_video_info();
         let hash = CachedFileHash {
-            size_bytes: 1_024,
-            modified_time_ns: 123_456,
-            blake3_hash: "abc123".to_string(),
-        };
-
-        let count = cache
-            .batch_upsert_hashes(&[(path, &hash)])
-            .expect("Failed to upsert hash");
-        assert_eq!(count, 1);
-
-        let hashes = cache.get_all_hashes().expect("Failed to retrieve hashes");
-        assert_eq!(hashes.get("/videos/test.mp4"), Some(&hash));
-    }
-
-    #[test]
-    fn validity_requires_matching_size_and_modification_time() {
-        let hash = CachedFileHash {
-            size_bytes: 1_024,
-            modified_time_ns: 123_456,
-            blake3_hash: "abc123".to_string(),
-        };
-
-        assert!(hash.is_current(1_024, 123_456));
-        assert!(!hash.is_current(2_048, 123_456));
-        assert!(!hash.is_current(1_024, 654_321));
-    }
-
-    #[test]
-    fn upserts_multiple_hashes_in_one_batch() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let first_path = Path::new("/videos/first.mp4");
-        let second_path = Path::new("/videos/second.mp4");
-        let first_hash = CachedFileHash {
-            size_bytes: 100,
-            modified_time_ns: 1,
-            blake3_hash: "first".to_string(),
-        };
-        let second_hash = CachedFileHash {
-            size_bytes: 200,
-            modified_time_ns: 2,
-            blake3_hash: "second".to_string(),
-        };
-
-        let count = cache
-            .batch_upsert_hashes(&[(first_path, &first_hash), (second_path, &second_hash)])
-            .expect("Failed to upsert hashes");
-        let hashes = cache.get_all_hashes().expect("Failed to retrieve hashes");
-
-        assert_eq!(count, 2);
-        assert_eq!(hashes.get("/videos/first.mp4"), Some(&first_hash));
-        assert_eq!(hashes.get("/videos/second.mp4"), Some(&second_hash));
-    }
-}
-
-#[cfg(test)]
-mod test_cached_video_info_conversion {
-    use super::*;
-
-    #[test]
-    fn converts_all_fields() {
-        let cached = CachedVideoInfo {
             size_bytes: 1_000_000,
-            codec: "h264".to_string(),
-            bitrate_kbps: 5000,
-            duration: 120.5,
-            width: 1920,
-            height: 1080,
-            frames_per_second: 29.97,
-            modified_time_ns: 0,
+            modified_time_ns: 42,
+            blake3_hash: "abc123".to_string(),
         };
 
-        let video_info = cached.to_video_info();
-        assert_eq!(video_info.size_bytes, Some(1_000_000));
-        assert_eq!(video_info.codec, Some("h264".to_string()));
-        assert_eq!(video_info.bitrate_kbps, Some(5000));
-        assert_eq!(video_info.duration, Some(120.5));
-
-        let resolution = video_info.resolution.expect("should have resolution");
-        assert_eq!(resolution.width, 1920);
-        assert_eq!(resolution.height, 1080);
-    }
-
-    #[test]
-    fn zero_bitrate_becomes_none() {
-        let cached = CachedVideoInfo {
-            size_bytes: 1_000,
-            codec: "h264".to_string(),
-            bitrate_kbps: 0,
-            duration: 10.0,
-            width: 640,
-            height: 480,
-            frames_per_second: 24.0,
-            modified_time_ns: 0,
-        };
-
-        let video_info = cached.to_video_info();
-        assert_eq!(video_info.bitrate_kbps, None);
-    }
-
-    #[test]
-    fn zero_duration_becomes_none() {
-        let cached = CachedVideoInfo {
-            size_bytes: 1_000,
-            codec: "h264".to_string(),
-            bitrate_kbps: 5000,
-            duration: 0.0,
-            width: 640,
-            height: 480,
-            frames_per_second: 24.0,
-            modified_time_ns: 0,
-        };
-
-        let video_info = cached.to_video_info();
-        assert_eq!(video_info.duration, None);
-    }
-
-    #[test]
-    fn empty_codec_becomes_none() {
-        let cached = CachedVideoInfo {
-            size_bytes: 1_000,
-            codec: String::new(),
-            bitrate_kbps: 5000,
-            duration: 10.0,
-            width: 640,
-            height: 480,
-            frames_per_second: 24.0,
-            modified_time_ns: 0,
-        };
-
-        let video_info = cached.to_video_info();
-        assert_eq!(video_info.codec, None);
-    }
-
-    #[test]
-    fn roundtrip_through_database() {
-        let mut cache = ScanCache::open_in_memory().expect("Failed to open in-memory database");
-        let original = VideoInfo {
-            size_bytes: Some(5_000_000),
-            resolution: Resolution::from_options(Some(3840), Some(2160)),
-            duration: Some(300.0),
-            codec: Some("hevc".to_string()),
-            bitrate_kbps: Some(15_000),
-            ..Default::default()
-        };
-        let path = Path::new("/videos/roundtrip.mkv");
-
-        cache.batch_upsert(&[(path, &original)]).expect("Failed to upsert");
-
-        let all = cache.get_all().expect("Failed to get entries");
-        let cached = all.get("/videos/roundtrip.mkv").expect("Entry not found");
-        let restored = cached.to_video_info();
-
-        assert_eq!(restored.size_bytes, original.size_bytes);
-        assert_eq!(restored.codec, original.codec);
-        assert_eq!(restored.bitrate_kbps, original.bitrate_kbps);
-        assert_eq!(restored.duration, original.duration);
-        assert_eq!(restored.resolution, original.resolution);
-    }
-
-    #[test]
-    fn zero_resolution_becomes_none() {
-        let cached = CachedVideoInfo {
-            size_bytes: 1_000,
-            codec: "h264".to_string(),
-            bitrate_kbps: 5000,
-            duration: 10.0,
-            width: 0,
-            height: 0,
-            frames_per_second: 24.0,
-            modified_time_ns: 1_000,
-        };
-
-        let video_info = cached.to_video_info();
-        assert_eq!(video_info.resolution, None);
-    }
-
-    #[test]
-    fn zero_modified_time_entry_is_never_current() {
-        let cached = CachedVideoInfo {
-            size_bytes: 1_000,
-            codec: "h264".to_string(),
-            bitrate_kbps: 5000,
-            duration: 10.0,
-            width: 1920,
-            height: 1080,
-            frames_per_second: 24.0,
-            modified_time_ns: 0,
-        };
-        let fingerprint = FileFingerprint {
-            size_bytes: 1_000,
-            modified_time_ns: 0,
-        };
-
-        assert!(!cached.is_current(&fingerprint));
-    }
-
-    #[test]
-    fn batch_upsert_clears_unverified_fps_and_bit_depth_from_a_legacy_row() {
         let mut cache = ScanCache::open_in_memory().unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("clip.mkv");
-        std::fs::write(&path, b"original").unwrap();
-        cache
-            .connection
-            .execute(
-                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time)
-                 VALUES (?1, 8, 'h264', 9000, 10.0, 1920, 1080, 60.0, 10, 100)",
-                params![path.to_str().unwrap()],
-            )
-            .unwrap();
-        std::fs::write(&path, b"new file").unwrap();
+        cache.batch_upsert(&[(old_path.as_path(), &info)]).unwrap();
+        cache.batch_upsert_hashes(&[(old_path.as_path(), &hash)]).unwrap();
 
-        let info = VideoInfo {
-            size_bytes: Some(8),
-            ..VideoInfo::default()
-        };
-        cache.batch_upsert(&[(&path, &info)]).unwrap();
+        cache.move_cached_path(&old_path, &new_path).unwrap();
+        let videos = cache.get_all().unwrap();
+        assert!(!videos.contains_key(old_path.to_str().unwrap()));
+        assert!(videos.contains_key(new_path.to_str().unwrap()));
+        let hashes = cache.get_all_hashes().unwrap();
+        assert!(hashes.contains_key(new_path.to_str().unwrap()));
 
-        let cached = cache.get_all().unwrap();
-        let cached = &cached[path.to_str().unwrap()];
-        assert!(cached.is_current(&fingerprint_file(&path).unwrap()));
-        let bit_depth: i64 = cache
-            .connection
-            .query_row("SELECT bit_depth FROM scanned_files", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!((cached.frames_per_second, bit_depth), (0.0, 0));
+        cache.remove_cached_path(&new_path).unwrap();
+        assert!(cache.get_all().unwrap().is_empty());
+        assert!(cache.get_all_hashes().unwrap().is_empty());
     }
 
     #[test]
-    fn batch_upsert_clears_fps_and_bit_depth_when_same_size_file_changes_mtime() {
-        let mut cache = ScanCache::open_in_memory().expect("open in-memory database");
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let file_path = temp_dir.path().join("clip.mkv");
-        std::fs::write(&file_path, b"1234567890").expect("write initial");
+    fn migrates_legacy_vconvert_db_into_cli_tools_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("vconvert.db");
+        let unified_path = dir.path().join("cli-tools.db");
 
-        // Seed row as vconvert would with fps = 60.0, bit_depth = 10, and an older mtime.
-        cache
-            .connection
-            .execute(
-                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
-                 VALUES (?1, 10, 'h264', 5000, 10.0, 1920, 1080, 60.0, 10, 100, 123456)",
-                params![file_path.to_string_lossy()],
+        let legacy_conn = sqlite::open_at(&legacy_path).unwrap();
+        legacy_conn
+            .execute_batch(
+                r"
+                CREATE TABLE scanned_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    bit_depth INTEGER NOT NULL DEFAULT 8,
+                    scanned_time INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL DEFAULT 555
+                );
+                INSERT INTO scanned_files (
+                    full_path, size_bytes, codec, bitrate_kbps, duration, width, height,
+                    frames_per_second, bit_depth, scanned_time, modified_time_ns
+                ) VALUES ('/videos/legacy.mkv', 5000, 'hevc', 4000, 60.0, 1920, 1080, 24.0, 10, 100, 555);
+                CREATE TABLE file_hashes (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL,
+                    blake3_hash TEXT NOT NULL,
+                    hashed_time INTEGER NOT NULL
+                );
+                INSERT INTO file_hashes (full_path, size_bytes, modified_time_ns, blake3_hash, hashed_time)
+                VALUES ('/videos/legacy.mkv', 5000, 555, 'deadbeef', 100);
+                ",
             )
-            .expect("seed row");
+            .unwrap();
+        drop(legacy_conn);
 
-        // Upsert new metadata for the same path and exact same byte size, but newer on-disk mtime.
-        let updated = VideoInfo {
-            size_bytes: Some(10),
-            resolution: Resolution::from_options(Some(1280), Some(720)),
-            duration: Some(5.0),
-            codec: Some("hevc".to_string()),
-            bitrate_kbps: Some(2000),
-            ..Default::default()
+        let cache = ScanCache::open_at(&unified_path).unwrap();
+        let videos = cache.get_all().unwrap();
+        let entry = videos.get("/videos/legacy.mkv").expect("legacy scanned row imported");
+        assert_eq!(entry.codec, "hevc");
+        assert_eq!(entry.bit_depth, 10);
+        assert_eq!(entry.modified_time_ns, 555);
+
+        let hashes = cache.get_all_hashes().unwrap();
+        assert_eq!(hashes.get("/videos/legacy.mkv").unwrap().blake3_hash, "deadbeef");
+        assert!(legacy_path.is_file());
+    }
+
+    #[test]
+    fn remove_missing_prunes_deleted_local_files_and_keeps_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("present.mp4");
+        let missing = dir.path().join("gone.mp4");
+        std::fs::write(&existing, b"keep").unwrap();
+
+        let info = full_video_info();
+        let hash = CachedFileHash {
+            size_bytes: 4,
+            modified_time_ns: 1,
+            blake3_hash: "aa".to_string(),
         };
-        cache.batch_upsert(&[(file_path.as_path(), &updated)]).expect("upsert");
 
-        let (fps, bit_depth): (f64, i64) = cache
-            .connection
-            .query_row(
-                "SELECT frames_per_second, bit_depth FROM scanned_files WHERE full_path = ?1",
-                params![file_path.to_string_lossy()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("query row");
-        assert!(fps.abs() < f64::EPSILON, "stale fps should be cleared, got {fps}");
-        assert_eq!(bit_depth, 0, "stale bit_depth should be cleared");
+        let mut cache = ScanCache::open_in_memory().unwrap();
+        cache
+            .batch_upsert(&[(existing.as_path(), &info), (missing.as_path(), &info)])
+            .unwrap();
+        cache
+            .batch_upsert_hashes(&[(existing.as_path(), &hash), (missing.as_path(), &hash)])
+            .unwrap();
+
+        assert_eq!(cache.remove_missing_scanned_files().unwrap(), 1);
+        assert_eq!(cache.remove_missing_file_hashes().unwrap(), 1);
+        assert_eq!(cache.scanned_file_count().unwrap(), 1);
+        assert_eq!(cache.file_hash_count().unwrap(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unmounted_macos_volume_is_not_treated_as_missing() {
+        let offline = Path::new("/Volumes/DefinitelyUnmountedTestDrive99999/movie.mkv");
+        assert!(!mount_root_is_available(offline));
+        assert!(!is_definitively_missing(offline));
     }
 
     #[cfg(unix)]
@@ -970,33 +1034,12 @@ mod test_cached_video_info_conversion {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
-        let mut cache = ScanCache::open_in_memory().expect("open in-memory database");
+        let mut cache = ScanCache::open_in_memory().unwrap();
         let first = Path::new(OsStr::from_bytes(b"/videos/clip_\xff.mp4"));
         let second = Path::new(OsStr::from_bytes(b"/videos/clip_\xfe.mp4"));
-        let info = VideoInfo {
-            size_bytes: Some(100),
-            resolution: None,
-            duration: None,
-            codec: Some("h264".to_string()),
-            bitrate_kbps: None,
-            ..Default::default()
-        };
+        let info = full_video_info();
 
-        let written = cache
-            .batch_upsert(&[(first, &info), (second, &info)])
-            .expect("upsert non-utf8");
-        assert_eq!(written, 0);
-        assert!(cache.get_all().expect("get_all").is_empty());
-
-        let hash_entry = CachedFileHash {
-            size_bytes: 100,
-            modified_time_ns: 1_000,
-            blake3_hash: "abc".to_string(),
-        };
-        let hashes_written = cache
-            .batch_upsert_hashes(&[(first, &hash_entry), (second, &hash_entry)])
-            .expect("upsert hashes");
-        assert_eq!(hashes_written, 0);
-        assert!(cache.get_all_hashes().expect("get_all_hashes").is_empty());
+        assert_eq!(cache.batch_upsert(&[(first, &info), (second, &info)]).unwrap(), 0);
+        assert!(cache.get_all().unwrap().is_empty());
     }
 }
