@@ -14,8 +14,8 @@ use clap_complete::Shell;
 use walkdir::WalkDir;
 
 use cli_tools_common::{
-    OverwritePolicy, TargetReservations, count_label, os_str_to_string, print_error, print_magenta_bold, print_yellow,
-    resolve_input_path, safe_rename, should_skip_entry, trash_or_delete,
+    OverwritePolicy, TargetReservations, count_label, is_network_path, os_str_to_string, print_error,
+    print_magenta_bold, print_yellow, resolve_input_path, safe_rename, should_skip_entry,
 };
 
 /// Action to take when a conflicting unsuffixed file already exists.
@@ -24,7 +24,12 @@ enum ConflictAction {
     /// Permanently delete the conflicting file.
     Delete,
     /// Move the conflicting file to the system trash.
-    Trash,
+    Trash {
+        /// Detect paths where system trash is unavailable on Windows.
+        is_network: fn(&Path) -> bool,
+        /// Send the staged destination to system trash.
+        dispose: fn(&Path) -> std::io::Result<()>,
+    },
 }
 
 /// Result of processing a single file.
@@ -115,6 +120,16 @@ impl RenameBatch {
     }
 }
 
+impl ConflictAction {
+    /// Select system trash using the platform's network path detection.
+    const fn trash() -> Self {
+        Self::Trash {
+            is_network: is_network_path,
+            dispose: trash_file,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -134,7 +149,7 @@ fn main() -> Result<()> {
     }
 
     let action = if args.trash {
-        ConflictAction::Trash
+        ConflictAction::trash()
     } else {
         ConflictAction::Delete
     };
@@ -176,9 +191,9 @@ fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSumm
     let rename_action = if dryrun { "would be renamed" } else { "renamed" };
     let removed_action = match (dryrun, action) {
         (true, ConflictAction::Delete) => "would be deleted",
-        (true, ConflictAction::Trash) => "would be trashed",
+        (true, ConflictAction::Trash { .. }) => "would be trashed",
         (false, ConflictAction::Delete) => "deleted",
-        (false, ConflictAction::Trash) => "trashed",
+        (false, ConflictAction::Trash { .. }) => "trashed",
     };
 
     println!("\n{} files {rename_action}", summary.renamed);
@@ -332,6 +347,17 @@ fn process_file_in_batch(
         false
     };
 
+    if has_conflict
+        && let ConflictAction::Trash { is_network, .. } = action
+        && is_network(&file_without_suffix)
+    {
+        anyhow::bail!(
+            "System trash is unavailable for this Windows network path: {}. \
+             Omit --trash only if you want to permanently replace the existing file",
+            file_without_suffix.display()
+        );
+    }
+
     if dryrun {
         batch.previewed_sources.insert(file_with_suffix.to_path_buf());
     } else if has_conflict {
@@ -339,7 +365,9 @@ fn process_file_in_batch(
             ConflictAction::Delete => {
                 safe_rename(file_with_suffix, &file_without_suffix, OverwritePolicy::Overwrite)?;
             }
-            ConflictAction::Trash => replace_with_trash(file_with_suffix, &file_without_suffix, trash_or_delete)?,
+            ConflictAction::Trash { dispose, .. } => {
+                replace_with_trash(file_with_suffix, &file_without_suffix, dispose)?;
+            }
         }
     } else {
         std::fs::rename(file_with_suffix, &file_without_suffix)?;
@@ -350,6 +378,11 @@ fn process_file_in_batch(
     } else {
         Outcome::Renamed
     })
+}
+
+/// Move a file to system trash without a permanent deletion fallback.
+fn trash_file(path: &Path) -> std::io::Result<()> {
+    trash::delete(path).map_err(std::io::Error::other)
 }
 
 /// Stage the old destination on the same volume, then trash it only after the replacement is installed.
@@ -504,7 +537,7 @@ mod test_rename_files {
         std::fs::write(root.join("alpha_1.mp4"), b"new alpha")?;
         std::fs::write(root.join("alpha.mp4"), b"old alpha")?;
 
-        let summary = rename_files(root, true, ConflictAction::Trash);
+        let summary = rename_files(root, true, ConflictAction::trash());
 
         assert_eq!(
             summary,
@@ -614,7 +647,7 @@ mod test_process_file {
         std::fs::write(&suffixed, b"new")?;
         std::os::unix::fs::symlink(temp_directory.path().join("missing.txt"), &broken)?;
 
-        let summary = rename_files(temp_directory.path(), true, ConflictAction::Trash);
+        let summary = rename_files(temp_directory.path(), true, ConflictAction::trash());
         assert_eq!(summary.renamed, 1);
         assert_eq!(
             summary.removed, 1,
@@ -669,7 +702,7 @@ mod test_process_file {
         std::fs::write(&suffixed, b"new")?;
         std::fs::write(&unsuffixed, b"old")?;
 
-        let outcome = process_file(temp_directory.path(), &suffixed, 1, 1, 1, true, ConflictAction::Trash)?;
+        let outcome = process_file(temp_directory.path(), &suffixed, 1, 1, 1, true, ConflictAction::trash())?;
 
         assert!(matches!(outcome, Outcome::RenamedAndRemoved));
         assert_eq!(std::fs::read(&suffixed)?, b"new");
@@ -702,6 +735,48 @@ mod test_process_file {
 
         assert!(error.to_string().contains("does not end with '_1'"));
         Ok(())
+    }
+
+    #[test]
+    fn network_trash_refuses_conflicts_without_modifying_either_file() {
+        use cli_tools_common::test_support::TempTree;
+
+        let tree = TempTree::new();
+        tree.file_with("clip.txt", "old destination");
+        tree.file_with("clip_1.txt", "replacement");
+        let before = tree.snapshot();
+        let action = ConflictAction::Trash {
+            is_network: |_| true,
+            dispose: |_| panic!("network conflict must not reach the trash backend"),
+        };
+
+        // Check real execution first so a deletion failure is visible in the regression.
+        for dryrun in [false, true] {
+            let result = process_file(tree.path(), &tree.join("clip_1.txt"), 1, 1, 1, dryrun, action);
+
+            assert_eq!(tree.snapshot(), before);
+            let error = result.expect_err("explicit trash must refuse a network conflict");
+            assert!(error.to_string().contains("network"), "{error}");
+        }
+    }
+
+    #[test]
+    fn network_trash_allows_a_rename_without_a_conflict() {
+        use cli_tools_common::test_support::TempTree;
+
+        let tree = TempTree::new();
+        tree.file_with("clip_1.txt", "replacement");
+        let action = ConflictAction::Trash {
+            is_network: |_| true,
+            dispose: |_| panic!("there is no old destination to trash"),
+        };
+
+        let summary = rename_files(tree.path(), false, action);
+
+        assert_eq!(summary.renamed, 1);
+        assert_eq!(summary.removed, 0);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(tree.snapshot(), ["clip.txt: replacement"]);
     }
 
     #[test]

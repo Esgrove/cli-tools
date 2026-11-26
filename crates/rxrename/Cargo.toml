@@ -19,6 +19,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion"] }
 tempfile = { workspace = true }
+trash = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
