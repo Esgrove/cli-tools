@@ -2,28 +2,21 @@
 //!
 //! Combines the CLI arguments with the `[video_stats]` section of the user config file.
 
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::VideoStatsArgs;
 
 /// Config from the `[video_stats]` section of the user config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VideoStatsConfig {
     #[serde(default)]
     recurse: bool,
     #[serde(default)]
     verbose: bool,
-}
-
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    video_stats: VideoStatsConfig,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -33,6 +26,8 @@ pub struct Config {
     pub(crate) root: PathBuf,
     /// Recurse into subdirectories.
     pub(crate) recurse: bool,
+    /// Skip reading or writing the shared scan cache.
+    pub(crate) no_cache: bool,
     /// Print verbose per-file output.
     pub(crate) verbose: bool,
 }
@@ -44,26 +39,16 @@ impl VideoStatsConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
-        }
+        cli_tools_common::load_user_config_section("video_stats")
     }
 
     /// Parse config from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.video_stats)
-            .context("Failed to parse video_stats config TOML")
+        cli_tools_common::parse_user_config_section(toml_str, "video_stats")
     }
 }
 
@@ -82,6 +67,7 @@ impl Config {
         Ok(Self {
             root: cli_tools_common::resolve_input_path(args.path.as_deref())?,
             recurse: args.recurse || user_config.recurse,
+            no_cache: args.no_cache,
             verbose: args.verbose || user_config.verbose,
         })
     }
@@ -114,12 +100,9 @@ verbose = true
     }
 
     #[test]
-    fn invalid_value_type_returns_error() {
-        let toml = r#"
-[video_stats]
-recurse = "yes"
-"#;
-        assert!(VideoStatsConfig::from_toml_str(toml).is_err());
+    fn invalid_value_type_and_unknown_field_return_error() {
+        assert!(VideoStatsConfig::from_toml_str("[video_stats]\nrecurse = \"yes\"\n").is_err());
+        assert!(VideoStatsConfig::from_toml_str("[video_stats]\nunknown_key = true\n").is_err());
     }
 }
 

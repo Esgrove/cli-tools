@@ -11,8 +11,8 @@ mod config;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
 
 use crate::collector::StatsCollector;
 use crate::config::Config;
@@ -22,15 +22,7 @@ use crate::config::Config;
 enum VideoStatsCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -47,6 +39,10 @@ pub(crate) struct VideoStatsArgs {
     #[arg(short = 'r', long)]
     recurse: bool,
 
+    /// Skip the shared scan cache and re-probe every file
+    #[arg(short = 'C', long)]
+    no_cache: bool,
+
     /// Print verbose per-file output
     #[arg(short = 'v', long, global = true)]
     verbose: bool,
@@ -54,14 +50,8 @@ pub(crate) struct VideoStatsArgs {
 
 fn main() -> Result<()> {
     let args = VideoStatsArgs::parse();
-    if let Some(VideoStatsCommand::Completion { shell, install }) = &args.command {
-        cli_tools_common::generate_shell_completion(
-            *shell,
-            VideoStatsArgs::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        )
+    if let Some(VideoStatsCommand::Completion(completion)) = &args.command {
+        completion.generate::<VideoStatsArgs>(args.verbose, env!("CARGO_BIN_NAME"))
     } else {
         StatsCollector::new(Config::from_args(&args)?).run()
     }
@@ -70,6 +60,8 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod test_video_stats_args {
     use super::*;
+    use clap::CommandFactory;
+    use clap_complete::Shell;
 
     #[test]
     fn parses_defaults_and_operational_options() {
@@ -77,12 +69,14 @@ mod test_video_stats_args {
         assert!(defaults.command.is_none());
         assert!(defaults.path.is_none());
         assert!(!defaults.recurse);
+        assert!(!defaults.no_cache);
         assert!(!defaults.verbose);
 
-        let configured = VideoStatsArgs::try_parse_from(["vstats", "videos", "--recurse", "--verbose"])
+        let configured = VideoStatsArgs::try_parse_from(["vstats", "videos", "--recurse", "--no-cache", "--verbose"])
             .expect("operational arguments should parse");
         assert_eq!(configured.path, Some(PathBuf::from("videos")));
         assert!(configured.recurse);
+        assert!(configured.no_cache);
         assert!(configured.verbose);
     }
 
@@ -92,10 +86,10 @@ mod test_video_stats_args {
             .expect("completion command should parse");
         assert!(matches!(
             args.command,
-            Some(VideoStatsCommand::Completion {
+            Some(VideoStatsCommand::Completion(CompletionArgs {
                 shell: Shell::Bash,
                 install: true
-            })
+            }))
         ));
         VideoStatsArgs::command().debug_assert();
     }

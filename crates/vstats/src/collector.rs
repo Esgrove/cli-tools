@@ -1,19 +1,19 @@
-//! Video file discovery, probing, and aggregate statistics collection.
+//! Video file discovery, shared scan-cache lookup, parallel probing, and aggregate statistics collection.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::Result;
-use cli_tools_common::{create_semaphore_for_io_bound, print_error, print_yellow};
+use cli_tools_common::{print_error, print_yellow};
+use cli_tools_media::file_hash::{FileFingerprint, fingerprint_file};
+use cli_tools_media::scan_cache::{CachedVideoInfo, ScanCache};
 use cli_tools_media::video_info::{VideoInfo, VideoStats};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::config::Config;
-
-/// Supported video file extensions.
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v"];
 
 /// Progress bar template string.
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.magenta/blue} {pos}/{len} {percent}%";
@@ -25,14 +25,23 @@ const PROGRESS_BAR_CHARS: &str = "=>-";
 struct ProbedFile {
     /// Display name (relative path or filename).
     name: String,
-    /// Video metadata from ffprobe.
+    /// Video metadata from the scan cache or ffprobe.
     info: VideoInfo,
+}
+
+/// Result of probing one cache-miss file in parallel.
+struct ProbeAttempt {
+    path: PathBuf,
+    name: String,
+    fingerprint: Option<FileFingerprint>,
+    result: Result<VideoInfo>,
 }
 
 /// Collects and displays statistics for video files.
 pub struct StatsCollector {
     root: PathBuf,
     recurse: bool,
+    no_cache: bool,
     verbose: bool,
 }
 
@@ -43,6 +52,7 @@ impl StatsCollector {
         Self {
             root: config.root,
             recurse: config.recurse,
+            no_cache: config.no_cache,
             verbose: config.verbose,
         }
     }
@@ -50,14 +60,12 @@ impl StatsCollector {
     /// Run the stats collection process.
     ///
     /// # Errors
-    /// Returns an error if video files cannot be gathered or probed.
+    /// Returns an error if video files cannot be gathered or all probes fail.
     pub fn run(&self) -> Result<()> {
         let video_files = self.gather_video_files()?;
 
         if video_files.is_empty() {
-            if self.verbose {
-                print_yellow!("No video files found in: {}", self.root.display());
-            }
+            print_yellow!("No video files found in: {}", self.root.display());
             return Ok(());
         }
 
@@ -73,8 +81,8 @@ impl StatsCollector {
             );
         }
 
-        let runtime = tokio::runtime::Runtime::new()?;
-        let (mut probed_files, error_count) = runtime.block_on(probe_files_async(video_files, &self.root));
+        let mut cache = if self.no_cache { None } else { ScanCache::open().ok() };
+        let (mut probed_files, error_count) = probe_files_with_cache(video_files, &self.root, cache.as_mut());
 
         let mut stats = VideoStats::new();
         for probed in &probed_files {
@@ -182,13 +190,9 @@ impl StatsCollector {
         Ok(video_files)
     }
 
-    /// Check if a file is a video file based on its extension.
+    /// Check if a file is a video file based on the canonical extension list.
     fn is_video_file(path: &Path) -> bool {
-        path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|video_ext| video_ext.eq_ignore_ascii_case(ext))
-        })
+        cli_tools_media::is_video_file(path)
     }
 }
 
@@ -200,8 +204,6 @@ const fn should_list_files(verbose: bool, probed_count: usize) -> bool {
 }
 
 /// Sort probed files by duration and then by pixel count, longest and largest first.
-///
-/// Files without a duration or resolution sort as zero.
 fn sort_for_listing(probed_files: &mut [ProbedFile]) {
     probed_files.sort_by(|a, b| {
         let duration_cmp = b
@@ -218,57 +220,90 @@ fn sort_for_listing(probed_files: &mut [ProbedFile]) {
     });
 }
 
-/// Probe video files concurrently using semaphore-limited async tasks.
-///
-/// Each ffprobe call runs in a blocking task with concurrency controlled by a semaphore sized for I/O-bound work
-/// (`num_cpus * 2`).
-/// Returns the successfully probed files and the number of errors.
-async fn probe_files_async(files: Vec<PathBuf>, root: &Path) -> (Vec<ProbedFile>, usize) {
-    let semaphore = create_semaphore_for_io_bound();
+/// Probe video files in parallel using Rayon, reusing and populating the shared `ScanCache`.
+fn probe_files_with_cache(files: Vec<PathBuf>, root: &Path, cache: Option<&mut ScanCache>) -> (Vec<ProbedFile>, usize) {
+    let cached_entries: HashMap<String, CachedVideoInfo> = cache
+        .as_ref()
+        .and_then(|scan_cache| scan_cache.get_all().ok())
+        .unwrap_or_default();
 
-    let progress_bar = Arc::new(ProgressBar::new(files.len() as u64));
-    progress_bar.set_style(
-        ProgressStyle::default_bar()
-            .template(PROGRESS_BAR_TEMPLATE)
-            .expect("Failed to set progress bar template")
-            .progress_chars(PROGRESS_BAR_CHARS),
-    );
+    let mut probed_files = Vec::with_capacity(files.len());
+    let mut cache_misses: Vec<(PathBuf, String, Option<FileFingerprint>)> = Vec::new();
 
-    let tasks: Vec<_> = files
-        .into_iter()
-        .map(|path| {
-            let name = cli_tools_common::get_relative_path_or_filename(&path, root);
-            let semaphore = Arc::clone(&semaphore);
-            let progress = Arc::clone(&progress_bar);
-            tokio::spawn(async move {
-                let permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
-                let result = tokio::task::spawn_blocking(move || VideoInfo::from_path(&path))
-                    .await
-                    .expect("spawn_blocking task failed");
-                drop(permit);
-                progress.inc(1);
-                match result {
-                    Ok(info) => Ok(ProbedFile { name, info }),
-                    Err(error) => Err((name, error)),
-                }
-            })
+    for path in files {
+        let name = cli_tools_common::get_relative_path_or_filename(&path, root);
+        let fingerprint = fingerprint_file(&path).ok();
+        if let (Some(path_str), Some(fingerprint)) = (path.to_str(), fingerprint)
+            && let Some(cached) = cached_entries.get(path_str)
+            && cached.is_current(&fingerprint)
+        {
+            probed_files.push(ProbedFile {
+                name,
+                info: cached.to_video_info(),
+            });
+        } else {
+            cache_misses.push((path, name, fingerprint));
+        }
+    }
+
+    if cache_misses.is_empty() {
+        return (probed_files, 0);
+    }
+
+    let progress_bar = if cfg!(test) {
+        ProgressBar::hidden()
+    } else {
+        let bar = ProgressBar::new(cache_misses.len() as u64);
+        if let Ok(style) = ProgressStyle::default_bar().template(PROGRESS_BAR_TEMPLATE) {
+            bar.set_style(style.progress_chars(PROGRESS_BAR_CHARS));
+        }
+        bar
+    };
+
+    let attempts: Vec<ProbeAttempt> = cache_misses
+        .into_par_iter()
+        .map(|(path, name, fingerprint)| {
+            let result = VideoInfo::from_path(&path);
+            progress_bar.inc(1);
+            ProbeAttempt {
+                path,
+                name,
+                fingerprint,
+                result,
+            }
         })
         .collect();
-
-    let results = futures::future::join_all(tasks).await;
     progress_bar.finish_and_clear();
 
-    let mut probed_files = Vec::new();
     let mut error_count: usize = 0;
+    let mut newly_probed: Vec<(PathBuf, VideoInfo, FileFingerprint)> = Vec::new();
 
-    for result in results {
-        match result.expect("Probe task failed") {
-            Ok(probed) => probed_files.push(probed),
-            Err((name, error)) => {
-                print_error!("Failed to probe {name}: {error}");
+    for attempt in attempts {
+        match attempt.result {
+            Ok(info) => {
+                if let Some(fingerprint) = attempt.fingerprint {
+                    newly_probed.push((attempt.path, info.clone(), fingerprint));
+                }
+                probed_files.push(ProbedFile {
+                    name: attempt.name,
+                    info,
+                });
+            }
+            Err(error) => {
+                print_error!("Failed to probe {}: {error}", attempt.name);
                 error_count += 1;
             }
         }
+    }
+
+    if let Some(scan_cache) = cache
+        && !newly_probed.is_empty()
+    {
+        let batch: Vec<(&Path, &VideoInfo, FileFingerprint)> = newly_probed
+            .iter()
+            .map(|(path, info, fingerprint)| (path.as_path(), info, *fingerprint))
+            .collect();
+        let _ = scan_cache.batch_upsert_with_fingerprints(&batch);
     }
 
     (probed_files, error_count)
@@ -282,6 +317,7 @@ mod test_video_file_discovery {
         StatsCollector {
             root,
             recurse,
+            no_cache: true,
             verbose: false,
         }
     }
@@ -291,6 +327,8 @@ mod test_video_file_discovery {
         assert!(StatsCollector::is_video_file(Path::new("video.mp4")));
         assert!(StatsCollector::is_video_file(Path::new("video.MKV")));
         assert!(StatsCollector::is_video_file(Path::new("video.webm")));
+        assert!(StatsCollector::is_video_file(Path::new("video.mpeg")));
+        assert!(StatsCollector::is_video_file(Path::new("video.ts")));
         assert!(!StatsCollector::is_video_file(Path::new("notes.txt")));
         assert!(!StatsCollector::is_video_file(Path::new("README")));
     }
@@ -334,7 +372,7 @@ mod test_video_file_discovery {
         let nested = scan_root.join("nested");
         let hidden = scan_root.join(".hidden");
         std::fs::create_dir_all(&nested)?;
-        std::fs::create_dir(&hidden)?;
+        std::fs::create_dir_all(&hidden)?;
         let top_level = scan_root.join("top.mp4");
         let nested_video = nested.join("nested.mkv");
         std::fs::write(&top_level, b"top")?;
@@ -378,11 +416,13 @@ mod test_stats_collector_new {
         let collector = StatsCollector::new(Config {
             root: root.clone(),
             recurse: true,
+            no_cache: true,
             verbose: true,
         });
 
         assert_eq!(collector.root, root);
         assert!(collector.recurse);
+        assert!(collector.no_cache);
         assert!(collector.verbose);
     }
 }
@@ -435,6 +475,7 @@ mod test_sort_for_listing {
 #[cfg(test)]
 mod test_run {
     use super::*;
+    use cli_tools_media::Resolution;
 
     #[test]
     fn non_recursive_discovery_skips_hidden_files_and_symlinks() -> anyhow::Result<()> {
@@ -449,6 +490,7 @@ mod test_run {
         let found = StatsCollector::new(Config {
             root: temp_directory.path().to_path_buf(),
             recurse: false,
+            no_cache: true,
             verbose: false,
         })
         .gather_video_files()?;
@@ -464,17 +506,31 @@ mod test_run {
         assert!(should_list_files(true, 2));
     }
 
-    #[tokio::test]
-    async fn probing_returns_one_result_or_error_per_file() -> anyhow::Result<()> {
+    #[test]
+    fn probing_reuses_valid_scan_cache_entries_without_running_ffprobe() -> anyhow::Result<()> {
         let temp_directory = tempfile::TempDir::new()?;
-        let first = temp_directory.path().join("first.mp4");
-        let second = temp_directory.path().join("second.mp4");
-        std::fs::write(&first, b"not a video")?;
-        std::fs::write(&second, b"not a video")?;
+        let fake_video = temp_directory.path().join("cached.mp4");
+        std::fs::write(&fake_video, b"not a real video so ffprobe would fail")?;
+        let fingerprint = fingerprint_file(&fake_video)?;
 
-        let (probed_files, error_count) = probe_files_async(vec![first, second], temp_directory.path()).await;
+        let mut cache = ScanCache::open_in_memory()?;
+        let seeded = VideoInfo {
+            size_bytes: Some(fingerprint.size_bytes),
+            resolution: Some(Resolution::new(1920, 1080)),
+            duration: Some(120.0),
+            codec: Some("hevc".to_string()),
+            bitrate_kbps: Some(5000),
+            frames_per_second: Some(24.0),
+            bit_depth: Some(10),
+            ..Default::default()
+        };
+        cache.batch_upsert_with_fingerprints(&[(fake_video.as_path(), &seeded, fingerprint)])?;
 
-        assert_eq!(probed_files.len() + error_count, 2);
+        let (probed_files, error_count) =
+            probe_files_with_cache(vec![fake_video], temp_directory.path(), Some(&mut cache));
+        assert_eq!(error_count, 0);
+        assert_eq!(probed_files.len(), 1);
+        assert_eq!(probed_files[0].info.codec.as_deref(), Some("hevc"));
         Ok(())
     }
 }
