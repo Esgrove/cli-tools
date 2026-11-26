@@ -105,14 +105,6 @@ impl RustVersion {
         }
     }
 
-    /// Whether `rustc --version` output is from a nightly or beta toolchain.
-    fn is_prerelease_rustc_output(output: &str) -> bool {
-        output
-            .split_whitespace()
-            .nth(1)
-            .is_some_and(|version| version.contains('-'))
-    }
-
     /// Parse a version with one to three numeric components, such as "1", "1.94", or "1.94.0".
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
@@ -141,6 +133,14 @@ impl RustVersion {
     #[must_use]
     pub fn major_minor(&self) -> String {
         format!("{}.{}", self.major, self.minor)
+    }
+
+    /// Whether `rustc --version` output is from a nightly or beta toolchain.
+    fn is_prerelease_rustc_output(output: &str) -> bool {
+        output
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|version| version.contains('-'))
     }
 }
 
