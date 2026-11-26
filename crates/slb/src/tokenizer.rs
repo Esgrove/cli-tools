@@ -82,7 +82,7 @@ pub fn tokenize_line(content: &str, origin_line: usize, normalize_dashes: bool) 
         } else {
             chunk_end(content, &candidates, position, normalize_dashes)
         };
-        let (token, next) = read_token(content, &candidates, position, end, origin_line);
+        let (token, next) = read_token(content, &candidates, position, end, origin_line, normalize_dashes);
         tokens.push(token);
         position = next.max(position + character.len_utf8());
     }
@@ -177,6 +177,7 @@ fn read_token<'a>(
     start: usize,
     word_end: usize,
     origin_line: usize,
+    normalize_dashes: bool,
 ) -> (Token<'a>, usize) {
     let mut leading_end = start;
     while leading_end < word_end {
@@ -205,7 +206,7 @@ fn read_token<'a>(
 
     if let Some((atom_end, kind)) = atom_at(text, leading_end) {
         // The atom and the punctuation after it are one run of the line, so the core is one slice of it.
-        let tail_end = chunk_end(text, candidates, atom_end, false);
+        let tail_end = chunk_end(text, candidates, atom_end, normalize_dashes);
         let tail = text.get(atom_end..tail_end).unwrap_or_default();
         let trailing_start = atom_end + trailing_punctuation_start(tail, 0);
         let core = text.get(leading_end..trailing_start).unwrap_or_default();

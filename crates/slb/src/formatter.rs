@@ -1117,6 +1117,30 @@ mod test_format {
     }
 
     #[test]
+    fn atom_attached_em_dash_and_dash_semicolon_combination_converge_in_one_pass() {
+        let options = FormatOptions::default();
+
+        let atom_dash = "Use `foo`—it is faster.\n";
+        let atom_result = format(atom_dash, FileKind::Markdown, &options);
+        assert!(
+            atom_result
+                .fixed_text
+                .as_deref()
+                .is_some_and(|fixed| !fixed.contains('—')),
+            "em dash attached directly after inline code atom should be rewritten: {atom_result:?}"
+        );
+
+        let mixed = "First — alpha; second — beta.\n";
+        let first = format(mixed, FileKind::Markdown, &options);
+        let fixed = first.fixed_text.expect("should rewrite mixed dash and semicolon");
+        assert_eq!(
+            format(&fixed, FileKind::Markdown, &options),
+            FormatResult::default(),
+            "mixed dash and semicolon must converge in a single pass:\n{fixed}"
+        );
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",
