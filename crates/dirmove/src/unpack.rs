@@ -395,8 +395,7 @@ impl Unpacker {
         }
 
         if std::fs::rename(source, target).is_err() {
-            cli_tools_common::copy_file_with_times(source, target)?;
-            std::fs::remove_file(source)?;
+            copy_file_via_temp_and_remove(source, target)?;
         }
 
         Ok(EntryMove::Moved)
@@ -406,6 +405,26 @@ impl Unpacker {
     fn is_unpack_name(&self, name: &str) -> bool {
         self.unpack_directory_names.contains(&name.to_lowercase())
     }
+}
+
+/// Copy `source` (or recreate it when it is a Unix symlink) through a temporary sibling and remove `source`.
+fn copy_file_via_temp_and_remove(source: &Path, target: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if std::fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return crate::mover::move_symlink_via_temp(source, target);
+    }
+
+    let temporary = cli_tools_common::unique_sibling_path(target, "dirmove-tmp");
+    if let Err(error) = cli_tools_common::copy_file_with_times(source, &temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    if let Err(error) = std::fs::rename(&temporary, target) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    std::fs::remove_file(source)?;
+    Ok(())
 }
 
 /// Prune empty directories under `root_directory` that the unpack moves touched.
@@ -1407,6 +1426,37 @@ mod test_unpack_trees {
             "the colliding second file must stay in its source directory instead of overwriting the first: {:?}",
             tree.snapshot()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cross_device_fallback_recreates_file_and_broken_symlinks_without_following() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real.txt", "real content");
+        tree.symlink("outside/real.txt", "source_link.txt");
+        tree.symlink("outside/missing.txt", "broken_link.txt");
+
+        super::copy_file_via_temp_and_remove(&tree.join("source_link.txt"), &tree.join("dest_link.txt"))
+            .expect("recreate symlink");
+        super::copy_file_via_temp_and_remove(&tree.join("broken_link.txt"), &tree.join("dest_broken.txt"))
+            .expect("recreate broken symlink");
+
+        assert!(
+            tree.join("dest_link.txt")
+                .symlink_metadata()
+                .expect("dest link")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            tree.join("dest_broken.txt")
+                .symlink_metadata()
+                .expect("dest broken")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!tree.exists("source_link.txt"));
+        assert!(tree.join("broken_link.txt").symlink_metadata().is_err());
     }
 }
 

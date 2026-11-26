@@ -216,7 +216,7 @@ fn move_single_file(
             return Ok(());
         }
         Err(rename_error) => {
-            if !source.exists() {
+            if fs::symlink_metadata(source).is_err() {
                 if destination.exists()
                     && let Ok(metadata) = fs::metadata(destination)
                     && metadata.len() == expected_size
@@ -239,6 +239,13 @@ fn move_single_file(
                 });
             }
         }
+    }
+
+    #[cfg(unix)]
+    if fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        move_symlink_via_temp(source, destination)?;
+        observer.on_progress(expected_size);
+        return Ok(());
     }
 
     // Copy to a temporary name first so an existing destination is only replaced by a verified copy.
@@ -266,6 +273,23 @@ fn move_single_file(
         ))
     })?;
 
+    Ok(())
+}
+
+/// Recreate a symbolic link at `destination` via a temporary sibling and remove `source`.
+#[cfg(unix)]
+pub(crate) fn move_symlink_via_temp(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    let link_target = fs::read_link(source)?;
+    let temporary = unique_sibling_path(destination, "dirmove-tmp");
+    std::os::unix::fs::symlink(&link_target, &temporary)?;
+    if let Err(error) = fs::rename(&temporary, destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(anyhow::Error::new(error).context(format!(
+            "Failed to move recreated symlink into place at {}",
+            destination.display()
+        )));
+    }
+    fs::remove_file(source)?;
     Ok(())
 }
 
