@@ -50,6 +50,12 @@ impl VideoConvert<'_> {
             .map(|path| path_without_extension(path))
             .collect();
 
+        let sub_by_stem: HashMap<PathBuf, PathBuf> = subtitle_paths
+            .iter()
+            .filter(|path| cli_tools_common::path_to_file_extension_string(path) == "sub")
+            .map(|path| (path_without_extension(path), path.clone()))
+            .collect();
+
         let mut subtitle_files: Vec<SubtitleFile> = subtitle_paths
             .into_iter()
             .filter_map(|path| {
@@ -58,8 +64,7 @@ impl VideoConvert<'_> {
                     return None;
                 }
                 let paired_sub_path = if extension == "idx" {
-                    let pair = path.with_extension("sub");
-                    pair.exists().then_some(pair)
+                    sub_by_stem.get(&path_without_extension(&path)).cloned()
                 } else {
                     None
                 };
@@ -172,6 +177,19 @@ mod test_subtitle_discovery {
         assert_eq!(subtitle_files[0], SubtitleFile::new(&idx_path, Some(paired_sub_path)));
         assert_eq!(subtitle_files[1], SubtitleFile::new(&srt_path, None));
         assert_eq!(subtitle_files[2], SubtitleFile::new(&standalone_sub_path, None));
+    }
+
+    #[test]
+    fn pairs_uppercase_idx_and_sub_sidecars_preserving_actual_case() {
+        let temp_directory = tempfile::TempDir::new().expect("temp dir");
+        let idx_path = temp_directory.path().join("Movie.IDX");
+        let sub_path = temp_directory.path().join("Movie.SUB");
+        std::fs::write(&idx_path, "idx").expect("write idx");
+        std::fs::write(&sub_path, "sub").expect("write sub");
+
+        let subtitle_files = VideoConvert::gather_subtitle_files_from_root(temp_directory.path(), 1);
+        assert_eq!(subtitle_files.len(), 1);
+        assert_eq!(subtitle_files[0], SubtitleFile::new(&idx_path, Some(sub_path)));
     }
 
     #[test]

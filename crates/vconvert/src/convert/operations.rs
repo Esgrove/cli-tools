@@ -38,7 +38,10 @@ impl VideoConvert<'_> {
 
         let status = match run_command_isolated(&mut command) {
             Ok(status) => status,
-            Err(error) => return failed(format!("Failed to execute ffmpeg: {error}")),
+            Err(error) => {
+                self.remove_partial_output(output);
+                return failed(format!("Failed to execute ffmpeg: {error}"));
+            }
         };
 
         if status.success() {
@@ -106,7 +109,10 @@ impl VideoConvert<'_> {
 
         let status = match run_command_isolated(&mut command) {
             Ok(status) => status,
-            Err(error) => return failed(format!("Failed to execute ffmpeg: {error}")),
+            Err(error) => {
+                self.remove_partial_output(&command_output);
+                return failed(format!("Failed to execute ffmpeg: {error}"));
+            }
         };
 
         if !status.success() {
@@ -228,8 +234,10 @@ impl VideoConvert<'_> {
         info: &VideoInfo,
     ) -> Result<VideoInfo, String> {
         // First attempt: try with CUDA filters for better performance
-        let status =
-            run_command_isolated(ffmpeg_command).map_err(|error| format!("Failed to execute ffmpeg: {error}"))?;
+        let status = run_command_isolated(ffmpeg_command).map_err(|error| {
+            self.remove_partial_output(output);
+            format!("Failed to execute ffmpeg: {error}")
+        })?;
 
         if !status.success() {
             self.remove_partial_output(output);

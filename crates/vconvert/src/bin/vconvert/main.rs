@@ -195,7 +195,14 @@ fn main() -> Result<()> {
         let abort_flag_handler = Arc::clone(&abort_flag);
         ctrlc::set_handler(move || {
             if abort_flag_handler.load(Ordering::SeqCst) {
-                // Second Ctrl+C - force exit
+                // Second Ctrl+C - terminate active ffmpeg child and allow partial output cleanup before exit
+                cli_tools_vconvert::ffmpeg::request_force_abort();
+                for _ in 0..40 {
+                    if !cli_tools_vconvert::ffmpeg::has_active_command() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
                 std::process::exit(130);
             }
             println!("\n{}", "Received Ctrl+C, finishing current file...".yellow().bold());

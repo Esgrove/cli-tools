@@ -4,8 +4,10 @@
 //! runs child processes in isolation, and validates muxed output.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -30,6 +32,15 @@ const MIN_MUX_DURATION_RATIO: f64 = 0.99;
 /// Windows API constant for creating a new process group.
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Flag set on a forced abort (second Ctrl+C) so any active isolated ffmpeg child is terminated.
+static FORCE_ABORT: AtomicBool = AtomicBool::new(false);
+
+/// Count of isolated child commands currently running.
+static ACTIVE_COMMANDS: AtomicUsize = AtomicUsize::new(0);
+
+/// Polling interval while waiting on an isolated child process.
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Options used to build an ffmpeg HEVC conversion command.
 #[derive(Debug, Clone, Copy)]
@@ -185,11 +196,35 @@ pub fn build_remux_command(input: &Path, output: &Path, transcode_audio: bool, c
     command
 }
 
+/// Request immediate termination of any active isolated ffmpeg child process.
+pub fn request_force_abort() {
+    FORCE_ABORT.store(true, Ordering::SeqCst);
+}
+
+/// Return whether any isolated ffmpeg child process is still running.
+#[must_use]
+pub fn has_active_command() -> bool {
+    ACTIVE_COMMANDS.load(Ordering::SeqCst) > 0
+}
+
+/// Normalize a local file path for passing to `ffprobe` as an input argument.
+///
+/// Relative paths starting with `-` or containing `:` can be misread as options or URL protocols.
+#[must_use]
+fn ffmpeg_input_path(path: &Path) -> PathBuf {
+    if path.is_relative() && !path.starts_with(".") {
+        Path::new(".").join(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Probe video metadata from the first real video stream in a media file.
 ///
 /// # Errors
 /// Returns an error if ffprobe cannot be run or its output has no usable video stream.
 pub fn probe_video_info(path: &Path) -> Result<VideoInfo> {
+    let input_path = ffmpeg_input_path(path);
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -200,8 +235,9 @@ pub fn probe_video_info(path: &Path) -> Result<VideoInfo> {
             "stream=codec_name,bit_rate,width,height,r_frame_rate,avg_frame_rate,pix_fmt,bits_per_raw_sample:stream_tags=BPS,BPS-eng:format=bit_rate,size,duration",
             "-output_format",
             "default=nokey=0:noprint_wrappers=1",
+            "-i",
         ])
-        .arg(path)
+        .arg(&input_path)
         .output()
         .context("Failed to execute ffprobe")?;
 
@@ -219,6 +255,7 @@ pub fn probe_video_info(path: &Path) -> Result<VideoInfo> {
 /// # Errors
 /// Returns an error if ffprobe cannot be run or fails.
 pub fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSet<String>> {
+    let input_path = ffmpeg_input_path(input);
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -229,8 +266,9 @@ pub fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSe
             "stream=index:stream_tags=language",
             "-of",
             "csv=p=0",
+            "-i",
         ])
-        .arg(input)
+        .arg(&input_path)
         .output()
         .context("Failed to execute ffprobe")?;
 
@@ -301,8 +339,11 @@ pub fn validate_mux_output(input: &Path, output: &Path, input_info: &VideoInfo) 
 
 /// Run a command in a new process group so Ctrl+C remains under the parent process's control.
 ///
+/// When [`request_force_abort`] is called while the child is running, the child is killed cleanly
+/// before returning an `Interrupted` error so callers can remove partial output files.
+///
 /// # Errors
-/// Returns an error if the command cannot be started or waited on.
+/// Returns an error if the command cannot be started, is aborted, or cannot be waited on.
 pub fn run_command_isolated(command: &mut Command) -> std::io::Result<ExitStatus> {
     #[cfg(windows)]
     {
@@ -314,11 +355,29 @@ pub fn run_command_isolated(command: &mut Command) -> std::io::Result<ExitStatus
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command.stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()
+    let mut child = command.stdout(Stdio::inherit()).stderr(Stdio::inherit()).spawn()?;
+    ACTIVE_COMMANDS.fetch_add(1, Ordering::SeqCst);
+    let result = loop {
+        if FORCE_ABORT.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Command terminated by forced abort",
+            ));
+        }
+        if let Some(status) = child.try_wait()? {
+            break Ok(status);
+        }
+        std::thread::sleep(CHILD_POLL_INTERVAL);
+    };
+    ACTIVE_COMMANDS.fetch_sub(1, Ordering::SeqCst);
+    result
 }
 
 /// Probe how many streams of one ffmpeg stream type exist in a file.
 fn probe_stream_count(input: &Path, stream_type: &str) -> Result<usize> {
+    let input_path = ffmpeg_input_path(input);
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -329,8 +388,9 @@ fn probe_stream_count(input: &Path, stream_type: &str) -> Result<usize> {
             "stream=index",
             "-of",
             "csv=p=0",
+            "-i",
         ])
-        .arg(input)
+        .arg(&input_path)
         .output()
         .context("Failed to execute ffprobe")?;
 
@@ -800,5 +860,27 @@ mod test_external_subtitle_maps {
         add_external_subtitle_maps(&mut command, &[], 1);
 
         assert_eq!(command_args(&command), [] as [String; 0]);
+    }
+}
+
+#[cfg(test)]
+mod test_ffmpeg_input_path {
+    use super::*;
+
+    #[test]
+    fn prepends_dot_for_relative_paths_and_preserves_absolute_paths() {
+        assert_eq!(ffmpeg_input_path(Path::new("-dash.mkv")), PathBuf::from("./-dash.mkv"));
+        assert_eq!(
+            ffmpeg_input_path(Path::new("foo:bar.mkv")),
+            PathBuf::from("./foo:bar.mkv")
+        );
+        assert_eq!(
+            ffmpeg_input_path(Path::new("./already.mkv")),
+            PathBuf::from("./already.mkv")
+        );
+        assert_eq!(
+            ffmpeg_input_path(Path::new("/abs/movie.mkv")),
+            PathBuf::from("/abs/movie.mkv")
+        );
     }
 }
