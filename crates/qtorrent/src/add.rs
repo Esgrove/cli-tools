@@ -160,11 +160,12 @@ impl<'a> TorrentAdder<'a> {
     ///
     /// After adding, the content is renamed on disk when the torrent has a new output name,
     /// the files of a multi-file torrent are renamed with dots formatting when it is enabled,
-    /// and the excluded files are set to be skipped.
-    /// Failures after the torrent was added are reported to the observer and do not fail the add.
+    /// Torrents with excluded files start paused until their skip priorities are verified.
+    /// Rename failures are reported to the observer and do not fail the add.
     ///
     /// # Errors
-    /// Returns an error if qBittorrent rejects the torrent.
+    /// Returns an error if qBittorrent rejects the torrent,
+    /// if excluded priorities cannot be verified, or if starting a filtered torrent fails.
     pub async fn add(&self, info: TorrentInfo, observer: &mut impl AddObserver) -> Result<u64> {
         let info_hash = info.info_hash.clone();
         let display_name = info.display_name().into_owned();
@@ -188,7 +189,7 @@ impl<'a> TorrentAdder<'a> {
             tags: info.tags,
             rename: rename_to.clone(),
             skip_checking: false,
-            paused: self.options.paused,
+            paused: self.options.paused || !excluded_indices.is_empty(),
             content_layout,
         };
 
@@ -227,7 +228,12 @@ impl<'a> TorrentAdder<'a> {
                 wait_for_metadata,
                 observer,
             )
-            .await;
+            .await?;
+            if !self.options.paused {
+                self.client.start_torrent(&info_hash).await.with_context(|| {
+                    format!("Could not start torrent {info_hash} after verifying excluded file priorities")
+                })?;
+            }
         }
 
         Ok(info.included_size)
@@ -527,6 +533,74 @@ mod test_torrent_adder {
 
         assert_eq!(size, 1234);
         assert_eq!(observer.events, vec!["added Show.mkv", "renamed show.mkv Show.mkv"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filtered_torrent_starts_only_after_its_exclusions_are_verified() -> Result<()> {
+        use std::sync::{Arc, Mutex};
+
+        for (paused, can_verify) in [(false, true), (true, true), (false, false)] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let request_log = Arc::clone(&requests);
+            let mut priority_changed = false;
+            let port = crate::test_server::serve_with(vec![route("/api/v2/auth/login", 200, "Ok.")], move |request| {
+                let path = request.split_whitespace().nth(1).unwrap();
+                let (event, status, body) = if path.ends_with("/add") {
+                    let paused = request.contains("name=\"paused\"\r\n\r\ntrue")
+                        && request.contains("name=\"stopped\"\r\n\r\ntrue");
+                    (if paused { "add paused" } else { "add active" }, 200, "Ok.")
+                } else if path.contains("/files?") {
+                    if priority_changed && can_verify {
+                        (
+                            "verified priority",
+                            200,
+                            r#"[{"index":1,"name":"notes.txt","priority":0}]"#,
+                        )
+                    } else {
+                        ("read priority", 200, r#"[{"index":1,"name":"notes.txt","priority":1}]"#)
+                    }
+                } else if path.ends_with("/filePrio") {
+                    assert!(request.ends_with("id=1&priority=0"));
+                    priority_changed = true;
+                    ("set priority", 200, "")
+                } else if path.ends_with("/start") {
+                    assert!(request.ends_with("hash=test_hash"));
+                    ("start", 200, "")
+                } else {
+                    return None;
+                };
+                request_log.lock().unwrap().push(event);
+                Some(route("", status, body))
+            })
+            .await;
+            let mut client = QBittorrentClient::new("127.0.0.1", port);
+            client.login("user", "password").await?;
+            let mut info = create_torrent_info("Show.torrent", Some("Show.mkv"), None, true, false, None);
+            info.info_hash = "test_hash".to_owned();
+            info.excluded_indices = vec![1];
+            let options = AddOptions {
+                paused,
+                ..AddOptions::default()
+            };
+            let names = NameSuggester::default();
+            let result = TorrentAdder::new(&client, &options, &names).add(info, &mut ()).await;
+
+            let requests = requests.lock().unwrap().clone();
+            assert_eq!(requests.first(), Some(&"add paused"));
+            if can_verify {
+                let mut expected = vec!["add paused", "read priority", "set priority", "verified priority"];
+                if !paused {
+                    expected.push("start");
+                }
+                assert_eq!(requests, expected);
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert!(requests.contains(&"set priority"));
+                assert!(!requests.contains(&"start"));
+                assert!(result.is_err());
+            }
+        }
         Ok(())
     }
 
