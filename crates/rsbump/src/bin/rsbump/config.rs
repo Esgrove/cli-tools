@@ -2,11 +2,10 @@
 //!
 //! Combines the CLI arguments with the `[rsbump]` section of the user config file.
 
-use std::fs;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::Args;
@@ -17,6 +16,7 @@ const DEFAULT_MAX_DEPTH: usize = 5;
 
 /// Config from the `[rsbump]` section of the user config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[expect(clippy::struct_excessive_bools, reason = "independent config flags")]
 struct RsbumpConfig {
     #[serde(default)]
@@ -35,13 +35,6 @@ struct RsbumpConfig {
     jobs: Option<usize>,
     #[serde(default)]
     max_depth: Option<usize>,
-}
-
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    rsbump: RsbumpConfig,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -66,26 +59,16 @@ impl RsbumpConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
-        }
+        cli_tools_common::load_user_config_section("rsbump")
     }
 
     /// Parse config from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.rsbump)
-            .context("Failed to parse rsbump config TOML")
+        cli_tools_common::parse_user_config_section(toml_str, "rsbump")
     }
 }
 
@@ -109,11 +92,11 @@ impl Config {
                 .map(|path| cli_tools_common::resolve_input_path(Some(path)))
                 .collect::<Result<Vec<_>>>()?
         };
-        let jobs = args
-            .jobs
-            .or(user_config.jobs)
-            .filter(|&jobs| jobs > 0)
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, NonZeroUsize::get));
+        let jobs = match args.jobs.or(user_config.jobs) {
+            Some(0) => anyhow::bail!("jobs must be at least 1"),
+            Some(jobs) => jobs,
+            None => std::thread::available_parallelism().map_or(4, NonZeroUsize::get),
+        };
 
         Ok(Self {
             paths,

@@ -12,10 +12,9 @@ mod report;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
 
-use cli_tools_common::{count_label, print_bold, print_yellow};
+use cli_tools_common::{CompletionArgs, count_label, print_bold, print_yellow};
 use cli_tools_rsbump::{RustVersion, bump_projects, check_tools, ensure_none_failed, find_projects};
 
 use crate::config::Config;
@@ -26,15 +25,7 @@ use crate::report::ReportPrinter;
 enum RsbumpCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -92,14 +83,8 @@ pub struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    if let Some(RsbumpCommand::Completion { shell, install }) = &args.command {
-        return cli_tools_common::generate_shell_completion(
-            *shell,
-            Args::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        );
+    if let Some(RsbumpCommand::Completion(completion)) = &args.command {
+        return completion.generate::<Args>(args.verbose, env!("CARGO_BIN_NAME"));
     }
 
     let config = Config::from_args(&args)?;
@@ -147,6 +132,7 @@ mod test_args {
 
     #[test]
     fn verify_cli() {
+        use clap::CommandFactory;
         Args::command().debug_assert();
     }
 

@@ -29,8 +29,10 @@ const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
 pub struct DigestResolver {
     /// HTTP client shared by all requests.
     client: Client,
-    /// Digest per tag, `None` for tags that do not exist.
-    cache: Mutex<HashMap<String, Option<String>>>,
+    /// Cached lookup outcome per tag (`Ok(None)` for tags that do not exist, `Err(msg)` for cached failures).
+    cache: Mutex<HashMap<String, Result<Option<String>, String>>>,
+    /// Cached anonymous bearer token for the `library/rust` repository.
+    token: Mutex<Option<String>>,
 }
 
 /// Token response from the Docker Hub auth service.
@@ -54,28 +56,45 @@ impl DigestResolver {
         Ok(Self {
             client,
             cache: Mutex::new(HashMap::new()),
+            token: Mutex::new(None),
         })
     }
 
     /// Digest for the given `rust` image tag, or `None` if the tag does not exist.
     ///
-    /// The lock is held during the request, so a tag is only fetched once.
+    /// The cache mutex is released across network I/O so independent tags resolve concurrently,
+    /// while cached results and errors avoid hammering the registry repeatedly.
     ///
     /// # Errors
     /// Returns an error if the registry cannot be reached or answers with an unexpected status.
     pub fn resolve(&self, tag: &str) -> Result<Option<String>> {
-        let mut cache = self.cache.lock().map_err(|_| anyhow!("Digest cache lock poisoned"))?;
-        if let Some(digest) = cache.get(tag) {
-            return Ok(digest.clone());
+        {
+            let cache = self.cache.lock().map_err(|_| anyhow!("Digest cache lock poisoned"))?;
+            if let Some(cached) = cache.get(tag) {
+                return cached.clone().map_err(|message| anyhow!("{message}"));
+            }
         }
-        let digest = self.fetch_digest(tag)?;
-        cache.insert(tag.to_string(), digest.clone());
-        drop(cache);
-        Ok(digest)
+
+        let fetched = self.fetch_digest(tag);
+        let cache_value = match &fetched {
+            Ok(digest) => Ok(digest.clone()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(tag.to_string(), cache_value);
+        }
+        fetched
     }
 
-    /// Ask the registry for the digest of one tag.
-    fn fetch_digest(&self, tag: &str) -> Result<Option<String>> {
+    /// Get a cached bearer token or fetch a fresh one from the Docker Hub auth service.
+    fn bearer_token(&self, force_refresh: bool) -> Result<String> {
+        if !force_refresh
+            && let Ok(guard) = self.token.lock()
+            && let Some(token) = guard.as_ref()
+        {
+            return Ok(token.clone());
+        }
+
         let token_body = self
             .client
             .get(TOKEN_URL)
@@ -85,14 +104,33 @@ impl DigestResolver {
             .text()
             .context("Failed to read Docker Hub token")?;
         let token: TokenResponse = serde_json::from_str(&token_body).context("Failed to parse Docker Hub token")?;
+        if let Ok(mut guard) = self.token.lock() {
+            *guard = Some(token.token.clone());
+        }
+        Ok(token.token)
+    }
 
-        let response = self
+    /// Ask the registry for the digest of one tag, retrying once with a refreshed token on 401.
+    fn fetch_digest(&self, tag: &str) -> Result<Option<String>> {
+        let mut token = self.bearer_token(false)?;
+        let mut response = self
             .client
             .head(format!("{MANIFEST_URL}/{tag}"))
-            .bearer_auth(token.token)
+            .bearer_auth(&token)
             .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT)
             .send()
             .with_context(|| format!("Failed to query rust:{tag}"))?;
+
+        if response.status() == StatusCode::UNAUTHORIZED {
+            token = self.bearer_token(true)?;
+            response = self
+                .client
+                .head(format!("{MANIFEST_URL}/{tag}"))
+                .bearer_auth(&token)
+                .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT)
+                .send()
+                .with_context(|| format!("Failed to query rust:{tag}"))?;
+        }
 
         match response.status() {
             StatusCode::NOT_FOUND => Ok(None),

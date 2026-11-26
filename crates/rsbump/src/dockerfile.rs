@@ -89,8 +89,16 @@ impl<'a> ImageTag<'a> {
     }
 
     /// Build the tag for the target version with the same variant.
+    ///
+    /// Preserves 3-component patch precision (such as `1.100.0-slim`)
+    /// when the existing tag already pinned major, minor, and patch.
     fn with_version(&self, target: RustVersion) -> String {
-        let version = target.major_minor();
+        let keep_patch = self.version.is_some_and(|version| version.matches('.').count() >= 2);
+        let version = if keep_patch {
+            target.to_string()
+        } else {
+            target.major_minor()
+        };
         self.variant
             .map_or_else(|| version.clone(), |variant| format!("{version}-{variant}"))
     }
@@ -171,10 +179,15 @@ pub fn update_dockerfile(
         let original = content.get(start..offset).unwrap_or(line);
         if let Some((reference, alias)) = from_instruction(&instruction) {
             let first = original.split_inclusive('\n').next().unwrap_or(original);
+            let (bom_prefix, first_without_bom) = first
+                .strip_prefix('\u{feff}')
+                .map_or(("", first), |stripped| ("\u{feff}", stripped));
             if !(rust_is_stage && reference.eq_ignore_ascii_case("rust"))
-                && from_instruction(first).is_some_and(|(physical_reference, _)| physical_reference == reference)
-                && let Some(rewritten) = rewrite_line(first, target, resolve_digest, &mut update)
+                && from_instruction(first_without_bom)
+                    .is_some_and(|(physical_reference, _)| physical_reference == reference)
+                && let Some(rewritten) = rewrite_line(first_without_bom, target, resolve_digest, &mut update)
             {
+                update.content.push_str(bom_prefix);
                 update.content.push_str(&rewritten);
                 update
                     .content
@@ -280,7 +293,7 @@ fn instruction_heredocs(mut instruction: &str) -> Vec<Heredoc> {
             }
         } else if matches!(character, '\'' | '"') {
             quote = Some(character);
-        } else if character.is_whitespace() {
+        } else if character.is_whitespace() || matches!(character, '|' | '&' | ';' | '(' | ')') {
             if let Some(heredoc) = arguments.get(start..index).and_then(heredoc_operand) {
                 heredocs.push(heredoc);
             }
@@ -411,7 +424,7 @@ mod test_image_tag {
     fn full_version_with_variant() {
         assert_eq!(
             ImageTag::parse("1.94.0-alpine3.20").with_version(TARGET),
-            "1.100-alpine3.20"
+            "1.100.0-alpine3.20"
         );
     }
 
@@ -483,6 +496,25 @@ mod test_update_dockerfile {
     fn variant_without_version() {
         let result = update("FROM rust:alpine AS deps\n");
         assert_eq!(result.content, "FROM rust:1.100-alpine AS deps\n");
+    }
+
+    #[test]
+    fn handles_utf8_bom_on_first_from_line() {
+        let content = "\u{feff}FROM rust:1.94-slim AS builder\n";
+        let result = update(content);
+        assert_eq!(result.content, "\u{feff}FROM rust:1.100-slim AS builder\n");
+        assert_eq!(result.changes.len(), 1);
+    }
+
+    #[test]
+    fn handles_heredoc_followed_by_shell_operator() {
+        let content = "FROM rust:1.94-slim\nRUN cat <<EOF&& echo done\nFROM rust:1.80-slim\nEOF\n";
+        let result = update(content);
+        assert_eq!(
+            result.content,
+            "FROM rust:1.100-slim\nRUN cat <<EOF&& echo done\nFROM rust:1.80-slim\nEOF\n"
+        );
+        assert_eq!(result.changes.len(), 1);
     }
 
     #[test]

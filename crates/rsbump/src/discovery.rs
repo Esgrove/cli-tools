@@ -95,7 +95,14 @@ pub fn find_projects(paths: &[PathBuf], max_depth: usize) -> Result<Vec<PathBuf>
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && entry.file_name() == "Cargo.toml");
         for manifest in manifests {
-            roots.insert(project_root(manifest.path(), &mut workspaces)?);
+            match project_root(manifest.path(), &mut workspaces) {
+                Ok(root) => {
+                    roots.insert(root);
+                }
+                Err(error) => {
+                    eprintln!("Warning: skipping {}: {error:#}", manifest.path().display());
+                }
+            }
         }
     }
     Ok(roots.into_iter().collect())
@@ -130,8 +137,9 @@ pub fn find_member_manifests(root: &Path) -> Result<Vec<PathBuf>> {
 /// Find the nearest independent project roots beneath this project.
 /// A scope boundary has a manifest of its own but is not a Cargo member.
 pub(super) fn find_nested_projects(root: &Path, members: &[PathBuf]) -> Vec<PathBuf> {
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut nested = Vec::new();
-    let mut entries = WalkDir::new(root).into_iter();
+    let mut entries = WalkDir::new(&canonical_root).into_iter();
     while let Some(entry) = entries.next() {
         let Ok(entry) = entry else { continue };
         if should_skip(&entry, &EXCLUDED_DIRECTORIES) {

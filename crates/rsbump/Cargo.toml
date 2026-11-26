@@ -26,11 +26,11 @@ default = ["cli"]
 # Dependencies of the rsbump binary, left out by library users with `default-features = false`.
 cli = [
     "cli-tools-common/completion",
+    "cli-tools-common/config",
     "cli-tools-common/diff",
     "dep:clap",
     "dep:clap_complete",
     "dep:colored",
-    "dep:toml",
 ]
 
 [dependencies]
@@ -47,7 +47,6 @@ walkdir = { workspace = true }
 clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
-toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }

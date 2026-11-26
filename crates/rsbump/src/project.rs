@@ -461,6 +461,16 @@ fn process_scope(root: &Path, git: GitState, context: &RunContext, scope: &Proje
         return report;
     }
 
+    if !rust_changed
+        && !options.dry_run
+        && (options.update || options.check)
+        && git.is_repository
+        && !git.is_dirty
+        && has_changes(root, &scope.nested, "--untracked-files=no").unwrap_or(false)
+    {
+        report.outcome = Outcome::Updated;
+    }
+
     if options.commit && !options.dry_run {
         commit_changes(&mut report, git, rust_changed, context, &scope.nested);
     }
@@ -695,12 +705,10 @@ fn commit_changes(
 
     let message = commit_message(context.target, rust_changed, context.options.update);
     let pathspecs = pathspecs(&root, nested_roots);
-    let mut add_args = vec!["add", "--update", "--"];
-    add_args.extend(pathspecs.iter().map(String::as_str));
     let mut commit_args = vec!["commit", "--only", "--message", message.as_str(), "--"];
     commit_args.extend(pathspecs.iter().map(String::as_str));
 
-    if report.run_step("git", &add_args, false) && report.run_step("git", &commit_args, false) {
+    if report.run_step("git", &commit_args, false) {
         report.committed = true;
     }
 }
@@ -749,7 +757,7 @@ fn run_command(directory: &Path, program: &str, args: &[&str]) -> Result<Command
         // Recognize Git's ordinary nonrepository diagnostic independently of the user's locale.
         command.env("LC_ALL", "C");
     }
-    if program == "cargo" && std::io::stdout().is_terminal() {
+    if program == "cargo" && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
         command.env("CARGO_TERM_COLOR", "always");
     }
     let output = command
