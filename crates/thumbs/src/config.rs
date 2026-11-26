@@ -1,6 +1,6 @@
 //! Thumbnail configuration parsing and CLI option merging.
 
-use std::fs;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -31,8 +31,9 @@ const DEFAULT_SCALE_WIDTH: u32 = 480;
 /// Default JPEG quality (lower is better).
 const DEFAULT_QUALITY: u32 = 2;
 
-/// User configuration from the config file.
+/// User configuration from the `[thumbnail]` config file section.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThumbnailConfig {
     #[serde(default)]
     cols_landscape: Option<u32>,
@@ -41,7 +42,11 @@ pub struct ThumbnailConfig {
     #[serde(default)]
     dryrun: bool,
     #[serde(default)]
+    font: Option<PathBuf>,
+    #[serde(default)]
     font_size: Option<u32>,
+    #[serde(default)]
+    jobs: Option<usize>,
     #[serde(default)]
     overwrite: bool,
     #[serde(default)]
@@ -68,8 +73,14 @@ pub struct Config {
     pub(crate) cols_landscape: u32,
     pub(crate) cols_portrait: u32,
     pub(crate) dryrun: bool,
+    /// Optional custom font file path overriding the OS default.
+    pub(crate) font: Option<PathBuf>,
     /// Explicit overlay size, or `None` to choose a default for the video's aspect ratio.
     pub(crate) font_size: Option<u32>,
+    /// Maximum concurrent ffmpeg thumbnail jobs.
+    pub(crate) jobs: usize,
+    /// Skip reading or writing the shared scan cache.
+    pub(crate) no_cache: bool,
     pub(crate) overwrite: bool,
     pub(crate) padding_landscape: u32,
     pub(crate) padding_portrait: u32,
@@ -81,13 +92,6 @@ pub struct Config {
     pub(crate) verbose: bool,
 }
 
-/// Wrapper needed for parsing the user config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    thumbnail: ThumbnailConfig,
-}
-
 impl ThumbnailConfig {
     /// Try to read user config from the file if it exists.
     /// Otherwise, fall back to default config.
@@ -95,29 +99,16 @@ impl ThumbnailConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
+        cli_tools_common::load_user_config_section("thumbnail")
     }
 
     /// Parse configuration from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.thumbnail)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
+        cli_tools_common::parse_user_config_section(toml_str, "thumbnail")
     }
 }
 
@@ -156,11 +147,17 @@ impl Config {
         let rows_portrait = args.rows.or(user_config.rows_portrait).unwrap_or(DEFAULT_ROWS_PORTRAIT);
         let scale_width = args.scale.or(user_config.scale_width).unwrap_or(DEFAULT_SCALE_WIDTH);
 
+        let font = args.font.clone().or(user_config.font);
+        let jobs = args.jobs.or(user_config.jobs).unwrap_or(1);
+
         let config = Self {
             cols_landscape,
             cols_portrait,
             dryrun: args.print || user_config.dryrun,
+            font,
             font_size,
+            jobs,
+            no_cache: args.no_cache,
             overwrite: args.force || user_config.overwrite,
             padding_landscape,
             padding_portrait,
@@ -175,7 +172,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Validate that grid dimensions, scale width, and JPEG quality are usable.
+    /// Validate that grid dimensions, scale width, job count, custom font path, and JPEG quality are usable.
     fn validate(&self) -> Result<()> {
         if self.cols_landscape == 0 || self.cols_portrait == 0 {
             anyhow::bail!("Number of columns must be greater than 0");
@@ -190,6 +187,14 @@ impl Config {
         }
         if self.scale_width == 0 {
             anyhow::bail!("Thumbnail scale width must be greater than 0");
+        }
+        if self.jobs == 0 {
+            anyhow::bail!("Number of jobs must be greater than 0");
+        }
+        if let Some(ref font) = self.font
+            && !font.is_file()
+        {
+            anyhow::bail!("Font file does not exist: {}", font.display());
         }
         if !(1..=31).contains(&self.quality) {
             anyhow::bail!("JPEG quality must be between 1 and 31, got {}", self.quality);

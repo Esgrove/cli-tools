@@ -4,19 +4,21 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use cli_tools_common::print_error;
-use cli_tools_common::print_yellow;
-use cli_tools_media::video_info::{VideoInfo, VideoStats};
+use cli_tools_common::locks::{AcquireOutcome, ActiveLockStore};
+use cli_tools_common::{print_error, print_yellow};
+use cli_tools_media::file_hash::{FileFingerprint, fingerprint_file};
+use cli_tools_media::scan_cache::{CachedVideoInfo, ScanCache};
+use cli_tools_media::video_info::{VideoInfo, VideoStats, ffmpeg_input_path};
 use colored::Colorize;
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::ThumbnailArgs;
 use crate::config::Config;
-
-/// Supported video file extensions.
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "webm", "m4v"];
 
 /// Default font file path for macOS.
 #[cfg(target_os = "macos")]
@@ -38,8 +40,9 @@ const SCREENS_DIR_NAME: &str = "Screens";
 
 /// Result of attempting to create a thumbnail.
 enum ThumbnailOutcome {
-    CreatedOrPreviewed,
+    CreatedOrPreviewed(Option<VideoInfo>),
     SkippedExisting,
+    SkippedLocked,
 }
 
 /// Thumbnail creator that processes video files and creates thumbnail sheets.
@@ -76,7 +79,11 @@ impl ThumbnailCreator {
 
         let input_path = cli_tools_common::resolve_input_path(args.path.as_deref())?;
         let config = Config::from_args(args)?;
-        let escaped_font = Self::escape_for_drawtext(DEFAULT_FONT_FILE);
+        let font_path = config.font.as_deref().map_or_else(
+            || DEFAULT_FONT_FILE.to_string(),
+            |path| path.to_string_lossy().into_owned(),
+        );
+        let escaped_font = Self::escape_for_drawtext(&font_path);
         let quality_str = config.quality.to_string();
 
         Ok(Self {
@@ -87,8 +94,14 @@ impl ThumbnailCreator {
         })
     }
 
-    /// Run the thumbnail creation process.
+    /// Run the thumbnail creation process without an external abort flag.
+    #[cfg(test)]
     pub fn run(&self) -> Result<()> {
+        self.run_with_abort(&AtomicBool::new(false))
+    }
+
+    /// Run the thumbnail creation process, stopping before new files when `abort_flag` is set.
+    pub fn run_with_abort(&self, abort_flag: &AtomicBool) -> Result<()> {
         let video_files = self.gather_video_files()?;
 
         if video_files.is_empty() {
@@ -106,23 +119,93 @@ impl ThumbnailCreator {
             .bold()
         );
 
-        let mut success_count = 0;
-        let mut skipped_count = 0;
-        let mut error_count = 0;
-        let mut stats = VideoStats::new();
+        let mut cache = if self.config.no_cache {
+            None
+        } else {
+            ScanCache::open().ok()
+        };
+        let cached_entries: HashMap<String, CachedVideoInfo> = cache
+            .as_ref()
+            .and_then(|scan_cache| scan_cache.get_all().ok())
+            .unwrap_or_default();
+        let lock_store = if self.config.dryrun {
+            None
+        } else {
+            ActiveLockStore::open_default("thumbs").ok()
+        };
 
         let total_count = video_files.len();
         let progress_width = total_count.to_string().len();
-
         let output_paths = self.output_paths(&video_files)?;
-        for (index, (video_file, output_path)) in video_files.iter().zip(&output_paths).enumerate() {
+        let items: Vec<(usize, &PathBuf, &PathBuf)> = video_files
+            .iter()
+            .zip(&output_paths)
+            .enumerate()
+            .map(|(index, (video, output))| (index, video, output))
+            .collect();
+
+        let newly_probed: Mutex<Vec<(PathBuf, VideoInfo, FileFingerprint)>> = Mutex::new(Vec::new());
+        let process_item = |(index, video_file, output_path): (usize, &PathBuf, &PathBuf)| {
+            if abort_flag.load(Ordering::SeqCst) {
+                return None;
+            }
             let progress_prefix = Self::format_progress_prefix(index + 1, total_count, progress_width);
-            match self.create_thumbnail(video_file, output_path, &mut stats, &progress_prefix) {
-                Ok(ThumbnailOutcome::CreatedOrPreviewed) => success_count += 1,
-                Ok(ThumbnailOutcome::SkippedExisting) => skipped_count += 1,
-                Err(e) => {
+            let outcome = self.create_thumbnail(
+                video_file,
+                output_path,
+                &cached_entries,
+                &newly_probed,
+                lock_store.as_ref(),
+                &progress_prefix,
+            );
+            Some((video_file.clone(), progress_prefix, outcome))
+        };
+
+        let results: Vec<_> = if self.config.jobs > 1 && items.len() > 1 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(self.config.jobs)
+                .build()
+                .context("Failed to create thumbnail worker pool")?;
+            pool.install(|| items.into_par_iter().filter_map(process_item).collect())
+        } else {
+            items.into_iter().filter_map(process_item).collect()
+        };
+
+        if let Some(ref mut scan_cache) = cache
+            && let Ok(probed) = newly_probed.into_inner()
+            && !probed.is_empty()
+        {
+            let batch: Vec<(&Path, &VideoInfo, FileFingerprint)> = probed
+                .iter()
+                .map(|(path, info, fingerprint)| (path.as_path(), info, *fingerprint))
+                .collect();
+            let _ = scan_cache.batch_upsert_with_fingerprints(&batch);
+        }
+
+        self.report_run_summary(results)
+    }
+
+    /// Print summary statistics for all thumbnail outcomes and return an error if every job failed.
+    fn report_run_summary(&self, results: Vec<(PathBuf, String, Result<ThumbnailOutcome>)>) -> Result<()> {
+        let mut success_count = 0usize;
+        let mut skipped_count = 0usize;
+        let mut error_count = 0usize;
+        let mut stats = VideoStats::new();
+
+        for (video_file, progress_prefix, result) in results {
+            match result {
+                Ok(ThumbnailOutcome::CreatedOrPreviewed(video_info)) => {
+                    if let Some(info) = video_info {
+                        stats.add(&info);
+                    }
+                    success_count += 1;
+                }
+                Ok(ThumbnailOutcome::SkippedExisting | ThumbnailOutcome::SkippedLocked) => {
+                    skipped_count += 1;
+                }
+                Err(error) => {
                     print_error!(
-                        "Failed to create thumbnail for {progress_prefix} {}: {e}",
+                        "Failed to create thumbnail for {progress_prefix} {}: {error}",
                         video_file.display()
                     );
                     error_count += 1;
@@ -150,18 +233,14 @@ impl ThumbnailCreator {
         Ok(())
     }
 
-    /// Check that required dependencies (ffmpeg, ffprobe) are available.
+    /// Check that required dependencies (ffmpeg, ffprobe) are available on `PATH`.
     fn check_dependencies() -> Result<()> {
-        let ffprobe_check = Command::new("ffprobe").arg("-version").output();
-        if ffprobe_check.is_err() {
+        if !cli_tools_common::command_exists("ffprobe") {
             anyhow::bail!("ffprobe not found. Install ffmpeg first and make sure it is in PATH");
         }
-
-        let ffmpeg_check = Command::new("ffmpeg").arg("-version").output();
-        if ffmpeg_check.is_err() {
+        if !cli_tools_common::command_exists("ffmpeg") {
             anyhow::bail!("ffmpeg not found. Install ffmpeg first and make sure it is in PATH");
         }
-
         Ok(())
     }
 
@@ -240,26 +319,24 @@ impl ThumbnailCreator {
         Ok(paths)
     }
 
-    /// Check if a file is a video file based on its extension.
+    /// Check if a file is a video file based on the canonical video extensions.
     fn is_video_file(path: &Path) -> bool {
-        path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-            VIDEO_EXTENSIONS
-                .iter()
-                .any(|video_ext| video_ext.eq_ignore_ascii_case(ext))
-        })
+        cli_tools_media::is_video_file(path)
     }
 
-    /// Create a thumbnail for a single video file.
+    /// Create a thumbnail for a single video file, staging atomically through a hidden temp file.
     fn create_thumbnail(
         &self,
         video_path: &Path,
         output_path: &Path,
-        stats: &mut VideoStats,
+        cached_entries: &HashMap<String, CachedVideoInfo>,
+        newly_probed: &Mutex<Vec<(PathBuf, VideoInfo, FileFingerprint)>>,
+        lock_store: Option<&ActiveLockStore>,
         progress_prefix: &str,
     ) -> Result<ThumbnailOutcome> {
         let filename = video_path
             .file_name()
-            .and_then(|n| n.to_str())
+            .and_then(|name| name.to_str())
             .context("Invalid filename")?;
 
         let screens_dir = output_path.parent().context("No thumbnail directory")?;
@@ -272,6 +349,23 @@ impl ThumbnailCreator {
             return Ok(ThumbnailOutcome::SkippedExisting);
         }
 
+        let _lock_guard = if let Some(store) = lock_store {
+            match store.try_acquire(&[video_path.to_path_buf(), output_path.to_path_buf()], "thumbnail") {
+                Ok(AcquireOutcome::Acquired(guard)) => Some(guard),
+                Ok(AcquireOutcome::AlreadyLocked(holder)) => {
+                    print_yellow!(
+                        "Skipping locked file (held by {} pid {}): {progress_prefix} {filename}",
+                        holder.tool,
+                        holder.pid,
+                    );
+                    return Ok(ThumbnailOutcome::SkippedLocked);
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         println!(
             "{}",
             format!("Creating thumbnail for: {progress_prefix} {filename}")
@@ -279,9 +373,21 @@ impl ThumbnailCreator {
                 .bold()
         );
 
-        // Get video info
-        let video_info = VideoInfo::from_path(video_path)?;
-        stats.add(&video_info);
+        let fingerprint = fingerprint_file(video_path).ok();
+        let video_info = if let (Some(path_str), Some(fingerprint)) = (video_path.to_str(), fingerprint)
+            && let Some(cached) = cached_entries.get(path_str)
+            && cached.is_current(&fingerprint)
+        {
+            cached.to_video_info()
+        } else {
+            let info = VideoInfo::from_path(video_path)?;
+            if let Some(fingerprint) = fingerprint
+                && let Ok(mut pending) = newly_probed.lock()
+            {
+                pending.push((video_path.to_path_buf(), info.clone(), fingerprint));
+            }
+            info
+        };
 
         Self::print_missing_video_info_warnings(&video_info, filename, progress_prefix);
         self.print_verbose_video_info(&video_info);
@@ -292,20 +398,26 @@ impl ThumbnailCreator {
             println!("  interval: {:.2}s", params.interval);
         }
 
-        // Create output directory
-        if !self.config.dryrun {
-            std::fs::create_dir_all(screens_dir)?;
+        if self.config.dryrun {
+            let text_file = Self::write_text_file(&params.metadata_text)?;
+            let command = self.build_ffmpeg_command(video_path, output_path, &params, text_file.path());
+            println!("[DRYRUN] {command:#?}");
+            return Ok(ThumbnailOutcome::CreatedOrPreviewed(Some(video_info)));
         }
+
+        std::fs::create_dir_all(screens_dir)?;
+
+        let staged = tempfile::Builder::new()
+            .prefix(".thumbs-")
+            .suffix(".jpg")
+            .tempfile_in(screens_dir)
+            .context("Failed to stage temporary thumbnail output")?
+            .into_temp_path();
 
         // The header holds the file name, which can contain any character,
         // so it is read from a file instead of being quoted into the filter graph.
         let text_file = Self::write_text_file(&params.metadata_text)?;
-        let mut command = self.build_ffmpeg_command(video_path, output_path, &params, text_file.path());
-
-        if self.config.dryrun {
-            println!("[DRYRUN] {command:#?}");
-            return Ok(ThumbnailOutcome::CreatedOrPreviewed);
-        }
+        let mut command = self.build_ffmpeg_command(video_path, &staged, &params, text_file.path());
 
         let output = command.output().context("Failed to execute ffmpeg")?;
 
@@ -314,11 +426,21 @@ impl ThumbnailCreator {
             anyhow::bail!("ffmpeg failed: {}", stderr.trim());
         }
 
+        if self.config.overwrite {
+            staged
+                .persist(output_path)
+                .context("Failed to install thumbnail output")?;
+        } else {
+            staged
+                .persist_noclobber(output_path)
+                .context("Failed to install thumbnail output")?;
+        }
+
         if self.config.verbose {
             println!("  output: {}", output_path.display());
         }
 
-        Ok(ThumbnailOutcome::CreatedOrPreviewed)
+        Ok(ThumbnailOutcome::CreatedOrPreviewed(Some(video_info)))
     }
 
     /// Format a progress prefix with current index aligned to the total digit width.
@@ -487,10 +609,11 @@ impl ThumbnailCreator {
         );
 
         let mut command = Command::new("ffmpeg");
+        let safe_input = ffmpeg_input_path(input_path);
         command
             .args(["-hide_banner", "-nostats", "-loglevel", "warning", "-nostdin", "-y"])
             .arg("-i")
-            .arg(input_path)
+            .arg(&safe_input)
             .arg("-vf")
             .arg(&filter)
             .args(["-frames:v", "1"])
@@ -601,7 +724,10 @@ mod test_thumbnail_helpers {
             cols_landscape: 3,
             cols_portrait: 4,
             dryrun: false,
+            font: None,
             font_size: None,
+            jobs: 1,
+            no_cache: true,
             overwrite: false,
             padding_landscape: 8,
             padding_portrait: 16,
@@ -837,7 +963,7 @@ mod test_thumbnail_helpers {
 
         assert_eq!(command.get_program(), "ffmpeg");
         assert!(arguments.contains(&"-nostdin".to_string()));
-        assert!(arguments.contains(&"input.mp4".to_string()));
+        assert!(arguments.contains(&"./input.mp4".to_string()));
         assert!(arguments.contains(&"output.jpg".to_string()));
         assert!(arguments.contains(&"2".to_string()));
         assert!(arguments.iter().any(|argument| argument.contains("tile=3x4")));
@@ -936,7 +1062,10 @@ mod test_thumbnail_run {
                 cols_landscape: 3,
                 cols_portrait: 4,
                 dryrun: true,
+                font: None,
                 font_size: None,
+                jobs: 1,
+                no_cache: true,
                 overwrite: false,
                 padding_landscape: 8,
                 padding_portrait: 16,
@@ -1019,7 +1148,10 @@ mod test_thumbnail_file_discovery {
             cols_landscape: 3,
             cols_portrait: 4,
             dryrun: false,
+            font: None,
             font_size: None,
+            jobs: 1,
+            no_cache: true,
             overwrite: false,
             padding_landscape: 8,
             padding_portrait: 16,
@@ -1097,9 +1229,17 @@ mod test_thumbnail_file_discovery {
         std::fs::create_dir(&screens)?;
         std::fs::write(screens.join("video.jpg"), b"existing")?;
         let creator = creator(video.clone(), false);
-        let mut stats = VideoStats::new();
+        let cached = HashMap::new();
+        let newly_probed = Mutex::new(Vec::new());
 
-        creator.create_thumbnail(&video, &screens.join("video.jpg"), &mut stats, "[1 / 1]")?;
+        creator.create_thumbnail(
+            &video,
+            &screens.join("video.jpg"),
+            &cached,
+            &newly_probed,
+            None,
+            "[1 / 1]",
+        )?;
 
         assert_eq!(std::fs::read(screens.join("video.jpg"))?, b"existing");
         Ok(())

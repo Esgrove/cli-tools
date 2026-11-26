@@ -1,6 +1,7 @@
 //! Thumbnail sheet command-line entrypoint.
 //!
-//! Parses grid and rendering options, then delegates work to `ThumbnailCreator`.
+//! Parses grid and rendering options, installs a Ctrl+C handler,
+//! and delegates work to `ThumbnailCreator`.
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
@@ -8,10 +9,13 @@ mod config;
 mod thumbnail;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
+use colored::Colorize;
 
 use crate::thumbnail::ThumbnailCreator;
 
@@ -20,15 +24,7 @@ use crate::thumbnail::ThumbnailCreator;
 enum ThumbnailCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -73,6 +69,18 @@ pub(crate) struct ThumbnailArgs {
     #[arg(short = 't', long, name = "SIZE")]
     fontsize: Option<u32>,
 
+    /// Custom font file path for timestamp and header overlays
+    #[arg(short = 'F', long, name = "FONT")]
+    font: Option<PathBuf>,
+
+    /// Number of concurrent thumbnail jobs
+    #[arg(short = 'j', long, name = "JOBS")]
+    jobs: Option<usize>,
+
+    /// Skip the shared scan cache and re-probe every file
+    #[arg(short = 'C', long)]
+    no_cache: bool,
+
     /// JPEG quality (1-31, lower is better)
     #[arg(short = 'q', long, name = "QUALITY")]
     quality: Option<u32>,
@@ -84,22 +92,24 @@ pub(crate) struct ThumbnailArgs {
 
 fn main() -> Result<()> {
     let args = ThumbnailArgs::parse();
-    if let Some(ThumbnailCommand::Completion { shell, install }) = &args.command {
-        cli_tools_common::generate_shell_completion(
-            *shell,
-            ThumbnailArgs::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        )
+    if let Some(ThumbnailCommand::Completion(completion)) = &args.command {
+        completion.generate::<ThumbnailArgs>(args.verbose, env!("CARGO_BIN_NAME"))
     } else {
-        ThumbnailCreator::new(&args)?.run()
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let handler_flag = Arc::clone(&abort_flag);
+        let _ = ctrlc::set_handler(move || {
+            println!("\n{}", "Received Ctrl+C, stopping after active jobs...".yellow().bold());
+            handler_flag.store(true, Ordering::SeqCst);
+        });
+        ThumbnailCreator::new(&args)?.run_with_abort(&abort_flag)
     }
 }
 
 #[cfg(test)]
 mod test_thumbnail_args {
     use super::*;
+    use clap::CommandFactory;
+    use clap_complete::Shell;
 
     #[test]
     fn parses_defaults_and_rendering_options() {
@@ -109,12 +119,15 @@ mod test_thumbnail_args {
         assert!(!defaults.force);
         assert!(!defaults.print);
         assert!(!defaults.recurse);
+        assert!(!defaults.no_cache);
         assert!(!defaults.verbose);
         assert!(defaults.cols.is_none());
         assert!(defaults.rows.is_none());
         assert!(defaults.scale.is_none());
         assert!(defaults.padding.is_none());
         assert!(defaults.fontsize.is_none());
+        assert!(defaults.font.is_none());
+        assert!(defaults.jobs.is_none());
         assert!(defaults.quality.is_none());
 
         let configured = ThumbnailArgs::try_parse_from([
@@ -123,6 +136,7 @@ mod test_thumbnail_args {
             "-f",
             "-p",
             "-r",
+            "-C",
             "-v",
             "-c",
             "5",
@@ -134,6 +148,8 @@ mod test_thumbnail_args {
             "12",
             "-t",
             "24",
+            "-j",
+            "4",
             "-q",
             "3",
         ])
@@ -142,12 +158,14 @@ mod test_thumbnail_args {
         assert!(configured.force);
         assert!(configured.print);
         assert!(configured.recurse);
+        assert!(configured.no_cache);
         assert!(configured.verbose);
         assert_eq!(configured.cols, Some(5));
         assert_eq!(configured.rows, Some(6));
         assert_eq!(configured.scale, Some(640));
         assert_eq!(configured.padding, Some(12));
         assert_eq!(configured.fontsize, Some(24));
+        assert_eq!(configured.jobs, Some(4));
         assert_eq!(configured.quality, Some(3));
     }
 
@@ -162,10 +180,10 @@ mod test_thumbnail_args {
             .expect("completion command should parse");
         assert!(matches!(
             args.command,
-            Some(ThumbnailCommand::Completion {
+            Some(ThumbnailCommand::Completion(CompletionArgs {
                 shell: Shell::Bash,
                 install: true
-            })
+            }))
         ));
         ThumbnailArgs::command().debug_assert();
     }

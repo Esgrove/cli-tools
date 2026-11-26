@@ -17,10 +17,18 @@ fn run(tree: &TempTree, arguments: &[&str]) -> Output {
     let encoder = tree.file_with(
         "bin/ffmpeg",
         r#"#!/bin/sh
-for argument; do output=$argument; done
+input=""
+prev=""
+for argument; do
+    if [ "$prev" = "-i" ]; then input=$argument; fi
+    prev=$argument
+    output=$argument
+done
 case $output in
     -version) exit 0;;
-    */good.jpg) echo 'test thumbnail' > "$output";;
+esac
+case $input in
+    *good.mp4) echo 'test thumbnail' > "$output";;
     *) echo 'test thumbnail failure' >&2; exit 1;;
 esac
 "#,
@@ -33,6 +41,8 @@ esac
         .args(arguments)
         .env("PATH", tree.join("bin"))
         .env("HOME", tree.dir("home"))
+        .env("CLI_TOOLS_DB", tree.join("cli-tools.db"))
+        .env("CLI_TOOLS_CONFIG", "")
         .env_remove("CARGO_MANIFEST_DIR")
         .env_remove("XDG_CONFIG_HOME")
         .output()
