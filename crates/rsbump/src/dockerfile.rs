@@ -5,6 +5,7 @@
 //! so `rust:1-slim-trixie` becomes `rust:1.100-slim-trixie`.
 //! A digest on the line is replaced with the digest of the new tag.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -48,6 +49,12 @@ struct ImageTag<'a> {
     version: Option<&'a str>,
     /// Variant part, such as "slim-trixie" or "alpine".
     variant: Option<&'a str>,
+}
+
+/// Terminator of a heredoc in a Docker instruction.
+struct Heredoc {
+    delimiter: String,
+    strip_tabs: bool,
 }
 
 impl DockerfileUpdate {
@@ -120,11 +127,193 @@ pub fn update_dockerfile(
         ..DockerfileUpdate::default()
     };
 
+    let escape = escape_character(content.trim_start_matches('\u{feff}'));
+    let mut heredocs: VecDeque<Heredoc> = VecDeque::new();
+    let mut rust_is_stage = false;
+    let mut instruction = String::new();
+    let mut first_line = None;
+    let mut offset = 0;
+
     for line in content.split_inclusive('\n') {
-        let rewritten = rewrite_line(line, target, resolve_digest, &mut update);
-        update.content.push_str(rewritten.as_deref().unwrap_or(line));
+        let start = offset;
+        offset += line.len();
+        let physical_line = if start == 0 {
+            line.strip_prefix('\u{feff}').unwrap_or(line)
+        } else {
+            line
+        };
+        let source = physical_line.trim_end_matches(['\r', '\n']);
+        if let Some(heredoc) = heredocs.front() {
+            let candidate = if heredoc.strip_tabs {
+                source.trim_start_matches('\t')
+            } else {
+                source
+            };
+            if candidate == heredoc.delimiter {
+                heredocs.pop_front();
+            }
+            update.content.push_str(line);
+            continue;
+        }
+        if source.trim().is_empty() || source.trim_start().starts_with('#') {
+            if first_line.is_none() {
+                update.content.push_str(line);
+            }
+            continue;
+        }
+
+        let start = *first_line.get_or_insert(start);
+        if let Some(fragment) = continued_fragment(source, escape) {
+            instruction.push_str(fragment);
+            continue;
+        }
+        instruction.push_str(source);
+        let original = content.get(start..offset).unwrap_or(line);
+        if let Some((reference, alias)) = from_instruction(&instruction) {
+            let first = original.split_inclusive('\n').next().unwrap_or(original);
+            if !(rust_is_stage && reference.eq_ignore_ascii_case("rust"))
+                && from_instruction(first).is_some_and(|(physical_reference, _)| physical_reference == reference)
+                && let Some(rewritten) = rewrite_line(first, target, resolve_digest, &mut update)
+            {
+                update.content.push_str(&rewritten);
+                update
+                    .content
+                    .push_str(original.strip_prefix(first).unwrap_or_default());
+            } else {
+                update.content.push_str(original);
+            }
+            rust_is_stage |= alias.is_some_and(|alias| alias.eq_ignore_ascii_case("rust"));
+        } else {
+            heredocs.extend(instruction_heredocs(&instruction));
+            update.content.push_str(original);
+        }
+        instruction.clear();
+        first_line = None;
+    }
+    if let Some(remaining) = first_line.and_then(|start| content.get(start..)) {
+        update.content.push_str(remaining);
     }
     update
+}
+
+/// Read Docker's escape parser directive before the first ordinary line or comment.
+fn escape_character(content: &str) -> char {
+    for line in content.lines() {
+        let Some(comment) = line.trim_start().strip_prefix('#') else {
+            break;
+        };
+        let Some((key, value)) = comment.split_once('=') else {
+            break;
+        };
+        let key = key.trim();
+        if key.eq_ignore_ascii_case("escape") {
+            return if value.trim() == "`" { '`' } else { '\\' };
+        }
+        if !key.eq_ignore_ascii_case("syntax") && !key.eq_ignore_ascii_case("check") {
+            break;
+        }
+    }
+    '\\'
+}
+
+/// Remove the Docker continuation character unless preceded immediately by another escape.
+fn continued_fragment(line: &str, escape: char) -> Option<&str> {
+    let fragment = line.trim_end_matches([' ', '\t']).strip_suffix(escape)?;
+    (!fragment.ends_with(escape)).then_some(fragment)
+}
+
+/// Extract the image or stage reference and optional name from a logical `FROM` instruction.
+fn from_instruction(instruction: &str) -> Option<(&str, Option<&str>)> {
+    let mut words = instruction.split_ascii_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("from") {
+        return None;
+    }
+    let reference = words.find(|word| !word.starts_with("--"))?;
+    let alias = words
+        .next()
+        .filter(|word| word.eq_ignore_ascii_case("as"))
+        .and_then(|_| words.next());
+    Some((reference, alias))
+}
+
+/// Read heredoc operands from the supported shell form instructions.
+fn instruction_heredocs(mut instruction: &str) -> Vec<Heredoc> {
+    instruction = instruction.trim_start();
+    let Some((mut keyword, mut arguments)) = instruction.split_once(char::is_whitespace) else {
+        return Vec::new();
+    };
+    if keyword.eq_ignore_ascii_case("onbuild") {
+        let Some(trigger) = arguments.trim_start().split_once(char::is_whitespace) else {
+            return Vec::new();
+        };
+        (keyword, arguments) = trigger;
+    }
+    if !["run", "copy", "add"]
+        .iter()
+        .any(|kind| keyword.eq_ignore_ascii_case(kind))
+    {
+        return Vec::new();
+    }
+    let mut arguments = arguments.trim_start();
+    while arguments.starts_with("--") {
+        let Some((_, remaining)) = arguments.split_once(char::is_whitespace) else {
+            return Vec::new();
+        };
+        arguments = remaining.trim_start();
+    }
+    if arguments.starts_with('[') {
+        return Vec::new();
+    }
+
+    let mut heredocs = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in arguments.char_indices().chain(std::iter::once((arguments.len(), ' '))) {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if let Some(heredoc) = arguments.get(start..index).and_then(heredoc_operand) {
+                heredocs.push(heredoc);
+            }
+            start = index + character.len_utf8();
+        }
+    }
+    heredocs
+}
+
+/// Parse a heredoc operator and remove its shell quoting from the delimiter.
+fn heredoc_operand(word: &str) -> Option<Heredoc> {
+    let word = word
+        .trim_start_matches(|character: char| character.is_ascii_digit())
+        .strip_prefix("<<")?;
+    let (word, strip_tabs) = word.strip_prefix('-').map_or((word, false), |rest| (rest, true));
+    if word.starts_with('<') {
+        return None;
+    }
+    let mut delimiter = String::new();
+    let mut quote = None;
+    let mut characters = word.chars();
+    while let Some(character) = characters.next() {
+        match (quote, character) {
+            (Some(active), character) if active == character => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, '\\') => delimiter.push(characters.next()?),
+            (Some('"'), '\\') if characters.as_str().starts_with(['$', '`', '"', '\\']) => {
+                delimiter.push(characters.next()?);
+            }
+            _ => delimiter.push(character),
+        }
+    }
+    (!delimiter.is_empty()).then_some(Heredoc { delimiter, strip_tabs })
 }
 
 /// Rewrite one line, returning `None` when it stays unchanged.
@@ -328,6 +517,44 @@ mod test_update_dockerfile {
     fn already_current_is_unchanged() {
         let result = update("FROM rust:1.100-slim\n");
         assert!(!result.is_changed());
+    }
+
+    #[test]
+    fn a_previous_stage_alias_shadows_an_unqualified_image_name() {
+        let original =
+            "FROM rust AS first\nFROM deBIAN aS RuSt\nFROM rust AS release\nFROM docker.io/library/rust AS upstream\n";
+        let result = update(original);
+        assert_eq!(
+            result.content,
+            "FROM rust:1.100 AS first\nFROM deBIAN aS RuSt\nFROM rust AS release\nFROM docker.io/library/rust:1.100 AS upstream\n"
+        );
+        assert_eq!(result.changes.len(), 2);
+    }
+
+    #[test]
+    fn heredoc_bodies_and_continued_instruction_arguments_are_not_instructions() {
+        let original = concat!(
+            "# escape=`\r\n",
+            "FROM rust:1 AS build\r\n",
+            "RUN cat <<'FIRST' `\r\n",
+            "    <<-\"SECOND\"\r\n",
+            "FROM debian AS rust\r\n",
+            "FROM rust:1\r\n",
+            "FIRST\r\n",
+            "FROM rust:1\r\n",
+            "\tSECOND\r\n",
+            "COPY <<END /tmp/example\r\n",
+            "FROM rust:1\r\n",
+            "END\r\n",
+            "RUN printf '%s' `\r\n",
+            "FROM rust:1\r\n",
+            "FROM rust:1",
+        );
+        let expected = original.replacen("FROM rust:1 AS build", "FROM rust:1.100 AS build", 1);
+        let expected = format!("{}FROM rust:1.100", expected.strip_suffix("FROM rust:1").unwrap());
+        let result = update(original);
+        assert_eq!(result.content, expected);
+        assert_eq!(result.changes.len(), 2);
     }
 
     #[test]
