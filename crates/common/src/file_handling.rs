@@ -260,13 +260,38 @@ fn copy_dir_contents(source: &Path, target: &Path) -> io::Result<()> {
 
 /// Copy one file, keeping its permissions and modification time.
 ///
+/// The modification time is applied before read-only permissions so copying read-only files succeeds.
+/// Any partially created target file is removed if the copy fails.
+///
 /// # Errors
-/// Returns an error if the copy fails or the modification time cannot be read or set.
+/// Returns an error if the copy fails or the metadata cannot be read or applied.
 pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
-    let bytes = fs::copy(source, target)?;
-    let modified = fs::metadata(source)?.modified()?;
-    fs::File::options().write(true).open(target)?.set_modified(modified)?;
-    Ok(bytes)
+    let mut source_file = fs::File::open(source)?;
+    let metadata = source_file.metadata()?;
+    let modified = metadata.modified()?;
+    let permissions = metadata.permissions();
+
+    let mut target_file = fs::File::create(target)?;
+    let copy_result = (|| -> io::Result<u64> {
+        let bytes = io::copy(&mut source_file, &mut target_file)?;
+        target_file.set_modified(modified)?;
+        Ok(bytes)
+    })();
+
+    drop(target_file);
+    match copy_result {
+        Ok(bytes) => {
+            if let Err(error) = fs::set_permissions(target, permissions) {
+                let _ = fs::remove_file(target);
+                return Err(error);
+            }
+            Ok(bytes)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(target);
+            Err(error)
+        }
+    }
 }
 
 /// Recreate a symbolic link at the target.
@@ -806,6 +831,41 @@ mod test_copy_dir_recursive {
             fs::metadata(&copied).expect("metadata").modified().expect("time"),
             old_time
         );
+    }
+
+    #[test]
+    fn copies_read_only_files_and_keeps_modification_times() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("source");
+        fs::create_dir_all(&source).expect("create");
+        let source_file = source.join("readonly.txt");
+        fs::write(&source_file, "readonly content").expect("write");
+        let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&source_file)
+            .expect("open")
+            .set_modified(old_time)
+            .expect("set time");
+        let mut permissions = fs::metadata(&source_file).expect("meta").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source_file, permissions).expect("set readonly");
+
+        let target = directory.path().join("target");
+        copy_dir_recursive(&source, &target).expect("copy read-only file");
+
+        let copied = target.join("readonly.txt");
+        assert_eq!(fs::read_to_string(&copied).expect("read"), "readonly content");
+        let copied_meta = fs::metadata(&copied).expect("metadata");
+        assert!(copied_meta.permissions().readonly());
+        assert_eq!(copied_meta.modified().expect("time"), old_time);
+
+        // Restore write permission so TempDir cleanup succeeds on all platforms.
+        let mut writable = copied_meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        let _ = fs::set_permissions(&copied, writable.clone());
+        let _ = fs::set_permissions(&source_file, writable);
     }
 
     #[test]
