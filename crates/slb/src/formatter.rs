@@ -925,6 +925,59 @@ mod test_format {
     }
 
     #[test]
+    fn multiline_strings_heredocs_templates_and_other_languages_are_preserved() {
+        let options = FormatOptions::default();
+        let cases = [
+            (
+                FileKind::Shell,
+                "MSG=\"first line\n# not a comment; second clause\n\"\n",
+            ),
+            (
+                FileKind::Shell,
+                "cat <<EOF # write config\n# inside heredoc; must not change\nEOF\n",
+            ),
+            (
+                FileKind::Toml,
+                "path = '''\nC:\\dir\\'''\n# First clause; second clause.\n",
+            ),
+            (
+                FileKind::JavaScript,
+                "const s = `a ${x === '`' ? 1 : 2}\n// inside template; must not change\n`;\n",
+            ),
+            (
+                FileKind::CLike,
+                "const char* s = R\"(\n// not a comment; must not change\n)\";\n",
+            ),
+            (FileKind::Sql, "SELECT '\n-- not a comment; must not change\n';\n"),
+            (
+                FileKind::Sql,
+                "CREATE FUNCTION f() AS $$\n-- not a comment; must not change\n$$;\n",
+            ),
+            (FileKind::Sql, "/*\n-- close */ DROP TABLE foo; SELECT 1;\n"),
+            (FileKind::Lua, "local s = [[\n-- not a comment; must not change\n]]\n"),
+            (FileKind::Ruby, "s = <<~EOF\n# not a comment; must not change\nEOF\n"),
+            (FileKind::CMake, "set(S \"\n# not a comment; must not change\n\")\n"),
+            (FileKind::Dockerfile, "COPY <<EOF /app.conf\n# key; val\nEOF\n"),
+        ];
+
+        for (kind, text) in cases {
+            if kind == FileKind::Toml {
+                // TOML literal string closes properly on line 2, so line 3's comment IS formatted.
+                let fixed = format(text, kind, &options)
+                    .fixed_text
+                    .expect("TOML comment after ''' should format");
+                assert!(fixed.contains("# First clause.\n# Second clause.\n"), "{fixed}");
+            } else {
+                assert_eq!(
+                    format(text, kind, &options),
+                    FormatResult::default(),
+                    "multiline construct must stay verbatim for {kind:?}:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",

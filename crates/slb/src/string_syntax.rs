@@ -28,6 +28,12 @@ pub struct StringSyntax {
     pub(super) triple_quotes: bool,
     /// Whether Rust style raw strings exist.
     pub(super) rust_raw_strings: bool,
+    /// Whether C++11 raw strings (`R"delim(...)delim"`) exist.
+    pub(super) cpp_raw_strings: bool,
+    /// Whether SQL dollar-quoted strings (`$$...$$`, `$tag$...$tag$`) exist.
+    pub(super) dollar_quotes: bool,
+    /// Whether Lua/CMake bracket strings (`[[...]]`, `[=[...]=]`) exist.
+    pub(super) bracket_strings: bool,
     /// Whether backslash escapes quotes inside double quoted strings.
     pub(super) backslash_escapes: bool,
     /// Whether backslash escapes quotes inside single quoted strings.
@@ -42,6 +48,8 @@ pub struct StringSyntax {
     pub(super) heredoc: bool,
     /// Whether YAML block scalars exist.
     pub(super) block_scalars: bool,
+    /// Whether trailing comment relocation is supported for this language.
+    pub(super) supports_trailing_comments: bool,
     /// The trigger bytes as a precomputed set, see [`StringSyntax::trigger_bytes`].
     pub(super) trigger_set: ByteSet,
     /// Bytes that can change the state of the scanner in code,
@@ -56,7 +64,7 @@ impl StringSyntax {
     ///
     /// A line in code without any of them is code to its end, so the scanner can skip it.
     /// Bytes a language does not use are replaced with a slash, which is always part of the set.
-    pub(super) const fn trigger_bytes(&self) -> [u8; 7] {
+    pub(super) const fn trigger_bytes(&self) -> [u8; 9] {
         let block_open = match self.block_comment {
             Some((open, _)) => first_byte_or_slash(open),
             None => b'/',
@@ -72,6 +80,8 @@ impl StringSyntax {
                 b'`'
             },
             if self.heredoc { b'<' } else { b'/' },
+            if self.dollar_quotes { b'$' } else { b'/' },
+            if self.bracket_strings { b'[' } else { b'/' },
             b'/',
         ]
     }
@@ -79,8 +89,14 @@ impl StringSyntax {
     /// The syntax with its byte sets computed from the other fields.
     const fn with_byte_sets(self) -> Self {
         let triggers = self.trigger_bytes();
-        let [marker, block, double, single, backtick, heredoc, slash] = triggers;
-        let raw = if self.rust_raw_strings { b'r' } else { slash };
+        let [marker, block, double, single, backtick, heredoc, dollar, bracket, slash] = triggers;
+        let raw = if self.rust_raw_strings {
+            b'r'
+        } else if self.cpp_raw_strings {
+            b'R'
+        } else {
+            slash
+        };
         let block_comment_set = match self.block_comment {
             Some((open, close)) => {
                 let close = first_byte_or_slash(close);
@@ -95,7 +111,9 @@ impl StringSyntax {
         };
         Self {
             trigger_set: ByteSet::new(&triggers),
-            normal_set: ByteSet::new(&[marker, block, double, single, backtick, heredoc, slash, raw]),
+            normal_set: ByteSet::new(&[
+                marker, block, double, single, backtick, heredoc, dollar, bracket, slash, raw,
+            ]),
             block_comment_set,
             ..self
         }
@@ -110,28 +128,44 @@ pub(super) const fn first_byte_or_slash(text: &str) -> u8 {
     }
 }
 
+/// Base syntax template shared by language definitions.
+const BASE_STRING_SYNTAX: StringSyntax = StringSyntax {
+    line_marker: "//",
+    block_comment: Some(("/*", "*/")),
+    nested_block_comments: false,
+    double_quote: true,
+    single_quote: SingleQuote::CharLiteral,
+    backtick: Backtick::None,
+    triple_quotes: false,
+    rust_raw_strings: false,
+    cpp_raw_strings: false,
+    dollar_quotes: false,
+    bracket_strings: false,
+    backslash_escapes: true,
+    single_quote_escapes: true,
+    doubled_quote_escape: false,
+    multiline_strings: false,
+    marker_needs_leading_space: false,
+    heredoc: false,
+    block_scalars: false,
+    supports_trailing_comments: true,
+    trigger_set: ByteSet::new(b""),
+    normal_set: ByteSet::new(b""),
+    block_comment_set: None,
+};
+
+/// Base syntax template for `#`-comment languages without block comments.
+const HASH_STRING_SYNTAX: StringSyntax = StringSyntax {
+    line_marker: "#",
+    block_comment: None,
+    single_quote: SingleQuote::String,
+    ..BASE_STRING_SYNTAX
+};
+
 /// String syntax for languages the trailing comment scanner supports.
 pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
-    let base = StringSyntax {
-        line_marker: "//",
-        block_comment: Some(("/*", "*/")),
-        nested_block_comments: false,
-        double_quote: true,
-        single_quote: SingleQuote::CharLiteral,
-        backtick: Backtick::None,
-        triple_quotes: false,
-        rust_raw_strings: false,
-        backslash_escapes: true,
-        single_quote_escapes: true,
-        doubled_quote_escape: false,
-        multiline_strings: false,
-        marker_needs_leading_space: false,
-        heredoc: false,
-        block_scalars: false,
-        trigger_set: ByteSet::new(b""),
-        normal_set: ByteSet::new(b""),
-        block_comment_set: None,
-    };
+    let base = BASE_STRING_SYNTAX;
+    let hash = HASH_STRING_SYNTAX;
     let syntax = match kind {
         FileKind::Rust => StringSyntax {
             nested_block_comments: true,
@@ -141,6 +175,7 @@ pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
         },
         FileKind::CLike => StringSyntax {
             triple_quotes: true,
+            cpp_raw_strings: true,
             ..base
         },
         FileKind::JavaScript => StringSyntax {
@@ -158,46 +193,62 @@ pub(super) const fn string_syntax(kind: FileKind) -> Option<StringSyntax> {
             ..base
         },
         FileKind::Python => StringSyntax {
-            line_marker: "#",
-            block_comment: None,
-            single_quote: SingleQuote::String,
             triple_quotes: true,
-            ..base
+            ..hash
         },
         FileKind::Shell => StringSyntax {
-            line_marker: "#",
-            block_comment: None,
-            single_quote: SingleQuote::String,
             single_quote_escapes: false,
+            multiline_strings: true,
             marker_needs_leading_space: true,
             heredoc: true,
-            ..base
+            ..hash
         },
         FileKind::Toml => StringSyntax {
-            line_marker: "#",
-            block_comment: None,
-            single_quote: SingleQuote::String,
             single_quote_escapes: false,
             triple_quotes: true,
-            ..base
+            ..hash
         },
         FileKind::Yaml => StringSyntax {
-            line_marker: "#",
-            block_comment: None,
-            single_quote: SingleQuote::String,
             single_quote_escapes: false,
             doubled_quote_escape: true,
+            multiline_strings: true,
             marker_needs_leading_space: true,
             block_scalars: true,
+            ..hash
+        },
+        FileKind::Sql => StringSyntax {
+            line_marker: "--",
+            single_quote: SingleQuote::String,
+            backslash_escapes: false,
+            single_quote_escapes: false,
+            doubled_quote_escape: true,
+            multiline_strings: true,
+            dollar_quotes: true,
+            supports_trailing_comments: false,
             ..base
         },
-        FileKind::Dockerfile
-        | FileKind::Makefile
-        | FileKind::CMake
-        | FileKind::Ruby
-        | FileKind::Sql
-        | FileKind::Lua
-        | FileKind::Markdown => return None,
+        FileKind::Lua => StringSyntax {
+            line_marker: "--",
+            block_comment: Some(("--[[", "]]")),
+            single_quote: SingleQuote::String,
+            bracket_strings: true,
+            supports_trailing_comments: false,
+            ..base
+        },
+        FileKind::Ruby | FileKind::Dockerfile => StringSyntax {
+            multiline_strings: true,
+            heredoc: true,
+            supports_trailing_comments: false,
+            ..hash
+        },
+        FileKind::CMake => StringSyntax {
+            single_quote: SingleQuote::CharLiteral,
+            multiline_strings: true,
+            bracket_strings: true,
+            supports_trailing_comments: false,
+            ..hash
+        },
+        FileKind::Makefile | FileKind::Markdown => return None,
     };
     Some(syntax.with_byte_sets())
 }

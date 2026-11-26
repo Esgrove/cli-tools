@@ -18,7 +18,8 @@ pub(super) fn uncertain_regex(
     if rest.contains('`') && syntax.backtick != Backtick::None
         || syntax.block_comment.is_some_and(|(open, _)| rest.contains(open))
         || rest.ends_with('\\')
-        || syntax.multiline_strings && rest.contains('"')
+        || syntax.multiline_strings
+            && has_unclosed_quote(rest, '"', syntax.backslash_escapes, syntax.doubled_quote_escape)
         || syntax.triple_quotes && (rest.contains("\"\"\"") || rest.contains("'''"))
         || syntax.heredoc && (rest.contains("<<") || cursor.pending_heredoc.is_some())
         || syntax.block_scalars && RE_BLOCK_SCALAR.is_match(rest)
@@ -29,6 +30,28 @@ pub(super) fn uncertain_regex(
     } else {
         NormalStep::Uncertain
     }
+}
+
+/// Return whether `quote` opens a string in `text` that is not closed before the end of the line.
+fn has_unclosed_quote(text: &str, quote: char, backslash_escapes: bool, doubled_quote_escape: bool) -> bool {
+    let mut chars = text.chars().peekable();
+    let mut inside = false;
+    while let Some(character) = chars.next() {
+        if !inside {
+            if character == quote {
+                inside = true;
+            }
+        } else if character == '\\' && backslash_escapes {
+            let _ = chars.next();
+        } else if character == quote {
+            if doubled_quote_escape && chars.peek() == Some(&quote) {
+                let _ = chars.next();
+            } else {
+                inside = false;
+            }
+        }
+    }
+    inside
 }
 
 /// Recognize definite operands before division so later strings and block comments are still tracked.

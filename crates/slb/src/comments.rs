@@ -95,6 +95,7 @@ pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
                     ScanState::InString(_)
                         | ScanState::InTripleQuote(_)
                         | ScanState::InRawString(_)
+                        | ScanState::InDelimitedString(_)
                         | ScanState::InTemplate
                         | ScanState::InBacktickRaw
                         | ScanState::InHeredoc(_)
@@ -241,7 +242,7 @@ pub fn fix_trailing_comments_scanned(
 ) -> (Vec<Option<(String, String)>>, Vec<Violation>) {
     let mut replacements = vec![None; lines.len()];
     let mut violations = Vec::new();
-    let Some(syntax) = string_syntax(kind) else {
+    let Some(syntax) = string_syntax(kind).filter(|syntax| syntax.supports_trailing_comments) else {
         return (replacements, violations);
     };
     let style = kind.comment_style();

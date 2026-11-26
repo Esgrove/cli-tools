@@ -29,14 +29,14 @@ const BACKTICK_QUOTED_SET: ByteSet = ByteSet::new(b"`\\");
 const RAW_STRING_SET: ByteSet = ByteSet::new(b"\"");
 
 /// Bytes that can change the state inside a JavaScript template literal.
-const TEMPLATE_SET: ByteSet = ByteSet::new(b"\\`");
+const TEMPLATE_SET: ByteSet = ByteSet::new(b"\\`$");
 
 /// Bytes that can change the state inside a Go raw string.
 const BACKTICK_RAW_SET: ByteSet = ByteSet::new(b"`");
 
-/// Matches a shell heredoc start and captures the terminator word.
+/// Matches a shell, Dockerfile, or Ruby heredoc start and captures the terminator word.
 static RE_HEREDOC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"<<-?\s*(?:'(\w+)'|"(\w+)"|(\w+))"#).expect("Invalid heredoc regex"));
+    LazyLock::new(|| Regex::new(r#"<<[-~]?\s*(?:'(\w+)'|"(\w+)"|(\w+))"#).expect("Invalid heredoc regex"));
 
 /// Matches a YAML block scalar indicator at the end of a key or sequence-item line.
 pub(super) static RE_BLOCK_SCALAR: LazyLock<Regex> =
@@ -76,6 +76,8 @@ pub enum ScanState {
     InTripleQuote(char),
     /// Inside a Rust raw string closed by a quote followed by the given number of hashes.
     InRawString(usize),
+    /// Inside a multi-line string closed by an exact delimiter (C++ raw strings, SQL dollar quotes, Lua/CMake brackets).
+    InDelimitedString(String),
     /// Inside a JavaScript template literal.
     InTemplate,
     /// Inside a Go raw string.
@@ -308,7 +310,10 @@ const fn significant_set<'a>(state: &ScanState, syntax: &'a StringSyntax) -> Opt
         ScanState::InRawString(_) => Some(&RAW_STRING_SET),
         ScanState::InTemplate => Some(&TEMPLATE_SET),
         ScanState::InBacktickRaw => Some(&BACKTICK_RAW_SET),
-        ScanState::InHeredoc(_) | ScanState::InBlockScalar(_) | ScanState::Uncertain => None,
+        ScanState::InDelimitedString(_)
+        | ScanState::InHeredoc(_)
+        | ScanState::InBlockScalar(_)
+        | ScanState::Uncertain => None,
     }
 }
 
@@ -379,7 +384,14 @@ fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syn
             }
         }
         ScanState::InString(quote) => {
-            if character == '\\' && syntax.backslash_escapes {
+            let escapes = if quote == '"' {
+                syntax.backslash_escapes
+            } else {
+                syntax.single_quote_escapes
+            };
+            let is_escape = (character == '\\' && escapes)
+                || (character == quote && syntax.doubled_quote_escape && char_at(chars, *index + 1) == Some(quote));
+            if is_escape {
                 *index += 2;
                 state
             } else {
@@ -388,11 +400,16 @@ fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syn
             }
         }
         ScanState::InTripleQuote(quote) => {
+            let escapes = if quote == '"' {
+                syntax.backslash_escapes
+            } else {
+                syntax.single_quote_escapes
+            };
             if is_triple(chars, *index, quote) {
                 *index += 3;
                 ScanState::Normal
             } else {
-                *index += if character == '\\' { 2 } else { 1 };
+                *index += if character == '\\' && escapes { 2 } else { 1 };
                 state
             }
         }
@@ -405,9 +422,21 @@ fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syn
                 state
             }
         }
+        ScanState::InDelimitedString(ref closing) => {
+            if rest_starts_with(chars, *index, closing) {
+                *index += closing.chars().count();
+                ScanState::Normal
+            } else {
+                *index += 1;
+                state
+            }
+        }
         ScanState::InTemplate => {
             if character == '\\' {
                 *index += 2;
+                state
+            } else if character == '$' && char_at(chars, *index + 1) == Some('{') {
+                *index = skip_template_expression(chars, *index + 2);
                 state
             } else {
                 *index += 1;
@@ -429,6 +458,12 @@ fn scan_normal(line: &str, chars: LineChars<'_>, cursor: &mut Cursor, syntax: &S
         return NormalStep::Continue(ScanState::Normal);
     };
 
+    if let Some((open, _)) = syntax.block_comment
+        && rest_starts_with(chars, index, open)
+    {
+        cursor.index += open.chars().count();
+        return NormalStep::Continue(ScanState::InBlockComment(1));
+    }
     if rest_starts_with(chars, index, syntax.line_marker) {
         let previous = index.checked_sub(1).and_then(|position| char_at(chars, position));
         let is_url = syntax.line_marker == "//" && previous == Some(':');
@@ -440,11 +475,26 @@ fn scan_normal(line: &str, chars: LineChars<'_>, cursor: &mut Cursor, syntax: &S
         cursor.index += syntax.line_marker.chars().count();
         return NormalStep::Continue(ScanState::Normal);
     }
-    if let Some((open, _)) = syntax.block_comment
-        && rest_starts_with(chars, index, open)
+    if syntax.cpp_raw_strings
+        && character == 'R'
+        && let Some((after_open, closing)) = match_cpp_raw_string_start(chars, index)
     {
-        cursor.index += open.chars().count();
-        return NormalStep::Continue(ScanState::InBlockComment(1));
+        cursor.index = after_open;
+        return NormalStep::Continue(ScanState::InDelimitedString(closing));
+    }
+    if syntax.dollar_quotes
+        && character == '$'
+        && let Some((after_open, closing)) = match_dollar_quote_start(chars, index)
+    {
+        cursor.index = after_open;
+        return NormalStep::Continue(ScanState::InDelimitedString(closing));
+    }
+    if syntax.bracket_strings
+        && character == '['
+        && let Some((after_open, closing)) = match_bracket_string_start(chars, index)
+    {
+        cursor.index = after_open;
+        return NormalStep::Continue(ScanState::InDelimitedString(closing));
     }
     if character == '"' && syntax.double_quote || character == '\'' {
         return scan_quote(chars, cursor, syntax, character);
@@ -563,11 +613,134 @@ fn scan_quote(chars: LineChars<'_>, cursor: &mut Cursor, syntax: &StringSyntax, 
             cursor.index = end;
             NormalStep::Continue(ScanState::Normal)
         }
-        None if quote == '"' && syntax.multiline_strings => {
+        None if syntax.multiline_strings && (quote == '"' || syntax.single_quote == SingleQuote::String) => {
+            cursor.index = chars.len();
+            NormalStep::Continue(ScanState::InString(quote))
+        }
+        None if escapes && ends_with_unescaped_backslash(chars) => {
             cursor.index = chars.len();
             NormalStep::Continue(ScanState::InString(quote))
         }
         None => NormalStep::Uncertain,
+    }
+}
+
+/// Return whether the line ends with an odd number of backslashes (line continuation).
+fn ends_with_unescaped_backslash(chars: LineChars<'_>) -> bool {
+    let mut backslashes = 0;
+    let mut pos = chars.len();
+    while let Some(prev) = pos.checked_sub(1) {
+        if char_at(chars, prev) == Some('\\') {
+            backslashes += 1;
+            pos = prev;
+        } else {
+            break;
+        }
+    }
+    backslashes % 2 == 1
+}
+
+/// Skip a `${...}` expression inside a JavaScript template literal on the current line.
+///
+/// Quotes and nested braces inside the expression are skipped so backticks inside
+/// `'...'` or `"..."` strings do not prematurely terminate the outer template literal.
+fn skip_template_expression(chars: LineChars<'_>, mut index: usize) -> usize {
+    let mut depth = 1usize;
+    while index < chars.len() && depth > 0 {
+        let Some(character) = char_at(chars, index) else {
+            break;
+        };
+        match character {
+            '{' => {
+                depth += 1;
+                index += 1;
+            }
+            '}' => {
+                depth -= 1;
+                index += 1;
+            }
+            '\'' | '"' => {
+                if let Some(end) = find_string_end(chars, index + 1, character, true, false) {
+                    index = end;
+                } else {
+                    return chars.len();
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+/// Match a C++11 raw string opener `R"delim(` at `index` and return `(index_after_open, ")delim\"")`.
+fn match_cpp_raw_string_start(chars: LineChars<'_>, index: usize) -> Option<(usize, String)> {
+    if char_at(chars, index) != Some('R') || char_at(chars, index + 1) != Some('"') {
+        return None;
+    }
+    if index > 0
+        && let Some(previous) = char_at(chars, index - 1)
+        && (previous.is_alphanumeric() || previous == '_')
+    {
+        return None;
+    }
+    let mut delimiter = String::new();
+    let mut pos = index + 2;
+    while pos < chars.len() && delimiter.len() <= 16 {
+        let character = char_at(chars, pos)?;
+        if character == '(' {
+            return Some((pos + 1, format!("){delimiter}\"")));
+        }
+        if character.is_whitespace() || character == ')' || character == '\\' {
+            return None;
+        }
+        delimiter.push(character);
+        pos += 1;
+    }
+    None
+}
+
+/// Match a SQL dollar-quoted string opener `$$` or `$tag$` at `index`.
+fn match_dollar_quote_start(chars: LineChars<'_>, index: usize) -> Option<(usize, String)> {
+    if char_at(chars, index) != Some('$') {
+        return None;
+    }
+    let mut tag = String::from("$");
+    let mut pos = index + 1;
+    while pos < chars.len() {
+        let character = char_at(chars, pos)?;
+        if character == '$' {
+            tag.push('$');
+            return Some((pos + 1, tag));
+        }
+        if pos == index + 1 {
+            if !character.is_alphabetic() && character != '_' {
+                return None;
+            }
+        } else if !character.is_alphanumeric() && character != '_' {
+            return None;
+        }
+        tag.push(character);
+        pos += 1;
+    }
+    None
+}
+
+/// Match a Lua/CMake long bracket opener `[[`, `[=[`, `[==[`, etc. at `index`.
+fn match_bracket_string_start(chars: LineChars<'_>, index: usize) -> Option<(usize, String)> {
+    if char_at(chars, index) != Some('[') {
+        return None;
+    }
+    let mut equals = 0usize;
+    let mut pos = index + 1;
+    while char_at(chars, pos) == Some('=') {
+        equals += 1;
+        pos += 1;
+    }
+    if char_at(chars, pos) == Some('[') {
+        let closing = format!("]{}]", "=".repeat(equals));
+        Some((pos + 1, closing))
+    } else {
+        None
     }
 }
 
