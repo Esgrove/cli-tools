@@ -87,7 +87,10 @@ static RESOLUTION_REGEX_CACHE: LazyLock<HashMap<(u32, u32), Regex>> = LazyLock::
 #[derive(Copy, Clone, Debug)]
 struct ResolutionMatch {
     /// The height value used in the label (e.g. 1080 for "1080p").
+    /// Target height in pixels, used for the `<height>p` label.
     label_height: u32,
+    /// Target width in pixels for choosing the closest match when tolerance boxes overlap.
+    target_width: u32,
     /// Acceptable width range `(min, max)` for this resolution.
     width_range: (u32, u32),
     /// Acceptable height range `(min, max)` for this resolution.
@@ -312,36 +315,40 @@ impl fmt::Display for Resolution {
 
 /// Attempt fuzzy matching for vertical (portrait) video resolutions.
 ///
-/// Falls back to the full labeled resolution string if no fuzzy match is found.
+/// Picks the closest matching known resolution when tolerance ranges overlap,
+/// and falls back to the full labeled resolution string if no fuzzy match is found.
 fn label_fuzzy_vertical(resolution: Resolution) -> Cow<'static, str> {
-    for res in &FUZZY_RESOLUTIONS {
-        if resolution.height >= res.width_range.0
-            && resolution.height <= res.width_range.1
-            && resolution.width >= res.height_range.0
-            && resolution.width <= res.height_range.1
-        {
-            return Cow::Owned(format!("Vertical.{}p", res.label_height));
-        }
+    if let Some(best_height) = closest_fuzzy_label_height(resolution.height, resolution.width) {
+        return Cow::Owned(format!("Vertical.{best_height}p"));
     }
-    // fall back to full resolution label
     Cow::Owned(resolution.to_labeled_string())
 }
 
 /// Attempt fuzzy matching for horizontal (landscape) video resolutions.
 ///
-/// Falls back to the full labeled resolution string if no fuzzy match is found.
+/// Picks the closest matching known resolution when tolerance ranges overlap,
+/// and falls back to the full labeled resolution string if no fuzzy match is found.
 fn label_fuzzy_horizontal(resolution: Resolution) -> Cow<'static, str> {
-    for res in &FUZZY_RESOLUTIONS {
-        if resolution.width >= res.width_range.0
-            && resolution.width <= res.width_range.1
-            && resolution.height >= res.height_range.0
-            && resolution.height <= res.height_range.1
-        {
-            return Cow::Owned(format!("{}p", res.label_height));
-        }
+    if let Some(best_height) = closest_fuzzy_label_height(resolution.width, resolution.height) {
+        return Cow::Owned(format!("{best_height}p"));
     }
-    // fall back to full resolution label
     Cow::Owned(resolution.to_labeled_string())
+}
+
+/// Return the label height of the closest matching known resolution within tolerance.
+fn closest_fuzzy_label_height(long_edge: u32, short_edge: u32) -> Option<u32> {
+    FUZZY_RESOLUTIONS
+        .iter()
+        .filter(|candidate| {
+            long_edge >= candidate.width_range.0
+                && long_edge <= candidate.width_range.1
+                && short_edge >= candidate.height_range.0
+                && short_edge <= candidate.height_range.1
+        })
+        .min_by_key(|candidate| {
+            long_edge.abs_diff(candidate.target_width) + short_edge.abs_diff(candidate.label_height)
+        })
+        .map(|candidate| candidate.label_height)
 }
 
 /// Print all precalculated fuzzy resolution ranges to stdout for debugging.
@@ -360,6 +367,7 @@ pub fn print_fuzzy_resolution_ranges() {
 const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS.len()] {
     let mut out = [ResolutionMatch {
         label_height: 0,
+        target_width: 0,
         width_range: (0, 0),
         height_range: (0, 0),
     }; KNOWN_RESOLUTIONS.len()];
@@ -368,6 +376,7 @@ const fn precalculate_fuzzy_resolutions() -> [ResolutionMatch; KNOWN_RESOLUTIONS
         let (width, height) = KNOWN_RESOLUTIONS[index];
         out[index] = ResolutionMatch {
             label_height: height,
+            target_width: width,
             width_range: compute_bounds(width),
             height_range: compute_bounds(height),
         };
@@ -1078,6 +1087,7 @@ mod test_fuzzy_resolutions {
     fn resolution_match_display() {
         let res_match = ResolutionMatch {
             label_height: 1080,
+            target_width: 1920,
             width_range: (1872, 1968),
             height_range: (1053, 1107),
         };
@@ -1113,19 +1123,29 @@ mod test_fuzzy_resolutions {
 
     #[test]
     fn no_overlapping_height_ranges() {
-        for (i, a) in FUZZY_RESOLUTIONS.iter().enumerate() {
-            for b in &FUZZY_RESOLUTIONS[(i + 1)..] {
-                if a.label_height != b.label_height {
-                    let a_overlaps_b = a.height_range.0 <= b.height_range.1 && a.height_range.1 >= b.height_range.0;
-                    if a_overlaps_b {
-                        assert_ne!(
-                            a.label_height, b.label_height,
-                            "Different resolutions should have different labels"
-                        );
-                    }
+        for (index, left) in FUZZY_RESOLUTIONS.iter().enumerate() {
+            for right in &FUZZY_RESOLUTIONS[(index + 1)..] {
+                if left.label_height == right.label_height {
+                    continue;
+                }
+                let widths_overlap =
+                    left.width_range.0 <= right.width_range.1 && left.width_range.1 >= right.width_range.0;
+                let heights_overlap =
+                    left.height_range.0 <= right.height_range.1 && left.height_range.1 >= right.height_range.0;
+                if widths_overlap && heights_overlap {
+                    // Only 540p and 544p share a 720-wide fuzzy overlap, and closest match resolves it.
+                    let pair = (
+                        left.label_height.min(right.label_height),
+                        left.label_height.max(right.label_height),
+                    );
+                    assert_eq!(pair, (540, 544));
                 }
             }
         }
+        assert_eq!(Resolution::new(718, 544).label(), "544p");
+        assert_eq!(Resolution::new(720, 546).label(), "544p");
+        assert_eq!(Resolution::new(720, 541).label(), "540p");
+        assert_eq!(Resolution::new(544, 718).label(), "Vertical.544p");
     }
 
     #[test]
