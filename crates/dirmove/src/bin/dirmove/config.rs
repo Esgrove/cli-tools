@@ -219,7 +219,12 @@ pub fn add_ignored_group_name_to_config(name: &str) -> Result<bool> {
     let Some(config_path) = cli_tools_common::config_path() else {
         anyhow::bail!("Could not determine config file path");
     };
+    add_ignored_group_name_to_config_at(config_path, name)
+}
 
+/// Add a group name to `ignored_group_names` in the config file at `config_path`,
+/// creating parent directories if needed.
+fn add_ignored_group_name_to_config_at(config_path: &std::path::Path, name: &str) -> Result<bool> {
     let content = match fs::read_to_string(config_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -234,6 +239,12 @@ pub fn add_ignored_group_name_to_config(name: &str) -> Result<bool> {
     let (new_content, added) = add_ignored_name_to_toml(&content, name)?;
 
     if added {
+        if let Some(parent) = config_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|error| anyhow::anyhow!("Failed to create config directory {}: {error}", parent.display()))?;
+        }
         cli_tools_common::write_atomically(config_path, new_content)
             .map_err(|error| anyhow::anyhow!("Failed to write config file {}: {error}", config_path.display()))?;
     }
@@ -1015,5 +1026,16 @@ mod test_cli_args {
         let config = config_from_args_default_config(args);
         // Invalid format should be skipped
         assert_eq!(config.custom_mappings, [] as [CustomMapping; 0]);
+    }
+
+    #[test]
+    fn add_ignored_group_name_creates_missing_parent_directory() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config_path = temp_dir.path().join("missing_config_dir").join("cli-tools.toml");
+
+        let added = add_ignored_group_name_to_config_at(&config_path, "Episode").expect("create and write config");
+        assert!(added);
+        let written = fs::read_to_string(&config_path).expect("read config");
+        assert!(written.contains("Episode"), "{written}");
     }
 }
