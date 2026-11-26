@@ -3,31 +3,28 @@
 //! Reads credit card statement files, extracts the transactions,
 //! filters out unwanted merchants, and writes the collected data.
 
+mod xml;
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
-use encoding_rs::Encoding;
-use jiff::{ZonedDateTime, civil::Date};
+use jiff::civil::Date;
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use walkdir::WalkDir;
 
 use crate::config::Config;
+use xml::{StatementMonth, read_xml_file};
 
 static RE_BRACKETS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[\({\]}\)]+").expect("Failed to create regex pattern for brackets"));
-
-static RE_HTML_AND: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)&amp;").expect("Failed to create regex pattern for html"));
 
 static RE_SEPARATORS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\r\n\t]+").expect("Failed to create regex pattern for separators"));
@@ -36,22 +33,7 @@ static RE_WHITESPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s{2,}").expect("Failed to create regex pattern for whitespace"));
 
 static RE_ITEM_DATE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\d{2}\.\d{2}\.)(.*)").expect("Failed to create regex pattern for item date"));
-
-static RE_START_DATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<StartDate Format="CCYYMMDD">(\d{4})(\d{2})\d{2}</StartDate>"#)
-        .expect("Failed to create regex pattern for start date")
-});
-
-static RE_INVOICING_PERIOD_END_DATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<InvoicingPeriodEndDate Format="CCYYMMDD">(\d{4})(\d{2})\d{2}</InvoicingPeriodEndDate>"#)
-        .expect("Failed to create regex pattern for invoicing period end date")
-});
-
-static RE_SPECIFICATION_FREE_TEXT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\s*<SpecificationFreeText>(.*?)</SpecificationFreeText>")
-        .expect("Failed to create regex pattern for SpecificationFreeText")
-});
+    LazyLock::new(|| Regex::new(r"^[0-9]{2}\.[0-9]{2}\.").expect("Failed to create regex pattern for item date"));
 
 // Replace a pattern with replacement
 static REPLACE_PAIRS: [(&str, &str); 11] = [
@@ -182,17 +164,6 @@ pub static DEFAULT_FILTER_PREFIXES: [&str; 82] = [
     "TUNTUR.MAX OY SKI BISTRO",
     "WOLT",
 ];
-
-/// Year and month the statement period ends in, which decides the year of each item.
-///
-/// Items only carry a day and a month,
-/// and an item in a later month than the period end is from the end of the previous year,
-/// such as a December purchase on a January statement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StatementMonth {
-    year: i32,
-    month: i32,
-}
 
 /// Intermediate parsed data before creating a `VisaItem`.
 /// Used during the parsing phase to handle year transitions.
@@ -366,8 +337,8 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
             )
             .bold()
         );
-        let (raw_lines, statement) = read_xml_file(&file);
-        let items = extract_items(&raw_lines, statement)?;
+        let (rows, statement) = read_xml_file(&file)?;
+        let items = extract_items(&rows, statement)?;
         if items.is_empty() {
             println!(" ({})", "0".yellow());
         } else {
@@ -393,83 +364,6 @@ fn parse_files(root: &Path, files: Vec<PathBuf>, verbose: bool) -> Result<Vec<Vi
     );
 
     Ok(result)
-}
-
-/// Read transaction lines from an XML file.
-///
-/// The statement month comes from the invoicing period end date,
-/// or from the delivery period start date when the period end is missing,
-/// and defaults to the end of the current year.
-fn read_xml_file(file: &Path) -> (Vec<String>, StatementMonth) {
-    let mut lines: Vec<String> = Vec::new();
-    let mut start_month: Option<StatementMonth> = None;
-    let mut period_end_month: Option<StatementMonth> = None;
-    let default_month = StatementMonth {
-        year: i32::from(ZonedDateTime::now().year()),
-        month: 12,
-    };
-    let xml_file = match File::open(file) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("{}", format!("Failed to open file: {}\n{}", file.display(), e).red());
-            return (lines, default_month);
-        }
-    };
-
-    // Read the first 256 bytes to detect encoding
-    let mut buf_reader = BufReader::new(&xml_file);
-    let mut buf = [0; 256];
-    let n = buf_reader.read(&mut buf).unwrap_or(0);
-    let header = String::from_utf8_lossy(buf.get(..n).unwrap_or_default()).to_lowercase();
-    let encoding_name = header
-        .split("encoding=")
-        .nth(1)
-        .and_then(|s| s.split(['"', '\'']).nth(1))
-        .unwrap_or("iso-8859-15");
-    let encoding = Encoding::for_label(encoding_name.as_bytes()).unwrap_or(encoding_rs::ISO_8859_15);
-
-    // Read the whole file as bytes
-    let mut xml_file = xml_file;
-    xml_file.seek(SeekFrom::Start(0)).ok();
-    let mut bytes = Vec::new();
-    xml_file.read_to_end(&mut bytes).ok();
-
-    // Decode to UTF-8
-    let (cow, _, had_errors) = encoding.decode(&bytes);
-    if had_errors {
-        eprintln!("{}", "Warning: Decoding errors occurred".yellow());
-    }
-
-    // Process lines as UTF-8
-    for line in cow.lines() {
-        if let Some(caps) = RE_START_DATE.captures(line) {
-            match statement_month(&caps) {
-                Some(month) => start_month = Some(month),
-                None => eprintln!("{}", "Failed to parse year and month from start date".red()),
-            }
-        }
-        if let Some(caps) = RE_INVOICING_PERIOD_END_DATE.captures(line)
-            && let Some(month) = statement_month(&caps)
-        {
-            period_end_month = Some(month);
-        }
-        if let Some(caps) = RE_SPECIFICATION_FREE_TEXT.captures(line)
-            && let Some(matched) = caps.get(1)
-        {
-            let text = matched.as_str();
-            if RE_ITEM_DATE.is_match(text) {
-                lines.push(text.to_string());
-            }
-        }
-    }
-    (lines, period_end_month.or(start_month).unwrap_or(default_month))
-}
-
-/// Read the year and month captured by a date regex.
-fn statement_month(captures: &regex::Captures<'_>) -> Option<StatementMonth> {
-    let year = captures.get(1)?.as_str().parse().ok()?;
-    let month = captures.get(2)?.as_str().parse().ok()?;
-    Some(StatementMonth { year, month })
 }
 
 /// Convert text lines to visa items.
@@ -530,7 +424,6 @@ fn format_name(text: &str) -> String {
         .replace("TC*", "")
         .replace(['*', '/', '_'], " ");
 
-    name = RE_HTML_AND.replace_all(&name, "&").to_string();
     name = RE_BRACKETS.replace_all(&name, "").to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
     name = name.to_uppercase();
@@ -603,10 +496,9 @@ fn print_statistics(items: &[VisaItem], totals: &[(String, f64)], num_files: usi
     println!();
 }
 
-/// Split item line to separate parts.
+/// Separate the date, merchant, and amount before normalizing whitespace within each column.
 fn split_item_text(input: &str) -> (String, String, String) {
-    // Split the string at the first whitespace
-    let mut parts = input.splitn(2, ' ');
+    let mut parts = input.splitn(2, char::is_whitespace);
     let first_part = parts.next().unwrap_or("").trim();
     let remainder = parts.next().unwrap_or("");
     let (second_part, third_part) = split_from_last_whitespaces(remainder);
@@ -891,13 +783,6 @@ mod test_format_name {
     }
 
     #[test]
-    fn replaces_html_ampersand() {
-        let result = format_name("STORE &amp; NAME");
-        assert!(result.contains('&'));
-        assert!(!result.contains("&amp;"));
-    }
-
-    #[test]
     fn replaces_known_patterns() {
         let result = format_name("K-CITYMARKET STORE");
         assert_eq!(result, "K-MARKET");
@@ -1075,7 +960,7 @@ mod test_read_xml_file {
     #[test]
     fn reads_sample_xml_file() {
         let path = Path::new("tests/fixtures/visa_sample.xml");
-        let (lines, statement) = read_xml_file(path);
+        let (lines, statement) = read_xml_file(path).unwrap();
 
         assert_eq!(statement, StatementMonth { year: 2024, month: 3 });
         assert_eq!(lines.len(), 8);
@@ -1089,7 +974,7 @@ mod test_read_xml_file {
     #[test]
     fn reads_year_transition_xml_file() {
         let path = Path::new("tests/fixtures/visa_year_transition.xml");
-        let (lines, statement) = read_xml_file(path);
+        let (lines, statement) = read_xml_file(path).unwrap();
 
         // The statement month comes from the invoicing period end date 20250101
         assert_eq!(statement, StatementMonth { year: 2025, month: 1 });
@@ -1103,7 +988,7 @@ mod test_read_xml_file {
     #[test]
     fn handles_nonexistent_file() {
         let path = Path::new("tests/fixtures/nonexistent.xml");
-        let (lines, _year) = read_xml_file(path);
+        let (lines, _year) = read_xml_file(path).unwrap();
 
         assert_eq!(lines, [] as [String; 0]);
     }
@@ -1278,7 +1163,7 @@ mod test_integration_xml_parsing {
     #[test]
     fn parses_sample_xml_end_to_end() {
         let path = Path::new("tests/fixtures/visa_sample.xml");
-        let (lines, statement) = read_xml_file(path);
+        let (lines, statement) = read_xml_file(path).unwrap();
         let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 8);
@@ -1303,7 +1188,7 @@ mod test_integration_xml_parsing {
     #[test]
     fn parses_year_transition_xml_end_to_end() {
         let path = Path::new("tests/fixtures/visa_year_transition.xml");
-        let (lines, statement) = read_xml_file(path);
+        let (lines, statement) = read_xml_file(path).unwrap();
         let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 6);
@@ -1337,7 +1222,7 @@ mod test_integration_xml_parsing {
         let path = directory.path().join("december_only.xml");
         std::fs::write(&path, without_january).expect("write");
 
-        let (lines, statement) = read_xml_file(&path);
+        let (lines, statement) = read_xml_file(&path).unwrap();
         let items = extract_items(&lines, statement).expect("should parse items");
 
         assert_eq!(items.len(), 3);
@@ -1349,7 +1234,7 @@ mod test_integration_xml_parsing {
     #[test]
     fn calculates_correct_totals_from_sample() {
         let path = Path::new("tests/fixtures/visa_sample.xml");
-        let (lines, statement) = read_xml_file(path);
+        let (lines, statement) = read_xml_file(path).unwrap();
         let items = extract_items(&lines, statement).expect("should parse items");
         let totals = calculate_totals_for_each_name(&items);
 
@@ -1466,11 +1351,6 @@ mod test_format_name_comprehensive {
     #[test]
     fn replaces_underscore_with_space() {
         assert_eq!(format_name("SOME_STORE_NAME"), "SOME STORE NAME");
-    }
-
-    #[test]
-    fn replaces_html_ampersand() {
-        assert_eq!(format_name("ROCK&amp;ROLL"), "ROCK&ROLL");
     }
 
     #[test]
@@ -1926,12 +1806,6 @@ mod test_regex_patterns {
     }
 
     #[test]
-    fn re_html_and_matches_ampersand() {
-        assert!(RE_HTML_AND.is_match("&amp;"));
-        assert!(RE_HTML_AND.is_match("&AMP;"));
-    }
-
-    #[test]
     fn re_separators_matches_newline() {
         assert!(RE_SEPARATORS.is_match("\n"));
     }
@@ -1966,22 +1840,6 @@ mod test_regex_patterns {
     #[test]
     fn re_item_date_does_not_match_without_date() {
         assert!(!RE_ITEM_DATE.is_match("Some text without date"));
-    }
-
-    #[test]
-    fn re_start_date_extracts_year() {
-        let text = r#"<StartDate Format="CCYYMMDD">20240201</StartDate>"#;
-        let caps = RE_START_DATE.captures(text);
-        assert!(caps.is_some());
-        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "2024");
-    }
-
-    #[test]
-    fn re_specification_free_text_extracts_content() {
-        let text = "  <SpecificationFreeText>05.02. Some content here</SpecificationFreeText>";
-        let caps = RE_SPECIFICATION_FREE_TEXT.captures(text);
-        assert!(caps.is_some());
-        assert!(caps.unwrap().get(1).unwrap().as_str().contains("05.02."));
     }
 }
 
@@ -2022,6 +1880,60 @@ mod test_replace_pairs {
 #[cfg(test)]
 mod test_parse_files {
     use super::*;
+    use cli_tools_common::test_support::TempTree;
+
+    #[test]
+    fn parses_the_same_items_when_fixture_is_on_one_line() {
+        let tree = TempTree::new();
+        let fixture = fixture_directory().join("visa_year_transition.xml");
+        let compact = std::fs::read_to_string(&fixture)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .collect::<String>();
+        let compact_path = tree.file_with("statements/compact.xml", compact);
+
+        let expected = parse_files(&fixture_directory(), vec![fixture], false).unwrap();
+        assert_eq!(expected.len(), 6);
+        assert_eq!(parse_files(tree.path(), vec![compact_path], false).unwrap(), expected);
+    }
+
+    #[test]
+    fn reads_multiline_latin9_fields_without_losing_the_amount_separator() {
+        let tree = TempTree::new();
+        let xml = r"<?xml version='1.0'
+    encoding = 'ISO-8859-15'?>
+<Finvoice>
+  <StartDate Format = 'CCYYMMDD'>
+    20240101
+  </StartDate>
+  <SpecificationFreeText type='purchase'>
+    31.12. Osto Käfé &amp; <![CDATA[€uro]]><!-- merchant suffix --> &#xD6;y  1&#160;488,90
+  </SpecificationFreeText>
+</Finvoice>";
+        let (bytes, _, had_errors) = encoding_rs::ISO_8859_15.encode(xml);
+        assert!(!had_errors);
+        let path = tree.file_with("statements/latin9.xml", bytes);
+
+        let items = parse_files(tree.path(), vec![path], false).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].date, Date::constant(2023, 12, 31));
+        assert_eq!(items[0].name, "KÄFÉ & €URO ÖY");
+        assert_eq!(items[0].finnish_sum(), "1488,90");
+    }
+
+    #[test]
+    fn reads_undeclared_utf8_without_double_decoding_entities() {
+        let tree = TempTree::new();
+        let path = tree.file_with(
+            "utf8.xml",
+            "<Finvoice>\n  <SpecificationFreeText>05.02. Osto Käfé &amp;amp; Co  2,50</SpecificationFreeText>\n</Finvoice>",
+        );
+
+        let items = parse_files(tree.path(), vec![path], false).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "KÄFÉ &AMP; CO");
+    }
 
     /// Absolute path to the fixture directory, so a test does not depend on the working directory.
     fn fixture_directory() -> PathBuf {
