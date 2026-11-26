@@ -21,6 +21,8 @@ pub struct TorrentPathCollector {
     include_patterns: Vec<Regex>,
     /// Torrent file name patterns to exclude.
     exclude_patterns: Vec<Regex>,
+    /// The first malformed filter, if any.
+    invalid_pattern: Option<String>,
 }
 
 impl TorrentPathCollector {
@@ -28,14 +30,24 @@ impl TorrentPathCollector {
     ///
     /// The globs match case-insensitively,
     /// and a pattern without glob characters matches as a substring.
+    /// Malformed filters are reported by `collect`.
     #[must_use]
     pub fn new(input_paths: Vec<PathBuf>, recurse: bool, include: &[String], exclude: &[String]) -> Self {
-        Self {
+        let mut collector = Self {
             input_paths,
             recurse,
-            include_patterns: compile_name_patterns(include),
-            exclude_patterns: compile_name_patterns(exclude),
+            ..Self::default()
+        };
+        match compile_name_patterns(include, "include")
+            .and_then(|include| compile_name_patterns(exclude, "exclude").map(|exclude| (include, exclude)))
+        {
+            Ok((include, exclude)) => {
+                collector.include_patterns = include;
+                collector.exclude_patterns = exclude;
+            }
+            Err(error) => collector.invalid_pattern = Some(error),
         }
+        collector
     }
 
     /// Collect torrent file paths from the input paths.
@@ -47,8 +59,12 @@ impl TorrentPathCollector {
     /// The result is sorted and has no duplicates.
     ///
     /// # Errors
-    /// Returns an error if paths cannot be resolved or directories cannot be read.
+    /// Returns an error for a malformed filter, an unresolved path, or an unreadable directory.
     pub fn collect(&self) -> Result<Vec<PathBuf>> {
+        if let Some(error) = &self.invalid_pattern {
+            anyhow::bail!("{error}");
+        }
+
         let mut torrent_paths = Vec::new();
 
         if self.input_paths.is_empty() {
@@ -75,6 +91,10 @@ impl TorrentPathCollector {
     /// Check whether the file name passes the include and exclude patterns.
     #[must_use]
     pub fn matches_name_filters(&self, path: &Path) -> bool {
+        if self.invalid_pattern.is_some() {
+            return false;
+        }
+
         let file_name = path
             .file_name()
             .map_or_default(|name| name.to_string_lossy().to_lowercase());
@@ -121,16 +141,17 @@ fn is_torrent_file(path: &Path) -> bool {
 
 /// Compile case-insensitive file name globs.
 /// A pattern without glob characters matches as a substring.
-fn compile_name_patterns(patterns: &[String]) -> Vec<Regex> {
+fn compile_name_patterns(patterns: &[String], kind: &str) -> Result<Vec<Regex>, String> {
     patterns
         .iter()
-        .filter_map(|pattern| {
+        .map(|pattern| {
             let lowercase = pattern.to_lowercase();
-            if lowercase.contains(['*', '?', '[', '{']) {
-                cli_tools_common::glob_to_regex(&lowercase)
+            let glob = if lowercase.contains(['*', '?', '[', '{']) {
+                lowercase
             } else {
-                cli_tools_common::glob_to_regex(&format!("*{lowercase}*"))
-            }
+                format!("*{lowercase}*")
+            };
+            cli_tools_common::glob_to_regex(&glob).ok_or_else(|| format!("Invalid {kind} glob: {pattern:?}"))
         })
         .collect()
 }
@@ -154,6 +175,24 @@ mod test_torrent_path_collector {
         assert!(collector.matches_name_filters(Path::new("The.Movie.2024.torrent")));
         assert!(!collector.matches_name_filters(Path::new("Other.torrent")));
         assert!(!collector.matches_name_filters(Path::new("Show.Sample.torrent")));
+    }
+
+    #[test]
+    fn malformed_include_is_reported_instead_of_selecting_everything() -> Result<()> {
+        let directory = TempDir::new()?;
+        fs::write(directory.path().join("Friendly.torrent"), b"")?;
+        let inputs = vec![directory.path().to_path_buf()];
+        let nonmatching = TorrentPathCollector::new(inputs.clone(), false, &["Other*".to_owned()], &[]);
+        assert_eq!(nonmatching.collect()?, Vec::<PathBuf>::new());
+
+        let invalid = TorrentPathCollector::new(inputs, false, &["[abc".to_owned()], &[]);
+        let error = invalid
+            .collect()
+            .expect_err("an invalid include must not become unrestricted");
+        assert!(error.to_string().contains("include"));
+        assert!(error.to_string().contains("[abc"));
+        assert!(!invalid.matches_name_filters(Path::new("Friendly.torrent")));
+        Ok(())
     }
 
     #[test]
