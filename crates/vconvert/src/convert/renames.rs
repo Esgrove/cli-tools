@@ -3,6 +3,7 @@
 //! Renames files that already use a target codec so their names carry the codec label,
 //! never replacing an existing file.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use cli_tools_common::{OverwritePolicy, RenameOutcome};
@@ -13,18 +14,24 @@ use crate::types::ProcessableFile;
 
 impl VideoConvert<'_> {
     /// Process all files that need renaming. Returns the number of files successfully renamed.
-    pub(super) fn process_renames(&self, files: &[ProcessableFile]) -> usize {
+    pub(super) fn process_renames(&self, files: &[ProcessableFile], abort_flag: &AtomicBool) -> usize {
         let start = Instant::now();
         let total = files.len();
         let mut renamed_count = 0;
 
         for (index, file) in files.iter().enumerate() {
+            if abort_flag.load(Ordering::SeqCst) {
+                break;
+            }
             let position = FilePosition {
                 index: index + 1,
                 total,
             };
             self.observer
                 .rename_started(position, &file.file.path, &file.output_path, self.options.dry_run);
+            if abort_flag.load(Ordering::SeqCst) {
+                break;
+            }
 
             if self.options.dry_run {
                 renamed_count += 1;
@@ -58,7 +65,7 @@ mod test_process_renames {
         let output = file.output_path.clone();
         let converter = converter(ConvertOptions::default());
 
-        let renamed = converter.process_renames(&[file]);
+        let renamed = converter.process_renames(&[file], &AtomicBool::new(false));
 
         assert_eq!(renamed, 1);
         assert!(!path.exists());
@@ -75,7 +82,7 @@ mod test_process_renames {
             ..ConvertOptions::default()
         });
 
-        let renamed = converter.process_renames(&[processable(&path, "hevc")]);
+        let renamed = converter.process_renames(&[processable(&path, "hevc")], &AtomicBool::new(false));
 
         assert_eq!(renamed, 1);
         assert!(path.is_file());
@@ -99,7 +106,7 @@ mod test_process_renames {
         });
         let converter = converter(ConvertOptions::default());
 
-        let renamed = converter.process_renames(&files);
+        let renamed = converter.process_renames(&files, &AtomicBool::new(false));
 
         assert_eq!(renamed, 1);
         assert_eq!(std::fs::read(&output).expect("output should exist"), b"FIRST");
@@ -112,6 +119,9 @@ mod test_process_renames {
         let missing = directory.path().join("Missing.mp4");
         let converter = converter(ConvertOptions::default());
 
-        assert_eq!(converter.process_renames(&[processable(&missing, "hevc")]), 0);
+        assert_eq!(
+            converter.process_renames(&[processable(&missing, "hevc")], &AtomicBool::new(false)),
+            0
+        );
     }
 }

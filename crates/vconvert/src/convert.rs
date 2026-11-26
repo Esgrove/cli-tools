@@ -82,6 +82,12 @@ impl<'a> VideoConvert<'a> {
     /// Returns an error if an input path does not exist.
     pub fn run(&self, database: &mut Database, abort_flag: &AtomicBool) -> Result<Option<RunSummary>> {
         let mut stats = RunStats::default();
+        if abort_flag.load(Ordering::SeqCst) {
+            return Ok(Some(RunSummary {
+                stats,
+                outcome: ProcessingOutcome::Aborted,
+            }));
+        }
 
         let candidate_files = self.gather_files_to_process()?;
         if candidate_files.is_empty() {
@@ -95,11 +101,16 @@ impl<'a> VideoConvert<'a> {
         };
         self.observer.analysis_started(candidate_files.len());
 
-        let analysis_output = self.analyze_files(candidate_files, database, subtitle_matches);
+        let analysis_output = self.analyze_files(candidate_files, database, subtitle_matches, abort_flag);
 
-        // These files are already in a target codec but missing their codec suffix label
-        if !analysis_output.renames.is_empty() {
-            stats.files_renamed = self.process_renames(&analysis_output.renames);
+        if !analysis_output.renames.is_empty() && !abort_flag.load(Ordering::SeqCst) {
+            stats.files_renamed = self.process_renames(&analysis_output.renames, abort_flag);
+        }
+        if abort_flag.load(Ordering::SeqCst) {
+            return Ok(Some(RunSummary {
+                stats,
+                outcome: ProcessingOutcome::Aborted,
+            }));
         }
 
         let mut plan = ProcessingPlan::new(
@@ -137,6 +148,12 @@ impl<'a> VideoConvert<'a> {
     /// # Errors
     /// Returns an error if the database cannot be read or updated.
     pub fn run_from_database(&self, database: &mut Database, abort_flag: &AtomicBool) -> Result<Option<RunSummary>> {
+        if abort_flag.load(Ordering::SeqCst) {
+            return Ok(Some(RunSummary {
+                stats: RunStats::default(),
+                outcome: ProcessingOutcome::Aborted,
+            }));
+        }
         if !self.options.dry_run {
             let missing_count = database.remove_missing_files()?;
             let changed_count = database.remove_changed_files()?;
@@ -168,6 +185,12 @@ impl<'a> VideoConvert<'a> {
         let mut reservations = TargetReservations::new();
 
         for pending_file in pending_files.into_iter().filter(|file| file.full_path.exists()) {
+            if abort_flag.load(Ordering::SeqCst) {
+                return Ok(Some(RunSummary {
+                    stats: RunStats::default(),
+                    outcome: ProcessingOutcome::Aborted,
+                }));
+            }
             let is_subtitle_mux = pending_file.action == PendingAction::SubtitleMux;
             let video_file = VideoFile::new_with_metadata(&pending_file.full_path);
             let subtitles = subtitle_matches.remove(&video_file.path).unwrap_or_default();
@@ -529,6 +552,75 @@ mod test_process_files_with_db_cleanup {
         assert_eq!(outcome, ProcessingOutcome::Aborted);
         assert_eq!(stats.files_converted, 0);
         assert_eq!(pending_paths(&database).len(), 1);
+    }
+
+    #[test]
+    fn a_preaborted_scan_keeps_duplicates_and_unlabeled_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open_in_memory().unwrap();
+        let unlabeled = directory.path().join("unlabeled.mp4");
+        let source = directory.path().join("duplicate.mkv");
+        let output = directory.path().join("duplicate.x265.mp4");
+        for (path, codec) in [(&unlabeled, "hevc"), (&source, "h264"), (&output, "hevc")] {
+            std::fs::write(path, vec![0_u8; 1_024]).unwrap();
+            database
+                .batch_upsert_scanned_files(&[(path.as_path(), &video_info(codec))])
+                .unwrap();
+        }
+        let options = ConvertOptions {
+            paths: vec![unlabeled.clone(), source.clone()],
+            extensions: vec!["mp4".to_owned(), "mkv".to_owned()],
+            delete_duplicates: true,
+            delete: true,
+            ..ConvertOptions::default()
+        };
+
+        let summary = converter(options)
+            .run(&mut database, &AtomicBool::new(true))
+            .unwrap()
+            .unwrap();
+
+        assert!(unlabeled.is_file(), "a cancelled scan renamed a source");
+        assert!(source.is_file(), "a cancelled scan deleted a duplicate");
+        assert_eq!(summary.outcome, ProcessingOutcome::Aborted);
+    }
+
+    #[test]
+    fn cancellation_between_renames_keeps_remaining_files() {
+        struct AbortOnSecondRename<'a>(&'a AtomicBool);
+
+        impl ConvertObserver for AbortOnSecondRename<'_> {
+            fn rename_started(&self, position: FilePosition, _: &Path, _: &Path, _: bool) {
+                if position.index == 2 {
+                    self.0.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open_in_memory().unwrap();
+        let paths = [directory.path().join("first.mp4"), directory.path().join("second.mp4")];
+        for path in &paths {
+            std::fs::write(path, vec![0_u8; 1_024]).unwrap();
+            database
+                .batch_upsert_scanned_files(&[(path.as_path(), &video_info("hevc"))])
+                .unwrap();
+        }
+        let abort = AtomicBool::new(false);
+        let observer = AbortOnSecondRename(&abort);
+        let options = ConvertOptions {
+            paths: paths.to_vec(),
+            extensions: vec!["mp4".to_owned()],
+            ..ConvertOptions::default()
+        };
+        let summary = VideoConvert::new(options, &observer)
+            .run(&mut database, &abort)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(paths.iter().filter(|path| path.is_file()).count(), 1);
+        assert_eq!(summary.stats.files_renamed, 1);
+        assert_eq!(summary.outcome, ProcessingOutcome::Aborted);
     }
 
     #[test]
