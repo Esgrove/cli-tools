@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -h | --help)
             echo "$USAGE"
-            exit 1
+            exit 0
             ;;
         -s | --silent)
             SILENT=true
@@ -53,7 +53,7 @@ cd "$REPO_ROOT"
 # Get binary names from the workspace crate manifests, stripping any .exe suffix
 COMPLETION_BINARIES=()
 while IFS= read -r name; do
-    COMPLETION_BINARIES+=("${name%.exe}")
+    [ -n "$name" ] && COMPLETION_BINARIES+=("${name%.exe}")
 done <<< "$(get_rust_executable_names)"
 
 if [ ${#COMPLETION_BINARIES[@]} -eq 0 ]; then
@@ -116,6 +116,10 @@ fi
 
 if [ "$INSTALLED_COUNT" -eq 0 ]; then
     print_error_and_exit "No completions were installed. Are the binaries installed? Run install.sh first."
+fi
+
+if [ ${#FAILED_BINARIES[@]} -gt 0 ]; then
+    print_error_and_exit "Installed $INSTALLED_COUNT completion(s), but ${#FAILED_BINARIES[@]} failed"
 fi
 
 print_green "Successfully installed $INSTALLED_COUNT completion(s)"

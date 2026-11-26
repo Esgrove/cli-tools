@@ -65,7 +65,7 @@ print_usage_and_exit() {
 # Get all Rust executable names from the workspace crate manifests
 get_rust_executable_names() {
     local executables
-    executables=$(awk -F'=' '/\[\[bin\]\]/,/name/ {if($1 ~ /name/) print $2}' "$REPO_ROOT"/crates/*/Cargo.toml | tr -d ' "')
+    executables=$(awk -F'=' '/\[\[bin\]\]/,/name/ {if($1 ~ /name/) print $2}' "$REPO_ROOT"/crates/*/Cargo.toml | tr -d ' "\r')
     if [ "$BASH_PLATFORM" = "windows" ]; then
         executables=$(echo "$executables" | sed 's/$/.exe/')
     fi
@@ -74,7 +74,12 @@ get_rust_executable_names() {
 
 # Get the directories of the workspace crates that define at least one binary
 get_rust_binary_crate_directories() {
-    grep -l '^\[\[bin\]\]' "$REPO_ROOT"/crates/*/Cargo.toml | xargs -n 1 dirname
+    local manifest
+    for manifest in "$REPO_ROOT"/crates/*/Cargo.toml; do
+        if grep -q '^\[\[bin\]\]' "$manifest"; then
+            dirname "$manifest"
+        fi
+    done
 }
 
 # if DRYRUN or DRY_RUN has been set, only print commands instead of running them

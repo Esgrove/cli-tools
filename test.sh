@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         -c | --cases)
-            [ -n "$2" ] || print_usage_and_exit "$1 needs a case count"
+            [[ "${2:-}" =~ ^[0-9]+$ ]] || print_usage_and_exit "$1 needs a whole number of cases"
             export PROPTEST_CASES="$2"
             shift
             ;;
@@ -63,7 +63,7 @@ while [ $# -gt 0 ]; do
             FUZZ=false
             ;;
         -t | --fuzz-time)
-            [[ "$2" =~ ^[0-9]+$ ]] || print_usage_and_exit "$1 needs a whole number of seconds"
+            [[ "${2:-}" =~ ^[0-9]+$ ]] || print_usage_and_exit "$1 needs a whole number of seconds"
             FUZZ_SECONDS="$2"
             shift
             ;;

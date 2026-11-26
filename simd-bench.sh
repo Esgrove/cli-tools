@@ -14,7 +14,7 @@ and a summary table is written to target/simd-bench-<os>-<arch>.md.
 See docs/simd.md for how to read the results.
 
 OPTIONS: All options are optional
-    --help
+    -h | --help
         Display these instructions.
 
     --quick
@@ -23,7 +23,7 @@ OPTIONS: All options are optional
     --summary-only
         Skip running benchmarks and only print the summary of the saved baselines.
 
-    --verbose
+    -v | --verbose
         Display commands being executed.
 "
 
@@ -32,9 +32,9 @@ SUMMARY_ONLY=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --help)
+        -h | --help)
             echo "$USAGE"
-            exit 1
+            exit 0
             ;;
         --quick)
             CRITERION_ARGS+=(--warm-up-time 1 --measurement-time 2)
@@ -42,7 +42,7 @@ while [ $# -gt 0 ]; do
         --summary-only)
             SUMMARY_ONLY=true
             ;;
-        --verbose)
+        -v | --verbose)
             set -x
             ;;
         *)

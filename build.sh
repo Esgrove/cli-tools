@@ -11,20 +11,20 @@ USAGE="Usage: $0 [OPTIONS]
 Build all Rust binaries.
 
 OPTIONS: All options are optional
-    --help
+    -h | --help
         Display these instructions.
 
-    --verbose
+    -v | --verbose
         Display commands being executed.
 "
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --help)
+        -h | --help)
             echo "$USAGE"
-            exit 1
+            exit 0
             ;;
-        --verbose)
+        -v | --verbose)
             set -x
             ;;
         *)

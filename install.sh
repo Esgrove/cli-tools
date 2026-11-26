@@ -16,10 +16,10 @@ OPTIONS: All options are optional
     -f | --force
         Force recompilation by touching source files.
 
-    --help
+    -h | --help
         Display these instructions.
 
-    --verbose
+    -v | --verbose
         Display commands being executed.
 "
 
@@ -30,11 +30,11 @@ while [ $# -gt 0 ]; do
         -f | --force)
             FORCE=true
             ;;
-        --help)
+        -h | --help)
             echo "$USAGE"
-            exit 1
+            exit 0
             ;;
-        --verbose)
+        -v | --verbose)
             set -x
             ;;
         *)
@@ -65,9 +65,10 @@ if [ "$FORCE" = true ]; then
     find crates -path "*/src/*" -name "*.rs" -exec touch {} \;
 fi
 
-for crate_directory in $(get_rust_binary_crate_directories); do
+while IFS= read -r crate_directory; do
+    [ -n "$crate_directory" ] || continue
     cargo install --force --locked --path "$crate_directory"
-done
+done < <(get_rust_binary_crate_directories)
 echo ""
 
 print_green "Installed binaries:"
@@ -75,7 +76,7 @@ for executable in $(get_rust_executable_names); do
     if [ -z "$(command -v "$executable")" ]; then
         print_error_and_exit "Binary not found. Is the Cargo install directory in path?"
     fi
-    echo "$($executable --version) from $(which "$executable")"
+    echo "$("$executable" --version) from $(command -v "$executable")"
 done
 
 # Install shell completions

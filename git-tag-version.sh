@@ -34,7 +34,8 @@ FORCE=false
 while [ $# -gt 0 ]; do
     case "$1" in
         -h | --help)
-            print_usage_and_exit
+            echo "$USAGE"
+            exit 0
             ;;
         -d | --dryrun)
             DRYRUN=true
@@ -59,7 +60,7 @@ current_tag=""
 for commit_hash in $(git log --format="%H" --reverse -- Cargo.toml); do
     # Use git show to display changes in the commit for Cargo.toml,
     # and filter for added lines modifying the version
-    version_line=$(git show "$commit_hash":Cargo.toml | grep '^version = ' || true)
+    version_line=$(git show "$commit_hash":Cargo.toml | grep '^version = ' | head -n 1 || true)
     if [ -n "$version_line" ]; then
         version_number=$(echo "$version_line" | awk -F'"' '/version = / {print $2}')
         if [ "$current_tag" = "$version_number" ]; then
@@ -74,7 +75,7 @@ for commit_hash in $(git log --format="%H" --reverse -- Cargo.toml); do
             if [ "$FORCE" = true ]; then
                 run_command git tag -af "$tag" "$commit_hash" -m "Rust version $version_number"
             else
-                if git tag -l | grep -q "^${tag}$"; then
+                if git tag -l | grep -Fxq "$tag"; then
                     print_red "Tag $tag already exists, skipping..."
                     continue
                 else
