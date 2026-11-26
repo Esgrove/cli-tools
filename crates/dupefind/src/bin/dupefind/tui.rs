@@ -607,9 +607,7 @@ fn apply_actions_with(
                     .collect();
 
                 if let Some(new_stem) = new_name {
-                    let new_path = keep_file
-                        .path
-                        .with_file_name(format!("{new_stem}.{}", keep_file.extension));
+                    let new_path = build_renamed_path(&keep_file.path, new_stem, &keep_file.extension)?;
                     if new_path != keep_file.path {
                         // Another member of the group may already hold the new name.
                         // It is deleted anyway, so remove it first instead of letting the rename replace it.
@@ -632,9 +630,7 @@ fn apply_actions_with(
                     .get(*rename_index)
                     .copied()
                     .context("Selected file to rename is unavailable")?;
-                let new_path = file_to_rename
-                    .path
-                    .with_file_name(format!("{new_name}.{}", file_to_rename.extension));
+                let new_path = build_renamed_path(&file_to_rename.path, new_name, &file_to_rename.extension)?;
 
                 if new_path != file_to_rename.path {
                     rename_file(&file_to_rename.path, &new_path)?;
@@ -645,6 +641,20 @@ fn apply_actions_with(
     }
 
     Ok(())
+}
+
+/// Build a validated sibling destination path for a TUI rename, rejecting path traversal or separators.
+fn build_renamed_path(original: &Path, new_stem: &str, extension: &str) -> anyhow::Result<PathBuf> {
+    let trimmed = new_stem.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." || trimmed.contains(['/', '\\', '\0']) {
+        anyhow::bail!("Invalid rename target '{new_stem}': must be a single filename without path separators");
+    }
+    let file_name = if extension.is_empty() {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.{extension}")
+    };
+    Ok(original.with_file_name(file_name))
 }
 
 /// Rename a file without replacing a different existing file, printing the change.
@@ -1212,6 +1222,19 @@ mod test_apply_actions {
         assert_eq!(read(directory.path(), "c.mp4").as_deref(), Some("UNRELATED"));
         assert_eq!(read(directory.path(), "a.mp4").as_deref(), Some("A"));
         assert_eq!(read(directory.path(), "b.mp4"), None);
+    }
+
+    #[test]
+    fn build_renamed_path_rejects_path_traversal_and_handles_empty_extension() {
+        let original = Path::new("/videos/show/clip.mp4");
+        assert!(build_renamed_path(original, "../escape", "mp4").is_err());
+        assert!(build_renamed_path(original, "sub/clip", "mp4").is_err());
+        assert!(build_renamed_path(original, "..", "mp4").is_err());
+        assert!(build_renamed_path(original, "  ", "mp4").is_err());
+        assert_eq!(
+            build_renamed_path(Path::new("/videos/clip"), "renamed", "").expect("empty ext"),
+            PathBuf::from("/videos/renamed")
+        );
     }
 
     #[test]

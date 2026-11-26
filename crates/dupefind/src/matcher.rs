@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use itertools::Itertools;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 
 use super::{DupeFileInfo, DuplicateGroup, MatchRange, normalize_stem, strip_ignored_prefixes};
@@ -36,6 +36,11 @@ pub struct DuplicateMatchOptions<'a> {
     pub additional_match_groups: &'a [Vec<usize>],
 }
 
+/// Return whether a file's final path component contains non-UTF-8 bytes.
+fn has_non_utf8_filename(file: &DupeFileInfo) -> bool {
+    file.path.file_name().is_some_and(|name| name.to_str().is_none())
+}
+
 /// Find duplicate groups using filename, pattern, normalization, and matches supplied by the caller.
 #[must_use]
 #[allow(
@@ -45,9 +50,14 @@ pub struct DuplicateMatchOptions<'a> {
 pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'_>) -> Vec<DuplicateGroup> {
     let normalized_keys: Vec<String> = files
         .par_iter()
-        .map(|file| {
-            let stem = strip_ignored_prefixes(&file.stem, options.prefix_ignores);
-            normalize_stem(&stem)
+        .enumerate()
+        .map(|(index, file)| {
+            if has_non_utf8_filename(file) {
+                format!("\0nonutf8:{index}")
+            } else {
+                let stem = strip_ignored_prefixes(&file.stem, options.prefix_ignores);
+                normalize_stem(&stem)
+            }
         })
         .collect();
 
@@ -55,6 +65,9 @@ pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'
 
     let mut filename_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, file) in files.iter().enumerate() {
+        if has_non_utf8_filename(file) {
+            continue;
+        }
         let filename = strip_ignored_prefixes(&file.filename, options.prefix_ignores).to_lowercase();
         filename_to_indices.entry(filename).or_default().push(index);
     }
@@ -63,6 +76,9 @@ pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'
     let mut pattern_matches: HashMap<usize, MatchRange> = HashMap::new();
     let mut pattern_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, file) in files.iter().enumerate() {
+        if has_non_utf8_filename(file) {
+            continue;
+        }
         for pattern in options.patterns {
             if let Some(pattern_match) = pattern.find(&file.filename) {
                 pattern_to_indices
@@ -338,6 +354,29 @@ mod test_find_duplicates {
 
         assert_eq!(duplicates.len(), 1);
         assert_eq!(duplicates[0].files.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distinct_non_utf8_names_do_not_collapse_into_duplicates() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let first = DupeFileInfo::new(
+            std::path::PathBuf::from(OsStr::from_bytes(b"/dir/clip_\xff.mp4")),
+            "mp4".to_string(),
+        );
+        let second = DupeFileInfo::new(
+            std::path::PathBuf::from(OsStr::from_bytes(b"/dir/clip_\xfe.mp4")),
+            "mp4".to_string(),
+        );
+        let valid = make_file("/dir/clip_.mp4", "mp4");
+
+        let duplicates = find_duplicates(&[first, second, valid], &DuplicateMatchOptions::default());
+        assert!(
+            duplicates.is_empty(),
+            "distinct non-UTF-8 filenames must not collapse into a false duplicate group: {duplicates:?}"
+        );
     }
 
     #[test]

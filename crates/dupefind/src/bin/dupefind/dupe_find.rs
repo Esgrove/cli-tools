@@ -248,7 +248,7 @@ impl DupeFind {
         );
 
         for group in duplicates {
-            let group_name = group.display_name();
+            let group_name = sanitize_group_dir_name(&group.display_name());
             let target_dir = duplicates_dir.join(&group_name);
             // The file the interactive view would preselect stays in place, and only the others are moved.
             let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|file| &file.path).collect();
@@ -298,6 +298,23 @@ impl DupeFind {
                 }
             }
         }
+    }
+}
+
+/// Sanitize a duplicate group display name so it stays a single directory component inside `Duplicates/`.
+fn sanitize_group_dir_name(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | '\0' => '_',
+            other => other,
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        "_group".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -1119,5 +1136,28 @@ mod test_move_duplicates_in_trees {
         assert_eq!(skipped, RenameOutcome::SkippedExisting);
         assert!(second_source.exists());
         assert_eq!(std::fs::read(&target).expect("read target"), b"video payload");
+    }
+
+    #[test]
+    fn group_named_dot_dot_stays_inside_duplicates_directory() {
+        let tree = TempTree::new();
+        tree.file_with("a/Studio....mp4", "one");
+        tree.file_with("b/Studio....mp4", "two");
+
+        let mut finder = moving_finder(&tree, false);
+        finder.config.prefix_ignores = vec!["studio".to_string()];
+        finder.run().expect("run");
+
+        assert!(
+            !tree.exists("Studio....mp4"),
+            "duplicate must stay inside Duplicates/ and never escape into root: {:?}",
+            tree.snapshot()
+        );
+        let inside_duplicates = tree
+            .files()
+            .into_iter()
+            .filter(|path| path.starts_with("Duplicates/"))
+            .count();
+        assert_eq!(inside_duplicates, 1, "{:?}", tree.snapshot());
     }
 }
