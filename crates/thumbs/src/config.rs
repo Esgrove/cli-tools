@@ -28,9 +28,6 @@ const DEFAULT_PADDING_PORTRAIT: u32 = 16;
 /// Default thumbnail width in pixels.
 const DEFAULT_SCALE_WIDTH: u32 = 480;
 
-/// Default font size for timestamp overlay.
-const DEFAULT_FONT_SIZE: u32 = 20;
-
 /// Default JPEG quality (lower is better).
 const DEFAULT_QUALITY: u32 = 2;
 
@@ -71,7 +68,8 @@ pub struct Config {
     pub(crate) cols_landscape: u32,
     pub(crate) cols_portrait: u32,
     pub(crate) dryrun: bool,
-    pub(crate) font_size: u32,
+    /// Explicit overlay size, or `None` to choose a default for the video's aspect ratio.
+    pub(crate) font_size: Option<u32>,
     pub(crate) overwrite: bool,
     pub(crate) padding_landscape: u32,
     pub(crate) padding_portrait: u32,
@@ -137,7 +135,7 @@ impl Config {
             .unwrap_or(DEFAULT_COLS_LANDSCAPE);
 
         let cols_portrait = args.cols.or(user_config.cols_portrait).unwrap_or(DEFAULT_COLS_PORTRAIT);
-        let font_size = args.fontsize.or(user_config.font_size).unwrap_or(DEFAULT_FONT_SIZE);
+        let font_size = args.fontsize.or(user_config.font_size);
 
         let padding_landscape = args
             .padding
@@ -314,7 +312,7 @@ mod test_config_from_args {
         assert_eq!(config.padding_landscape, 8);
         assert_eq!(config.padding_portrait, 16);
         assert_eq!(config.scale_width, 480);
-        assert_eq!(config.font_size, 20);
+        assert_eq!(config.font_size, Some(20));
         assert_eq!(config.quality, 2);
         assert!(!config.dryrun);
         assert!(!config.overwrite);
@@ -353,7 +351,7 @@ mod test_config_from_args {
         assert_eq!(config.padding_landscape, 9);
         assert_eq!(config.padding_portrait, 9);
         assert_eq!(config.scale_width, 720);
-        assert_eq!(config.font_size, 26);
+        assert_eq!(config.font_size, Some(26));
         assert_eq!(config.quality, 4);
         assert!(config.dryrun);
         assert!(config.overwrite);

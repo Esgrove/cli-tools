@@ -281,7 +281,8 @@ replace = [
 # Thumbnail width in pixels (height is calculated to maintain aspect ratio)
 # scale_width = 480
 
-# Font size for timestamp overlay
+# Override the font size for all video shapes.
+# Leave unset for defaults of 20 for landscape, 28 for square, and 36 for portrait.
 # font_size = 20
 
 # JPEG quality (1-31, lower values = better quality, larger file size)
