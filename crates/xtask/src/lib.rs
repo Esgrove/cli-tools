@@ -133,6 +133,7 @@ impl Runner {
             && self.delegate
             && !task_file.settings.runner.is_empty()
             && std::env::var_os(DELEGATED_ENV).is_none()
+            && !skips_delegation(argv)
         {
             return delegate(&task_file.settings.runner, argv, location);
         }
@@ -219,6 +220,45 @@ fn generate_completion(
     cli_tools_common::generate_shell_completion(shell, command, install, verbose, "xtask")
 }
 
+/// Return whether `argv` asks for a local meta-operation (`--version`, `-V`, or `completion`)
+/// that must never execute an untrusted `[settings].runner` command from `xtask.toml`.
+fn skips_delegation(argv: &[OsString]) -> bool {
+    let mut skip_next = false;
+    for arg in argv.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let Some(text) = arg.to_str() else {
+            continue;
+        };
+        if text == "--" {
+            return false;
+        }
+        if matches!(
+            text,
+            "-C" | "--config"
+                | "-S"
+                | "--scope"
+                | "-j"
+                | "--jobs"
+                | "-O"
+                | "--output"
+                | "-K"
+                | "--color"
+                | "-T"
+                | "--tail-lines"
+        ) {
+            skip_next = true;
+            continue;
+        }
+        if matches!(text, "-V" | "--version" | "completion") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Run the project runner from `[settings]` with the same arguments and return its exit code.
 fn delegate(runner: &[String], argv: &[OsString], location: &TaskFileLocation) -> Result<ExitCode> {
     let Some((program, runner_args)) = runner.split_first() else {
@@ -290,5 +330,41 @@ mod test_runner_api {
 
         let ids = runner.resolve_task_ids(&argv).expect("tasks should resolve");
         assert_eq!(ids, ["prepare", "check"]);
+    }
+
+    #[test]
+    fn delegation_does_not_execute_runner_for_version_or_completion() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let task_file = temp.path().join("xtask.toml");
+        std::fs::write(
+            &task_file,
+            "[settings]\nrunner = [\"definitely_nonexistent_xtask_runner_binary_xyz\"]\n",
+        )
+        .expect("write task file");
+
+        let runner = Runner::new().with_delegation();
+        let version_argv: Vec<OsString> = ["xtask", "-C"]
+            .into_iter()
+            .map(OsString::from)
+            .chain([task_file.clone().into_os_string(), OsString::from("--version")])
+            .collect();
+        let code = runner
+            .run_with_args(&version_argv)
+            .expect("--version must not execute [settings].runner");
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        let completion_argv: Vec<OsString> = ["xtask", "-C"]
+            .into_iter()
+            .map(OsString::from)
+            .chain([
+                task_file.into_os_string(),
+                OsString::from("completion"),
+                OsString::from("zsh"),
+            ])
+            .collect();
+        let code = runner
+            .run_with_args(&completion_argv)
+            .expect("completion must not execute [settings].runner");
+        assert_eq!(code, ExitCode::SUCCESS);
     }
 }
