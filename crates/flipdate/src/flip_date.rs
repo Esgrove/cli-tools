@@ -74,6 +74,7 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
     // Overwriting only replaces files that existed before the run,
     // never a file that another source in this run was renamed to.
     let mut reservations = TargetReservations::new();
+    let mut planned: Vec<(RenameItem, PathBuf)> = Vec::new();
     for item in files_to_rename {
         // Recursive runs find files in subdirectories, so the new name stays in the file's own directory.
         let new_path = item.path.with_file_name(&item.new_name);
@@ -94,12 +95,88 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
         }
         println!("{heading}");
         cli_tools_common::show_diff(&item.filename, &item.new_name);
-        if !config.dryrun {
-            let outcome = cli_tools_common::safe_rename(&item.path, &new_path, policy)
-                .with_context(|| format!("Failed to rename {}", item.path.display()))?;
-            if outcome == RenameOutcome::SkippedExisting {
-                eprintln!("{}", "File already exists".yellow());
+        planned.push((item, new_path));
+    }
+
+    if !config.dryrun {
+        execute_planned_renames(planned, policy)?;
+    }
+
+    Ok(())
+}
+
+/// Execute planned file renames without clobbering any pending source in cycles or chains.
+///
+/// Any source path that is also a destination of another planned rename in the batch is staged
+/// through a unique temporary sibling first, so swaps and chains never overwrite pending files.
+fn execute_planned_renames(planned: Vec<(RenameItem, PathBuf)>, policy: OverwritePolicy) -> Result<()> {
+    use std::collections::HashSet;
+
+    let path_key = |path: &std::path::Path| path.to_string_lossy().to_lowercase();
+
+    // When overwriting is disabled, drop items whose target is blocked by an existing entry
+    // that is not itself being moved out of the way by another active item.
+    let mut active: Vec<bool> = vec![true; planned.len()];
+    if policy == OverwritePolicy::Skip {
+        loop {
+            let active_sources: HashSet<String> = planned
+                .iter()
+                .zip(&active)
+                .filter(|(_, is_active)| **is_active)
+                .map(|((item, _), _)| path_key(&item.path))
+                .collect();
+            let mut changed = false;
+            for ((item, target), is_active) in planned.iter().zip(&mut active) {
+                if !*is_active {
+                    continue;
+                }
+                let target_exists = std::fs::symlink_metadata(target).is_ok()
+                    && !cli_tools_common::paths_refer_to_same_entry(&item.path, target);
+                if target_exists && !active_sources.contains(&path_key(target)) {
+                    eprintln!("{}", "File already exists".yellow());
+                    *is_active = false;
+                    changed = true;
+                }
             }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    let active_targets: HashSet<String> = planned
+        .iter()
+        .zip(&active)
+        .filter(|(_, is_active)| **is_active)
+        .map(|((_, target), _)| path_key(target))
+        .collect();
+
+    // Phase 1: Stage any active source whose path is also targeted by another active rename.
+    let mut staged_sources: Vec<Option<PathBuf>> = Vec::with_capacity(planned.len());
+    for ((item, _), is_active) in planned.iter().zip(&active) {
+        if *is_active && active_targets.contains(&path_key(&item.path)) {
+            let temporary = cli_tools_common::unique_sibling_path(&item.path, "flipdate-tmp");
+            cli_tools_common::safe_rename(&item.path, &temporary, OverwritePolicy::Error)
+                .with_context(|| format!("Failed to stage {}", item.path.display()))?;
+            staged_sources.push(Some(temporary));
+        } else {
+            staged_sources.push(None);
+        }
+    }
+
+    // Phase 2: Move each active item from its original or staged path to its final destination.
+    for (((item, new_path), is_active), staged) in planned.into_iter().zip(active).zip(staged_sources) {
+        if !is_active {
+            continue;
+        }
+        let current_source = staged.as_deref().unwrap_or(item.path.as_path());
+        let outcome = cli_tools_common::safe_rename(current_source, &new_path, policy)
+            .with_context(|| format!("Failed to rename {}", item.path.display()))?;
+        if outcome == RenameOutcome::SkippedExisting {
+            if let Some(temp_path) = staged {
+                let _ = std::fs::rename(&temp_path, &item.path);
+            }
+            eprintln!("{}", "File already exists".yellow());
         }
     }
 
@@ -949,5 +1026,33 @@ mod test_nested_trees {
 
         assert_eq!(tree.files().len(), 1, "{:?}", tree.files());
         assert_eq!(contents(&tree), BTreeSet::from(["data".to_string()]));
+    }
+
+    #[test]
+    fn swap_with_overwrite_preserves_both_files_in_a_rename_cycle() {
+        let tree = TempTree::new();
+        tree.file_with("photo 2005.12.23.jpg", "A_content");
+        tree.file_with("photo 2023.12.05.jpg", "B_content");
+
+        let mut config = file_config(false, false, true);
+        config.swap_year = true;
+        flip_files(&tree, &config);
+
+        assert_eq!(tree.read("photo 2023.12.05.jpg"), "A_content");
+        assert_eq!(tree.read("photo 2005.12.23.jpg"), "B_content");
+    }
+
+    #[test]
+    fn swap_with_overwrite_preserves_all_files_in_a_rename_chain() {
+        let tree = TempTree::new();
+        tree.file_with("05.12.2023.jpg", "A_content");
+        tree.file_with("2023.12.05.jpg", "B_content");
+
+        let mut config = file_config(false, false, true);
+        config.swap_year = true;
+        flip_files(&tree, &config);
+
+        assert_eq!(tree.read("2023.12.05.jpg"), "A_content");
+        assert_eq!(tree.read("2005.12.23.jpg"), "B_content");
     }
 }
