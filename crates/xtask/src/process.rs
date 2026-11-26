@@ -357,16 +357,23 @@ fn run_piped(spec: &CommandSpec, log_path: &Path, sink: Option<&OutputSink>) -> 
     let Some((pipe_program, pipe_args)) = spec.pipe_through.split_first() else {
         bail!("Pipe command is empty");
     };
-    let mut pipe_child = Command::new(pipe_program)
+    let mut pipe_cmd = Command::new(pipe_program);
+    pipe_cmd
         .args(pipe_args)
         .current_dir(&spec.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    for &key in CARGO_RUN_ENV_VARS {
+        pipe_cmd.env_remove(key);
+    }
+    let mut pipe_child = pipe_cmd
         .spawn()
         .with_context(|| format!("Failed to spawn '{pipe_program}'"))?;
 
     let Some(pipe_stdin) = pipe_child.stdin.take() else {
+        let _ = pipe_child.kill();
+        let _ = pipe_child.wait();
         bail!("Standard input of '{pipe_program}' is unavailable");
     };
     let pipe_stdout = pipe_child.stdout.take();
@@ -374,9 +381,15 @@ fn run_piped(spec: &CommandSpec, log_path: &Path, sink: Option<&OutputSink>) -> 
 
     let mut main_cmd = build_command(spec);
     main_cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = main_cmd
-        .spawn()
-        .with_context(|| format!("Failed to spawn '{}'", spec.program))?;
+    let mut child = match main_cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            drop(pipe_stdin);
+            let _ = pipe_child.kill();
+            let _ = pipe_child.wait();
+            return Err(error).with_context(|| format!("Failed to spawn '{}'", spec.program));
+        }
+    };
 
     let child_stdout = child.stdout.take();
     let child_stderr = child.stderr.take();

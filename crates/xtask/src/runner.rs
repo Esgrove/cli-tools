@@ -151,7 +151,7 @@ pub fn run(
         return Ok(true);
     }
 
-    let run_id = Timestamp::now().strftime("%Y%m%dT%H%M%SZ").to_string();
+    let run_id = next_run_id();
     let log_dir = root
         .join(task_file.settings.log_dir.as_deref().unwrap_or(DEFAULT_LOG_DIR))
         .join(run_id);
@@ -199,6 +199,16 @@ pub fn plan(
     let all_tasks = build_tasks(task_file, &condition_context, &location.root, builtins)?;
     let selected_scopes = resolve_scope(task_file, options.scope.as_deref())?;
     filter_tasks(all_tasks, selected_scopes.as_ref(), &options.task_ids)
+}
+
+/// Generate a unique log directory name across rapid or concurrent runs.
+fn next_run_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stamp = Timestamp::now().strftime("%Y%m%dT%H%M%SZ");
+    format!("{stamp}-{}-{sequence}", std::process::id())
 }
 
 /// Name of the operating system as used by flag `platforms` and the built-in conditions.
@@ -604,6 +614,11 @@ mod test_variable_expansion {
     fn names_flag_environment_variables() {
         assert_eq!(flag_env_name("sign-in"), "XTASK_FLAG_SIGN_IN");
         assert_eq!(flag_env_name("all"), "XTASK_FLAG_ALL");
+    }
+
+    #[test]
+    fn rapid_run_ids_are_distinct() {
+        assert_ne!(next_run_id(), next_run_id());
     }
 }
 

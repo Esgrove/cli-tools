@@ -239,6 +239,17 @@ impl TaskFile {
     ///
     /// Returns an error describing the first problem found.
     pub fn validate(&self, builtins: &BTreeSet<String>) -> Result<()> {
+        if self.settings.jobs == Some(0) {
+            bail!("settings.jobs must be at least 1");
+        }
+        if self
+            .settings
+            .runner
+            .first()
+            .is_some_and(|program| program.trim().is_empty())
+        {
+            bail!("settings.runner program name cannot be empty");
+        }
         self.validate_flags()?;
         let conditions = self.parsed_conditions()?;
         Self::validate_condition_cycles(&conditions)?;
@@ -704,6 +715,15 @@ mod test_task_file_discovery {
 
         assert!(find_task_file(&nested).is_none());
         assert_eq!(find_task_file(temp.path()).expect("should find").root, temp.path());
+    }
+
+    #[test]
+    fn rejects_zero_jobs_and_empty_runner_program() {
+        let zero_jobs = TaskFile::from_toml_str("[settings]\njobs = 0\n").expect("parse");
+        assert!(zero_jobs.validate(&BTreeSet::new()).is_err());
+
+        let empty_runner = TaskFile::from_toml_str("[settings]\nrunner = [\"   \"]\n").expect("parse");
+        assert!(empty_runner.validate(&BTreeSet::new()).is_err());
     }
 
     #[test]
