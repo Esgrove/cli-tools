@@ -1,13 +1,16 @@
 //! Rust project discovery.
 //!
-//! Walks the input paths for `Cargo.toml` files and maps each one to its project root:
-//! the closest ancestor workspace, or the package itself when no workspace contains it.
+//! Walks the input paths for `Cargo.toml` files and uses Cargo's workspace membership to group them.
 //! Also finds the Dockerfiles that belong to a project.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use toml_edit::{DocumentMut, Item};
 use walkdir::{DirEntry, WalkDir};
 
 use cli_tools_common::should_skip_entry;
@@ -25,19 +28,63 @@ const EXCLUDED_DOCKERFILE_DIRECTORIES: [&str; 5] = ["target", "node_modules", "f
 /// Search depth for Dockerfiles inside one project.
 const DOCKERFILE_MAX_DEPTH: usize = 6;
 
+/// The parts of Cargo metadata that identify the workspace and its members.
+#[derive(Deserialize)]
+struct CargoWorkspace {
+    workspace_root: PathBuf,
+    workspace_members: BTreeSet<String>,
+    packages: Vec<CargoPackage>,
+}
+
+/// A package listed by Cargo metadata.
+#[derive(Deserialize)]
+struct CargoPackage {
+    id: String,
+    manifest_path: PathBuf,
+}
+
+impl CargoWorkspace {
+    /// Run Cargo offline without resolving dependencies to get the actual members.
+    fn read(root: &Path) -> Result<Self> {
+        let output = Command::new("cargo")
+            .args(["metadata", "--offline", "--no-deps", "--format-version", "1"])
+            .current_dir(root)
+            .output()
+            .with_context(|| format!("Failed to run Cargo metadata in {}", root.display()))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Cargo metadata failed in {}: {}",
+                root.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        serde_json::from_slice(&output.stdout).with_context(|| format!("Invalid Cargo metadata in {}", root.display()))
+    }
+
+    /// Return the member manifests, without the root manifest.
+    fn member_manifests(self) -> BTreeSet<PathBuf> {
+        let root_manifest = self.workspace_root.join("Cargo.toml");
+        self.packages
+            .into_iter()
+            .filter(|package| package.manifest_path != root_manifest && self.workspace_members.contains(&package.id))
+            .map(|package| package.manifest_path)
+            .collect()
+    }
+}
+
 /// Find the Rust project roots under the given paths.
-///
-/// A path inside a workspace member resolves to the workspace root.
+/// A workspace member resolves to its Cargo workspace root.
 /// The result is sorted and has no duplicates.
-#[must_use]
-pub fn find_projects(paths: &[PathBuf], max_depth: usize) -> Vec<PathBuf> {
+///
+/// # Errors
+/// Returns an error if a manifest cannot be read or workspace membership cannot be determined.
+pub fn find_projects(paths: &[PathBuf], max_depth: usize) -> Result<Vec<PathBuf>> {
     let mut roots = BTreeSet::new();
+    let mut workspaces = BTreeMap::new();
     for path in paths {
         if path.is_file() {
-            if path.file_name().is_some_and(|name| name == "Cargo.toml")
-                && let Some(directory) = path.parent()
-            {
-                roots.insert(project_root(directory));
+            if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+                roots.insert(project_root(path, &mut workspaces)?);
             }
             continue;
         }
@@ -48,12 +95,10 @@ pub fn find_projects(paths: &[PathBuf], max_depth: usize) -> Vec<PathBuf> {
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && entry.file_name() == "Cargo.toml");
         for manifest in manifests {
-            if let Some(directory) = manifest.path().parent() {
-                roots.insert(project_root(directory));
-            }
+            roots.insert(project_root(manifest.path(), &mut workspaces)?);
         }
     }
-    roots.into_iter().collect()
+    Ok(roots.into_iter().collect())
 }
 
 /// Find the Dockerfiles inside a project, skipping nested projects in `other_roots`.
@@ -74,40 +119,76 @@ pub fn find_dockerfiles(root: &Path, other_roots: &[PathBuf]) -> Vec<PathBuf> {
     dockerfiles
 }
 
-/// Find the member manifests of a workspace, without the root manifest and without nested project roots.
-#[must_use]
-pub fn find_member_manifests(root: &Path, other_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let root_manifest = root.join("Cargo.toml");
-    let mut manifests: Vec<PathBuf> = WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|entry| {
-            !should_skip(entry, &EXCLUDED_DIRECTORIES)
-                && (entry.depth() == 0 || !other_roots.iter().any(|other| other.as_path() == entry.path()))
-        })
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() && entry.file_name() == "Cargo.toml")
-        .map(DirEntry::into_path)
-        .filter(|path| *path != root_manifest)
-        .collect();
-    manifests.sort();
-    manifests
+/// Find the member manifests Cargo reports for a project, without the root manifest.
+///
+/// # Errors
+/// Returns an error when Cargo cannot determine membership.
+pub fn find_member_manifests(root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(CargoWorkspace::read(root)?.member_manifests().into_iter().collect())
 }
 
-/// Map a directory holding a `Cargo.toml` to its project root.
-///
-/// The directory is its own root when its manifest defines a workspace.
-/// Otherwise the closest ancestor with a workspace manifest is the root,
-/// and with no such ancestor the directory is a standalone package.
-fn project_root(directory: &Path) -> PathBuf {
-    if is_workspace_manifest(&directory.join("Cargo.toml")) {
-        return directory.to_path_buf();
+/// Find the nearest independent project roots beneath this project.
+/// A scope boundary has a manifest of its own but is not a Cargo member.
+pub(super) fn find_nested_projects(root: &Path, members: &[PathBuf]) -> Vec<PathBuf> {
+    let mut nested = Vec::new();
+    let mut entries = WalkDir::new(root).into_iter();
+    while let Some(entry) = entries.next() {
+        let Ok(entry) = entry else { continue };
+        if should_skip(&entry, &EXCLUDED_DIRECTORIES) {
+            if entry.file_type().is_dir() {
+                entries.skip_current_dir();
+            }
+            continue;
+        }
+        if entry.depth() > 0 && entry.file_type().is_dir() {
+            let manifest = entry.path().join("Cargo.toml");
+            if manifest.is_file() && members.binary_search(&manifest).is_err() {
+                nested.push(entry.into_path());
+                entries.skip_current_dir();
+            }
+        }
     }
-    directory
-        .ancestors()
-        .skip(1)
-        .find(|ancestor| is_workspace_manifest(&ancestor.join("Cargo.toml")))
-        .unwrap_or(directory)
-        .to_path_buf()
+    nested
+}
+
+/// Map a manifest to its workspace only if Cargo reports it as a member.
+fn project_root(manifest: &Path, workspaces: &mut BTreeMap<PathBuf, BTreeSet<PathBuf>>) -> Result<PathBuf> {
+    let manifest = cli_tools_common::resolve_input_path(Some(manifest))?;
+    let directory = manifest.parent().context("Manifest has no parent directory")?;
+    let content = fs::read_to_string(&manifest).with_context(|| format!("Failed to read {}", manifest.display()))?;
+    let document: DocumentMut = content
+        .parse()
+        .with_context(|| format!("Failed to parse {}", manifest.display()))?;
+    if document.contains_key("workspace") {
+        return Ok(directory.to_path_buf());
+    }
+    let explicit = document
+        .get("package")
+        .and_then(|package| package.get("workspace"))
+        .and_then(Item::as_str);
+    let candidate = if let Some(path) = explicit {
+        Some(cli_tools_common::resolve_input_path(Some(&directory.join(path)))?)
+    } else {
+        directory
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| is_workspace_manifest(&ancestor.join("Cargo.toml")))
+            .map(Path::to_path_buf)
+    };
+    let Some(candidate) = candidate else {
+        return Ok(directory.to_path_buf());
+    };
+    if !workspaces.contains_key(&candidate) {
+        workspaces.insert(candidate.clone(), CargoWorkspace::read(&candidate)?.member_manifests());
+    }
+    if workspaces
+        .get(&candidate)
+        .is_some_and(|members| members.contains(&manifest))
+    {
+        Ok(candidate)
+    } else {
+        Ok(directory.to_path_buf())
+    }
 }
 
 /// Check if the manifest at the given path exists and defines a workspace.
@@ -132,7 +213,12 @@ mod test_find_projects {
     fn write(root: &Path, relative: &str, content: &str) {
         let path = root.join(relative);
         fs::create_dir_all(path.parent().expect("has parent")).expect("create directories");
-        fs::write(path, content).expect("write file");
+        fs::write(&path, content).expect("write file");
+        if content.starts_with("[package]") {
+            let source = path.parent().unwrap().join("src");
+            fs::create_dir_all(&source).unwrap();
+            fs::write(source.join("lib.rs"), "").unwrap();
+        }
     }
 
     fn canonical_temp_dir() -> (TempDir, PathBuf) {
@@ -152,7 +238,7 @@ mod test_find_projects {
         write(&root, "ws/nested/Cargo.toml", "[workspace]\n");
         write(&root, "ws/nested/d/Cargo.toml", "[package]\nname = \"d\"\n");
 
-        let members = find_member_manifests(&workspace, &[workspace.clone(), workspace.join("nested")]);
+        let members = find_member_manifests(&workspace).unwrap();
 
         assert_eq!(
             members,
@@ -170,7 +256,10 @@ mod test_find_projects {
         write(&root, "ws/crates/a/Cargo.toml", "[package]\nname = \"a\"\n");
         write(&root, "ws/crates/b/Cargo.toml", "[package]\nname = \"b\"\n");
 
-        assert_eq!(find_projects(std::slice::from_ref(&root), 5), vec![root.join("ws")]);
+        assert_eq!(
+            find_projects(std::slice::from_ref(&root), 5).unwrap(),
+            vec![root.join("ws")]
+        );
     }
 
     #[test]
@@ -185,7 +274,7 @@ mod test_find_projects {
         );
 
         assert_eq!(
-            find_projects(std::slice::from_ref(&root), 5),
+            find_projects(std::slice::from_ref(&root), 5).unwrap(),
             vec![root.join("ws"), root.join("ws/rust/fuzz")]
         );
     }
@@ -197,7 +286,7 @@ mod test_find_projects {
         write(&root, "app/office/docker/Cargo.toml", "[package]\nname = \"docker\"\n");
 
         assert_eq!(
-            find_projects(std::slice::from_ref(&root), 5),
+            find_projects(std::slice::from_ref(&root), 5).unwrap(),
             vec![root.join("app"), root.join("app/office/docker")]
         );
     }
@@ -214,7 +303,10 @@ mod test_find_projects {
         write(&root, "web/node_modules/dep/Cargo.toml", "[package]\nname = \"dep\"\n");
         write(&root, ".hidden/Cargo.toml", "[package]\nname = \"hidden\"\n");
 
-        assert_eq!(find_projects(std::slice::from_ref(&root), 5), vec![root.join("app")]);
+        assert_eq!(
+            find_projects(std::slice::from_ref(&root), 5).unwrap(),
+            vec![root.join("app")]
+        );
     }
 
     #[test]
@@ -223,7 +315,55 @@ mod test_find_projects {
         write(&root, "ws/Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
         write(&root, "ws/crates/a/Cargo.toml", "[package]\nname = \"a\"\n");
 
-        assert_eq!(find_projects(&[root.join("ws/crates/a")], 5), vec![root.join("ws")]);
+        assert_eq!(
+            find_projects(&[root.join("ws/crates/a")], 5).unwrap(),
+            vec![root.join("ws")]
+        );
+    }
+
+    #[test]
+    fn cargo_membership_keeps_excluded_packages_separate() {
+        let tree = cli_tools_common::test_support::TempTree::new();
+        let root = tree.path().canonicalize().unwrap();
+        tree.file_with(
+            "ws/Cargo.toml",
+            "[workspace]\nmembers = ['app']\nexclude = ['legacy']\n",
+        );
+        for name in ["app", "legacy", "unlisted"] {
+            tree.file_with(
+                &format!("ws/{name}/Cargo.toml"),
+                format!("[package]\nname = '{name}'\nversion = '0.1.0'\n"),
+            );
+            tree.file(&format!("ws/{name}/src/lib.rs"));
+        }
+        let workspace = root.join("ws");
+        let legacy = workspace.join("legacy");
+        assert_eq!(find_projects(&[legacy.join("Cargo.toml")], 5).unwrap(), [legacy]);
+        assert_eq!(
+            find_member_manifests(&workspace).unwrap(),
+            [workspace.join("app/Cargo.toml")]
+        );
+    }
+
+    #[test]
+    fn cargo_membership_honors_an_explicit_workspace_over_the_nearest_one() {
+        let tree = cli_tools_common::test_support::TempTree::new();
+        let workspace = tree.path().canonicalize().unwrap();
+        tree.file_with("Cargo.toml", "[workspace]\nmembers = ['nested/app']\n");
+        tree.file_with("nested/Cargo.toml", "[workspace]\nmembers = []\n");
+        tree.file_with(
+            "nested/app/Cargo.toml",
+            "[package]\nname = 'app'\nversion = '0.1.0'\nworkspace = '../..'\n",
+        );
+        tree.file("nested/app/src/lib.rs");
+        assert_eq!(
+            find_projects(&[workspace.join("nested/app/Cargo.toml")], 5).unwrap(),
+            std::slice::from_ref(&workspace)
+        );
+        assert_eq!(
+            find_member_manifests(&workspace).unwrap(),
+            [workspace.join("nested/app/Cargo.toml")]
+        );
     }
 
     #[test]
@@ -232,10 +372,13 @@ mod test_find_projects {
         write(&root, "a/b/c/Cargo.toml", "[package]\nname = \"deep\"\n");
 
         assert_eq!(
-            find_projects(std::slice::from_ref(&root), 3),
+            find_projects(std::slice::from_ref(&root), 3).unwrap(),
             [] as [std::path::PathBuf; 0]
         );
-        assert_eq!(find_projects(std::slice::from_ref(&root), 4), vec![root.join("a/b/c")]);
+        assert_eq!(
+            find_projects(std::slice::from_ref(&root), 4).unwrap(),
+            vec![root.join("a/b/c")]
+        );
     }
 
     #[test]
@@ -243,7 +386,10 @@ mod test_find_projects {
         let (_temp, root) = canonical_temp_dir();
         write(&root, "app/Cargo.toml", "[package]\nname = \"app\"\n");
 
-        assert_eq!(find_projects(&[root.join("app/Cargo.toml")], 5), vec![root.join("app")]);
+        assert_eq!(
+            find_projects(&[root.join("app/Cargo.toml")], 5).unwrap(),
+            vec![root.join("app")]
+        );
     }
 }
 

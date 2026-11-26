@@ -16,7 +16,7 @@ use rayon::prelude::*;
 
 use cli_tools_common::{command_exists, count_label, get_relative_path_or_filename};
 
-use crate::discovery::{find_dockerfiles, find_member_manifests};
+use crate::discovery::{find_dockerfiles, find_member_manifests, find_nested_projects};
 use crate::dockerfile::update_dockerfile;
 use crate::manifest::{FieldLocation, ManifestUpdate, RustVersion, has_workspace_table, update_rust_version};
 use crate::registry::DigestResolver;
@@ -174,6 +174,16 @@ pub struct Report {
     pub entries: Vec<ReportEntry>,
 }
 
+/// Files and directory boundaries for a project update.
+struct ProjectScope {
+    /// Root manifest before any edits.
+    original: String,
+    /// Member manifests owned by this project.
+    members: Vec<PathBuf>,
+    /// Other projects nested under this root.
+    nested: Vec<PathBuf>,
+}
+
 /// Output of one external command.
 struct CommandResult {
     /// The command exited successfully.
@@ -285,6 +295,33 @@ impl Report {
     }
 }
 
+impl ProjectScope {
+    /// Read the manifest and resolve the membership and nested project boundaries before making edits.
+    fn new(root: &Path, roots: &[PathBuf]) -> Result<Self> {
+        let path = root.join("Cargo.toml");
+        let original = fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let members = if has_workspace_table(&original) {
+            find_member_manifests(root)?
+        } else {
+            Vec::new()
+        };
+        let mut nested = find_nested_projects(root, &members);
+        nested.extend(
+            roots
+                .iter()
+                .filter(|other| other.as_path() != root && other.starts_with(root))
+                .cloned(),
+        );
+        nested.sort_unstable();
+        nested.dedup();
+        Ok(Self {
+            original,
+            members,
+            nested,
+        })
+    }
+}
+
 impl CommandResult {
     /// Combine both streams for display, never for parsing.
     fn combined_output(&self) -> String {
@@ -325,8 +362,16 @@ pub fn bump_projects(
         .build()
         .context("Failed to build thread pool")?;
 
-    let git_states: Vec<Result<GitState>> =
-        pool.install(|| roots.par_iter().map(|root| GitState::read(root, roots)).collect());
+    let projects: Vec<Result<(ProjectScope, GitState)>> = pool.install(|| {
+        roots
+            .par_iter()
+            .map(|root| {
+                let scope = ProjectScope::new(root, roots)?;
+                let git = GitState::read(root, &scope.nested)?;
+                Ok((scope, git))
+            })
+            .collect()
+    });
 
     let resolver = DigestResolver::new()?;
     let commit_lock = Mutex::new(());
@@ -341,10 +386,10 @@ pub fn bump_projects(
     Ok(pool.install(|| {
         roots
             .par_iter()
-            .zip(git_states.par_iter())
-            .map(|(root, git)| {
-                let report = match git {
-                    Ok(git) => process_project(root, *git, &context),
+            .zip(projects.par_iter())
+            .map(|(root, project)| {
+                let report = match project {
+                    Ok((scope, git)) => process_scope(root, *git, &context, scope),
                     Err(error) => {
                         let mut report = Report::new(root.clone());
                         report.fail(format!("{error:#}"));
@@ -373,6 +418,18 @@ pub fn ensure_none_failed(reports: &[Report]) -> Result<()> {
 /// Run every step for one project.
 #[must_use]
 pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Report {
+    match ProjectScope::new(root, context.roots) {
+        Ok(scope) => process_scope(root, git, context, &scope),
+        Err(error) => {
+            let mut report = Report::new(root.to_path_buf());
+            report.fail(format!("{error:#}"));
+            report
+        }
+    }
+}
+
+/// Run the update within the known Cargo project boundaries.
+fn process_scope(root: &Path, git: GitState, context: &RunContext, scope: &ProjectScope) -> Report {
     let options = context.options;
     let mut report = Report::new(root.to_path_buf());
 
@@ -382,14 +439,14 @@ pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Repo
         return report;
     }
 
-    let mut rust_changed = match bump_manifest(&mut report, context) {
+    let mut rust_changed = match bump_manifest(&mut report, context, scope) {
         Ok(changed) => changed,
         Err(error) => {
             report.fail(format!("{error:#}"));
             return report;
         }
     };
-    match bump_dockerfiles(&mut report, context) {
+    match bump_dockerfiles(&mut report, context, &scope.nested) {
         Ok(changed) => rust_changed |= changed,
         Err(error) => {
             report.fail(format!("{error:#}"));
@@ -405,7 +462,7 @@ pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Repo
     }
 
     if options.commit && !options.dry_run {
-        commit_changes(&mut report, git, rust_changed, context);
+        commit_changes(&mut report, git, rust_changed, context, &scope.nested);
     }
     report
 }
@@ -413,25 +470,21 @@ pub fn process_project(root: &Path, git: GitState, context: &RunContext) -> Repo
 /// Bump `rust-version` in the project manifest.
 ///
 /// Returns whether the manifest changed.
-fn bump_manifest(report: &mut Report, context: &RunContext) -> Result<bool> {
+fn bump_manifest(report: &mut Report, context: &RunContext, scope: &ProjectScope) -> Result<bool> {
     let path = report.root.join("Cargo.toml");
-    let original = fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-    // Members that set their own rust-version instead of inheriting it are bumped too.
     let mut members_changed = false;
     let mut member_has_field = false;
-    if has_workspace_table(&original) {
-        for member in find_member_manifests(&report.root, context.roots) {
-            match bump_member_manifest(report, context, &member)? {
-                MemberUpdate::Updated => {
-                    members_changed = true;
-                    member_has_field = true;
-                }
-                MemberUpdate::Current => member_has_field = true,
-                MemberUpdate::NoField => {}
+    for member in &scope.members {
+        match bump_member_manifest(report, context, member)? {
+            MemberUpdate::Updated => {
+                members_changed = true;
+                member_has_field = true;
             }
+            MemberUpdate::Current => member_has_field = true,
+            MemberUpdate::NoField => {}
         }
     }
-    let root_changed = bump_root_manifest(report, context, &path, &original, member_has_field)?;
+    let root_changed = bump_root_manifest(report, context, &path, &scope.original, member_has_field)?;
     Ok(root_changed || members_changed)
 }
 
@@ -503,18 +556,11 @@ fn bump_member_manifest(report: &mut Report, context: &RunContext, path: &Path) 
 /// Pin the `rust` images in the project Dockerfiles.
 ///
 /// Returns whether any Dockerfile changed.
-fn bump_dockerfiles(report: &mut Report, context: &RunContext) -> Result<bool> {
+fn bump_dockerfiles(report: &mut Report, context: &RunContext, nested_roots: &[PathBuf]) -> Result<bool> {
     let root = report.root.clone();
-    let nested_roots: Vec<PathBuf> = context
-        .roots
-        .iter()
-        .filter(|other| other.as_path() != root && other.starts_with(&root))
-        .cloned()
-        .collect();
-
     let resolve = |tag: &str| context.resolver.resolve(tag);
     let mut changed = false;
-    for path in find_dockerfiles(&root, &nested_roots) {
+    for path in find_dockerfiles(&root, nested_roots) {
         let original = fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
         let update = update_dockerfile(&original, context.target, &resolve);
         let display = get_relative_path_or_filename(&path, &root);
@@ -614,7 +660,13 @@ fn run_cargo_steps(report: &mut Report, options: Options) -> bool {
 }
 
 /// Commit the project changes when there are any.
-fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, context: &RunContext) {
+fn commit_changes(
+    report: &mut Report,
+    git: GitState,
+    rust_changed: bool,
+    context: &RunContext,
+    nested_roots: &[PathBuf],
+) {
     if !git.is_repository {
         report.push(ReportEntry::NotARepository);
         return;
@@ -629,7 +681,7 @@ fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, contex
         return;
     };
     let root = report.root.clone();
-    match has_changes(&root, context.roots, "--untracked-files=no") {
+    match has_changes(&root, nested_roots, "--untracked-files=no") {
         Ok(false) => {
             report.push(ReportEntry::NothingToCommit);
             return;
@@ -642,7 +694,7 @@ fn commit_changes(report: &mut Report, git: GitState, rust_changed: bool, contex
     }
 
     let message = commit_message(context.target, rust_changed, context.options.update);
-    let pathspecs = pathspecs(&root, context.roots);
+    let pathspecs = pathspecs(&root, nested_roots);
     let mut add_args = vec!["add", "--update", "--"];
     add_args.extend(pathspecs.iter().map(String::as_str));
     let mut commit_args = vec!["commit", "--only", "--message", message.as_str(), "--"];
@@ -811,6 +863,7 @@ mod test_git_state {
             },
             true,
             &context,
+            &[],
         );
         assert!(
             report.committed,
@@ -834,13 +887,47 @@ mod test_bump_manifest {
     use super::*;
 
     #[test]
+    fn a_workspace_only_updates_files_belonging_to_its_members() {
+        let tree = cli_tools_common::test_support::TempTree::new();
+        let root = cli_tools_common::resolve_input_path(Some(tree.path())).unwrap();
+        tree.file_with("Cargo.toml", "[workspace]\nmembers = ['app']\nexclude = ['legacy']\n");
+        let original = "[package]\nname = 'legacy'\nrust-version = '1.90'\n";
+        tree.file_with("legacy/Cargo.toml", original);
+        tree.file("legacy/src/lib.rs");
+        tree.file_with("legacy/Dockerfile", "FROM rust:1\n");
+        tree.file_with("app/Cargo.toml", "[package]\nname = 'app'\nrust-version = '1.90'\n");
+        tree.file("app/src/lib.rs");
+        tree.file_with("app/Dockerfile", "FROM rust:1\n");
+        let resolver = DigestResolver::new().unwrap();
+        let context = RunContext {
+            target: RustVersion::new(1, 100, 0),
+            options: Options::default(),
+            resolver: &resolver,
+            roots: std::slice::from_ref(&root),
+            commit_lock: &Mutex::new(()),
+        };
+
+        let report = process_project(&root, GitState::default(), &context);
+
+        assert_eq!(report.outcome, Outcome::Updated, "{:?}", report.entries);
+        assert_eq!(tree.read("legacy/Cargo.toml"), original);
+        assert_eq!(tree.read("legacy/Dockerfile"), "FROM rust:1\n");
+        assert_eq!(tree.read("app/Dockerfile"), "FROM rust:1.100\n");
+    }
+
+    #[test]
     fn members_with_their_own_rust_version_are_bumped() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let root = directory.path().canonicalize().expect("canonical directory");
         let write = |relative: &str, content: &str| {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().expect("parent")).expect("create directories");
-            fs::write(path, content).expect("write manifest");
+            fs::write(&path, content).expect("write manifest");
+            if content.starts_with("[package]") {
+                let source = path.parent().unwrap().join("src");
+                fs::create_dir_all(&source).unwrap();
+                fs::write(source.join("lib.rs"), "").unwrap();
+            }
         };
         write(
             "Cargo.toml",

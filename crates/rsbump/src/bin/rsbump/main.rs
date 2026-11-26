@@ -117,7 +117,7 @@ fn run(config: &Config) -> Result<()> {
     }
     check_tools(config.options)?;
 
-    let roots = find_projects(&config.paths, config.max_depth);
+    let roots = find_projects(&config.paths, config.max_depth)?;
     if roots.is_empty() {
         print_yellow!("No Rust projects found");
         return Ok(());
