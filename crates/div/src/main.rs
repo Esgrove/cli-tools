@@ -90,7 +90,13 @@ fn divider_lines(texts: &[String], length: usize, character: char, align: bool) 
         let aligned_length: usize = length.saturating_sub(longest + 2) / 2;
         return texts
             .iter()
-            .map(|text| format_aligned_divider(text, length, character, aligned_length))
+            .map(|text| {
+                if aligned_length == 0 {
+                    format_centered_divider(text, length, character)
+                } else {
+                    format_aligned_divider(text, length, character, aligned_length)
+                }
+            })
             .collect();
     }
 
@@ -108,7 +114,7 @@ fn format_centered_divider(text: &str, count: usize, character: char) -> String 
     }
 
     let message_length: usize = text.chars().count() + 2;
-    if message_length > count {
+    if message_length >= count {
         text
     } else {
         let total_padding: usize = count - message_length;
@@ -125,12 +131,13 @@ fn format_aligned_divider(text: &str, count: usize, character: char, padding_lef
     }
 
     let message_length: usize = text.chars().count() + 2;
-    if message_length > count {
+    if message_length >= count {
         text
     } else {
         let total_padding: usize = count - message_length;
-        let padding_right: usize = total_padding.saturating_sub(padding_left);
-        format_div_with_text(padding_left, &text, padding_right, &div)
+        let clamped_left = padding_left.min(total_padding);
+        let padding_right: usize = total_padding - clamped_left;
+        format_div_with_text(clamped_left, &text, padding_right, &div)
     }
 }
 
@@ -274,5 +281,17 @@ mod test_divider_lines {
         assert_eq!(args.length, 20);
         assert_eq!(args.character, '=');
         assert!(args.align);
+    }
+
+    #[test]
+    fn exact_message_width_omits_blank_padding_and_aligned_padding_is_clamped() {
+        assert_eq!(format_centered_divider("hello", 7, '%'), "HELLO");
+        let clamped = format_aligned_divider("Textmore", 13, '-', 10);
+        assert_eq!(clamped.chars().count(), 13);
+        assert_eq!(clamped, "--- TEXTMORE ");
+
+        let lines = divider_lines(&texts(&["very long header text", "short"]), 15, '#', true);
+        assert_eq!(lines[0], "VERY LONG HEADER TEXT");
+        assert_eq!(lines[1], "#### SHORT ####");
     }
 }
