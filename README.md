@@ -232,7 +232,11 @@ and `yyyy-mm-dd` for directories.
 ```console
 Flip dates in file and directory names to start with year
 
-Usage: flipdate [OPTIONS] [PATH]
+Usage: flipdate [OPTIONS] [PATH] [COMMAND]
+
+Commands:
+  completion  Generate shell completion script
+  help        Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATH]  Optional input directory or file

@@ -39,16 +39,21 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
 
     let mut files_to_rename: Vec<RenameItem> = Vec::new();
     for file in files {
-        let filename = file
-            .file_name()
-            .context("Failed to get filename")?
-            .to_string_lossy()
-            .into_owned();
+        let Some(filename) = file.file_name().and_then(std::ffi::OsStr::to_str) else {
+            if config.verbose {
+                eprintln!(
+                    "{}",
+                    format!("Skipping non-UTF-8 filename: {}", file.display()).yellow()
+                );
+            }
+            continue;
+        };
 
         if let Some(new_name) =
-            Date::reorder_filename_date(&filename, config.year_first, config.swap_year, config.verbose)
+            Date::reorder_filename_date(filename, config.year_first, config.swap_year, config.verbose)
             && new_name.to_lowercase() != filename.to_lowercase()
         {
+            let filename = filename.to_string();
             files_to_rename.push(RenameItem {
                 path: file,
                 filename,
@@ -254,7 +259,7 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[String], recurse: bool) ->
                     && path.extension().is_some_and(|ext| {
                         file_extensions
                             .iter()
-                            .any(|e| ext.to_str().is_some_and(|ext_str| e == ext_str))
+                            .any(|e| ext.to_str().is_some_and(|ext_str| e.eq_ignore_ascii_case(ext_str)))
                     })
             })
             .collect();
@@ -277,11 +282,13 @@ fn directories_to_rename(path: PathBuf, recurse: bool) -> Result<Vec<RenameItem>
     {
         let entry = entry.context("Failed to read directory entry")?;
         if entry.path().is_dir() {
-            let filename = entry.file_name().to_string_lossy().into_owned();
-            if let Some(new_name) = Date::reorder_directory_date(&filename) {
+            let Some(filename) = entry.file_name().to_str() else {
+                continue;
+            };
+            if let Some(new_name) = Date::reorder_directory_date(filename) {
                 directories_to_rename.push(RenameItem {
                     path: entry.path().to_path_buf(),
-                    filename,
+                    filename: filename.to_string(),
                     new_name,
                 });
             }
@@ -1024,8 +1031,21 @@ mod test_nested_trees {
 
         flip_files(&tree, &file_config(true, false, false));
 
+        assert!(path.exists(), "non-UTF-8 file must not be corrupted into U+FFFD name");
         assert_eq!(tree.files().len(), 1, "{:?}", tree.files());
         assert_eq!(contents(&tree), BTreeSet::from(["data".to_string()]));
+    }
+
+    #[test]
+    fn uppercase_extensions_are_renamed_in_directory_scans() {
+        let tree = TempTree::new();
+        tree.file_with("Photo 01.02.2020.JPG", "img");
+        tree.file_with("Clip 31.12.2023.MP4", "vid");
+
+        flip_files(&tree, &file_config(false, false, false));
+
+        assert!(tree.exists("Photo 2020.02.01.JPG"), "{:?}", tree.snapshot());
+        assert!(tree.exists("Clip 2023.12.31.MP4"), "{:?}", tree.snapshot());
     }
 
     #[test]
