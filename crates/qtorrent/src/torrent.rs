@@ -320,6 +320,10 @@ impl FileFilter {
 
         // Check extension
         if let Some(extension) = file.lowercase_extension() {
+            if self.skip_extensions.contains(&extension) {
+                return Some(format!("extension: .{extension}"));
+            }
+
             if is_image_extension(&extension) {
                 if !self.include_images {
                     return Some(format!("images disabled: .{extension}"));
@@ -336,10 +340,6 @@ impl FileFilter {
                 }
 
                 return None;
-            }
-
-            if self.skip_extensions.contains(&extension) {
-                return Some(format!("extension: .{extension}"));
             }
         }
 
@@ -1059,6 +1059,19 @@ mod test_file_filter {
         let reason = filter.should_exclude(&file);
 
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn explicitly_excluded_image_extension_wins_when_images_are_enabled() {
+        let filter = FileFilter::new(vec!["jpg".to_string()], vec![], None, true, None, Some(3));
+        let jpeg = make_file_info("movie/poster.JPG", 1_000_000);
+        let png = make_file_info("movie/poster.png", 1_000_000);
+
+        assert_eq!(
+            filter.should_exclude_with_image_count(&jpeg, 3).as_deref(),
+            Some("extension: .jpg")
+        );
+        assert!(filter.should_exclude_with_image_count(&png, 3).is_none());
     }
 
     #[test]
