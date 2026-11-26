@@ -13,11 +13,12 @@ use crate::observer::FilePosition;
 use crate::types::ProcessableFile;
 
 impl VideoConvert<'_> {
-    /// Process all files that need renaming. Returns the number of files successfully renamed.
-    pub(super) fn process_renames(&self, files: &[ProcessableFile], abort_flag: &AtomicBool) -> usize {
+    /// Process the renames and return the counts of successful and failed attempts.
+    pub(super) fn process_renames(&self, files: &[ProcessableFile], abort_flag: &AtomicBool) -> (usize, usize) {
         let start = Instant::now();
         let total = files.len();
         let mut renamed_count = 0;
+        let mut failed_count = 0;
 
         for (index, file) in files.iter().enumerate() {
             if abort_flag.load(Ordering::SeqCst) {
@@ -40,12 +41,15 @@ impl VideoConvert<'_> {
             match cli_tools_common::safe_rename(&file.file.path, &file.output_path, OverwritePolicy::Skip) {
                 Ok(RenameOutcome::SkippedExisting) => self.observer.rename_skipped_existing(&file.output_path),
                 Ok(_) => renamed_count += 1,
-                Err(error) => self.observer.rename_failed(&file.file.path, &error.into()),
+                Err(error) => {
+                    failed_count += 1;
+                    self.observer.rename_failed(&file.file.path, &error.into());
+                }
             }
         }
 
         self.observer.renames_finished(renamed_count, total, start.elapsed());
-        renamed_count
+        (renamed_count, failed_count)
     }
 }
 
@@ -67,7 +71,7 @@ mod test_process_renames {
 
         let renamed = converter.process_renames(&[file], &AtomicBool::new(false));
 
-        assert_eq!(renamed, 1);
+        assert_eq!(renamed, (1, 0));
         assert!(!path.exists());
         assert!(output.is_file());
     }
@@ -84,7 +88,7 @@ mod test_process_renames {
 
         let renamed = converter.process_renames(&[processable(&path, "hevc")], &AtomicBool::new(false));
 
-        assert_eq!(renamed, 1);
+        assert_eq!(renamed, (1, 0));
         assert!(path.is_file());
     }
 
@@ -108,20 +112,20 @@ mod test_process_renames {
 
         let renamed = converter.process_renames(&files, &AtomicBool::new(false));
 
-        assert_eq!(renamed, 1);
+        assert_eq!(renamed, (1, 0));
         assert_eq!(std::fs::read(&output).expect("output should exist"), b"FIRST");
         assert_eq!(std::fs::read(&second).expect("second file should remain"), b"SECOND");
     }
 
     #[test]
-    fn a_failed_rename_is_not_counted() {
+    fn a_failed_rename_is_counted_separately() {
         let directory = tempfile::tempdir().expect("Failed to create temporary directory");
         let missing = directory.path().join("Missing.mp4");
         let converter = converter(ConvertOptions::default());
 
         assert_eq!(
             converter.process_renames(&[processable(&missing, "hevc")], &AtomicBool::new(false)),
-            0
+            (0, 1)
         );
     }
 }

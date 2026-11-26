@@ -81,10 +81,9 @@ impl<'a> VideoConvert<'a> {
     /// # Errors
     /// Returns an error if an input path does not exist.
     pub fn run(&self, database: &mut Database, abort_flag: &AtomicBool) -> Result<Option<RunSummary>> {
-        let mut stats = RunStats::default();
         if abort_flag.load(Ordering::SeqCst) {
             return Ok(Some(RunSummary {
-                stats,
+                stats: RunStats::default(),
                 outcome: ProcessingOutcome::Aborted,
             }));
         }
@@ -101,10 +100,11 @@ impl<'a> VideoConvert<'a> {
         };
         self.observer.analysis_started(candidate_files.len());
 
-        let analysis_output = self.analyze_files(candidate_files, database, subtitle_matches, abort_flag);
-
+        let (analysis_output, mut stats) = self.analyze_files(candidate_files, database, subtitle_matches, abort_flag);
         if !analysis_output.renames.is_empty() && !abort_flag.load(Ordering::SeqCst) {
-            stats.files_renamed = self.process_renames(&analysis_output.renames, abort_flag);
+            let (renamed, failed) = self.process_renames(&analysis_output.renames, abort_flag);
+            stats.files_renamed = renamed;
+            stats.files_failed += failed;
         }
         if abort_flag.load(Ordering::SeqCst) {
             return Ok(Some(RunSummary {

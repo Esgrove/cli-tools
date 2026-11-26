@@ -53,9 +53,14 @@ toml = { workspace = true, optional = true }
 trash = { workspace = true, optional = true }
 
 [dev-dependencies]
+cli-tools-common = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+
+[[test]]
+name = "qtorrent_cli_tests"
+required-features = ["cli"]
 
 [lints]
 workspace = true

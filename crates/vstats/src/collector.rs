@@ -103,6 +103,10 @@ impl StatsCollector {
 
         stats.print_summary(self.verbose);
 
+        anyhow::ensure!(
+            error_count == 0 || !probed_files.is_empty(),
+            "No video files could be probed"
+        );
         Ok(())
     }
 
@@ -431,36 +435,6 @@ mod test_sort_for_listing {
 #[cfg(test)]
 mod test_run {
     use super::*;
-
-    #[test]
-    fn verbose_run_over_files_that_are_not_real_videos_completes() -> anyhow::Result<()> {
-        let temp_directory = tempfile::TempDir::new()?;
-        let root = temp_directory.path().join("videos");
-        std::fs::create_dir(&root)?;
-        std::fs::write(root.join("first.mp4"), b"not a video")?;
-        std::fs::write(root.join("second.mkv"), b"not a video either")?;
-
-        StatsCollector::new(Config {
-            root,
-            recurse: false,
-            verbose: true,
-        })
-        .run()
-    }
-
-    #[test]
-    fn quiet_run_over_a_single_file_completes() -> anyhow::Result<()> {
-        let temp_directory = tempfile::TempDir::new()?;
-        let video = temp_directory.path().join("clip.mp4");
-        std::fs::write(&video, b"not a video")?;
-
-        StatsCollector::new(Config {
-            root: video,
-            recurse: false,
-            verbose: false,
-        })
-        .run()
-    }
 
     #[test]
     fn non_recursive_discovery_skips_hidden_files_and_symlinks() -> anyhow::Result<()> {

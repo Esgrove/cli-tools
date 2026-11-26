@@ -29,6 +29,7 @@ cli-tools-common = { workspace = true, features = ["async", "completion"] }
 tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
+cli-tools-common = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 
 [lints]

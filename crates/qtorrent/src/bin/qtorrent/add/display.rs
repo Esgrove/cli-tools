@@ -18,12 +18,12 @@ use cli_tools_qtorrent::{TorrentInfo, TorrentListItem, find_existing_torrent};
 use super::QTorrent;
 
 impl QTorrent {
-    /// Print dry-run summary of all torrents.
+    /// Print the dry-run summary and report whether any torrent would be added.
     pub(super) fn print_dryrun_summary(
         &self,
         torrents: &[TorrentInfo],
         existing_torrents: Option<&HashMap<String, TorrentListItem>>,
-    ) {
+    ) -> bool {
         let total = torrents.len();
 
         let mut duplicate_count = 0;
@@ -65,6 +65,7 @@ impl QTorrent {
                 println!("  {} Already exists as: {}", "⊘".yellow(), existing_item.name.cyan());
             }
         }
+        skipped_total < total
     }
 
     /// Print information about a single torrent.

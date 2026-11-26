@@ -65,23 +65,26 @@ impl QTorrent {
             bail!("No torrent files found");
         }
 
-        // Parse all torrent files first
         let torrents = self.parse_torrents(&torrent_paths);
+        let parse_failed = torrents.len() < torrent_paths.len();
 
         if torrents.is_empty() {
             println!("{}", "No valid torrents to add".yellow());
-            return Ok(());
+            bail!("All input torrents failed to parse");
         }
 
-        if self.config.dryrun {
-            return self.run_dryrun(torrents).await;
-        }
-
-        self.add_torrents_individually(torrents).await
+        let (failed, succeeded) = if self.config.dryrun {
+            (parse_failed, self.run_dryrun(torrents).await?)
+        } else {
+            let stats = self.add_torrents_individually(torrents).await?;
+            (parse_failed || stats.error > 0, stats.success + stats.renamed > 0)
+        };
+        anyhow::ensure!(!failed || succeeded, "No requested torrent work succeeded");
+        Ok(())
     }
 
     /// Connect to qBittorrent and add torrents one by one with individual confirmation.
-    async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<()> {
+    async fn add_torrents_individually(&self, torrents: Vec<TorrentInfo>) -> Result<TorrentStats> {
         self.add_torrents_with_collision_handlers(
             torrents,
             |existing, prompt| self.confirm_downloaded_collision(existing, prompt),
@@ -97,7 +100,7 @@ impl QTorrent {
         torrents: Vec<TorrentInfo>,
         confirm_collision: impl Fn(&Path, &str) -> Result<bool>,
         mut trash_duplicate: impl FnMut(&Path),
-    ) -> Result<()> {
+    ) -> Result<TorrentStats> {
         let mut client = client::connect(&self.config.connection, self.config.verbose).await?;
         let adder = TorrentAdder::new(&client, &self.config.add_options, &self.names);
         let mut printer = EventPrinter::new(self.config.verbose);
@@ -174,7 +177,7 @@ impl QTorrent {
                     Ok(false) => stats.inc_duplicate(),
                     Err(error) => {
                         cli_tools_common::print_error!("Failed to rename: {error}");
-                        stats.inc_duplicate();
+                        stats.inc_error();
                     }
                 }
 
@@ -244,37 +247,33 @@ impl QTorrent {
 
         printer::print_summary(&stats);
 
-        Ok(())
+        Ok(stats)
     }
 
-    /// Show what would be added, with the suggested names and the torrents that already exist.
-    async fn run_dryrun(self, torrents: Vec<TorrentInfo>) -> Result<()> {
+    /// Show what would be added and report whether at least one torrent would be submitted.
+    async fn run_dryrun(self, torrents: Vec<TorrentInfo>) -> Result<bool> {
         let torrents_with_names = self.preview_torrents(torrents);
 
-        if self.config.offline {
-            self.print_dryrun_summary(&torrents_with_names, None);
-            return Ok(());
-        }
-
-        if !self.config.connection.has_credentials() {
+        let existing_torrents = if self.config.offline {
+            None
+        } else if !self.config.connection.has_credentials() {
             cli_tools_common::print_yellow!("No credentials configured. Use --offline to skip qBittorrent connection.");
-            self.print_dryrun_summary(&torrents_with_names, None);
-            return Ok(());
-        }
-
-        match client::connect(&self.config.connection, self.config.verbose).await {
-            Ok(mut client) => {
-                let existing_torrents = client.get_torrent_list().await;
-                client::logout(&mut client).await;
-                self.print_dryrun_summary(&torrents_with_names, Some(&existing_torrents?));
+            None
+        } else {
+            match client::connect(&self.config.connection, self.config.verbose).await {
+                Ok(mut client) => {
+                    let existing_torrents = client.get_torrent_list().await;
+                    client::logout(&mut client).await;
+                    Some(existing_torrents?)
+                }
+                Err(error) => {
+                    cli_tools_common::print_yellow!("Failed to connect: {error}");
+                    None
+                }
             }
-            Err(error) => {
-                cli_tools_common::print_yellow!("Failed to connect: {error}");
-                self.print_dryrun_summary(&torrents_with_names, None);
-            }
-        }
+        };
 
-        Ok(())
+        Ok(self.print_dryrun_summary(&torrents_with_names, existing_torrents.as_ref()))
     }
 
     /// Prepare names for the dry run without asking interactive questions.
@@ -521,7 +520,7 @@ mod test_add_workflow {
         routes.push(route("/api/v2/torrents/add", 415, ""));
         let port = serve(routes).await;
 
-        connected_qtorrent(&directory, port, &[]).run().await?;
+        assert!(connected_qtorrent(&directory, port, &[]).run().await.is_err());
 
         assert!(directory.torrent_path.is_file());
         assert!(!directory.moved_torrent_path().exists());
@@ -581,7 +580,7 @@ mod test_add_workflow {
         routes.push(route("/api/v2/torrents/add", 200, "<html>Sign in</html>"));
         let port = serve(routes).await;
 
-        connected_qtorrent(&directory, port, &[]).run().await?;
+        assert!(connected_qtorrent(&directory, port, &[]).run().await.is_err());
 
         assert!(directory.torrent_path.is_file());
         assert!(!directory.moved_torrent_path().exists());

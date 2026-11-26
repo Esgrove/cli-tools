@@ -35,6 +35,9 @@ pub struct RunStats {
     pub files_remuxed: usize,
     pub files_subtitle_muxed: usize,
     pub files_converted: usize,
+    /// Files successfully deleted or previewed for deletion as verified duplicates.
+    pub duplicates_deleted: usize,
+    /// Files that encountered a processing error, including analysis and rename failures.
     pub files_failed: usize,
     pub total_original_size: u64,
     pub total_converted_size: u64,
@@ -118,6 +121,17 @@ impl ConversionStats {
 }
 
 impl RunStats {
+    /// Whether any processing operation succeeded or was previewed successfully.
+    #[must_use]
+    pub const fn has_successes(&self) -> bool {
+        self.files_renamed
+            + self.files_remuxed
+            + self.files_subtitle_muxed
+            + self.files_converted
+            + self.duplicates_deleted
+            > 0
+    }
+
     /// Record the result of processing a file.
     pub(crate) fn add_result(&mut self, result: &ProcessResult, duration: Duration) {
         self.total_duration += duration;
@@ -173,6 +187,7 @@ impl AddAssign<Self> for RunStats {
         self.files_remuxed += other.files_remuxed;
         self.files_subtitle_muxed += other.files_subtitle_muxed;
         self.files_renamed += other.files_renamed;
+        self.duplicates_deleted += other.duplicates_deleted;
         self.files_failed += other.files_failed;
         self.total_original_size += other.total_original_size;
         self.total_converted_size += other.total_converted_size;
@@ -186,6 +201,7 @@ impl AddAssign<&Self> for RunStats {
         self.files_remuxed += other.files_remuxed;
         self.files_subtitle_muxed += other.files_subtitle_muxed;
         self.files_renamed += other.files_renamed;
+        self.duplicates_deleted += other.duplicates_deleted;
         self.files_failed += other.files_failed;
         self.total_original_size += other.total_original_size;
         self.total_converted_size += other.total_converted_size;
@@ -443,6 +459,7 @@ mod run_stats_tests {
             files_remuxed: 3,
             files_subtitle_muxed: 1,
             files_renamed: 2,
+            duplicates_deleted: 1,
             files_failed: 1,
             total_original_size: 1_000_000,
             total_converted_size: 500_000,
@@ -453,6 +470,7 @@ mod run_stats_tests {
             files_remuxed: 2,
             files_subtitle_muxed: 4,
             files_renamed: 1,
+            duplicates_deleted: 1,
             files_failed: 0,
             total_original_size: 500_000,
             total_converted_size: 250_000,
@@ -464,6 +482,7 @@ mod run_stats_tests {
         assert_eq!(stats1.files_remuxed, 5);
         assert_eq!(stats1.files_subtitle_muxed, 5);
         assert_eq!(stats1.files_renamed, 3);
+        assert_eq!(stats1.duplicates_deleted, 2);
         assert_eq!(stats1.files_failed, 1);
         assert_eq!(stats1.total_original_size, 1_500_000);
         assert_eq!(stats1.total_converted_size, 750_000);
