@@ -155,8 +155,9 @@ fn find_hash_matches_with_cache(
     let mut hash_values = Vec::with_capacity(collection.candidates.len());
     let mut cache_misses = Vec::new();
     for candidate in collection.candidates {
-        let path_key = candidate.path.to_string_lossy();
-        if let Some(cached) = cached_entries.get(path_key.as_ref())
+        // Like cache writes, lookups require a lossless path key.
+        if let Some(path_key) = candidate.path.to_str()
+            && let Some(cached) = cached_entries.get(path_key)
             && cached.is_current(candidate.fingerprint.size_bytes, candidate.fingerprint.modified_time_ns)
         {
             hash_values.push(IndexedFileHash {
@@ -363,6 +364,53 @@ mod test_hash_matches {
 
         let cached_matches = find_hash_matches_with_cache(&files, false, Some(&mut cache));
         assert_eq!(cached_matches, matches);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_path_does_not_use_the_literal_replacement_characters_cached_hash() {
+        let tree = cli_tools_common::test_support::TempTree::new();
+        let Some(raw_path) = tree.non_utf8_file("videos", "clip", "mp4") else {
+            return;
+        };
+        fs::write(&raw_path, b"RAW").unwrap();
+        let replacement_path = tree.file_with("videos/clip\u{fffd}.mp4", b"UTF");
+        let matching_path = tree.file_with("videos/matching.mp4", b"RAW");
+        assert!(raw_path.to_str().is_none());
+        assert_eq!(raw_path.to_string_lossy(), replacement_path.to_str().unwrap());
+
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for path in [&raw_path, &replacement_path] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+        let fingerprint = fingerprint_file(&replacement_path).unwrap();
+        assert_eq!(fingerprint_file(&raw_path).unwrap(), fingerprint);
+        let replacement_hash = CachedFileHash {
+            size_bytes: fingerprint.size_bytes,
+            modified_time_ns: fingerprint.modified_time_ns,
+            blake3_hash: blake3::hash(b"UTF").to_string(),
+        };
+        let mut cache = ScanCache::open_at(&tree.join("hash-cache.db")).unwrap();
+        assert_eq!(
+            cache
+                .batch_upsert_hashes(&[(&replacement_path, &replacement_hash)])
+                .unwrap(),
+            1
+        );
+        let files = [
+            DupeFileInfo::new(raw_path, "mp4".to_string()),
+            DupeFileInfo::new(replacement_path, "mp4".to_string()),
+            DupeFileInfo::new(matching_path, "mp4".to_string()),
+        ];
+
+        let matches = find_hash_matches_with_cache(&files, false, Some(&mut cache));
+
+        assert_eq!(matches, vec![vec![0, 2]]);
     }
 
     #[test]
