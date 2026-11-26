@@ -11,28 +11,31 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rusqlite::params;
 
-use super::Database;
+use super::{Database, file_modified_time_ns};
 use crate::types::VideoInfo;
 
 impl Database {
     /// Insert or update a scanned file cache entry.
     ///
     /// Called after every ffprobe run so the result can be reused on subsequent scans without re-running ffprobe,
-    /// as long as the file size has not changed.
+    /// as long as the file size and modification time have not changed.
     ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn upsert_scanned_file(&self, path: &Path, info: &VideoInfo) -> Result<()> {
-        let path_str = path.to_string_lossy();
+        let Some(path_str) = path.to_str() else {
+            return Ok(());
+        };
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs() as i64);
+        let modified_time_ns = file_modified_time_ns(path);
 
         self.connection
             .execute(
                 r"
-                INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 ON CONFLICT(full_path) DO UPDATE SET
                     size_bytes = excluded.size_bytes,
                     codec = excluded.codec,
@@ -42,7 +45,8 @@ impl Database {
                     height = excluded.height,
                     frames_per_second = excluded.frames_per_second,
                     bit_depth = excluded.bit_depth,
-                    scanned_time = excluded.scanned_time
+                    scanned_time = excluded.scanned_time,
+                    modified_time_ns = excluded.modified_time_ns
                 ",
                 params![
                     path_str,
@@ -55,6 +59,7 @@ impl Database {
                     info.frames_per_second,
                     i64::from(info.bit_depth),
                     now,
+                    modified_time_ns,
                 ],
             )
             .context("Failed to upsert scanned file")?;
@@ -84,12 +89,15 @@ impl Database {
         let mut count = 0;
 
         for (path, info) in entries {
-            let path_str = path.to_string_lossy();
+            let Some(path_str) = path.to_str() else {
+                continue;
+            };
+            let modified_time_ns = file_modified_time_ns(path);
             transaction
                 .execute(
                     r"
-                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time, modified_time_ns)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                     ON CONFLICT(full_path) DO UPDATE SET
                         size_bytes = excluded.size_bytes,
                         codec = excluded.codec,
@@ -99,7 +107,8 @@ impl Database {
                         height = excluded.height,
                         frames_per_second = excluded.frames_per_second,
                         bit_depth = excluded.bit_depth,
-                        scanned_time = excluded.scanned_time
+                        scanned_time = excluded.scanned_time,
+                        modified_time_ns = excluded.modified_time_ns
                     ",
                     params![
                         path_str,
@@ -112,6 +121,7 @@ impl Database {
                         info.frames_per_second,
                         i64::from(info.bit_depth),
                         now,
+                        modified_time_ns,
                     ],
                 )
                 .context("Failed to upsert scanned file")?;
@@ -192,6 +202,41 @@ impl Database {
                     warning: None,
                 };
                 Ok((path, info))
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Load all scanned file cache entries alongside their recorded nanosecond modification times.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails.
+    pub(crate) fn get_all_scanned_files_with_mtime(&self) -> Result<HashMap<String, (VideoInfo, i64)>> {
+        let mut statement = self.connection.prepare(
+            r"
+            SELECT full_path, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, modified_time_ns
+            FROM scanned_files
+            ",
+        )?;
+
+        let entries = statement
+            .query_map([], |row| {
+                let path: String = row.get(0)?;
+                let info = VideoInfo {
+                    codec: row.get(1)?,
+                    bitrate_kbps: row.get::<_, i64>(2)? as u64,
+                    size_bytes: row.get::<_, i64>(3)? as u64,
+                    duration: row.get(4)?,
+                    width: row.get::<_, i64>(5)? as u32,
+                    height: row.get::<_, i64>(6)? as u32,
+                    frames_per_second: row.get(7)?,
+                    bit_depth: row.get::<_, i64>(8)? as u8,
+                    warning: None,
+                };
+                let modified_time_ns: i64 = row.get(9)?;
+                Ok((path, (info, modified_time_ns)))
             })?
             .filter_map(std::result::Result::ok)
             .collect();

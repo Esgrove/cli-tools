@@ -67,7 +67,12 @@ pub struct PendingFile {
     #[allow(dead_code)]
     pub created_time: i64,
     /// File's modification time when scanned, used to detect later changes.
+    /// File modification time in whole seconds since the Unix epoch, if recorded.
     pub modified_time: Option<i64>,
+    /// File modification time in nanoseconds since the Unix epoch (0 if unrecorded).
+    pub modified_time_ns: i64,
+    /// On-disk byte size recorded when the file was scanned, if available.
+    pub disk_size_bytes: Option<u64>,
 }
 
 /// Statistics about the database contents.
@@ -248,14 +253,14 @@ impl Database {
                     height INTEGER NOT NULL,
                     frames_per_second REAL NOT NULL,
                     bit_depth INTEGER NOT NULL DEFAULT 0,
-                    scanned_time INTEGER NOT NULL
+                    scanned_time INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
 
-                -- Remove entries with invalid fps
-                -- (written by older versions that accepted 0 or timebase values).
-                DELETE FROM scanned_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
+                -- Remove entries with corrupted fps while keeping 0.0 rows shared with dupefind.
+                DELETE FROM scanned_files WHERE (frames_per_second > 0.0 AND frames_per_second < 1.0) OR frames_per_second > 240.0;
                 DELETE FROM pending_files WHERE frames_per_second < 1.0 OR frames_per_second > 240.0;
 
                 -- Performance optimizations
@@ -267,10 +272,10 @@ impl Database {
             .context("Failed to initialize database schema")?;
 
         self.add_column_if_missing("pending_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("pending_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("pending_files", "disk_size_bytes", "INTEGER")?;
         self.add_column_if_missing("scanned_files", "bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
-        self.connection
-            .execute("DELETE FROM scanned_files WHERE bit_depth < 8", [])
-            .context("Failed to remove stale scan cache entries without bit depth")?;
+        self.add_column_if_missing("scanned_files", "modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
 
         Ok(())
     }
@@ -286,12 +291,17 @@ impl Database {
             .any(|name| name == column_name);
 
         if !column_exists {
-            self.connection
-                .execute(
-                    &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
-                    [],
-                )
-                .with_context(|| format!("Failed to add {column_name} column to {table_name}"))?;
+            match self.connection.execute(
+                &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"),
+                [],
+            ) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
+                    if message.contains("duplicate column name") => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("Failed to add {column_name} column to {table_name}"));
+                }
+            }
         }
         Ok(())
     }
@@ -307,18 +317,22 @@ impl Database {
         info: &VideoInfo,
         action: PendingAction,
     ) -> Result<i64> {
-        let path_str = path.to_string_lossy();
+        let Some(path_str) = path.to_str() else {
+            return Ok(0);
+        };
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_secs() as i64);
 
         let modified_time = file_modified_time(path);
+        let modified_time_ns = file_modified_time_ns(path);
+        let disk_size_bytes = file_disk_size(path);
 
         self.connection
             .execute(
                 r"
-                INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 ON CONFLICT(full_path) DO UPDATE SET
                     extension = excluded.extension,
                     codec = excluded.codec,
@@ -330,7 +344,9 @@ impl Database {
                     frames_per_second = excluded.frames_per_second,
                     bit_depth = excluded.bit_depth,
                     action = excluded.action,
-                    modified_time = excluded.modified_time
+                    modified_time = excluded.modified_time,
+                    modified_time_ns = excluded.modified_time_ns,
+                    disk_size_bytes = excluded.disk_size_bytes
                 ",
                 params![
                     path_str,
@@ -346,6 +362,8 @@ impl Database {
                     action.as_str(),
                     now,
                     modified_time,
+                    modified_time_ns,
+                    disk_size_bytes.map(|size| size as i64),
                 ],
             )
             .context("Failed to insert pending file")?;
@@ -377,14 +395,18 @@ impl Database {
         let mut count = 0;
 
         for (path, extension, info, action) in entries {
-            let path_str = path.to_string_lossy();
+            let Some(path_str) = path.to_str() else {
+                continue;
+            };
             let modified_time = file_modified_time(path);
+            let modified_time_ns = file_modified_time_ns(path);
+            let disk_size_bytes = file_disk_size(path);
 
             transaction
                 .execute(
                     r"
-                    INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    INSERT INTO pending_files (full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                     ON CONFLICT(full_path) DO UPDATE SET
                         extension = excluded.extension,
                         codec = excluded.codec,
@@ -396,7 +418,9 @@ impl Database {
                         frames_per_second = excluded.frames_per_second,
                         bit_depth = excluded.bit_depth,
                         action = excluded.action,
-                        modified_time = excluded.modified_time
+                        modified_time = excluded.modified_time,
+                        modified_time_ns = excluded.modified_time_ns,
+                        disk_size_bytes = excluded.disk_size_bytes
                     ",
                     params![
                         path_str,
@@ -412,6 +436,8 @@ impl Database {
                         action.as_str(),
                         now,
                         modified_time,
+                        modified_time_ns,
+                        disk_size_bytes.map(|size| size as i64),
                     ],
                 )
                 .context("Failed to insert pending file")?;
@@ -499,7 +525,7 @@ impl Database {
 
         let sql = format!(
             r"
-            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes
             FROM pending_files
             {where_clause}
             {order_clause}
@@ -529,7 +555,7 @@ impl Database {
 
         let mut statement = self.connection.prepare(
             r"
-            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time
+            SELECT id, full_path, extension, codec, bitrate_kbps, size_bytes, duration, width, height, frames_per_second, bit_depth, action, created_time, modified_time, modified_time_ns, disk_size_bytes
             FROM pending_files
             WHERE full_path = ?1
             ",
@@ -735,14 +761,31 @@ impl PendingFile {
         }
     }
 
-    /// Whether the file on disk has a different modification time than when it was scanned.
+    /// Whether the file on disk has a different size or modification time than when it was scanned.
     ///
-    /// Entries without a stored time, or files whose time cannot be read, count as unchanged.
+    /// Entries without a stored time, or files whose metadata cannot be read, count as unchanged.
     #[must_use]
     pub fn is_changed_on_disk(&self) -> bool {
-        self.modified_time
-            .zip(file_modified_time(&self.full_path))
-            .is_some_and(|(stored, current)| stored != current)
+        let Some(stored_secs) = self.modified_time else {
+            return false;
+        };
+        let Ok(metadata) = std::fs::metadata(&self.full_path) else {
+            return false;
+        };
+        if let Some(stored_disk_size) = self.disk_size_bytes
+            && metadata.len() != stored_disk_size
+        {
+            return true;
+        }
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        if self.modified_time_ns != 0 {
+            return system_time_to_unix_nanos(modified) != self.modified_time_ns;
+        }
+        modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .is_ok_and(|duration| duration.as_secs() as i64 != stored_secs)
     }
 }
 
@@ -790,7 +833,14 @@ fn row_to_pending_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingFile>
         action: PendingAction::from_str(&row.get::<_, String>(11)?),
         created_time: row.get(12)?,
         modified_time: row.get(13)?,
+        modified_time_ns: row.get(14)?,
+        disk_size_bytes: row.get::<_, Option<i64>>(15)?.map(|size| size as u64),
     })
+}
+
+/// On-disk size of `path` in bytes, or `None` if it cannot be read.
+fn file_disk_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
 /// File modification time in whole seconds since the Unix epoch, or `None` if it cannot be read.
@@ -800,6 +850,25 @@ fn file_modified_time(path: &Path) -> Option<i64> {
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs() as i64)
+}
+
+/// File modification time in signed nanoseconds relative to the Unix epoch, or `0` if unavailable.
+pub(crate) fn file_modified_time_ns(path: &Path) -> i64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map_or(0, system_time_to_unix_nanos)
+}
+
+/// Convert a [`SystemTime`] to signed nanoseconds relative to the Unix epoch.
+fn system_time_to_unix_nanos(time: SystemTime) -> i64 {
+    match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX),
+        Err(error) => {
+            let before_epoch = error.duration().as_nanos();
+            i64::try_from(before_epoch).map_or(i64::MIN, |nanos| -nanos)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -824,6 +893,72 @@ mod test_database {
     fn test_open_in_memory() {
         let database = Database::open_in_memory();
         assert!(database.is_ok());
+    }
+
+    #[test]
+    fn initialize_preserves_shared_scan_cache_rows_written_by_dupefind() {
+        let database = Database::open_in_memory().expect("open initial");
+        database
+            .connection
+            .execute(
+                "INSERT INTO scanned_files (full_path, size_bytes, codec, bitrate_kbps, duration, width, height, frames_per_second, bit_depth, scanned_time)
+                 VALUES ('/videos/dupefind_entry.mkv', 5000, 'hevc', 4000, 60.0, 1920, 1080, 0.0, 0, 100)",
+                [],
+            )
+            .expect("insert dupefind row");
+
+        database.initialize().expect("reinitialize");
+        let entries = database.get_all_scanned_files().expect("read scanned");
+        assert!(
+            entries.contains_key("/videos/dupefind_entry.mkv"),
+            "vconvert startup must not delete rows written by dupefind"
+        );
+    }
+
+    #[test]
+    fn pending_file_is_changed_on_disk_detects_same_second_size_change() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let file_path = temp_dir.path().join("clip.mkv");
+        std::fs::write(&file_path, b"12345").expect("write initial");
+
+        let database = Database::open_in_memory().expect("open db");
+        let mut info = create_test_video_info();
+        info.size_bytes = 5;
+        database
+            .upsert_pending_file(&file_path, "mkv", &info, PendingAction::Convert)
+            .expect("insert");
+
+        // Rewrite with different size within the same second.
+        std::fs::write(&file_path, b"123456789").expect("rewrite larger");
+        let pending = database
+            .get_pending_file(&file_path)
+            .expect("query")
+            .expect("row exists");
+        assert!(
+            pending.is_changed_on_disk(),
+            "same-second size change must be detected by is_changed_on_disk"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_are_skipped_by_upserts() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut database = Database::open_in_memory().expect("open db");
+        let bad_path = Path::new(OsStr::from_bytes(b"/videos/clip_\xff.mkv"));
+        let info = create_test_video_info();
+
+        let pending_written = database
+            .batch_upsert_pending_files(&[(bad_path, "mkv", &info, PendingAction::Convert)])
+            .expect("batch pending");
+        assert_eq!(pending_written, 0);
+
+        let scanned_written = database
+            .batch_upsert_scanned_files(&[(bad_path, &info)])
+            .expect("batch scanned");
+        assert_eq!(scanned_written, 0);
     }
 
     #[test]
@@ -1214,6 +1349,8 @@ mod test_database {
             action: PendingAction::Convert,
             created_time: 0,
             modified_time: None,
+            modified_time_ns: 0,
+            disk_size_bytes: None,
         };
 
         let info = pending.to_video_info();
@@ -2571,6 +2708,8 @@ mod test_database_statistics_display {
             action: PendingAction::Convert,
             created_time: 0,
             modified_time: None,
+            modified_time_ns: 0,
+            disk_size_bytes: None,
         };
 
         assert_eq!(pending.to_video_info().bit_depth, 8);

@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 use super::VideoConvert;
 use crate::classification::{ClassificationRequest, probe_and_classify, resolve_output_collisions};
-use crate::database::Database;
+use crate::database::{Database, file_modified_time_ns};
 use crate::stats::AnalysisStats;
 use crate::types::{
     AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessableFileSliceExt, SkipReason, SubtitleFile, VideoFile,
@@ -38,16 +38,16 @@ impl VideoConvert<'_> {
 
         // Phase 1 (sequential): bulk-load the scan cache into a HashMap for O(1) lookups,
         // then split files into cache hits (classified immediately) and cache misses.
-        let scan_cache: HashMap<String, VideoInfo> = database.get_all_scanned_files().unwrap_or_default();
+        let scan_cache: HashMap<String, (VideoInfo, i64)> =
+            database.get_all_scanned_files_with_mtime().unwrap_or_default();
         let mut cache_results: Vec<AnalysisResult> = Vec::new();
         let mut cache_misses: Vec<(VideoFile, Vec<SubtitleFile>)> = Vec::new();
 
         for file in files {
-            let path_key = file.path.to_string_lossy();
             let subtitles = subtitle_matches.remove(&file.path).unwrap_or_default();
-            if let Some(cached_info) = scan_cache.get(path_key.as_ref())
-                && cached_info.size_bytes == file.size_bytes
-                && cached_info.bit_depth >= 8
+            if let Some(path_key) = file.path.to_str()
+                && let Some((cached_info, cached_mtime)) = scan_cache.get(path_key)
+                && is_usable_scan_cache_entry(cached_info, *cached_mtime, &file)
             {
                 cache_results
                     .push(ClassificationRequest::new(&filter, cached_info, movie_mode, subtitles).classify(file));
@@ -144,4 +144,13 @@ impl VideoConvert<'_> {
 
         output
     }
+}
+
+/// Return whether a cached scan entry is complete and still matches `file`'s size and modification time.
+fn is_usable_scan_cache_entry(cached_info: &VideoInfo, cached_mtime: i64, file: &VideoFile) -> bool {
+    cached_info.size_bytes == file.size_bytes
+        && cached_info.bit_depth >= 8
+        && (1.0..=240.0).contains(&cached_info.frames_per_second)
+        && cached_mtime != 0
+        && cached_mtime == file_modified_time_ns(&file.path)
 }
