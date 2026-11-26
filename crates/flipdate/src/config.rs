@@ -50,39 +50,6 @@ struct UserConfig {
     flip_date: DateConfig,
 }
 
-impl DateConfig {
-    /// Try to read user config from the file if it exists.
-    /// Otherwise, fall back to default config.
-    ///
-    /// # Errors
-    /// Returns an error if config file exists but cannot be read or parsed.
-    fn get_user_config() -> anyhow::Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
-    }
-
-    /// Parse config from a TOML string.
-    ///
-    /// # Errors
-    /// Returns an error if the TOML string is invalid.
-    fn from_toml_str(toml_str: &str) -> anyhow::Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.flip_date)
-            .context("Failed to parse flip_date config TOML")
-    }
-}
-
 impl Config {
     /// Create config from given command line args and user config file.
     ///
@@ -119,6 +86,39 @@ impl Config {
             verbose: args.verbose || user_config.verbose,
             year_first: args.year || user_config.year_first,
         })
+    }
+}
+
+impl DateConfig {
+    /// Try to read user config from the file if it exists.
+    /// Otherwise, fall back to default config.
+    ///
+    /// # Errors
+    /// Returns an error if config file exists but cannot be read or parsed.
+    fn get_user_config() -> anyhow::Result<Self> {
+        let Some(path) = cli_tools_common::config_path() else {
+            return Ok(Self::default());
+        };
+
+        match fs::read_to_string(path) {
+            Ok(content) => Self::from_toml_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(anyhow::anyhow!(
+                "Failed to read config file {}: {error}",
+                path.display()
+            )),
+        }
+    }
+
+    /// Parse config from a TOML string.
+    ///
+    /// # Errors
+    /// Returns an error if the TOML string is invalid.
+    fn from_toml_str(toml_str: &str) -> anyhow::Result<Self> {
+        toml::from_str::<UserConfig>(toml_str)
+            .map(|config| config.flip_date)
+            .context("Failed to parse flip_date config TOML")
     }
 }
 

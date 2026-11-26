@@ -14,12 +14,14 @@ use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations};
 pub use crate::config::Config;
 
 pub static FILE_EXTENSIONS: [&str; 20] = [
-    "m4a", "mp3", // Audio
-    "mp4", "mkv", "mov", "avi", "wmv", "flv", "m4v", // Video
-    "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", // Image
-    "txt", "rtf", "csv", // Other
+    // Audio
+    "m4a", "mp3", // Video
+    "mp4", "mkv", "mov", "avi", "wmv", "flv", "m4v", // Image
+    "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", // Other
+    "txt", "rtf", "csv",
 ];
 
+/// A file or directory scheduled to be renamed to its reordered date name.
 #[derive(Debug)]
 struct RenameItem {
     path: PathBuf,
