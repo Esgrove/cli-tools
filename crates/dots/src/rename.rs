@@ -1,5 +1,6 @@
 //! Dot rename implementation for formatting filenames with dot separators.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs};
 
@@ -10,6 +11,7 @@ use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use rayon::prelude::*;
 use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
 use crate::normalize_extension;
@@ -86,7 +88,7 @@ impl DotRename {
             return Ok(());
         }
 
-        let num_renamed = self.rename_paths(paths_to_rename);
+        let num_renamed = self.rename_paths(&paths_to_rename);
         let message = format!(
             "{num_renamed} {}",
             match (self.config.rename_directories, num_renamed > 1) {
@@ -380,41 +382,63 @@ impl DotRename {
     }
 
     /// Rename all given path pairs or just print changes if dryrun is enabled.
-    fn rename_paths(&self, paths: Vec<(PathBuf, PathBuf)>) -> usize {
+    fn rename_paths(&self, paths: &[(PathBuf, PathBuf)]) -> usize {
         let mut num_renamed: usize = 0;
         let max_items = paths.len();
         let max_chars = paths.len().checked_ilog10().map_or(1, |d| d as usize + 1);
         // Track destinations claimed earlier in this batch so --force never overwrites
         // another renamed source and dry-run reports the same collision outcomes as a real run.
         let mut reservations = TargetReservations::new();
+        let mut source_indices = HashMap::<_, Vec<_>>::new();
+        for (index, (path, _)) in paths.iter().enumerate() {
+            source_indices
+                .entry(Self::source_lookup_key(path))
+                .or_default()
+                .push(index);
+        }
 
-        for (index, (path, mut new_path)) in paths.into_iter().enumerate() {
-            let old_str = cli_tools_common::get_relative_path_or_filename(&path, &self.root);
-            let mut new_str = cli_tools_common::get_relative_path_or_filename(&new_path, &self.root);
+        for (index, (path, target)) in paths.iter().enumerate() {
+            let mut new_path = target.as_path();
+            let old_str = cli_tools_common::get_relative_path_or_filename(path, &self.root);
+            let mut new_str = cli_tools_common::get_relative_path_or_filename(new_path, &self.root);
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
             // On a case-insensitive file system a capitalization only change finds the source itself at the target.
             // Only a different existing entry counts as a conflict.
-            let target_metadata = fs::symlink_metadata(&new_path).ok();
+            let target_metadata = fs::symlink_metadata(new_path).ok();
             let target_is_other_entry =
-                target_metadata.is_some() && !cli_tools_common::paths_refer_to_same_entry(&path, &new_path);
+                target_metadata.is_some() && !cli_tools_common::paths_refer_to_same_entry(path, new_path);
+            let target_is_pending_source = target_is_other_entry
+                && source_indices
+                    .get(&Self::source_lookup_key(new_path))
+                    .is_some_and(|indices| {
+                        indices.iter().any(|&source_index| {
+                            source_index > index
+                                && cli_tools_common::paths_refer_to_same_entry(&paths[source_index].0, new_path)
+                        })
+                    });
 
-            // Handle directory renaming when target already exists
-            // Copy files from source to target directory and remove source directory if empty.
-            // Neither a source nor a target symlink to a directory is ever merged,
-            // since that would move files out of or into an outside directory it points to.
-            let source_is_real_directory = fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+            // Merge real directories only when the target is not itself waiting to be renamed.
+            // Do not merge symlinks, which could move files into or out of a directory outside the run.
+            let source_is_real_directory = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
             let target_is_real_directory = target_metadata.is_some_and(|metadata| metadata.is_dir());
-            let is_directory_merge = source_is_real_directory && target_is_real_directory && target_is_other_entry;
-            let reserved_by_batch = !is_directory_merge && reservations.contains(&new_path);
+            let is_directory_merge = source_is_real_directory
+                && target_is_real_directory
+                && target_is_other_entry
+                && !target_is_pending_source;
+            let reserved_by_batch = !is_directory_merge && reservations.contains(new_path);
             let mut skip_rename = false;
+            let incremented_path;
 
-            if !is_directory_merge && (reserved_by_batch || (target_is_other_entry && !self.config.overwrite)) {
+            if !is_directory_merge
+                && (reserved_by_batch || target_is_pending_source || (target_is_other_entry && !self.config.overwrite))
+            {
                 if self.config.increment_name {
-                    match Self::get_incremented_path_avoiding(&new_path, &reservations) {
-                        Ok(incremented_path) => {
-                            new_str = cli_tools_common::get_relative_path_or_filename(&incremented_path, &self.root);
-                            new_path = incremented_path;
+                    match Self::get_incremented_path_avoiding(new_path, &reservations) {
+                        Ok(incremented) => {
+                            incremented_path = incremented;
+                            new_path = &incremented_path;
+                            new_str = cli_tools_common::get_relative_path_or_filename(new_path, &self.root);
                         }
                         Err(e) => {
                             println!("Error while incrementing name: {e}");
@@ -427,7 +451,7 @@ impl DotRename {
             }
 
             if !skip_rename && !is_directory_merge {
-                reservations.reserve(&new_path);
+                reservations.reserve(new_path);
             }
 
             if self.config.dryrun {
@@ -458,10 +482,10 @@ impl DotRename {
                     println!("Merging directory: {old_str} -> {new_str}");
                 }
 
-                match self.move_directory_contents(&path, &new_path) {
+                match self.move_directory_contents(path, new_path) {
                     Ok(_files_moved) => {
                         // Try to remove the source directory and any empty parent directories
-                        if let Err(e) = self.remove_empty_directories(&path) {
+                        if let Err(e) = self.remove_empty_directories(path) {
                             eprintln!("{}", format!("Could not remove empty directories: {e}").red());
                         }
                         num_renamed += 1;
@@ -486,7 +510,7 @@ impl DotRename {
             } else {
                 OverwritePolicy::Skip
             };
-            match cli_tools_common::safe_rename(&path, &new_path, policy) {
+            match cli_tools_common::safe_rename(path, new_path, policy) {
                 Ok(RenameOutcome::SkippedExisting) => {
                     println!(
                         "{}",
@@ -625,6 +649,12 @@ impl DotRename {
     /// which misses case-only and extension-only changes like `Photo.JPG` → `Photo.jpg`.
     fn path_changed(old: &Path, new: &Path) -> bool {
         cli_tools_common::path_to_string(old) != cli_tools_common::path_to_string(new)
+    }
+
+    /// Group possible aliases of a source by case and Unicode spelling.
+    /// The caller must still confirm entry identity on disk.
+    fn source_lookup_key(path: &Path) -> String {
+        path.to_string_lossy().to_lowercase().nfc().collect()
     }
 
     #[cfg(test)]
@@ -2053,8 +2083,8 @@ mod test_rename_conflicts {
             },
             false,
         )
-        .rename_paths(paths.clone());
-        let real = dots(temporary.path(), DotRenameConfig::default(), false).rename_paths(paths);
+        .rename_paths(&paths);
+        let real = dots(temporary.path(), DotRenameConfig::default(), false).rename_paths(&paths);
 
         assert_eq!(real, 0, "the existing target should be skipped");
         assert_eq!(dryrun, real);
@@ -2393,6 +2423,141 @@ mod test_nested_trees {
         let mut contents: Vec<String> = files.iter().map(|file| tree.read(file)).collect();
         contents.sort();
         assert_eq!(contents, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn overwrite_skips_a_pending_source_destination() {
+        let tree = TempTree::new();
+        tree.file_with("nested/Alpha.txt", "first");
+        tree.file_with("nested/Beta.txt", "second");
+        let config = DotRenameConfig {
+            overwrite: true,
+            ..Default::default()
+        };
+        let paths = vec![
+            (tree.join("nested/Alpha.txt"), tree.join("nested/Beta.txt")),
+            (tree.join("nested/Beta.txt"), tree.join("nested/Gamma.txt")),
+        ];
+        let before = tree.snapshot();
+
+        let dryrun = DotRename::new(
+            tree.path().to_path_buf(),
+            DotRenameConfig {
+                dryrun: true,
+                overwrite: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let planned = dryrun.rename_paths(&paths);
+        assert_eq!(tree.snapshot(), before);
+
+        let dots = DotRename::new(tree.path().to_path_buf(), config, false);
+        assert_eq!(dots.rename_paths(&paths), 1);
+        assert_eq!(
+            tree.snapshot(),
+            ["nested/", "nested/Alpha.txt: first", "nested/Gamma.txt: second"]
+        );
+        assert_eq!(planned, 1);
+    }
+
+    #[test]
+    fn overwrite_protects_an_alias_of_a_pending_source_but_allows_its_case_change() {
+        let tree = TempTree::new();
+        tree.file_with("nested/Alpha.txt", "first");
+        tree.file_with("nested/beta.txt", "second");
+        let alias = tree.join("nested/Beta.txt");
+        if !alias.exists() {
+            return;
+        }
+
+        let dots = DotRename::new(
+            tree.path().to_path_buf(),
+            DotRenameConfig {
+                overwrite: true,
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(
+            dots.rename_paths(&[
+                (tree.join("nested/Alpha.txt"), alias.clone()),
+                (tree.join("nested/beta.txt"), alias),
+            ]),
+            1
+        );
+        assert_eq!(
+            tree.snapshot(),
+            ["nested/", "nested/Alpha.txt: first", "nested/Beta.txt: second"]
+        );
+    }
+
+    #[test]
+    fn overwrite_increments_a_pending_source_destination_when_requested() {
+        let tree = TempTree::new();
+        tree.file_with("nested/Alpha.txt", "first");
+        tree.file_with("nested/Beta.txt", "second");
+        tree.file_with("nested/Beta.2.txt", "untouched");
+        let dots = DotRename::new(
+            tree.path().to_path_buf(),
+            DotRenameConfig {
+                overwrite: true,
+                increment_name: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(
+            dots.rename_paths(&[
+                (tree.join("nested/Alpha.txt"), tree.join("nested/Beta.txt")),
+                (tree.join("nested/Beta.txt"), tree.join("nested/Gamma.txt")),
+            ]),
+            2
+        );
+        assert_eq!(
+            tree.snapshot(),
+            [
+                "nested/",
+                "nested/Beta.2.txt: untouched",
+                "nested/Beta.3.txt: first",
+                "nested/Gamma.txt: second"
+            ]
+        );
+    }
+
+    #[test]
+    fn directories_do_not_merge_into_a_pending_source() {
+        let tree = TempTree::new();
+        tree.file_with("nested/Alpha/item.txt", "first");
+        tree.file_with("nested/Beta/item.txt", "second");
+        let dots = DotRename::new(
+            tree.path().to_path_buf(),
+            DotRenameConfig {
+                rename_directories: true,
+                overwrite: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(
+            dots.rename_paths(&[
+                (tree.join("nested/Alpha"), tree.join("nested/Beta")),
+                (tree.join("nested/Beta"), tree.join("nested/Gamma")),
+            ]),
+            1
+        );
+        assert_eq!(
+            tree.snapshot(),
+            [
+                "nested/",
+                "nested/Alpha/",
+                "nested/Alpha/item.txt: first",
+                "nested/Gamma/",
+                "nested/Gamma/item.txt: second"
+            ]
+        );
     }
 
     #[test]
