@@ -10,6 +10,9 @@ and [`cli-tools-media`](./crates/media) library crates.
 ./install.sh
 ```
 
+`build.sh` requires `jq` to read the executable paths reported by Cargo.
+It uses those paths even when `CARGO_TARGET_DIR` redirects build outputs.
+
 Install a single tool straight from GitHub by its package name:
 
 ```shell
