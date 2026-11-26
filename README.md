@@ -460,6 +460,8 @@ Options:
 ## Visaparse
 
 Parse Finvoice credit card statements and output items as CSV and Excel sheet.
+Pass a directory to `-o` for `VISA.csv` and `VISA.xlsx`,
+or pass `report.csv` or `report.xlsx` to write those two files side by side.
 
 ```console
 Parse Finvoice XML credit card statement files
