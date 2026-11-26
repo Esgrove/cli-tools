@@ -162,6 +162,7 @@ impl Unpacker {
         }
 
         let mut touched_directories: HashSet<PathBuf> = HashSet::new();
+        let mut reservations = TargetReservations::new();
         for directory in candidates.unpack {
             if !directory.exists() {
                 continue;
@@ -179,7 +180,6 @@ impl Unpacker {
                 continue;
             }
 
-            let mut reservations = TargetReservations::new();
             for PlannedMove { source, target } in &plan.directory_moves {
                 if !reservations.reserve(target) {
                     observer.on_unpack_event(UnpackEvent::DuplicateTarget(source));
@@ -1384,6 +1384,29 @@ mod test_unpack_trees {
             "broken symlink at unpack target must be preserved when overwrite is false"
         );
         assert!(tree2.exists("Library/Movie/subs/broken.srt"));
+    }
+
+    #[test]
+    fn sibling_unpack_directories_do_not_overwrite_each_other_under_force() {
+        let tree = TempTree::new();
+        tree.file_with("Example/Videos/clip.mp4", "from videos");
+        tree.file_with("Example/Extras/clip.mp4", "from extras");
+
+        let names = vec!["videos".to_string(), "extras".to_string()];
+        super::Unpacker::new(&names, true, false).unpack(&[tree.join("Example")], true, &mut ());
+
+        assert!(
+            tree.exists("Example/clip.mp4"),
+            "first unpacked file should land at Example/clip.mp4"
+        );
+        let remaining_in_sources =
+            usize::from(tree.exists("Example/Videos/clip.mp4")) + usize::from(tree.exists("Example/Extras/clip.mp4"));
+        assert_eq!(
+            remaining_in_sources,
+            1,
+            "the colliding second file must stay in its source directory instead of overwriting the first: {:?}",
+            tree.snapshot()
+        );
     }
 }
 
