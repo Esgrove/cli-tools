@@ -1,8 +1,8 @@
 //! slb - Check and format prose with semantic line breaks.
 //!
 //! This CLI tool scans source files and Markdown documents for comments, docstrings, and paragraphs
-//! that violate the semantic line break style,
-//! reports the violations, and optionally reflows the prose and moves trailing comments above the code.
+//! that violate the semantic line break style, reports the violations,
+//! and optionally reflows the prose and moves trailing comments above the code.
 //!
 //! This module defines the command line arguments and the entry point.
 //! File discovery lives in [`files`], the check and fix modes in [`cli`], and reporting in [`output`].
