@@ -209,6 +209,7 @@ impl Unpacker {
 
             touched_directories.insert(directory.clone());
             touched_directories.insert(parent);
+            self.mark_nested_unpack_directories(&directory, &mut touched_directories);
 
             for pruned in prune_empty_directories(&directory, &mut touched_directories) {
                 observer.on_unpack_event(UnpackEvent::Pruned(&pruned));
@@ -265,6 +266,8 @@ impl Unpacker {
             }
         }
 
+        unwanted_directories.sort();
+        unwanted_directories.dedup();
         unwanted_directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
         unpack_candidates.sort_by_key(|path| path.components().count());
 
@@ -404,6 +407,21 @@ impl Unpacker {
     /// Return whether a directory name is one of the configured unpack names, ignoring case.
     fn is_unpack_name(&self, name: &str) -> bool {
         self.unpack_directory_names.contains(&name.to_lowercase())
+    }
+
+    /// Mark nested unpack directories under `root_directory` as touched so empty nested unpack chains are pruned.
+    fn mark_nested_unpack_directories(&self, root_directory: &Path, touched_directories: &mut HashSet<PathBuf>) {
+        for entry in WalkDir::new(root_directory)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_dir())
+        {
+            if entry.file_name().to_str().is_some_and(|name| self.is_unpack_name(name)) {
+                touched_directories.insert(entry.into_path());
+            }
+        }
     }
 }
 
@@ -1457,6 +1475,35 @@ mod test_unpack_trees {
         );
         assert!(!tree.exists("source_link.txt"));
         assert!(tree.join("broken_link.txt").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn empty_nested_unpack_directory_is_pruned_along_with_outer() {
+        let tree = TempTree::with_entries(&["Example/Videos/Videos/"]);
+        let names = vec!["videos".to_string()];
+
+        super::Unpacker::new(&names, false, false).unpack(&[tree.join("Example")], true, &mut ());
+
+        assert!(
+            !tree.exists("Example/Videos"),
+            "empty nested unpack directories must be pruned so the outer unpack directory is removed too: {:?}",
+            tree.snapshot()
+        );
+    }
+
+    #[test]
+    fn overlapping_roots_do_not_duplicate_unwanted_directories() {
+        let tree = TempTree::with_entries(&["sub/.unwanted/junk.txt"]);
+        let names = vec!["videos".to_string()];
+        let unpacker = super::Unpacker::new(&names, false, false);
+
+        let candidates = unpacker.collect_candidates(&[tree.path().to_path_buf(), tree.join("sub")], true);
+        assert_eq!(
+            candidates.unwanted.len(),
+            1,
+            "overlapping roots must not duplicate unwanted directories: {:?}",
+            candidates.unwanted
+        );
     }
 }
 
