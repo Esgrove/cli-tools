@@ -185,8 +185,32 @@ pub fn glob_to_regex(glob: &str) -> Option<Regex> {
     let mut pattern = String::from("^");
     let chars: Vec<char> = glob.chars().collect();
     let mut index = 0;
-    let mut in_braces = false;
+    let mut brace_depth: usize = 0;
+    let mut in_class = false;
+    let mut class_start = 0;
+    let mut class_negated = false;
+
     while let Some(&character) = chars.get(index) {
+        if in_class {
+            let at_class_open = index == class_start;
+            let at_negated_first = class_negated && index == class_start + 1;
+            if at_class_open && (character == '!' || character == '^') {
+                class_negated = true;
+                pattern.push('^');
+            } else if character == ']' && !at_class_open && !at_negated_first {
+                in_class = false;
+                class_negated = false;
+                pattern.push(']');
+            } else if matches!(character, '\\' | '[' | ']' | '^') {
+                pattern.push('\\');
+                pattern.push(character);
+            } else {
+                pattern.push(character);
+            }
+            index += 1;
+            continue;
+        }
+
         match character {
             '*' if chars.get(index + 1) == Some(&'*') => {
                 if chars.get(index + 2) == Some(&'/') {
@@ -201,18 +225,27 @@ pub fn glob_to_regex(glob: &str) -> Option<Regex> {
             '*' => pattern.push_str("[^/]*"),
             '?' => pattern.push_str("[^/]"),
             '{' => {
-                in_braces = true;
+                brace_depth += 1;
                 pattern.push_str("(?:");
             }
-            '}' if in_braces => {
-                in_braces = false;
+            '}' if brace_depth > 0 => {
+                brace_depth -= 1;
                 pattern.push(')');
             }
-            ',' if in_braces => pattern.push('|'),
-            '[' | ']' => pattern.push(character),
+            ',' if brace_depth > 0 => pattern.push('|'),
+            '[' => {
+                in_class = true;
+                class_start = index + 1;
+                class_negated = false;
+                pattern.push('[');
+            }
             _ => pattern.push_str(&regex::escape(&character.to_string())),
         }
         index += 1;
+    }
+
+    if in_class || brace_depth > 0 {
+        return None;
     }
     pattern.push('$');
     Regex::new(&pattern).ok()
@@ -509,6 +542,36 @@ mod test_glob_to_regex {
         let regex = glob_to_regex("a.b").expect("glob should convert");
         assert!(regex.is_match("a.b"));
         assert!(!regex.is_match("axb"));
+    }
+
+    #[test]
+    fn character_ranges_negation_and_class_literals_work() {
+        let range = glob_to_regex("[a-z].rs").expect("range glob");
+        assert!(range.is_match("m.rs"));
+        assert!(!range.is_match("M.rs"));
+        assert!(!range.is_match("-.rs"));
+
+        let negated_bang = glob_to_regex("[!abc].rs").expect("negated ! glob");
+        assert!(negated_bang.is_match("d.rs"));
+        assert!(!negated_bang.is_match("a.rs"));
+
+        let negated_caret = glob_to_regex("[^abc].rs").expect("negated ^ glob");
+        assert!(negated_caret.is_match("d.rs"));
+        assert!(!negated_caret.is_match("b.rs"));
+
+        let class_literals = glob_to_regex("[*?,{].txt").expect("literal glob chars inside class");
+        assert!(class_literals.is_match("*.txt"));
+        assert!(class_literals.is_match(",.txt"));
+        assert!(!class_literals.is_match("a.txt"));
+    }
+
+    #[test]
+    fn nested_braces_match_all_alternatives() {
+        let regex = glob_to_regex("*.{rs,{md,txt}}").expect("nested brace glob");
+        assert!(regex.is_match("main.rs"));
+        assert!(regex.is_match("notes.md"));
+        assert!(regex.is_match("readme.txt"));
+        assert!(!regex.is_match("image.png"));
     }
 }
 
