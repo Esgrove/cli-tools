@@ -40,6 +40,8 @@ pub struct LineScan {
     inside_block_comment: Vec<bool>,
     /// Byte offset where a trailing comment starts, for the lines that have one.
     comment_start: Vec<Option<usize>>,
+    /// Whether a Python line starts in an implicitly continued bracketed expression.
+    inside_expression: Vec<bool>,
 }
 
 impl LineScan {
@@ -53,6 +55,11 @@ impl LineScan {
     #[must_use]
     pub(super) fn starts_inside_block_comment(&self, index: usize) -> bool {
         self.inside_block_comment.get(index).copied().unwrap_or(false)
+    }
+
+    /// Whether the line begins in a Python bracketed expression.
+    pub(super) fn starts_inside_expression(&self, index: usize) -> bool {
+        self.inside_expression.get(index).copied().unwrap_or(false)
     }
 
     /// Byte offset of a trailing comment on the given zero based line, when present.
@@ -77,16 +84,26 @@ pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
             inside_string: vec![false; count],
             inside_block_comment: vec![false; count],
             comment_start: vec![None; count],
+            inside_expression: Vec::new(),
         };
     };
     let mut scan = LineScan {
         inside_string: Vec::with_capacity(count),
         inside_block_comment: Vec::with_capacity(count),
         comment_start: Vec::with_capacity(count),
+        inside_expression: if syntax.python_expressions {
+            Vec::with_capacity(count)
+        } else {
+            Vec::new()
+        },
     };
     let mut state = ScanState::Normal;
     let mut characters = Vec::new();
+    let mut expression_depth = 0;
     for (index, line) in lines.iter().enumerate() {
+        if syntax.python_expressions {
+            scan.inside_expression.push(expression_depth > 0);
+        }
         let in_block_scalar = match state {
             ScanState::InBlockScalar(indent) => {
                 line.trim().is_empty() || leading_whitespace(line).chars().count() > indent
@@ -115,7 +132,13 @@ pub fn scan_lines(lines: &[&str], kind: FileKind) -> LineScan {
             scan.comment_start.push(None);
             continue;
         }
-        let result = scan_line_buffered(line, std::mem::take(&mut state), &syntax, &mut characters);
+        let result = scan_line_buffered(
+            line,
+            std::mem::take(&mut state),
+            &syntax,
+            &mut characters,
+            &mut expression_depth,
+        );
         state = result.state;
         scan.comment_start.push(result.comment_start);
     }
@@ -532,7 +555,7 @@ fn docstring_regions(
     regions: &mut Vec<Region>,
     notices: &mut Vec<SkipNotice>,
 ) -> Option<usize> {
-    let docstring = Docstring::at_scanned(lines, index, Some(scan))?;
+    let docstring = Docstring::at_scanned(lines, index, scan)?;
     let indent = docstring.indent;
     let quote = docstring.quote;
     let close_index = docstring.close_line;

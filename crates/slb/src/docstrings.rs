@@ -59,14 +59,14 @@ impl<'a> Docstring<'a> {
     /// so it gives `None` too.
     #[cfg(test)]
     pub(super) fn at(lines: &[&'a str], index: usize) -> Option<Self> {
-        Self::at_scanned(lines, index, None)
+        Self::at_scanned(lines, index, &super::comments::scan_lines(lines, FileKind::Python))
     }
 
-    /// Parse the docstring opening on line `index`, using `scan` when available to strip comments string-safely.
-    pub(super) fn at_scanned(lines: &[&'a str], index: usize, scan: Option<&LineScan>) -> Option<Self> {
+    /// Parse the docstring opening on line `index` using the lexical context recorded by `scan`.
+    pub(super) fn at_scanned(lines: &[&'a str], index: usize, scan: &LineScan) -> Option<Self> {
         let line = lines.get(index)?;
         let captures = RE_DOCSTRING_OPEN.captures(line)?;
-        if !starts_statement(lines, index, scan) {
+        if scan.starts_inside_expression(index) || !starts_statement(lines, index, scan) {
             return None;
         }
         let indent = captures.get(1).map_or("", |group| group.as_str());
@@ -140,35 +140,12 @@ fn is_escaped_at(text: &str, offset: usize) -> bool {
 }
 
 /// Strip a Python `#` comment from `line` without cutting through `#` inside string literals.
-fn strip_python_comment<'a>(line: &'a str, line_index: usize, scan: Option<&LineScan>) -> &'a str {
-    if line.trim_start().starts_with('#') {
+fn strip_python_comment<'a>(line: &'a str, line_index: usize, scan: &LineScan) -> &'a str {
+    if line_index == 0 && line.starts_with("#!") {
         return "";
     }
-    if let Some(comment_start) = scan.and_then(|scan| scan.comment_start_at(line_index)) {
-        return line.get(..comment_start).unwrap_or(line).trim_end();
-    }
-    if scan.is_some() {
-        return line.trim_end();
-    }
-    // Fallback without a precomputed LineScan: track single/double quotes on the line.
-    let mut in_quote: Option<char> = None;
-    let mut escaped = false;
-    for (byte_offset, character) in line.char_indices() {
-        if let Some(quote) = in_quote {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == quote {
-                in_quote = None;
-            }
-        } else if character == '\'' || character == '"' {
-            in_quote = Some(character);
-        } else if character == '#' {
-            return line.get(..byte_offset).unwrap_or(line).trim_end();
-        }
-    }
-    line.trim_end()
+    let end = scan.comment_start_at(line_index).unwrap_or(line.len());
+    line.get(..end).unwrap_or(line).trim_end()
 }
 
 /// Whether line `index` starts a statement rather than continuing an expression from the code above it.
@@ -176,7 +153,7 @@ fn strip_python_comment<'a>(line: &'a str, line_index: usize, scan: Option<&Line
 /// Blank lines and comment lines are passed over.
 /// A file start, a block opener ending in a colon, and a complete statement all start a new statement.
 /// Implicit string concatenation (previous code ending in `"` or `'`) does not start a docstring.
-fn starts_statement(lines: &[&str], index: usize, scan: Option<&LineScan>) -> bool {
+fn starts_statement(lines: &[&str], index: usize, scan: &LineScan) -> bool {
     let previous_code = lines
         .get(..index)
         .unwrap_or_default()
@@ -213,7 +190,7 @@ pub(super) fn fix_docstring_quotes(
             index += 1;
             continue;
         }
-        let Some(docstring) = Docstring::at_scanned(lines, index, Some(scan)) else {
+        let Some(docstring) = Docstring::at_scanned(lines, index, scan) else {
             index += 1;
             continue;
         };
@@ -421,6 +398,35 @@ mod test_docstring_position {
             let (lines, index) = with_body(before);
             assert_eq!(Docstring::at(&lines, index), None, "{before:?}");
         }
+    }
+
+    #[test]
+    fn a_triple_quoted_dictionary_value_is_preserved() {
+        let source = concat!(
+            "settings = {\n",
+            "    \"message\":  # Display text.\n",
+            "\n",
+            "        \"\"\"Leave the punctuation; it belongs to the value.\n",
+            "        Leave the line breaks too.\"\"\"\n",
+            "}\n",
+        );
+        let formatted = crate::format(source, FileKind::Python, &FormatOptions::default());
+        assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source);
+        assert!(formatted.violations.is_empty());
+    }
+
+    #[test]
+    fn bracket_characters_in_strings_and_comments_do_not_change_expression_nesting() {
+        let source = concat!(
+            "value = \"{\"  # [\n",
+            "def example(\n",
+            "    labels=(\")\",),  # {\n",
+            "):\n",
+            "    \"\"\"This is prose; it should be formatted.\n",
+            "    It is not an argument.\"\"\"\n",
+        );
+        let formatted = crate::format(source, FileKind::Python, &FormatOptions::default());
+        assert!(formatted.fixed_text.unwrap().contains("This is prose.\n"));
     }
 
     #[test]
