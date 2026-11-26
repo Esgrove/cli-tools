@@ -141,6 +141,64 @@ fn conflicting_targets_keep_every_file() {
 }
 
 #[test]
+fn an_explicit_file_must_match_all_includes() {
+    let tree = TempTree::new();
+    tree.file_with("library/selected clip.mkv", "clip");
+    let home = TempTree::new();
+    let file = tree.join("library/selected clip.mkv");
+    let before = tree.snapshot();
+
+    let skipped = run_dots(home.path(), &["--include", "library", "--include", ".mp4"], &file);
+    assert_success(&skipped);
+    assert_eq!(tree.snapshot(), before);
+
+    let matched = run_dots(home.path(), &["--include", "library", "--include", ".mkv"], &file);
+    assert_success(&matched);
+    assert_eq!(tree.snapshot(), ["library/", "library/Selected.Clip.mkv: clip"]);
+}
+
+#[test]
+fn an_explicit_file_matching_an_exclude_is_skipped() {
+    let tree = TempTree::new();
+    tree.file_with("library/private/selected clip.mkv", "clip");
+    let home = TempTree::new();
+    let before = tree.snapshot();
+
+    let output = run_dots(
+        home.path(),
+        &["--include", ".mkv", "--exclude", "private"],
+        &tree.join("library/private/selected clip.mkv"),
+    );
+    assert_success(&output);
+    assert_eq!(tree.snapshot(), before);
+}
+
+#[test]
+fn an_explicit_file_must_match_at_least_one_literal_edit() {
+    let tree = TempTree::new();
+    tree.file_with("library/selected clip.mkv", "clip");
+    let home = TempTree::new();
+    let file = tree.join("library/selected clip.mkv");
+    let before = tree.snapshot();
+
+    let skipped = run_dots(
+        home.path(),
+        &["--substitute", "other", "new", "--remove", "absent"],
+        &file,
+    );
+    assert_success(&skipped);
+    assert_eq!(tree.snapshot(), before);
+
+    let matched = run_dots(
+        home.path(),
+        &["--substitute", "other", "new", "--remove", "selected"],
+        &file,
+    );
+    assert_success(&matched);
+    assert_eq!(tree.snapshot(), ["library/", "library/Clip.mkv: clip"]);
+}
+
+#[test]
 fn a_missing_path_is_an_error() {
     let tree = TempTree::new();
     let home = TempTree::new();

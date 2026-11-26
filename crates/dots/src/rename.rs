@@ -25,6 +25,14 @@ const PROGRESS_BAR_CHARS: &str = "=> ";
 #[cfg(not(test))]
 const PROGRESS_BAR_TEMPLATE: &str = "[{elapsed_precise}] {bar:80.cyan/blue} {pos}/{len} {percent}%";
 
+/// How to handle the initial destination for a rename.
+#[derive(Clone, Copy)]
+enum RenameTarget {
+    Available,
+    MergeDirectory,
+    Conflict,
+}
+
 /// Dot rename handler for formatting filenames with dot separators.
 #[derive(Debug, Default)]
 pub struct DotRename {
@@ -112,6 +120,15 @@ impl DotRename {
         DotFormat::new(&self.config)
     }
 
+    /// Check the configured literal filters against the entire input path.
+    fn matches_filters(&self, path: &Path) -> bool {
+        let path = cli_tools_common::path_to_string(path);
+        self.config.include.iter().all(|pattern| path.contains(pattern))
+            && (self.config.include_any.is_empty()
+                || self.config.include_any.iter().any(|pattern| path.contains(pattern)))
+            && !self.config.exclude.iter().any(|pattern| path.contains(pattern))
+    }
+
     /// Get all files that need to be renamed.
     fn gather_files_to_rename(&mut self) -> Result<Vec<(PathBuf, PathBuf)>> {
         // Handle recursive prefix/suffix separately - they compute per-file
@@ -125,6 +142,9 @@ impl DotRename {
         }
 
         if self.root.is_file() {
+            if !self.matches_filters(&self.root) {
+                return Ok(Vec::new());
+            }
             if self.config.verbose {
                 println!("{}", format!("Formatting file {}", self.root.display()).bold());
             }
@@ -156,21 +176,13 @@ impl DotRename {
         let mut results: Vec<_> = paths
             .into_par_iter()
             .filter_map(|path| {
-                let result = {
-                    // Filter based on include, include_any, and exclude lists
-                    let path_str = cli_tools_common::path_to_string(&path);
-                    let include = self.config.include.iter().all(|name| path_str.contains(name));
-                    let include_any = self.config.include_any.is_empty()
-                        || self.config.include_any.iter().any(|name| path_str.contains(name));
-                    let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
-                    if include && include_any && exclude {
-                        self.formatted_filepath(&path)
-                            .ok()
-                            .filter(|new_path| Self::path_changed(&path, new_path))
-                            .map(|new_path| (path, new_path))
-                    } else {
-                        None
-                    }
+                let result = if self.matches_filters(&path) {
+                    self.formatted_filepath(&path)
+                        .ok()
+                        .filter(|new_path| Self::path_changed(&path, new_path))
+                        .map(|new_path| (path, new_path))
+                } else {
+                    None
                 };
                 progress_bar.inc(1);
                 result
@@ -217,15 +229,7 @@ impl DotRename {
         let mut results: Vec<(PathBuf, PathBuf)> = Vec::new();
 
         for path in paths {
-            let path_str = cli_tools_common::path_to_string(&path);
-            let include = self.config.include.iter().all(|name| path_str.contains(name));
-            let include_any = self.config.include_any.is_empty()
-                || self.config.include_any.iter().any(|name| path_str.contains(name));
-            let exclude = self.config.exclude.iter().all(|name| !path_str.contains(name));
-
-            if include
-                && include_any
-                && exclude
+            if self.matches_filters(&path)
                 && let Some(result) = self.format_file_with_parent_prefix_suffix(&path)
                 && Self::path_changed(&path, &result)
             {
@@ -276,23 +280,13 @@ impl DotRename {
         let mut results: Vec<_> = paths
             .into_par_iter()
             .filter_map(|path| {
-                let result = {
-                    // Filter based on include, include_any, and exclude lists
-                    let path_str = cli_tools_common::path_to_string(&path);
-                    let include = self.config.include.is_empty()
-                        || self.config.include.iter().all(|name| path_str.contains(name));
-                    let include_any = self.config.include_any.is_empty()
-                        || self.config.include_any.iter().any(|name| path_str.contains(name));
-                    let exclude = self.config.exclude.iter().any(|name| path_str.contains(name));
-                    let matches_filter = include && include_any && !exclude;
-                    if matches_filter {
-                        self.formatted_directory_path(&path)
-                            .ok()
-                            .filter(|new_path| Self::path_changed(&path, new_path))
-                            .map(|new_path| (path, new_path))
-                    } else {
-                        None
-                    }
+                let result = if self.matches_filters(&path) {
+                    self.formatted_directory_path(&path)
+                        .ok()
+                        .filter(|new_path| Self::path_changed(&path, new_path))
+                        .map(|new_path| (path, new_path))
+                } else {
+                    None
                 };
                 progress_bar.inc(1);
                 result
@@ -390,13 +384,7 @@ impl DotRename {
         // Track destinations claimed earlier in this batch so --force never overwrites
         // another renamed source and dry-run reports the same collision outcomes as a real run.
         let mut reservations = TargetReservations::new();
-        let mut source_indices = HashMap::<_, Vec<_>>::new();
-        for (index, (path, _)) in paths.iter().enumerate() {
-            source_indices
-                .entry(Self::source_lookup_key(path))
-                .or_default()
-                .push(index);
-        }
+        let pending_sources = Self::index_sources(paths);
 
         for (index, (path, target)) in paths.iter().enumerate() {
             let mut new_path = target.as_path();
@@ -404,36 +392,12 @@ impl DotRename {
             let mut new_str = cli_tools_common::get_relative_path_or_filename(new_path, &self.root);
             let number = format!("{:>max_chars$} / {max_items}", index + 1);
 
-            // On a case-insensitive file system a capitalization only change finds the source itself at the target.
-            // Only a different existing entry counts as a conflict.
-            let target_metadata = fs::symlink_metadata(new_path).ok();
-            let target_is_other_entry =
-                target_metadata.is_some() && !cli_tools_common::paths_refer_to_same_entry(path, new_path);
-            let target_is_pending_source = target_is_other_entry
-                && source_indices
-                    .get(&Self::source_lookup_key(new_path))
-                    .is_some_and(|indices| {
-                        indices.iter().any(|&source_index| {
-                            source_index > index
-                                && cli_tools_common::paths_refer_to_same_entry(&paths[source_index].0, new_path)
-                        })
-                    });
-
-            // Merge real directories only when the target is not itself waiting to be renamed.
-            // Do not merge symlinks, which could move files into or out of a directory outside the run.
-            let source_is_real_directory = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
-            let target_is_real_directory = target_metadata.is_some_and(|metadata| metadata.is_dir());
-            let is_directory_merge = source_is_real_directory
-                && target_is_real_directory
-                && target_is_other_entry
-                && !target_is_pending_source;
-            let reserved_by_batch = !is_directory_merge && reservations.contains(new_path);
+            let disposition = self.classify_target(path, new_path, index, &pending_sources, &reservations);
+            let is_directory_merge = matches!(disposition, RenameTarget::MergeDirectory);
             let mut skip_rename = false;
             let incremented_path;
 
-            if !is_directory_merge
-                && (reserved_by_batch || target_is_pending_source || (target_is_other_entry && !self.config.overwrite))
-            {
+            if matches!(disposition, RenameTarget::Conflict) {
                 if self.config.increment_name {
                     match Self::get_incremented_path_avoiding(new_path, &reservations) {
                         Ok(incremented) => {
@@ -650,6 +614,55 @@ impl DotRename {
     /// which misses case-only and extension-only changes like `Photo.JPG` → `Photo.jpg`.
     fn path_changed(old: &Path, new: &Path) -> bool {
         cli_tools_common::path_to_string(old) != cli_tools_common::path_to_string(new)
+    }
+
+    /// Index source paths by possible aliases and retain their positions in the batch.
+    fn index_sources(paths: &[(PathBuf, PathBuf)]) -> HashMap<String, Vec<(usize, &Path)>> {
+        let mut sources = HashMap::<_, Vec<_>>::new();
+        for (index, (path, _)) in paths.iter().enumerate() {
+            sources
+                .entry(Self::source_lookup_key(path))
+                .or_default()
+                .push((index, path.as_path()));
+        }
+        sources
+    }
+
+    /// Decide whether the destination is usable, mergeable, or needs a different path.
+    fn classify_target(
+        &self,
+        source: &Path,
+        target: &Path,
+        index: usize,
+        sources: &HashMap<String, Vec<(usize, &Path)>>,
+        reservations: &TargetReservations,
+    ) -> RenameTarget {
+        if let Ok(metadata) = fs::symlink_metadata(target)
+            && !cli_tools_common::paths_refer_to_same_entry(source, target)
+        {
+            let is_pending_source = sources.get(&Self::source_lookup_key(target)).is_some_and(|candidates| {
+                candidates.iter().any(|&(source_index, candidate)| {
+                    source_index > index && cli_tools_common::paths_refer_to_same_entry(candidate, target)
+                })
+            });
+            if is_pending_source {
+                return RenameTarget::Conflict;
+            }
+
+            // Only merge real directories. A symlink could point outside the run.
+            if metadata.is_dir() && fs::symlink_metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
+                return RenameTarget::MergeDirectory;
+            }
+            if !self.config.overwrite {
+                return RenameTarget::Conflict;
+            }
+        }
+
+        if reservations.contains(target) {
+            RenameTarget::Conflict
+        } else {
+            RenameTarget::Available
+        }
     }
 
     /// Group possible aliases of a source by case and Unicode spelling.
