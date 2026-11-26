@@ -107,7 +107,7 @@ impl ThumbnailCreator {
         let total_count = video_files.len();
         let progress_width = total_count.to_string().len();
 
-        let output_paths = thumbnail_paths(&video_files);
+        let output_paths = self.output_paths(&video_files)?;
         for (index, (video_file, output_path)) in video_files.iter().zip(&output_paths).enumerate() {
             let progress_prefix = Self::format_progress_prefix(index + 1, total_count, progress_width);
             match self.create_thumbnail(video_file, output_path, &mut stats, &progress_prefix) {
@@ -193,6 +193,34 @@ impl ThumbnailCreator {
         video_files.sort();
 
         Ok(video_files)
+    }
+
+    /// Choose thumbnail paths based on all video siblings, even for a single file invocation.
+    fn output_paths(&self, video_files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        let [video] = video_files else {
+            return Ok(thumbnail_paths(video_files));
+        };
+        if self.root != *video {
+            return Ok(thumbnail_paths(video_files));
+        }
+
+        let parent = video.parent().context("Video has no parent directory")?;
+        let include_hidden = cli_tools_common::is_hidden_path(video);
+        let mut siblings = vec![video.clone()];
+        for entry in std::fs::read_dir(parent).with_context(|| format!("Reading {}", parent.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            if path != *video
+                && Self::is_video_file(&path)
+                && (include_hidden || !cli_tools_common::is_hidden_path(&path))
+                && entry.file_type()?.is_file()
+            {
+                siblings.push(path);
+            }
+        }
+        let mut paths = thumbnail_paths(&siblings);
+        paths.truncate(1);
+        Ok(paths)
     }
 
     /// Check if a file is a video file based on its extension.
@@ -907,6 +935,30 @@ mod test_thumbnail_run {
         assert_eq!(std::fs::read(screens.join("first.jpg"))?, b"existing");
         assert_eq!(std::fs::read(screens.join("second.jpg"))?, b"existing");
         Ok(())
+    }
+
+    #[test]
+    fn separate_single_file_runs_use_distinct_paths_for_same_stem_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let mp4 = directory.path().join("Film.mp4");
+        let mkv = directory.path().join("Film.mkv");
+        let dotted_stem = directory.path().join("Film.mp4.mkv");
+        for video in [&mp4, &mkv, &dotted_stem] {
+            std::fs::write(video, []).unwrap();
+        }
+
+        let directory_run = creator(directory.path().to_path_buf());
+        let videos = directory_run.gather_video_files().unwrap();
+        let directory_paths = directory_run.output_paths(&videos).unwrap();
+        assert_eq!(directory_paths.len(), 3);
+        for (video, path) in videos.into_iter().zip(directory_paths) {
+            let file_run = creator(video.clone());
+            let selected = file_run.gather_video_files().unwrap();
+            let isolated_paths = file_run.output_paths(&selected).unwrap();
+            let name = video.file_name().unwrap().to_str().unwrap();
+            assert_eq!(path, directory.path().join(format!("Screens/{name}.jpg")));
+            assert_eq!(isolated_paths, [path]);
+        }
     }
 
     #[test]
