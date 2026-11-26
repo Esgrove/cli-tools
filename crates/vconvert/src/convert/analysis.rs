@@ -23,7 +23,8 @@ use crate::types::{
 
 impl VideoConvert<'_> {
     /// Analyze files in parallel to determine which need processing.
-    /// Runs ffprobe concurrently and returns the selected files and the run counts from analysis and duplicate handling.
+    /// Runs ffprobe concurrently.
+    /// Returns the selected files and the counts from analysis and duplicate handling.
     pub(super) fn analyze_files(
         &self,
         files: Vec<VideoFile>,
