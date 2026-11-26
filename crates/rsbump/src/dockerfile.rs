@@ -138,6 +138,9 @@ fn rewrite_line(
     let prefix = captures.name("prefix")?;
     let image = captures.name("image")?;
     let old_tag = captures.name("tag").map_or("latest", |tag| tag.as_str());
+    if old_tag.contains('$') {
+        return None;
+    }
     let old_digest = captures.name("digest").map(|digest| digest.as_str());
     let reference_end = captures
         .name("digest")
@@ -297,6 +300,14 @@ mod test_update_dockerfile {
     fn image_without_tag() {
         let result = update("FROM rust\n");
         assert_eq!(result.content, "FROM rust:1.100\n");
+    }
+
+    #[test]
+    fn build_arg_variable_tag_is_left_unchanged() {
+        let content = "ARG RUST_VERSION=1.90\nFROM rust:${RUST_VERSION}-slim AS builder\nFROM rust:$TAG\n";
+        let result = update(content);
+        assert_eq!(result.content, content);
+        assert!(!result.is_changed());
     }
 
     #[test]

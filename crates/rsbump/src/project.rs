@@ -522,7 +522,8 @@ fn write_or_record_diff(
             updated,
         });
     } else {
-        fs::write(path, updated).with_context(|| format!("Failed to write {}", path.display()))?;
+        cli_tools_common::write_atomically(path, updated)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
     }
     Ok(())
 }
