@@ -471,11 +471,16 @@ impl ThumbnailCreator {
         Ok(file)
     }
 
-    /// Escape text for ffmpeg drawtext filter.
+    /// Escape a path or option value for placement inside single quotes in an ffmpeg drawtext filter.
+    ///
+    /// Filtergraph strings go through two `av_get_token` passes (graph splitting then option parsing).
+    /// Inside single quotes, `\\` passes through level 1 and yields a literal `\` at level 2,
+    /// `\:` yields a literal `:`, and `'\\\''` closes the level-1 quote, emits `\'` for level 2,
+    /// and reopens the level-1 quote so a literal `'` survives both passes without breaking out.
     fn escape_for_drawtext(text: &str) -> String {
         text.replace('\\', "\\\\")
             .replace(':', "\\:")
-            .replace('\'', "\\'")
+            .replace('\'', r"'\\\''")
             .replace('|', "\\|")
     }
 }
@@ -625,8 +630,69 @@ mod test_thumbnail_helpers {
     fn escapes_all_drawtext_special_characters() {
         assert_eq!(
             ThumbnailCreator::escape_for_drawtext(r"C:\font:path's|name"),
-            r"C\:\\font\:path\'s\|name"
+            r"C\:\\font\:path'\\\''s\|name"
         );
+    }
+
+    #[test]
+    fn renders_thumbnail_when_textfile_path_contains_apostrophe_comma_and_colon() {
+        if !cli_tools_common::command_exists("ffmpeg") {
+            return;
+        }
+        let filters = Command::new("ffmpeg")
+            .args(["-hide_banner", "-filters"])
+            .output()
+            .ok()
+            .map_or_default(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        if !filters.contains("drawtext") {
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let tricky_dir = temp_dir.path().join("O'Brien,Jr;a:b");
+        std::fs::create_dir_all(&tricky_dir).expect("create tricky dir");
+        let video_path = temp_dir.path().join("clip.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=128x128:d=1",
+                "-c:v",
+                "libx264",
+                "-y",
+            ])
+            .arg(&video_path)
+            .status()
+            .expect("generate clip");
+        assert!(status.success(), "ffmpeg should generate tiny test clip");
+
+        let text_file = tricky_dir.join("header's,1.txt");
+        std::fs::write(&text_file, "clip.mp4\n128x128").expect("write header text");
+        let output_path = temp_dir.path().join("out.jpg");
+
+        let mut creator = creator(temp_dir.path().to_path_buf(), config());
+        creator.escaped_font = ThumbnailCreator::escape_for_drawtext(DEFAULT_FONT_FILE);
+        let params = ThumbnailParams {
+            interval: 1.0,
+            cols: 1,
+            rows: 1,
+            padding: 0,
+            font_size: 16,
+            metadata_text: "clip.mp4".to_string(),
+        };
+
+        let mut command = creator.build_ffmpeg_command(&video_path, &output_path, &params, &text_file);
+        let output = command.output().expect("run ffmpeg drawtext");
+        assert!(
+            output.status.success(),
+            "ffmpeg drawtext failed with tricky textfile path: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output_path.is_file(), "thumbnail jpg should be written");
     }
 
     #[test]
