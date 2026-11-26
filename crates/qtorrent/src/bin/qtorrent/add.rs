@@ -10,6 +10,7 @@ mod display;
 mod printer;
 mod prompt;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Result, bail};
@@ -17,7 +18,7 @@ use colored::Colorize;
 
 use cli_tools_dots::DotRenameConfig;
 use cli_tools_qtorrent::utils;
-use cli_tools_qtorrent::{NameSuggester, TorrentAdder, TorrentInfo, TorrentStats, find_existing_torrent};
+use cli_tools_qtorrent::{NameSuggester, TorrentAdder, TorrentInfo, TorrentStats};
 
 use crate::QtorrentArgs;
 use crate::client;
@@ -102,7 +103,12 @@ impl QTorrent {
         let mut printer = EventPrinter::new(self.config.verbose);
 
         // Get the list of existing torrents to check for duplicates
-        let existing_torrents = client.get_torrent_list().await?;
+        let mut existing_torrents: HashMap<_, _> = client
+            .get_torrent_list()
+            .await?
+            .into_iter()
+            .map(|(hash, item)| (hash, Some(item.name)))
+            .collect();
         if self.config.verbose {
             println!(
                 "{} {}",
@@ -134,11 +140,19 @@ impl QTorrent {
                 .as_deref()
                 .and_then(|directory| utils::existing_torrent_in_downloaded(directory, &torrent_path));
 
-            if let Some(existing_item) = find_existing_torrent(&info, &existing_torrents) {
+            let info_hash = info.info_hash.to_lowercase();
+            if let Some(existing_name) = existing_torrents.get(&info_hash) {
+                let Some(existing_name) = existing_name else {
+                    cli_tools_common::print_yellow!(
+                        "Already added, but setup failed earlier in this run. Keeping the input."
+                    );
+                    stats.inc_skipped();
+                    continue;
+                };
                 println!(
                     "  {} Already exists in qBittorrent as: {}",
                     "⊘".yellow(),
-                    existing_item.name.cyan()
+                    existing_name.cyan()
                 );
 
                 if let Some(existing) = downloaded_collision.as_deref()
@@ -153,7 +167,7 @@ impl QTorrent {
                 }
 
                 match self
-                    .prompt_rename_existing(&info, &existing_item.name, &adder, &mut printer)
+                    .prompt_rename_existing(&info, existing_name, &adder, &mut printer)
                     .await
                 {
                     Ok(true) => stats.inc_renamed(),
@@ -207,7 +221,12 @@ impl QTorrent {
                 continue;
             }
 
-            match adder.add(info, &mut printer).await {
+            let display_name = info.display_name().into_owned();
+            let add_result = adder.add(info, &mut printer).await;
+            if printer.take_add_acknowledged() {
+                existing_torrents.insert(info_hash, add_result.is_ok().then_some(display_name));
+            }
+            match add_result {
                 Ok(size) => {
                     stats.inc_success(size);
                     if let Some(directory) = downloaded_directory.as_deref() {
@@ -443,6 +462,41 @@ mod test_add_workflow {
 
         assert!(!directory.torrent_path.exists());
         assert!(directory.moved_torrent_path().is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn identical_hashes_are_only_submitted_once_per_run() -> Result<()> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let directory = TorrentDirectory::new();
+        let second_path = directory.root.join("Other.Name.torrent");
+        std::fs::copy(&directory.torrent_path, &second_path)?;
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&submissions);
+        let port = crate::test_server::serve_with(session_routes("[]".to_owned()), move |request| {
+            if request.starts_with("POST /api/v2/torrents/add ") {
+                recorded.fetch_add(1, Ordering::Relaxed);
+            }
+            None
+        })
+        .await;
+
+        connected_qtorrent(&directory, port, &[]).run().await?;
+
+        assert_eq!(submissions.load(Ordering::Relaxed), 1);
+        assert!(directory.moved_torrent_path().is_file());
+        assert!(!second_path.exists());
+        assert!(
+            directory
+                .root
+                .join(utils::DOWNLOADED_DIRECTORY_NAME)
+                .join("Other.Name.torrent")
+                .is_file()
+        );
         Ok(())
     }
 
