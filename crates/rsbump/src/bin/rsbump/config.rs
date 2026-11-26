@@ -70,7 +70,7 @@ impl RsbumpConfig {
             return Ok(Self::default());
         };
 
-        match fs::read_to_string(path) {
+        match fs::read_to_string(&path) {
             Ok(content) => Self::from_toml_str(&content)
                 .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),

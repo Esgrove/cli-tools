@@ -108,7 +108,7 @@ impl SlbConfig {
         let Some(path) = cli_tools_common::config_path() else {
             return Ok(Self::default());
         };
-        match fs::read_to_string(path) {
+        match fs::read_to_string(&path) {
             Ok(content) => Self::from_toml_str(&content)
                 .map_err(|error| anyhow::anyhow!("Failed to parse config file {}:\n{error}", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),

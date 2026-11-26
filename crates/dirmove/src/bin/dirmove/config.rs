@@ -116,7 +116,7 @@ impl DirMoveConfig {
             return Ok(Self::default());
         };
 
-        match fs::read_to_string(path) {
+        match fs::read_to_string(&path) {
             Ok(content) => Self::from_toml_str(&content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -219,7 +219,7 @@ pub fn add_ignored_group_name_to_config(name: &str) -> Result<bool> {
     let Some(config_path) = cli_tools_common::config_path() else {
         anyhow::bail!("Could not determine config file path");
     };
-    add_ignored_group_name_to_config_at(config_path, name)
+    add_ignored_group_name_to_config_at(&config_path, name)
 }
 
 /// Add a group name to `ignored_group_names` in the config file at `config_path`,

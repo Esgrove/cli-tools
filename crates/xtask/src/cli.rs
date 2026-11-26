@@ -325,7 +325,7 @@ impl UserConfig {
         let Some(path) = cli_tools_common::config_path() else {
             return Ok(Self::default());
         };
-        match std::fs::read_to_string(path) {
+        match std::fs::read_to_string(&path) {
             Ok(content) => Self::from_toml_str(&content)
                 .with_context(|| format!("Invalid [xtask] section in user config {}", path.display())),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),

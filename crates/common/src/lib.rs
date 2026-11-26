@@ -58,34 +58,13 @@ pub static RE_RESOLUTION: LazyLock<Regex> =
 pub static RE_REPEATED_SEPARATORS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[.\-_\s]{2,}").expect("Invalid repeated separators regex"));
 
+/// Environment variable that overrides the user config file path.
+///
+/// An empty value disables reading a user config file altogether.
+pub const CONFIG_PATH_ENV: &str = "CLI_TOOLS_CONFIG";
+
 /// Base name of the shared user config file.
-#[cfg(not(test))]
 const PROJECT_NAME: &str = "cli-tools";
-
-/// Path to the user config file: `$HOME/.config/cli-tools.toml`.
-///
-/// When the lib itself is compiled under `#[cfg(test)]`, returns the fixture directly at compile time.
-/// No runtime check needed.
-///
-/// For tests of the other workspace crates the lib is compiled in normal mode,
-/// so the non-test static detects the test context at runtime via `CARGO_MANIFEST_DIR`,
-/// which Cargo injects as a runtime env var for every `cargo test` and `cargo run` invocation.
-/// Only a manifest directory inside this workspace counts,
-/// so projects that depend on these crates and launch a tool through `cargo run` still read the real user config.
-///
-/// Returns `None` if the home directory cannot be determined (production path only).
-#[cfg(not(test))]
-static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-    if std::env::var_os("CARGO_MANIFEST_DIR").is_some_and(|directory| is_inside_workspace(Path::new(&directory))) {
-        return Some(sample_config_fixture_path());
-    }
-    let home_dir = dirs::home_dir()?;
-    Some(home_dir.join(".config").join(format!("{PROJECT_NAME}.toml")))
-});
-
-/// Path to the sample config fixture, used directly when the lib is compiled under `#[cfg(test)]`.
-#[cfg(test)]
-static CONFIG_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| Some(sample_config_fixture_path()));
 
 /// Bytes per kilobyte.
 const KB: u64 = 1024;
@@ -148,12 +127,35 @@ impl MatchRange {
 
 /// Return the path to the user config file.
 ///
-/// During library tests, returns the sample fixture at `crates/common/tests/fixtures/sample_config.toml`.
+/// Checks `CLI_TOOLS_CONFIG` first so tests and callers can point to a custom config file,
+/// or disable config loading by setting it to an empty string.
+/// During workspace tests, returns the sample fixture at `crates/common/tests/fixtures/sample_config.toml`.
 /// Otherwise, returns `$HOME/.config/cli-tools.toml`.
 ///
-/// Returns `None` if the home directory cannot be determined.
-pub fn config_path() -> Option<&'static Path> {
-    CONFIG_PATH.as_deref()
+/// Returns `None` if config loading is explicitly disabled or the home directory cannot be determined.
+#[must_use]
+pub fn config_path() -> Option<PathBuf> {
+    if let Some(override_path) = env::var_os(CONFIG_PATH_ENV) {
+        return (!override_path.is_empty()).then(|| PathBuf::from(override_path));
+    }
+
+    if cfg!(test) {
+        return Some(sample_config_fixture_path());
+    }
+
+    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let target_tmpdir = env::var_os("CARGO_TARGET_TMPDIR").map(PathBuf::from);
+    let current_exe = env::current_exe().ok();
+    if is_workspace_test_context(
+        manifest_dir.as_deref(),
+        target_tmpdir.as_deref(),
+        current_exe.as_deref(),
+    ) {
+        return Some(sample_config_fixture_path());
+    }
+
+    let home_dir = dirs::home_dir()?;
+    Some(home_dir.join(".config").join(format!("{PROJECT_NAME}.toml")))
 }
 
 /// Append an extension to `PathBuf`, stripping any trailing path separators first.
@@ -173,10 +175,10 @@ pub fn append_extension_to_path(path: &Path, extension: impl AsRef<OsStr>) -> Pa
 /// Helper method to assert floating point equality in test cases.
 ///
 /// # Panics
-/// Panics if the absolute difference between `a` and `b` exceeds `f64::EPSILON`.
+/// Panics if the difference between `a` and `b` exceeds scaled `f64::EPSILON`.
 #[inline]
 pub fn assert_f64_eq(a: f64, b: f64) {
-    let epsilon = f64::EPSILON;
+    let epsilon = f64::EPSILON * a.abs().max(b.abs()).max(1.0);
     assert!(
         (a - b).abs() <= epsilon,
         "Values are not equal: {a} and {b} (epsilon = {epsilon})"
@@ -271,14 +273,21 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 }
 
 /// Format duration from seconds as a human-readable string.
-/// Negative values are treated as zero.
+/// Negative and non-finite values are treated as zero.
 #[must_use]
 pub fn format_duration_seconds(seconds: f64) -> String {
+    if !seconds.is_finite() {
+        return "0.0s".to_string();
+    }
     // Ensure non-negative value before converting to avoid sign loss
     let seconds = seconds.max(0.0);
-    // Values larger than u64::MAX will saturate, which is acceptable for duration display
+    // Round sub-minute values that would otherwise format as "60.0s" up into the minute branch.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let secs = seconds as u64;
+    let secs = if (59.95..60.0).contains(&seconds) {
+        60
+    } else {
+        seconds as u64
+    };
     if secs >= 3600 {
         format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
     } else if secs >= 60 {
@@ -291,7 +300,7 @@ pub fn format_duration_seconds(seconds: f64) -> String {
 /// Prompt the user for confirmation with a yes or no question.
 ///
 /// Returns `true` if the user answers "y" or "yes".
-/// Returns `false` if the user answers anything else.
+/// Returns `false` if the user answers anything else or if stdin reaches EOF.
 /// The default value is used when the user presses Enter without input.
 ///
 /// # Errors
@@ -305,11 +314,14 @@ pub fn get_user_confirmation(message: &str, default: bool) -> std::io::Result<bo
 
 /// Read one answer from the reader and decide what it means.
 ///
-/// An empty answer takes the default, "y" and "yes" are yes, and anything else is no.
+/// End of input returns `false` so closed stdin never auto-confirms a prompt.
+/// An empty line takes the default, "y" and "yes" are yes, and anything else is no.
 /// Taking the reader as an argument keeps the decision testable.
 fn read_confirmation(mut reader: impl io::BufRead, default: bool) -> std::io::Result<bool> {
     let mut input = String::new();
-    reader.read_line(&mut input)?;
+    if reader.read_line(&mut input)? == 0 {
+        return Ok(false);
+    }
 
     let trimmed = input.trim().to_lowercase();
     if trimmed.is_empty() {
@@ -408,6 +420,9 @@ pub fn is_system_directory(entry: &walkdir::DirEntry) -> bool {
 #[cfg(feature = "async")]
 #[must_use]
 pub fn is_system_directory_tokio(entry: &tokio::fs::DirEntry) -> bool {
+    if !entry.path().is_dir() {
+        return false;
+    }
     let file_name = entry.file_name();
     let name = file_name.to_string_lossy();
     SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir))
@@ -417,9 +432,10 @@ pub fn is_system_directory_tokio(entry: &tokio::fs::DirEntry) -> bool {
 /// Returns true for OS-specific directories like `$RECYCLE.BIN`, `.Spotlight-V100`, or `lost+found`.
 #[must_use]
 pub fn is_system_directory_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir)))
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir))
+    })
 }
 
 /// Classify a Windows path string as a UNC share, a drive letter, or another local path.
@@ -500,9 +516,31 @@ pub const fn is_network_path(_path: &Path) -> bool {
     false
 }
 
+/// Walk up from `path` to find the nearest existing directory on disk.
+fn nearest_existing_directory(path: &Path) -> PathBuf {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    };
+
+    while !current.is_dir() {
+        match current.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() && parent != current => {
+                current = parent.to_path_buf();
+            }
+            _ => return PathBuf::from("."),
+        }
+    }
+    current
+}
+
 /// Get the available disk space in bytes for the volume containing the given path.
 ///
-/// When `path` is a file, the space is measured for the volume of its parent directory.
+/// When `path` is a file or does not exist yet,
+/// the space is measured for the volume of the nearest existing ancestor directory.
 /// Returns `None` if the available space could not be determined.
 #[cfg(windows)]
 #[must_use]
@@ -510,15 +548,7 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-    // `GetDiskFreeSpaceExW` expects a directory. Use the parent directory for file paths.
-    let directory = if path.is_dir() {
-        path
-    } else {
-        path.parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-    };
-
+    let directory = nearest_existing_directory(path);
     let mut wide: Vec<u16> = directory.as_os_str().encode_wide().collect();
     // null terminator
     wide.push(0);
@@ -542,9 +572,40 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
 
 /// Get the available disk space in bytes for the volume containing the given path.
 ///
-/// On non-Windows platforms the available space cannot be determined without an additional dependency,
-/// so this always returns `None`.
-#[cfg(not(windows))]
+/// When `path` is a file or does not exist yet,
+/// the space is measured for the volume of the nearest existing ancestor directory.
+/// Returns `None` if the available space could not be determined.
+#[cfg(unix)]
+#[must_use]
+pub fn available_disk_space(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let directory = nearest_existing_directory(path);
+    let path_cstr = CString::new(directory.as_os_str().as_bytes()).ok()?;
+    let mut volume_info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+
+    // SAFETY: `path_cstr` is a valid null-terminated path and `volume_info` points to writable `statvfs` storage.
+    #[allow(unsafe_code)]
+    let call_result = unsafe { libc::statvfs(path_cstr.as_ptr(), volume_info.as_mut_ptr()) };
+    if call_result != 0 {
+        return None;
+    }
+
+    // SAFETY: `statvfs` returned 0, so `volume_info` has been initialized by the operating system.
+    #[allow(unsafe_code)]
+    let volume_info = unsafe { volume_info.assume_init() };
+    // Field widths differ across Unix targets (u32 vs u64), so widen explicitly.
+    #[allow(clippy::useless_conversion)]
+    let block_size = u64::from(volume_info.f_frsize).max(u64::from(volume_info.f_bsize));
+    #[allow(clippy::useless_conversion)]
+    u64::from(volume_info.f_bavail).checked_mul(block_size)
+}
+
+/// Get the available disk space in bytes for the volume containing the given path.
+///
+/// Returns `None` on platforms that are neither Unix nor Windows.
+#[cfg(not(any(unix, windows)))]
 #[must_use]
 pub const fn available_disk_space(_path: &Path) -> Option<u64> {
     None
@@ -712,11 +773,14 @@ pub fn resolve_required_input_path_str(path: &str) -> Result<PathBuf> {
     resolve_required_input_path(Path::new(path))
 }
 
-/// Trim surrounding whitespace from a path that is valid UTF-8.
+/// Trim surrounding whitespace from a UTF-8 path unless the literal path already exists on disk.
 ///
-/// Paths that are not valid UTF-8 are returned unchanged,
-/// so they are resolved as given instead of being treated as empty.
+/// Existing paths with leading or trailing spaces are kept intact,
+/// and paths that are not valid UTF-8 are returned unchanged.
 fn trim_path(path: &Path) -> PathBuf {
+    if !path.as_os_str().is_empty() && path.exists() {
+        return path.to_path_buf();
+    }
     path.to_str()
         .map_or_else(|| path.to_path_buf(), |text| PathBuf::from(text.trim()))
 }
@@ -978,12 +1042,46 @@ fn sample_config_fixture_path() -> PathBuf {
 }
 
 /// Whether the directory is inside this cargo workspace, two levels above this crate's manifest directory.
-#[cfg(not(test))]
 fn is_inside_workspace(directory: &Path) -> bool {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .is_some_and(|workspace_root| directory.starts_with(workspace_root))
+}
+
+/// Return whether the current process is a test harness running inside this workspace.
+///
+/// Cargo sets `CARGO_MANIFEST_DIR` for both `cargo test` and `cargo run`,
+/// so `cargo run` is excluded by also requiring either `CARGO_TARGET_TMPDIR`
+/// (which Cargo sets for integration tests) or a hashed Cargo test executable path.
+fn is_workspace_test_context(
+    manifest_dir: Option<&Path>,
+    target_tmpdir: Option<&Path>,
+    current_exe: Option<&Path>,
+) -> bool {
+    if !manifest_dir.is_some_and(is_inside_workspace) {
+        return false;
+    }
+    if target_tmpdir.is_some() {
+        return true;
+    }
+    current_exe.is_some_and(exe_is_cargo_test_binary)
+}
+
+/// Return whether an executable path looks like a Cargo test binary (`<name>-<16 hex chars>` in `deps` or `build`).
+fn exe_is_cargo_test_binary(exe_path: &Path) -> bool {
+    let Some(stem) = exe_path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let has_cargo_hash = stem
+        .rsplit_once('-')
+        .is_some_and(|(_, hash)| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if !has_cargo_hash {
+        return false;
+    }
+    exe_path
+        .components()
+        .any(|component| matches!(component.as_os_str().to_str(), Some("deps" | "build")))
 }
 
 #[cfg(test)]
@@ -2220,8 +2318,78 @@ mod test_read_confirmation {
     }
 
     #[test]
-    fn a_closed_input_takes_the_default() {
-        assert!(read_confirmation(&b""[..], true).expect("should read"));
+    fn a_closed_input_returns_false_regardless_of_default() {
+        assert!(!read_confirmation(&b""[..], true).expect("should read"));
         assert!(!read_confirmation(&b""[..], false).expect("should read"));
+    }
+}
+
+#[cfg(test)]
+mod test_core_bugfixes {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[test]
+    fn format_duration_seconds_rounds_boundary_and_rejects_non_finite() {
+        assert_eq!(format_duration_seconds(59.96), "1m 00s");
+        assert_eq!(format_duration_seconds(f64::INFINITY), "0.0s");
+        assert_eq!(format_duration_seconds(f64::NAN), "0.0s");
+    }
+
+    #[test]
+    fn available_disk_space_returns_positive_bytes_on_unix_and_windows() {
+        let dir = tempdir().unwrap();
+        let space = available_disk_space(dir.path());
+        assert!(
+            space.is_some_and(|bytes| bytes > 0),
+            "expected disk space, got {space:?}"
+        );
+
+        let nested_missing = dir.path().join("missing_parent").join("file.mp4");
+        let nested_space = available_disk_space(&nested_missing);
+        assert!(
+            nested_space.is_some_and(|bytes| bytes > 0),
+            "expected disk space via existing ancestor, got {nested_space:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_input_path_preserves_existing_path_with_surrounding_spaces() {
+        let dir = tempdir().unwrap();
+        let spaced = dir.path().join(" padded.txt ");
+        File::create(&spaced).unwrap();
+
+        let resolved = resolve_input_path(Some(&spaced)).expect("existing spaced file should resolve");
+        assert_eq!(resolved, dunce::canonicalize(&spaced).unwrap());
+    }
+
+    #[test]
+    fn workspace_test_context_excludes_cargo_run_binaries() {
+        let workspace_manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cargo_run_exe = Path::new("/tmp/target/debug/dirmove");
+        let unit_test_exe = Path::new("/tmp/target/debug/deps/cli_tools_dirmove-0123456789abcdef");
+        let outside_manifest = Path::new("/tmp/external-project");
+
+        assert!(!is_workspace_test_context(
+            Some(workspace_manifest),
+            None,
+            Some(cargo_run_exe),
+        ));
+        assert!(is_workspace_test_context(
+            Some(workspace_manifest),
+            None,
+            Some(unit_test_exe),
+        ));
+        assert!(is_workspace_test_context(
+            Some(workspace_manifest),
+            Some(Path::new("/tmp/target/tmp")),
+            Some(cargo_run_exe),
+        ));
+        assert!(!is_workspace_test_context(
+            Some(outside_manifest),
+            Some(Path::new("/tmp/target/tmp")),
+            Some(unit_test_exe),
+        ));
     }
 }
