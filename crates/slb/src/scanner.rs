@@ -468,7 +468,7 @@ fn scan_normal(line: &str, chars: LineChars<'_>, cursor: &mut Cursor, syntax: &S
         let previous = index.checked_sub(1).and_then(|position| char_at(chars, position));
         let is_url = syntax.line_marker == "//" && previous == Some(':');
         let needs_space = syntax.marker_needs_leading_space
-            && previous.is_some_and(|previous| !previous.is_whitespace() && previous != ';');
+            && previous.is_some_and(|previous| !(previous.is_whitespace() || (syntax.heredoc && previous == ';')));
         if !is_url && !needs_space {
             return NormalStep::Comment(byte);
         }

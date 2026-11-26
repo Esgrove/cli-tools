@@ -23,6 +23,8 @@ use cli_tools_common::{leading_whitespace, starts_with_ignore_case};
 pub struct TrailingComment {
     /// Code part of the line with trailing whitespace removed.
     pub code: String,
+    /// Full comment marker preserved from the source line (for example `//`, `///`, or `#`).
+    pub marker: String,
     /// Comment text after the marker, trimmed.
     pub text: String,
     /// One based character column of the marker.
@@ -261,7 +263,7 @@ pub fn fix_trailing_comments_scanned(
         let Some(comment_start) = scan.comment_start.get(index).copied().flatten() else {
             continue;
         };
-        let Some(trailing) = trailing_comment(line, comment_start, &syntax) else {
+        let Some(trailing) = trailing_comment(line, comment_start, &syntax, &style) else {
             continue;
         };
         if is_directive(&trailing.text, options) {
@@ -306,7 +308,7 @@ pub fn fix_trailing_comments_scanned(
             continue;
         }
         let indent = leading_whitespace(line);
-        let comment_line = format!("{indent}{} {}", syntax.line_marker, trailing.text);
+        let comment_line = format!("{indent}{} {}", trailing.marker, trailing.text);
         violations.push(Violation {
             line: index + 1,
             column: Some(trailing.column),
@@ -354,19 +356,33 @@ fn has_comment_line_above(lines: &[&str], index: usize, style: &CommentStyle, sc
         .is_some_and(|line| line_marker(line.trim_start(), style.line_markers).is_some())
 }
 
-/// Split a line at a comment marker byte offset into code and comment text.
-fn trailing_comment(line: &str, comment_start: usize, syntax: &StringSyntax) -> Option<TrailingComment> {
+/// Split a line at a comment marker byte offset into code, preserved marker, and comment text.
+///
+/// Doxygen post-member doc comments (`///<` and `//!<`) document the preceding member on the same line,
+/// so moving them above would change what they document; they return `None`.
+fn trailing_comment(
+    line: &str,
+    comment_start: usize,
+    syntax: &StringSyntax,
+    style: &CommentStyle,
+) -> Option<TrailingComment> {
     let code = line.get(..comment_start)?.trim_end();
     if code.is_empty() {
         return None;
     }
-    let text = line.get(comment_start + syntax.line_marker.len()..)?.trim();
+    let rest = line.get(comment_start..)?;
+    if rest.starts_with("///<") || rest.starts_with("//!<") {
+        return None;
+    }
+    let marker = line_marker(rest, style.line_markers).unwrap_or(syntax.line_marker);
+    let text = rest.get(marker.len()..)?.trim();
     if text.is_empty() {
         return None;
     }
     let column = line.get(..comment_start)?.chars().count() + 1;
     Some(TrailingComment {
         code: code.to_string(),
+        marker: marker.to_string(),
         text: text.to_string(),
         column,
     })
@@ -1203,9 +1219,24 @@ mod test_trailing_other_languages {
     #[test]
     fn yaml_fragment_in_url_is_not_a_comment() {
         assert_eq!(replacement("url: http://x#frag", FileKind::Yaml), None);
+        assert_eq!(replacement("value: foo;#bar", FileKind::Yaml), None);
+        assert_eq!(
+            replacement("cmd;# comment", FileKind::Shell),
+            Some(pair("# comment", "cmd;"))
+        );
         assert_eq!(
             replacement("key: value # c", FileKind::Yaml),
             Some(pair("# c", "key: value"))
+        );
+    }
+
+    #[test]
+    fn trailing_doc_markers_are_preserved_and_doxygen_post_comments_stay_in_place() {
+        assert_eq!(replacement("int x = 1; ///< member doc", FileKind::CLike), None);
+        assert_eq!(replacement("int x = 1; //!< member doc", FileKind::CLike), None);
+        assert_eq!(
+            replacement("let x = 1; /// doc note", FileKind::Rust),
+            Some(pair("/// doc note", "let x = 1;"))
         );
     }
 

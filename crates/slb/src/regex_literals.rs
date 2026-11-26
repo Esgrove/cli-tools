@@ -110,8 +110,10 @@ pub(super) fn regex_can_start(prefix: &str) -> bool {
         '>' => prefix.ends_with("=>"),
         _ => {
             let word_start = prefix
-                .rfind(|character: char| !character.is_alphanumeric() && character != '_' && character != '$')
-                .map_or(0, |index| index + 1);
+                .char_indices()
+                .rev()
+                .find(|(_, character)| !character.is_alphanumeric() && *character != '_' && *character != '$')
+                .map_or(0, |(index, character)| index + character.len_utf8());
             let word = prefix.get(word_start..).unwrap_or_default();
             matches!(
                 word,
@@ -721,6 +723,12 @@ mod test_regex_literals {
             assert_eq!(result.state, ScanState::InBlockComment(1));
             assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![2]);
         }
+    }
+
+    #[test]
+    fn regex_can_start_handles_multibyte_separator_before_keyword() {
+        assert!(super::regex_can_start("—return"));
+        assert!(super::regex_can_start("«throw"));
     }
 
     #[test]
