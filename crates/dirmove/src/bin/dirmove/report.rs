@@ -127,7 +127,8 @@ impl MoveObserver for ConsoleReporter<'_> {
             }
             MoveEvent::Finished(report) => {
                 self.progress_bar.finish_and_clear();
-                println!("  Moved {}", count_label(report.moved_count(), "file", "files"));
+                let action = if self.dryrun { "Would move" } else { "Moved" };
+                println!("  {action} {}", count_label(report.moved_count(), "file", "files"));
             }
             _ => {}
         }

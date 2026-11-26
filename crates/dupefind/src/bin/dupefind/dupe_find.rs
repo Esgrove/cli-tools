@@ -16,7 +16,7 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use walkdir::WalkDir;
 
-use cli_tools_common::{OverwritePolicy, RenameOutcome, print_error, print_yellow};
+use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations, print_error, print_yellow};
 use cli_tools_dupefind::{
     DupeFileInfo, DuplicateGroup, DuplicateMatchOptions, filter_ignored_groups, find_duplicates,
     format_filename_with_highlight, group_matches_ignore,
@@ -247,6 +247,7 @@ impl DupeFind {
                 .bold()
         );
 
+        let mut reservations = TargetReservations::new();
         for group in duplicates {
             let group_name = sanitize_group_dir_name(&group.display_name());
             let target_dir = duplicates_dir.join(&group_name);
@@ -267,8 +268,13 @@ impl DupeFind {
                 if index == best_index || file.path.parent() == Some(target_dir.as_path()) {
                     continue;
                 }
-                let target_path =
-                    cli_tools_common::get_unique_path(&target_dir, &file.filename, &file.stem, &file.extension);
+                let target_path = cli_tools_common::get_unique_path_with_reservations(
+                    &target_dir,
+                    &file.filename,
+                    &file.stem,
+                    &file.extension,
+                    &reservations,
+                );
 
                 println!(
                     "{}: {}",
@@ -281,6 +287,7 @@ impl DupeFind {
                 );
 
                 if self.config.dryrun {
+                    reservations.reserve(&target_path);
                     continue;
                 }
 
@@ -293,7 +300,9 @@ impl DupeFind {
                     Ok(RenameOutcome::SkippedExisting) => {
                         print_yellow!("Skipping move, file already exists: {}", target_path.display());
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        reservations.reserve(&target_path);
+                    }
                     Err(e) => print_error!("Failed to move file: {e}"),
                 }
             }

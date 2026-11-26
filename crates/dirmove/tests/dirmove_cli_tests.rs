@@ -139,6 +139,61 @@ fn an_existing_file_in_the_target_directory_is_kept_without_force() {
 }
 
 #[test]
+fn preview_offers_a_file_to_the_next_match_after_a_collision() {
+    let tree = TempTree::with_entries(&["Library/Show/"]);
+    tree.file_with("Library/Show.Alpha.S01E01.mkv", "incoming");
+    tree.file_with("Library/Show Alpha/Show.Alpha.S01E01.mkv", "existing");
+    let home = TempTree::new();
+    let before = tree.snapshot();
+    let root = tree.join("Library");
+
+    let preview = run_dirmove(home.path(), &["--print", "--files-only"], &root);
+
+    assert_success(&preview);
+    let printed = stdout(&preview);
+    assert!(printed.lines().any(|line| line.ends_with("Move to: Show")), "{printed}");
+    assert!(String::from_utf8_lossy(&preview.stderr).contains("Skipping existing file:"));
+    assert_eq!(tree.snapshot(), before);
+
+    let run = run_dirmove(home.path(), &["--auto", "--files-only"], &root);
+
+    assert_success(&run);
+    assert_eq!(tree.read("Library/Show/Show.Alpha.S01E01.mkv"), "incoming");
+    assert_eq!(tree.read("Library/Show Alpha/Show.Alpha.S01E01.mkv"), "existing");
+}
+
+#[test]
+fn unpack_preview_excludes_an_occupied_destination() {
+    let tree = TempTree::new();
+    tree.file_with("Library/Film/english.srt", "existing");
+    tree.file_with("Library/Film/subs/english.srt", "blocked");
+    tree.file_with("Library/Film/subs/other.srt", "incoming");
+    let home = TempTree::new();
+    let before = tree.snapshot();
+    let root = tree.join("Library");
+
+    let preview = run_dirmove(
+        home.path(),
+        &[&ARGUMENTS[..], &["--print", "--verbose"]].concat(),
+        &root,
+    );
+
+    assert_success(&preview);
+    let printed = stdout(&preview).replace('\\', "/");
+    assert!(printed.contains("subs/other.srt -> other.srt"), "{printed}");
+    assert!(!printed.contains("subs/english.srt -> english.srt"), "{printed}");
+    assert!(String::from_utf8_lossy(&preview.stderr).contains("Skipping existing file:"));
+    assert_eq!(tree.snapshot(), before);
+
+    let run = run_dirmove(home.path(), &ARGUMENTS, &root);
+
+    assert_success(&run);
+    assert_eq!(tree.read("Library/Film/other.srt"), "incoming");
+    assert_eq!(tree.read("Library/Film/english.srt"), "existing");
+    assert_eq!(tree.read("Library/Film/subs/english.srt"), "blocked");
+}
+
+#[test]
 fn a_missing_path_is_an_error() {
     let tree = TempTree::new();
     let home = TempTree::new();

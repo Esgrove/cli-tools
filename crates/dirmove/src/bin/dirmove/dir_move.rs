@@ -388,8 +388,10 @@ impl DirMove {
         println!("{} Move to: {move_to_display}", "→".green());
 
         if self.config.dryrun {
+            let report =
+                mover::preview_file_moves(&dir.path, &file_paths, self.config.overwrite, &mut self.reporter())?;
             println!();
-            return Ok(DirectoryMatchOutcome::Consumed(file_paths));
+            return Ok(DirectoryMatchOutcome::Consumed(report.moved_files));
         }
 
         let confirmed =

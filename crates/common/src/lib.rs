@@ -807,14 +807,21 @@ pub fn resolve_output_path(path: Option<&str>, absolute_input_path: &Path) -> Re
 /// ```
 #[must_use]
 pub fn get_unique_path(dir: &Path, filename: &str, stem: &str, extension: &str) -> PathBuf {
+    get_unique_path_with_reservations(dir, filename, stem, extension, &TargetReservations::new())
+}
+
+/// Find a numbered destination that is free on disk and not already claimed in this batch.
+#[must_use]
+pub fn get_unique_path_with_reservations(
+    dir: &Path,
+    filename: &str,
+    stem: &str,
+    extension: &str,
+    reservations: &TargetReservations,
+) -> PathBuf {
     let mut path = dir.join(filename);
-
-    if std::fs::symlink_metadata(&path).is_err() {
-        return path;
-    }
-
     let mut counter = 1;
-    while std::fs::symlink_metadata(&path).is_ok() {
+    while std::fs::symlink_metadata(&path).is_ok() || reservations.contains(&path) {
         let new_name = if extension.is_empty() {
             format!("{stem}.{counter}")
         } else {

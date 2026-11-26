@@ -118,6 +118,14 @@ impl RenameBatch {
         }
         batch
     }
+
+    /// Test whether a previewed source would have vacated this exact directory entry.
+    fn is_vacated_in_preview(&self, target: &Path) -> bool {
+        self.previewed_sources.contains(target)
+            || self.previewed_sources.iter().any(|source| {
+                source.parent() == target.parent() && cli_tools_common::paths_refer_to_same_entry(source, target)
+            })
+    }
 }
 
 impl ConflictAction {
@@ -318,8 +326,8 @@ fn process_file_in_batch(
         return Ok(Outcome::Skipped);
     }
 
-    let has_conflict = if !batch.previewed_sources.contains(&file_without_suffix)
-        && let Ok(metadata) = std::fs::symlink_metadata(&file_without_suffix)
+    let has_conflict = if let Ok(metadata) = std::fs::symlink_metadata(&file_without_suffix)
+        && (!dryrun || !batch.is_vacated_in_preview(&file_without_suffix))
     {
         if metadata.is_dir() || file_without_suffix.is_dir() {
             return Ok(Outcome::Skipped);
