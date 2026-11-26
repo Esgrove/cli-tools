@@ -6,12 +6,14 @@
 use std::path::Path;
 use std::process::Command;
 
+use anyhow::{Context, Result};
+use tempfile::TempPath;
+
 use super::VideoConvert;
 use crate::ffmpeg::{
     ConversionOptions, build_conversion_command, build_remux_command, build_subtitle_mux_command, probe_video_info,
     run_command_isolated, validate_mux_output,
 };
-use crate::helpers::temporary_output_path;
 use crate::observer::{FilePosition, Operation, Retry};
 use crate::stats::ConversionStats;
 use crate::types::{ProcessResult, ProcessableFile, VideoInfo};
@@ -29,56 +31,47 @@ impl VideoConvert<'_> {
 
         self.observer.file_started(Operation::Remux, position, file, None);
 
-        let mut command = build_remux_command(input, output, false, codec);
-
         if self.options.dry_run {
-            self.observer.dry_run_command(&command);
+            self.observer
+                .dry_run_command(&build_remux_command(input, output, false, codec));
             return ProcessResult::Remuxed {};
         }
 
-        let status = match run_command_isolated(&mut command) {
-            Ok(status) => status,
-            Err(error) => {
-                self.remove_partial_output(output);
-                return failed(format!("Failed to execute ffmpeg: {error}"));
-            }
+        let staged = match stage_output(output) {
+            Ok(staged) => staged,
+            Err(error) => return failed(format!("Failed to stage remux output: {error}")),
         };
-
-        if status.success() {
-            if let Some(failure) = self.reject_invalid_remux(input, output, info) {
-                return failure;
-            }
-            self.delete_file_reporting_failure(input);
-            return ProcessResult::Remuxed {};
-        }
-
-        // Fallback: if audio codec is not MP4-friendly, transcode audio to AAC
-        self.observer.retrying(Retry::AacAudio { status });
-
-        // Remove failed output file if it exists
-        if output.exists() {
-            self.remove_partial_output(output);
-        }
-
-        let mut command = build_remux_command(input, output, true, codec);
-
+        let mut command = build_remux_command(input, &staged, false, codec);
         let status = match run_command_isolated(&mut command) {
             Ok(status) => status,
             Err(error) => return failed(format!("Failed to execute ffmpeg: {error}")),
         };
 
         if !status.success() {
-            self.remove_partial_output(output);
-            return failed(format!(
-                "ffmpeg remux with AAC transcode failed with status: {}",
-                status.code().unwrap_or(-1)
-            ));
+            // Transcode to AAC if stream copy failed with an incompatible audio codec.
+            self.observer.retrying(Retry::AacAudio { status });
+            if let Err(error) = clear_staged_output(&staged) {
+                return failed(error);
+            }
+            let mut command = build_remux_command(input, &staged, true, codec);
+            let status = match run_command_isolated(&mut command) {
+                Ok(status) => status,
+                Err(error) => return failed(format!("Failed to execute ffmpeg: {error}")),
+            };
+            if !status.success() {
+                return failed(format!(
+                    "ffmpeg remux with AAC transcode failed with status: {}",
+                    status.code().unwrap_or(-1)
+                ));
+            }
         }
 
-        if let Some(failure) = self.reject_invalid_remux(input, output, info) {
-            return failure;
+        if let Err(error) = validate_mux_output(input, &staged, info) {
+            return failed(format!("Remux output failed validation: {error:#}"));
         }
-        self.delete_file_reporting_failure(input);
+        if let Err(error) = self.publish_output(staged, input, output, false) {
+            return failed(error.to_string());
+        }
 
         ProcessResult::Remuxed {}
     }
@@ -88,52 +81,46 @@ impl VideoConvert<'_> {
         let input = &file.file.path;
         let final_output = &file.output_path;
         let in_place = cli_tools_common::paths_refer_to_same_file(input, final_output);
-        let command_output = if in_place {
-            temporary_output_path(final_output)
-        } else {
-            final_output.clone()
-        };
         let info = &file.info;
 
         self.observer.file_started(Operation::SubtitleMux, position, file, None);
 
-        let mut command = match build_subtitle_mux_command(input, &command_output, &file.subtitle_files) {
+        let staged = if self.options.dry_run {
+            None
+        } else {
+            match stage_output(final_output) {
+                Ok(staged) => Some(staged),
+                Err(error) => return failed(format!("Failed to stage subtitle mux output: {error}")),
+            }
+        };
+        let command_output = staged.as_deref().unwrap_or(final_output);
+        let mut command = match build_subtitle_mux_command(input, command_output, &file.subtitle_files) {
             Ok(command) => command,
             Err(error) => return failed(format!("Failed to build subtitle mux command: {error}")),
         };
 
-        if self.options.dry_run {
+        let Some(staged) = staged else {
             self.observer.dry_run_command(&command);
             return ProcessResult::SubtitlesMuxed {};
-        }
+        };
 
         let status = match run_command_isolated(&mut command) {
             Ok(status) => status,
-            Err(error) => {
-                self.remove_partial_output(&command_output);
-                return failed(format!("Failed to execute ffmpeg: {error}"));
-            }
+            Err(error) => return failed(format!("Failed to execute ffmpeg: {error}")),
         };
 
         if !status.success() {
-            self.remove_partial_output(&command_output);
             return failed(format!(
                 "ffmpeg subtitle mux failed with status: {}",
                 status.code().unwrap_or(-1)
             ));
         }
 
-        if let Err(error) = validate_mux_output(input, &command_output, info) {
-            self.delete_file_reporting_failure(&command_output);
+        if let Err(error) = validate_mux_output(input, &staged, info) {
             return failed(error.to_string());
         }
-
-        if in_place {
-            if let Err(error) = self.replace_input_with_output(input, final_output, &command_output) {
-                return failed(error.to_string());
-            }
-        } else {
-            self.delete_file_reporting_failure(input);
+        if let Err(error) = self.publish_output(staged, input, final_output, in_place) {
+            return failed(error.to_string());
         }
 
         self.delete_subtitle_files(&file.subtitle_files);
@@ -160,34 +147,46 @@ impl VideoConvert<'_> {
         // Determine audio codec: copy for mp4/mkv, transcode for others
         let copy_audio = extension == "mp4" || extension == "mkv";
 
-        let conversion_options = ConversionOptions::new(
-            input,
-            output,
-            quality_level,
-            copy_audio,
-            self.options.movie_mode,
-            &file.subtitle_files,
-            info.bit_depth,
-        );
+        let staged = if self.options.dry_run {
+            None
+        } else {
+            match stage_output(output) {
+                Ok(staged) => Some(staged),
+                Err(error) => return failed(format!("Failed to stage conversion output: {error}")),
+            }
+        };
+        let make_options = |command_output| {
+            ConversionOptions::new(
+                input,
+                command_output,
+                quality_level,
+                copy_audio,
+                self.options.movie_mode,
+                &file.subtitle_files,
+                info.bit_depth,
+            )
+        };
+        let Some(staged) = staged else {
+            match build_conversion_command(&make_options(output)) {
+                Ok(command) => self.observer.dry_run_command(&command),
+                Err(error) => return failed(format!("Failed to build ffmpeg command: {error}")),
+            }
+            return ProcessResult::converted(info.size_bytes, info.bitrate_kbps, 0, 0);
+        };
+        let conversion_options = make_options(&staged);
         let mut ffmpeg_command = match build_conversion_command(&conversion_options) {
             Ok(command) => command,
             Err(error) => return failed(format!("Failed to build ffmpeg command: {error}")),
         };
 
-        if self.options.dry_run {
-            self.observer.dry_run_command(&ffmpeg_command);
-            return ProcessResult::converted(info.size_bytes, info.bitrate_kbps, 0, 0);
-        }
-
         let output_info =
-            match self.run_conversion(&mut ffmpeg_command, conversion_options, output, quality_level, info) {
+            match self.run_conversion(&mut ffmpeg_command, conversion_options, &staged, quality_level, info) {
                 Ok(output_info) => output_info,
                 Err(error) => return failed(error),
             };
 
         // Validate output duration
         if output_info.duration < info.duration * MIN_DURATION_RATIO {
-            self.delete_file_reporting_failure(output);
             return failed(format!(
                 "Output duration {:.1}s is less than {:.0}% of original {:.1}s",
                 output_info.duration,
@@ -196,7 +195,9 @@ impl VideoConvert<'_> {
             ));
         }
 
-        self.delete_file_reporting_failure(input);
+        if let Err(error) = self.publish_output(staged, input, output, false) {
+            return failed(error.to_string());
+        }
         self.delete_subtitle_files(&file.subtitle_files);
 
         ProcessResult::Converted {
@@ -209,15 +210,19 @@ impl VideoConvert<'_> {
         }
     }
 
-    /// Check a remux output before the original is deleted,
-    /// removing the output and returning a failure when it is invalid.
-    ///
-    /// A stream copy can exit successfully on a truncated or corrupt input,
-    /// so the output has to keep the duration and audio of the input.
-    fn reject_invalid_remux(&self, input: &Path, output: &Path, info: &VideoInfo) -> Option<ProcessResult> {
-        let error = validate_mux_output(input, output, info).err()?;
-        self.remove_partial_output(output);
-        Some(failed(format!("Remux output failed validation: {error:#}")))
+    /// Install a validated output before disposing of the original.
+    fn publish_output(&self, staged: TempPath, input: &Path, output: &Path, in_place: bool) -> Result<()> {
+        if in_place {
+            return self.replace_input_with_output(input, output, &staged);
+        }
+        if self.options.overwrite {
+            staged.persist(output)
+        } else {
+            staged.persist_noclobber(output)
+        }
+        .context("Failed to install validated output")?;
+        self.delete_file_reporting_failure(input);
+        Ok(())
     }
 
     /// Run the conversion and return the probed output.
@@ -234,13 +239,11 @@ impl VideoConvert<'_> {
         info: &VideoInfo,
     ) -> Result<VideoInfo, String> {
         // First attempt: try with CUDA filters for better performance
-        let status = run_command_isolated(ffmpeg_command).map_err(|error| {
-            self.remove_partial_output(output);
-            format!("Failed to execute ffmpeg: {error}")
-        })?;
+        let status =
+            run_command_isolated(ffmpeg_command).map_err(|error| format!("Failed to execute ffmpeg: {error}"))?;
 
         if !status.success() {
-            self.remove_partial_output(output);
+            clear_staged_output(output)?;
 
             // Retry without CUDA filters (fallback for format compatibility issues)
             self.observer.retrying(Retry::CpuFilters);
@@ -251,15 +254,11 @@ impl VideoConvert<'_> {
                 .map_err(|error| format!("Failed to execute ffmpeg (retry): {error}"))?;
 
             if !status.success() {
-                self.remove_partial_output(output);
                 return Err(format!("ffmpeg failed with status: {}", status.code().unwrap_or(-1)));
             }
         }
 
-        let output_info = probe_video_info(output).map_err(|error| {
-            self.remove_partial_output(output);
-            format!("Failed to get output info: {error}")
-        })?;
+        let output_info = probe_video_info(output).map_err(|error| format!("Failed to get output info: {error}"))?;
 
         if output_info.size_bytes <= info.size_bytes {
             return Ok(output_info);
@@ -272,7 +271,7 @@ impl VideoConvert<'_> {
             input_size: info.size_bytes,
             quality_level,
         });
-        self.remove_partial_output(output);
+        clear_staged_output(output)?;
 
         conversion_options = conversion_options.with_quality_level(quality_level);
         let mut reconvert_command = build_conversion_command(&conversion_options)
@@ -281,18 +280,38 @@ impl VideoConvert<'_> {
             .map_err(|error| format!("Failed to execute ffmpeg (reconvert): {error}"))?;
 
         if !status.success() {
-            self.remove_partial_output(output);
             return Err(format!(
                 "ffmpeg reconversion failed with status: {}",
                 status.code().unwrap_or(-1)
             ));
         }
 
-        probe_video_info(output).map_err(|error| {
-            self.remove_partial_output(output);
-            format!("Failed to get reconverted video info: {error}")
-        })
+        probe_video_info(output).map_err(|error| format!("Failed to get reconverted video info: {error}"))
     }
+}
+
+/// Reserve a hidden sibling with the final extension so ffmpeg selects the right container.
+fn stage_output(output: &Path) -> Result<TempPath> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let extension = cli_tools_common::path_to_file_extension_string(output);
+    Ok(tempfile::Builder::new()
+        .prefix(".vconvert-")
+        .suffix(&format!(".{extension}"))
+        .tempfile_in(parent)?
+        .into_temp_path())
+}
+
+/// Clear a previous attempt so even a successful retry that writes nothing cannot publish stale bytes.
+fn clear_staged_output(output: &Path) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(output)
+        .map(|_| ())
+        .map_err(|error| format!("Failed to clear staged output: {error}"))
 }
 
 /// A failed processing result with the given error message.

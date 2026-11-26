@@ -15,7 +15,7 @@ use tempfile::TempDir;
 const FAKE_FFPROBE: &str = r#"#!/bin/sh
 for argument; do last="$argument"; done
 [ -s "$last" ] || { echo "empty or missing file" >&2; exit 1; }
-codec=h264; grep -q hevc "$last" && codec=hevc
+codec=h264; /usr/bin/grep -q hevc "$last" && codec=hevc
 case "$*" in *csv=p=0*) exit 0;; esac
 echo "codec_name=$codec"; echo "width=1920"; echo "height=1080"; echo "r_frame_rate=24/1"; echo "pix_fmt=yuv420p"
 echo "bit_rate=99000000"; echo "duration=100.0"
@@ -67,22 +67,25 @@ impl Sandbox {
 
     /// Run `vconvert` with the fake tools first on `PATH`.
     fn run(&self, arguments: &[&str]) -> Output {
-        let path = format!(
-            "{}:{}",
-            self.root.path().join("bin").display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        Command::new(env!("CARGO_BIN_EXE_vconvert"))
-            .args(arguments)
-            .arg(self.videos())
+        self.command(arguments).output().expect("vconvert should run")
+    }
+
+    /// Build a command whose media tools, config, and database are isolated from the host.
+    fn command(&self, arguments: &[&str]) -> Command {
+        let path = self.root.path().join("bin");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vconvert"));
+        command.args(arguments);
+        if !arguments.contains(&"--from-db") {
+            command.arg(self.videos());
+        }
+        command
             .env("PATH", path)
             .env("HOME", self.root.path().join("home"))
             // The shared config lookup treats a set manifest directory as a test run and reads a fixture config.
             .env_remove("CARGO_MANIFEST_DIR")
             .env_remove("XDG_CONFIG_HOME")
-            .env_remove("XDG_DATA_HOME")
-            .output()
-            .expect("vconvert should run")
+            .env_remove("XDG_DATA_HOME");
+        command
     }
 }
 
@@ -113,6 +116,23 @@ fn a_remux_with_an_empty_output_keeps_the_original() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(fs::read_to_string(&original).expect("read original"), "hevc video data");
+}
+
+#[test]
+fn a_forced_remux_that_cannot_start_preserves_the_existing_output() {
+    let sandbox = Sandbox::new("#!/no-such-vconvert-test-interpreter\n");
+    let original = sandbox.videos().join("show.mkv");
+    let prior_output = sandbox.videos().join("show.x265.mp4");
+    fs::write(&original, b"hevc new source").unwrap();
+    fs::write(&prior_output, b"hevc prior output").unwrap();
+
+    sandbox.run(&["--force", "--delete"]);
+    assert_eq!(fs::read(&original).unwrap(), b"hevc new source");
+    assert_eq!(
+        fs::read(&prior_output).ok().as_deref(),
+        Some(b"hevc prior output".as_slice())
+    );
+    assert_eq!(file_names(&sandbox.videos()), ["show.mkv", "show.x265.mp4"]);
 }
 
 #[test]

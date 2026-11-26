@@ -1,15 +1,14 @@
 //! Removing replaced files for video convert.
 //!
 //! Deletes or trashes originals and subtitle sidecars once their output is in place,
-//! swaps a muxed output over its input when both share the same path,
-//! and removes the partial outputs of failed ffmpeg runs.
+//! and swaps a muxed output over its input when both share the same path.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use super::VideoConvert;
-use crate::helpers::{backup_output_path, remove_partial_output};
+use crate::helpers::backup_output_path;
 use crate::observer::DeleteMethod;
 use crate::types::SubtitleFile;
 
@@ -31,13 +30,6 @@ impl VideoConvert<'_> {
     pub(super) fn delete_file_reporting_failure(&self, path: &Path) {
         if let Err(error) = self.delete_file(path) {
             self.observer.delete_failed(path, &error);
-        }
-    }
-
-    /// Remove a partial ffmpeg output, reporting a failure to the observer.
-    pub(super) fn remove_partial_output(&self, output: &Path) {
-        if let Err(error) = remove_partial_output(output) {
-            self.observer.partial_output_removal_failed(output, &error);
         }
     }
 
