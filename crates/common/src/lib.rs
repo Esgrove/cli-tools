@@ -118,6 +118,18 @@ const SYSTEM_DIRECTORIES: &[&str] = &[
     "_Serato_",
 ];
 
+/// Classification of a Windows path prefix for network drive detection.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsPathPrefix {
+    /// A UNC network share path such as `\\server\share`, `//server/share`, or `\\?\UNC\server\share`.
+    Unc,
+    /// A drive letter path such as `C:\...` or `\\?\C:\...`, whose drive type must be queried.
+    DriveLetter(u8),
+    /// A local or device path that is not a UNC share or drive letter.
+    Other,
+}
+
 /// Byte range of a highlighted match in text.
 #[derive(Debug, Clone, Copy)]
 pub struct MatchRange {
@@ -406,40 +418,73 @@ pub fn is_system_directory_path(path: &Path) -> bool {
         .is_some_and(|name| SYSTEM_DIRECTORIES.iter().any(|dir| name.eq_ignore_ascii_case(dir)))
 }
 
+/// Classify a Windows path string as a UNC share, a drive letter, or another local path.
+///
+/// Verbatim local paths (`\\?\C:\...`) and device paths (`\\.\...`) are distinguished from
+/// UNC network shares (`\\server\share`, `//server/share`, and `\\?\UNC\server\share`).
+#[cfg(any(windows, test))]
+fn classify_windows_path_prefix(path_str: &str) -> WindowsPathPrefix {
+    let bytes = path_str.as_bytes();
+    let starts_with_double_sep = bytes.get(..2).is_some_and(|prefix| prefix == br"\\" || prefix == b"//");
+
+    if starts_with_double_sep {
+        let rest = path_str.get(2..).unwrap_or_default();
+        if let Some(after_prefix) = rest
+            .strip_prefix(r"?\")
+            .or_else(|| rest.strip_prefix("?/"))
+            .or_else(|| rest.strip_prefix(r".\"))
+            .or_else(|| rest.strip_prefix("./"))
+        {
+            if after_prefix
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"unc\") || prefix.eq_ignore_ascii_case("unc/"))
+            {
+                return WindowsPathPrefix::Unc;
+            }
+            if let Some(drive) = extract_drive_letter(after_prefix) {
+                return WindowsPathPrefix::DriveLetter(drive);
+            }
+            return WindowsPathPrefix::Other;
+        }
+        return WindowsPathPrefix::Unc;
+    }
+
+    if let Some(drive) = extract_drive_letter(path_str) {
+        return WindowsPathPrefix::DriveLetter(drive);
+    }
+
+    WindowsPathPrefix::Other
+}
+
+/// Extract an ASCII drive letter from a path beginning with `X:`.
+#[cfg(any(windows, test))]
+fn extract_drive_letter(text: &str) -> Option<u8> {
+    let bytes = text.as_bytes();
+    let first = *bytes.first()?;
+    let second = *bytes.get(1)?;
+    (first.is_ascii_alphabetic() && second == b':').then_some(first.to_ascii_uppercase())
+}
+
 /// Check if a path is on a network drive.
 /// On Windows, detects mapped network drives and UNC paths.
 /// On other platforms, always returns false.
 #[cfg(windows)]
 #[must_use]
 pub fn is_network_path(path: &Path) -> bool {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
 
-    // Check for UNC paths (\\server\share)
     let path_str = path.to_string_lossy();
-    if path_str.starts_with(r"\\") {
-        return true;
-    }
-
-    // Check drive type for mapped network drives
-    if let Some(prefix) = path.components().next() {
-        let prefix_str = prefix.as_os_str();
-        // Create a root path like "X:\"
-        let mut root: Vec<u16> = prefix_str.encode_wide().collect();
-        if root.get(1).is_some_and(|value| *value == u16::from(b':')) {
-            root.push(u16::from(b'\\'));
-            // null terminator
-            root.push(0);
-
-            // SAFETY: GetDriveTypeW is a safe Windows API call
-            // that only reads the null-terminated string to determine drive type
+    match classify_windows_path_prefix(&path_str) {
+        WindowsPathPrefix::Unc => true,
+        WindowsPathPrefix::DriveLetter(drive) => {
+            let root: [u16; 4] = [u16::from(drive), u16::from(b':'), u16::from(b'\\'), 0];
+            // SAFETY: GetDriveTypeW reads a valid null-terminated UTF-16 drive root string.
             #[allow(unsafe_code)]
             let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
-            return drive_type == DRIVE_REMOTE;
+            drive_type == DRIVE_REMOTE
         }
+        WindowsPathPrefix::Other => false,
     }
-
-    false
 }
 
 /// Check if a path is on a network drive.
@@ -1826,6 +1871,38 @@ mod network_path_tests {
         // Local drives should not be detected as network paths
         // (unless they are actually mapped network drives)
         assert!(!is_network_path(path));
+    }
+
+    #[test]
+    fn classifies_verbatim_local_device_and_unc_prefixes() {
+        assert_eq!(
+            classify_windows_path_prefix(r"\\server\share\file.txt"),
+            WindowsPathPrefix::Unc
+        );
+        assert_eq!(
+            classify_windows_path_prefix("//server/share/file.txt"),
+            WindowsPathPrefix::Unc
+        );
+        assert_eq!(
+            classify_windows_path_prefix(r"\\?\UNC\server\share\file.txt"),
+            WindowsPathPrefix::Unc
+        );
+        assert_eq!(
+            classify_windows_path_prefix(r"\\?\C:\Users\test\file.txt"),
+            WindowsPathPrefix::DriveLetter(b'C')
+        );
+        assert_eq!(
+            classify_windows_path_prefix(r"\\.\C:\Users\test\file.txt"),
+            WindowsPathPrefix::DriveLetter(b'C')
+        );
+        assert_eq!(
+            classify_windows_path_prefix(r"\\.\PhysicalDrive0"),
+            WindowsPathPrefix::Other
+        );
+        assert_eq!(
+            classify_windows_path_prefix(r"d:\Media\video.mp4"),
+            WindowsPathPrefix::DriveLetter(b'D')
+        );
     }
 
     #[test]
