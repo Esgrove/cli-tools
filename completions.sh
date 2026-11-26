@@ -97,7 +97,7 @@ for binary in "${COMPLETION_BINARIES[@]}"; do
     fi
 
     for shell in "${SHELLS[@]}"; do
-        if "$binary" completion "$shell" "${COMPLETION_ARGS[@]}" 2>/dev/null; then
+        if "$binary" completion "$shell" "${COMPLETION_ARGS[@]}" 2> /dev/null; then
             INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
         else
             print_red "Failed to install $shell completion for $binary"
