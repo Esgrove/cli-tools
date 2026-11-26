@@ -36,6 +36,10 @@ xtask list
 xtask --dryrun -a
 ```
 
+A skipped task blocks anything that needs it through `deps`.
+Tasks ordered with `after` can still run once it finishes.
+If you request a blocked task by ID, `xtask` exits unsuccessfully even if no task failed.
+
 Each task's outcome is printed once, when it finishes.
 The run then ends with the failure recap, followed by the totals, the log directory, and any notes:
 
