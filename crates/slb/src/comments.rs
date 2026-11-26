@@ -304,6 +304,16 @@ pub fn fix_trailing_comments_scanned(
             });
             continue;
         }
+        if scan.starts_inside_string(index) && !scan.starts_inside_block_comment(index) {
+            violations.push(Violation {
+                line: index + 1,
+                column: Some(trailing.column),
+                kind: ViolationKind::TrailingComment,
+                message: "comment shares a line with code that closes a multiline literal".into(),
+                fixable: false,
+            });
+            continue;
+        }
         if scan.starts_inside_block_comment(index)
             && style.block.is_some_and(|block| trailing.text.contains(block.close))
         {
@@ -1029,6 +1039,31 @@ mod test_trailing_rust {
     use super::*;
 
     #[test]
+    fn trailing_comments_stay_on_the_line_that_closes_a_literal() {
+        for (name, kind, source) in [
+            ("Rust string", FileKind::Rust, "let text = \"first\nsecond\"; // note\n"),
+            (
+                "Rust raw string",
+                FileKind::Rust,
+                "let text = r#\"first\nsecond\"#; // note\n",
+            ),
+            ("Go raw string", FileKind::Go, "const text = `first\nsecond` // note\n"),
+            (
+                "JS template",
+                FileKind::JavaScript,
+                "const text = `first\nsecond`; // note\n",
+            ),
+        ] {
+            let mut options = FormatOptions::default();
+            options.rules.trailing_comment = true;
+            let formatted = crate::format(source, kind, &options);
+            assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source, "{name}");
+            assert_eq!(formatted.violations.len(), 1, "{name}");
+            assert!(!formatted.violations[0].fixable, "{name}");
+        }
+    }
+
+    #[test]
     fn simple_trailing_comment_is_split_and_reported() {
         let (replacements, violations) = fix(&["let x = 1; // one"], FileKind::Rust);
         assert_eq!(replacements, vec![Some(pair("// one", "let x = 1;"))]);
@@ -1070,9 +1105,9 @@ mod test_trailing_rust {
     #[test]
     fn raw_string_across_lines_hides_markers_until_closed() {
         let lines = ["let s = r#\"first // no", "second // no", "\"#; // c"];
-        assert_eq!(replaced_indices(&lines, FileKind::Rust), vec![2]);
+        assert!(replaced_indices(&lines, FileKind::Rust).is_empty());
         let (replacements, violations) = fix(&lines, FileKind::Rust);
-        assert_eq!(replacements[2], Some(pair("// c", "\"#;")));
+        assert_eq!(replacements[2], None);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].line, 3);
     }
@@ -1080,7 +1115,7 @@ mod test_trailing_rust {
     #[test]
     fn plain_string_across_lines_hides_markers() {
         let lines = ["let s = \"first // no", "second\"; // c"];
-        assert_eq!(replaced_indices(&lines, FileKind::Rust), vec![1]);
+        assert!(replaced_indices(&lines, FileKind::Rust).is_empty());
     }
 
     #[test]
@@ -1299,7 +1334,7 @@ mod test_trailing_other_languages {
             Some(pair("// c", "const t = `a ${a} // not`;"))
         );
         let lines = ["const t = `line", "${a} // not a comment", "end`; // c"];
-        assert_eq!(replaced_indices(&lines, FileKind::JavaScript), vec![2]);
+        assert!(replaced_indices(&lines, FileKind::JavaScript).is_empty());
     }
 
     #[test]
@@ -1329,9 +1364,10 @@ mod test_trailing_other_languages {
     #[test]
     fn go_backtick_raw_string_across_lines_hides_markers() {
         let lines = ["const s = `start", "// inside", "end` // c"];
-        assert_eq!(replaced_indices(&lines, FileKind::Go), vec![2]);
-        let (replacements, _) = fix(&lines, FileKind::Go);
-        assert_eq!(replacements[2], Some(pair("// c", "end`")));
+        assert!(replaced_indices(&lines, FileKind::Go).is_empty());
+        let (_, violations) = fix(&lines, FileKind::Go);
+        assert_eq!(violations.len(), 1);
+        assert!(!violations[0].fixable);
     }
 
     #[test]
@@ -1369,7 +1405,7 @@ mod test_trailing_other_languages {
                 "  curl http://x # nor this",
                 last.as_str(),
             ];
-            assert_eq!(replaced_indices(&lines, FileKind::Groovy), vec![3], "{quote}");
+            assert!(replaced_indices(&lines, FileKind::Groovy).is_empty(), "{quote}");
         }
     }
 
