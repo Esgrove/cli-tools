@@ -146,6 +146,78 @@ fn a_valid_remux_replaces_the_original() {
     assert_eq!(file_names(&sandbox.videos()), vec!["show.x265.mp4"]);
 }
 
+/// Fake tool fixture that represents subtitle tracks as `subtitle=LANG` lines in the video file.
+const MOVIE_FFPROBE: &str = r#"#!/bin/sh
+for argument; do last="$argument"; done
+[ -s "$last" ] || exit 1
+case "$*" in
+    *'-select_streams s '*)
+        /usr/bin/awk -F= '/^subtitle=/ {printf "%d,%s\n", NR, $2}' "$last"
+        exit 0;;
+    *csv=p=0*) exit 0;;
+esac
+codec=h264; /usr/bin/grep -q hevc "$last" && codec=hevc
+printf 'codec_name=%s\nwidth=1920\nheight=1080\nr_frame_rate=24/1\npix_fmt=yuv420p\nbit_rate=99000000\nduration=100.0\n' "$codec"
+"#;
+
+/// Fake ffmpeg that only writes subtitle tracks actually mapped by the command.
+const MOVIE_FFMPEG: &str = r#"#!/bin/sh
+previous=; input=; internal=; external=0; languages=; disable=0
+for argument; do
+    case "$previous" in
+        -i) [ -n "$input" ] || input=$argument;;
+        -map) case "$argument" in
+            0:s:m:language:*) internal="$internal ${argument##*:}";;
+            [1-9]*:s*) external=$((external+1));;
+        esac;;
+        -metadata:s:s:*) languages="$languages ${argument#language=}";;
+    esac
+    [ "$argument" != -sn ] || disable=1
+    previous=$argument
+done
+printf 'hevc\n' > "$previous"
+if [ "$disable" = 0 ]; then
+    for language in $internal; do
+        /usr/bin/grep "^subtitle=$language$" "$input" >> "$previous"
+    done
+    set -- $languages
+    while [ "$external" -gt 0 ]; do
+        printf 'subtitle=%s\n' "${1-}" >> "$previous"
+        [ "$#" = 0 ] || shift
+        external=$((external-1))
+    done
+fi
+"#;
+
+#[test]
+fn a_movie_sidecar_remains_embedded_after_a_second_run() {
+    let sandbox = Sandbox::new(MOVIE_FFMPEG);
+    sandbox.write_script("ffprobe", MOVIE_FFPROBE);
+    let original = sandbox.videos().join("Film.mkv");
+    let sidecar = sandbox.videos().join("Film.English.srt");
+    let final_output = sandbox.videos().join("Film.x265.mkv");
+    fs::write(&original, b"hevc original video").unwrap();
+    fs::write(&sidecar, b"English subtitles").unwrap();
+
+    sandbox.run(&["--movie", "--delete"]);
+    assert_eq!(file_names(&sandbox.videos()), ["Film.x265.mkv"]);
+    sandbox.run(&["--movie", "--delete"]);
+    assert_eq!(fs::read_to_string(final_output).unwrap(), "hevc\nsubtitle=eng\n");
+}
+
+#[test]
+fn a_movie_mux_that_omits_a_mapped_sidecar_keeps_the_inputs() {
+    let sandbox = Sandbox::new(FAKE_FFMPEG);
+    sandbox.write_script("ffprobe", MOVIE_FFPROBE);
+    let original = sandbox.videos().join("Film.mkv");
+    let sidecar = sandbox.videos().join("Film.English.srt");
+    fs::write(&original, b"hevc original video").unwrap();
+    fs::write(&sidecar, b"English subtitles").unwrap();
+
+    sandbox.run(&["--movie", "--delete"]);
+    assert_eq!(file_names(&sandbox.videos()), ["Film.English.srt", "Film.mkv"]);
+}
+
 #[test]
 fn forced_abort_during_retry_leaves_pending_work_retryable() {
     use std::io::{BufRead, BufReader};

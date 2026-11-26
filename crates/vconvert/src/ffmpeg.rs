@@ -3,7 +3,7 @@
 //! Builds media processing commands, probes stream metadata,
 //! runs child processes in isolation, and validates muxed output.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -115,9 +115,14 @@ pub fn build_conversion_command(options: &ConversionOptions<'_>) -> Result<Comma
 
     if options.movie_mode {
         let audio_languages = probe_stream_languages(options.input, "a")?;
-        let subtitle_languages = probe_stream_languages(options.input, "s")?;
+        let subtitle_counts = probe_stream_language_counts(options.input, "s")?;
+        let subtitle_languages = subtitle_counts.keys().cloned().collect();
         add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
-        add_external_subtitle_maps(&mut command, options.subtitle_files, 1);
+        add_external_subtitle_maps(
+            &mut command,
+            options.subtitle_files,
+            selected_subtitle_count(&subtitle_counts),
+        );
     }
 
     if options.use_cuda_filters {
@@ -166,9 +171,10 @@ pub fn build_subtitle_mux_command(input: &Path, output: &Path, subtitle_files: &
     }
 
     let audio_languages = probe_stream_languages(input, "a")?;
-    let subtitle_languages = probe_stream_languages(input, "s")?;
+    let subtitle_counts = probe_stream_language_counts(input, "s")?;
+    let subtitle_languages = subtitle_counts.keys().cloned().collect();
     add_movie_mode_stream_maps(&mut command, &audio_languages, &subtitle_languages);
-    add_external_subtitle_maps(&mut command, subtitle_files, 1);
+    add_external_subtitle_maps(&mut command, subtitle_files, selected_subtitle_count(&subtitle_counts));
     command.args(["-c", "copy"]);
     command.arg(output);
     Ok(command)
@@ -255,6 +261,11 @@ pub fn probe_video_info(path: &Path) -> Result<VideoInfo> {
 /// # Errors
 /// Returns an error if ffprobe cannot be run or fails.
 pub fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSet<String>> {
+    Ok(probe_stream_language_counts(input, stream_type)?.into_keys().collect())
+}
+
+/// Count each language separately, including multiple tracks with the same tag.
+fn probe_stream_language_counts(input: &Path, stream_type: &str) -> Result<BTreeMap<String, usize>> {
     let input_path = ffmpeg_input_path(input);
     let output = Command::new("ffprobe")
         .args([
@@ -280,19 +291,22 @@ pub fn probe_stream_languages(input: &Path, stream_type: &str) -> Result<BTreeSe
         );
     }
 
-    Ok(parse_stream_languages(&String::from_utf8_lossy(&output.stdout)))
+    Ok(parse_stream_language_counts(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// Parse `index,language` lines from ffprobe into unique language tags, using "und" for untagged streams.
-fn parse_stream_languages(stdout: &str) -> BTreeSet<String> {
-    stdout
-        .lines()
-        .map(|line| {
-            let language = line.trim().split_once(',').map_or("", |(_, language)| language.trim());
-            if language.is_empty() { "und" } else { language }
-        })
-        .map(ToOwned::to_owned)
-        .collect()
+/// Parse `index,language` lines from ffprobe, using "und" for untagged streams.
+fn parse_stream_language_counts(stdout: &str) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for line in stdout.lines().map(str::trim) {
+        let (index, language) = line.split_once(',').unwrap_or((line, ""));
+        if index.trim().parse::<usize>().is_err() {
+            continue;
+        }
+        let language = language.trim();
+        let language = if language.is_empty() { "und" } else { language };
+        *counts.entry(language.to_owned()).or_default() += 1;
+    }
+    counts
 }
 
 /// Return whether applying movie-mode stream maps would remove any internal tracks.
@@ -461,11 +475,42 @@ fn add_movie_mode_passthrough_codecs(command: &mut Command) {
     command.args(["-c:a", "copy", "-c:s", "copy"]);
 }
 
-/// Add stream maps for external subtitle inputs.
-fn add_external_subtitle_maps(command: &mut Command, subtitle_files: &[SubtitleFile], first_input_index: usize) {
-    for input_index in first_input_index..first_input_index + subtitle_files.len() {
-        command.arg("-map").arg(format!("{input_index}:s?"));
+/// Count retained embedded subtitle tracks to locate the first sidecar output stream.
+fn selected_subtitle_count(subtitle_counts: &BTreeMap<String, usize>) -> usize {
+    MOVIE_SUBTITLE_LANGUAGES
+        .iter()
+        .filter_map(|language| subtitle_counts.get(*language))
+        .sum()
+}
+
+/// Map one required subtitle stream per sidecar and set its inferred output language.
+fn add_external_subtitle_maps(command: &mut Command, subtitle_files: &[SubtitleFile], first_output_index: usize) {
+    for (offset, subtitle_file) in subtitle_files.iter().enumerate() {
+        command.arg("-map").arg(format!("{}:s:0", offset + 1));
+        if let Some(language) = subtitle_file.language() {
+            command
+                .arg(format!("-metadata:s:s:{}", first_output_index + offset))
+                .arg(format!("language={language}"));
+        }
     }
+}
+
+/// Verify the output contains the expected number of subtitle tracks for each retained language.
+pub(crate) fn validate_movie_subtitles(input: &Path, output: &Path, sidecars: &[SubtitleFile]) -> Result<()> {
+    let mut expected = probe_stream_language_counts(input, "s")?;
+    expected.retain(|language, _| MOVIE_SUBTITLE_LANGUAGES.contains(&language.as_str()));
+    for sidecar in sidecars {
+        *expected
+            .entry(sidecar.language().unwrap_or("und").to_owned())
+            .or_default() += 1;
+    }
+    let actual = probe_stream_language_counts(output, "s")?;
+    for (language, count) in expected {
+        if actual.get(&language).copied().unwrap_or_default() < count {
+            anyhow::bail!("Output is missing expected {language} subtitle tracks");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -492,7 +537,9 @@ mod test_ffprobe_output_parsing {
 
     #[test]
     fn collects_unique_languages_and_marks_untagged_streams() {
-        let languages = parse_stream_languages("1,eng\n2,fin\n3,eng\n4,\n5\n");
+        let languages = parse_stream_language_counts("1,eng\n2,fin\n3,eng\n4,\n5\n")
+            .into_keys()
+            .collect::<BTreeSet<_>>();
 
         assert_eq!(
             languages,
@@ -502,14 +549,16 @@ mod test_ffprobe_output_parsing {
 
     #[test]
     fn trims_whitespace_around_language_tags() {
-        let languages = parse_stream_languages("  1, jpn  \r\n");
+        let languages = parse_stream_language_counts("  1, jpn  \r\n")
+            .into_keys()
+            .collect::<BTreeSet<_>>();
 
         assert_eq!(languages, BTreeSet::from(["jpn".to_string()]));
     }
 
     #[test]
     fn no_streams_gives_no_languages() {
-        assert!(parse_stream_languages("").is_empty());
+        assert!(parse_stream_language_counts("").is_empty());
     }
 
     #[test]
@@ -827,30 +876,32 @@ mod test_remux_command {
 
 #[cfg(test)]
 mod test_external_subtitle_maps {
-    use std::path::PathBuf;
-
     use super::test_helpers::command_args;
     use super::*;
 
     #[test]
-    fn maps_each_external_subtitle_from_its_input_index() {
+    fn maps_each_external_subtitle_and_indexes_tags_after_embedded_tracks() {
         let subtitle_files = [
-            SubtitleFile {
-                path: PathBuf::from("movie.en.srt"),
-                extension: "srt".to_string(),
-                paired_sub_path: None,
-            },
-            SubtitleFile {
-                path: PathBuf::from("movie.fi.srt"),
-                extension: "srt".to_string(),
-                paired_sub_path: None,
-            },
+            SubtitleFile::new(Path::new("movie.English.srt"), None),
+            SubtitleFile::new(Path::new("movie.Finnish.forced.srt"), None),
         ];
         let mut command = Command::new("ffmpeg");
 
         add_external_subtitle_maps(&mut command, &subtitle_files, 2);
 
-        assert_eq!(command_args(&command), ["-map", "2:s?", "-map", "3:s?"]);
+        assert_eq!(
+            command_args(&command),
+            [
+                "-map",
+                "1:s:0",
+                "-metadata:s:s:2",
+                "language=eng",
+                "-map",
+                "2:s:0",
+                "-metadata:s:s:3",
+                "language=fin"
+            ]
+        );
     }
 
     #[test]
