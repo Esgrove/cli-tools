@@ -204,7 +204,14 @@ impl DupeFind {
 
         walker
             .into_iter()
-            .filter_entry(|e| !cli_tools_common::should_skip_entry(e))
+            .filter_entry(|entry| {
+                if cli_tools_common::should_skip_entry(entry) {
+                    return false;
+                }
+                !(entry.depth() > 0
+                    && entry.file_type().is_dir()
+                    && entry.file_name().eq_ignore_ascii_case("Duplicates"))
+            })
             .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
             .filter_map(|entry| {
@@ -1033,6 +1040,37 @@ mod test_move_duplicates_in_trees {
             kept_after_second_run,
             kept_after_first_run,
             "the kept copy must stay in place: {:?}",
+            tree.snapshot()
+        );
+    }
+
+    #[test]
+    fn a_second_run_keeps_library_copy_when_directory_sorts_before_duplicates() {
+        let tree = TempTree::new();
+        tree.file_with("Archive/Movie.1080p.mp4", "one");
+        tree.file_with("Downloads/Movie.1080p.mp4", "two");
+        let before = contents(&tree);
+
+        moving_finder(&tree, false).run().expect("first run");
+        let kept_after_first_run: Vec<String> = tree
+            .files()
+            .into_iter()
+            .filter(|path| !path.starts_with("Duplicates/"))
+            .collect();
+        assert_eq!(kept_after_first_run.len(), 1, "{:?}", tree.snapshot());
+
+        moving_finder(&tree, false).run().expect("second run");
+        let kept_after_second_run: Vec<String> = tree
+            .files()
+            .into_iter()
+            .filter(|path| !path.starts_with("Duplicates/"))
+            .collect();
+
+        assert_eq!(contents(&tree), before, "no file contents may be lost");
+        assert_eq!(
+            kept_after_second_run,
+            kept_after_first_run,
+            "kept library copy must not be evacuated into Duplicates: {:?}",
             tree.snapshot()
         );
     }

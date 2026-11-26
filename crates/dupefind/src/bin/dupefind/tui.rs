@@ -663,22 +663,37 @@ fn same_location(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Find the index of the best file to preselect based on resolution and codec.
+/// Find the index of the best file to preselect based on location, resolution, and codec.
+///
+/// Files outside any `Duplicates` directory are always preferred over copies already inside `Duplicates`.
 pub fn find_best_file_index(files: &[&DupeFileInfo]) -> usize {
     files
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| {
-            let (res_a, x265_a) = score_file(a);
-            let (res_b, x265_b) = score_file(b);
+        .max_by(|(_, left), (_, right)| {
+            let left_outside = !is_in_duplicates_directory(&left.path);
+            let right_outside = !is_in_duplicates_directory(&right.path);
+            let (res_left, x265_left) = score_file(left);
+            let (res_right, x265_right) = score_file(right);
 
-            // First compare by resolution (higher is better)
-            res_a.cmp(&res_b).then_with(|| {
-                // If resolution is equal, prefer x265
-                x265_a.cmp(&x265_b)
-            })
+            left_outside
+                .cmp(&right_outside)
+                .then_with(|| res_left.cmp(&res_right))
+                .then_with(|| x265_left.cmp(&x265_right))
         })
         .map_or(0, |(idx, _)| idx)
+}
+
+/// Return whether any ancestor directory component of `path` is named `Duplicates`.
+fn is_in_duplicates_directory(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("Duplicates"))
+        })
+    })
 }
 
 /// Score a file based on resolution and codec labels.
