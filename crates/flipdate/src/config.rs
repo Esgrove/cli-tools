@@ -2,9 +2,6 @@
 //!
 //! Combines the CLI arguments with the `[flip_date]` section of the user config file.
 
-use std::fs;
-
-use anyhow::Context;
 use serde::Deserialize;
 
 use crate::Args;
@@ -22,8 +19,9 @@ pub struct Config {
     pub(crate) year_first: bool,
 }
 
-/// Config from a config file
+/// Config from the `[flip_date]` section of the user config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DateConfig {
     #[serde(default)]
     directory: bool,
@@ -43,13 +41,6 @@ struct DateConfig {
     year_first: bool,
 }
 
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    flip_date: DateConfig,
-}
-
 impl Config {
     /// Create config from given command line args and user config file.
     ///
@@ -58,16 +49,14 @@ impl Config {
     pub fn from_args(args: Args) -> anyhow::Result<Self> {
         let user_config = DateConfig::get_user_config()?;
 
-        // Determine which extensions to use (args > config > default)
+        // Determine which extensions to use (args > config > default), normalized lowercase without dots.
         let file_extensions = args
             .extensions
+            .map(cli_tools_common::normalize_extensions)
             .filter(|extensions| !extensions.is_empty())
-            .or({
-                if user_config.file_extensions.is_empty() {
-                    None
-                } else {
-                    Some(user_config.file_extensions)
-                }
+            .or_else(|| {
+                let normalized = cli_tools_common::normalize_extensions(user_config.file_extensions);
+                (!normalized.is_empty()).then_some(normalized)
             })
             .unwrap_or_else(|| {
                 crate::flip_date::FILE_EXTENSIONS
@@ -96,29 +85,16 @@ impl DateConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> anyhow::Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
+        cli_tools_common::load_user_config_section("flip_date")
     }
 
     /// Parse config from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     fn from_toml_str(toml_str: &str) -> anyhow::Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.flip_date)
-            .context("Failed to parse flip_date config TOML")
+        cli_tools_common::parse_user_config_section(toml_str, "flip_date")
     }
 }
 

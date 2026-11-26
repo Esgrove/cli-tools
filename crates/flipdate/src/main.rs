@@ -7,23 +7,15 @@ mod flip_date;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
 
 /// Subcommands for flipdate.
 #[derive(Subcommand)]
 enum FlipDateCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -76,14 +68,8 @@ pub struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(FlipDateCommand::Completion { shell, install }) = &args.command {
-        return cli_tools_common::generate_shell_completion(
-            *shell,
-            Args::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        );
+    if let Some(FlipDateCommand::Completion(completion)) = &args.command {
+        return completion.generate::<Args>(args.verbose, env!("CARGO_BIN_NAME"));
     }
     let path = cli_tools_common::resolve_input_path(args.path.as_deref())?;
     let config = flip_date::Config::from_args(args)?;
@@ -144,14 +130,17 @@ mod test_args {
 
     #[test]
     fn parses_completion_and_has_valid_command_definition() {
+        use clap::CommandFactory;
+        use clap_complete::Shell;
+
         let args = Args::try_parse_from(["flipdate", "completion", "bash", "--install"])
             .expect("completion command should parse");
         assert!(matches!(
             args.command,
-            Some(FlipDateCommand::Completion {
+            Some(FlipDateCommand::Completion(CompletionArgs {
                 shell: Shell::Bash,
                 install: true
-            })
+            }))
         ));
         Args::command().debug_assert();
     }

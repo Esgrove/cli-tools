@@ -13,10 +13,10 @@ use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations};
 
 pub use crate::config::Config;
 
-pub static FILE_EXTENSIONS: [&str; 20] = [
+pub static FILE_EXTENSIONS: [&str; 24] = [
     // Audio
     "m4a", "mp3", // Video
-    "mp4", "mkv", "mov", "avi", "wmv", "flv", "m4v", // Image
+    "mp4", "mkv", "mov", "avi", "wmv", "flv", "m4v", "webm", "ts", "mpg", "mpeg", // Image
     "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "heic", // Other
     "txt", "rtf", "csv",
 ];
@@ -238,6 +238,7 @@ pub fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
         .max()
         .context("Failed to get max path length")?;
 
+    let mut failed_count = 0usize;
     for directory in directories {
         let new_path = directory.path.with_file_name(directory.new_name.clone());
         println!(
@@ -257,6 +258,7 @@ pub fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
                 }
                 Ok(_) => {}
                 Err(error) => {
+                    failed_count += 1;
                     cli_tools_common::print_error!(
                         "Failed to rename {} to {}: {error}",
                         directory.path.display(),
@@ -267,6 +269,11 @@ pub fn date_flip_directories(path: PathBuf, config: &Config) -> Result<()> {
         }
     }
 
+    anyhow::ensure!(
+        failed_count == 0,
+        "Failed to rename {}",
+        cli_tools_common::count_label(failed_count, "directory", "directories")
+    );
     Ok(())
 }
 
@@ -279,19 +286,20 @@ fn files_to_rename(path: &PathBuf, file_extensions: &[String], recurse: bool) ->
         )
     } else {
         let list: Vec<PathBuf> = WalkDir::new(path)
+            .follow_links(false)
             .min_depth(1)
             .max_depth(if recurse { usize::MAX } else { 1 })
             .into_iter()
             .filter_entry(|e| !cli_tools_common::should_skip_entry(e))
             .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_type().is_file())
             .map(walkdir::DirEntry::into_path)
             .filter(|path| {
-                path.is_file()
-                    && path.extension().is_some_and(|ext| {
-                        file_extensions
-                            .iter()
-                            .any(|e| ext.to_str().is_some_and(|ext_str| e.eq_ignore_ascii_case(ext_str)))
-                    })
+                path.extension().is_some_and(|ext| {
+                    file_extensions
+                        .iter()
+                        .any(|e| ext.to_str().is_some_and(|ext_str| e.eq_ignore_ascii_case(ext_str)))
+                })
             })
             .collect();
         (list, path.clone())
@@ -578,7 +586,7 @@ mod test_rename_discovery {
         assert!(FILE_EXTENSIONS.contains(&"mp4"));
         assert!(FILE_EXTENSIONS.contains(&"txt"));
         assert!(FILE_EXTENSIONS.contains(&"mkv"));
-        assert_eq!(FILE_EXTENSIONS.len(), 20);
+        assert_eq!(FILE_EXTENSIONS.len(), 24);
     }
 }
 
