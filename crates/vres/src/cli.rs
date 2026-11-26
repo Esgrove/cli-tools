@@ -334,7 +334,7 @@ async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
             "-v",
             "error",
             "-select_streams",
-            "v:0",
+            "V:0",
             "-show_entries",
             "stream=width,height:stream_side_data=rotation:stream_tags=rotate",
             "-output_format",
@@ -550,6 +550,48 @@ mod regex_tests {
 #[cfg(test)]
 mod ffpprobe_tests {
     use super::*;
+    use cli_tools_media::video_info::VideoInfo;
+
+    #[tokio::test]
+    async fn cover_art_without_video_does_not_supply_video_dimensions() {
+        if !cli_tools_common::command_exists("ffmpeg") || !cli_tools_common::command_exists("ffprobe") {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("album.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=320x320:r=1:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=d=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-c:v",
+                "mjpeg",
+                "-disposition:v:0",
+                "attached_pic",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&file)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success(), "ffmpeg should generate an album with cover art");
+
+        let shared = VideoInfo::from_path(&file).unwrap();
+        let dedicated = run_ffprobe(file).await;
+        assert_eq!((shared.resolution(), dedicated.is_err()), (None, true));
+    }
 
     #[test]
     fn parse_ffprobe_output_windows_crlf() {

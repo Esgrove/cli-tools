@@ -57,7 +57,7 @@ impl VideoInfo {
                 "-v",
                 "error",
                 "-select_streams",
-                "v:0",
+                "V:0",
                 "-show_entries",
                 "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng,rotate:stream_side_data=rotation:format=bit_rate,duration",
                 "-of",
