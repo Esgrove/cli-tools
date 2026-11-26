@@ -43,7 +43,7 @@ static REPLACE_PAIRS: [(&str, &str); 11] = [
     (", ", " "),
     (" 35314369001", ""),
     (" 402-935-7733", ""),
-    (" DRI ", ""),
+    (" DRI ", " "),
     (" LEVISTRAUSS ", " LEVIS "),
     (".COMFI", ".COM"),
     ("CHATGPT SUBSCRIPTION HTTPSOPENAI.C", "CHATGPT SUBSCRIPTION OPENAI.COM"),
@@ -176,7 +176,7 @@ struct RawParsedItem {
 }
 
 /// Represents one credit card purchase.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct VisaItem {
     date: Date,
     name: String,
@@ -221,7 +221,12 @@ impl fmt::Display for VisaItem {
     }
 }
 
-// f64 does not have Eq so this way it uses PartialEq
+impl PartialEq for VisaItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.date == other.date && self.name == other.name && self.sum.total_cmp(&other.sum) == Ordering::Equal
+    }
+}
+
 impl Eq for VisaItem {}
 
 impl PartialOrd for VisaItem {
@@ -269,7 +274,16 @@ pub fn visa_parse(config: &Config) -> Result<()> {
     if !config.print {
         let (csv_path, workbook_path) = report_paths(&config.output_path);
         write_to_csv(&items, &csv_path)?;
-        if !items.is_empty() {
+        if items.is_empty() {
+            match std::fs::remove_file(&workbook_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("Failed to remove stale workbook: {}", workbook_path.display()));
+                }
+            }
+        } else {
             write_to_excel(&items, &totals, &config.filter_prefixes, &workbook_path)?;
         }
     }
@@ -318,11 +332,13 @@ fn get_xml_file_list(input: &PathBuf) -> Result<(PathBuf, Vec<PathBuf>)> {
 /// Collect all XML files recursively from the given root path.
 fn get_xml_files<P: AsRef<Path>>(root: P) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(root)
+        .follow_links(false)
         .into_iter()
-        .filter_entry(|e| !cli_tools_common::is_hidden(e))
+        .filter_entry(|e| !cli_tools_common::should_skip_entry(e))
         .filter_map(std::result::Result::ok)
-        .map(|e| e.path().to_owned())
-        .filter(|path| path.is_file() && is_xml_path(path))
+        .filter(|e| e.file_type().is_file())
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| is_xml_path(path))
         .collect();
 
     files.sort_by(|a, b| {
@@ -402,10 +418,7 @@ fn extract_items(rows: &[String], statement: StatementMonth) -> Result<Vec<VisaI
             statement.year
         };
 
-        match item.into_visa_item(item_year) {
-            Ok(visa_item) => result.push(visa_item),
-            Err(err) => eprintln!("{}", format!("Failed to parse item: {err}").red()),
-        }
+        result.push(item.into_visa_item(item_year)?);
     }
 
     Ok(result)
@@ -432,10 +445,12 @@ fn clean_whitespaces(text: &str) -> String {
 
 /// Format item names to consistent style.
 fn format_name(text: &str) -> String {
-    let mut name = text
-        .replace("Osto ", "")
-        .replace("TC*", "")
-        .replace(['*', '/', '_'], " ");
+    let trimmed = text.trim();
+    let without_osto = trimmed
+        .strip_prefix("Osto ")
+        .or_else(|| trimmed.strip_prefix("OSTO "))
+        .unwrap_or(trimmed);
+    let mut name = without_osto.replace("TC*", "").replace(['*', '/', '_'], " ");
 
     name = RE_BRACKETS.replace_all(&name, "").to_string();
     name = RE_WHITESPACE.replace_all(&name, " ").trim().to_string();
@@ -523,13 +538,16 @@ fn split_item_text(input: &str) -> (String, String, String) {
     )
 }
 
-/// Split to two parts from the last whitespace character.
+/// Split into `(before, after)` from the last double space, falling back to the last whitespace.
 fn split_from_last_whitespaces(s: &str) -> (&str, &str) {
-    let mut parts = s.rsplitn(2, "  ");
-    let after = parts.next().unwrap_or("").trim();
-    let before = parts.next().unwrap_or("").trim();
-
-    (before, after)
+    let trimmed = s.trim_end();
+    if let Some((before, after)) = trimmed.rsplit_once("  ") {
+        (before.trim(), after.trim())
+    } else if let Some((before, after)) = trimmed.rsplit_once(char::is_whitespace) {
+        (before.trim(), after.trim())
+    } else {
+        ("", trimmed.trim())
+    }
 }
 
 /// Format one CSV field according to RFC 4180, quoting when it contains `,`, `"`, `\r`, or `\n`.
@@ -547,18 +565,18 @@ fn write_to_csv(items: &[VisaItem], output_file: &Path) -> Result<()> {
         "{}",
         format!("Writing data to CSV:   {}", output_file.display()).green()
     );
-    let mut content = String::from("Date,Sum,Name\n");
+    let mut content = String::from("Date,Name,Sum\n");
     for item in items {
         use std::fmt::Write as _;
         let name = escape_csv_field(&item.name);
-        writeln!(content, "{},{:.2},{name}", item.finnish_date(), item.sum)?;
+        writeln!(content, "{},{name},{:.2}", item.finnish_date(), item.sum)?;
     }
     cli_tools_common::write_atomically(output_file, content)
         .with_context(|| format!("Failed to write CSV file: {}", output_file.display()))?;
     Ok(())
 }
 
-/// Save parsed data to an Excel file.
+/// Save parsed data to an Excel file atomically.
 fn write_to_excel(
     items: &[VisaItem],
     totals: &[(String, f64)],
@@ -571,18 +589,22 @@ fn write_to_excel(
     );
     let first_item = items.first().context("Cannot write Excel workbook without items")?;
     let mut workbook = Workbook::new();
-    let sheet = workbook.add_worksheet().set_name("VISA")?;
     let header_format = Format::new()
         .set_bold()
         .set_border(FormatBorder::Thin)
         .set_background_color("C6E0B4");
+    let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0.00");
 
+    let sheet = workbook.add_worksheet().set_name("VISA")?;
     sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
-    sheet.serialize(&items)?;
+    for (row, item) in (1_u32..).zip(items) {
+        sheet.write_string(row, 0, item.finnish_date())?;
+        sheet.write_string(row, 1, item.name.clone())?;
+        sheet.write_number_with_format(row, 2, item.sum, &sum_format)?;
+    }
     sheet.autofit();
 
     let dj_sheet = workbook.add_worksheet().set_name("DJ")?;
-    let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0.00");
     dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
     for (row, item) in (1_u32..).zip(dj_items(items, filter_prefixes)) {
         dj_sheet.write_string(row, 0, item.finnish_date())?;
@@ -600,15 +622,9 @@ fn write_to_excel(
     }
     totals_sheet.autofit();
 
-    let temporary = cli_tools_common::unique_sibling_path(output_file, "xlsx-tmp");
-    if let Err(error) = workbook.save(&temporary) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error.into());
-    }
-    if let Err(error) = std::fs::rename(&temporary, output_file) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error).with_context(|| format!("Failed to move workbook into place: {}", output_file.display()));
-    }
+    let buffer = workbook.save_to_buffer()?;
+    cli_tools_common::write_atomically(output_file, &buffer)
+        .with_context(|| format!("Failed to write workbook: {}", output_file.display()))?;
     Ok(())
 }
 
@@ -822,8 +838,8 @@ mod test_split_from_last_whitespaces {
     #[test]
     fn handles_no_double_space() {
         let (before, after) = split_from_last_whitespaces("hello world");
-        assert_eq!(before, "");
-        assert_eq!(after, "hello world");
+        assert_eq!(before, "hello");
+        assert_eq!(after, "world");
     }
 
     #[test]
@@ -850,9 +866,9 @@ mod test_split_from_last_whitespaces {
 
     #[test]
     fn handles_trailing_double_space() {
-        let (before, after) = split_from_last_whitespaces("hello world  ");
-        assert_eq!(before, "hello world");
-        assert_eq!(after, "");
+        let (before, after) = split_from_last_whitespaces("hello  world  ");
+        assert_eq!(before, "hello");
+        assert_eq!(after, "world");
     }
 }
 
@@ -981,9 +997,7 @@ mod test_read_xml_file {
     #[test]
     fn handles_nonexistent_file() {
         let path = Path::new("tests/fixtures/nonexistent.xml");
-        let (lines, _year) = read_xml_file(path).unwrap();
-
-        assert_eq!(lines, [] as [String; 0]);
+        assert!(read_xml_file(path).is_err());
     }
 }
 
@@ -1388,8 +1402,8 @@ mod test_format_name_comprehensive {
 
     #[test]
     fn replaces_dri_pattern() {
-        // " DRI " is replaced with "" which collapses spaces
-        assert_eq!(format_name("STORE DRI NAME"), "STORENAME");
+        // " DRI " is replaced with a single space so adjacent words stay separated.
+        assert_eq!(format_name("STORE DRI NAME"), "STORE NAME");
     }
 
     #[test]
@@ -2002,7 +2016,7 @@ mod test_write_to_csv {
         let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
         assert_eq!(
             content,
-            "Date,Sum,Name\n2024.01.05,25.50,K-MARKET\n2024.02.17,18.90,WOLT\n"
+            "Date,Name,Sum\n2024.01.05,K-MARKET,25.50\n2024.02.17,WOLT,18.90\n"
         );
     }
 
@@ -2037,7 +2051,7 @@ mod test_write_to_csv {
         write_to_csv(&[], &directory.path().join("VISA.csv")).expect("the csv should be written");
 
         let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
-        assert_eq!(content, "Date,Sum,Name\n");
+        assert_eq!(content, "Date,Name,Sum\n");
     }
 
     #[test]
@@ -2050,7 +2064,7 @@ mod test_write_to_csv {
         };
         write_to_csv(&[item], &directory.path().join("VISA.csv")).expect("csv should be written");
         let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("read csv");
-        assert_eq!(content, "Date,Sum,Name\n2024.02.05,12.50,\"CAFE, \"\"HELSINKI\"\"\"\n");
+        assert_eq!(content, "Date,Name,Sum\n2024.02.05,\"CAFE, \"\"HELSINKI\"\"\",12.50\n");
     }
 }
 
@@ -2177,7 +2191,7 @@ mod test_visa_parse {
         visa_parse(&config(directory.path(), false)).expect("the fixtures should parse");
 
         let csv = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
-        assert!(csv.starts_with("Date,Sum,Name\n"));
+        assert!(csv.starts_with("Date,Name,Sum\n"));
         assert!(csv.lines().count() > 9, "every fixture item should be a row: {csv}");
         assert!(directory.path().join("VISA.xlsx").exists(), "the workbook should exist");
     }

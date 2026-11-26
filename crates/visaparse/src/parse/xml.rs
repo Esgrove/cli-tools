@@ -5,7 +5,6 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
-use colored::Colorize;
 use encoding_rs::Encoding;
 use jiff::{ZonedDateTime, civil::Date};
 use regex::bytes::Regex;
@@ -27,15 +26,10 @@ pub(super) struct StatementMonth {
 }
 
 /// Read transaction text and the statement month from a Finvoice document.
-/// The invoicing period end takes precedence over the start date, with December of the current year as a fallback.
+/// The invoicing period end takes precedence over the invoice date and start date,
+/// with December of the current year as a fallback.
 pub(super) fn read_xml_file(file: &Path) -> Result<(Vec<String>, StatementMonth)> {
-    let bytes = match std::fs::read(file) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("{}", format!("Failed to read file: {}\n{error}", file.display()).red());
-            return Ok((Vec::new(), default_statement_month()));
-        }
-    };
+    let bytes = std::fs::read(file).with_context(|| format!("Failed to read XML file: {}", file.display()))?;
     let xml = decode_xml(&bytes).with_context(|| format!("Failed to decode XML file: {}", file.display()))?;
     // Accept Finvoice DTD declarations without resolving any external entities.
     let document = Document::parse_with_options(
@@ -49,10 +43,12 @@ pub(super) fn read_xml_file(file: &Path) -> Result<(Vec<String>, StatementMonth)
 
     let mut rows = Vec::new();
     let mut start_month = None;
+    let mut invoice_month = None;
     let mut period_end_month = None;
     for element in document.descendants().filter(Node::is_element) {
         match element.tag_name().name() {
             "StartDate" => start_month = statement_month(element).or(start_month),
+            "InvoiceDate" => invoice_month = statement_month(element).or(invoice_month),
             "InvoicingPeriodEndDate" => period_end_month = statement_month(element).or(period_end_month),
             "SpecificationFreeText" => {
                 let text = element_text(element);
@@ -66,7 +62,10 @@ pub(super) fn read_xml_file(file: &Path) -> Result<(Vec<String>, StatementMonth)
     }
     Ok((
         rows,
-        period_end_month.or(start_month).unwrap_or_else(default_statement_month),
+        period_end_month
+            .or(invoice_month)
+            .or(start_month)
+            .unwrap_or_else(default_statement_month),
     ))
 }
 

@@ -2,10 +2,9 @@
 //!
 //! Handles reading configuration from CLI arguments and the user config file.
 
-use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::VisaParseArgs;
@@ -14,8 +13,9 @@ use crate::parse::DEFAULT_FILTER_PREFIXES;
 /// Default number of totals to display in verbose output.
 pub const DEFAULT_NUM_TOTALS: usize = 20;
 
-/// User configuration from the config file.
+/// User configuration from the `[visaparse]` section of the config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VisaParseConfig {
     /// How many total sums to print with verbose output.
     #[serde(default)]
@@ -29,13 +29,6 @@ pub struct VisaParseConfig {
     /// Name prefixes left out of the DJ sheet, replacing the built-in list when set.
     #[serde(default)]
     pub filter_prefixes: Option<Vec<String>>,
-}
-
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    visaparse: VisaParseConfig,
 }
 
 /// Final config combined from CLI arguments and user config file.
@@ -62,26 +55,16 @@ impl VisaParseConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     pub fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow!("Failed to read config file {}: {error}", path.display())),
-        }
+        cli_tools_common::load_user_config_section("visaparse")
     }
 
     /// Parse configuration from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.visaparse)
-            .map_err(|e| anyhow!("Failed to parse config: {e}"))
+        cli_tools_common::parse_user_config_section(toml_str, "visaparse")
     }
 }
 

@@ -22,8 +22,8 @@ fn assert_workbook_and_sibling_csv(output_name: &str) {
 
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let csv = tree.read("reports/report.csv");
-    assert!(csv.starts_with("Date,Sum,Name\n"));
-    assert!(csv.contains("2024.02.05,25.50,K-MARKET\n"));
+    assert!(csv.starts_with("Date,Name,Sum\n"));
+    assert!(csv.contains("2024.02.05,K-MARKET,25.50\n"));
     assert!(
         std::fs::read(tree.join(output_name))
             .unwrap()

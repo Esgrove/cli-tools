@@ -9,8 +9,8 @@ mod parse;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
 
 pub use crate::config::Config;
 use crate::parse::visa_parse;
@@ -20,15 +20,7 @@ use crate::parse::visa_parse;
 enum VisaParseCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 /// Command line arguments for visaparse.
@@ -66,14 +58,8 @@ pub struct VisaParseArgs {
 
 fn main() -> Result<()> {
     let args = VisaParseArgs::parse();
-    if let Some(VisaParseCommand::Completion { shell, install }) = &args.command {
-        return cli_tools_common::generate_shell_completion(
-            *shell,
-            VisaParseArgs::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        );
+    if let Some(VisaParseCommand::Completion(completion)) = &args.command {
+        return completion.generate::<VisaParseArgs>(args.verbose, env!("CARGO_BIN_NAME"));
     }
     let config = Config::from_args(&args)?;
     visa_parse(&config)
@@ -112,14 +98,17 @@ mod test_args {
 
     #[test]
     fn parses_completion_and_has_valid_command_definition() {
+        use clap::CommandFactory;
+        use clap_complete::Shell;
+
         let args = VisaParseArgs::try_parse_from(["visaparse", "completion", "bash", "--install"])
             .expect("completion should parse");
         assert!(matches!(
             args.command,
-            Some(VisaParseCommand::Completion {
+            Some(VisaParseCommand::Completion(CompletionArgs {
                 shell: Shell::Bash,
                 install: true
-            })
+            }))
         ));
         VisaParseArgs::command().debug_assert();
     }
