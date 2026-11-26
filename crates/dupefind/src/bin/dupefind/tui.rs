@@ -58,6 +58,11 @@ struct TuiState {
     confirming: bool,
 }
 
+/// RAII guard that leaves the alternate screen and disables raw mode on drop.
+struct TerminalGuard {
+    active: bool,
+}
+
 impl TuiState {
     const fn new() -> Self {
         Self {
@@ -130,22 +135,51 @@ impl TuiState {
     }
 }
 
+impl TerminalGuard {
+    /// Enter raw mode and the alternate screen, returning a guard that restores them on drop.
+    fn enter() -> anyhow::Result<Self> {
+        let mut stdout = std::io::stdout();
+        stdout.execute(EnterAlternateScreen)?;
+        if let Err(error) = enable_raw_mode() {
+            let _ = stdout.execute(LeaveAlternateScreen);
+            return Err(error.into());
+        }
+        Ok(Self { active: true })
+    }
+
+    /// Restore the terminal explicitly and surface any I/O error.
+    fn restore(&mut self) -> anyhow::Result<()> {
+        if self.active {
+            self.active = false;
+            disable_raw_mode()?;
+            std::io::stdout().execute(LeaveAlternateScreen)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            let _ = disable_raw_mode();
+            let _ = std::io::stdout().execute(LeaveAlternateScreen);
+        }
+    }
+}
+
 /// Run interactive TUI mode for handling duplicates
 pub fn run_interactive(duplicates: &[DuplicateGroup], metadata: &HashMap<PathBuf, VideoInfo>) -> anyhow::Result<()> {
-    let mut stdout = std::io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
-    enable_raw_mode()?;
+    let mut guard = TerminalGuard::enter()?;
 
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let actions = interactive_loop(&mut terminal, duplicates, metadata)?;
 
-    // Restore terminal
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    // Restore terminal before applying actions so warnings display correctly.
+    guard.restore()?;
 
-    // Apply actions after terminal is restored so warnings display correctly
     if !actions.is_empty() {
         apply_actions(duplicates, &actions)?;
     }

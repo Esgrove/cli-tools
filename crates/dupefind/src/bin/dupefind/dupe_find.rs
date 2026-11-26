@@ -289,7 +289,7 @@ impl DupeFind {
                     continue;
                 }
 
-                match cli_tools_common::safe_rename(&file.path, &target_path, OverwritePolicy::Skip) {
+                match move_file_with_cross_device_fallback(&file.path, &target_path) {
                     Ok(RenameOutcome::SkippedExisting) => {
                         print_yellow!("Skipping move, file already exists: {}", target_path.display());
                     }
@@ -299,6 +299,32 @@ impl DupeFind {
             }
         }
     }
+}
+
+/// Move a file to `target`, falling back to copy-with-times and remove on cross-device links.
+fn move_file_with_cross_device_fallback(source: &Path, target: &Path) -> std::io::Result<RenameOutcome> {
+    match cli_tools_common::safe_rename(source, target, OverwritePolicy::Skip) {
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => copy_and_remove_file(source, target),
+        other => other,
+    }
+}
+
+/// Copy `source` to `target` through a temporary sibling and remove `source` once the target is in place.
+fn copy_and_remove_file(source: &Path, target: &Path) -> std::io::Result<RenameOutcome> {
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Ok(RenameOutcome::SkippedExisting);
+    }
+    let temporary = cli_tools_common::unique_sibling_path(target, "move-tmp");
+    if let Err(error) = cli_tools_common::copy_file_with_times(source, &temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temporary, target) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    std::fs::remove_file(source)?;
+    Ok(RenameOutcome::Renamed)
 }
 
 /// Remove repeated roots, and roots inside another root when scanning recursively.
@@ -1073,5 +1099,25 @@ mod test_move_duplicates_in_trees {
             "kept library copy must not be evacuated into Duplicates: {:?}",
             tree.snapshot()
         );
+    }
+
+    #[test]
+    fn copy_and_remove_fallback_moves_file_and_skips_existing_target() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let source = temp_dir.path().join("source.mp4");
+        let target = temp_dir.path().join("target.mp4");
+        std::fs::write(&source, b"video payload").expect("write source");
+
+        let outcome = copy_and_remove_file(&source, &target).expect("fallback move");
+        assert_eq!(outcome, RenameOutcome::Renamed);
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&target).expect("read target"), b"video payload");
+
+        let second_source = temp_dir.path().join("second.mp4");
+        std::fs::write(&second_source, b"other").expect("write second");
+        let skipped = copy_and_remove_file(&second_source, &target).expect("skip existing");
+        assert_eq!(skipped, RenameOutcome::SkippedExisting);
+        assert!(second_source.exists());
+        assert_eq!(std::fs::read(&target).expect("read target"), b"video payload");
     }
 }
