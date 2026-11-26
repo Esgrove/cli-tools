@@ -552,6 +552,15 @@ impl PrefixGroupBuilder {
         }
     }
 
+    /// Convert this builder into a final `PrefixGroup`.
+    #[must_use]
+    pub fn into_prefix_group(self) -> (String, PrefixGroup) {
+        (
+            self.original_prefix,
+            PrefixGroup::new(self.files, self.part_count, self.min_start_position),
+        )
+    }
+
     /// Determine if `new_prefix` is better than `current_prefix` for display.
     /// Prefers CamelCase (mixed case) over all-uppercase or all-lowercase.
     /// Uses alphabetical order as final tiebreaker for determinism.
@@ -596,15 +605,6 @@ impl PrefixGroupBuilder {
             // All lowercase (e.g., "photolab") or edge cases
             _ => 0,
         }
-    }
-
-    /// Convert this builder into a final `PrefixGroup`.
-    #[must_use]
-    pub fn into_prefix_group(self) -> (String, PrefixGroup) {
-        (
-            self.original_prefix,
-            PrefixGroup::new(self.files, self.part_count, self.min_start_position),
-        )
     }
 }
 
