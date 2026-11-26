@@ -511,11 +511,16 @@ impl DotRename {
         }
 
         if let Ok((file_name, file_extension)) = get_normalized_file_name_and_extension(path) {
-            let new_file = format!(
-                "{}.{}",
-                self.format_name(&file_name),
-                normalize_extension(&file_extension)
-            );
+            let formatted_stem = self.format_name(&file_name);
+            if formatted_stem.is_empty() {
+                anyhow::bail!("Formatted filename stem is empty");
+            }
+            let normalized_extension = normalize_extension(&file_extension);
+            let new_file = if normalized_extension.is_empty() {
+                formatted_stem
+            } else {
+                format!("{formatted_stem}.{normalized_extension}")
+            };
             let new_path = path.with_file_name(new_file);
             Ok(new_path)
         } else {
@@ -523,7 +528,7 @@ impl DotRename {
         }
     }
 
-    /// Get the full path with formatted filename and extension.
+    /// Get the full path with formatted directory name.
     fn formatted_directory_path(&self, path: &Path) -> Result<PathBuf> {
         if !path.is_dir() {
             anyhow::bail!("Path is not a directory")
@@ -531,6 +536,9 @@ impl DotRename {
 
         let directory_name = os_str_to_string(path.file_name().context("Failed to get directory name")?);
         let formatted_name = self.format_directory_name(&directory_name);
+        if formatted_name.is_empty() {
+            anyhow::bail!("Formatted directory name is empty");
+        }
 
         Ok(path.with_file_name(formatted_name))
     }
@@ -2344,6 +2352,46 @@ mod test_nested_trees {
         let mut contents: Vec<String> = files.iter().map(|file| tree.read(file)).collect();
         contents.sort();
         assert_eq!(contents, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn punctuation_only_names_are_skipped_and_extensionless_files_omit_trailing_dot() {
+        let tree = TempTree::new();
+        tree.file_with("---/secret.txt", "secret");
+        tree.file_with("!!!.txt", "punct");
+        tree.file_with("my readme", "docs");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                rename_directories: true,
+                recurse: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            tree.exists("---/secret.txt"),
+            "punctuation-only directory must not flatten into parent: {:?}",
+            tree.snapshot()
+        );
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: false,
+                ..Default::default()
+            },
+        );
+        assert!(
+            tree.exists("!!!.txt"),
+            "punctuation-only file must not become a hidden dotfile"
+        );
+        assert!(
+            tree.exists("My.Readme"),
+            "extensionless file must not gain a trailing dot: {:?}",
+            tree.snapshot()
+        );
+        assert!(!tree.exists("My.Readme."));
     }
 
     #[test]

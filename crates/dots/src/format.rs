@@ -297,14 +297,22 @@ impl DotFormat<'_> {
         let formatted_name = self.format_name_without_prefix_suffix(&file_name);
 
         // Apply prefix or suffix based on config
-        let name = if self.config.prefix_dir_recursive {
+        let mut name = if self.config.prefix_dir_recursive {
             Self::apply_prefix(&formatted_name, &formatted_parent)
         } else {
             self.apply_suffix(&formatted_name, &formatted_parent)
         };
+        remove_extra_dots(&mut name);
+        if name.is_empty() {
+            return None;
+        }
 
         let extension = normalize_extension(&file_extension);
-        let formatted_filename = format!("{name}.{extension}");
+        let formatted_filename = if extension.is_empty() {
+            name
+        } else {
+            format!("{name}.{extension}")
+        };
         Some(path.with_file_name(formatted_filename))
     }
 
