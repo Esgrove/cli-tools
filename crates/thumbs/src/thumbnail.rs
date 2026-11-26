@@ -694,6 +694,7 @@ mod test_thumbnail_helpers {
             duration: Some(90.0),
             codec: Some("hevc".to_string()),
             bitrate_kbps: Some(5_000),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -914,6 +915,7 @@ mod test_thumbnail_helpers {
             duration: Some(90.0),
             codec: Some("hevc".to_string()),
             bitrate_kbps: Some(5_000),
+            ..Default::default()
         };
 
         ThumbnailCreator::print_missing_video_info_warnings(&VideoInfo::default(), "clip.mp4", "[1 / 1]");

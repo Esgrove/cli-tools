@@ -430,6 +430,12 @@ impl CachedVideoInfo {
             } else {
                 None
             },
+            frames_per_second: if self.frames_per_second > 0.0 {
+                Some(self.frames_per_second)
+            } else {
+                None
+            },
+            ..Default::default()
         }
     }
 }
@@ -486,6 +492,7 @@ mod test_scan_cache_upsert {
             duration: Some(120.5),
             codec: Some("h264".to_string()),
             bitrate_kbps: Some(5000),
+            ..Default::default()
         }
     }
 
@@ -589,6 +596,7 @@ mod test_scan_cache_upsert {
             duration: Some(240.0),
             codec: Some("hevc".to_string()),
             bitrate_kbps: Some(10_000),
+            ..Default::default()
         };
         cache.batch_upsert(&[(path, &info_v2)]).expect("Failed to upsert v2");
 
@@ -613,6 +621,7 @@ mod test_scan_cache_upsert {
             duration: Some(60.0),
             codec: Some("hevc".to_string()),
             bitrate_kbps: Some(3000),
+            ..Default::default()
         };
 
         let path_a = Path::new("/videos/a.mp4");
@@ -638,6 +647,7 @@ mod test_scan_cache_upsert {
             duration: Some(120.5),
             codec: Some("h264".to_string()),
             bitrate_kbps: Some(5000),
+            ..Default::default()
         };
         let path = Path::new("/videos/test.mp4");
 
@@ -828,6 +838,7 @@ mod test_cached_video_info_conversion {
             duration: Some(300.0),
             codec: Some("hevc".to_string()),
             bitrate_kbps: Some(15_000),
+            ..Default::default()
         };
         let path = Path::new("/videos/roundtrip.mkv");
 
@@ -937,6 +948,7 @@ mod test_cached_video_info_conversion {
             duration: Some(5.0),
             codec: Some("hevc".to_string()),
             bitrate_kbps: Some(2000),
+            ..Default::default()
         };
         cache.batch_upsert(&[(file_path.as_path(), &updated)]).expect("upsert");
 
@@ -967,6 +979,7 @@ mod test_cached_video_info_conversion {
             duration: None,
             codec: Some("h264".to_string()),
             bitrate_kbps: None,
+            ..Default::default()
         };
 
         let written = cache

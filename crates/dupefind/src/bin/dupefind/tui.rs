@@ -853,6 +853,7 @@ mod tui_test_helpers {
             duration: Some(120.0),
             codec: Some(codec.to_string()),
             bitrate_kbps: Some(4000),
+            ..Default::default()
         }
     }
 

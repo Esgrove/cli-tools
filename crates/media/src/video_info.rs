@@ -15,14 +15,22 @@ pub use crate::resolution::Resolution;
 pub struct VideoInfo {
     /// File size in bytes.
     pub size_bytes: Option<u64>,
-    /// Video resolution (width and height in pixels).
+    /// Display video resolution after applying stream rotation (width and height in pixels).
     pub resolution: Option<Resolution>,
+    /// Raw coded video resolution before rotation is applied.
+    pub coded_resolution: Option<Resolution>,
+    /// Stream rotation in degrees (0, 90, 180, or 270) when reported by ffprobe.
+    pub rotation: Option<i32>,
     /// Duration in seconds.
     pub duration: Option<f64>,
-    /// Video codec name (e.g., "h264", "hevc").
+    /// Video codec name (for example "h264", "hevc", "av1").
     pub codec: Option<String>,
     /// Video bitrate in kbps.
     pub bitrate_kbps: Option<u64>,
+    /// Video frames per second.
+    pub frames_per_second: Option<f64>,
+    /// Per-channel video bit depth (for example 8 or 10).
+    pub bit_depth: Option<u8>,
 }
 
 /// Collected statistics across all processed video files.
@@ -59,7 +67,7 @@ impl VideoInfo {
                 "-select_streams",
                 "V:0",
                 "-show_entries",
-                "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng,rotate:stream_side_data=rotation:format=bit_rate,duration",
+                "stream=codec_name,bit_rate,width,height,r_frame_rate,avg_frame_rate,pix_fmt,bits_per_raw_sample:stream_tags=BPS,BPS-eng,rotate:stream_side_data=rotation:format=bit_rate,duration,size",
                 "-of",
                 "default=nokey=0:noprint_wrappers=1",
                 "-i",
@@ -77,23 +85,42 @@ impl VideoInfo {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut info = Self::parse_ffprobe_output(&stdout);
-        info.size_bytes = size_bytes;
+        if info.codec.is_none() && info.resolution.is_none() {
+            anyhow::bail!("No video stream found in {}", path.display());
+        }
+        if info.size_bytes.is_none() {
+            info.size_bytes = size_bytes;
+        } else if let Some(fs_size) = size_bytes {
+            info.size_bytes = Some(fs_size);
+        }
         Ok(info)
     }
 
-    /// Parse ffprobe key=value output into a `VideoInfo`.
+    /// Parse ffprobe `key=value` output into a [`VideoInfo`].
     ///
-    /// Fields that are missing or unparseable in the output will be `None`.
-    fn parse_ffprobe_output(output: &str) -> Self {
+    /// Fields that are missing or unparseable in the output are `None`.
+    /// When both `bits_per_raw_sample` and `pix_fmt` are present,
+    /// `bits_per_raw_sample` always takes precedence regardless of line order.
+    #[must_use]
+    pub fn parse_ffprobe_output(output: &str) -> Self {
         let mut codec: Option<String> = None;
         let mut bitrate_kbps: Option<u64> = None;
+        let mut size_bytes: Option<u64> = None;
         let mut duration: Option<f64> = None;
+        let mut frames_per_second: Option<f64> = None;
+        let mut average_frames_per_second: Option<f64> = None;
+        let mut bits_per_raw_sample: Option<u8> = None;
+        let mut pix_fmt_depth: Option<u8> = None;
 
         for line in output.lines() {
             let line = line.trim();
             if let Some((key, value)) = line.split_once('=') {
                 match key {
-                    "codec_name" => codec = Some(value.to_lowercase()),
+                    "codec_name" => {
+                        if !value.is_empty() {
+                            codec = Some(value.to_lowercase());
+                        }
+                    }
                     "bit_rate" | "BPS" | "BPS-eng" | "TAG:BPS" | "TAG:BPS-eng" => {
                         if bitrate_kbps.is_none()
                             && let Ok(bps) = value.parse::<u64>()
@@ -102,12 +129,42 @@ impl VideoInfo {
                             bitrate_kbps = Some(bps / 1000);
                         }
                     }
+                    "size" => {
+                        if size_bytes.is_none()
+                            && let Ok(size) = value.parse::<u64>()
+                        {
+                            size_bytes = Some(size);
+                        }
+                    }
                     "duration" => {
                         if let Ok(seconds) = value.parse::<f64>()
                             && seconds.is_finite()
-                            && seconds >= 0.0
+                            && seconds > 0.0
                         {
                             duration = Some(seconds);
+                        }
+                    }
+                    "bits_per_raw_sample" => {
+                        if bits_per_raw_sample.is_none()
+                            && let Ok(depth) = value.parse::<u8>()
+                            && depth > 0
+                        {
+                            bits_per_raw_sample = Some(depth);
+                        }
+                    }
+                    "pix_fmt" => {
+                        if pix_fmt_depth.is_none() {
+                            pix_fmt_depth = bit_depth_from_pixel_format(value);
+                        }
+                    }
+                    "r_frame_rate" | "avg_frame_rate" => {
+                        let target = if key == "r_frame_rate" {
+                            &mut frames_per_second
+                        } else {
+                            &mut average_frames_per_second
+                        };
+                        if target.is_none() {
+                            *target = parse_frame_rate(value);
                         }
                     }
                     _ => {}
@@ -115,12 +172,18 @@ impl VideoInfo {
             }
         }
 
+        let (coded_resolution, rotation, resolution) = parse_resolution_and_rotation(output);
+
         Self {
-            size_bytes: None,
-            resolution: parse_display_resolution(output),
+            size_bytes,
+            resolution,
+            coded_resolution,
+            rotation,
             duration,
             codec,
             bitrate_kbps,
+            frames_per_second: frames_per_second.or(average_frames_per_second),
+            bit_depth: bits_per_raw_sample.or(pix_fmt_depth),
         }
     }
 
@@ -241,10 +304,13 @@ impl VideoStats {
             entry.1 = entry.1.max(max_dimension);
         }
 
-        // Sort by count descending, then by max dimension descending (prefers landscape)
+        // Sort by count descending, then by max dimension descending, then by label ascending for determinism.
         let mut sorted_labels: Vec<_> = label_counts.into_iter().collect();
-        sorted_labels.sort_by(|(_, (count_a, max_dim_a)), (_, (count_b, max_dim_b))| {
-            count_b.cmp(count_a).then_with(|| max_dim_b.cmp(max_dim_a))
+        sorted_labels.sort_by(|(label_a, (count_a, max_dim_a)), (label_b, (count_b, max_dim_b))| {
+            count_b
+                .cmp(count_a)
+                .then_with(|| max_dim_b.cmp(max_dim_a))
+                .then_with(|| label_a.cmp(label_b))
         });
 
         let total_labels = sorted_labels.len();
@@ -318,7 +384,7 @@ impl VideoStats {
         }
 
         let mut sorted_codecs: Vec<_> = self.codecs.iter().collect();
-        sorted_codecs.sort_by(|a, b| b.1.cmp(a.1));
+        sorted_codecs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
         let codec_summary: Vec<String> = if sorted_codecs.len() == 1 {
             sorted_codecs.iter().map(|(codec, _)| (*codec).clone()).collect()
@@ -454,6 +520,47 @@ fn compute_median_u64(values: &[u64]) -> u64 {
 /// or from the older `rotate` tag as `TAG:rotate`.
 #[must_use]
 pub fn parse_display_resolution(output: &str) -> Option<Resolution> {
+    parse_resolution_and_rotation(output).2
+}
+
+/// Infer the per-channel bit depth from an ffmpeg pixel format name.
+#[must_use]
+pub fn bit_depth_from_pixel_format(pixel_format: &str) -> Option<u8> {
+    if matches!(pixel_format, "nv12" | "nv21" | "nv16" | "yuv410p") {
+        Some(8)
+    } else if pixel_format.contains("10") {
+        Some(10)
+    } else if pixel_format.contains("12") {
+        Some(12)
+    } else if pixel_format.contains("16")
+        || pixel_format.starts_with("rgb48")
+        || pixel_format.starts_with("bgr48")
+        || pixel_format.starts_with("rgba64")
+        || pixel_format.starts_with("bgra64")
+    {
+        Some(16)
+    } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") {
+        Some(8)
+    } else {
+        None
+    }
+}
+
+/// Parse an ffprobe rational frame rate string (such as `"30000/1001"`) within `1.0..=240.0` fps.
+#[must_use]
+pub fn parse_frame_rate(value: &str) -> Option<f64> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator = numerator.parse::<f64>().ok()?;
+    let denominator = denominator.parse::<f64>().ok()?;
+    if denominator <= 0.0 {
+        return None;
+    }
+    let fps = numerator / denominator;
+    (1.0..=240.0).contains(&fps).then_some(fps)
+}
+
+/// Parse coded resolution, normalized rotation degrees, and display resolution from ffprobe output.
+fn parse_resolution_and_rotation(output: &str) -> (Option<Resolution>, Option<i32>, Option<Resolution>) {
     let mut width: Option<u32> = None;
     let mut height: Option<u32> = None;
     let mut rotation: Option<f64> = None;
@@ -468,13 +575,17 @@ pub fn parse_display_resolution(output: &str) -> Option<Resolution> {
             _ => {}
         }
     }
-    let resolution = Resolution::from_options(width, height)?;
+    let coded = Resolution::from_options(width, height);
+    let normalized_rotation = rotation.map(|degrees| degrees.rem_euclid(360.0).round() as i32 % 360);
     let quarter_turn = rotation.is_some_and(|degrees| (degrees.rem_euclid(180.0) - 90.0).abs() < 1.0);
-    Some(if quarter_turn {
-        Resolution::new(resolution.height, resolution.width)
-    } else {
-        resolution
-    })
+    let display = coded.map(|resolution| {
+        if quarter_turn {
+            Resolution::new(resolution.height, resolution.width)
+        } else {
+            resolution
+        }
+    });
+    (coded, normalized_rotation, display)
 }
 
 #[cfg(test)]
@@ -573,6 +684,7 @@ mod test_video_stats {
             duration: Some(120.0),
             codec: Some("h264".to_string()),
             bitrate_kbps: Some(5000),
+            ..Default::default()
         };
         stats.add(&info);
 
@@ -1071,6 +1183,7 @@ mod test_summary_lines {
             duration: Some(duration),
             codec: Some(codec.to_string()),
             bitrate_kbps: Some(bitrate_kbps),
+            ..Default::default()
         }
     }
 
@@ -1241,5 +1354,71 @@ mod test_summary_lines {
         stats.print_summary(false);
         stats.print_summary(true);
         VideoStats::new().print_summary(true);
+    }
+}
+
+#[cfg(test)]
+mod test_full_metadata_parsing {
+    use super::*;
+
+    #[test]
+    fn bits_per_raw_sample_overrides_pix_fmt_regardless_of_line_order() {
+        let ffprobe_output = "\
+codec_name=hevc
+width=3840
+height=2160
+pix_fmt=yuv420p
+r_frame_rate=30000/1001
+bits_per_raw_sample=10
+duration=123.45
+bit_rate=12000000
+";
+        let info = VideoInfo::parse_ffprobe_output(ffprobe_output);
+        assert_eq!(info.codec.as_deref(), Some("hevc"));
+        assert_eq!(info.bit_depth, Some(10));
+        assert_eq!(info.resolution, Some(Resolution::new(3840, 2160)));
+        assert_eq!(info.coded_resolution, Some(Resolution::new(3840, 2160)));
+        assert!(info.frames_per_second.is_some_and(|fps| (fps - 29.97).abs() < 0.01));
+    }
+
+    #[test]
+    fn rotated_video_tracks_both_coded_and_display_resolution() {
+        let ffprobe_output = "\
+codec_name=h264
+width=1920
+height=1080
+rotation=-90
+duration=10.0
+";
+        let info = VideoInfo::parse_ffprobe_output(ffprobe_output);
+        assert_eq!(info.coded_resolution, Some(Resolution::new(1920, 1080)));
+        assert_eq!(info.resolution, Some(Resolution::new(1080, 1920)));
+        assert_eq!(info.rotation, Some(270));
+    }
+
+    #[test]
+    fn zero_duration_is_treated_as_missing() {
+        let info = VideoInfo::parse_ffprobe_output("codec_name=h264\nduration=0.0\n");
+        assert!(info.duration.is_none());
+    }
+
+    #[test]
+    fn video_stats_breaks_codec_and_resolution_ties_deterministically() {
+        let mut stats = VideoStats::new();
+        stats.add(&VideoInfo {
+            resolution: Some(Resolution::new(1920, 1080)),
+            codec: Some("hevc".to_string()),
+            ..Default::default()
+        });
+        stats.add(&VideoInfo {
+            resolution: Some(Resolution::new(1080, 1920)),
+            codec: Some("av1".to_string()),
+            ..Default::default()
+        });
+
+        let summary = stats.summary_lines(true).join("\n");
+        let av1_pos = summary.find("av1 (1)").expect("av1 present");
+        let hevc_pos = summary.find("hevc (1)").expect("hevc present");
+        assert!(av1_pos < hevc_pos, "expected alphabetical tie-break: {summary}");
     }
 }

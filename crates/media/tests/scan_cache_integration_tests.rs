@@ -25,6 +25,7 @@ fn persists_video_metadata_and_hashes_after_reopening() -> anyhow::Result<()> {
         duration: Some(60.5),
         codec: Some("h264".to_string()),
         bitrate_kbps: Some(4_000),
+        ..Default::default()
     };
 
     {

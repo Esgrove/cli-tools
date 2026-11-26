@@ -532,6 +532,7 @@ mod test_collect_metadata {
             resolution: Some(Resolution::new(1920, 1080)),
             codec: Some("hevc".to_string()),
             bitrate_kbps: Some(4_000),
+            ..Default::default()
         }
     }
 
