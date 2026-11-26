@@ -7,12 +7,17 @@ use regex::Regex;
 use cli_tools_common::RE_RESOLUTION;
 
 /// Common codec patterns removed during normalization.
-pub const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265"];
+pub const CODEC_PATTERNS: &[&str] = &["x264", "x265", "h264", "h265", "hevc", "av1", "avc", "vp9"];
 
-/// Regex matching codec patterns removed during normalization.
+/// Regex matching codec patterns (including `h.264`/`h.265`) removed during normalization.
 static RE_CODEC: LazyLock<Regex> = LazyLock::new(|| {
-    let pattern = format!(r"(?i)\b({})\b", CODEC_PATTERNS.join("|"));
+    let pattern = format!(r"(?i)\b({}|h\.264|h\.265)\b", CODEC_PATTERNS.join("|"));
     Regex::new(&pattern).expect("Invalid codec regex")
+});
+
+/// Regex matching an optional `vertical.` prefix directly preceding a resolution token.
+static RE_VERTICAL_RESOLUTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bvertical[.\-_\s]+(\d{3,4}p|\d{3,4}x\d{3,4})\b").expect("Invalid vertical resolution regex")
 });
 
 /// Strip configured dot delimited prefixes from the start of a filename or stem.
@@ -81,9 +86,10 @@ pub fn normalize_stem(stem: &str) -> String {
     }
 }
 
-/// Remove resolution and codec tags from lowercase text and collapse the separators left behind.
+/// Remove resolution (including `vertical.` prefixes) and codec tags from lowercase text.
 fn remove_tags(text: &str) -> String {
-    let without_resolution = RE_RESOLUTION.replace_all(text, "");
+    let without_vertical_res = RE_VERTICAL_RESOLUTION.replace_all(text, "");
+    let without_resolution = RE_RESOLUTION.replace_all(&without_vertical_res, "");
     let without_codec = RE_CODEC.replace_all(&without_resolution, "");
     cli_tools_common::collapse_repeated_separators(&without_codec)
 }

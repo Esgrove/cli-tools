@@ -169,13 +169,10 @@ pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'
                     .entry(pattern_match.as_str().to_lowercase())
                     .or_default()
                     .push(index);
-                pattern_matches.insert(
-                    index,
-                    MatchRange {
-                        start: pattern_match.start(),
-                        end: pattern_match.end(),
-                    },
-                );
+                pattern_matches.entry(index).or_insert_with(|| MatchRange {
+                    start: pattern_match.start(),
+                    end: pattern_match.end(),
+                });
                 break;
             }
         }
@@ -199,6 +196,27 @@ pub fn find_duplicates(files: &[DupeFileInfo], options: &DuplicateMatchOptions<'
                 })
                 .collect();
             DuplicateGroup::new(key, group_files)
+        })
+        .sorted_by(|left, right| left.key.cmp(&right.key))
+        .collect()
+}
+
+/// Build duplicate groups exclusively from exact content-hash index groups (`--hash-only`).
+#[must_use]
+pub fn find_hash_only_duplicates(files: &[DupeFileInfo], hash_groups: &[Vec<usize>]) -> Vec<DuplicateGroup> {
+    hash_groups
+        .iter()
+        .filter(|indices| indices.len() > 1)
+        .filter_map(|indices| {
+            let group_files: Vec<DupeFileInfo> =
+                indices.iter().filter_map(|&index| files.get(index).cloned()).collect();
+            if group_files.len() < 2 {
+                return None;
+            }
+            let key = group_files
+                .first()
+                .map_or_else(|| "hash_group".to_string(), |file| normalize_stem(&file.stem));
+            Some(DuplicateGroup::new(key, group_files))
         })
         .sorted_by(|left, right| left.key.cmp(&right.key))
         .collect()

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use itertools::Itertools;
 use ratatui::prelude::*;
@@ -245,7 +245,10 @@ fn handle_duplicate_group(
     total_groups: usize,
     metadata: &HashMap<PathBuf, VideoInfo>,
 ) -> anyhow::Result<DuplicateAction> {
-    let best_index = find_best_file_index(files);
+    if files.is_empty() {
+        return Ok(DuplicateAction::Skip);
+    }
+    let best_index = find_best_file_index_with_metadata(files, metadata);
     let mut state = TuiState::new();
     state.selected = best_index;
     let mut list_state = ListState::default();
@@ -269,40 +272,14 @@ fn handle_duplicate_group(
             if key_event.kind != KeyEventKind::Press {
                 continue;
             }
+            if key_event.modifiers.contains(KeyModifiers::CONTROL) && matches!(key_event.code, KeyCode::Char('c' | 'C'))
+            {
+                return Ok(DuplicateAction::Quit);
+            }
 
             if state.editing {
-                match key_event.code {
-                    KeyCode::Esc => state.stop_editing(),
-                    KeyCode::Enter => {
-                        if state.rename_only {
-                            if state.edit_buffer.is_empty() {
-                                state.stop_editing();
-                            } else {
-                                return Ok(DuplicateAction::RenameOnly {
-                                    rename_index: state.selected,
-                                    new_name: state.edit_buffer.clone(),
-                                });
-                            }
-                        } else {
-                            let new_name = if state.edit_buffer.is_empty() {
-                                None
-                            } else {
-                                Some(state.edit_buffer.clone())
-                            };
-                            return Ok(DuplicateAction::Keep {
-                                keep_index: state.selected,
-                                new_name,
-                            });
-                        }
-                    }
-                    KeyCode::Backspace => state.delete_char(),
-                    KeyCode::Delete => state.delete_char_forward(),
-                    KeyCode::Left => state.move_cursor_left(),
-                    KeyCode::Right => state.move_cursor_right(),
-                    KeyCode::Home => state.cursor_pos = 0,
-                    KeyCode::End => state.cursor_pos = state.edit_buffer.len(),
-                    KeyCode::Char(c) => state.insert_char(c),
-                    _ => {}
+                if let Some(action) = handle_editing_key(key_event.code, &mut state, files) {
+                    return Ok(action);
                 }
             } else if state.confirming {
                 match key_event.code {
@@ -346,6 +323,50 @@ fn handle_duplicate_group(
             }
         }
     }
+}
+
+/// Handle a key press while the inline rename editor is active.
+fn handle_editing_key(code: KeyCode, state: &mut TuiState, files: &[&DupeFileInfo]) -> Option<DuplicateAction> {
+    match code {
+        KeyCode::Esc => state.stop_editing(),
+        KeyCode::Enter => {
+            if state.rename_only {
+                if state.edit_buffer.trim().is_empty() {
+                    state.stop_editing();
+                } else if files
+                    .get(state.selected)
+                    .is_some_and(|file| build_renamed_path(&file.path, &state.edit_buffer, &file.extension).is_ok())
+                {
+                    return Some(DuplicateAction::RenameOnly {
+                        rename_index: state.selected,
+                        new_name: state.edit_buffer.clone(),
+                    });
+                }
+            } else if state.edit_buffer.trim().is_empty() {
+                return Some(DuplicateAction::Keep {
+                    keep_index: state.selected,
+                    new_name: None,
+                });
+            } else if files
+                .get(state.selected)
+                .is_some_and(|file| build_renamed_path(&file.path, &state.edit_buffer, &file.extension).is_ok())
+            {
+                return Some(DuplicateAction::Keep {
+                    keep_index: state.selected,
+                    new_name: Some(state.edit_buffer.clone()),
+                });
+            }
+        }
+        KeyCode::Backspace => state.delete_char(),
+        KeyCode::Delete => state.delete_char_forward(),
+        KeyCode::Left => state.move_cursor_left(),
+        KeyCode::Right => state.move_cursor_right(),
+        KeyCode::Home => state.cursor_pos = 0,
+        KeyCode::End => state.cursor_pos = state.edit_buffer.len(),
+        KeyCode::Char(c) => state.insert_char(c),
+        _ => {}
+    }
+    None
 }
 
 /// Format a metadata detail line for a single file.
@@ -569,6 +590,8 @@ fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyh
 }
 
 /// Apply all collected actions, removing files with the given delete function.
+///
+/// Failures on one group are recorded and reported without aborting remaining groups.
 fn apply_actions_with(
     duplicates: &[DuplicateGroup],
     actions: &[GroupAction],
@@ -580,10 +603,26 @@ fn apply_actions_with(
         .collect();
     let total = actionable.len();
 
+    let lock_store = if cfg!(test) {
+        None
+    } else {
+        cli_tools_common::locks::ActiveLockStore::open_default("dupefind").ok()
+    };
+    let mut scan_cache = if cfg!(test) {
+        None
+    } else {
+        cli_tools_media::scan_cache::ScanCache::open().ok()
+    };
+
+    let mut errors: Vec<String> = Vec::new();
     for (number, group_action) in actionable.into_iter().enumerate() {
-        let group = duplicates
-            .get(group_action.group_index)
-            .with_context(|| format!("Duplicate group index {} is out of bounds", group_action.group_index))?;
+        let Some(group) = duplicates.get(group_action.group_index) else {
+            errors.push(format!(
+                "Duplicate group index {} is out of bounds",
+                group_action.group_index
+            ));
+            continue;
+        };
         let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|f| &f.path).collect();
 
         println!(
@@ -593,64 +632,118 @@ fn apply_actions_with(
             ))
         );
 
-        match &group_action.action {
-            DuplicateAction::Keep { keep_index, new_name } => {
-                let keep_file = sorted_files
-                    .get(*keep_index)
-                    .copied()
-                    .context("Selected file to keep is unavailable")?;
-                let keep_path = &keep_file.path;
-                // The keeper may have disappeared while the TUI was collecting decisions.
-                let keep_metadata = keep_path
-                    .symlink_metadata()
-                    .with_context(|| format!("Cannot verify selected file to keep: {}", keep_path.display()))?;
-                anyhow::ensure!(
-                    keep_metadata.is_file(),
-                    "Selected file to keep is not a regular file: {}",
-                    keep_path.display()
-                );
-
-                let mut others: Vec<&DupeFileInfo> = sorted_files
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, file)| *index != *keep_index && !same_location(&file.path, &keep_file.path))
-                    .map(|(_, file)| *file)
-                    .collect();
-
-                if let Some(new_stem) = new_name {
-                    let new_path = build_renamed_path(&keep_file.path, new_stem, &keep_file.extension)?;
-                    if new_path != keep_file.path {
-                        // Another member of the group may already hold the new name.
-                        // It is deleted anyway, so remove it first instead of letting the rename replace it.
-                        if let Some(position) = others.iter().position(|file| same_location(&file.path, &new_path)) {
-                            let occupant = others.remove(position);
-                            if !delete_duplicate(&occupant.path, delete_file) {
-                                print_yellow!("Keeping original name since {} still exists", new_path.display());
-                                delete_all(&others, delete_file);
-                                continue;
-                            }
-                        }
-                        rename_file(&keep_file.path, &new_path)?;
-                    }
-                }
-
-                delete_all(&others, delete_file);
-            }
-            DuplicateAction::RenameOnly { rename_index, new_name } => {
-                let file_to_rename = sorted_files
-                    .get(*rename_index)
-                    .copied()
-                    .context("Selected file to rename is unavailable")?;
-                let new_path = build_renamed_path(&file_to_rename.path, new_name, &file_to_rename.extension)?;
-
-                if new_path != file_to_rename.path {
-                    rename_file(&file_to_rename.path, &new_path)?;
-                }
-            }
-            DuplicateAction::Skip | DuplicateAction::Quit => unreachable!(),
+        let result = apply_single_group_action(
+            &sorted_files,
+            &group_action.action,
+            delete_file,
+            lock_store.as_ref(),
+            scan_cache.as_mut(),
+        );
+        if let Err(error) = result {
+            cli_tools_common::print_error!("{error}");
+            errors.push(error.to_string());
         }
     }
 
+    if !errors.is_empty() {
+        anyhow::bail!("{}", errors.join("; "));
+    }
+    Ok(())
+}
+
+/// Apply one group's decision, respecting active cross-tool locks and updating `ScanCache`.
+fn apply_single_group_action(
+    sorted_files: &[&DupeFileInfo],
+    action: &DuplicateAction,
+    delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
+    lock_store: Option<&cli_tools_common::locks::ActiveLockStore>,
+    mut scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
+) -> anyhow::Result<()> {
+    match action {
+        DuplicateAction::Keep { keep_index, new_name } => {
+            let keep_file = sorted_files
+                .get(*keep_index)
+                .copied()
+                .context("Selected file to keep is unavailable")?;
+            let keep_path = &keep_file.path;
+            let keep_metadata = keep_path
+                .symlink_metadata()
+                .with_context(|| format!("Cannot verify selected file to keep: {}", keep_path.display()))?;
+            anyhow::ensure!(
+                keep_metadata.is_file(),
+                "Selected file to keep is not a regular file: {}",
+                keep_path.display()
+            );
+
+            let mut others: Vec<&DupeFileInfo> = sorted_files
+                .iter()
+                .enumerate()
+                .filter(|(index, file)| *index != *keep_index && !same_location(&file.path, &keep_file.path))
+                .map(|(_, file)| *file)
+                .collect();
+
+            if let Some(new_stem) = new_name {
+                let new_path = build_renamed_path(&keep_file.path, new_stem, &keep_file.extension)?;
+                if new_path != keep_file.path {
+                    if let Some(store) = lock_store
+                        && let Ok(Some(holder)) =
+                            store.is_any_locked_by_other(&[keep_file.path.clone(), new_path.clone()])
+                    {
+                        print_yellow!(
+                            "Skipping locked file (held by {} pid {}): {}",
+                            holder.tool,
+                            holder.pid,
+                            keep_file.path.display()
+                        );
+                        return Ok(());
+                    }
+                    if let Some(position) = others.iter().position(|file| same_location(&file.path, &new_path)) {
+                        let occupant = others.remove(position);
+                        if !delete_duplicate(&occupant.path, delete_file, lock_store, scan_cache.as_deref_mut()) {
+                            print_yellow!("Keeping original name since {} still exists", new_path.display());
+                            delete_all(&others, delete_file, lock_store, scan_cache);
+                            return Ok(());
+                        }
+                    }
+                    if rename_file(&keep_file.path, &new_path)?
+                        && let Some(cache) = scan_cache.as_deref_mut()
+                    {
+                        let _ = cache.move_cached_path(&keep_file.path, &new_path);
+                    }
+                }
+            }
+
+            delete_all(&others, delete_file, lock_store, scan_cache);
+        }
+        DuplicateAction::RenameOnly { rename_index, new_name } => {
+            let file_to_rename = sorted_files
+                .get(*rename_index)
+                .copied()
+                .context("Selected file to rename is unavailable")?;
+            let new_path = build_renamed_path(&file_to_rename.path, new_name, &file_to_rename.extension)?;
+
+            if new_path != file_to_rename.path {
+                if let Some(store) = lock_store
+                    && let Ok(Some(holder)) =
+                        store.is_any_locked_by_other(&[file_to_rename.path.clone(), new_path.clone()])
+                {
+                    print_yellow!(
+                        "Skipping locked file (held by {} pid {}): {}",
+                        holder.tool,
+                        holder.pid,
+                        file_to_rename.path.display()
+                    );
+                    return Ok(());
+                }
+                if rename_file(&file_to_rename.path, &new_path)?
+                    && let Some(cache) = scan_cache
+                {
+                    let _ = cache.move_cached_path(&file_to_rename.path, &new_path);
+                }
+            }
+        }
+        DuplicateAction::Skip | DuplicateAction::Quit => unreachable!(),
+    }
     Ok(())
 }
 
@@ -669,7 +762,7 @@ fn build_renamed_path(original: &Path, new_stem: &str, extension: &str) -> anyho
 }
 
 /// Rename a file without replacing a different existing file, printing the change.
-fn rename_file(source: &Path, target: &Path) -> anyhow::Result<()> {
+fn rename_file(source: &Path, target: &Path) -> anyhow::Result<bool> {
     println!("{}", colored::Colorize::cyan("Rename:"));
     cli_tools_common::show_diff(
         &cli_tools_common::path_to_string_relative(source),
@@ -679,19 +772,41 @@ fn rename_file(source: &Path, target: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("Failed to rename {}", source.display()))?;
     if outcome == RenameOutcome::SkippedExisting {
         print_yellow!("Skipping rename, file already exists: {}", target.display());
+        return Ok(false);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Delete every given file, reporting failures without stopping.
-fn delete_all(files: &[&DupeFileInfo], delete_file: &dyn Fn(&Path) -> std::io::Result<()>) {
+fn delete_all(
+    files: &[&DupeFileInfo],
+    delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
+    lock_store: Option<&cli_tools_common::locks::ActiveLockStore>,
+    mut scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
+) {
     for file in files {
-        delete_duplicate(&file.path, delete_file);
+        delete_duplicate(&file.path, delete_file, lock_store, scan_cache.as_deref_mut());
     }
 }
 
 /// Delete one duplicate file and return whether it was removed.
-fn delete_duplicate(path: &Path, delete_file: &dyn Fn(&Path) -> std::io::Result<()>) -> bool {
+fn delete_duplicate(
+    path: &Path,
+    delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
+    lock_store: Option<&cli_tools_common::locks::ActiveLockStore>,
+    scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
+) -> bool {
+    if let Some(store) = lock_store
+        && let Ok(Some(holder)) = store.is_locked_by_other(path)
+    {
+        print_yellow!(
+            "Skipping locked file (held by {} pid {}): {}",
+            holder.tool,
+            holder.pid,
+            path.display()
+        );
+        return false;
+    }
     // Network paths are deleted directly since trash doesn't work there
     if cli_tools_common::is_network_path(path) {
         println!("{}: {}", colored::Colorize::red("Delete"), path.display());
@@ -701,6 +816,9 @@ fn delete_duplicate(path: &Path, delete_file: &dyn Fn(&Path) -> std::io::Result<
     if let Err(error) = delete_file(path) {
         print_yellow!("Failed to delete {}: {error}", path.display());
         return false;
+    }
+    if let Some(cache) = scan_cache {
+        let _ = cache.remove_cached_path(path);
     }
     true
 }
@@ -718,23 +836,30 @@ fn same_location(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Find the index of the best file to preselect based on location, resolution, and codec.
+/// Find the index of the best file to preselect using filename heuristics only.
+#[cfg(test)]
+pub fn find_best_file_index(files: &[&DupeFileInfo]) -> usize {
+    find_best_file_index_with_metadata(files, &HashMap::new())
+}
+
+/// Find the index of the best file to keep using probed [`VideoInfo`] metadata when available,
+/// falling back to filename resolution and codec labels when metadata is absent.
 ///
 /// Files outside any `Duplicates` directory are always preferred over copies already inside `Duplicates`.
-pub fn find_best_file_index(files: &[&DupeFileInfo]) -> usize {
+pub fn find_best_file_index_with_metadata(files: &[&DupeFileInfo], metadata: &HashMap<PathBuf, VideoInfo>) -> usize {
     files
         .iter()
         .enumerate()
         .max_by(|(_, left), (_, right)| {
             let left_outside = !is_in_duplicates_directory(&left.path);
             let right_outside = !is_in_duplicates_directory(&right.path);
-            let (res_left, x265_left) = score_file(left);
-            let (res_right, x265_right) = score_file(right);
+
+            let left_score = rank_file(left, metadata.get(&left.path));
+            let right_score = rank_file(right, metadata.get(&right.path));
 
             left_outside
                 .cmp(&right_outside)
-                .then_with(|| res_left.cmp(&res_right))
-                .then_with(|| x265_left.cmp(&x265_right))
+                .then_with(|| left_score.cmp(&right_score))
         })
         .map_or(0, |(idx, _)| idx)
 }
@@ -751,25 +876,66 @@ fn is_in_duplicates_directory(path: &Path) -> bool {
     })
 }
 
-/// Score a file based on resolution and codec labels.
-/// Higher score = better quality. Returns (`resolution_score`, `has_x265`).
-fn score_file(file: &DupeFileInfo) -> (u8, bool) {
+/// Composite quality rank for one duplicate candidate.
+fn rank_file(file: &DupeFileInfo, info: Option<&VideoInfo>) -> (u64, u8, u64, u64, u8, u8) {
+    let (filename_res, filename_codec) = score_file(file);
+    info.map_or_else(
+        || {
+            (
+                u64::from(filename_res),
+                filename_codec,
+                0,
+                0,
+                filename_res,
+                filename_codec,
+            )
+        },
+        |info| {
+            let pixels = info
+                .resolution
+                .map_or_else(|| u64::from(filename_res), |res| res.pixel_count());
+            let codec_rank = info.codec.as_deref().map_or(filename_codec, codec_quality_rank);
+            let bitrate = info.bitrate_kbps.unwrap_or(0);
+            let size = info.size_bytes.unwrap_or(0);
+            (pixels, codec_rank, bitrate, size, filename_res, filename_codec)
+        },
+    )
+}
+
+/// Rank codecs for duplicate selection: modern HEVC/AV1 > H.264/AVC > other/unknown.
+fn codec_quality_rank(codec: &str) -> u8 {
+    match codec.to_ascii_lowercase().as_str() {
+        "av1" | "hevc" | "h265" | "x265" => 2,
+        "h264" | "avc" | "x264" | "vp9" => 1,
+        _ => 0,
+    }
+}
+
+/// Score a file based on resolution and codec labels when video metadata is unavailable.
+fn score_file(file: &DupeFileInfo) -> (u8, u8) {
     let filename_lower = file.filename.to_lowercase();
 
-    // Resolution score: higher resolution = higher score
-    let resolution_score = if filename_lower.contains(".2160p") {
+    let resolution_score = if filename_lower.contains("2160p") || filename_lower.contains(".4k") {
         4
-    } else if filename_lower.contains(".1440p") {
+    } else if filename_lower.contains("1440p") {
         3
-    } else if filename_lower.contains(".1080p") {
+    } else if filename_lower.contains("1080p") {
         2
     } else {
-        u8::from(filename_lower.contains(".720p"))
+        u8::from(filename_lower.contains("720p"))
     };
 
-    let has_x265 = filename_lower.contains(".x265");
+    let codec_score = if filename_lower.contains("x265")
+        || filename_lower.contains("hevc")
+        || filename_lower.contains("h265")
+        || filename_lower.contains("av1")
+    {
+        2
+    } else {
+        u8::from(filename_lower.contains("x264") || filename_lower.contains("h264"))
+    };
 
-    (resolution_score, has_x265)
+    (resolution_score, codec_score)
 }
 
 #[cfg(test)]
@@ -830,6 +996,36 @@ mod test_file_scoring {
     #[test]
     fn empty_file_list_defaults_to_first_index() {
         assert_eq!(find_best_file_index(&[]), 0);
+    }
+
+    #[test]
+    fn prefers_probed_metadata_over_misleading_filename_labels() {
+        let low_actual = make_file("movie.2160p.x265.mp4");
+        let high_actual = make_file("movie_plain.mp4");
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            low_actual.path.clone(),
+            VideoInfo {
+                resolution: Some(cli_tools_media::Resolution::new(1280, 720)),
+                codec: Some("h264".to_string()),
+                bitrate_kbps: Some(2000),
+                size_bytes: Some(100_000),
+                ..Default::default()
+            },
+        );
+        metadata.insert(
+            high_actual.path.clone(),
+            VideoInfo {
+                resolution: Some(cli_tools_media::Resolution::new(3840, 2160)),
+                codec: Some("hevc".to_string()),
+                bitrate_kbps: Some(15_000),
+                size_bytes: Some(500_000),
+                ..Default::default()
+            },
+        );
+
+        let files = vec![&low_actual, &high_actual];
+        assert_eq!(find_best_file_index_with_metadata(&files, &metadata), 1);
     }
 }
 

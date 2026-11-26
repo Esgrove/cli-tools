@@ -23,7 +23,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 colored = { workspace = true }
 crossterm = { workspace = true }
-futures = { workspace = true }
+ctrlc = { workspace = true }
 indicatif = { workspace = true }
 itertools = { workspace = true }
 ratatui = { workspace = true }
@@ -32,9 +32,8 @@ regex = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 walkdir = { workspace = true }
-cli-tools-common = { workspace = true, features = ["async", "completion", "diff"] }
+cli-tools-common = { workspace = true, features = ["completion", "config", "diff", "sqlite"] }
 cli-tools-media = { workspace = true, features = ["scan-cache"] }
-tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }

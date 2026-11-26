@@ -2,7 +2,6 @@
 //!
 //! Handles reading configuration from CLI arguments and the user config file.
 
-use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -13,8 +12,9 @@ use serde::Deserialize;
 use crate::Args;
 use cli_tools_dupefind::FILE_EXTENSIONS;
 
-/// Config from the user config file.
+/// Config from the `[dupefind]` section of the user config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DupeConfig {
     #[serde(default)]
     pub(crate) default_paths: Vec<PathBuf>,
@@ -40,13 +40,6 @@ pub struct DupeConfig {
     verbose: bool,
 }
 
-/// Wrapper needed for parsing the config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    dupefind: DupeConfig,
-}
-
 /// Final config created from CLI arguments and user config file.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -54,6 +47,8 @@ pub struct Config {
     pub(crate) dryrun: bool,
     pub(crate) extensions: Vec<String>,
     pub(crate) hash_compare: bool,
+    pub(crate) hash_only: bool,
+    pub(crate) no_cache: bool,
     /// Pattern match texts to ignore (case-insensitive).
     /// Groups whose display name matches any of these strings will be skipped.
     pub(crate) ignore_matches: Vec<String>,
@@ -71,29 +66,16 @@ impl DupeConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     pub(crate) fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
+        cli_tools_common::load_user_config_section("dupefind")
     }
 
     /// Parse configuration from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.dupefind)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
+        cli_tools_common::parse_user_config_section(toml_str, "dupefind")
     }
 }
 
@@ -102,9 +84,14 @@ impl Config {
     ///
     /// # Errors
     /// Returns an error if the config file cannot be read or parsed.
+    #[cfg(test)]
     pub fn from_args(args: Args) -> anyhow::Result<Self> {
         let user_config = DupeConfig::get_user_config()?;
+        Self::from_args_and_user_config(args, user_config)
+    }
 
+    /// Combine CLI arguments with an already-loaded user config so `cli-tools.toml` is only read once.
+    pub(crate) fn from_args_and_user_config(args: Args, user_config: DupeConfig) -> anyhow::Result<Self> {
         // Collect ignore matches from config (stored lowercase for case-insensitive comparison)
         let ignore_matches: Vec<String> = user_config
             .ignore_matches
@@ -131,15 +118,15 @@ impl Config {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("Invalid regex pattern: {e}"))?;
 
-        // Combine extensions from config and CLI, with defaults if none specified
-        let mut extensions: Vec<String> = user_config
-            .extensions
-            .into_iter()
-            .chain(args.extension)
-            .unique()
-            .map(|e| e.trim_start_matches('.').to_lowercase())
-            .collect();
-
+        // CLI extensions override config extensions when supplied.
+        // Otherwise use config or defaults.
+        let mut extensions = if !args.extension.is_empty() {
+            cli_tools_common::normalize_extensions(args.extension)
+        } else if !user_config.extensions.is_empty() {
+            cli_tools_common::normalize_extensions(user_config.extensions)
+        } else {
+            FILE_EXTENSIONS.iter().map(|&s| s.to_string()).collect()
+        };
         if extensions.is_empty() {
             extensions = FILE_EXTENSIONS.iter().map(|&s| s.to_string()).collect();
         }
@@ -148,7 +135,9 @@ impl Config {
             debug: args.debug,
             dryrun: args.print || user_config.dryrun,
             extensions,
-            hash_compare: args.hash_compare || user_config.hash_compare,
+            hash_compare: args.hash_compare || args.hash_only || user_config.hash_compare,
+            hash_only: args.hash_only,
+            no_cache: args.no_cache,
             ignore_matches,
             move_files: args.move_files || user_config.move_files,
             patterns,

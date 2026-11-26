@@ -7,8 +7,8 @@ mod tui;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
+use cli_tools_common::CompletionArgs;
 
 use crate::dupe_find::DupeFind;
 
@@ -17,15 +17,7 @@ use crate::dupe_find::DupeFind;
 enum DupeFindCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -42,7 +34,7 @@ struct Args {
     #[arg(short = 'g', long, num_args = 1, action = clap::ArgAction::Append, name = "PATTERN")]
     pattern: Vec<String>,
 
-    /// File extensions to include
+    /// File extensions to include (overrides extensions from config when specified)
     #[arg(short = 'e', long, num_args = 1, action = clap::ArgAction::Append, name = "EXTENSION")]
     extension: Vec<String>,
 
@@ -57,6 +49,18 @@ struct Args {
     /// Compare file contents using BLAKE3 hashes
     #[arg(short = 'H', long = "hash")]
     hash_compare: bool,
+
+    /// Group duplicates exclusively by exact BLAKE3 content hash (ignores filename/pattern matches)
+    #[arg(short = 'O', long = "hash-only")]
+    hash_only: bool,
+
+    /// Skip the shared scan and hash caches
+    #[arg(short = 'C', long = "no-cache")]
+    no_cache: bool,
+
+    /// Remove stale entries from the shared scan and hash caches
+    #[arg(short = 'X', long = "clean-cache")]
+    clean_cache: bool,
 
     /// Only print changes without moving files
     #[arg(short = 'p', long)]
@@ -81,14 +85,10 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(DupeFindCommand::Completion { shell, install }) = &args.command {
-        cli_tools_common::generate_shell_completion(
-            *shell,
-            Args::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        )
+    if let Some(DupeFindCommand::Completion(completion)) = &args.command {
+        completion.generate::<Args>(args.verbose, env!("CARGO_BIN_NAME"))
+    } else if args.clean_cache {
+        helpers::clean_cache(args.verbose)
     } else {
         DupeFind::new(args)?.run()
     }
@@ -100,6 +100,7 @@ mod cli_args_tests {
 
     #[test]
     fn the_command_definition_is_valid() {
+        use clap::CommandFactory;
         Args::command().debug_assert();
     }
 

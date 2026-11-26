@@ -16,11 +16,15 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use walkdir::WalkDir;
 
-use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations, print_error, print_yellow};
+use cli_tools_common::locks::ActiveLockStore;
+use cli_tools_common::{MoveResult, OverwritePolicy, TargetReservations, print_error, print_yellow};
 use cli_tools_dupefind::{
     DupeFileInfo, DuplicateGroup, DuplicateMatchOptions, filter_ignored_groups, find_duplicates,
-    format_filename_with_highlight, group_matches_ignore,
+    find_hash_only_duplicates, format_filename_with_highlight, group_matches_ignore,
 };
+use cli_tools_media::file_hash::hash_file;
+use cli_tools_media::scan_cache::ScanCache;
+use cli_tools_media::video_info::VideoInfo;
 
 use crate::config::{Config, DupeConfig};
 #[cfg(not(test))]
@@ -61,7 +65,7 @@ impl DupeFind {
             vec![cli_tools_common::resolve_input_path(None)?]
         };
 
-        let config = Config::from_args(args)?;
+        let config = Config::from_args_and_user_config(args, user_config)?;
         let roots = deduplicate_roots(roots, config.recurse);
 
         Ok(Self { config, roots })
@@ -93,21 +97,31 @@ impl DupeFind {
                 println!("Prefix ignores: {:?}", self.config.prefix_ignores);
             }
             println!("Hash comparison: {}", self.config.hash_compare);
+            println!("Hash only: {}", self.config.hash_only);
         }
 
         let files = self.gather_files();
         if self.config.verbose {
             println!("Checking {} files for duplicates...", files.len());
         }
-        let hash_matches = helpers::find_hash_matches(&files, self.config.hash_compare, self.config.verbose);
-        let duplicates = find_duplicates(
+        let hash_matches = helpers::find_hash_matches(
             &files,
-            &DuplicateMatchOptions {
-                patterns: &self.config.patterns,
-                prefix_ignores: &self.config.prefix_ignores,
-                additional_match_groups: &hash_matches,
-            },
+            self.config.hash_compare,
+            !self.config.no_cache,
+            self.config.verbose,
         );
+        let duplicates = if self.config.hash_only {
+            find_hash_only_duplicates(&files, &hash_matches)
+        } else {
+            find_duplicates(
+                &files,
+                &DuplicateMatchOptions {
+                    patterns: &self.config.patterns,
+                    prefix_ignores: &self.config.prefix_ignores,
+                    additional_match_groups: &hash_matches,
+                },
+            )
+        };
         if self.config.verbose {
             for group in duplicates
                 .iter()
@@ -125,26 +139,39 @@ impl DupeFind {
 
         // Interactive mode when not moving and not in print/dryrun mode
         if !self.config.dryrun && !self.config.move_files {
-            let metadata = helpers::collect_metadata_for_groups(&duplicates);
+            let metadata = helpers::collect_metadata_for_groups(&duplicates, !self.config.no_cache);
             return crate::tui::run_interactive(&duplicates, &metadata);
         }
 
-        // Print-only mode
+        // Print-only or move mode:
+        // print group display names and full relative paths so directories are distinguishable.
         println!(
             "{}",
             format!("Found {} duplicate groups:", duplicates.len()).yellow().bold()
         );
 
         for group in &duplicates {
-            println!("\n{}:", group.key.cyan());
+            println!("\n{}:", group.display_name().cyan());
             for file in group.files.iter().sorted_by_key(|f| &f.path) {
-                let display_name = format_filename_with_highlight(&file.filename, file.pattern_match);
-                println!("  {display_name}");
+                let relative = cli_tools_common::path_to_string_relative(&file.path);
+                let highlighted_filename = format_filename_with_highlight(&file.filename, file.pattern_match);
+                let display = match Path::new(&relative).parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => {
+                        format!("{}/{highlighted_filename}", parent.display())
+                    }
+                    _ => highlighted_filename,
+                };
+                println!("  {display}");
             }
         }
 
         if self.config.move_files {
-            self.move_duplicates(&duplicates);
+            let metadata = if cfg!(test) {
+                std::collections::HashMap::new()
+            } else {
+                helpers::collect_metadata_for_groups(&duplicates, !self.config.no_cache)
+            };
+            self.move_duplicates(&duplicates, &metadata)?;
         }
 
         Ok(())
@@ -228,18 +255,13 @@ impl DupeFind {
             .collect()
     }
 
-    /// Move duplicate files to a Duplicates directory
-    fn move_duplicates(&self, duplicates: &[DuplicateGroup]) {
-        // Use the first root as the duplicates directory location
-        let duplicates_dir = self.roots.first().map_or_else(
-            || {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join("Duplicates")
-            },
-            |r| r.join("Duplicates"),
-        );
-
+    /// Move duplicate files to a `Duplicates` directory, keeping the best-ranked file in place.
+    fn move_duplicates(
+        &self,
+        duplicates: &[DuplicateGroup],
+        metadata: &std::collections::HashMap<PathBuf, VideoInfo>,
+    ) -> anyhow::Result<()> {
+        let duplicates_dir = self.duplicates_dir();
         println!(
             "{}",
             format!("\nMoving duplicates to {}", duplicates_dir.display())
@@ -247,13 +269,24 @@ impl DupeFind {
                 .bold()
         );
 
+        let lock_store = if self.config.dryrun || cfg!(test) {
+            None
+        } else {
+            ActiveLockStore::open_default("dupefind").ok()
+        };
+        let mut scan_cache = if self.config.dryrun || self.config.no_cache || cfg!(test) {
+            None
+        } else {
+            ScanCache::open().ok()
+        };
+
         let mut reservations = TargetReservations::new();
+        let mut failed_count = 0usize;
         for group in duplicates {
             let group_name = sanitize_group_dir_name(&group.display_name());
             let target_dir = duplicates_dir.join(&group_name);
-            // The file the interactive view would preselect stays in place, and only the others are moved.
             let sorted_files: Vec<&DupeFileInfo> = group.files.iter().sorted_by_key(|file| &file.path).collect();
-            let best_index = crate::tui::find_best_file_index(&sorted_files);
+            let best_index = crate::tui::find_best_file_index_with_metadata(&sorted_files, metadata);
             if let Some(best) = sorted_files.get(best_index) {
                 println!(
                     "{}: {}",
@@ -263,8 +296,6 @@ impl DupeFind {
             }
 
             for (index, file) in sorted_files.iter().enumerate() {
-                // A copy moved by an earlier run is found again when the duplicates directory is inside a root.
-                // It is already where it belongs, and moving it again would only give it a new numbered name.
                 if index == best_index || file.path.parent() == Some(target_dir.as_path()) {
                     continue;
                 }
@@ -291,85 +322,116 @@ impl DupeFind {
                     continue;
                 }
 
-                if let Err(e) = std::fs::create_dir_all(&target_dir) {
-                    print_yellow!("Failed to create directory {}: {e}", target_dir.display());
+                if let Some(ref store) = lock_store
+                    && let Ok(Some(holder)) = store.is_any_locked_by_other(&[file.path.clone(), target_path.clone()])
+                {
+                    print_yellow!(
+                        "Skipping locked file (held by {} pid {}): {}",
+                        holder.tool,
+                        holder.pid,
+                        file.path.display()
+                    );
                     continue;
                 }
 
-                match move_file_with_cross_device_fallback(&file.path, &target_path) {
-                    Ok(RenameOutcome::SkippedExisting) => {
+                if let Err(e) = std::fs::create_dir_all(&target_dir) {
+                    print_yellow!("Failed to create directory {}: {e}", target_dir.display());
+                    failed_count += 1;
+                    continue;
+                }
+
+                match move_file_with_verification(&file.path, &target_path) {
+                    Ok(MoveResult::SkippedExisting) => {
                         print_yellow!("Skipping move, file already exists: {}", target_path.display());
                     }
                     Ok(_) => {
                         reservations.reserve(&target_path);
+                        if let Some(ref mut cache) = scan_cache {
+                            let _ = cache.move_cached_path(&file.path, &target_path);
+                        }
                     }
-                    Err(e) => print_error!("Failed to move file: {e}"),
+                    Err(e) => {
+                        print_error!("Failed to move file: {e}");
+                        failed_count += 1;
+                    }
                 }
             }
         }
+
+        anyhow::ensure!(
+            failed_count == 0,
+            "Failed to move {}",
+            cli_tools_common::count_label(failed_count, "duplicate file", "duplicate files")
+        );
+        Ok(())
+    }
+
+    /// Resolve the `Duplicates` destination directory under the first configured root.
+    fn duplicates_dir(&self) -> PathBuf {
+        self.roots.first().map_or_else(
+            || {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("Duplicates")
+            },
+            |root| root.join("Duplicates"),
+        )
     }
 }
 
-/// Sanitize a duplicate group display name so it stays a single directory component inside `Duplicates/`.
+/// Sanitize a duplicate group display name so it is a safe directory component on Unix and Windows.
 fn sanitize_group_dir_name(name: &str) -> String {
     let cleaned: String = name
         .trim()
         .chars()
         .map(|character| match character {
-            '/' | '\\' | '\0' => '_',
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
             other => other,
         })
         .collect();
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+    let trimmed = cleaned.trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
         "_group".to_string()
     } else {
-        cleaned
+        trimmed.to_string()
     }
 }
 
-/// Move a file to `target`, falling back to copy-with-times and remove on cross-device links.
-fn move_file_with_cross_device_fallback(source: &Path, target: &Path) -> std::io::Result<RenameOutcome> {
-    match cli_tools_common::safe_rename(source, target, OverwritePolicy::Skip) {
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => copy_and_remove_file(source, target),
-        other => other,
-    }
+/// Move a file to `target`, verifying BLAKE3 hashes when a cross-device copy is required.
+fn move_file_with_verification(source: &Path, target: &Path) -> std::io::Result<MoveResult> {
+    let verify = |src: &Path, dst: &Path| -> std::io::Result<()> {
+        let src_hash = hash_file(src).map_err(std::io::Error::other)?;
+        let dst_hash = hash_file(dst).map_err(std::io::Error::other)?;
+        if src_hash != dst_hash {
+            return Err(std::io::Error::other(format!(
+                "BLAKE3 hash mismatch after cross-device copy of {}",
+                src.display()
+            )));
+        }
+        Ok(())
+    };
+    cli_tools_common::safe_move_file(source, target, OverwritePolicy::Skip, Some(&verify))
 }
 
-/// Copy `source` to `target` through a temporary sibling and remove `source` once the target is in place.
-fn copy_and_remove_file(source: &Path, target: &Path) -> std::io::Result<RenameOutcome> {
-    if std::fs::symlink_metadata(target).is_ok() {
-        return Ok(RenameOutcome::SkippedExisting);
+/// Remove repeated roots while preserving user CLI order, dropping roots nested under an ancestor when recursing.
+fn deduplicate_roots(roots: Vec<PathBuf>, recurse: bool) -> Vec<PathBuf> {
+    let mut unique: Vec<PathBuf> = Vec::with_capacity(roots.len());
+    for root in roots {
+        if !unique.contains(&root) {
+            unique.push(root);
+        }
     }
-    let temporary = cli_tools_common::unique_sibling_path(target, "move-tmp");
-    if let Err(error) = cli_tools_common::copy_file_with_times(source, &temporary) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
-    if let Err(error) = std::fs::rename(&temporary, target) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
-    std::fs::remove_file(source)?;
-    Ok(RenameOutcome::Renamed)
-}
-
-/// Remove repeated roots, and roots inside another root when scanning recursively.
-///
-/// Roots are already canonical, so a plain path prefix check finds nesting.
-/// Without recursion a nested root is scanned separately and is kept.
-fn deduplicate_roots(mut roots: Vec<PathBuf>, recurse: bool) -> Vec<PathBuf> {
-    roots.sort();
-    roots.dedup();
     if recurse {
-        let mut kept: Vec<PathBuf> = Vec::with_capacity(roots.len());
-        for root in roots {
-            if !kept.iter().any(|parent| root.starts_with(parent)) {
-                kept.push(root);
+        let mut kept: Vec<PathBuf> = Vec::with_capacity(unique.len());
+        for root in &unique {
+            let has_ancestor = unique.iter().any(|other| other != root && root.starts_with(other));
+            if !has_ancestor {
+                kept.push(root.clone());
             }
         }
         kept
     } else {
-        roots
+        unique
     }
 }
 
@@ -387,6 +449,8 @@ mod test_gather_files {
                 dryrun: true,
                 extensions: vec!["mp4".to_string()],
                 hash_compare: false,
+                hash_only: false,
+                no_cache: true,
                 ignore_matches: vec![],
                 move_files: false,
                 patterns: vec![],
@@ -458,6 +522,8 @@ mod test_move_duplicates {
                 dryrun: true,
                 extensions: vec!["mp4".to_string()],
                 hash_compare: false,
+                hash_only: false,
+                no_cache: true,
                 ignore_matches: vec![],
                 move_files: true,
                 patterns: vec![],
@@ -488,7 +554,9 @@ mod test_move_duplicates {
         let mut finder = dryrun_finder(directory.path().to_path_buf());
         finder.config.dryrun = false;
 
-        finder.move_duplicates(&[group]);
+        finder
+            .move_duplicates(&[group], &std::collections::HashMap::new())
+            .unwrap();
 
         assert!(
             directory.path().join("movie.1080p.mp4").is_file(),
@@ -532,7 +600,9 @@ mod test_move_duplicates {
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let group = group_in(directory.path(), &["movie.1080p.mp4", "movie.720p.mp4"]);
 
-        dryrun_finder(directory.path().to_path_buf()).move_duplicates(&[group]);
+        dryrun_finder(directory.path().to_path_buf())
+            .move_duplicates(&[group], &std::collections::HashMap::new())
+            .unwrap();
 
         assert!(directory.path().join("movie.1080p.mp4").is_file());
         assert!(directory.path().join("movie.720p.mp4").is_file());
@@ -546,7 +616,9 @@ mod test_move_duplicates {
     fn no_duplicate_groups_is_a_no_op() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
 
-        dryrun_finder(directory.path().to_path_buf()).move_duplicates(&[]);
+        dryrun_finder(directory.path().to_path_buf())
+            .move_duplicates(&[], &std::collections::HashMap::new())
+            .unwrap();
 
         assert!(!directory.path().join("Duplicates").exists());
     }
@@ -557,7 +629,9 @@ mod test_move_duplicates {
         let first = group_in(directory.path(), &["one.1080p.mp4", "one.720p.mp4"]);
         let second = group_in(directory.path(), &["two.1080p.mp4", "two.720p.mp4"]);
 
-        dryrun_finder(directory.path().to_path_buf()).move_duplicates(&[first, second]);
+        dryrun_finder(directory.path().to_path_buf())
+            .move_duplicates(&[first, second], &std::collections::HashMap::new())
+            .unwrap();
 
         assert_eq!(
             std::fs::read_dir(directory.path())
@@ -577,7 +651,9 @@ mod test_move_duplicates {
             ..dryrun_finder(directory.path().to_path_buf())
         };
 
-        finder.move_duplicates(&[group]);
+        finder
+            .move_duplicates(&[group], &std::collections::HashMap::new())
+            .unwrap();
 
         assert!(directory.path().join("movie.1080p.mp4").is_file());
     }
@@ -698,6 +774,8 @@ mod test_run {
                 dryrun: true,
                 extensions: vec!["mp4".to_string()],
                 hash_compare: false,
+                hash_only: false,
+                no_cache: true,
                 ignore_matches: Vec::new(),
                 move_files: false,
                 patterns: vec![Regex::new(r"ID\d+").expect("valid regex")],
@@ -788,6 +866,8 @@ mod test_gather_nested_trees {
                 dryrun: true,
                 extensions: vec!["mp4".to_string(), "mkv".to_string()],
                 hash_compare: false,
+                hash_only: false,
+                no_cache: true,
                 ignore_matches: vec![],
                 move_files: false,
                 patterns: vec![],
@@ -926,6 +1006,8 @@ mod test_move_duplicates_in_trees {
                 dryrun,
                 extensions: vec!["mp4".to_string(), "mkv".to_string()],
                 hash_compare: false,
+                hash_only: false,
+                no_cache: true,
                 ignore_matches: vec![],
                 move_files: true,
                 patterns: vec![],
@@ -970,7 +1052,9 @@ mod test_move_duplicates_in_trees {
         );
         let before = contents(&tree);
 
-        moving_finder(&tree, false).move_duplicates(&[duplicates]);
+        moving_finder(&tree, false)
+            .move_duplicates(&[duplicates], &std::collections::HashMap::new())
+            .unwrap();
 
         assert_eq!(contents(&tree), before, "no file contents may be lost");
         assert!(tree.exists("x/Movie.1080p.mp4"), "the best file stays in place");
@@ -995,7 +1079,9 @@ mod test_move_duplicates_in_trees {
         tree.file_with(&format!("{target_directory}/Movie.mp4"), "already there");
         let before = contents(&tree);
 
-        moving_finder(&tree, false).move_duplicates(&[duplicates]);
+        moving_finder(&tree, false)
+            .move_duplicates(&[duplicates], &std::collections::HashMap::new())
+            .unwrap();
 
         assert_eq!(contents(&tree), before, "no file contents may be lost");
         assert!(!tree.exists("a/Movie.mp4"));
@@ -1016,7 +1102,9 @@ mod test_move_duplicates_in_trees {
         let duplicates = group(&tree, "movie", &["a/Movie.1080p.mp4", "b/Movie.mp4", &moved_earlier]);
         let before = contents(&tree);
 
-        moving_finder(&tree, false).move_duplicates(&[duplicates]);
+        moving_finder(&tree, false)
+            .move_duplicates(&[duplicates], &std::collections::HashMap::new())
+            .unwrap();
 
         assert_eq!(contents(&tree), before, "no file contents may be lost");
         assert_eq!(tree.read(&moved_earlier), "moved earlier", "{:?}", tree.snapshot());
@@ -1037,7 +1125,9 @@ mod test_move_duplicates_in_trees {
         );
         let before = tree.snapshot();
 
-        moving_finder(&tree, true).move_duplicates(&[duplicates]);
+        moving_finder(&tree, true)
+            .move_duplicates(&[duplicates], &std::collections::HashMap::new())
+            .unwrap();
 
         assert_eq!(tree.snapshot(), before);
     }
@@ -1134,15 +1224,15 @@ mod test_move_duplicates_in_trees {
         let target = temp_dir.path().join("target.mp4");
         std::fs::write(&source, b"video payload").expect("write source");
 
-        let outcome = copy_and_remove_file(&source, &target).expect("fallback move");
-        assert_eq!(outcome, RenameOutcome::Renamed);
+        let outcome = move_file_with_verification(&source, &target).expect("fallback move");
+        assert_eq!(outcome, MoveResult::Renamed);
         assert!(!source.exists());
         assert_eq!(std::fs::read(&target).expect("read target"), b"video payload");
 
         let second_source = temp_dir.path().join("second.mp4");
         std::fs::write(&second_source, b"other").expect("write second");
-        let skipped = copy_and_remove_file(&second_source, &target).expect("skip existing");
-        assert_eq!(skipped, RenameOutcome::SkippedExisting);
+        let skipped = move_file_with_verification(&second_source, &target).expect("skip existing");
+        assert_eq!(skipped, MoveResult::SkippedExisting);
         assert!(second_source.exists());
         assert_eq!(std::fs::read(&target).expect("read target"), b"video payload");
     }

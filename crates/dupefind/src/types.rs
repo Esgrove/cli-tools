@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use cli_tools_common::MatchRange;
 
-/// All video extensions considered by default.
-pub const FILE_EXTENSIONS: &[&str] = &["mp4", "mkv", "wmv", "flv", "m4v", "ts", "mpg", "avi", "mov", "webm"];
+/// All video extensions considered by default, shared with `cli-tools-media`.
+pub const FILE_EXTENSIONS: &[&str] = cli_tools_media::VIDEO_EXTENSIONS;
 
 /// A group of duplicate files that share a common key.
 #[derive(Debug, Clone)]

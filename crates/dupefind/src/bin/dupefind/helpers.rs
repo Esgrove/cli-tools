@@ -6,19 +6,26 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::Result;
+use colored::Colorize;
 use indicatif::ProgressBar;
 #[cfg(not(test))]
 use indicatif::ProgressStyle;
+use rayon::prelude::*;
 
-use cli_tools_common::{create_semaphore_for_io_bound, print_yellow};
+use cli_tools_common::print_yellow;
 use cli_tools_dupefind::hash::{
     CalculatedFileHash, IndexedFileHash, calculate_file_hash_with_progress, collect_hash_candidates, group_hash_matches,
 };
 use cli_tools_dupefind::{DupeFileInfo, DuplicateGroup};
-use cli_tools_media::file_hash::fingerprint_file;
+use cli_tools_media::file_hash::{FileFingerprint, fingerprint_file};
 use cli_tools_media::scan_cache::{CachedFileHash, ScanCache};
 use cli_tools_media::video_info::VideoInfo;
+
+/// Flush newly computed hashes to `cli-tools.db` every this many files so interrupted runs keep progress.
+const HASH_CHECKPOINT_INTERVAL: usize = 16;
 
 #[cfg(not(test))]
 pub const PROGRESS_BAR_CHARS: &str = "=>-";
@@ -30,22 +37,58 @@ pub const HASH_PROGRESS_BAR_TEMPLATE: &str =
 #[cfg(not(test))]
 pub const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg} ({pos} files found)";
 
-/// Collect metadata for all files in duplicate groups using ffprobe.
-///
-/// Checks the shared scan cache first
-/// so that files already analysed by `vconvert` or a previous `dupefind` run are not probed again.
-/// Newly probed results are written back to the cache.
-pub fn collect_metadata_for_groups(groups: &[DuplicateGroup]) -> HashMap<PathBuf, VideoInfo> {
+/// Remove stale scan and file-hash cache entries whose files no longer exist on mounted volumes.
+pub fn clean_cache(verbose: bool) -> Result<()> {
+    let mut cache = ScanCache::open()?;
+    let stats = cache.cache_stats()?;
+    if verbose {
+        println!(
+            "{}",
+            format!(
+                "Database: {}",
+                cli_tools_common::sqlite::database_path()
+                    .map_or_else(|_| "cli-tools.db".to_string(), |path| path.display().to_string())
+            )
+            .bold()
+        );
+    }
+    if stats.scanned_files_count == 0 && stats.file_hashes_count == 0 {
+        println!("Cache is empty");
+        return Ok(());
+    }
+    println!(
+        "Checking {} cached scan entries and {} file hashes...",
+        stats.scanned_files_count, stats.file_hashes_count
+    );
+    let removed_scans = cache.remove_missing_scanned_files()?;
+    let removed_hashes = cache.remove_missing_file_hashes()?;
+    if removed_scans > 0 || removed_hashes > 0 {
+        println!(
+            "{}",
+            format!("Removed {removed_scans} stale scan entries and {removed_hashes} stale hash entries").green()
+        );
+    } else {
+        println!("{}", "All cached entries are up to date".green());
+    }
+    Ok(())
+}
+
+/// Collect metadata for all files in duplicate groups using the shared scan cache and parallel ffprobe.
+pub fn collect_metadata_for_groups(groups: &[DuplicateGroup], use_cache: bool) -> HashMap<PathBuf, VideoInfo> {
     if groups.iter().all(|group| group.files.is_empty()) {
         return HashMap::new();
     }
 
-    let scan_cache = match ScanCache::open() {
-        Ok(cache) => Some(cache),
-        Err(error) => {
-            print_yellow!("Could not open scan cache: {error}");
-            None
+    let scan_cache = if use_cache {
+        match ScanCache::open() {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                print_yellow!("Could not open scan cache: {error}");
+                None
+            }
         }
+    } else {
+        None
     };
 
     collect_metadata_for_groups_with_cache(groups, scan_cache)
@@ -71,19 +114,17 @@ fn collect_metadata_for_groups_with_cache(
         .unwrap_or_default();
 
     let mut metadata: HashMap<PathBuf, VideoInfo> = HashMap::new();
-    let mut cache_misses: Vec<PathBuf> = Vec::new();
+    let mut cache_misses: Vec<(PathBuf, Option<FileFingerprint>)> = Vec::new();
 
     for path in &all_files {
-        let path_key = path.to_string_lossy();
-        // Size and modification time both have to match, since a replaced file can have the same size.
         let fingerprint = fingerprint_file(path).ok();
-
-        if let Some(cached) = cached_entries.get(path_key.as_ref())
+        if let Some(path_key) = path.to_str()
+            && let Some(cached) = cached_entries.get(path_key)
             && fingerprint.is_some_and(|fingerprint| cached.is_current(&fingerprint))
         {
             metadata.insert(path.clone(), cached.to_video_info());
         } else {
-            cache_misses.push(path.clone());
+            cache_misses.push((path.clone(), fingerprint));
         }
     }
 
@@ -97,44 +138,57 @@ fn collect_metadata_for_groups_with_cache(
     }
 
     if !cache_misses.is_empty() {
-        let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        let probed = runtime.block_on(collect_metadata_async(cache_misses));
+        let probed = collect_metadata_parallel(cache_misses);
 
         if let Some(mut cache) = scan_cache {
-            let entries: Vec<(&Path, &VideoInfo)> = probed.iter().map(|(path, info)| (path.as_path(), info)).collect();
-            if let Err(error) = cache.batch_upsert(&entries) {
+            let entries: Vec<(&Path, &VideoInfo, FileFingerprint)> = probed
+                .iter()
+                .filter_map(|(path, info, fingerprint)| fingerprint.map(|fp| (path.as_path(), info, fp)))
+                .collect();
+            if let Err(error) = cache.batch_upsert_with_fingerprints(&entries) {
                 print_yellow!("Failed to write scan cache: {error}");
             }
         }
 
-        metadata.extend(probed);
+        for (path, info, _) in probed {
+            metadata.insert(path, info);
+        }
     }
 
     metadata
 }
 
 /// Find groups of files with identical BLAKE3 hashes when hash comparison is enabled.
-pub fn find_hash_matches(files: &[DupeFileInfo], hash_compare: bool, verbose: bool) -> Vec<Vec<usize>> {
+pub fn find_hash_matches(
+    files: &[DupeFileInfo],
+    hash_compare: bool,
+    use_cache: bool,
+    verbose: bool,
+) -> Vec<Vec<usize>> {
     if !hash_compare {
         return Vec::new();
     }
 
-    let mut hash_cache = match ScanCache::open() {
-        Ok(cache) => Some(cache),
-        Err(error) => {
-            print_yellow!("Could not open hash cache: {error}");
-            None
+    let mut hash_cache = if use_cache {
+        match ScanCache::open() {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                print_yellow!("Could not open hash cache: {error}");
+                None
+            }
         }
+    } else {
+        None
     };
 
     find_hash_matches_with_cache(files, verbose, hash_cache.as_mut())
 }
 
-/// Find hash matches while using the supplied cache when available.
+/// Find hash matches while incrementally checkpointing computed hashes to `hash_cache`.
 fn find_hash_matches_with_cache(
     files: &[DupeFileInfo],
     verbose: bool,
-    hash_cache: Option<&mut ScanCache>,
+    mut hash_cache: Option<&mut ScanCache>,
 ) -> Vec<Vec<usize>> {
     let collection = collect_hash_candidates(files);
     for (path, error) in collection.errors {
@@ -198,31 +252,52 @@ fn find_hash_matches_with_cache(
         progress_bar
     };
 
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    #[cfg(not(test))]
+    {
+        let handler_flag = Arc::clone(&abort_flag);
+        let _ = ctrlc::set_handler(move || {
+            handler_flag.store(true, Ordering::SeqCst);
+        });
+    }
+
     let total_hash_files = cache_misses.len();
-    let calculated_results: Vec<anyhow::Result<CalculatedFileHash>> = cache_misses
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| {
-            progress_bar.set_message(format!(
-                "[{}/{}] {}",
-                index + 1,
-                total_hash_files,
-                candidate.path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-            calculate_file_hash_with_progress(candidate, |bytes_read| progress_bar.inc(bytes_read))
-        })
-        .collect();
-    progress_bar.finish_and_clear();
-    let mut calculated_hashes = Vec::new();
-    for result in calculated_results {
-        match result {
-            Ok(calculated) => calculated_hashes.push(calculated),
+    let mut pending_checkpoint: Vec<CalculatedFileHash> = Vec::with_capacity(HASH_CHECKPOINT_INTERVAL);
+    for (index, candidate) in cache_misses.iter().enumerate() {
+        if abort_flag.load(Ordering::SeqCst) {
+            print_yellow!("Interrupted while hashing; flushing computed hashes to cache...");
+            break;
+        }
+        progress_bar.set_message(format!(
+            "[{}/{}] {}",
+            index + 1,
+            total_hash_files,
+            candidate.path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        match calculate_file_hash_with_progress(candidate, |bytes_read| progress_bar.inc(bytes_read)) {
+            Ok(calculated) => {
+                hash_values.push(calculated.indexed_hash());
+                pending_checkpoint.push(calculated);
+                if pending_checkpoint.len() >= HASH_CHECKPOINT_INTERVAL {
+                    flush_hash_checkpoint(hash_cache.as_deref_mut(), &mut pending_checkpoint);
+                }
+            }
             Err(error) => print_yellow!("Could not hash file: {error:#}"),
         }
     }
+    progress_bar.finish_and_clear();
+    flush_hash_checkpoint(hash_cache, &mut pending_checkpoint);
 
+    group_hash_matches(&hash_values)
+}
+
+/// Flush accumulated calculated hashes into the shared `ScanCache` and clear the buffer.
+fn flush_hash_checkpoint(hash_cache: Option<&mut ScanCache>, buffer: &mut Vec<CalculatedFileHash>) {
+    if buffer.is_empty() {
+        return;
+    }
     if let Some(cache) = hash_cache {
-        let cache_values: Vec<CachedFileHash> = calculated_hashes
+        let cache_values: Vec<CachedFileHash> = buffer
             .iter()
             .map(|calculated| CachedFileHash {
                 size_bytes: calculated.fingerprint.size_bytes,
@@ -230,7 +305,7 @@ fn find_hash_matches_with_cache(
                 blake3_hash: calculated.hash.to_string(),
             })
             .collect();
-        let entries: Vec<(&Path, &CachedFileHash)> = calculated_hashes
+        let entries: Vec<(&Path, &CachedFileHash)> = buffer
             .iter()
             .zip(&cache_values)
             .map(|(calculated, cached)| (calculated.path.as_path(), cached))
@@ -239,18 +314,13 @@ fn find_hash_matches_with_cache(
             print_yellow!("Failed to write hash cache: {error}");
         }
     }
-
-    hash_values.extend(calculated_hashes.iter().map(CalculatedFileHash::indexed_hash));
-    group_hash_matches(&hash_values)
+    buffer.clear();
 }
 
-/// Collect video metadata concurrently using async tasks limited by a semaphore.
-///
-/// Each ffprobe call runs in a blocking task with concurrency controlled by a semaphore sized for input
-/// and output work.
-async fn collect_metadata_async(files: Vec<PathBuf>) -> HashMap<PathBuf, VideoInfo> {
-    let semaphore = create_semaphore_for_io_bound();
-
+/// Collect video metadata in parallel using Rayon.
+fn collect_metadata_parallel(
+    files: Vec<(PathBuf, Option<FileFingerprint>)>,
+) -> Vec<(PathBuf, VideoInfo, Option<FileFingerprint>)> {
     #[cfg(not(test))]
     let progress_bar = {
         let progress_bar = ProgressBar::new(files.len() as u64);
@@ -260,46 +330,28 @@ async fn collect_metadata_async(files: Vec<PathBuf>) -> HashMap<PathBuf, VideoIn
                 .expect("Failed to set progress bar template")
                 .progress_chars(PROGRESS_BAR_CHARS),
         );
-        Arc::new(progress_bar)
+        progress_bar
     };
     #[cfg(test)]
-    let progress_bar = Arc::new(ProgressBar::hidden());
+    let progress_bar = ProgressBar::hidden();
 
-    let tasks: Vec<_> = files
-        .into_iter()
-        .map(|path| {
-            let semaphore = Arc::clone(&semaphore);
-            let progress = Arc::clone(&progress_bar);
-            tokio::spawn(async move {
-                let permit = semaphore.acquire().await.expect("Failed to acquire semaphore");
-                let result = tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || VideoInfo::from_path(&path)
-                })
-                .await
-                .expect("spawn_blocking task failed");
-                drop(permit);
-                progress.inc(1);
-                (path, result)
-            })
-        })
-        .collect();
-
-    let metadata = futures::future::join_all(tasks)
-        .await
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .filter_map(|(path, result)| match result {
-            Ok(info) => Some((path, info)),
-            Err(error) => {
-                eprintln!("Error: {error}");
-                None
+    let results: Vec<(PathBuf, VideoInfo, Option<FileFingerprint>)> = files
+        .into_par_iter()
+        .filter_map(|(path, fingerprint)| {
+            let result = VideoInfo::from_path(&path);
+            progress_bar.inc(1);
+            match result {
+                Ok(info) => Some((path, info, fingerprint)),
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    None
+                }
             }
         })
         .collect();
 
     progress_bar.finish_and_clear();
-    metadata
+    results
 }
 
 #[cfg(test)]
@@ -487,7 +539,7 @@ mod test_hash_matches {
     fn disabled_hash_comparison_finds_nothing() {
         let files = vec![DupeFileInfo::new(PathBuf::from("missing.mp4"), "mp4".to_string())];
 
-        assert_eq!(find_hash_matches(&files, false, true), [] as [Vec<usize>; 0]);
+        assert_eq!(find_hash_matches(&files, false, false, true), [] as [Vec<usize>; 0]);
     }
 
     #[test]
@@ -538,7 +590,7 @@ mod test_collect_metadata {
 
     #[test]
     fn no_groups_collect_nothing() {
-        assert!(collect_metadata_for_groups(&[]).is_empty());
+        assert!(collect_metadata_for_groups(&[], false).is_empty());
         assert!(collect_metadata_for_groups_with_cache(&[], None).is_empty());
     }
 

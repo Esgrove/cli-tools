@@ -9,7 +9,8 @@ mod types;
 
 pub use cli_tools_common::{MatchRange, RE_RESOLUTION};
 pub use matcher::{
-    DuplicateMatchOptions, filter_ignored_groups, find_duplicates, group_matches_ignore, merge_indices_into_groups,
+    DuplicateMatchOptions, filter_ignored_groups, find_duplicates, find_hash_only_duplicates, group_matches_ignore,
+    merge_indices_into_groups,
 };
 pub use normalization::{CODEC_PATTERNS, normalize_stem, strip_ignored_prefixes};
 pub use types::{DupeFileInfo, DuplicateGroup, FILE_EXTENSIONS};
