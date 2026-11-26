@@ -267,13 +267,26 @@ pub fn visa_parse(config: &Config) -> Result<()> {
     print_statistics(&items, &totals, num_files, config.verbose, config.number);
 
     if !config.print {
-        write_to_csv(&items, &config.output_path)?;
+        let (csv_path, workbook_path) = report_paths(&config.output_path);
+        write_to_csv(&items, &csv_path)?;
         if !items.is_empty() {
-            write_to_excel(&items, &totals, &config.filter_prefixes, &config.output_path)?;
+            write_to_excel(&items, &totals, &config.filter_prefixes, &workbook_path)?;
         }
     }
 
     Ok(())
+}
+
+/// Resolve both report destinations from a directory or a requested report filename.
+fn report_paths(output: &Path) -> (PathBuf, PathBuf) {
+    let extension = output.extension().unwrap_or_default();
+    if extension.eq_ignore_ascii_case("csv") {
+        (output.to_path_buf(), output.with_extension("xlsx"))
+    } else if extension.eq_ignore_ascii_case("xlsx") {
+        (output.with_extension("csv"), output.to_path_buf())
+    } else {
+        (output.join("VISA.csv"), output.join("VISA.xlsx"))
+    }
 }
 
 /// Check whether `path` has an `.xml` extension, ignoring ASCII case.
@@ -529,16 +542,7 @@ fn escape_csv_field(field: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Save parsed data to a CSV file atomically.
-fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
-    let output_file = if output_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
-    {
-        output_path.to_path_buf()
-    } else {
-        output_path.join("VISA.csv")
-    };
+fn write_to_csv(items: &[VisaItem], output_file: &Path) -> Result<()> {
     println!(
         "{}",
         format!("Writing data to CSV:   {}", output_file.display()).green()
@@ -549,7 +553,7 @@ fn write_to_csv(items: &[VisaItem], output_path: &Path) -> Result<()> {
         let name = escape_csv_field(&item.name);
         writeln!(content, "{},{:.2},{name}", item.finnish_date(), item.sum)?;
     }
-    cli_tools_common::write_atomically(&output_file, content)
+    cli_tools_common::write_atomically(output_file, content)
         .with_context(|| format!("Failed to write CSV file: {}", output_file.display()))?;
     Ok(())
 }
@@ -559,17 +563,8 @@ fn write_to_excel(
     items: &[VisaItem],
     totals: &[(String, f64)],
     filter_prefixes: &[String],
-    output_path: &Path,
+    output_file: &Path,
 ) -> Result<()> {
-    let output_file = if output_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("xlsx"))
-    {
-        output_path.with_extension("xlsx")
-    } else {
-        output_path.join("VISA.xlsx")
-    };
     println!(
         "{}",
         format!("Writing data to Excel: {}", output_file.display()).green()
@@ -605,12 +600,12 @@ fn write_to_excel(
     }
     totals_sheet.autofit();
 
-    let temporary = cli_tools_common::unique_sibling_path(&output_file, "xlsx-tmp");
+    let temporary = cli_tools_common::unique_sibling_path(output_file, "xlsx-tmp");
     if let Err(error) = workbook.save(&temporary) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error.into());
     }
-    if let Err(error) = std::fs::rename(&temporary, &output_file) {
+    if let Err(error) = std::fs::rename(&temporary, output_file) {
         let _ = std::fs::remove_file(&temporary);
         return Err(error).with_context(|| format!("Failed to move workbook into place: {}", output_file.display()));
     }
@@ -2004,7 +1999,7 @@ mod test_write_to_csv {
     fn writes_a_header_and_one_row_per_item() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
 
-        write_to_csv(&items(), directory.path()).expect("the csv should be written");
+        write_to_csv(&items(), &directory.path().join("VISA.csv")).expect("the csv should be written");
 
         let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
         assert_eq!(
@@ -2030,7 +2025,7 @@ mod test_write_to_csv {
         let output = directory.path().join("VISA.csv");
         std::fs::write(&output, "stale content that must not survive\n").expect("file should be written");
 
-        write_to_csv(&items(), directory.path()).expect("the csv should be written");
+        write_to_csv(&items(), &directory.path().join("VISA.csv")).expect("the csv should be written");
 
         let content = std::fs::read_to_string(&output).expect("the csv should exist");
         assert!(!content.contains("stale"));
@@ -2041,7 +2036,7 @@ mod test_write_to_csv {
     fn no_items_writes_only_the_header() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
 
-        write_to_csv(&[], directory.path()).expect("the csv should be written");
+        write_to_csv(&[], &directory.path().join("VISA.csv")).expect("the csv should be written");
 
         let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("the csv should exist");
         assert_eq!(content, "Date,Sum,Name\n");
@@ -2055,7 +2050,7 @@ mod test_write_to_csv {
             name: "CAFE, \"HELSINKI\"".to_string(),
             sum: 12.5,
         };
-        write_to_csv(&[item], directory.path()).expect("csv should be written");
+        write_to_csv(&[item], &directory.path().join("VISA.csv")).expect("csv should be written");
         let content = std::fs::read_to_string(directory.path().join("VISA.csv")).expect("read csv");
         assert_eq!(content, "Date,Sum,Name\n2024.02.05,12.50,\"CAFE, \"\"HELSINKI\"\"\"\n");
     }
@@ -2085,7 +2080,8 @@ mod test_write_to_excel {
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let totals = calculate_totals_for_each_name(&items());
 
-        write_to_excel(&items(), &totals, &[], directory.path()).expect("the workbook should be written");
+        write_to_excel(&items(), &totals, &[], &directory.path().join("VISA.xlsx"))
+            .expect("the workbook should be written");
 
         let output = directory.path().join("VISA.xlsx");
         let size = std::fs::metadata(&output).expect("the workbook should exist").len();
@@ -2108,7 +2104,8 @@ mod test_write_to_excel {
     fn no_items_is_an_error_because_the_sheet_needs_a_first_date() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
 
-        let error = write_to_excel(&[], &[], &[], directory.path()).expect_err("an empty workbook should fail");
+        let error = write_to_excel(&[], &[], &[], &directory.path().join("VISA.xlsx"))
+            .expect_err("an empty workbook should fail");
 
         assert!(error.to_string().contains("without items"));
     }
@@ -2118,7 +2115,8 @@ mod test_write_to_excel {
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let totals = calculate_totals_for_each_name(&items());
 
-        write_to_excel(&items(), &totals, &[], directory.path()).expect("workbook should be written");
+        write_to_excel(&items(), &totals, &[], &directory.path().join("VISA.xlsx"))
+            .expect("workbook should be written");
         let output = directory.path().join("VISA.xlsx");
 
         if !cli_tools_common::command_exists("unzip") {
