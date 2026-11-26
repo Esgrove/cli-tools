@@ -20,7 +20,7 @@ use std::time::Instant;
 use anyhow::Result;
 use cli_tools_common::TargetReservations;
 
-use crate::classification::database_output_conflict;
+use crate::classification::database_output_conflict_with_mode;
 use crate::database::{Database, PendingAction};
 use crate::ffmpeg::probe_video_info;
 use crate::helpers::disk_space_shortage;
@@ -143,7 +143,10 @@ impl<'a> VideoConvert<'a> {
             self.observer.database_cleaned(missing_count, changed_count);
         }
 
-        let pending_files = database.get_pending_files(&self.options.pending_file_filter())?;
+        // Defer count truncation until after action skips and output-conflict checks so skipped rows do not starve --count.
+        let mut filter = self.options.pending_file_filter();
+        filter.limit = None;
+        let pending_files = database.get_pending_files(&filter)?;
         if pending_files.is_empty() {
             return Ok(None);
         }
@@ -154,7 +157,10 @@ impl<'a> VideoConvert<'a> {
             .filter(|file| file.full_path.exists())
             .map(|file| VideoFile::new_with_metadata(&file.full_path))
             .collect();
-        let mut subtitle_matches = if self.options.movie_mode {
+        let has_subtitle_mux = pending_files
+            .iter()
+            .any(|file| file.action == PendingAction::SubtitleMux);
+        let mut subtitle_matches = if self.options.movie_mode || has_subtitle_mux {
             let subtitle_files = Self::gather_subtitle_files_for_video_files(&video_files);
             self.match_subtitle_files(&video_files, subtitle_files)
         } else {
@@ -165,6 +171,7 @@ impl<'a> VideoConvert<'a> {
         let mut reservations = TargetReservations::new();
 
         for pending_file in pending_files.into_iter().filter(|file| file.full_path.exists()) {
+            let is_subtitle_mux = pending_file.action == PendingAction::SubtitleMux;
             let video_file = VideoFile::new_with_metadata(&pending_file.full_path);
             let subtitles = subtitle_matches.remove(&video_file.path).unwrap_or_default();
             let info = if pending_file.bit_depth >= 8 {
@@ -172,10 +179,16 @@ impl<'a> VideoConvert<'a> {
             } else {
                 probe_video_info(&pending_file.full_path).unwrap_or_else(|_| pending_file.to_video_info())
             };
-            let processable = ProcessableFile::for_mode(video_file, info, subtitles, self.options.movie_mode);
+            let processable =
+                ProcessableFile::for_mode(video_file, info, subtitles, self.options.movie_mode || is_subtitle_mux);
             // The output may have appeared since the scan, so the scan time checks are repeated here.
             // A blocked row is dropped from the database and a new scan classifies the file again.
-            if let Some(reason) = database_output_conflict(&processable, self.options.overwrite, &mut reservations) {
+            if let Some(reason) = database_output_conflict_with_mode(
+                &processable,
+                self.options.overwrite,
+                is_subtitle_mux,
+                &mut reservations,
+            ) {
                 self.observer.pending_file_blocked(&processable.file.path, &reason);
                 if !self.options.dry_run
                     && let Err(error) = database.remove_pending_file(&pending_file.full_path)
@@ -544,5 +557,125 @@ mod test_process_files_with_db_cleanup {
             2,
             "dry-run must not remove pending rows from the database"
         );
+    }
+
+    #[test]
+    fn from_db_respects_min_resolution_include_exclude_and_skip_before_count() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut database = Database::open_in_memory().expect("open db");
+
+        let remux_path = directory.path().join("01_remux.mkv");
+        let small_path = directory.path().join("02_small.mkv");
+        let excluded_path = directory.path().join("03_sample_keep.mkv");
+        let target_path = directory.path().join("04_keep_1080p.mkv");
+        for path in [&remux_path, &small_path, &excluded_path, &target_path] {
+            std::fs::write(path, b"video").expect("write");
+        }
+
+        let mut small_info = video_info("h264");
+        small_info.width = 640;
+        small_info.height = 480;
+        let large_info = video_info("h264");
+        let remux_info = video_info("hevc");
+
+        database
+            .upsert_pending_file(&remux_path, "mkv", &remux_info, PendingAction::Remux)
+            .expect("insert remux");
+        database
+            .upsert_pending_file(&small_path, "mkv", &small_info, PendingAction::Convert)
+            .expect("insert small");
+        database
+            .upsert_pending_file(&excluded_path, "mkv", &large_info, PendingAction::Convert)
+            .expect("insert excluded");
+        database
+            .upsert_pending_file(&target_path, "mkv", &large_info, PendingAction::Convert)
+            .expect("insert target");
+
+        let options = ConvertOptions {
+            dry_run: true,
+            skip_remux: true,
+            min_resolution: Some(1080),
+            include: vec!["keep".to_string()],
+            exclude: vec!["sample".to_string()],
+            count: Some(1),
+            sort: crate::options::SortOrder::Name,
+            ..ConvertOptions::default()
+        };
+        let summary = converter(options)
+            .run_from_database(&mut database, &AtomicBool::new(false))
+            .expect("run from db")
+            .expect("summary");
+
+        assert_eq!(summary.stats.files_remuxed, 0);
+        assert_eq!(
+            summary.stats.files_converted, 1,
+            "count=1 with skip_remux, min_resolution, include, and exclude should still convert 04_keep_1080p.mkv"
+        );
+    }
+
+    #[test]
+    fn from_db_allows_in_place_subtitle_mux_rows() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let movie_path = directory.path().join("Movie.x265.mkv");
+        let srt_path = directory.path().join("Movie.x265.srt");
+        std::fs::write(&srt_path, "1\n00:00:00,000 --> 00:00:00,500\nHello\n").expect("write srt");
+
+        if cli_tools_common::command_exists("ffmpeg") {
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=64x64:d=1",
+                    "-c:v",
+                    "libx265",
+                    "-tag:v",
+                    "hvc1",
+                    "-y",
+                ])
+                .arg(&movie_path)
+                .status()
+                .expect("generate mkv");
+            assert!(status.success(), "ffmpeg should generate tiny sample mkv");
+        } else {
+            std::fs::write(&movie_path, b"video").expect("write dummy");
+        }
+
+        let processable_in_place = ProcessableFile::for_mode(
+            VideoFile::new_with_metadata(&movie_path),
+            video_info("hevc"),
+            vec![crate::types::SubtitleFile::new(&srt_path, None)],
+            true,
+        );
+        let mut reservations = TargetReservations::new();
+        assert!(
+            database_output_conflict_with_mode(&processable_in_place, false, true, &mut reservations).is_none(),
+            "in-place SubtitleMux must not be flagged as an output conflict"
+        );
+
+        if cli_tools_common::command_exists("ffmpeg") {
+            let mut database = Database::open_in_memory().expect("open db");
+            database
+                .upsert_pending_file(&movie_path, "mkv", &video_info("hevc"), PendingAction::SubtitleMux)
+                .expect("insert subtitle mux");
+
+            let options = ConvertOptions {
+                dry_run: true,
+                movie_mode: true,
+                ..ConvertOptions::default()
+            };
+            let summary = converter(options)
+                .run_from_database(&mut database, &AtomicBool::new(false))
+                .expect("run from db")
+                .expect("summary");
+
+            assert_eq!(
+                summary.stats.files_subtitle_muxed, 1,
+                "in-place SubtitleMux row must proceed in run_from_database"
+            );
+        }
     }
 }

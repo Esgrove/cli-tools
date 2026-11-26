@@ -116,6 +116,12 @@ pub struct PendingFileFilter {
     pub min_duration: Option<f64>,
     /// Maximum duration in seconds.
     pub max_duration: Option<f64>,
+    /// Minimum width and height in pixels (conversions only).
+    pub min_resolution: Option<u32>,
+    /// Include files whose stem contains at least one of these patterns.
+    pub include: Vec<String>,
+    /// Exclude files whose stem contains any of these patterns.
+    pub exclude: Vec<String>,
     /// Limit number of results.
     pub limit: Option<usize>,
     /// Sort order for results.
@@ -510,13 +516,27 @@ impl Database {
             ));
         }
 
+        if let Some(min_resolution) = filter.min_resolution {
+            params_vec.push(Box::new(i64::from(min_resolution)));
+            let param_index = params_vec.len();
+            conditions.push(format!(
+                "(action != '{}' OR (width >= ?{param_index} AND height >= ?{param_index}))",
+                PendingAction::Convert.as_str(),
+            ));
+        }
+
         let where_clause = if conditions.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", conditions.join(" AND "))
         };
 
-        let limit_clause = filter.limit.map_or_default(|limit| format!("LIMIT {limit}"));
+        let has_name_filters = !filter.include.is_empty() || !filter.exclude.is_empty();
+        let limit_clause = if has_name_filters {
+            String::new()
+        } else {
+            filter.limit.map_or_default(|limit| format!("LIMIT {limit}"))
+        };
 
         let order_clause = filter.sort.map_or_else(
             || "ORDER BY action, size_bytes DESC".to_string(),
@@ -539,9 +559,21 @@ impl Database {
 
         let rows = statement.query_map(params_refs.as_slice(), row_to_pending_file)?;
 
-        let files = rows
+        let mut files = rows
             .collect::<Result<Vec<_>, _>>()
             .context("Failed to query pending files")?;
+
+        if has_name_filters {
+            files.retain(|file| {
+                let stem = cli_tools_common::path_to_file_stem_string(&file.full_path);
+                let excluded = filter.exclude.iter().any(|pattern| stem.contains(pattern));
+                let included = filter.include.is_empty() || filter.include.iter().any(|pattern| stem.contains(pattern));
+                !excluded && included
+            });
+            if let Some(limit) = filter.limit {
+                files.truncate(limit);
+            }
+        }
 
         Ok(files)
     }

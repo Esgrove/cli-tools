@@ -286,13 +286,27 @@ pub fn database_output_conflict(
     overwrite: bool,
     reservations: &mut TargetReservations,
 ) -> Option<SkipReason> {
+    database_output_conflict_with_mode(processable, overwrite, false, reservations)
+}
+
+/// Check whether a pending database file can safely write its output, optionally allowing in-place replacement.
+///
+/// Movie-mode subtitle muxing writes through a temporary file before replacing the input in place,
+/// so `allow_in_place` permits `output_path` resolving to the input file.
+pub(crate) fn database_output_conflict_with_mode(
+    processable: &ProcessableFile,
+    overwrite: bool,
+    allow_in_place: bool,
+    reservations: &mut TargetReservations,
+) -> Option<SkipReason> {
     let output_path = &processable.output_path;
-    if cli_tools_common::paths_refer_to_same_file(output_path, &processable.file.path) {
+    let same_file = cli_tools_common::paths_refer_to_same_file(output_path, &processable.file.path);
+    if same_file && !allow_in_place {
         return Some(SkipReason::AnalysisFailed {
             error: "Output path resolves to the input file, refusing in-place conversion/remux".to_string(),
         });
     }
-    if !overwrite && output_path.exists() {
+    if !same_file && !overwrite && output_path.exists() {
         return Some(SkipReason::OutputExists {
             path: output_path.clone(),
             source_duration: processable.info.duration,

@@ -128,6 +128,9 @@ impl ConvertOptions {
             max_bitrate: self.max_bitrate,
             min_duration: self.min_duration,
             max_duration: self.max_duration,
+            min_resolution: self.min_resolution,
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
             limit: self.count,
             sort: Some(self.sort),
         }
