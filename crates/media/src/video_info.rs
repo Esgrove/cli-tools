@@ -51,6 +51,7 @@ impl VideoInfo {
     pub fn from_path(path: &Path) -> anyhow::Result<Self> {
         let size_bytes = std::fs::metadata(path).map(|m| m.len()).ok();
 
+        let input_path = ffmpeg_input_path(path);
         let output = Command::new("ffprobe")
             .args([
                 "-v",
@@ -61,8 +62,9 @@ impl VideoInfo {
                 "stream=codec_name,bit_rate,width,height:stream_tags=BPS,BPS-eng,rotate:stream_side_data=rotation:format=bit_rate,duration",
                 "-of",
                 "default=nokey=0:noprint_wrappers=1",
+                "-i",
             ])
-            .arg(path)
+            .arg(&input_path)
             .output()
             .context("Failed to execute ffprobe")?;
         if !output.status.success() {
@@ -92,7 +94,7 @@ impl VideoInfo {
             if let Some((key, value)) = line.split_once('=') {
                 match key {
                     "codec_name" => codec = Some(value.to_lowercase()),
-                    "bit_rate" | "BPS" | "BPS-eng" => {
+                    "bit_rate" | "BPS" | "BPS-eng" | "TAG:BPS" | "TAG:BPS-eng" => {
                         if bitrate_kbps.is_none()
                             && let Ok(bps) = value.parse::<u64>()
                             && bps > 0
@@ -101,7 +103,10 @@ impl VideoInfo {
                         }
                     }
                     "duration" => {
-                        if let Ok(seconds) = value.parse::<f64>() {
+                        if let Ok(seconds) = value.parse::<f64>()
+                            && seconds.is_finite()
+                            && seconds >= 0.0
+                        {
                             duration = Some(seconds);
                         }
                     }
@@ -379,13 +384,26 @@ impl Default for VideoStats {
     }
 }
 
-/// Compute the median of a slice of `f64` values.
+/// Normalize a local file path for passing to `ffmpeg` or `ffprobe` as an input argument.
+///
+/// Relative paths starting with `-` or containing `:` can be misread by ffmpeg as options or URL protocols.
+/// Prepending `.` forces local filesystem interpretation while leaving absolute paths unchanged.
+#[must_use]
+pub fn ffmpeg_input_path(path: &Path) -> std::path::PathBuf {
+    if path.is_relative() && !path.starts_with(".") {
+        Path::new(".").join(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Compute the median of a slice of `f64` values, ignoring non-finite entries.
 fn compute_median_f64(values: &[f64]) -> f64 {
-    if values.is_empty() {
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|value| value.is_finite()).collect();
+    if sorted.is_empty() {
         return 0.0;
     }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
     let length = sorted.len();
     let middle = length / 2;
     let Some(&upper) = sorted.get(middle) else {
@@ -731,6 +749,126 @@ mod test_parse_ffprobe_output {
         let output = "codec_name=hevc\nwidth=1920\nheight=1080\nBPS-eng=4000000\n";
         let info = VideoInfo::parse_ffprobe_output(output);
         assert_eq!(info.bitrate_kbps, Some(4000));
+    }
+
+    #[test]
+    fn parses_bitrate_from_tag_prefixed_bps_keys() {
+        let bps = VideoInfo::parse_ffprobe_output("codec_name=hevc\nbit_rate=N/A\nTAG:BPS=8000000\nbit_rate=9500000\n");
+        assert_eq!(bps.bitrate_kbps, Some(8000));
+
+        let bps_eng =
+            VideoInfo::parse_ffprobe_output("codec_name=hevc\nbit_rate=N/A\nTAG:BPS-eng=4000000\nbit_rate=9500000\n");
+        assert_eq!(bps_eng.bitrate_kbps, Some(4000));
+    }
+
+    #[test]
+    fn ignores_non_finite_and_negative_durations_and_median_handles_nan() {
+        assert!(VideoInfo::parse_ffprobe_output("duration=NaN\n").duration.is_none());
+        assert!(VideoInfo::parse_ffprobe_output("duration=inf\n").duration.is_none());
+        assert!(VideoInfo::parse_ffprobe_output("duration=-5.0\n").duration.is_none());
+
+        let values = [
+            1.0,
+            f64::NAN,
+            3.0,
+            2.0,
+            f64::NAN,
+            4.0,
+            5.0,
+            6.0,
+            7.0,
+            8.0,
+            9.0,
+            10.0,
+            11.0,
+            12.0,
+            13.0,
+            14.0,
+            15.0,
+            16.0,
+            17.0,
+            18.0,
+            19.0,
+            20.0,
+        ];
+        let median = compute_median_f64(&values);
+        assert!(median.is_finite());
+    }
+
+    #[test]
+    fn probes_real_mkv_with_tag_bps_and_dash_or_colon_filenames() {
+        if !cli_tools_common::command_exists("ffmpeg") || !cli_tools_common::command_exists("ffprobe") {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mkv = dir.path().join("sample.mkv");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=1",
+                "-c:v",
+                "libx264",
+                "-metadata:s:v:0",
+                "BPS=8000000",
+                "-y",
+            ])
+            .arg(&mkv)
+            .status()
+            .expect("run ffmpeg");
+        assert!(status.success(), "ffmpeg should generate tiny sample mkv");
+
+        let info = VideoInfo::from_path(&mkv).expect("ffprobe should succeed");
+        assert_eq!(info.bitrate_kbps, Some(8000));
+
+        // Verify relative paths starting with '-' or containing ':' resolve cleanly via ffmpeg_input_path.
+        let dash_file = dir.path().join("-dash.mkv");
+        std::fs::copy(&mkv, &dash_file).expect("copy dash file");
+        let dash_output = Command::new("ffprobe")
+            .current_dir(dir.path())
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,bit_rate:stream_tags=BPS,BPS-eng:format=bit_rate",
+                "-of",
+                "default=nokey=0:noprint_wrappers=1",
+                "-i",
+            ])
+            .arg(ffmpeg_input_path(Path::new("-dash.mkv")))
+            .output()
+            .expect("probe dash file");
+        assert!(dash_output.status.success(), "ffprobe should accept ./-dash.mkv");
+        let dash_info = VideoInfo::parse_ffprobe_output(&String::from_utf8_lossy(&dash_output.stdout));
+        assert_eq!(dash_info.bitrate_kbps, Some(8000));
+
+        if std::fs::copy(&mkv, dir.path().join("foo:bar.mkv")).is_ok() {
+            let colon_output = Command::new("ffprobe")
+                .current_dir(dir.path())
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=codec_name,bit_rate:stream_tags=BPS,BPS-eng:format=bit_rate",
+                    "-of",
+                    "default=nokey=0:noprint_wrappers=1",
+                    "-i",
+                ])
+                .arg(ffmpeg_input_path(Path::new("foo:bar.mkv")))
+                .output()
+                .expect("probe colon file");
+            assert!(colon_output.status.success(), "ffprobe should accept ./foo:bar.mkv");
+            let colon_info = VideoInfo::parse_ffprobe_output(&String::from_utf8_lossy(&colon_output.stdout));
+            assert_eq!(colon_info.bitrate_kbps, Some(8000));
+        }
     }
 
     #[test]
