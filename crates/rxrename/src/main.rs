@@ -13,8 +13,8 @@ use clap_complete::Shell;
 use walkdir::WalkDir;
 
 use cli_tools_common::{
-    count_label, os_str_to_string, print_error, print_magenta_bold, print_yellow, resolve_input_path,
-    should_skip_entry, trash_or_delete,
+    TargetReservations, count_label, os_str_to_string, print_error, print_magenta_bold, print_yellow,
+    resolve_input_path, should_skip_entry, trash_or_delete,
 };
 
 /// Action to take when a conflicting unsuffixed file already exists.
@@ -133,9 +133,10 @@ fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSumm
     let width = total.to_string().len();
 
     let mut summary = RenameSummary::default();
+    let mut reservations = TargetReservations::new();
 
     for (i, file) in files.iter().enumerate() {
-        match process_file(root, file, i + 1, total, width, dryrun, action) {
+        match process_file_with_reservations(root, file, i + 1, total, width, dryrun, action, &mut reservations) {
             Ok(Outcome::RenamedAndRemoved) => {
                 summary.renamed += 1;
                 summary.removed += 1;
@@ -162,6 +163,19 @@ fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSumm
     summary
 }
 
+/// Check whether a raw file stem ends with the literal `_1` suffix without stripping invalid UTF-8 bytes.
+fn stem_ends_with_rx_suffix(stem: &std::ffi::OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        stem.as_bytes().ends_with(b"_1")
+    }
+    #[cfg(not(unix))]
+    {
+        stem.to_string_lossy().ends_with("_1")
+    }
+}
+
 /// Find all files under `root` whose stem ends with `_1`, sorted by path.
 fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(root)
@@ -169,20 +183,15 @@ fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
         .filter_entry(|e| !should_skip_entry(e))
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
-                .file_stem()
-                .is_some_and(|stem| os_str_to_string(stem).ends_with("_1"))
-        })
+        .filter(|e| e.path().file_stem().is_some_and(stem_ends_with_rx_suffix))
         .map(walkdir::DirEntry::into_path)
         .collect();
     files.sort();
     files
 }
 
-/// Process a single file ending in `_1`.
-///
-/// If a matching unsuffixed file already exists, trash it first, then rename.
+/// Process a single file ending in `_1` in isolation.
+#[cfg(test)]
 fn process_file(
     root: &Path,
     file_with_suffix: &Path,
@@ -192,11 +201,42 @@ fn process_file(
     dryrun: bool,
     action: ConflictAction,
 ) -> Result<Outcome> {
-    // Parts of the name that are not valid UTF-8 are removed, so the new name is a clean string.
-    let stem = file_with_suffix
+    let mut reservations = TargetReservations::new();
+    process_file_with_reservations(
+        root,
+        file_with_suffix,
+        index,
+        total,
+        width,
+        dryrun,
+        action,
+        &mut reservations,
+    )
+}
+
+/// Process a single file ending in `_1`, tracking batch reservations so earlier renamed targets are never overwritten.
+///
+/// If a matching unsuffixed file already exists, delete or trash it first, then rename.
+#[allow(clippy::too_many_arguments)]
+fn process_file_with_reservations(
+    root: &Path,
+    file_with_suffix: &Path,
+    index: usize,
+    total: usize,
+    width: usize,
+    dryrun: bool,
+    action: ConflictAction,
+    reservations: &mut TargetReservations,
+) -> Result<Outcome> {
+    let raw_stem = file_with_suffix
         .file_stem()
-        .map(os_str_to_string)
         .ok_or_else(|| anyhow::anyhow!("Missing file name: {}", file_with_suffix.display()))?;
+    if !stem_ends_with_rx_suffix(raw_stem) {
+        anyhow::bail!("Filename does not end with '_1': {}", file_with_suffix.display());
+    }
+
+    // Parts of the name that are not valid UTF-8 are removed, so the new name is a clean string.
+    let stem = os_str_to_string(raw_stem);
 
     // Build the unsuffixed name: strip trailing "_1" and re-add the extension
     let new_stem = stem
@@ -207,16 +247,23 @@ fn process_file(
     if new_stem.is_empty() {
         return Ok(Outcome::Skipped);
     }
-    let original_name = match file_with_suffix.extension().map(os_str_to_string) {
-        // Dropping an extension with no valid characters would leave the bare stem,
-        // which could be an unrelated file that the conflict handling then removes.
-        Some(extension) if extension.is_empty() => {
-            anyhow::bail!(
-                "Extension has no valid UTF-8 characters: {}",
-                file_with_suffix.display()
-            );
+    let original_name = match file_with_suffix.extension() {
+        Some(raw_extension) => {
+            if raw_extension.is_empty() {
+                format!("{new_stem}.")
+            } else {
+                let extension = os_str_to_string(raw_extension);
+                // Dropping an extension with no valid characters would leave the bare stem,
+                // which could be an unrelated file that the conflict handling then removes.
+                if extension.is_empty() {
+                    anyhow::bail!(
+                        "Extension has no valid UTF-8 characters: {}",
+                        file_with_suffix.display()
+                    );
+                }
+                format!("{new_stem}.{extension}")
+            }
         }
-        Some(extension) => format!("{new_stem}.{extension}"),
         None => new_stem.to_string(),
     };
     let file_without_suffix = file_with_suffix.with_file_name(&original_name);
@@ -226,11 +273,19 @@ fn process_file(
     print_magenta_bold!("[{index:>width$} / {total}]:");
     println!("{}", relative.display());
 
-    let needs_trash = if file_without_suffix.exists() {
-        if !file_without_suffix.is_file() {
+    if !reservations.reserve(&file_without_suffix) {
+        print_yellow!(
+            "Skipping: {} was already claimed by another rename in this run",
+            file_without_suffix.display()
+        );
+        return Ok(Outcome::Skipped);
+    }
+
+    let needs_trash = if let Ok(metadata) = std::fs::symlink_metadata(&file_without_suffix) {
+        if metadata.is_dir() || file_without_suffix.is_dir() {
             return Ok(Outcome::Skipped);
         }
-        // A sanitized name is not the original spelling, so the existing file may be unrelated,
+        // A sanitized name is not the original spelling, so the existing entry may be unrelated,
         // or another sanitized file renamed earlier in this run, and must not be removed.
         if file_with_suffix.file_name().and_then(std::ffi::OsStr::to_str).is_none() {
             print_yellow!(
@@ -465,6 +520,47 @@ mod test_process_file {
         assert_eq!(std::fs::read(&unrelated)?, b"unrelated");
         assert_eq!(std::fs::read(&suffixed)?, b"new");
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_at_destination_is_counted_as_conflict_in_dryrun() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join("clip_1.txt");
+        let broken = temp_directory.path().join("clip.txt");
+        std::fs::write(&suffixed, b"new")?;
+        std::os::unix::fs::symlink(temp_directory.path().join("missing.txt"), &broken)?;
+
+        let summary = rename_files(temp_directory.path(), true, ConflictAction::Trash);
+        assert_eq!(summary.renamed, 1);
+        assert_eq!(
+            summary.removed, 1,
+            "broken symlink at destination must be reported as a conflict removal"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_trailing_dot_filename_renames_cleanly() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let suffixed = temp_directory.path().join("clip_1.");
+        std::fs::write(&suffixed, b"data")?;
+
+        let summary = rename_files(temp_directory.path(), false, ConflictAction::Delete);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.renamed, 1);
+        assert_eq!(std::fs::read(temp_directory.path().join("clip."))?, b"data");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stem_with_non_utf8_bytes_after_suffix_does_not_match() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        assert!(!stem_ends_with_rx_suffix(OsStr::from_bytes(b"clip_1\xff")));
+        assert!(stem_ends_with_rx_suffix(OsStr::from_bytes(b"clip_1")));
     }
 
     #[test]
