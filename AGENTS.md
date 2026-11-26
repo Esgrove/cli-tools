@@ -11,6 +11,11 @@ Such a crate puts the dependencies only its binary uses behind a default `cli` f
 lists it under `required-features` for the binary and the tests that run it,
 and a library user turns it off with `default-features = false`.
 
+## Planning
+
+When Plan Mode is active or when creating or adjusting an implementation plan,
+read and follow `.agents/skills/plan-workflow/SKILL.md`.
+
 ## Build and Test Commands
 
 After making code changes, always run:
