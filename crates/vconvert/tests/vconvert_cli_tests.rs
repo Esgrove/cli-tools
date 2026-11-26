@@ -219,6 +219,41 @@ fn a_movie_mux_that_omits_a_mapped_sidecar_keeps_the_inputs() {
 }
 
 #[test]
+fn non_movie_conversion_in_mixed_database_queue_keeps_its_sidecars() {
+    let sandbox = Sandbox::new(MOVIE_FFMPEG);
+    sandbox.write_script("ffprobe", MOVIE_FFPROBE);
+    let movie = sandbox.videos().join("Film.mkv");
+    let movie_sidecar = sandbox.videos().join("Film.English.srt");
+    let conversion = sandbox.videos().join("Show.mkv");
+    let english = sandbox.videos().join("Show.English.srt");
+    let finnish = sandbox.videos().join("Show.Finnish.srt");
+    fs::write(&movie, b"hevc original video").unwrap();
+    fs::write(&conversion, b"h264 original video").unwrap();
+    for sidecar in [&movie_sidecar, &english, &finnish] {
+        fs::write(sidecar, b"unembedded subtitle data").unwrap();
+    }
+    let scan = sandbox.run(&["--movie", "--skip-remux", "--skip-convert"]);
+    assert!(scan.status.success());
+
+    let replay = sandbox.run(&["--from-db", "--delete"]);
+    assert!(replay.status.success());
+    assert!(sandbox.videos().join("Show.x265.mp4").exists());
+    assert_eq!(
+        fs::read(english).ok().as_deref(),
+        Some(b"unembedded subtitle data".as_slice())
+    );
+    assert_eq!(
+        fs::read(finnish).ok().as_deref(),
+        Some(b"unembedded subtitle data".as_slice())
+    );
+    assert!(!movie_sidecar.exists());
+    assert_eq!(
+        fs::read_to_string(sandbox.videos().join("Film.x265.mkv")).unwrap(),
+        "hevc\nsubtitle=eng\n"
+    );
+}
+
+#[test]
 fn forced_abort_during_retry_leaves_pending_work_retryable() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;

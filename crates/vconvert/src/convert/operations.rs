@@ -157,6 +157,11 @@ impl VideoConvert<'_> {
                 Err(error) => return failed(format!("Failed to stage conversion output: {error}")),
             }
         };
+        let subtitle_files = if self.options.movie_mode {
+            file.subtitle_files.as_slice()
+        } else {
+            &[]
+        };
         let make_options = |command_output| {
             ConversionOptions::new(
                 input,
@@ -164,7 +169,7 @@ impl VideoConvert<'_> {
                 quality_level,
                 copy_audio,
                 self.options.movie_mode,
-                &file.subtitle_files,
+                subtitle_files,
                 info.bit_depth,
             )
         };
@@ -198,14 +203,14 @@ impl VideoConvert<'_> {
         }
 
         if self.options.movie_mode
-            && let Err(error) = validate_movie_subtitles(input, &staged, &file.subtitle_files)
+            && let Err(error) = validate_movie_subtitles(input, &staged, subtitle_files)
         {
             return failed(error.to_string());
         }
         if let Err(error) = self.publish_output(staged, input, output, false) {
             return failed(error.to_string());
         }
-        self.delete_subtitle_files(&file.subtitle_files);
+        self.delete_subtitle_files(subtitle_files);
 
         ProcessResult::Converted {
             stats: ConversionStats::new(
