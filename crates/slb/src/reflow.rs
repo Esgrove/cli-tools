@@ -188,8 +188,9 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
     if !changed {
         violations.retain(|violation| violation.kind != ViolationKind::MidClauseBreak);
     }
-    let reported = !violations.is_empty();
-    violations.extend(list_item_violation(paragraph, options, output.len(), reported));
+    let has_fixable = violations.iter().any(|violation| violation.fixable);
+    violations.extend(list_item_violation(paragraph, options, output.len(), has_fixable));
+    violations.extend(join_sentences_violation(changed, options, line_offset, &violations));
 
     let reworded = holds_reworded_fix(&violations);
     if changed && let Some(refusal) = reflow_refusal(&output, paragraph, options, hard_limit, old_max, reworded) {
@@ -217,6 +218,22 @@ pub fn reflow_paragraph(paragraph: &Paragraph, options: &FormatOptions, produce_
         changed,
         violations,
     }
+}
+
+/// Emit a fixable violation when `--join-sentences` changed the paragraph and no other fixable violation exists.
+fn join_sentences_violation(
+    changed: bool,
+    options: &FormatOptions,
+    line: usize,
+    violations: &[Violation],
+) -> Option<Violation> {
+    (changed && options.join_sentences && !violations.iter().any(|violation| violation.fixable)).then(|| Violation {
+        line,
+        column: None,
+        kind: ViolationKind::MidClauseBreak,
+        message: "short sentences can be joined onto one line".into(),
+        fixable: true,
+    })
 }
 
 /// Sort the violations by line and kind, keeping a single report of each over long line.

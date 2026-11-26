@@ -1038,6 +1038,27 @@ mod test_format {
     }
 
     #[test]
+    fn join_sentences_reports_fixable_violation_and_converges() {
+        let options = FormatOptions {
+            join_sentences: true,
+            ..FormatOptions::default()
+        };
+        let text = "Short first.\nShort second.\n";
+        let checked = check(text, FileKind::Markdown, &options);
+        assert!(
+            checked.violations.iter().any(|violation| violation.fixable),
+            "check() with --join-sentences must report a fixable violation: {checked:?}"
+        );
+        let formatted = format(text, FileKind::Markdown, &options);
+        assert_eq!(formatted.fixed_text.as_deref(), Some("Short first. Short second.\n"));
+        assert_eq!(checked.violations, formatted.violations);
+        assert_eq!(
+            format("Short first. Short second.\n", FileKind::Markdown, &options),
+            FormatResult::default()
+        );
+    }
+
+    #[test]
     fn javascript_division_preserves_multiline_template_content() {
         let text = concat!(
             "const value = total / count + `\n",

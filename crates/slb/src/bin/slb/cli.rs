@@ -305,7 +305,7 @@ fn process_file(file: &Path, kind: FileKind, context: &RunContext<'_>) -> FileOu
         }
     }
     outcome.skipped = result.skips.len();
-    if result.violations.is_empty() {
+    if result.violations.is_empty() && result.fixed_text.is_none() {
         return outcome;
     }
     outcome.violations = result.violations.len();
