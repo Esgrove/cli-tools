@@ -55,11 +55,26 @@ const RENAMED: [&str; 11] = [
 ];
 
 #[test]
-fn dryrun_lists_planned_changes_and_changes_nothing() {
+fn dryrun_defaults_to_non_recursive_and_trash() {
     let tree = downloads();
     let before = tree.snapshot();
 
     let output = run_rxrename(&tree, &["downloads", "--dryrun"]);
+
+    assert!(output.status.success(), "{output:?}");
+    let printed = stdout(&output);
+    assert!(printed.contains("1 file would be renamed"), "{printed}");
+    assert!(printed.contains("1 file would be trashed"), "{printed}");
+    assert!(!printed.contains("photo_1.jpg"), "{printed}");
+    assert_eq!(tree.snapshot(), before);
+}
+
+#[test]
+fn dryrun_with_recurse_and_delete_lists_all_planned_changes() {
+    let tree = downloads();
+    let before = tree.snapshot();
+
+    let output = run_rxrename(&tree, &["downloads", "--recurse", "--delete", "--dryrun"]);
 
     assert!(output.status.success(), "{output:?}");
     let printed = stdout(&output);
@@ -71,16 +86,16 @@ fn dryrun_lists_planned_changes_and_changes_nothing() {
 }
 
 #[test]
-fn real_run_renames_every_level_and_a_second_run_changes_nothing() {
+fn real_run_renames_every_level_with_recurse_and_a_second_run_changes_nothing() {
     let tree = downloads();
 
-    let output = run_rxrename(&tree, &["downloads"]);
+    let output = run_rxrename(&tree, &["downloads", "--recurse", "--delete"]);
 
     assert!(output.status.success(), "{output:?}");
     assert!(stdout(&output).contains("4 files renamed"), "{}", stdout(&output));
     assert_eq!(tree.snapshot(), RENAMED);
 
-    let output = run_rxrename(&tree, &["downloads"]);
+    let output = run_rxrename(&tree, &["downloads", "--recurse", "--delete"]);
     assert!(output.status.success(), "{output:?}");
     assert!(stdout(&output).contains("0 files renamed"), "{}", stdout(&output));
     assert_eq!(tree.snapshot(), RENAMED);
@@ -93,13 +108,13 @@ fn blocked_suffix_chain_keeps_both_sources() {
     tree.file_with("downloads/x_1_1.txt", "newest");
     let before = tree.snapshot();
 
-    let preview = run_rxrename(&tree, &["downloads", "--dryrun"]);
+    let preview = run_rxrename(&tree, &["downloads", "--delete", "--dryrun"]);
     assert!(preview.status.success(), "{preview:?}");
     let printed = stdout(&preview);
     assert!(printed.contains("0 files would be renamed"), "{printed}");
     assert!(printed.contains("0 files would be deleted"), "{printed}");
 
-    let output = run_rxrename(&tree, &["downloads"]);
+    let output = run_rxrename(&tree, &["downloads", "--delete"]);
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(tree.snapshot(), before);
@@ -115,7 +130,7 @@ fn preview_reuses_a_vacated_suffix_chain_name_with_different_case() {
     tree.file_with("downloads/clip_1_1.txt", "newest");
     let before = tree.snapshot();
 
-    let preview = run_rxrename(&tree, &["downloads", "--dryrun"]);
+    let preview = run_rxrename(&tree, &["downloads", "--delete", "--dryrun"]);
 
     assert!(preview.status.success(), "{preview:?}");
     let printed = stdout(&preview);
@@ -123,7 +138,7 @@ fn preview_reuses_a_vacated_suffix_chain_name_with_different_case() {
     assert!(printed.contains("0 files would be deleted"), "{printed}");
     assert_eq!(tree.snapshot(), before);
 
-    let run = run_rxrename(&tree, &["downloads"]);
+    let run = run_rxrename(&tree, &["downloads", "--delete"]);
 
     assert!(run.status.success(), "{run:?}");
     assert_eq!(tree.read("downloads/Clip.txt"), "newer");

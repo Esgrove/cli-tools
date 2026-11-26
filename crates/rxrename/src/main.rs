@@ -1,7 +1,9 @@
 //! The `rxrename` binary.
 //!
-//! Recursively removes a trailing "_1" suffix from file names,
-//! deleting or trashing an existing unsuffixed file that would conflict.
+//! Removes a trailing "_1" suffix from file names,
+//! moving any conflicting unsuffixed file to the system trash by default
+//! (or permanently deleting it with `--delete`).
+//! Operates on the given directory only unless `--recurse` is specified.
 
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
@@ -9,14 +11,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
-use walkdir::WalkDir;
-
+use clap::{Parser, Subcommand};
 use cli_tools_common::{
-    OverwritePolicy, TargetReservations, count_label, is_network_path, os_str_to_string, print_error,
+    CompletionArgs, OverwritePolicy, TargetReservations, count_label, is_network_path, os_str_to_string, print_error,
     print_magenta_bold, print_yellow, resolve_input_path, safe_rename, should_skip_entry,
 };
+use walkdir::WalkDir;
 
 /// Action to take when a conflicting unsuffixed file already exists.
 #[derive(Debug, Clone, Copy)]
@@ -43,20 +43,12 @@ enum Outcome {
     Skipped,
 }
 
-/// Subcommands for `rx_rename`.
+/// Subcommands for `rxrename`.
 #[derive(Subcommand)]
 enum RxRenameCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -64,7 +56,7 @@ enum RxRenameCommand {
     author,
     version,
     name = env!("CARGO_BIN_NAME"),
-    about = "Recursively remove a trailing '_1' from filenames"
+    about = "Remove a trailing '_1' from filenames"
 )]
 struct Args {
     #[command(subcommand)]
@@ -74,11 +66,19 @@ struct Args {
     #[arg(value_hint = clap::ValueHint::DirPath)]
     root: Option<PathBuf>,
 
+    /// Permanently delete conflicting files instead of moving them to system trash
+    #[arg(short = 'D', long, conflicts_with = "trash")]
+    delete: bool,
+
     /// Only print what would be done without making changes
     #[arg(short, long)]
     dryrun: bool,
 
-    /// Move conflicting files to system trash instead of permanently deleting them
+    /// Recurse into subdirectories
+    #[arg(short = 'r', long)]
+    recurse: bool,
+
+    /// Move conflicting files to system trash (default behavior)
     #[arg(short, long)]
     trash: bool,
 
@@ -141,14 +141,8 @@ impl ConflictAction {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    if let Some(RxRenameCommand::Completion { shell, install }) = &args.command {
-        return cli_tools_common::generate_shell_completion(
-            *shell,
-            Args::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        );
+    if let Some(RxRenameCommand::Completion(completion)) = &args.command {
+        return completion.generate::<Args>(args.verbose, env!("CARGO_BIN_NAME"));
     }
 
     let root = resolve_input_path(args.root.as_deref())?;
@@ -156,25 +150,25 @@ fn main() -> Result<()> {
         anyhow::bail!("Not a directory: {}", root.display());
     }
 
-    let action = if args.trash {
-        ConflictAction::trash()
-    } else {
+    let action = if args.delete {
         ConflictAction::Delete
+    } else {
+        ConflictAction::trash()
     };
-    let summary = rename_files(&root, args.dryrun, action);
+    let summary = rename_files(&root, args.recurse, args.dryrun, action);
     if summary.failed > 0 {
         anyhow::bail!("Failed to process {}", count_label(summary.failed, "file", "files"));
     }
     Ok(())
 }
 
-/// Scan `root` recursively for files with a trailing `_1` suffix and rename them.
+/// Scan `root` for files with a trailing `_1` suffix and rename them.
 ///
-/// An existing unsuffixed file is replaced directly in delete mode, or staged for disposal in trash mode.
+/// An existing unsuffixed file is moved to the system trash by default, or deleted directly with `--delete`.
 /// Errors for individual files are printed and counted without aborting.
 /// Prints a summary of renamed and removed file counts when finished.
-fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSummary {
-    let files = find_files_with_rx_duplicate_suffix(root);
+fn rename_files(root: &Path, recurse: bool, dryrun: bool, action: ConflictAction) -> RenameSummary {
+    let files = find_files_with_rx_duplicate_suffix(root, recurse);
     let total = files.len();
     let width = total.to_string().len();
 
@@ -204,8 +198,8 @@ fn rename_files(root: &Path, dryrun: bool, action: ConflictAction) -> RenameSumm
         (false, ConflictAction::Trash { .. }) => "trashed",
     };
 
-    println!("\n{} files {rename_action}", summary.renamed);
-    println!("{} files {removed_action}", summary.removed);
+    println!("\n{} {rename_action}", count_label(summary.renamed, "file", "files"));
+    println!("{} {removed_action}", count_label(summary.removed, "file", "files"));
     summary
 }
 
@@ -222,9 +216,16 @@ fn stem_ends_with_rx_suffix(stem: &std::ffi::OsStr) -> bool {
     }
 }
 
-/// Find all files under `root` whose stem ends with `_1`, sorted by path.
-fn find_files_with_rx_duplicate_suffix(root: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = WalkDir::new(root)
+/// Find files under `root` whose stem ends with `_1`, sorted by path.
+///
+/// Only direct children of `root` are scanned unless `recurse` is `true`.
+fn find_files_with_rx_duplicate_suffix(root: &Path, recurse: bool) -> Vec<PathBuf> {
+    let walker = if recurse {
+        WalkDir::new(root).follow_links(false)
+    } else {
+        WalkDir::new(root).follow_links(false).max_depth(1)
+    };
+    let mut files: Vec<PathBuf> = walker
         .into_iter()
         .filter_entry(|e| !should_skip_entry(e))
         .filter_map(Result::ok)
@@ -361,7 +362,7 @@ fn process_file_in_batch(
     {
         anyhow::bail!(
             "System trash is unavailable for this Windows network path: {}. \
-             Omit --trash only if you want to permanently replace the existing file",
+             Pass --delete only if you want to permanently replace the existing file",
             file_without_suffix.display()
         );
     }
@@ -451,28 +452,34 @@ mod test_args {
         let defaults = Args::try_parse_from(["rxrename"]).expect("default arguments should parse");
         assert!(defaults.command.is_none());
         assert!(defaults.root.is_none());
+        assert!(!defaults.delete);
         assert!(!defaults.dryrun);
+        assert!(!defaults.recurse);
         assert!(!defaults.trash);
         assert!(!defaults.verbose);
 
-        let combined = Args::try_parse_from(["rxrename", "folder", "--dryrun", "--trash", "--verbose"])
+        let combined = Args::try_parse_from(["rxrename", "folder", "--delete", "--dryrun", "--recurse", "--verbose"])
             .expect("combined arguments should parse");
         assert_eq!(combined.root, Some(PathBuf::from("folder")));
+        assert!(combined.delete);
         assert!(combined.dryrun);
-        assert!(combined.trash);
+        assert!(combined.recurse);
         assert!(combined.verbose);
     }
 
     #[test]
     fn parses_completion_and_has_valid_command_definition() {
+        use clap::CommandFactory;
+        use clap_complete::Shell;
+
         let args = Args::try_parse_from(["rxrename", "completion", "bash", "--install"])
             .expect("completion command should parse");
         assert!(matches!(
             args.command,
-            Some(RxRenameCommand::Completion {
+            Some(RxRenameCommand::Completion(CompletionArgs {
                 shell: Shell::Bash,
                 install: true
-            })
+            }))
         ));
         Args::command().debug_assert();
     }
@@ -499,9 +506,11 @@ mod test_find_files_with_rx_duplicate_suffix {
         std::fs::write(hidden.join("ignored_1.mp4"), b"hidden")?;
         std::fs::create_dir(scan_root.join("directory_1"))?;
 
-        let files = find_files_with_rx_duplicate_suffix(&scan_root);
+        let non_recursive = find_files_with_rx_duplicate_suffix(&scan_root, false);
+        assert_eq!(non_recursive, vec![alpha.clone()]);
 
-        assert_eq!(files, vec![alpha, beta]);
+        let recursive = find_files_with_rx_duplicate_suffix(&scan_root, true);
+        assert_eq!(recursive, vec![alpha, beta]);
         Ok(())
     }
 }
@@ -521,7 +530,7 @@ mod test_rename_files {
         std::fs::write(root.join("gamma_1.mp4"), b"new gamma")?;
         std::fs::create_dir(root.join("gamma.mp4"))?;
 
-        let summary = rename_files(root, false, ConflictAction::Delete);
+        let summary = rename_files(root, true, false, ConflictAction::Delete);
 
         assert_eq!(
             summary,
@@ -545,7 +554,7 @@ mod test_rename_files {
         std::fs::write(root.join("alpha_1.mp4"), b"new alpha")?;
         std::fs::write(root.join("alpha.mp4"), b"old alpha")?;
 
-        let summary = rename_files(root, true, ConflictAction::trash());
+        let summary = rename_files(root, true, true, ConflictAction::trash());
 
         assert_eq!(
             summary,
@@ -564,7 +573,7 @@ mod test_rename_files {
     fn empty_directory_has_empty_summary() -> anyhow::Result<()> {
         let temp_directory = tempfile::TempDir::new()?;
 
-        let summary = rename_files(temp_directory.path(), false, ConflictAction::Delete);
+        let summary = rename_files(temp_directory.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(summary, RenameSummary::default());
         Ok(())
@@ -655,7 +664,7 @@ mod test_process_file {
         std::fs::write(&suffixed, b"new")?;
         std::os::unix::fs::symlink(temp_directory.path().join("missing.txt"), &broken)?;
 
-        let summary = rename_files(temp_directory.path(), true, ConflictAction::trash());
+        let summary = rename_files(temp_directory.path(), true, true, ConflictAction::trash());
         assert_eq!(summary.renamed, 1);
         assert_eq!(
             summary.removed, 1,
@@ -670,7 +679,7 @@ mod test_process_file {
         let suffixed = temp_directory.path().join("clip_1.");
         std::fs::write(&suffixed, b"data")?;
 
-        let summary = rename_files(temp_directory.path(), false, ConflictAction::Delete);
+        let summary = rename_files(temp_directory.path(), true, false, ConflictAction::Delete);
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.renamed, 1);
         assert_eq!(std::fs::read(temp_directory.path().join("clip."))?, b"data");
@@ -779,7 +788,7 @@ mod test_process_file {
             dispose: |_| panic!("there is no old destination to trash"),
         };
 
-        let summary = rename_files(tree.path(), false, action);
+        let summary = rename_files(tree.path(), true, false, action);
 
         assert_eq!(summary.renamed, 1);
         assert_eq!(summary.removed, 0);
@@ -914,7 +923,7 @@ mod test_nested_trees {
     fn renames_suffixed_files_at_every_depth() {
         let tree = nested_tree();
 
-        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(
             summary,
@@ -946,7 +955,7 @@ mod test_nested_trees {
         let tree = nested_tree();
         let before = tree.snapshot();
 
-        let summary = rename_files(tree.path(), true, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, true, ConflictAction::Delete);
 
         assert_eq!(summary.renamed, 5);
         assert_eq!(summary.removed, 2);
@@ -956,10 +965,10 @@ mod test_nested_trees {
     #[test]
     fn second_run_changes_nothing() {
         let tree = nested_tree();
-        rename_files(tree.path(), false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete);
         let after_first_run = tree.snapshot();
 
-        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(summary, RenameSummary::default());
         assert_eq!(tree.snapshot(), after_first_run);
@@ -972,7 +981,7 @@ mod test_nested_trees {
         tree.file(".secret/deep/clip_1.mp4");
         tree.file("visible/clip_1.mp4");
 
-        rename_files(tree.path(), false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(
             tree.files(),
@@ -987,7 +996,7 @@ mod test_nested_trees {
         tree.file_with("one/two/x_1.txt", "two");
         tree.file_with("one/two/three/x_1.txt", "three");
 
-        rename_files(tree.path(), false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(tree.read("one/x.txt"), "one");
         assert_eq!(tree.read("one/two/x.txt"), "two");
@@ -1000,8 +1009,8 @@ mod test_nested_trees {
         tree.file_with("x_1_1.txt", "newest");
         tree.file_with("x_1.txt", "newer");
 
-        let preview = rename_files(tree.path(), true, ConflictAction::Delete);
-        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+        let preview = rename_files(tree.path(), true, true, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(preview, summary);
         assert_eq!(summary.renamed, 2);
@@ -1015,7 +1024,7 @@ mod test_nested_trees {
         tree.file_with("folder/_1.txt", "only suffix");
         tree.file_with("folder/_1", "bare suffix");
 
-        rename_files(tree.path(), false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(
             tree.snapshot(),
@@ -1027,7 +1036,7 @@ mod test_nested_trees {
     fn empty_directory_is_a_no_op() {
         let tree = TempTree::with_entries(&["empty/nested/"]);
 
-        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(summary, RenameSummary::default());
         assert_eq!(tree.snapshot(), vec!["empty/", "empty/nested/"]);
@@ -1042,7 +1051,7 @@ mod test_nested_trees {
         tree.symlink("outside/real_1.txt", "walked/link_1.txt");
         tree.symlink("outside/folder", "walked/folder_1");
 
-        rename_files(&tree.join("walked"), false, ConflictAction::Delete);
+        rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
 
         assert_eq!(tree.read("outside/real_1.txt"), "real");
         assert_eq!(tree.read("outside/folder/inner_1.txt"), "inner");
@@ -1058,7 +1067,7 @@ mod test_nested_trees {
         tree.file_with("walked/clip_1.txt", "new");
         tree.symlink("outside/original.txt", "walked/clip.txt");
 
-        rename_files(&tree.join("walked"), false, ConflictAction::Delete);
+        rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
 
         assert_eq!(tree.read("outside/original.txt"), "original");
         assert_eq!(tree.read("walked/clip.txt"), "new");
@@ -1073,7 +1082,7 @@ mod test_nested_trees {
         tree.file_with("walked/clip_1.txt", "new");
         tree.symlink("outside/folder", "walked/clip.txt");
 
-        rename_files(&tree.join("walked"), false, ConflictAction::Delete);
+        rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
 
         assert_eq!(tree.read("walked/clip_1.txt"), "new");
         assert_eq!(tree.read("outside/folder/inner.txt"), "inner");
@@ -1087,7 +1096,7 @@ mod test_nested_trees {
         let case_sensitive =
             cli_tools_common::directory_is_case_sensitive(tree.path()).expect("case probe should succeed");
 
-        let summary = rename_files(tree.path(), false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
 
         assert_eq!(summary.failed, 0);
         if case_sensitive {
