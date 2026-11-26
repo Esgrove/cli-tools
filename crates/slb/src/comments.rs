@@ -1112,7 +1112,7 @@ mod test_trailing_rust {
     #[test]
     fn raw_string_across_lines_hides_markers_until_closed() {
         let lines = ["let s = r#\"first // no", "second // no", "\"#; // c"];
-        assert!(replaced_indices(&lines, FileKind::Rust).is_empty());
+        assert_eq!(replaced_indices(&lines, FileKind::Rust), [] as [usize; 0]);
         let (replacements, violations) = fix(&lines, FileKind::Rust);
         assert_eq!(replacements[2], None);
         assert_eq!(violations.len(), 1);
@@ -1122,7 +1122,7 @@ mod test_trailing_rust {
     #[test]
     fn plain_string_across_lines_hides_markers() {
         let lines = ["let s = \"first // no", "second\"; // c"];
-        assert!(replaced_indices(&lines, FileKind::Rust).is_empty());
+        assert_eq!(replaced_indices(&lines, FileKind::Rust), [] as [usize; 0]);
     }
 
     #[test]
@@ -1341,7 +1341,7 @@ mod test_trailing_other_languages {
             Some(pair("// c", "const t = `a ${a} // not`;"))
         );
         let lines = ["const t = `line", "${a} // not a comment", "end`; // c"];
-        assert!(replaced_indices(&lines, FileKind::JavaScript).is_empty());
+        assert_eq!(replaced_indices(&lines, FileKind::JavaScript), [] as [usize; 0]);
     }
 
     #[test]
@@ -1371,7 +1371,7 @@ mod test_trailing_other_languages {
     #[test]
     fn go_backtick_raw_string_across_lines_hides_markers() {
         let lines = ["const s = `start", "// inside", "end` // c"];
-        assert!(replaced_indices(&lines, FileKind::Go).is_empty());
+        assert_eq!(replaced_indices(&lines, FileKind::Go), [] as [usize; 0]);
         let (_, violations) = fix(&lines, FileKind::Go);
         assert_eq!(violations.len(), 1);
         assert!(!violations[0].fixable);
@@ -1412,7 +1412,7 @@ mod test_trailing_other_languages {
                 "  curl http://x # nor this",
                 last.as_str(),
             ];
-            assert!(replaced_indices(&lines, FileKind::Groovy).is_empty(), "{quote}");
+            assert_eq!(replaced_indices(&lines, FileKind::Groovy), [] as [usize; 0], "{quote}");
         }
     }
 

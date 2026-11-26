@@ -332,9 +332,10 @@ const fn significant_set<'a>(state: &ScanState, syntax: &'a StringSyntax) -> Opt
         },
         ScanState::InRawString(_) => Some(&RAW_STRING_SET),
         ScanState::InTemplate => Some(&TEMPLATE_SET),
-        ScanState::InTemplateFrames(_) | ScanState::InRubyPercent(..) => None,
         ScanState::InBacktickRaw => Some(&BACKTICK_RAW_SET),
-        ScanState::InDelimitedString(_)
+        ScanState::InTemplateFrames(_)
+        | ScanState::InRubyPercent(..)
+        | ScanState::InDelimitedString(_)
         | ScanState::InHeredoc(_)
         | ScanState::InBlockScalar(_)
         | ScanState::Uncertain => None,
@@ -474,29 +475,30 @@ fn continue_state(state: ScanState, chars: LineChars<'_>, index: &mut usize, syn
             *index += 1;
             if character == '`' { ScanState::Normal } else { state }
         }
-        ScanState::InRubyPercent(open, close, depth) => {
-            if character == '\\' {
-                *index += 2;
-                return state;
-            }
-            *index += 1;
-            if character == close {
-                if depth == 1 {
-                    ScanState::Normal
-                } else {
-                    ScanState::InRubyPercent(open, close, depth - 1)
-                }
-            } else if character == open {
-                ScanState::InRubyPercent(open, close, depth + 1)
-            } else {
-                state
-            }
-        }
+        ScanState::InRubyPercent(open, close, depth) => continue_ruby_percent(character, index, open, close, depth),
         ScanState::Normal
         | ScanState::InTemplateFrames(_)
         | ScanState::InHeredoc(_)
         | ScanState::InBlockScalar(_)
         | ScanState::Uncertain => state,
+    }
+}
+
+/// Advance a Ruby percent literal, retaining its nesting depth and escaped delimiters.
+const fn continue_ruby_percent(character: char, index: &mut usize, open: char, close: char, depth: usize) -> ScanState {
+    if character == '\\' {
+        *index += 2;
+        return ScanState::InRubyPercent(open, close, depth);
+    }
+    *index += 1;
+    if character == close && depth == 1 {
+        ScanState::Normal
+    } else if character == close {
+        ScanState::InRubyPercent(open, close, depth - 1)
+    } else if character == open {
+        ScanState::InRubyPercent(open, close, depth + 1)
+    } else {
+        ScanState::InRubyPercent(open, close, depth)
     }
 }
 
@@ -553,18 +555,9 @@ fn scan_normal(
     }
     if syntax.ruby_literals
         && character == '%'
-        && char_at(chars, index + 1) == Some('q')
-        && let Some(open) = char_at(chars, index + 2).filter(|character| character.is_ascii_punctuation())
+        && let Some(state) = open_ruby_percent(chars, cursor)
     {
-        let close = match open {
-            '(' => ')',
-            '[' => ']',
-            '{' => '}',
-            '<' => '>',
-            _ => open,
-        };
-        cursor.index += 3;
-        return NormalStep::Continue(ScanState::InRubyPercent(open, close, 1));
+        return NormalStep::Continue(state);
     }
     if character == '"' && syntax.double_quote || character == '\'' {
         return scan_quote(chars, cursor, syntax, character);
@@ -615,6 +608,23 @@ fn scan_normal(
     }
     cursor.index += 1;
     NormalStep::Continue(ScanState::Normal)
+}
+
+/// Recognize Ruby's noninterpolating percent string and its matching delimiter.
+fn open_ruby_percent(chars: LineChars<'_>, cursor: &mut Cursor) -> Option<ScanState> {
+    if char_at(chars, cursor.index + 1) != Some('q') {
+        return None;
+    }
+    let open = char_at(chars, cursor.index + 2).filter(char::is_ascii_punctuation)?;
+    let close = match open {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        '<' => '>',
+        _ => open,
+    };
+    cursor.index += 3;
+    Some(ScanState::InRubyPercent(open, close, 1))
 }
 
 /// Skip regex literals without mistaking division operators or ordinary paths for their contents.

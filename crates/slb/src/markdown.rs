@@ -30,8 +30,10 @@ enum LineClass {
     MathFence,
     /// Opens an HTML comment.
     HtmlComment,
-    /// Starts an HTML block.
+    /// Starts an HTML block terminated by a blank line.
     HtmlBlock,
+    /// Starts a preformatted HTML block terminated by a matching closing tag.
+    PreformattedHtml,
     /// Starts a pipe table (header row followed by a table separator row).
     Table,
     /// Single verbatim line such as a heading, rule, table row, or link reference.
@@ -69,8 +71,10 @@ struct SplitContext<'a> {
     base_prefix: &'a str,
     /// Zero based index of the first line in the text buffer.
     start_line: usize,
-    /// Whether front matter detection and hard break markers are enabled.
+    /// Whether this is the top level of a Markdown document.
     is_document: bool,
+    /// Whether Markdown hard breaks are preserved in this container.
+    hard_breaks: bool,
 }
 
 /// Marker text that excludes the surrounding paragraph from formatting.
@@ -131,6 +135,14 @@ const INLINE_HTML_TAGS: &[&str] = &[
     "a", "abbr", "b", "br", "code", "em", "i", "kbd", "mark", "p", "small", "span", "strong", "sub", "sup", "u",
 ];
 
+/// Matches a preformatted HTML opening tag where a raw block can start.
+static RE_PRE_OPEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s{0,3}<pre(?:[\s/>]|$)").expect("Invalid preformatted HTML opener"));
+
+/// Matches a preformatted HTML closing tag.
+static RE_PRE_CLOSE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)</pre\s*>").expect("Invalid preformatted HTML closer"));
+
 /// Matches a link reference definition.
 static RE_LINK_REFERENCE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s{0,3}\[[^\]]+\]:\s").expect("Invalid link reference regex"));
@@ -181,6 +193,7 @@ pub fn split_paragraphs_with_notices(
         base_prefix,
         start_line,
         is_document,
+        hard_breaks: is_document,
     };
     let mut notices = Vec::new();
     let regions = split_paragraphs_with(lines, context, code_indent, &mut notices);
@@ -207,25 +220,15 @@ fn split_paragraphs_with(
     notices: &mut Vec<SkipNotice>,
 ) -> Vec<Region> {
     let SplitContext {
-        base_prefix: _,
         start_line,
         is_document,
+        ..
     } = context;
     let mut regions = Vec::new();
     let count = lines.len();
-    let mut index = 0;
-
-    if is_document && lines.first().is_some_and(|line| line.trim_end() == "---") {
-        let close = lines
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, line)| matches!(line.trim_end(), "---" | "..."))
-            .map(|(position, _)| position);
-        if let Some(close) = close {
-            regions.push(verbatim(start_line, 0, close + 1));
-            index = close + 1;
-        }
+    let mut index = if is_document { front_matter_end(lines) } else { 0 };
+    if index > 0 {
+        regions.push(verbatim(start_line, 0, index));
     }
 
     let mut ignore_next = false;
@@ -263,12 +266,7 @@ fn split_paragraphs_with(
             }
             LineClass::MathFence => find_math_fence_end(lines, index, line),
             LineClass::HtmlComment => find_html_comment_end(lines, index, line),
-            LineClass::HtmlBlock => lines
-                .iter()
-                .enumerate()
-                .skip(index + 1)
-                .find(|(_, line)| line.trim().is_empty())
-                .map_or(count, |(position, _)| position),
+            LineClass::PreformattedHtml | LineClass::HtmlBlock => html_block_end(lines, index, &class),
             LineClass::Blockquote => {
                 let end = collect_blockquote(
                     lines,
@@ -316,6 +314,36 @@ fn split_paragraphs_with(
     regions
 }
 
+/// Index past an HTML block, using the closing tag for preformatted HTML and a blank line otherwise.
+fn html_block_end(lines: &[&str], index: usize, class: &LineClass) -> usize {
+    let preformatted = *class == LineClass::PreformattedHtml;
+    lines
+        .iter()
+        .enumerate()
+        .skip(if preformatted { index } else { index + 1 })
+        .find(|(_, line)| {
+            if preformatted {
+                RE_PRE_CLOSE.is_match(line)
+            } else {
+                line.trim().is_empty()
+            }
+        })
+        .map_or(lines.len(), |(position, _)| position + usize::from(preformatted))
+}
+
+/// Index after a leading front matter block, or zero when the document has none.
+fn front_matter_end(lines: &[&str]) -> usize {
+    if lines.first().is_none_or(|line| line.trim_end() != "---") {
+        return 0;
+    }
+    lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, line)| matches!(line.trim_end(), "---" | "..."))
+        .map_or(0, |(position, _)| position + 1)
+}
+
 /// Collect a contiguous blockquote starting at `index` and append its inner regions.
 ///
 /// Honors a preceding `slb-ignore` marker by keeping the entire blockquote verbatim,
@@ -353,6 +381,7 @@ fn collect_blockquote(
         base_prefix: &prefix,
         start_line: context.start_line + index,
         is_document: false,
+        hard_breaks: context.hard_breaks,
     };
     regions.extend(split_paragraphs_with(&inner_refs, inner_context, code_indent, notices));
     end
@@ -370,7 +399,7 @@ fn list_item_paragraph(
     let SplitContext {
         base_prefix,
         start_line,
-        is_document,
+        ..
     } = context;
     let item_lines = lines.get(index..end).unwrap_or_default();
     let first_line = item_lines.first().copied().unwrap_or_default();
@@ -406,7 +435,7 @@ fn list_item_paragraph(
         rest_prefix,
         start_line + index,
         start_line + end,
-        is_document,
+        context.hard_breaks,
         notices,
     );
     if indented { mark_list_item(region) } else { region }
@@ -423,7 +452,7 @@ fn text_paragraph(
     let SplitContext {
         base_prefix,
         start_line,
-        is_document,
+        ..
     } = context;
     let text_lines = lines.get(index..end).unwrap_or_default();
     let first_line = text_lines.first().copied().unwrap_or_default();
@@ -438,7 +467,7 @@ fn text_paragraph(
         format!("{base_prefix}{rest_indent}"),
         start_line + index,
         start_line + end,
-        is_document,
+        context.hard_breaks,
         notices,
     )
 }
@@ -490,6 +519,9 @@ fn classify(line: &str, next: Option<&str>) -> LineClass {
     }
     if matches!(first, b'|' | b':' | b'-') && line.contains('|') && RE_TABLE_SEPARATOR.is_match(line) {
         return LineClass::Verbatim;
+    }
+    if first == b'<' && RE_PRE_OPEN.is_match(line) {
+        return LineClass::PreformattedHtml;
     }
     if first == b'<' && RE_HTML_BLOCK.is_match(line) && !starts_with_inline_html_tag(line) {
         return LineClass::HtmlBlock;
@@ -1095,6 +1127,47 @@ mod test_markdown_verbatim {
 mod test_markdown_lists {
     use super::test_helpers::*;
     use super::*;
+
+    #[test]
+    fn preserve_markup_preformatted_html_across_blank_lines() {
+        let source = "<PRE class=\"example\">\nfirst line\n\nKeep the punctuation; it is literal.\n</pRE>\n\nAfter this; format the prose.\n";
+        let expected = source.replace("After this; format", "After this.\nFormat");
+        let formatted = crate::format(source, crate::FileKind::Markdown, &crate::FormatOptions::default());
+        assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), expected);
+    }
+
+    #[test]
+    fn preserve_markup_blockquote_hard_breaks() {
+        for marker in ["  ", "\\"] {
+            let source = format!("> First part; this is still the first part{marker}\n> second part of the quote.\n");
+            let expected =
+                format!("> First part.\n> This is still the first part{marker}\n> second part of the quote.\n");
+            let formatted = crate::format(&source, crate::FileKind::Markdown, &crate::FormatOptions::default());
+            assert_eq!(formatted.fixed_text.as_deref().unwrap_or(&source), expected);
+        }
+    }
+
+    #[test]
+    fn preserve_markup_inline_html_code() {
+        let source = "Use <code class=\"expr\">foo; bar — baz</CoDe> in the example.\n";
+        let formatted = crate::format(source, crate::FileKind::Markdown, &crate::FormatOptions::default());
+        assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source);
+        assert_eq!(formatted.violations, [] as [crate::Violation; 0]);
+    }
+
+    #[test]
+    fn preserve_markup_em_dash_in_bare_url() {
+        for url in [
+            "https://example.com/alpha—beta",
+            "www.example.com/alpha—beta",
+            "https://example.com/alpha—",
+        ] {
+            let source = format!("Read ({url}) for the details.\n");
+            let formatted = crate::format(&source, crate::FileKind::Markdown, &crate::FormatOptions::default());
+            assert_eq!(formatted.fixed_text.as_deref().unwrap_or(&source), source);
+            assert_eq!(formatted.violations, [] as [crate::Violation; 0]);
+        }
+    }
 
     #[test]
     fn a_fence_at_the_start_of_a_list_item_is_verbatim() {

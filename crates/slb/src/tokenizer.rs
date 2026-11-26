@@ -24,11 +24,20 @@ const CHUNK_END_CANDIDATES: ByteSet = ByteSet::new(b" \t\n\x0b\x0c\r\xc2\xe1\xe2
 const BACKTICK: ByteSet = ByteSet::new(b"`");
 
 /// Bytes that can begin a code span or an HTML character reference in the middle of a chunk.
-const EMBEDDED_ATOM_STARTS: ByteSet = ByteSet::new(b"`&");
+const EMBEDDED_ATOM_STARTS: ByteSet = ByteSet::new(b"`&<");
 
 /// Matches a URL such as `https://example.com/path` or `www.example.com`.
 static RE_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(?:[a-z][a-z0-9+.-]*://\S+|www\.\S+)$").expect("Invalid URL regex"));
+
+/// Matches an inline HTML code opener, respecting quoted attribute values.
+static RE_HTML_CODE_OPEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)^<code(?:\s+(?:[^<>"']|"[^"]*"|'[^']*')*)?>"#).expect("Invalid HTML code opener")
+});
+
+/// Matches the closing tag of an inline HTML code element.
+static RE_HTML_CODE_CLOSE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)</code\s*>").expect("Invalid HTML code closer"));
 
 /// Matches the syntax of a named, decimal, or hexadecimal HTML character reference.
 static RE_HTML_REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
@@ -213,10 +222,25 @@ fn read_token<'a>(
     }
     let leading = text.get(start..leading_end).unwrap_or_default();
 
-    let (search_from, word_end, initial_kind) = atom_at(text, leading_end)
-        .map_or((leading_end, word_end, None), |(end, kind)| {
-            (end, chunk_end(text, candidates, end, normalize_dashes), Some(kind))
+    let initial_atom = atom_at(text, leading_end).or_else(|| {
+        let prefix = text.get(leading_end..word_end)?;
+        if !normalize_dashes
+            || !(prefix.contains("://") || prefix.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("www.")))
+        {
+            return None;
+        }
+        let end = chunk_end(text, candidates, leading_end, false);
+        let chunk = text.get(leading_end..end)?;
+        let core_end = trailing_punctuation_start_with(chunk, 0, |character| {
+            character != EM_DASH && is_trailing_closer(character)
         });
+        RE_URL
+            .is_match(chunk.get(..core_end)?)
+            .then_some((leading_end + core_end, TokenKind::Url))
+    });
+    let (search_from, word_end, initial_kind) = initial_atom.map_or((leading_end, word_end, None), |(end, kind)| {
+        (end, chunk_end(text, candidates, end, normalize_dashes), Some(kind))
+    });
     let (word_end, protected_end, embedded_kind) =
         embedded_atoms(text, candidates, search_from, word_end, normalize_dashes);
     let protected_kind = initial_kind.or(embedded_kind);
@@ -253,12 +277,12 @@ fn embedded_atoms(
     {
         position += offset;
         let rest = text.get(position..).unwrap_or_default();
-        let matched = if rest.starts_with('`') {
-            backtick_span_end(text, position).map(|end| (end, TokenKind::Code))
-        } else {
-            RE_HTML_REFERENCE
+        let matched = match rest.as_bytes().first() {
+            Some(b'`') => backtick_span_end(text, position).map(|end| (end, TokenKind::Code)),
+            Some(b'<') => html_code_end(rest).map(|end| (position + end, TokenKind::Code)),
+            _ => RE_HTML_REFERENCE
                 .find(rest)
-                .map(|reference| (position + reference.end(), TokenKind::Html))
+                .map(|reference| (position + reference.end(), TokenKind::Html)),
         };
         if let Some((end, atom_kind)) = matched {
             protected_end = end;
@@ -303,12 +327,17 @@ pub(super) fn has_multiline_code_span(lines: &[&str]) -> bool {
 /// At least `keep` bytes are left in front of it, so a token is never all punctuation,
 /// and a closing bracket that belongs to an unclosed one inside the chunk stays in the core.
 fn trailing_punctuation_start(chunk: &str, keep: usize) -> usize {
+    trailing_punctuation_start_with(chunk, keep, is_trailing_closer)
+}
+
+/// Peel punctuation according to the supplied predicate, without peeling below `keep`.
+fn trailing_punctuation_start_with(chunk: &str, keep: usize, can_peel: impl Fn(char) -> bool) -> usize {
     let mut end = chunk.len();
     while end > keep {
         let Some((offset, character)) = chunk.get(..end).and_then(|head| head.char_indices().next_back()) else {
             break;
         };
-        if !is_trailing_closer(character) {
+        if !can_peel(character) {
             break;
         }
         if matches!(character, ')' | ']') && has_unclosed_bracket(chunk.get(..offset).unwrap_or_default()) {
@@ -338,6 +367,9 @@ fn atom_at(text: &str, start: usize) -> Option<(usize, TokenKind)> {
         b'[' => link_end(text, start).map(|end| (end, TokenKind::Link)),
         b'!' if bytes.get(1) == Some(&b'[') => link_end(text, start + 1).map(|end| (end, TokenKind::Link)),
         b'<' => {
+            if let Some(end) = html_code_end(rest) {
+                return Some((start + end, TokenKind::Code));
+            }
             let next = *bytes.get(1)?;
             if next.is_ascii_alphabetic() || matches!(next, b'/' | b'!') {
                 let end = rest.find('>').map(|offset| start + offset + 1)?;
@@ -348,6 +380,14 @@ fn atom_at(text: &str, start: usize) -> Option<(usize, TokenKind)> {
         }
         _ => None,
     }
+}
+
+/// Byte index after a complete inline HTML code element beginning at the start of `text`.
+fn html_code_end(text: &str) -> Option<usize> {
+    let open = RE_HTML_CODE_OPEN.find(text)?;
+    let content = text.get(open.end()..)?;
+    let close = RE_HTML_CODE_CLOSE.find(content)?;
+    Some(open.end() + close.end())
 }
 
 /// End byte index of a backtick code span starting at `start`, matching runs of equal length.
