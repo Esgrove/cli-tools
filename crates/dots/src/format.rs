@@ -43,14 +43,14 @@ static RE_LEADING_DIGITS: std::sync::LazyLock<Regex> =
 
 static RE_WRITTEN_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>[0-9]{1,2})\.(?P<year>[0-9]{4})\b",
+        r"(?i-u)\b(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<day>[0-9]{1,2})\.(?P<year>[0-9]{4})\b",
     )
         .expect("Failed to compile MDY written date regex")
 });
 
 static RE_WRITTEN_DATE_DMY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(?P<day>[0-9]{1,2})\.(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<year>[0-9]{4})\b",
+        r"(?i-u)\b(?P<day>[0-9]{1,2})\.(?P<month>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.(?P<year>[0-9]{4})\b",
     )
         .expect("Failed to compile DMY written date regex")
 });
@@ -513,33 +513,29 @@ impl DotFormat<'_> {
     /// "December.6.2023" -> "2023.12.06"
     /// "23.May.2016" -> "2016.05.23"
     /// ```
-    ///
-    /// # Panics
-    ///
-    /// Panics if a captured month name is not found in the month mapping.
-    /// This should not happen in practice since the regex only matches valid month names.
     pub fn convert_written_date_format(name: &mut String) {
+        let replace_written = |caps: &regex::Captures<'_>| -> String {
+            let full_match = caps.get(0).map_or("", |matched| matched.as_str());
+            let (Some(year), Some(month_match), Some(day_match)) =
+                (caps.name("year"), caps.name("month"), caps.name("day"))
+            else {
+                return full_match.to_string();
+            };
+            let month_raw = month_match.as_str().to_ascii_lowercase();
+            let (Some(month), Ok(day)) = (
+                WRITTEN_MONTHS_MAP.get(month_raw.as_str()),
+                day_match.as_str().parse::<u8>(),
+            ) else {
+                return full_match.to_string();
+            };
+            format!("{}.{month}.{day:02}", year.as_str())
+        };
+
         // Replace Month.Day.Year
-        *name = RE_WRITTEN_DATE_MDY
-            .replace_all(name, |caps: &regex::Captures| {
-                let year = &caps["year"];
-                let month_raw = &caps["month"].to_lowercase();
-                let month = WRITTEN_MONTHS_MAP.get(month_raw.as_str()).expect("Failed to map month");
-                let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
-                format!("{year}.{month}.{day}")
-            })
-            .into_owned();
+        *name = RE_WRITTEN_DATE_MDY.replace_all(name, &replace_written).into_owned();
 
         // Replace Day.Month.Year
-        *name = RE_WRITTEN_DATE_DMY
-            .replace_all(name, |caps: &regex::Captures| {
-                let year = &caps["year"];
-                let month_raw = &caps["month"].to_lowercase();
-                let month = WRITTEN_MONTHS_MAP.get(month_raw.as_str()).expect("Failed to map month");
-                let day = format!("{:02}", caps["day"].parse::<u8>().expect("Failed to parse day"));
-                format!("{year}.{month}.{day}")
-            })
-            .into_owned();
+        *name = RE_WRITTEN_DATE_DMY.replace_all(name, &replace_written).into_owned();
     }
 
     /// Only retain alphanumeric characters and a few common filename characters.
@@ -1609,5 +1605,15 @@ mod test_idempotent_formatting {
             formatter.format_name("Show 05.30 😀 2021"),
             formatter.format_name("Show 05.30 2021")
         );
+    }
+
+    #[test]
+    fn unicode_long_s_in_written_month_does_not_panic() {
+        let config = DotRenameConfig::default();
+        let formatter = DotFormat::new(&config);
+        let _ = formatter.format_name("ſep 15 2020");
+        let _ = formatter.format_name("Auguſt 15 2020");
+        let _ = formatter.format_name("15 ſep 2020");
+        let _ = formatter.format_name("15 Auguſt 2020");
     }
 }
