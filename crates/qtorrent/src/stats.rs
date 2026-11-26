@@ -15,7 +15,7 @@ pub struct TorrentStats {
     pub duplicate: usize,
     /// Number of existing torrents that were renamed.
     pub renamed: usize,
-    /// Number of torrents that failed to add.
+    /// Number of torrents whose add or rename failed.
     pub error: usize,
     /// Total size of the added torrents in bytes.
     pub total_bytes: u64,
@@ -57,7 +57,7 @@ impl TorrentStats {
         self.renamed += 1;
     }
 
-    /// Count a torrent that failed to add.
+    /// Count a torrent whose add or rename failed.
     pub const fn inc_error(&mut self) {
         self.error += 1;
     }

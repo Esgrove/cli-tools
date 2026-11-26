@@ -103,6 +103,47 @@ fn file_names(directory: &Path) -> Vec<String> {
 }
 
 #[test]
+fn all_conversion_attempts_fail_in_scan_and_database_modes() {
+    let sandbox = Sandbox::new("#!/bin/sh\necho 'test conversion failure' >&2\nexit 1\n");
+    let original = sandbox.videos().join("show.mkv");
+    fs::write(&original, "h264 video data").unwrap();
+
+    let skipped = sandbox.run(&["--skip-convert"]);
+    assert!(skipped.status.success(), "{skipped:?}");
+    let scan = sandbox.run(&["--delete"]);
+    let replay = sandbox.run(&["--delete", "--from-db"]);
+    for output in [scan, replay] {
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("test conversion failure"),
+            "{output:?}"
+        );
+        assert!(!output.status.success(), "{output:?}");
+    }
+    assert!(original.is_file());
+}
+
+#[test]
+fn all_analysis_attempts_fail() {
+    let sandbox = Sandbox::new(FAKE_FFMPEG);
+    fs::write(sandbox.videos().join("empty.mkv"), []).unwrap();
+
+    let output = sandbox.run(&[]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("empty or missing file"));
+    assert!(!output.status.success(), "{output:?}");
+}
+
+#[test]
+fn a_failed_probe_does_not_fail_a_partially_successful_scan() {
+    let sandbox = Sandbox::new(FAKE_FFMPEG);
+    fs::write(sandbox.videos().join("empty.mkv"), []).unwrap();
+    fs::write(sandbox.videos().join("show.mkv"), "h264 video data").unwrap();
+
+    let output = sandbox.run(&["--delete"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(sandbox.videos().join("show.x265.mp4").is_file());
+}
+
+#[test]
 fn a_remux_with_an_empty_output_keeps_the_original() {
     let sandbox = Sandbox::new(FAKE_FFMPEG_EMPTY_OUTPUT);
     let original = sandbox.videos().join("show.mkv");

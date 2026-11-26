@@ -36,6 +36,12 @@ const MAX_METADATA_LENGTH: usize = 128;
 /// Name of the output directory for thumbnails.
 const SCREENS_DIR_NAME: &str = "Screens";
 
+/// Result of attempting to create a thumbnail.
+enum ThumbnailOutcome {
+    CreatedOrPreviewed,
+    SkippedExisting,
+}
+
 /// Thumbnail creator that processes video files and creates thumbnail sheets.
 pub struct ThumbnailCreator {
     config: Config,
@@ -101,6 +107,7 @@ impl ThumbnailCreator {
         );
 
         let mut success_count = 0;
+        let mut skipped_count = 0;
         let mut error_count = 0;
         let mut stats = VideoStats::new();
 
@@ -111,7 +118,8 @@ impl ThumbnailCreator {
         for (index, (video_file, output_path)) in video_files.iter().zip(&output_paths).enumerate() {
             let progress_prefix = Self::format_progress_prefix(index + 1, total_count, progress_width);
             match self.create_thumbnail(video_file, output_path, &mut stats, &progress_prefix) {
-                Ok(()) => success_count += 1,
+                Ok(ThumbnailOutcome::CreatedOrPreviewed) => success_count += 1,
+                Ok(ThumbnailOutcome::SkippedExisting) => skipped_count += 1,
                 Err(e) => {
                     print_error!(
                         "Failed to create thumbnail for {progress_prefix} {}: {e}",
@@ -122,14 +130,23 @@ impl ThumbnailCreator {
             }
         }
 
+        let skipped = if skipped_count > 0 {
+            format!(", {} skipped", skipped_count.to_string().yellow())
+        } else {
+            String::new()
+        };
         println!(
-            "Finished: {} successful, {} failed",
+            "Finished: {} successful, {} failed{skipped}",
             success_count.to_string().green(),
             error_count.to_string().red()
         );
 
         stats.print_summary(self.config.verbose);
 
+        anyhow::ensure!(
+            error_count == 0 || success_count > 0,
+            "No thumbnail generation succeeded"
+        );
         Ok(())
     }
 
@@ -239,7 +256,7 @@ impl ThumbnailCreator {
         output_path: &Path,
         stats: &mut VideoStats,
         progress_prefix: &str,
-    ) -> Result<()> {
+    ) -> Result<ThumbnailOutcome> {
         let filename = video_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -252,7 +269,7 @@ impl ThumbnailCreator {
                 "Thumbnail already exists for {progress_prefix} {filename}: {}",
                 output_path.display()
             );
-            return Ok(());
+            return Ok(ThumbnailOutcome::SkippedExisting);
         }
 
         println!(
@@ -287,7 +304,7 @@ impl ThumbnailCreator {
 
         if self.config.dryrun {
             println!("[DRYRUN] {command:#?}");
-            return Ok(());
+            return Ok(ThumbnailOutcome::CreatedOrPreviewed);
         }
 
         let output = command.output().context("Failed to execute ffmpeg")?;
@@ -301,7 +318,7 @@ impl ThumbnailCreator {
             println!("  output: {}", output_path.display());
         }
 
-        Ok(())
+        Ok(ThumbnailOutcome::CreatedOrPreviewed)
     }
 
     /// Format a progress prefix with current index aligned to the total digit width.

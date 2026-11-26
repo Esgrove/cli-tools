@@ -12,10 +12,10 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use super::VideoConvert;
+use super::{DuplicateOutcome, VideoConvert};
 use crate::classification::{ClassificationRequest, probe_and_classify, resolve_output_collisions};
 use crate::database::{Database, file_modified_time_ns};
-use crate::stats::AnalysisStats;
+use crate::stats::{AnalysisStats, RunStats};
 use crate::types::{
     AnalysisFilter, AnalysisOutput, AnalysisResult, ProcessableFileSliceExt, SkipReason, SubtitleFile, VideoFile,
     VideoInfo, VideoInfoCache,
@@ -23,14 +23,15 @@ use crate::types::{
 
 impl VideoConvert<'_> {
     /// Analyze files in parallel to determine which need processing.
-    /// Runs ffprobe on each file concurrently and filters based on video information.
+    /// Runs ffprobe concurrently.
+    /// Returns the selected files and the counts from analysis and duplicate handling.
     pub(super) fn analyze_files(
         &self,
         files: Vec<VideoFile>,
         database: &mut Database,
         mut subtitle_matches: HashMap<PathBuf, Vec<SubtitleFile>>,
         abort_flag: &AtomicBool,
-    ) -> AnalysisOutput {
+    ) -> (AnalysisOutput, RunStats) {
         let start = Instant::now();
         let total_files = files.len();
 
@@ -92,10 +93,20 @@ impl VideoConvert<'_> {
         // Combine cache hits (Phase 1) with ffprobe results (Phase 2)
         let mut results = cache_results;
         results.extend(probe_results.into_iter().map(|entry| entry.result));
-        let results = resolve_output_collisions(results);
+        self.collect_analysis_results(resolve_output_collisions(results), abort_flag, total_files, start)
+    }
 
+    /// Group the classified files, handle duplicates, and report the analysis counts.
+    fn collect_analysis_results(
+        &self,
+        results: Vec<AnalysisResult>,
+        abort_flag: &AtomicBool,
+        total_files: usize,
+        start: Instant,
+    ) -> (AnalysisOutput, RunStats) {
         let mut output = AnalysisOutput::default();
         let mut analysis_stats = AnalysisStats::default();
+        let mut duplicate_failures = 0;
 
         for result in results {
             if abort_flag.load(Ordering::SeqCst) {
@@ -131,6 +142,12 @@ impl VideoConvert<'_> {
                         } else {
                             analysis_stats.duplicate_delete_failed += 1;
                         }
+                        if matches!(
+                            outcome,
+                            DuplicateOutcome::ProbeFailed { .. } | DuplicateOutcome::DeleteFailed { .. }
+                        ) {
+                            duplicate_failures += 1;
+                        }
                         self.observer.duplicate_handled(&file.path, target_path, &outcome);
                     } else {
                         analysis_stats.count_skip(&reason);
@@ -147,7 +164,12 @@ impl VideoConvert<'_> {
         self.observer
             .analysis_finished(&analysis_stats, total_files, start.elapsed());
 
-        output
+        let run_stats = RunStats {
+            files_failed: analysis_stats.analysis_failed + duplicate_failures,
+            duplicates_deleted: analysis_stats.duplicates_deleted,
+            ..RunStats::default()
+        };
+        (output, run_stats)
     }
 }
 

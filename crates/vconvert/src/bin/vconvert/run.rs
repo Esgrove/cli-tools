@@ -5,8 +5,8 @@
 
 use std::sync::atomic::AtomicBool;
 
-use anyhow::Result;
-use cli_tools_vconvert::{Database, VideoConvert};
+use anyhow::{Result, bail, ensure};
+use cli_tools_vconvert::{Database, ProcessingOutcome, RunSummary, VideoConvert};
 use colored::Colorize;
 
 use crate::cli::{DatabaseMode, clean_scan_cache, clear_database, list_extensions, show_database_contents};
@@ -52,7 +52,7 @@ fn run_scan(config: &Config, logger: FileLogger, abort_flag: &AtomicBool) -> Res
     };
 
     reporter.finish(&summary);
-    Ok(())
+    processing_status(&summary)
 }
 
 /// Process the pending files stored in the database, then show what remains there.
@@ -74,5 +74,20 @@ fn run_from_database(config: &Config, logger: FileLogger, abort_flag: &AtomicBoo
         println!("{database_stats}");
     }
 
+    processing_status(&summary)
+}
+
+/// Return the command status after the conversion and database summaries have been printed.
+fn processing_status(summary: &RunSummary) -> Result<()> {
+    if summary.stats.has_successes() {
+        return Ok(());
+    }
+    if summary.outcome == ProcessingOutcome::OutOfDiskSpace {
+        bail!("{}", summary.outcome);
+    }
+    ensure!(
+        summary.stats.files_failed == 0,
+        "No requested video processing succeeded"
+    );
     Ok(())
 }

@@ -39,6 +39,13 @@ static RE_RESOLUTIONS: LazyLock<Regex> = LazyLock::new(|| {
 static RE_FULL_RESOLUTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d{3,4}x\d{3,4}\b").expect("Failed to create regex pattern for full resolutions"));
 
+/// Counts of successful and failed operations, excluding intentional skips.
+#[derive(Default)]
+struct OperationCounts {
+    succeeded: usize,
+    failed: usize,
+}
+
 /// Main entry point for the resolution CLI.
 pub async fn run(config: Config) -> anyhow::Result<()> {
     if config.debug {
@@ -58,15 +65,17 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         println!("Processing {} files...", files.len());
     }
 
-    let mut results = get_resolutions(files).await?;
+    let (results, probe_failures) = get_resolutions(files).await?;
+    let (remaining, deletions) = match config.delete_limit {
+        Some(limit) => delete_low_resolution_files(results, limit, &config),
+        None => (results, OperationCounts::default()),
+    };
+    let renames = add_resolution_labels(&config, remaining);
 
-    // Delete low resolution files if requested
-    if let Some(limit) = config.delete_limit {
-        results = delete_low_resolution_files(results, limit, &config);
-    }
-
-    add_resolution_labels(&config, results);
-
+    anyhow::ensure!(
+        probe_failures + deletions.failed + renames.failed == 0 || deletions.succeeded + renames.succeeded > 0,
+        "No requested resolution work succeeded"
+    );
     Ok(())
 }
 
@@ -74,8 +83,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 ///
 /// Files that already have the correct label are skipped.
 /// Errors during renaming are printed and do not stop processing of remaining files.
-fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
-    // Rename remaining files to add resolution labels
+fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> OperationCounts {
+    let mut counts = OperationCounts::default();
     let mut files_to_process: Vec<(FFProbeResult, PathBuf)> = files
         .into_iter()
         .filter_map(|result| match result.new_path_if_needed() {
@@ -83,6 +92,7 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
             Ok(None) => None,
             Err(err) => {
                 eprintln!("Error: {err}");
+                counts.failed += 1;
                 None
             }
         })
@@ -99,7 +109,7 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
         if config.verbose {
             println!("No video files require renaming");
         }
-        return 0;
+        return counts;
     } else if config.verbose {
         print_bold!("Renaming {}", cli_tools_common::count_label(num_files, "file", "files"));
     }
@@ -109,7 +119,6 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
     // Several files can map to the same target, for example "Movie.mp4" and "Movie.1920x1080.mp4".
     // Only the first one is renamed, so overwrite never replaces a file renamed earlier in the same run.
     let mut reservations = TargetReservations::new();
-    let mut num_renamed = 0;
     for (result, new_path) in files_to_process {
         if !reservations.reserve(&new_path) {
             cli_tools_common::print_error!(
@@ -120,22 +129,30 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
             continue;
         }
         match result.rename(&new_path, config.overwrite, config.dryrun) {
-            Ok(()) => num_renamed += 1,
-            Err(error) => cli_tools_common::print_error!("{error}"),
+            Ok(()) => counts.succeeded += 1,
+            Err(error) => {
+                counts.failed += 1;
+                cli_tools_common::print_error!("{error}");
+            }
         }
     }
 
     let action = if config.dryrun { "Would rename" } else { "Renamed" };
     print_green!(
         "{action} {}",
-        cli_tools_common::count_label(num_renamed, "file", "files")
+        cli_tools_common::count_label(counts.succeeded, "file", "files")
     );
-    num_renamed
+    counts
 }
 
 /// Deletes files with valid non-zero resolution smaller than the given limit.
-/// Returns the remaining files that were not deleted.
-fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: &Config) -> Vec<FFProbeResult> {
+/// Returns the files not selected for deletion and the deletion counts.
+fn delete_low_resolution_files(
+    results: Vec<FFProbeResult>,
+    limit: u32,
+    config: &Config,
+) -> (Vec<FFProbeResult>, OperationCounts) {
+    let mut counts = OperationCounts::default();
     let (to_delete, to_keep): (Vec<_>, Vec<_>) = results.into_iter().partition(|result| {
         result.resolution.width > 0 && result.resolution.height > 0 && result.resolution.is_smaller_than(limit)
     });
@@ -155,11 +172,13 @@ fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: 
         }
 
         print_bold!("Resolution            Path");
-        let mut deleted_count = 0;
         for result in to_delete {
             match result.delete(config.dryrun) {
-                Ok(()) => deleted_count += 1,
-                Err(error) => cli_tools_common::print_error!("{error}"),
+                Ok(()) => counts.succeeded += 1,
+                Err(error) => {
+                    counts.failed += 1;
+                    cli_tools_common::print_error!("{error}");
+                }
             }
         }
 
@@ -167,12 +186,12 @@ fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: 
             if config.dryrun {
                 print_green!(
                     "Would delete {}",
-                    cli_tools_common::count_label(deleted_count, "file", "files")
+                    cli_tools_common::count_label(counts.succeeded, "file", "files")
                 );
             } else {
                 print_green!(
                     "Deleted {}",
-                    cli_tools_common::count_label(deleted_count, "file", "files")
+                    cli_tools_common::count_label(counts.succeeded, "file", "files")
                 );
             }
         }
@@ -180,7 +199,7 @@ fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: 
         println!("No files smaller than {limit}");
     }
 
-    to_keep
+    (to_keep, counts)
 }
 
 /// Return whether `extension` matches a supported video extension, ignoring ASCII case.
@@ -255,11 +274,10 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_limit: Option<u32
     Ok(files)
 }
 
-/// Run ffprobe on all files concurrently and return successfully parsed results.
+/// Run ffprobe concurrently and return the parsed results and failure count.
 ///
-/// Errors from individual ffprobe calls are printed to stderr
-/// and the corresponding files are excluded from the returned results.
-async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<FFProbeResult>> {
+/// Errors from individual ffprobe calls are printed to stderr.
+async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<(Vec<FFProbeResult>, usize)> {
     let semaphore = create_semaphore_for_io_bound();
 
     let progress_bar = Arc::new(ProgressBar::new(files.len() as u64));
@@ -284,14 +302,16 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<FFProbeResul
         })
         .collect();
 
+    let mut failed = 0;
     let mut results: Vec<FFProbeResult> = futures::future::join_all(tasks)
         .await
         .into_iter()
-        .map(|res| res.expect("Download future failed"))
-        .filter_map(|res| match res {
-            Ok(val) => Some(val),
-            Err(err) => {
-                eprintln!("Error: {err}");
+        .map(|result| result.expect("Probe task failed"))
+        .filter_map(|result| match result {
+            Ok(probed) => Some(probed),
+            Err(error) => {
+                eprintln!("Error: {error}");
+                failed += 1;
                 None
             }
         })
@@ -301,7 +321,7 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<FFProbeResul
 
     results.sort_unstable_by(|a, b| a.resolution.cmp(&b.resolution).then_with(|| a.file.cmp(&b.file)));
 
-    Ok(results)
+    Ok((results, failed))
 }
 
 /// Run ffprobe on a single file and parse the output into an `FFProbeResult`.
@@ -918,7 +938,8 @@ mod test_gather_video_files {
             },
         ];
 
-        let kept = delete_low_resolution_files(results, 500, &config);
+        let (kept, deletions) = delete_low_resolution_files(results, 500, &config);
+        assert_eq!(deletions.succeeded, 1);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].file, zero_path);
         assert!(zero_path.exists());
@@ -1011,7 +1032,7 @@ mod test_add_resolution_labels {
 
         let renamed = add_resolution_labels(&config, results);
 
-        assert_eq!(renamed, 1);
+        assert_eq!(renamed.succeeded, 1);
     }
 }
 
@@ -1058,7 +1079,7 @@ mod test_delete_low_resolution_files {
             result("exact.mp4", 1280, 720),
         ];
 
-        let remaining = delete_low_resolution_files(results, 720, &config(true));
+        let (remaining, _) = delete_low_resolution_files(results, 720, &config(true));
 
         assert_eq!(kept(&remaining), vec!["exact.mp4", "large.mp4"]);
     }
@@ -1067,14 +1088,14 @@ mod test_delete_low_resolution_files {
     fn nothing_below_the_limit_keeps_every_file() {
         let results = vec![result("large.mp4", 1920, 1080), result("exact.mp4", 1280, 720)];
 
-        let remaining = delete_low_resolution_files(results, 720, &config(true));
+        let (remaining, _) = delete_low_resolution_files(results, 720, &config(true));
 
         assert_eq!(kept(&remaining), vec!["exact.mp4", "large.mp4"]);
     }
 
     #[test]
     fn an_empty_list_stays_empty() {
-        let remaining = delete_low_resolution_files(Vec::new(), 720, &config(false));
+        let (remaining, _) = delete_low_resolution_files(Vec::new(), 720, &config(false));
 
         assert_eq!(remaining, [] as [FFProbeResult; 0]);
     }
@@ -1083,7 +1104,7 @@ mod test_delete_low_resolution_files {
     fn a_quiet_run_reports_less_but_keeps_the_same_files() {
         let results = vec![result("small.mp4", 640, 480), result("large.mp4", 1920, 1080)];
 
-        let remaining = delete_low_resolution_files(results, 720, &config(false));
+        let (remaining, _) = delete_low_resolution_files(results, 720, &config(false));
 
         assert_eq!(kept(&remaining), vec!["large.mp4"]);
     }
@@ -1346,7 +1367,7 @@ mod test_add_resolution_labels_in_trees {
 
         let renamed = add_resolution_labels(&config(&tree, false, false), files);
 
-        assert_eq!(renamed, 3);
+        assert_eq!(renamed.succeeded, 3);
         assert_eq!(
             tree.snapshot(),
             vec![
@@ -1370,7 +1391,7 @@ mod test_add_resolution_labels_in_trees {
 
         let renamed = add_resolution_labels(&config(&tree, true, false), files);
 
-        assert_eq!(renamed, 2);
+        assert_eq!(renamed.succeeded, 2);
         assert_eq!(tree.snapshot(), before);
     }
 
@@ -1383,7 +1404,7 @@ mod test_add_resolution_labels_in_trees {
 
         let renamed = add_resolution_labels(&config(&tree, false, false), files);
 
-        assert_eq!(renamed, 1);
+        assert_eq!(renamed.succeeded, 1);
         assert_eq!(tree.files().len(), 2, "{:?}", tree.snapshot());
     }
 
@@ -1396,7 +1417,7 @@ mod test_add_resolution_labels_in_trees {
 
         let renamed = add_resolution_labels(&config(&tree, false, true), files);
 
-        assert_eq!(renamed, 1);
+        assert_eq!(renamed.succeeded, 1);
         let snapshot = tree.snapshot();
         assert_eq!(tree.files().len(), 2, "{snapshot:?}");
         assert!(snapshot.iter().any(|entry| entry.ends_with(": plain")), "{snapshot:?}");
@@ -1429,7 +1450,7 @@ mod test_add_resolution_labels_in_trees {
 
         let renamed = add_resolution_labels(&config(&tree, false, true), files);
 
-        assert_eq!(renamed, 1);
+        assert_eq!(renamed.succeeded, 1);
         assert_eq!(tree.snapshot(), vec!["dir/", "dir/movie.1080p.mp4: new"]);
     }
 }
