@@ -303,7 +303,7 @@ impl ThumbnailCreator {
             )
         };
 
-        let num_shots = cols * rows;
+        let num_shots = cols.saturating_mul(rows).max(1);
         let interval = match video_info.duration {
             Some(duration) if duration > 0.0 => duration / f64::from(num_shots),
             _ => 1.0,

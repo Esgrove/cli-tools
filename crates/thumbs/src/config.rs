@@ -158,7 +158,7 @@ impl Config {
         let rows_portrait = args.rows.or(user_config.rows_portrait).unwrap_or(DEFAULT_ROWS_PORTRAIT);
         let scale_width = args.scale.or(user_config.scale_width).unwrap_or(DEFAULT_SCALE_WIDTH);
 
-        Ok(Self {
+        let config = Self {
             cols_landscape,
             cols_portrait,
             dryrun: args.print || user_config.dryrun,
@@ -172,7 +172,31 @@ impl Config {
             rows_portrait,
             scale_width,
             verbose: args.verbose || user_config.verbose,
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate that grid dimensions, scale width, and JPEG quality are usable.
+    fn validate(&self) -> Result<()> {
+        if self.cols_landscape == 0 || self.cols_portrait == 0 {
+            anyhow::bail!("Number of columns must be greater than 0");
+        }
+        if self.rows_landscape == 0 || self.rows_portrait == 0 {
+            anyhow::bail!("Number of rows must be greater than 0");
+        }
+        if self.cols_landscape.checked_mul(self.rows_landscape).is_none()
+            || self.cols_portrait.checked_mul(self.rows_portrait).is_none()
+        {
+            anyhow::bail!("Thumbnail grid size (cols * rows) overflows supported range");
+        }
+        if self.scale_width == 0 {
+            anyhow::bail!("Thumbnail scale width must be greater than 0");
+        }
+        if !(1..=31).contains(&self.quality) {
+            anyhow::bail!("JPEG quality must be between 1 and 31, got {}", self.quality);
+        }
+        Ok(())
     }
 }
 
@@ -335,5 +359,23 @@ mod test_config_from_args {
         assert!(config.overwrite);
         assert!(config.recurse);
         assert!(config.verbose);
+    }
+
+    #[test]
+    fn rejects_zero_grid_scale_overflow_and_out_of_range_quality() {
+        for bad_args in [
+            vec!["thumbs", "--cols", "0"],
+            vec!["thumbs", "--rows", "0"],
+            vec!["thumbs", "--scale", "0"],
+            vec!["thumbs", "--quality", "0"],
+            vec!["thumbs", "--quality", "32"],
+            vec!["thumbs", "--cols", "100000", "--rows", "100000"],
+        ] {
+            let args = ThumbnailArgs::try_parse_from(&bad_args).expect("args parse");
+            assert!(
+                Config::from_args(&args).is_err(),
+                "expected invalid config error for {bad_args:?}"
+            );
+        }
     }
 }
