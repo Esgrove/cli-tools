@@ -145,3 +145,69 @@ fn a_valid_remux_replaces_the_original() {
 
     assert_eq!(file_names(&sandbox.videos()), vec!["show.x265.mp4"]);
 }
+
+#[test]
+fn forced_abort_during_retry_leaves_pending_work_retryable() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let sandbox = Sandbox::new(
+        r#"#!/bin/sh
+for argument; do last=$argument; done
+case $* in *hwupload_cuda*) exit 1;; esac
+printf 'partial hevc header' > "$last"
+echo 'retry wrote header'
+exec /bin/sleep 15
+"#,
+    );
+    let original = sandbox.videos().join("show.mkv");
+    let final_output = sandbox.videos().join("show.x265.mp4");
+    fs::write(&original, b"h264 source and plenty of video data").unwrap();
+    let mut child = sandbox
+        .command(&["--delete"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line.contains("retry wrote header") || line.contains("Received Ctrl+C") {
+                let _ = sender.send(line);
+            }
+        }
+    });
+    let abort = || {
+        Command::new("/bin/kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "retry wrote header"
+    );
+    assert!(abort());
+    assert!(
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .contains("Received Ctrl+C")
+    );
+    assert!(abort());
+    child.wait().unwrap();
+    reader.join().unwrap();
+
+    assert!(original.exists());
+    assert!(!final_output.exists(), "retry published an unvalidated header");
+
+    sandbox.write_script("ffmpeg", FAKE_FFMPEG);
+    let replay = sandbox.run(&["--from-db", "--delete"]);
+    assert!(replay.status.success());
+    assert!(!original.exists(), "pending conversion was not retried");
+    assert_eq!(fs::read_to_string(final_output).unwrap(), "hevc converted video data\n");
+}
