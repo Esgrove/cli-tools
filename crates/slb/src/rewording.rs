@@ -702,7 +702,7 @@ mod test_rewording {
         let source = "Use pre`foo; bar`post in the example.\n";
         let formatted = crate::format(source, crate::FileKind::Markdown, &FormatOptions::default());
         assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source);
-        assert!(formatted.violations.is_empty());
+        assert_eq!(formatted.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -710,7 +710,7 @@ mod test_rewording {
         let source = "Use `foo;\nbar` in the example.\n";
         let formatted = crate::format(source, crate::FileKind::Markdown, &FormatOptions::default());
         assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source);
-        assert!(formatted.violations.is_empty());
+        assert_eq!(formatted.violations, [] as [Violation; 0]);
     }
 
     #[test]
@@ -723,7 +723,7 @@ mod test_rewording {
                 source,
                 "{reference}"
             );
-            assert!(formatted.violations.is_empty());
+            assert_eq!(formatted.violations, [] as [Violation; 0]);
         }
     }
 
@@ -738,7 +738,7 @@ mod test_rewording {
     fn an_html_reference_inside_quotes_is_not_reported_as_a_semicolon() {
         let outcome = reflow(&["the key is \"Tietokoneet &amp; tabletit\" in the source data"], 120);
         assert_eq!(outcome.lines, None);
-        assert!(outcome.violations.is_empty());
+        assert_eq!(outcome.violations, [] as [Violation; 0]);
     }
 
     #[test]

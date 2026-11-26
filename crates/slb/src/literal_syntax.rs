@@ -69,7 +69,7 @@ impl Heredoc {
 /// Whether a Make line is part of a definition and must stay verbatim.
 ///
 /// GNU Make counts nested directives, but a tab-prefixed line is part of the value, not a directive.
-pub(super) fn inside_make_definition(line: &str, depth: &mut usize) -> bool {
+pub fn inside_make_definition(line: &str, depth: &mut usize) -> bool {
     let already_inside = *depth > 0;
     if !line.starts_with('\t') {
         let trimmed = line.trim_start();

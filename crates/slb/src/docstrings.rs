@@ -342,7 +342,7 @@ mod test_docstring_parsing {
                 let lines = [opening.as_str(), escaped.as_str(), "Actual body.", quote];
                 let docstring = Docstring::at(&lines, 0).unwrap();
                 assert_eq!(docstring.close_line, 3, "{lines:?}");
-                assert!(docstring.closing_text.is_empty());
+                assert_eq!(docstring.closing_text, "");
             }
         }
     }
@@ -412,7 +412,7 @@ mod test_docstring_position {
         );
         let formatted = crate::format(source, FileKind::Python, &FormatOptions::default());
         assert_eq!(formatted.fixed_text.as_deref().unwrap_or(source), source);
-        assert!(formatted.violations.is_empty());
+        assert_eq!(formatted.violations, [] as [Violation; 0]);
     }
 
     #[test]

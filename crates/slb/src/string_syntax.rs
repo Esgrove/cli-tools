@@ -111,7 +111,9 @@ impl StringSyntax {
         } else {
             b'/'
         };
-        normal[triggers.len() - 1] = raw;
+        if let Some(last) = normal.last_mut() {
+            *last = raw;
+        }
         let block_comment_set = match self.block_comment {
             Some((open, close)) => {
                 let close = first_byte_or_slash(close);
