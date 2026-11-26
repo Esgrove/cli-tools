@@ -523,6 +523,7 @@ fn same_entry_metadata_without_following(left: &Path, right: &Path) -> Option<(b
     }
 }
 
+/// Fallback when neither Unix nor Windows file identity metadata is available.
 #[cfg(not(any(unix, windows)))]
 const fn same_entry_metadata_without_following(_left: &Path, _right: &Path) -> Option<(bool, u64)> {
     None
@@ -539,6 +540,7 @@ fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Compare Windows volume serial number and file index, following symbolic links.
 #[cfg(windows)]
 fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
     let Some((left_id, _)) = windows_file_identity(left, true) else {
@@ -551,6 +553,7 @@ fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
     left_id == right_id
 }
 
+/// Read the Windows volume serial, file index, and link count for `path`.
 #[cfg(windows)]
 fn windows_file_identity(path: &Path, follow_symlinks: bool) -> Option<((u32, u32, u32), u32)> {
     use std::os::windows::ffi::OsStrExt;
@@ -600,11 +603,13 @@ fn windows_file_identity(path: &Path, follow_symlinks: bool) -> Option<((u32, u3
     }
 }
 
+/// Fallback when neither Unix nor Windows file identity metadata is available.
 #[cfg(not(any(unix, windows)))]
 const fn paths_refer_to_same_file_by_metadata(_left: &Path, _right: &Path) -> bool {
     false
 }
 
+/// Compare two paths after canonicalizing both of them.
 fn paths_refer_to_same_file_by_canonical_path(left: &Path, right: &Path) -> bool {
     match (dunce::canonicalize(left), dunce::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,

@@ -56,6 +56,7 @@ static RE_SHORT_DATE_YEAR_FIRST: LazyLock<Regex> = LazyLock::new(|| {
     .expect("Failed to create regex pattern for short date")
 });
 
+/// A validated calendar date with year, month, and day components.
 pub struct Date {
     pub year: i32,
     pub month: i32,
