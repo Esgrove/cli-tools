@@ -222,11 +222,12 @@ fn version_tag(
             if !from_project_path && !root_fallback.accepts(content) {
                 continue;
             }
-            let version_number = parse_version(content, project_type).or_else(|| {
-                (project_type == ProjectType::Rust && inherits_workspace_version(content))
-                    .then(|| workspace_version_in_tree(&repo, &tree, &manifest_path))
-                    .flatten()
-            });
+            let source_path = if from_project_path {
+                &manifest_path
+            } else {
+                Path::new(manifest_filename)
+            };
+            let version_number = parse_version(content, project_type, &repo, &tree, source_path);
             let Some(version_number) = version_number else {
                 if verbose {
                     println!(
@@ -502,55 +503,97 @@ fn find_manifest_entry(
     tree.get_path(Path::new(file_name)).ok().map(|entry| (entry, false))
 }
 
-/// Parse the version string from the given file content based on the project type.
-fn parse_version(content: &str, project_type: ProjectType) -> Option<String> {
+/// Parse the version from the manifest and resolve Cargo workspace inheritance from the same commit.
+fn parse_version(
+    content: &str,
+    project_type: ProjectType,
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    manifest_path: &Path,
+) -> Option<String> {
     match project_type {
         ProjectType::CMake => parse_cmake_version(content),
         ProjectType::Python => parse_pyproject_toml_version(content),
-        ProjectType::Rust => parse_cargo_toml_version(content),
+        ProjectType::Rust => parse_cargo_toml_version(content, |explicit_workspace| {
+            workspace_manifest_in_tree(repo, tree, manifest_path, explicit_workspace)
+        }),
     }
 }
 
-/// Parse version from Cargo.toml content.
-///
-/// Reads `[package].version`, or `[workspace.package].version` for a virtual workspace manifest.
-fn parse_cargo_toml_version(content: &str) -> Option<String> {
-    let toml_value: toml::Value = toml::from_str(content).ok()?;
-    toml_value
-        .get("package")
-        .or_else(|| toml_value.get("workspace")?.get("package"))?
+/// Read the Cargo package version, resolving workspace inheritance if requested.
+fn parse_cargo_toml_version(
+    content: &str,
+    find_workspace: impl FnOnce(Option<&str>) -> Option<toml::Value>,
+) -> Option<String> {
+    let manifest: toml::Value = toml::from_str(content).ok()?;
+    let Some(package) = manifest.get("package") else {
+        return workspace_package_version(&manifest);
+    };
+    let version = package.get("version")?;
+    if let Some(version) = version.as_str() {
+        return Some(version.to_owned());
+    }
+    if version.get("workspace")?.as_bool() != Some(true) {
+        return None;
+    }
+    if manifest.get("workspace").is_some() {
+        return workspace_package_version(&manifest);
+    }
+    let explicit_workspace = match package.get("workspace") {
+        Some(path) => Some(path.as_str()?),
+        None => None,
+    };
+    workspace_package_version(&find_workspace(explicit_workspace)?)
+}
+
+/// Read `[workspace.package].version` for a virtual workspace or an inheriting package.
+fn workspace_package_version(manifest: &toml::Value) -> Option<String> {
+    manifest
+        .get("workspace")?
+        .get("package")?
         .get("version")?
         .as_str()
-        .map(ToString::to_string)
+        .map(str::to_owned)
 }
 
-/// Whether a member `Cargo.toml` takes its version from the workspace with `version.workspace = true`.
-fn inherits_workspace_version(content: &str) -> bool {
-    toml::from_str::<toml::Value>(content).is_ok_and(|value| {
-        value
-            .get("package")
-            .and_then(|package| package.get("version"))
-            .and_then(|version| version.get("workspace"))
-            .and_then(toml::Value::as_bool)
-            == Some(true)
-    })
-}
-
-/// Read the workspace version for a member manifest from the nearest workspace manifest above it in a commit.
-fn workspace_version_in_tree(repo: &Repository, tree: &git2::Tree<'_>, manifest_path: &Path) -> Option<String> {
+/// Find the explicitly configured workspace or the nearest ancestor workspace in the commit tree.
+fn workspace_manifest_in_tree(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    manifest_path: &Path,
+    explicit_workspace: Option<&str>,
+) -> Option<toml::Value> {
     let file_name = manifest_path.file_name()?;
-    manifest_path.parent()?.ancestors().skip(1).find_map(|directory| {
+    let package_directory = manifest_path.parent()?;
+    let read_workspace = |directory: &Path| {
         let entry = tree.get_path(&directory.join(file_name)).ok()?;
         let blob = entry.to_object(repo).ok()?.into_blob().ok()?;
         let content = std::str::from_utf8(blob.content()).ok()?;
-        let value: toml::Value = toml::from_str(content).ok()?;
-        value
-            .get("workspace")?
-            .get("package")?
-            .get("version")?
-            .as_str()
-            .map(ToString::to_string)
-    })
+        let manifest: toml::Value = toml::from_str(content).ok()?;
+        manifest.get("workspace")?.as_table()?;
+        Some(manifest)
+    };
+    if let Some(explicit_workspace) = explicit_workspace {
+        let directory = resolve_workspace_path(package_directory, Path::new(explicit_workspace))?;
+        return read_workspace(&directory);
+    }
+    package_directory.ancestors().skip(1).find_map(read_workspace)
+}
+
+/// Resolve a relative Cargo workspace path without consulting the working tree.
+///
+/// Absolute paths and paths escaping the repository cannot be read from a commit tree.
+fn resolve_workspace_path(package_directory: &Path, explicit_workspace: &Path) -> Option<PathBuf> {
+    let mut directory = package_directory.to_path_buf();
+    for component in explicit_workspace.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => directory.push(name),
+            std::path::Component::ParentDir if directory.pop() => {}
+            _ => return None,
+        }
+    }
+    Some(directory)
 }
 
 /// Parse version from CMakeLists.txt `project()` declaration.
@@ -664,31 +707,26 @@ mod test_version_parsing {
         let content = "[package]\nname = \"demo\"\nversion = \"1.2.3\"";
         let parsed: toml::Value = toml::from_str(content).expect("valid Cargo TOML should parse");
         assert!(parsed.get("package").is_some());
-        assert_eq!(parse_cargo_toml_version(content), Some("1.2.3".to_string()));
-        assert_eq!(
-            parse_version("[package]\nversion = \"1.2.3\"", ProjectType::Rust),
-            Some("1.2.3".to_string())
-        );
+        assert_eq!(parse_cargo_toml_version(content, |_| None).as_deref(), Some("1.2.3"));
     }
 
     #[test]
     fn parses_cargo_workspace_package_version() {
         let content = "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"0.3.0\"";
-        assert_eq!(parse_cargo_toml_version(content), Some("0.3.0".to_string()));
+        assert_eq!(parse_cargo_toml_version(content, |_| None).as_deref(), Some("0.3.0"));
     }
 
     #[test]
     fn cargo_parser_rejects_invalid_or_missing_versions() {
-        assert_eq!(parse_cargo_toml_version("invalid = ["), None);
-        assert_eq!(parse_cargo_toml_version("[workspace]"), None);
-        assert_eq!(parse_cargo_toml_version("[package]\nversion = 123"), None);
+        assert_eq!(parse_cargo_toml_version("invalid = [", |_| None), None);
+        assert_eq!(parse_cargo_toml_version("[workspace]", |_| None), None);
+        assert_eq!(parse_cargo_toml_version("[package]\nversion = 123", |_| None), None);
     }
 
     #[test]
     fn parses_python_project_version() {
         let content = "[project]\nname = \"demo\"\nversion = \"2.0.1\"";
         assert_eq!(parse_pyproject_toml_version(content), Some("2.0.1".to_string()));
-        assert_eq!(parse_version(content, ProjectType::Python), Some("2.0.1".to_string()));
     }
 
     #[test]
@@ -709,8 +747,8 @@ mod test_version_parsing {
             Some("3.4.5.6".to_string())
         );
         assert_eq!(
-            parse_version("project(Demo VERSION 3.4.5)", ProjectType::CMake),
-            Some("3.4.5".to_string())
+            parse_cmake_version("project(Demo VERSION 3.4.5)").as_deref(),
+            Some("3.4.5")
         );
     }
 
@@ -1027,6 +1065,13 @@ mod test_subdirectory_projects {
         format!("[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"{version}\"\n")
     }
 
+    /// Cargo workspace manifest whose root package inherits the workspace version.
+    fn workspace_root_package(version: &str) -> String {
+        format!(
+            "[package]\nname = \"app\"\nversion.workspace = true\n\n[workspace]\n\n[workspace.package]\nversion = \"{version}\"\n"
+        )
+    }
+
     #[test]
     fn tags_a_workspace_in_a_subdirectory_with_a_prefix() {
         let (directory, repository) = empty_repository();
@@ -1164,6 +1209,95 @@ mod test_subdirectory_projects {
 
         version_tag(&root.join("crates/member"), false, false, true, false, false, "").expect("tagging should succeed");
 
+        assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0"]);
+    }
+
+    /// A root package reads its version from the workspace table in the same manifest.
+    #[test]
+    fn a_workspace_root_package_inherits_its_own_workspace_version() {
+        let (directory, repository) = empty_repository();
+        for version in ["1.0.0", "1.1.0"] {
+            commit_changes(
+                &repository,
+                directory.path(),
+                &[("Cargo.toml", Some(&workspace_root_package(version)))],
+            );
+        }
+
+        version_tag(&directory.path().to_path_buf(), false, false, true, false, false, "").unwrap();
+        assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0"]);
+    }
+
+    /// An explicitly selected workspace can be a sibling of the member's parent directory.
+    #[test]
+    fn a_member_uses_the_explicit_workspace_from_each_commit() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        let member = "[package]\nname = \"member\"\nworkspace = \"../.././workspace\"\nversion.workspace = true\n";
+        let workspace = |version| {
+            format!("[workspace]\nmembers = [\"../crates/member\"]\n\n[workspace.package]\nversion = \"{version}\"\n")
+        };
+        commit_changes(
+            &repository,
+            root,
+            &[
+                ("Cargo.toml", Some(&workspace_manifest("9.0.0"))),
+                ("workspace/Cargo.toml", Some(&workspace("1.0.0"))),
+                ("crates/member/Cargo.toml", Some(member)),
+            ],
+        );
+        commit_changes(&repository, root, &[("workspace/Cargo.toml", None)]);
+        commit_changes(
+            &repository,
+            root,
+            &[("workspace/Cargo.toml", Some(&workspace("1.1.0")))],
+        );
+
+        version_tag(&directory.join("crates/member"), false, false, true, false, false, "").unwrap();
+        assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0"]);
+    }
+
+    /// A workspace with no inherited version does not borrow one from an outer workspace.
+    #[test]
+    fn a_member_does_not_skip_its_nearest_workspace_when_it_has_no_version() {
+        let (directory, repository) = empty_repository();
+        commit_changes(
+            &repository,
+            directory.path(),
+            &[
+                ("Cargo.toml", Some(&workspace_manifest("9.0.0"))),
+                ("nested/Cargo.toml", Some("[workspace]\nmembers = [\"member\"]\n")),
+                (
+                    "nested/member/Cargo.toml",
+                    Some("[package]\nname = \"member\"\nversion.workspace = true\n"),
+                ),
+            ],
+        );
+
+        version_tag(&directory.join("nested/member"), false, false, true, false, false, "").unwrap();
+        assert_eq!(tag_names(&repository), [] as [String; 0]);
+    }
+
+    /// Historical root manifests inherit from the old location, not the current subdirectory.
+    #[test]
+    fn a_moved_workspace_root_inherits_versions_from_its_historical_manifest() {
+        let (directory, repository) = empty_repository();
+        let root = directory.path();
+        commit_changes(
+            &repository,
+            root,
+            &[("Cargo.toml", Some(&workspace_root_package("1.0.0")))],
+        );
+        commit_changes(
+            &repository,
+            root,
+            &[
+                ("Cargo.toml", None),
+                ("rust/Cargo.toml", Some(&workspace_root_package("1.1.0"))),
+            ],
+        );
+
+        version_tag(&directory.join("rust"), false, false, true, false, false, "").unwrap();
         assert_eq!(tag_names(&repository), vec!["v1.0.0", "v1.1.0"]);
     }
 
