@@ -135,10 +135,9 @@ impl<'config> RunContext<'config> {
         }
     }
 
-    /// Project width source for the directory of the given file.
+    /// Project width source for the given file.
     fn width_source(&self, file: &Path, kind: FileKind) -> Option<&WidthSource> {
-        let directory = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-        self.widths.get(&(directory, kind))?.as_ref()
+        self.widths.get(&(file.to_path_buf(), kind))?.as_ref()
     }
 
     /// Path of the file as it should be printed.
@@ -147,22 +146,19 @@ impl<'config> RunContext<'config> {
     }
 }
 
-/// Width source for every directory and file kind of the run, resolved once per directory.
+/// Width source for every file and file kind of the run, resolved in parallel.
 ///
+/// Keying by `(file, kind)` ensures filename-specific `.editorconfig` globs
+/// (such as `[README.md]` vs `[*.md]`) apply accurately to sibling files.
 /// Returns an empty map when the width cannot come from a project config file,
 /// so nothing is read from disk in that case.
 fn resolve_project_widths(config: &Config, files: &[(PathBuf, FileKind)]) -> HashMap<WidthKey, Option<WidthSource>> {
     if config.width.is_some() || !config.project_width {
         return HashMap::new();
     }
-    let mut directories: HashMap<WidthKey, PathBuf> = HashMap::new();
-    for (file, kind) in files {
-        let directory = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-        directories.entry((directory, *kind)).or_insert_with(|| file.clone());
-    }
-    directories
-        .into_par_iter()
-        .map(|((directory, kind), file)| ((directory, kind), discover_width(&file, kind)))
+    files
+        .par_iter()
+        .map(|(file, kind)| ((file.clone(), *kind), discover_width(file, *kind)))
         .collect()
 }
 
@@ -194,9 +190,11 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 
     let outcomes = process_files(&files, &config)?;
     let mut summary = Summary::default();
+    let mut has_error = false;
     for outcome in &outcomes {
         if let Some(error) = &outcome.error {
             print_error!("{error}");
+            has_error = true;
         }
         for line in &outcome.lines {
             println!("{line}");
@@ -212,11 +210,12 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
     print_summary(&summary, &config);
 
-    let failed = if config.fix {
-        summary.remaining > 0
-    } else {
-        summary.violations > 0
-    };
+    let failed = has_error
+        || if config.fix {
+            summary.remaining > 0
+        } else {
+            summary.violations > 0
+        };
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
@@ -809,5 +808,26 @@ mod test_run {
                 .expect("file should be readable")
                 .contains("/// One sentence\n/// that is already quite long.\n")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_returns_failure_exit_code() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let path = directory.path().join("unreadable.md");
+        fs::write(&path, "Some prose. Another sentence.\n").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+
+        let unreadable = fs::read_to_string(&path).is_err();
+        let arguments = ["slb", path.to_str().expect("path should be unicode")];
+        let args = clap::Parser::try_parse_from(arguments).expect("parse args");
+        let code = run(&args).expect("run should return exit code");
+
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o644));
+        if unreadable {
+            assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::FAILURE));
+        }
     }
 }

@@ -27,6 +27,16 @@ static RE_COLUMN_LIMIT: LazyLock<Regex> =
 static RE_LINE_LENGTH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""?line_length"?\s*[:=]\s*(\d+)"#).expect("Invalid line_length regex"));
 
+/// Outcome of checking one `.editorconfig` file for a matching `max_line_length` setting.
+enum EditorConfigWidth {
+    /// A numeric line length was set for the file.
+    Width(WidthSource),
+    /// `max_line_length = off` explicitly disabled line length inheritance.
+    Off,
+    /// No matching `max_line_length` setting was present.
+    Unset,
+}
+
 /// A discovered line width limit and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidthSource {
@@ -52,10 +62,17 @@ impl WidthResolver {
         Self::default()
     }
 
-    /// Width for the given file, using the cache when the directory was seen before.
+    /// Width for the given file, using the cache when seen before.
+    ///
+    /// Directories that inherit an `.editorconfig` cache per file so filename globs
+    /// such as `[README.md]` vs `[*.md]` resolve independently.
     pub fn resolve(&mut self, file: &Path, kind: FileKind) -> Option<WidthSource> {
-        let directory = file.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-        let key = (directory, kind);
+        let key_path = if has_editorconfig_ancestor(file) {
+            file.to_path_buf()
+        } else {
+            file.parent().map_or_else(PathBuf::new, Path::to_path_buf)
+        };
+        let key = (key_path, kind);
         if let Some(cached) = self.cache.get(&key) {
             return cached.clone();
         }
@@ -65,14 +82,28 @@ impl WidthResolver {
     }
 }
 
+/// Whether `file` or any of its ancestor directories contains an `.editorconfig` file.
+fn has_editorconfig_ancestor(file: &Path) -> bool {
+    file.parent().is_some_and(|start| {
+        start
+            .ancestors()
+            .any(|directory| directory.join(".editorconfig").is_file())
+    })
+}
+
 /// Walk up from the file's directory and return the first applicable line width limit.
 #[must_use]
 pub fn discover_width(file: &Path, kind: FileKind) -> Option<WidthSource> {
     let start = file.parent()?;
+    let mut editorconfig_off = false;
     for directory in start.ancestors() {
         let (editorconfig, is_root) = editorconfig_width(directory, file);
-        if editorconfig.is_some() {
-            return editorconfig;
+        if !editorconfig_off {
+            match editorconfig {
+                EditorConfigWidth::Width(source) => return Some(source),
+                EditorConfigWidth::Off => editorconfig_off = true,
+                EditorConfigWidth::Unset => {}
+            }
         }
         let specific = match kind {
             FileKind::Rust => rustfmt_width(directory),
@@ -93,10 +124,10 @@ pub fn discover_width(file: &Path, kind: FileKind) -> Option<WidthSource> {
 }
 
 /// Width from an `.editorconfig` in the directory, and whether that file declares itself the root.
-fn editorconfig_width(directory: &Path, file: &Path) -> (Option<WidthSource>, bool) {
+fn editorconfig_width(directory: &Path, file: &Path) -> (EditorConfigWidth, bool) {
     let path = directory.join(".editorconfig");
     let Ok(content) = fs::read_to_string(&path) else {
-        return (None, false);
+        return (EditorConfigWidth::Unset, false);
     };
     let relative = file
         .strip_prefix(directory)
@@ -131,19 +162,27 @@ fn editorconfig_width(directory: &Path, file: &Path) -> (Option<WidthSource>, bo
             if value.eq_ignore_ascii_case("off") {
                 found_off = true;
                 width = None;
-            } else if let Ok(parsed) = value.parse::<usize>() {
+            } else if let Ok(parsed) = value.parse::<usize>()
+                && parsed > 0
+            {
                 found_off = false;
                 width = Some(parsed);
             }
         }
     }
-    let _ = found_off;
-    let source = width.map(|width| WidthSource {
-        width,
-        file: path,
-        key: "max_line_length".to_string(),
+    let fallback = if found_off {
+        EditorConfigWidth::Off
+    } else {
+        EditorConfigWidth::Unset
+    };
+    let result = width.map_or(fallback, |width| {
+        EditorConfigWidth::Width(WidthSource {
+            width,
+            file: path,
+            key: "max_line_length".to_string(),
+        })
     });
-    (source, is_root)
+    (result, is_root)
 }
 
 /// Whether an editorconfig section glob matches the file.
@@ -257,6 +296,8 @@ fn prettier_width(directory: &Path) -> Option<WidthSource> {
 }
 
 /// Width from `.clang-format`.
+///
+/// `ColumnLimit: 0` means no column limit in clang-format and is ignored.
 fn clang_format_width(directory: &Path) -> Option<WidthSource> {
     [".clang-format", "_clang-format"].iter().find_map(|name| {
         let path = directory.join(name);
@@ -264,7 +305,8 @@ fn clang_format_width(directory: &Path) -> Option<WidthSource> {
         let width = RE_COLUMN_LIMIT
             .captures(&content)
             .and_then(|captures| captures.get(1))
-            .and_then(|group| group.as_str().parse::<usize>().ok())?;
+            .and_then(|group| group.as_str().parse::<usize>().ok())
+            .filter(|&width| width > 0)?;
         Some(WidthSource {
             width,
             file: path,
@@ -806,5 +848,54 @@ mod test_width_resolver {
             Some(100)
         );
         assert_eq!(resolver.resolve(&python_file, FileKind::Python), None);
+    }
+
+    #[test]
+    fn clang_format_column_limit_zero_is_ignored() {
+        let root = temp_root();
+        write_file(root.path(), ".clang-format", "ColumnLimit: 0\n");
+        let cpp_file = file_path(root.path(), "main.cpp");
+
+        assert_eq!(
+            discover_width(&cpp_file, FileKind::CLike),
+            None,
+            "ColumnLimit: 0 means unlimited and must not be treated as width 0"
+        );
+    }
+
+    #[test]
+    fn editorconfig_max_line_length_off_stops_inheriting_parent_width() {
+        let root = temp_root();
+        write_file(root.path(), ".editorconfig", "[*.md]\nmax_line_length = 80\n");
+        write_file(root.path(), "sub/.editorconfig", "[*.md]\nmax_line_length = off\n");
+        let child_md = file_path(root.path(), "sub/doc.md");
+
+        assert_eq!(
+            discover_width(&child_md, FileKind::Markdown),
+            None,
+            "child max_line_length = off must override parent .editorconfig"
+        );
+    }
+
+    #[test]
+    fn width_resolver_distinguishes_sibling_files_matching_different_editorconfig_globs() {
+        let root = temp_root();
+        write_file(
+            root.path(),
+            ".editorconfig",
+            "[*.md]\nmax_line_length = 80\n\n[README.md]\nmax_line_length = 120\n",
+        );
+        let other_md = file_path(root.path(), "NOTES.md");
+        let readme_md = file_path(root.path(), "README.md");
+        let mut resolver = WidthResolver::new();
+
+        assert_eq!(
+            resolver.resolve(&other_md, FileKind::Markdown).map(|s| s.width),
+            Some(80)
+        );
+        assert_eq!(
+            resolver.resolve(&readme_md, FileKind::Markdown).map(|s| s.width),
+            Some(120)
+        );
     }
 }
