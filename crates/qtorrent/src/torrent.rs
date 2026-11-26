@@ -68,6 +68,8 @@ pub struct Info {
     pub pieces: ByteBuf,
     #[serde(default)]
     pub private: Option<u8>,
+    #[serde(default, rename = "meta version")]
+    pub meta_version: Option<u8>,
     #[serde(default)]
     #[serde(rename = "root hash")]
     pub root_hash: Option<String>,
@@ -138,7 +140,12 @@ impl Torrent {
     /// The error message includes the path to the field where parsing failed, for example "info.files[3].path".
     pub fn from_buffer(buffer: &[u8]) -> Result<Self> {
         let mut deserializer = serde_bencode::de::Deserializer::new(buffer);
-        serde_path_to_error::deserialize(&mut deserializer).context("Failed to parse torrent file")
+        let torrent: Self =
+            serde_path_to_error::deserialize(&mut deserializer).context("Failed to parse torrent file")?;
+        if torrent.info.meta_version == Some(2) && torrent.info.pieces.is_empty() {
+            anyhow::bail!("BitTorrent v2-only (BEP 52) torrents are not supported");
+        }
+        Ok(torrent)
     }
 
     /// Calculate SHA-1 info hash directly from raw torrent bytes.
@@ -1715,6 +1722,23 @@ mod test_parse_torrent_all_files_excluded {
         assert!(!info.all_files_excluded());
         assert_eq!(info.excluded_indices, [] as [usize; 0]);
         assert_eq!(info.included_size, 1000);
+    }
+
+    #[test]
+    fn rejects_bittorrent_v2_only_torrent_while_accepting_hybrid_v1_v2() {
+        // BEP 52 v2-only torrent: meta version = 2 and no v1 pieces field.
+        let v2_only = b"d4:infod12:meta versioni2e4:name4:test12:piece lengthi16384eee";
+        let error = Torrent::from_buffer(v2_only).expect_err("v2-only torrent must be rejected");
+        assert!(
+            error.to_string().contains("v2"),
+            "expected clear v2 unsupported error, got: {error:#}"
+        );
+
+        // Hybrid v1+v2 torrent: meta version = 2 with non-empty v1 pieces.
+        let hybrid =
+            b"d4:infod6:lengthi100e12:meta versioni2e4:name8:test.mp412:piece lengthi16384e6:pieces20:01234567890123456789ee";
+        let parsed = Torrent::from_buffer(hybrid).expect("hybrid v1+v2 torrent should still parse");
+        assert_eq!(parsed.name(), Some("test.mp4"));
     }
 }
 
