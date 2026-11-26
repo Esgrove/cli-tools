@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 use super::VideoConvert;
 use crate::helpers::path_without_extension;
 use crate::observer::SubtitleMatchProblem;
+use crate::options::ALL_EXTENSIONS;
 use crate::types::{SubtitleFile, VideoFile, movie_subtitle_match_score};
 
 impl VideoConvert<'_> {
@@ -71,17 +72,21 @@ impl VideoConvert<'_> {
 
     /// Match subtitle sidecars to video files in the same directory using normalized title tokens.
     ///
+    /// Scoring considers every known video file present in the same directory, not only the active batch,
+    /// so subtitles belonging to already-converted or filtered sibling videos are never stolen.
     /// A subtitle without a matching video, or with several equally good matches, is reported and left out.
     pub(super) fn match_subtitle_files(
         &self,
         video_files: &[VideoFile],
         subtitle_files: Vec<SubtitleFile>,
     ) -> HashMap<PathBuf, Vec<SubtitleFile>> {
+        let active_paths: HashSet<PathBuf> = video_files.iter().map(|video| video.path.clone()).collect();
+        let all_videos = Self::collect_all_sibling_videos(video_files);
         let mut matches: HashMap<PathBuf, Vec<SubtitleFile>> = HashMap::new();
 
         for subtitle_file in subtitle_files {
             let subtitle_stem = cli_tools_common::path_to_file_stem_string(&subtitle_file.path);
-            let mut candidates: Vec<(usize, &VideoFile)> = video_files
+            let mut candidates: Vec<(usize, &VideoFile)> = all_videos
                 .iter()
                 .filter(|video_file| video_file.path.parent() == subtitle_file.path.parent())
                 .filter_map(|video_file| {
@@ -102,10 +107,43 @@ impl VideoConvert<'_> {
                 continue;
             }
 
-            matches.entry(best_video.path.clone()).or_default().push(subtitle_file);
+            if active_paths.contains(&best_video.path) {
+                matches.entry(best_video.path.clone()).or_default().push(subtitle_file);
+            }
         }
 
         matches
+    }
+
+    /// Combine the active batch with all other known video files sitting in the same directories.
+    fn collect_all_sibling_videos(active_videos: &[VideoFile]) -> Vec<VideoFile> {
+        let mut all_videos: Vec<VideoFile> = active_videos.to_vec();
+        let mut seen_paths: HashSet<PathBuf> = active_videos.iter().map(|video| video.path.clone()).collect();
+        let mut seen_directories: HashSet<PathBuf> = HashSet::new();
+
+        for video in active_videos {
+            let Some(parent) = video.path.parent() else {
+                continue;
+            };
+            if parent.as_os_str().is_empty() || !seen_directories.insert(parent.to_path_buf()) {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(parent) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+                    continue;
+                }
+                let path = entry.path();
+                let extension = cli_tools_common::path_to_file_extension_string(&path);
+                if ALL_EXTENSIONS.contains(&extension.as_str()) && seen_paths.insert(path.clone()) {
+                    all_videos.push(VideoFile::new(&path, 0));
+                }
+            }
+        }
+
+        all_videos
     }
 }
 
@@ -241,5 +279,25 @@ mod test_subtitle_matching {
             converter(ConvertOptions::default()).match_subtitle_files(&[video], vec![unrelated, other_directory]);
 
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn does_not_steal_subtitle_belonging_to_sibling_video_outside_batch() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let active_path = dir.path().join("Alien.1979.mkv");
+        let sibling_path = dir.path().join("Alien.1979.Directors.Cut.x265.mkv");
+        let sibling_subtitle_path = dir.path().join("Alien.1979.Directors.Cut.srt");
+        std::fs::write(&active_path, b"video").expect("write active");
+        std::fs::write(&sibling_path, b"video").expect("write sibling");
+        std::fs::write(&sibling_subtitle_path, b"srt").expect("write srt");
+
+        let active_video = VideoFile::new_with_metadata(&active_path);
+        let subtitle = SubtitleFile::new(&sibling_subtitle_path, None);
+        let matches = converter(ConvertOptions::default()).match_subtitle_files(&[active_video], vec![subtitle]);
+
+        assert!(
+            matches.is_empty(),
+            "subtitle belonging to sibling video outside the active batch must not be stolen: {matches:?}"
+        );
     }
 }
