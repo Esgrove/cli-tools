@@ -675,12 +675,12 @@ fn write_to_excel(
     sheet.autofit();
 
     let dj_sheet = workbook.add_worksheet().set_name("DJ")?;
-    let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0,00");
+    let sum_format = Format::new().set_align(FormatAlign::Right).set_num_format("0.00");
     dj_sheet.serialize_headers_with_format::<VisaItem>(0, 0, first_item, &header_format)?;
     for (row, item) in (1_u32..).zip(dj_items(items, filter_prefixes)) {
         dj_sheet.write_string(row, 0, item.finnish_date())?;
         dj_sheet.write_string(row, 1, item.name.clone())?;
-        dj_sheet.write_string_with_format(row, 2, item.finnish_sum(), &sum_format)?;
+        dj_sheet.write_number_with_format(row, 2, item.sum, &sum_format)?;
     }
     dj_sheet.autofit();
 
@@ -689,16 +689,19 @@ fn write_to_excel(
     totals_sheet.write_string_with_format(0, 1, "Total sum", &header_format)?;
     for (totals_row, (name, sum)) in (1_u32..).zip(totals) {
         totals_sheet.write_string(totals_row, 0, name)?;
-        totals_sheet.write_string_with_format(totals_row, 1, format!("{sum:.2}").replace('.', ","), &sum_format)?;
+        totals_sheet.write_number_with_format(totals_row, 1, *sum, &sum_format)?;
     }
     totals_sheet.autofit();
 
-    if output_file.exists()
-        && let Err(e) = std::fs::remove_file(&output_file)
-    {
-        eprintln!("{}", format!("Failed to remove existing xlsx file: {e}").red());
+    let temporary = cli_tools_common::unique_sibling_path(&output_file, "xlsx-tmp");
+    if let Err(error) = workbook.save(&temporary) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
     }
-    workbook.save(output_file)?;
+    if let Err(error) = std::fs::rename(&temporary, &output_file) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("Failed to move workbook into place: {}", output_file.display()));
+    }
     Ok(())
 }
 
@@ -2160,6 +2163,50 @@ mod test_write_to_excel {
         let error = write_to_excel(&[], &[], &[], directory.path()).expect_err("an empty workbook should fail");
 
         assert!(error.to_string().contains("without items"));
+    }
+
+    #[test]
+    fn dj_and_totals_sheets_store_numeric_cells_with_ooxml_dot_format() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let totals = calculate_totals_for_each_name(&items());
+
+        write_to_excel(&items(), &totals, &[], directory.path()).expect("workbook should be written");
+        let output = directory.path().join("VISA.xlsx");
+
+        if !cli_tools_common::command_exists("unzip") {
+            return;
+        }
+        let read_entry = |entry: &str| {
+            let result = std::process::Command::new("unzip")
+                .args(["-p"])
+                .arg(&output)
+                .arg(entry)
+                .output()
+                .expect("run unzip");
+            assert!(result.status.success(), "unzip failed for {entry}");
+            String::from_utf8_lossy(&result.stdout).into_owned()
+        };
+
+        let styles = read_entry("xl/styles.xml");
+        assert!(
+            styles.contains("formatCode=\"0.00\"") || styles.contains("numFmtId=\"2\""),
+            "styles.xml should use OOXML 0.00 numeric format, got: {styles}"
+        );
+        assert!(
+            !styles.contains("formatCode=\"0,00\""),
+            "invalid 0,00 format code must not appear: {styles}"
+        );
+
+        let dj_xml = read_entry("xl/worksheets/sheet2.xml");
+        assert!(
+            dj_xml.contains("<v>25.5</v>") && !dj_xml.contains("t=\"s\"><v>25.5</v>"),
+            "DJ sheet should store numeric values, got: {dj_xml}"
+        );
+        let totals_xml = read_entry("xl/worksheets/sheet3.xml");
+        assert!(
+            totals_xml.contains("<v>25.5</v>") && !totals_xml.contains("t=\"s\"><v>25.5</v>"),
+            "TOTALS sheet should store numeric values, got: {totals_xml}"
+        );
     }
 }
 
