@@ -92,12 +92,26 @@ fn shell_completion_dir_in(home: &Path, shell: Shell, name: &str) -> Result<Path
         _ => anyhow::bail!("Unsupported shell"),
     };
 
-    if global_dir.exists() {
+    if global_dir.exists() && is_directory_writable(&global_dir) {
         return Ok(global_dir);
     }
 
     std::fs::create_dir_all(&user_dir)?;
     Ok(user_dir)
+}
+
+/// Return whether the current process can create a file inside `directory`.
+fn is_directory_writable(directory: &Path) -> bool {
+    let probe = crate::unique_sibling_path(&directory.join(".completion-write-probe"), "tmp");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .is_ok_and(|file| {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            true
+        })
 }
 
 #[cfg(test)]
@@ -180,5 +194,23 @@ mod test_shell_completion_dir {
             shell_completion_dir_in(home.path(), Shell::Elvish, "slb").expect("a directory should be chosen");
 
         assert_eq!(directory, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_zsh_directory_falls_back_to_writable_user_directory() {
+        let home = home();
+
+        let directory = shell_completion_dir_in(home.path(), Shell::Zsh, "slb").expect("a directory should be chosen");
+
+        assert!(
+            is_directory_writable(&directory),
+            "chosen completion directory must be writable: {}",
+            directory.display()
+        );
+        if !is_directory_writable(Path::new("/usr/share/zsh/site-functions")) {
+            assert_eq!(directory, home.path().join(".zsh/completions"));
+            assert!(directory.is_dir());
+        }
     }
 }
