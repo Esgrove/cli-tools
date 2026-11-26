@@ -107,90 +107,6 @@ impl ScanCache {
         Ok(cache)
     }
 
-    /// Platform-specific database path.
-    ///
-    /// - Windows: `%LOCALAPPDATA%\cli-tools\vconvert.db`
-    /// - macOS:   `~/Library/Application Support/cli-tools/vconvert.db`
-    /// - Linux:   `~/.local/share/cli-tools/vconvert.db`
-    fn database_path() -> PathBuf {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cli-tools");
-        data_dir.join(DATABASE_FILENAME)
-    }
-
-    /// Ensure the `scanned_files` table exists.
-    ///
-    /// The schema is identical to the one created by `vconvert` so both tools can read and write the same table.
-    fn initialise(&self) -> Result<()> {
-        self.connection
-            .execute_batch(
-                r"
-                CREATE TABLE IF NOT EXISTS scanned_files (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL,
-                    codec TEXT NOT NULL,
-                    bitrate_kbps INTEGER NOT NULL,
-                    duration REAL NOT NULL,
-                    width INTEGER NOT NULL,
-                    height INTEGER NOT NULL,
-                    frames_per_second REAL NOT NULL,
-                    scanned_time INTEGER NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
-
-                CREATE TABLE IF NOT EXISTS file_hashes (
-                    id INTEGER PRIMARY KEY,
-                    full_path TEXT NOT NULL UNIQUE,
-                    size_bytes INTEGER NOT NULL,
-                    modified_time_ns INTEGER NOT NULL,
-                    blake3_hash TEXT NOT NULL,
-                    hashed_time INTEGER NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_file_hashes_path ON file_hashes(full_path);
-                CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(blake3_hash);
-
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;
-                PRAGMA cache_size = -8000;
-                ",
-            )
-            .context("Failed to initialise scanned_files table")?;
-        // Columns added after the table first shipped, so a database created earlier gets them too.
-        // `bit_depth` is written by vconvert, which shares the table.
-        self.add_column_if_missing("bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
-        self.add_column_if_missing("modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
-        Ok(())
-    }
-
-    /// Add a column to `scanned_files` unless it already exists.
-    ///
-    /// Ignores SQLite's duplicate-column error so concurrent processes migrating the same database do not race.
-    fn add_column_if_missing(&self, column_name: &str, column_definition: &str) -> Result<()> {
-        let mut statement = self.connection.prepare("PRAGMA table_info(scanned_files)")?;
-        let column_exists = statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(std::result::Result::ok)
-            .any(|name| name == column_name);
-        if !column_exists {
-            match self.connection.execute(
-                &format!("ALTER TABLE scanned_files ADD COLUMN {column_name} {column_definition}"),
-                [],
-            ) {
-                Ok(_) => {}
-                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
-                    if message.contains("duplicate column name") => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("Failed to add column {column_name} to scanned_files"));
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Load every cached entry into a `HashMap` keyed by full path string.
     ///
     /// This allows callers to do O(1) lookups and decide which files still need to be probed.
@@ -386,6 +302,90 @@ impl ScanCache {
 
         transaction.commit()?;
         Ok(count)
+    }
+
+    /// Platform-specific database path.
+    ///
+    /// - Windows: `%LOCALAPPDATA%\cli-tools\vconvert.db`
+    /// - macOS:   `~/Library/Application Support/cli-tools/vconvert.db`
+    /// - Linux:   `~/.local/share/cli-tools/vconvert.db`
+    fn database_path() -> PathBuf {
+        let data_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("cli-tools");
+        data_dir.join(DATABASE_FILENAME)
+    }
+
+    /// Ensure the `scanned_files` table exists.
+    ///
+    /// The schema is identical to the one created by `vconvert` so both tools can read and write the same table.
+    fn initialise(&self) -> Result<()> {
+        self.connection
+            .execute_batch(
+                r"
+                CREATE TABLE IF NOT EXISTS scanned_files (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    codec TEXT NOT NULL,
+                    bitrate_kbps INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    frames_per_second REAL NOT NULL,
+                    scanned_time INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scanned_path ON scanned_files(full_path);
+
+                CREATE TABLE IF NOT EXISTS file_hashes (
+                    id INTEGER PRIMARY KEY,
+                    full_path TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL,
+                    modified_time_ns INTEGER NOT NULL,
+                    blake3_hash TEXT NOT NULL,
+                    hashed_time INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_file_hashes_path ON file_hashes(full_path);
+                CREATE INDEX IF NOT EXISTS idx_file_hashes_hash ON file_hashes(blake3_hash);
+
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA cache_size = -8000;
+                ",
+            )
+            .context("Failed to initialise scanned_files table")?;
+        // Columns added after the table first shipped, so a database created earlier gets them too.
+        // `bit_depth` is written by vconvert, which shares the table.
+        self.add_column_if_missing("bit_depth", "INTEGER NOT NULL DEFAULT 0")?;
+        self.add_column_if_missing("modified_time_ns", "INTEGER NOT NULL DEFAULT 0")?;
+        Ok(())
+    }
+
+    /// Add a column to `scanned_files` unless it already exists.
+    ///
+    /// Ignores SQLite's duplicate-column error so concurrent processes migrating the same database do not race.
+    fn add_column_if_missing(&self, column_name: &str, column_definition: &str) -> Result<()> {
+        let mut statement = self.connection.prepare("PRAGMA table_info(scanned_files)")?;
+        let column_exists = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .any(|name| name == column_name);
+        if !column_exists {
+            match self.connection.execute(
+                &format!("ALTER TABLE scanned_files ADD COLUMN {column_name} {column_definition}"),
+                [],
+            ) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
+                    if message.contains("duplicate column name") => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("Failed to add column {column_name} to scanned_files"));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
