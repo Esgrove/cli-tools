@@ -4,7 +4,8 @@ Bump Rust projects to the local Rust toolchain version.
 
 Sets `rust-version` in `Cargo.toml` and pins `rust` Docker images to the matching version,
 and can also upgrade dependencies, clean, verify, and commit the changes.
-A nightly or beta toolchain targets the stable release before it, since its own version is not released yet.
+If the active compiler is nightly or beta, `rsbump` uses the stable compiler installed through `rustup`.
+It stops without editing files if the stable compiler is unavailable.
 
 Provides the `rsbump` binary.
 See the [`rsbump` section](../../README.md#rsbump) of the main README for usage.
