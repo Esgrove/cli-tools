@@ -796,12 +796,10 @@ impl PendingFile {
 
     /// Whether the file on disk has a different size or modification time than when it was scanned.
     ///
-    /// Entries without a stored time, or files whose metadata cannot be read, count as unchanged.
+    /// Compare the stored size independently of the timestamp, using signed nanoseconds when available.
+    /// Files whose metadata cannot be read count as unchanged here.
     #[must_use]
     pub fn is_changed_on_disk(&self) -> bool {
-        let Some(stored_secs) = self.modified_time else {
-            return false;
-        };
         let Ok(metadata) = std::fs::metadata(&self.full_path) else {
             return false;
         };
@@ -816,9 +814,11 @@ impl PendingFile {
         if self.modified_time_ns != 0 {
             return system_time_to_unix_nanos(modified) != self.modified_time_ns;
         }
-        modified
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .is_ok_and(|duration| duration.as_secs() as i64 != stored_secs)
+        self.modified_time.is_some_and(|stored_secs| {
+            modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(true, |duration| duration.as_secs() as i64 != stored_secs)
+        })
     }
 }
 
@@ -2620,6 +2620,31 @@ mod test_pending_file_lookup_and_removal {
     }
 
     #[test]
+    fn pre_epoch_pending_rows_are_checked_for_signed_time_and_disk_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("older.mkv");
+        let file = std::fs::File::create(&path).unwrap();
+        let first_time = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(60);
+        file.set_modified(first_time).unwrap();
+        let database = Database::open_in_memory().unwrap();
+        database
+            .upsert_pending_file(&path, "mkv", &video_info(), PendingAction::Convert)
+            .unwrap();
+        let pending = database.get_pending_file(&path).unwrap().unwrap();
+        assert!(pending.modified_time.is_none());
+        assert!(pending.modified_time_ns < 0);
+        assert!(!pending.is_changed_on_disk());
+
+        file.set_modified(first_time - std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(pending.is_changed_on_disk(), "the signed modification time changed");
+
+        file.set_len(16).unwrap();
+        file.set_modified(first_time).unwrap();
+        assert!(pending.is_changed_on_disk(), "the size changed at the stored time");
+    }
+
+    #[test]
     fn entries_without_stored_or_readable_time_count_as_unchanged() {
         let temporary_directory = tempfile::tempdir().expect("Failed to create temporary directory");
         let existing_path = temporary_directory.path().join("existing.mkv");
@@ -2636,6 +2661,7 @@ mod test_pending_file_lookup_and_removal {
         assert!(!pending.is_changed_on_disk());
 
         pending.modified_time = None;
+        pending.modified_time_ns = 0;
         backdate_modified_time(&existing_path);
         assert!(!pending.is_changed_on_disk());
 
