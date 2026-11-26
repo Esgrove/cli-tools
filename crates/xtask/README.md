@@ -188,7 +188,8 @@ fn main() -> ExitCode {
 }
 ```
 
-Builtins also run during `--dryrun` so they can export placeholder values.
+Both command tasks and builtins honor `skip_if_missing` and `require_commands` before executing.
+Those checks are bypassed during `--dryrun`, when builtins still run so they can export placeholder values.
 `TaskContext` gives access to the project flags (`context.flag("coverage")`), `--fail-fast`,
 shared variables, notes, and `run_logged` for running commands with live output and logging.
 

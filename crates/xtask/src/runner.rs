@@ -309,14 +309,41 @@ fn build_action(
     root: &Path,
     builtins: &BTreeMap<String, Arc<dyn Builtin>>,
 ) -> Result<TaskAction> {
-    if let Some(name) = &task.builtin {
+    let action: TaskAction = if let Some(name) = &task.builtin {
         let Some(builtin) = builtins.get(name) else {
             bail!("Task '{}' uses unknown builtin '{name}'", task.id);
         };
         let builtin = Arc::clone(builtin);
-        return Ok(Box::new(move |context, log_path| builtin.run(context, log_path)));
-    }
+        Box::new(move |context, log_path| builtin.run(context, log_path))
+    } else {
+        build_command_action(task, steps, task_file, flags, root)?
+    };
+    let require_commands = task.require_commands.clone();
+    let skip_if_missing = task.skip_if_missing.clone();
+    Ok(Box::new(move |context, log_path| {
+        if !context.dry_run {
+            if let Some(optional_command) = &skip_if_missing
+                && !command_exists(optional_command)
+            {
+                return Ok(TaskActionResult::Skipped(format!("{optional_command} not found")));
+            }
+            for requirement in &require_commands {
+                let (name, hint) = requirement.as_parts();
+                require_command(name, hint)?;
+            }
+        }
+        action(context, log_path)
+    }))
+}
 
+/// Build a command task action that runs its steps and collects their exports.
+fn build_command_action(
+    task: &TaskConfig,
+    steps: Vec<CommandStepConfig>,
+    task_file: &TaskFile,
+    flags: &BTreeMap<String, bool>,
+    root: &Path,
+) -> Result<TaskAction> {
     let profile = match &task.env_profile {
         Some(name) => task_file
             .env_profiles
@@ -326,8 +353,6 @@ fn build_action(
         None => EnvProfile::default(),
     };
     let task_env = task.env.clone();
-    let require_commands = task.require_commands.clone();
-    let skip_if_missing = task.skip_if_missing.clone();
     let notes = task.notes.clone();
     let flag_env: Vec<(String, String)> = flags
         .iter()
@@ -338,15 +363,6 @@ fn build_action(
     Ok(Box::new(move |context, log_path| {
         if context.dry_run {
             return Ok(TaskActionResult::DryRun);
-        }
-        if let Some(optional_command) = &skip_if_missing
-            && !command_exists(optional_command)
-        {
-            return Ok(TaskActionResult::Skipped(format!("{optional_command} not found")));
-        }
-        for requirement in &require_commands {
-            let (name, hint) = requirement.as_parts();
-            require_command(name, hint)?;
         }
 
         let exports = ExportFiles::for_log(log_path);
@@ -664,6 +680,93 @@ mod test_exports {
         let exports = ExportFiles::for_log(&temp.path().join("task.log"));
         std::fs::write(&exports.env, "not a pair\n").expect("should write");
         assert!(exports.collect(&context_with_variables(&[])).is_err());
+    }
+}
+
+#[cfg(test)]
+mod test_builtin_command_checks {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use cli_tools_common::test_support::TempTree;
+
+    use super::test_helpers::*;
+    use super::*;
+
+    /// Run one builtin and return its outcome and whether its action was invoked.
+    fn run_builtin(command_checks: &str, dry_run: bool) -> (TaskOutcome, bool) {
+        let tree = TempTree::new();
+        let raw = format!("[[tasks]]\nid = 'setup'\nlabel = 'Setup'\nbuiltin = 'record-call'\n{command_checks}");
+        let location = TaskFileLocation {
+            path: tree.file_with("xtask.toml", &raw),
+            root: tree.path().to_path_buf(),
+        };
+        let task_file = TaskFile::load(&location.path).unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let action_called = Arc::clone(&called);
+        let builtin: Arc<dyn Builtin> = Arc::new(move |context: &TaskContext, _: &Path| {
+            action_called.store(true, Ordering::SeqCst);
+            Ok(if context.dry_run {
+                TaskActionResult::DryRun
+            } else {
+                TaskActionResult::Passed
+            })
+        });
+        let options = RunOptions {
+            dry_run,
+            ..RunOptions::default()
+        };
+        let tasks = plan(
+            &task_file,
+            &location,
+            &options,
+            &BTreeMap::from([("record-call".to_owned(), builtin)]),
+            false,
+        )
+        .unwrap();
+        let mut context = context_with_variables(&[]);
+        context.repo_root = location.root;
+        context.log_dir = tree.join("target/logs");
+        context.dry_run = dry_run;
+        let summary = run_schedule(tasks, &context, 1, false, "all").unwrap();
+        (summary.reports[0].outcome.clone(), called.load(Ordering::SeqCst))
+    }
+
+    /// A missing required command fails the task with its configured installation hint.
+    #[test]
+    fn missing_required_command_prevents_builtin_execution() {
+        let (outcome, called) = run_builtin(
+            "require_commands = [{ name = 'cli-tools-xtask-test-missing-required-8pkw', hint = 'Install the testing tool' }]",
+            false,
+        );
+        assert_eq!(outcome, TaskOutcome::Failed("Install the testing tool".to_owned()));
+        assert!(!called);
+    }
+
+    /// A missing optional command skips the builtin before checking required commands.
+    #[test]
+    fn missing_optional_command_prevents_builtin_execution() {
+        let (outcome, called) = run_builtin(
+            "skip_if_missing = 'cli-tools-xtask-test-missing-optional-8pkw'\n\
+             require_commands = ['cli-tools-xtask-test-missing-required-8pkw']",
+            false,
+        );
+        assert_eq!(
+            outcome,
+            TaskOutcome::Skipped("cli-tools-xtask-test-missing-optional-8pkw not found".to_owned())
+        );
+        assert!(!called);
+    }
+
+    /// Dry runs still invoke the builtin so it can export placeholders without external tools.
+    #[test]
+    fn dry_run_ignores_builtin_command_checks() {
+        let (outcome, called) = run_builtin(
+            "skip_if_missing = 'cli-tools-xtask-test-missing-optional-8pkw'\n\
+             require_commands = ['cli-tools-xtask-test-missing-required-8pkw']",
+            true,
+        );
+        assert_eq!(outcome, TaskOutcome::DryRun);
+        assert!(called);
     }
 }
 
