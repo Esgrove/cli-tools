@@ -163,7 +163,8 @@ impl<'a> VideoConvert<'a> {
         // Defer count truncation until after action skips and output-conflict checks so skipped rows do not starve --count.
         let mut filter = self.options.pending_file_filter();
         filter.limit = None;
-        let pending_files = database.get_pending_files(&filter)?;
+        let mut pending_files = database.get_pending_files(&filter)?;
+        pending_files.retain(|file| file.full_path.is_file() && !file.is_changed_on_disk());
         if pending_files.is_empty() {
             return Ok(None);
         }
@@ -175,7 +176,6 @@ impl<'a> VideoConvert<'a> {
                 file.action == PendingAction::SubtitleMux
                     || (file.action == PendingAction::Convert && self.options.movie_mode)
             })
-            .filter(|file| file.full_path.exists())
             .map(|file| VideoFile::new_with_metadata(&file.full_path))
             .collect();
         let subtitle_files = Self::gather_subtitle_files_for_video_files(&video_files);
@@ -646,6 +646,26 @@ mod test_process_files_with_db_cleanup {
             2,
             "dry-run must not remove pending rows from the database"
         );
+    }
+
+    #[test]
+    fn preview_ignores_changed_rows_without_removing_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = Database::open_in_memory().unwrap();
+        let files = pending_files(directory.path(), &database, &["stale.mkv", "current.mkv"]);
+        std::fs::write(&files[0].file.path, b"a replacement with different bytes").unwrap();
+
+        let preview = converter(ConvertOptions {
+            dry_run: true,
+            ..ConvertOptions::default()
+        });
+        let summary = preview
+            .run_from_database(&mut database, &AtomicBool::new(false))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(summary.stats.files_converted, 1);
+        assert_eq!(pending_paths(&database).len(), 2);
     }
 
     #[test]
