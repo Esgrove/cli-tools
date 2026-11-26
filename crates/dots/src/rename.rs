@@ -16,7 +16,7 @@ use crate::normalize_extension;
 use crate::{DotFormat, DotRenameConfig};
 use cli_tools_common::get_normalized_file_name_and_extension;
 use cli_tools_common::os_str_to_string;
-use cli_tools_common::{OverwritePolicy, RenameOutcome};
+use cli_tools_common::{OverwritePolicy, RenameOutcome, TargetReservations};
 
 #[cfg(not(test))]
 const PROGRESS_BAR_CHARS: &str = "=> ";
@@ -386,6 +386,10 @@ impl DotRename {
         let mut num_renamed: usize = 0;
         let max_items = paths.len();
         let max_chars = paths.len().checked_ilog10().map_or(1, |d| d as usize + 1);
+        // Track destinations claimed earlier in this batch so --force never overwrites
+        // another renamed source and dry-run reports the same collision outcomes as a real run.
+        let mut reservations = TargetReservations::new();
+
         for (index, (path, mut new_path)) in paths.into_iter().enumerate() {
             let old_str = cli_tools_common::get_relative_path_or_filename(&path, &self.root);
             let mut new_str = cli_tools_common::get_relative_path_or_filename(&new_path, &self.root);
@@ -402,11 +406,12 @@ impl DotRename {
             // since that would move the files out of the directory it points to.
             let source_is_real_directory = fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir());
             let is_directory_merge = source_is_real_directory && new_path.is_dir() && target_is_other_entry;
+            let reserved_by_batch = !is_directory_merge && reservations.contains(&new_path);
             let mut skip_rename = false;
 
-            if target_is_other_entry && !self.config.overwrite && !is_directory_merge {
+            if !is_directory_merge && (reserved_by_batch || (target_is_other_entry && !self.config.overwrite)) {
                 if self.config.increment_name {
-                    match Self::get_incremented_path(&new_path) {
+                    match Self::get_incremented_path_avoiding(&new_path, &reservations) {
                         Ok(incremented_path) => {
                             new_str = cli_tools_common::get_relative_path_or_filename(&incremented_path, &self.root);
                             new_path = incremented_path;
@@ -419,6 +424,10 @@ impl DotRename {
                 } else {
                     skip_rename = true;
                 }
+            }
+
+            if !skip_rename && !is_directory_merge {
+                reservations.reserve(&new_path);
             }
 
             if self.config.dryrun {
@@ -614,14 +623,23 @@ impl DotRename {
         cli_tools_common::path_to_string(old) != cli_tools_common::path_to_string(new)
     }
 
+    #[cfg(test)]
     fn get_incremented_path(original: &Path) -> Result<PathBuf> {
+        Self::get_incremented_path_avoiding(original, &TargetReservations::new())
+    }
+
+    fn get_incremented_path_avoiding(original: &Path, reservations: &TargetReservations) -> Result<PathBuf> {
         let mut index = 2;
         let parent = original.parent().unwrap_or_else(|| Path::new(""));
         let (name, extension) = cli_tools_common::get_normalized_file_name_and_extension(original)?;
         loop {
-            let file_name = format!("{name}.{index}.{extension}");
+            let file_name = if extension.is_empty() {
+                format!("{name}.{index}")
+            } else {
+                format!("{name}.{index}.{extension}")
+            };
             let new_path = parent.join(file_name);
-            if !new_path.exists() {
+            if fs::symlink_metadata(&new_path).is_err() && !reservations.contains(&new_path) {
                 return Ok(new_path);
             }
             index += 1;
@@ -2297,6 +2315,32 @@ mod test_nested_trees {
         let files = tree.files();
         assert_eq!(files.len(), 2, "no file should be lost: {files:?}");
         assert!(tree.exists("nested/dir/Some.File.txt"));
+        let mut contents: Vec<String> = files.iter().map(|file| tree.read(file)).collect();
+        contents.sort();
+        assert_eq!(contents, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn names_that_format_to_the_same_target_with_overwrite_keep_both_files() {
+        let tree = TempTree::new();
+        tree.file_with("nested/dir/some file.txt", "first");
+        tree.file_with("nested/dir/some_file.txt", "second");
+
+        run(
+            &tree,
+            DotRenameConfig {
+                recurse: true,
+                overwrite: true,
+                ..Default::default()
+            },
+        );
+
+        let files = tree.files();
+        assert_eq!(
+            files.len(),
+            2,
+            "overwrite must never destroy another source renamed earlier in the same batch: {files:?}"
+        );
         let mut contents: Vec<String> = files.iter().map(|file| tree.read(file)).collect();
         contents.sort();
         assert_eq!(contents, vec!["first", "second"]);
