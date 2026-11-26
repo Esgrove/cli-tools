@@ -164,28 +164,26 @@ impl ThumbnailCreator {
                     "{}",
                     format!("Searching recursively for video files in: {}", self.root.display()).magenta()
                 );
-                for entry in WalkDir::new(&self.root)
-                    .into_iter()
-                    .filter_entry(|e| !cli_tools_common::should_skip_entry(e))
-                    .filter_map(Result::ok)
-                    .filter(|e| e.file_type().is_file())
-                {
-                    let path = entry.path().to_path_buf();
-                    if Self::is_video_file(&path) {
-                        video_files.push(path);
-                    }
-                }
             } else {
                 println!(
                     "{}",
                     format!("Searching for video files in: {}", self.root.display()).magenta()
                 );
-                for entry in std::fs::read_dir(&self.root)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_file() && Self::is_video_file(&path) {
-                        video_files.push(path);
-                    }
+            }
+            let walker = if self.config.recurse {
+                WalkDir::new(&self.root)
+            } else {
+                WalkDir::new(&self.root).max_depth(1)
+            };
+            for entry in walker
+                .into_iter()
+                .filter_entry(|entry| !cli_tools_common::should_skip_entry(entry))
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+            {
+                let path = entry.path().to_path_buf();
+                if Self::is_video_file(&path) {
+                    video_files.push(path);
                 }
             }
         } else {
@@ -487,25 +485,45 @@ impl ThumbnailCreator {
 
 /// Thumbnail path for each video, in the same order.
 ///
-/// A thumbnail is named after the video stem.
-/// Videos in the same directory whose stems differ only by case or not at all, such as `a.mp4` and `a.mkv`,
-/// would share one thumbnail, so those keep their full file name instead.
+/// A thumbnail is named after the video stem unless that name collides with another video's thumbnail
+/// in the same directory (case-insensitively), in which case the colliding videos keep their full file names.
 fn thumbnail_paths(video_files: &[PathBuf]) -> Vec<PathBuf> {
-    let key = |video: &Path| {
-        let parent = video.parent().map_or_default(Path::to_path_buf);
-        let stem = video.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
-        (parent, stem)
-    };
-    let mut stem_counts: HashMap<(PathBuf, String), usize> = HashMap::new();
-    for video in video_files {
-        *stem_counts.entry(key(video)).or_default() += 1;
+    let mut use_full_name = vec![false; video_files.len()];
+    loop {
+        let mut counts: HashMap<(PathBuf, String), usize> = HashMap::new();
+        for (video, full_name) in video_files.iter().zip(&use_full_name) {
+            let parent = video.parent().map_or_default(Path::to_path_buf);
+            let candidate = if *full_name {
+                video.file_name().unwrap_or_default().to_string_lossy().to_lowercase()
+            } else {
+                video.file_stem().unwrap_or_default().to_string_lossy().to_lowercase()
+            };
+            *counts.entry((parent, candidate)).or_default() += 1;
+        }
+
+        let mut promoted = false;
+        for (video, full_name) in video_files.iter().zip(&mut use_full_name) {
+            if *full_name {
+                continue;
+            }
+            let parent = video.parent().map_or_default(Path::to_path_buf);
+            let candidate = video.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+            if counts.get(&(parent, candidate)).is_some_and(|count| *count > 1) {
+                *full_name = true;
+                promoted = true;
+            }
+        }
+        if !promoted {
+            break;
+        }
     }
+
     video_files
         .iter()
-        .map(|video| {
+        .zip(&use_full_name)
+        .map(|(video, full_name)| {
             let parent = video.parent().unwrap_or_else(|| Path::new(""));
-            let shared_stem = stem_counts.get(&key(video)).is_some_and(|count| *count > 1);
-            let name = if shared_stem {
+            let name = if *full_name {
                 video.file_name().unwrap_or_default().to_string_lossy()
             } else {
                 video.file_stem().unwrap_or_default().to_string_lossy()
@@ -993,11 +1011,45 @@ mod test_thumbnail_file_discovery {
         assert_eq!(std::fs::read(screens.join("video.jpg"))?, b"existing");
         Ok(())
     }
+
+    #[test]
+    fn non_recursive_discovery_skips_hidden_files_and_symlinks() -> anyhow::Result<()> {
+        let temp_directory = tempfile::TempDir::new()?;
+        let visible = temp_directory.path().join("visible.mp4");
+        let hidden = temp_directory.path().join(".hidden.mp4");
+        std::fs::write(&visible, b"visible")?;
+        std::fs::write(&hidden, b"hidden")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&visible, temp_directory.path().join("link.mp4"))?;
+
+        let found = creator(temp_directory.path().to_path_buf(), false).gather_video_files()?;
+        assert_eq!(found, vec![visible]);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod test_thumbnail_paths {
     use super::*;
+
+    #[test]
+    fn avoids_collision_between_fallback_full_name_and_nested_extension_stem() {
+        let videos = vec![
+            PathBuf::from("dir/a.mp4"),
+            PathBuf::from("dir/a.mkv"),
+            PathBuf::from("dir/a.mp4.mkv"),
+        ];
+
+        let paths = thumbnail_paths(&videos);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("dir/Screens/a.mp4.jpg"),
+                PathBuf::from("dir/Screens/a.mkv.jpg"),
+                PathBuf::from("dir/Screens/a.mp4.mkv.jpg"),
+            ]
+        );
+    }
 
     #[test]
     fn videos_sharing_a_stem_get_separate_thumbnails() {
