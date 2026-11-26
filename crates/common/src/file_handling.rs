@@ -301,34 +301,54 @@ fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(link_target, target)
 }
 
-/// Copy the file a symbolic link points to, since creating links needs extra privileges on Windows.
+/// Copy the target a symbolic link points to, since creating links needs extra privileges on Windows.
 #[cfg(not(unix))]
 fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
-    copy_file_with_times(source, target).map(|_| ())
+    if fs::metadata(source)?.is_dir() {
+        copy_dir_recursive(source, target)
+    } else {
+        copy_file_with_times(source, target).map(|_| ())
+    }
 }
 
-/// Canonicalize the longest existing prefix of a path and append the remaining components.
+/// Canonicalize the longest existing prefix of a path and apply the remaining components lexically.
 fn canonicalize_existing_prefix(path: &Path) -> io::Result<PathBuf> {
+    use std::path::Component;
+
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
 
-    let mut remaining = Vec::new();
-    let mut current = absolute.as_path();
-    loop {
-        if let Ok(canonical) = dunce::canonicalize(current) {
-            return Ok(remaining.iter().rev().fold(canonical, |path, part| path.join(part)));
-        }
-        match (current.parent(), current.file_name()) {
-            (Some(parent), Some(name)) => {
-                remaining.push(name.to_os_string());
-                current = parent;
+    let components: Vec<Component<'_>> = absolute.components().collect();
+    for prefix_len in (1..=components.len()).rev() {
+        let prefix: PathBuf = components.get(..prefix_len).unwrap_or_default().iter().collect();
+        if let Ok(mut canonical) = dunce::canonicalize(&prefix) {
+            for component in components.get(prefix_len..).unwrap_or_default() {
+                match component {
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        canonical.pop();
+                    }
+                    other => canonical.push(other.as_os_str()),
+                }
             }
-            _ => return Ok(absolute),
+            return Ok(canonical);
         }
     }
+
+    let mut normalized = PathBuf::new();
+    for component in components {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }
 
 /// Rename through a unique temporary sibling of the target, for spelling only changes.
@@ -784,6 +804,22 @@ mod test_safe_rename {
         assert_eq!(fs::read_to_string(&target).expect("read"), "photo");
         assert_eq!(fs::read_to_string(&external_link).expect("read external"), "photo");
     }
+
+    #[test]
+    fn case_only_directory_rename_handles_trailing_slash() {
+        let directory = TempDir::new().expect("temp directory");
+        let source_dir = directory.path().join("Show");
+        fs::create_dir(&source_dir).expect("create dir");
+        fs::write(source_dir.join("episode.mkv"), "video").expect("write");
+
+        let source_with_slash = PathBuf::from(format!("{}/", source_dir.display()));
+        let target_with_slash = PathBuf::from(format!("{}/", directory.path().join("show").display()));
+
+        let outcome = safe_rename(&source_with_slash, &target_with_slash, OverwritePolicy::Skip)
+            .expect("case-only rename with trailing slash should succeed");
+        assert!(matches!(outcome, RenameOutcome::Renamed | RenameOutcome::CaseRenamed));
+        assert!(directory.path().join("show").join("episode.mkv").exists());
+    }
 }
 
 #[cfg(test)]
@@ -889,6 +925,28 @@ mod test_copy_dir_recursive {
 
         let error = copy_dir_recursive(&source, &source).expect_err("should fail");
 
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn refuses_to_copy_into_itself_through_parent_dir_components() {
+        let directory = TempDir::new().expect("temp directory");
+        let source = directory.path().join("Show");
+        fs::create_dir_all(&source).expect("create");
+        fs::write(source.join("episode.mkv"), "video").expect("write");
+
+        let via_missing_sibling = directory
+            .path()
+            .join("missing_dir")
+            .join("..")
+            .join("Show")
+            .join("child");
+        let error = copy_dir_recursive(&source, &via_missing_sibling).expect_err("should fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!source.join("child").exists());
+
+        let via_missing_child = source.join("missing_child").join("..");
+        let error = copy_dir_recursive(&source, &via_missing_child).expect_err("should fail");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }

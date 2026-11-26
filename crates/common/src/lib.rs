@@ -157,10 +157,15 @@ pub fn config_path() -> Option<&'static Path> {
     CONFIG_PATH.as_deref()
 }
 
-/// Append an extension to `PathBuf`, which is missing from the standard lib :(
+/// Append an extension to `PathBuf`, stripping any trailing path separators first.
 #[must_use]
 pub fn append_extension_to_path(path: &Path, extension: impl AsRef<OsStr>) -> PathBuf {
-    let mut os_string: OsString = path.into();
+    let normalized: PathBuf = if path.as_os_str().is_empty() {
+        PathBuf::new()
+    } else {
+        path.components().collect()
+    };
+    let mut os_string: OsString = normalized.into();
     os_string.push(".");
     os_string.push(extension);
     os_string.into()
