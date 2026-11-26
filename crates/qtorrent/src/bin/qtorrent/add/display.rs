@@ -26,16 +26,15 @@ impl QTorrent {
     ) {
         let total = torrents.len();
 
-        // Count how many would be skipped as duplicates
-        let duplicate_count = existing_torrents.map_or(0, |existing| {
-            torrents
-                .iter()
-                .filter(|info| find_existing_torrent(info, existing).is_some())
-                .count()
-        });
-
-        // Count how many would be skipped because all files are excluded by filters
-        let all_excluded_count = torrents.iter().filter(|info| info.all_files_excluded()).count();
+        let mut duplicate_count = 0;
+        let mut all_excluded_count = 0;
+        for info in torrents {
+            if info.all_files_excluded() {
+                all_excluded_count += 1;
+            } else if existing_torrents.is_some_and(|existing| find_existing_torrent(info, existing).is_some()) {
+                duplicate_count += 1;
+            }
+        }
 
         let skipped_total = duplicate_count + all_excluded_count;
         let mode_label = if self.config.offline { "OFFLINE" } else { "DRYRUN" };
@@ -60,10 +59,7 @@ impl QTorrent {
             // Show if all files are excluded by filters
             if info.all_files_excluded() {
                 println!("  {} All files excluded by filters, skipping torrent", "⊘".yellow());
-            }
-
-            // Show if this torrent already exists
-            if let Some(existing) = existing_torrents
+            } else if let Some(existing) = existing_torrents
                 && let Some(existing_item) = find_existing_torrent(info, existing)
             {
                 println!("  {} Already exists as: {}", "⊘".yellow(), existing_item.name.cyan());

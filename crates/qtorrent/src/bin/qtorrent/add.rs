@@ -537,6 +537,28 @@ mod test_add_workflow {
     }
 
     #[tokio::test]
+    async fn dryrun_does_not_double_count_existing_fully_excluded_torrents() -> Result<()> {
+        let directory = TorrentDirectory::new();
+        let mut torrent = Torrent::from_buffer(&std::fs::read(&directory.torrent_path)?)?;
+        torrent.info.length = None;
+        torrent.info.files = Some(vec![cli_tools_qtorrent::torrent::File {
+            length: 1_000_000,
+            path: vec!["cover.jpg".to_owned()],
+            ..Default::default()
+        }]);
+        std::fs::write(&directory.torrent_path, serde_bencode::to_bytes(&torrent)?)?;
+        let port = serve(session_routes(torrent_list_with(&directory.info_hash()))).await;
+        let application = connected_qtorrent(&directory, port, &["--dryrun"]);
+        let torrents = application.parse_torrents(std::slice::from_ref(&directory.torrent_path));
+        assert!(torrents[0].all_files_excluded());
+
+        application.run().await?;
+
+        assert!(directory.torrent_path.is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn offline_and_unreachable_dryruns_still_print_the_summary() -> Result<()> {
         let directory = TorrentDirectory::new();
         let root = directory.root.to_string_lossy().into_owned();
