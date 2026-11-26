@@ -167,6 +167,14 @@ pub fn safe_rename(source: &Path, target: &Path, policy: OverwritePolicy) -> io:
                         format!("Refusing to replace existing directory: {}", target.display()),
                     ));
                 }
+                // On POSIX, `rename` between two distinct hard links to the same inode is a no-op
+                // and leaves the source entry behind. Removing the source completes the move
+                // while keeping the inode alive through the target entry.
+                if same_entry_metadata_without_following(source, target).is_some_and(|(is_directory, _)| !is_directory)
+                {
+                    fs::remove_file(source)?;
+                    return Ok(RenameOutcome::Renamed);
+                }
             }
         }
     }
@@ -325,20 +333,108 @@ pub fn unique_sibling_path(path: &Path, extension: &str) -> PathBuf {
 }
 
 /// Check whether two existing paths name the same directory entry without following a final symbolic link.
-#[cfg(unix)]
-fn paths_refer_to_same_entry(left: &Path, right: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
+///
+/// Two hard links to the same inode in different directories or under different names in the same directory
+/// are separate directory entries, so this returns `false` for them.
+/// Two spellings of the same directory entry on a case-insensitive or Unicode-normalizing file system
+/// return `true`.
+#[must_use]
+pub fn paths_refer_to_same_entry(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return fs::symlink_metadata(left).is_ok();
+    }
 
-    match (fs::symlink_metadata(left), fs::symlink_metadata(right)) {
-        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-        _ => false,
+    let (Some(left_parent), Some(right_parent)) = (parent_dir_for_comparison(left), parent_dir_for_comparison(right))
+    else {
+        return false;
+    };
+    if !paths_refer_to_same_file(left_parent, right_parent) {
+        return false;
+    }
+
+    let Some((is_directory, link_count)) = same_entry_metadata_without_following(left, right) else {
+        return false;
+    };
+
+    let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
+        return false;
+    };
+    if left_name == right_name {
+        return true;
+    }
+
+    if !is_directory && link_count > 1 && directory_has_both_entries(left_parent, left_name, right_name) {
+        return false;
+    }
+
+    true
+}
+
+/// Parent directory used for comparing whether two paths sit in the same directory.
+fn parent_dir_for_comparison(path: &Path) -> Option<&Path> {
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        Some(Path::new("."))
+    } else {
+        Some(parent)
     }
 }
 
-/// Check whether two existing paths name the same directory entry.
-#[cfg(not(unix))]
-fn paths_refer_to_same_entry(left: &Path, right: &Path) -> bool {
-    paths_refer_to_same_file(left, right)
+/// Return whether both exact entry names appear as separate directory entries in `directory`.
+fn directory_has_both_entries(directory: &Path, left_name: &std::ffi::OsStr, right_name: &std::ffi::OsStr) -> bool {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return false;
+    };
+    let mut found_left = false;
+    let mut found_right = false;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        if name == left_name {
+            found_left = true;
+        } else if name == right_name {
+            found_right = true;
+        }
+        if found_left && found_right {
+            return true;
+        }
+    }
+    false
+}
+
+/// Compare entry identity without following a final symbolic link.
+///
+/// Returns `Some((is_directory, link_count))` when both paths name the same underlying object.
+#[cfg(unix)]
+fn same_entry_metadata_without_following(left: &Path, right: &Path) -> Option<(bool, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let left_meta = fs::symlink_metadata(left).ok()?;
+    let right_meta = fs::symlink_metadata(right).ok()?;
+    if left_meta.dev() == right_meta.dev() && left_meta.ino() == right_meta.ino() {
+        Some((left_meta.is_dir(), left_meta.nlink()))
+    } else {
+        None
+    }
+}
+
+/// Compare entry identity without following a final symbolic link on Windows.
+///
+/// Returns `Some((is_directory, link_count))` when both paths name the same underlying object.
+#[cfg(windows)]
+fn same_entry_metadata_without_following(left: &Path, right: &Path) -> Option<(bool, u64)> {
+    let (left_id, left_links) = windows_file_identity(left, false)?;
+    let (right_id, _) = windows_file_identity(right, false)?;
+    if left_id == right_id {
+        let is_directory = fs::symlink_metadata(left).ok()?.is_dir();
+        Some((is_directory, u64::from(left_links)))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+const fn same_entry_metadata_without_following(_left: &Path, _right: &Path) -> Option<(bool, u64)> {
+    None
 }
 
 /// Compare device and inode numbers, following symbolic links.
@@ -354,10 +450,10 @@ fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
 
 #[cfg(windows)]
 fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
-    let Some(left_id) = windows_file_id(left) else {
+    let Some((left_id, _)) = windows_file_identity(left, true) else {
         return false;
     };
-    let Some(right_id) = windows_file_id(right) else {
+    let Some((right_id, _)) = windows_file_identity(right, true) else {
         return false;
     };
 
@@ -365,16 +461,21 @@ fn paths_refer_to_same_file_by_metadata(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(windows)]
-fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
+fn windows_file_identity(path: &Path, follow_symlinks: bool) -> Option<((u32, u32, u32), u32)> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
     };
 
     let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let flags = if follow_symlinks {
+        FILE_FLAG_BACKUP_SEMANTICS
+    } else {
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+    };
 
     // SAFETY: The path buffer is null terminated and lives for the duration of the calls.
     // The handle returned by CreateFileW is closed before returning when it is valid.
@@ -386,7 +487,7 @@ fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
+            flags,
             std::ptr::null_mut(),
         );
         if handle == INVALID_HANDLE_VALUE {
@@ -398,9 +499,12 @@ fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
         _ = CloseHandle(handle);
 
         (result != 0).then_some((
-            information.dwVolumeSerialNumber,
-            information.nFileIndexHigh,
-            information.nFileIndexLow,
+            (
+                information.dwVolumeSerialNumber,
+                information.nFileIndexHigh,
+                information.nFileIndexLow,
+            ),
+            information.nNumberOfLinks,
         ))
     }
 }
@@ -569,7 +673,7 @@ mod test_safe_rename {
     }
 
     #[test]
-    fn hard_link_to_source_keeps_data() {
+    fn hard_link_to_source_respects_skip_and_error_policies() {
         let directory = TempDir::new().expect("temp directory");
         let source = directory.path().join("a.txt");
         let target = directory.path().join("b.txt");
@@ -577,9 +681,83 @@ mod test_safe_rename {
         fs::hard_link(&source, &target).expect("hard link");
 
         assert!(paths_refer_to_same_file(&source, &target));
-        safe_rename(&source, &target, OverwritePolicy::Skip).expect("rename");
 
+        let skip_outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("skip rename");
+        assert_eq!(skip_outcome, RenameOutcome::SkippedExisting);
+        assert!(source.exists(), "source hard link must stay under Skip");
         assert_eq!(fs::read_to_string(&target).expect("read"), "a");
+
+        let error = safe_rename(&source, &target, OverwritePolicy::Error).expect_err("error rename");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(source.exists(), "source hard link must stay under Error");
+    }
+
+    #[test]
+    fn cross_directory_hard_link_respects_overwrite_policy() {
+        let directory = TempDir::new().expect("temp directory");
+        let first_dir = directory.path().join("first");
+        let second_dir = directory.path().join("second");
+        fs::create_dir(&first_dir).expect("create first");
+        fs::create_dir(&second_dir).expect("create second");
+        let source = first_dir.join("a.txt");
+        let target = second_dir.join("a.txt");
+        fs::write(&source, "a").expect("write");
+        fs::hard_link(&source, &target).expect("hard link");
+
+        let skip_outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("skip rename");
+        assert_eq!(skip_outcome, RenameOutcome::SkippedExisting);
+        assert!(source.exists());
+
+        let error = safe_rename(&source, &target, OverwritePolicy::Error).expect_err("error rename");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+
+        let overwrite_outcome = safe_rename(&source, &target, OverwritePolicy::Overwrite).expect("overwrite rename");
+        assert_eq!(overwrite_outcome, RenameOutcome::Renamed);
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(&target).expect("read"), "a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_pointing_to_target_respects_skip_policy() {
+        let directory = TempDir::new().expect("temp directory");
+        let target = directory.path().join("a.txt");
+        let source = directory.path().join("link.txt");
+        fs::write(&target, "important").expect("write");
+        std::os::unix::fs::symlink(&target, &source).expect("symlink");
+
+        let outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("skip rename");
+        assert_eq!(outcome, RenameOutcome::SkippedExisting);
+        assert!(
+            fs::symlink_metadata(&source)
+                .expect("source meta")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            !fs::symlink_metadata(&target)
+                .expect("target meta")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).expect("read"), "important");
+    }
+
+    #[test]
+    fn case_only_rename_works_with_external_hard_link() {
+        let directory = TempDir::new().expect("temp directory");
+        let other_dir = directory.path().join("other");
+        fs::create_dir(&other_dir).expect("create other");
+        let source = directory.path().join("Photo.JPG");
+        let target = directory.path().join("Photo.jpg");
+        let external_link = other_dir.join("Photo.JPG");
+        fs::write(&source, "photo").expect("write");
+        fs::hard_link(&source, &external_link).expect("hard link");
+
+        let outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("rename");
+        assert!(matches!(outcome, RenameOutcome::Renamed | RenameOutcome::CaseRenamed));
+        assert_eq!(fs::read_to_string(&target).expect("read"), "photo");
+        assert_eq!(fs::read_to_string(&external_link).expect("read external"), "photo");
     }
 }
 
