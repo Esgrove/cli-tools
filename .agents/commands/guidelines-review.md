@@ -24,7 +24,7 @@ An explicit file or directory narrows that scope.
 plus nearby declarations that must move together for a coherent cleanup.
 Do not infer `changes` from a dirty working tree.
 A clean `changes` selection is a no-op, not permission for a workspace-wide sweep.
-Exclude `target/`, checked-in binaries, and `crates/slb/tests/fixtures/slb`.
+Exclude `target/`, checked-in binaries, and `crates/slb/tests/fixtures`.
 
 ## Preparation
 

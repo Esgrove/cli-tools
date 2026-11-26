@@ -1,6 +1,6 @@
 //! Integration tests for the `slb` formatter using fixture file pairs.
 //!
-//! Each `*.in.*` fixture under `tests/fixtures/slb/` is formatted
+//! Each `*.in.*` fixture under `tests/fixtures/` is formatted
 //! and compared to the matching `*.out.*` file.
 //! The expected output is formatted again to verify that formatting is idempotent.
 
@@ -11,10 +11,7 @@ use cli_tools_slb::{FileKind, FormatOptions, RuleSet, format};
 
 /// Directory holding the fixture pairs.
 fn fixture_directory() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("slb")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures")
 }
 
 /// Read a fixture file.

@@ -29,7 +29,7 @@ If an explicitly requested ref is missing, ask rather than guessing.
 For either diff mode, read the full affected functions and callers and report issues introduced by the changes.
 A clean diff is an empty review, not permission to silently audit the whole workspace.
 Do not interpolate arbitrary arguments into shell commands.
-Exclude `target/`, checked-in binaries, and `crates/slb/tests/fixtures/slb`.
+Exclude `target/`, checked-in binaries, and `crates/slb/tests/fixtures`.
 
 ## Load project guidance
 

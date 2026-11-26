@@ -46,7 +46,7 @@ print(f"Formatted {total} files, {changed} of them changed, and {unfixable} viol
 
 self.violations = [violation for violation in self.violations if violation.kind != ViolationKind.MID_CLAUSE_BREAK and violation.fixable]
 
-$ cargo run --bin slb -- --stdin --type markdown --width 120 --trailing < tests/fixtures/slb/code_like_lines.in.md > /tmp/output.md
+$ cargo run --bin slb -- --stdin --type markdown --width 120 --trailing < tests/fixtures/code_like_lines.in.md > /tmp/output.md
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
 
@@ -82,6 +82,8 @@ and then run the checks.
 
 ## Prose
 
-A paragraph that only starts with one of those words is prose, so it is reflowed like any other paragraph of the document.
+A paragraph that only starts with one of those words is prose,
+so it is reflowed like any other paragraph of the document.
 
-Let the formatter handle the line breaks of every comment in the repository, and review the changes it makes before you commit them.
+Let the formatter handle the line breaks of every comment in the repository,
+and review the changes it makes before you commit them.

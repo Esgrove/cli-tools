@@ -1,4 +1,4 @@
-exclude: ^(.idea|.vscode|crates/slb/tests/fixtures/slb)/
+exclude: ^(.idea|.vscode|crates/slb/tests/fixtures)/
 fail_fast: false
 
 # Run with prek (https://prek.j178.dev), a fast drop-in replacement for pre-commit.

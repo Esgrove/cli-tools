@@ -80,10 +80,7 @@ pub fn rank_before(text: &str, index: usize) -> Option<Rank> {
 /// so the coverage tests of the modules that own such lists check them against this text.
 pub fn fixture_inputs() -> &'static str {
     static INPUTS: LazyLock<String> = LazyLock::new(|| {
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("slb");
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures");
         let mut paths: Vec<PathBuf> = fs::read_dir(&directory)
             .expect("the fixture directory should exist")
             .flatten()
