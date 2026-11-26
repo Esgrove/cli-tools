@@ -494,22 +494,10 @@ impl DotFormat<'_> {
         }
     }
 
-    /// Remove consecutive duplicate occurrences of patterns from the name.
-    /// For example, "Some.Name.Some.Name.File" with pattern "Some.Name." becomes "Some.Name.File"
-    fn remove_consecutive_duplicates(name: &mut String, patterns: &[(Regex, String)]) {
-        for (regex, replacement) in patterns {
-            *name = regex.replace_all(name, replacement.as_str()).into_owned();
-        }
-    }
-
     /// Check if the name starts with 5 or more digits followed by a boundary.
     /// Used to skip `prefix_dir` reordering for filenames with leading numeric identifiers.
     pub fn starts_with_five_or_more_digits(name: &str) -> bool {
         RE_LEADING_DIGITS.is_match(name)
-    }
-
-    fn has_at_least_six_digits(s: &str) -> bool {
-        s.chars().filter(char::is_ascii_digit).count() >= 6
     }
 
     /// Convert date with written month name to numeral date.
@@ -545,19 +533,39 @@ impl DotFormat<'_> {
         *name = RE_WRITTEN_DATE_DMY.replace_all(name, &replace_written).into_owned();
     }
 
+    /// Remove consecutive duplicate occurrences of patterns from the name.
+    /// For example, "Some.Name.Some.Name.File" with pattern "Some.Name." becomes "Some.Name.File"
+    fn remove_consecutive_duplicates(name: &mut String, patterns: &[(Regex, String)]) {
+        for (regex, replacement) in patterns {
+            *name = regex.replace_all(name, replacement.as_str()).into_owned();
+        }
+    }
+
+    /// Return whether `text` contains at least six ASCII digits.
+    fn has_at_least_six_digits(text: &str) -> bool {
+        text.chars().filter(char::is_ascii_digit).count() >= 6
+    }
+
     /// Only retain alphanumeric characters and a few common filename characters.
     ///
     /// Combining marks are kept when they follow an allowed character,
     /// so a letter written in decomposed form, such as the one case conversion produces for "İ", survives.
     fn remove_special_characters(name: &mut String) {
-        let is_allowed = |c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '\'' || c == '&';
+        let is_allowed = |character: char| {
+            character.is_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+                || character == '\''
+                || character == '&'
+        };
         let cleaned: String = name
             // Split the string into graphemes (for handling emojis and complex characters)
             .graphemes(true)
             .filter(|grapheme| {
                 let mut characters = grapheme.chars();
                 characters.next().is_some_and(is_allowed)
-                    && characters.all(|c| is_allowed(c) || is_combining_mark(c))
+                    && characters.all(|character| is_allowed(character) || is_combining_mark(character))
             })
             .collect();
 
@@ -570,6 +578,7 @@ impl DotFormat<'_> {
         Self::replace_separated_ampersands(name);
     }
 
+    /// Remove random-looking identifier tokens from `name` while keeping resolutions and whitelisted names.
     fn remove_random_identifiers(name: &mut String) {
         *name = RE_IDENTIFIER
             .replace_all(name, |caps: &regex::Captures| {

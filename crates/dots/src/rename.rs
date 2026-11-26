@@ -42,11 +42,6 @@ impl DotRename {
         }
     }
 
-    /// Create a formatter that borrows the config.
-    const fn formatter(&self) -> DotFormat<'_> {
-        DotFormat::new(&self.config)
-    }
-
     /// Format a file name using the configured formatting rules.
     #[must_use]
     pub fn format_name(&self, name: &str) -> String {
@@ -108,6 +103,11 @@ impl DotRename {
             println!("{}", format!("Renamed {message}").green());
         }
         Ok(())
+    }
+
+    /// Create a formatter that borrows the config.
+    const fn formatter(&self) -> DotFormat<'_> {
+        DotFormat::new(&self.config)
     }
 
     /// Get all files that need to be renamed.

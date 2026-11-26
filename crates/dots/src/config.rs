@@ -375,6 +375,7 @@ impl fmt::Display for DotRenameConfig {
     }
 }
 
+/// Default `true` value for serde fields.
 const fn default_true() -> bool {
     true
 }
