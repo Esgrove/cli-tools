@@ -25,6 +25,7 @@ dunce = { workspace = true }
 jiff = { workspace = true }
 num_cpus = { workspace = true, optional = true }
 regex = { workspace = true }
+rusqlite = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 trash = { workspace = true }
@@ -37,13 +38,14 @@ tempfile = { workspace = true, optional = true }
 libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Security"] }
+windows-sys = { workspace = true, features = ["Win32_Security", "Win32_System_Threading"] }
 
 [features]
 async = ["dep:num_cpus", "dep:tokio"]
 completion = ["dep:clap", "dep:clap_complete"]
 config = ["dep:serde", "dep:toml"]
 diff = ["dep:difference"]
+sqlite = ["dep:rusqlite"]
 test-support = ["dep:tempfile"]
 
 [dev-dependencies]
