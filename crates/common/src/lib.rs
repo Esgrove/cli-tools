@@ -8,6 +8,8 @@
 
 #[cfg(feature = "completion")]
 pub mod completion;
+#[cfg(feature = "config")]
+pub mod config;
 pub mod date;
 #[cfg(feature = "diff")]
 pub mod diff;
@@ -18,7 +20,9 @@ pub mod test_support;
 pub mod utils;
 
 #[cfg(feature = "completion")]
-pub use completion::generate_shell_completion;
+pub use completion::{CompletionArgs, generate_shell_completion};
+#[cfg(feature = "config")]
+pub use config::{load_user_config_section, load_user_config_section_at, parse_user_config_section};
 #[cfg(feature = "diff")]
 pub use diff::{color_diff, diff_lines, show_diff};
 pub use file_handling::{
@@ -27,11 +31,12 @@ pub use file_handling::{
     paths_refer_to_same_file, safe_rename, unique_sibling_path, write_atomically,
 };
 pub use utils::{
-    command_exists, count_files, find_command, get_relative_path_from_current_working_directory,
-    get_relative_path_or_filename, glob_to_regex, leading_whitespace, lowercase_extension, nearest_containing_root,
+    NameFilter, WalkOptions, collect_entries, command_exists, count_files, data_dir, data_file_path, find_command,
+    get_relative_path_from_current_working_directory, get_relative_path_or_filename, glob_to_regex, leading_whitespace,
+    lowercase_extension, nearest_containing_root, normalize_extensions, original_end_for_lowercase_prefix,
     os_str_to_string, path_to_file_extension_string, path_to_file_stem_string, path_to_filename_string, path_to_string,
-    path_to_string_relative, path_to_string_relative_to, relative_path_within, starts_with_ignore_case, strings_from,
-    unique_in_order,
+    path_to_string_relative, path_to_string_relative_to, relative_path_within, resolve_input_paths,
+    starts_with_ignore_case, strings_from, strip_ansi_codes, unique_in_order,
 };
 
 use std::env;

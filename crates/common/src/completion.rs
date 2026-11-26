@@ -6,8 +6,30 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Command;
+use clap::{Args, Command, CommandFactory};
 use clap_complete::Shell;
+
+/// Shared CLI arguments for the `completion` subcommand across all workspace binaries.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct CompletionArgs {
+    /// Shell to generate completion for.
+    #[arg(value_enum)]
+    pub shell: Shell,
+
+    /// Install completion file to shell completion directory.
+    #[arg(short = 'I', long)]
+    pub install: bool,
+}
+
+impl CompletionArgs {
+    /// Generate or install the completion script for clap command `C`.
+    ///
+    /// # Errors
+    /// Returns an error if the completion directory cannot be created or written.
+    pub fn generate<C: CommandFactory>(&self, verbose: bool, command_name: &str) -> Result<()> {
+        generate_shell_completion(self.shell, C::command(), self.install, verbose, command_name)
+    }
+}
 
 /// Generate a shell completion script for the given shell.
 ///

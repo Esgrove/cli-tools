@@ -6,13 +6,112 @@
 //! such as reading the leading whitespace of a line and translating a glob into a regular expression,
 //! and the lookup of executables on `PATH`.
 
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result, bail};
 use regex::Regex;
+use walkdir::WalkDir;
+
+/// Case-insensitive include and exclude matcher supporting both globs and substring patterns.
+///
+/// Patterns containing glob metacharacters (`*`, `?`, `[`, `{`) are compiled with [`glob_to_regex`].
+/// Plain patterns without metacharacters match as case-insensitive substrings anywhere in the name.
+/// Multiple `include` patterns are combined with OR, and any matching `exclude` pattern rejects the name.
+#[derive(Debug, Default, Clone)]
+pub struct NameFilter {
+    include: Vec<Regex>,
+    exclude: Vec<Regex>,
+}
+
+/// Configuration for collecting entries from a directory tree with [`collect_entries`].
+#[derive(Debug, Clone, Copy)]
+pub struct WalkOptions {
+    /// Recurse into subdirectories when `true`.
+    /// Otherwise visit only immediate children.
+    pub recurse: bool,
+    /// Optional explicit maximum depth override when recursing.
+    pub max_depth: Option<usize>,
+    /// Collect directories instead of regular files when `true`.
+    pub include_directories: bool,
+    /// Skip hidden entries and system directories below the walk root.
+    pub skip_hidden_and_system: bool,
+}
+
+impl NameFilter {
+    /// Compile include and exclude patterns into a [`NameFilter`].
+    ///
+    /// Empty or whitespace-only patterns are ignored.
+    ///
+    /// # Errors
+    /// Returns an error if any glob pattern has invalid syntax.
+    pub fn new(include: &[String], exclude: &[String]) -> Result<Self> {
+        let include = compile_filter_patterns(include)?;
+        let exclude = compile_filter_patterns(exclude)?;
+        Ok(Self { include, exclude })
+    }
+
+    /// Return whether neither include nor exclude patterns are configured.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+
+    /// Return whether `name` passes the include and exclude filters.
+    #[must_use]
+    pub fn matches_name(&self, name: &str) -> bool {
+        if !self.include.is_empty() && !self.include.iter().any(|pattern| pattern.is_match(name)) {
+            return false;
+        }
+        !self.exclude.iter().any(|pattern| pattern.is_match(name))
+    }
+
+    /// Return whether the file name component of `path` passes the include and exclude filters.
+    #[must_use]
+    pub fn matches_path(&self, path: &Path) -> bool {
+        let name = path_to_filename_string(path);
+        self.matches_name(&name)
+    }
+}
+
+impl Default for WalkOptions {
+    fn default() -> Self {
+        Self {
+            recurse: false,
+            max_depth: None,
+            include_directories: false,
+            skip_hidden_and_system: true,
+        }
+    }
+}
+
+impl WalkOptions {
+    /// Create walk options for files with the given recursion setting.
+    #[must_use]
+    pub const fn files(recurse: bool) -> Self {
+        Self {
+            recurse,
+            max_depth: None,
+            include_directories: false,
+            skip_hidden_and_system: true,
+        }
+    }
+
+    /// Create walk options for directories with the given recursion setting.
+    #[must_use]
+    pub const fn directories(recurse: bool) -> Self {
+        Self {
+            recurse,
+            max_depth: None,
+            include_directories: true,
+            skip_hidden_and_system: true,
+        }
+    }
+}
 
 /// Convert `OsStr` to String with invalid Unicode handling.
 pub fn os_str_to_string(name: &OsStr) -> String {
@@ -338,11 +437,165 @@ fn find_executable_with_extensions(base: &Path) -> Option<PathBuf> {
 /// Symlinks are not followed, and entries that cannot be read are not counted.
 #[must_use]
 pub fn count_files(directory: &Path) -> usize {
-    walkdir::WalkDir::new(directory)
+    WalkDir::new(directory)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .count()
+}
+
+/// Resolve a list of CLI input paths to canonical absolute paths, deduplicated in order.
+///
+/// When `paths` is empty, resolves the current working directory.
+/// When `paths` is non-empty, every entry must be non-empty and exist on disk.
+///
+/// # Errors
+/// Returns an error if any path is empty, missing, or inaccessible.
+pub fn resolve_input_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if paths.is_empty() {
+        return Ok(vec![crate::resolve_input_path(None)?]);
+    }
+    let mut resolved = Vec::with_capacity(paths.len());
+    let mut seen = HashSet::with_capacity(paths.len());
+    for path in paths {
+        let canonical = crate::resolve_required_input_path(path)?;
+        if seen.insert(canonical.clone()) {
+            resolved.push(canonical);
+        }
+    }
+    Ok(resolved)
+}
+
+/// Normalize file extensions by trimming whitespace, stripping leading dots, lowercasing, and deduplicating.
+#[must_use]
+pub fn normalize_extensions<I, S>(extensions: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for raw in extensions {
+        let normalized = raw.as_ref().trim().trim_start_matches('.').to_ascii_lowercase();
+        if !normalized.is_empty() && seen.insert(normalized.clone()) {
+            result.push(normalized);
+        }
+    }
+    result
+}
+
+/// Return the platform-specific local data directory for `cli-tools`.
+///
+/// - macOS: `~/Library/Application Support/cli-tools`
+/// - Windows: `%LOCALAPPDATA%\cli-tools`
+/// - Linux: `~/.local/share/cli-tools`
+///
+/// # Errors
+/// Returns an error if the operating system local data directory cannot be determined.
+pub fn data_dir() -> Result<PathBuf> {
+    let base = dirs::data_local_dir().context("Failed to determine local data directory")?;
+    Ok(base.join("cli-tools"))
+}
+
+/// Return the path to a named file inside the `cli-tools` local data directory.
+///
+/// # Errors
+/// Returns an error if the local data directory cannot be determined.
+pub fn data_file_path(filename: &str) -> Result<PathBuf> {
+    Ok(data_dir()?.join(filename))
+}
+
+/// Map a byte length in `original.to_lowercase()` back to the corresponding byte offset in `original`.
+///
+/// Unicode lowercasing can expand or shrink UTF-8 byte lengths (for example `'İ'` expands from 2 bytes to 3).
+/// Walking characters in lockstep avoids slicing `original` at an invalid UTF-8 boundary or wrong offset.
+#[must_use]
+pub fn original_end_for_lowercase_prefix(original: &str, lowercase_prefix_len: usize) -> usize {
+    let mut lower_consumed = 0usize;
+    for (byte_index, character) in original.char_indices() {
+        if lower_consumed >= lowercase_prefix_len {
+            return byte_index;
+        }
+        lower_consumed += character.to_lowercase().map(char::len_utf8).sum::<usize>();
+    }
+    original.len()
+}
+
+/// Strip ANSI CSI escape sequences from `text`.
+#[must_use]
+pub fn strip_ansi_codes(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\x1b' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for next_character in chars.by_ref() {
+                if ('@'..='~').contains(&next_character) {
+                    break;
+                }
+            }
+        } else {
+            cleaned.push(character);
+        }
+    }
+    cleaned
+}
+
+/// Collect regular files or directories under `root` without following symlinks.
+///
+/// Walk errors are passed to `on_error` rather than silently discarded or aborting the entire scan.
+pub fn collect_entries(root: &Path, options: &WalkOptions, mut on_error: impl FnMut(walkdir::Error)) -> Vec<PathBuf> {
+    let mut walker = WalkDir::new(root).follow_links(false).min_depth(1);
+    if !options.recurse {
+        walker = walker.max_depth(1);
+    } else if let Some(max_depth) = options.max_depth {
+        walker = walker.max_depth(max_depth);
+    }
+
+    let mut entries = Vec::new();
+    let skip_hidden = options.skip_hidden_and_system;
+    for entry_result in walker
+        .into_iter()
+        .filter_entry(move |entry| !skip_hidden || !crate::should_skip_entry(entry))
+    {
+        match entry_result {
+            Ok(entry) => {
+                let file_type = entry.file_type();
+                if options.include_directories {
+                    if file_type.is_dir() {
+                        entries.push(entry.into_path());
+                    }
+                } else if file_type.is_file() {
+                    entries.push(entry.into_path());
+                }
+            }
+            Err(error) => on_error(error),
+        }
+    }
+    entries
+}
+
+/// Compile case-insensitive include or exclude patterns into regular expressions.
+fn compile_filter_patterns(patterns: &[String]) -> Result<Vec<Regex>> {
+    let mut compiled = Vec::with_capacity(patterns.len());
+    for raw in patterns {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let has_glob_meta = trimmed.contains(['*', '?', '[', '{']);
+        let regex_source = if has_glob_meta {
+            let Some(regex) = glob_to_regex(trimmed) else {
+                bail!("Invalid glob pattern: '{trimmed}'");
+            };
+            format!("(?i){}", regex.as_str())
+        } else {
+            format!("(?i){}", regex::escape(trimmed))
+        };
+        let regex = Regex::new(&regex_source).with_context(|| format!("Invalid filter pattern: '{trimmed}'"))?;
+        compiled.push(regex);
+    }
+    Ok(compiled)
 }
 
 /// Whether the path is a regular file with an executable permission bit on Unix,
@@ -361,6 +614,91 @@ fn is_executable_file(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+#[cfg(test)]
+mod test_unification_helpers {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn name_filter_supports_globs_substrings_and_or_includes() {
+        let filter = NameFilter::new(
+            &["*.mp4".to_string(), "clip".to_string()],
+            &["*sample*".to_string(), "draft".to_string()],
+        )
+        .unwrap();
+
+        assert!(filter.matches_name("Movie.MP4"));
+        assert!(filter.matches_name("My.Clip.mkv"));
+        assert!(!filter.matches_name("Other.mkv"));
+        assert!(!filter.matches_name("Movie.Sample.mp4"));
+        assert!(!filter.matches_name("Clip.Draft.mkv"));
+        assert!(filter.matches_path(Path::new("/Users/draft/videos/Movie.mp4")));
+    }
+
+    #[test]
+    fn name_filter_rejects_invalid_glob() {
+        assert!(NameFilter::new(&["[unclosed".to_string()], &[]).is_err());
+    }
+
+    #[test]
+    fn normalize_extensions_strips_dots_lowercases_and_deduplicates() {
+        let normalized = normalize_extensions([" .MP4 ", "mkv", ".mp4", "", "  ", ".MKV"]);
+        assert_eq!(normalized, vec!["mp4", "mkv"]);
+    }
+
+    #[test]
+    fn original_end_for_lowercase_prefix_handles_expanding_unicode() {
+        let original = "İstanbul.Video";
+        let lower_prefix_len = "i\u{307}st".len();
+        let end = original_end_for_lowercase_prefix(original, lower_prefix_len);
+        assert_eq!(original.get(..end), Some("İst"));
+    }
+
+    #[test]
+    fn strip_ansi_codes_removes_color_sequences() {
+        let colored = "\x1b[32mgreen\x1b[0m plain \x1b[1;31mred\x1b[0m";
+        assert_eq!(strip_ansi_codes(colored), "green plain red");
+    }
+
+    #[test]
+    fn resolve_input_paths_deduplicates_preserving_order() {
+        let dir = TempDir::new().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+
+        let resolved = resolve_input_paths(&[b.clone(), a.clone(), b]).unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0], dunce::canonicalize(dir.path().join("b")).unwrap());
+        assert_eq!(resolved[1], dunce::canonicalize(&a).unwrap());
+    }
+
+    #[test]
+    fn collect_entries_skips_hidden_and_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let visible = dir.path().join("movie.mp4");
+        let hidden = dir.path().join(".secret.mp4");
+        let nested_dir = dir.path().join("sub");
+        let nested_file = nested_dir.join("deep.mp4");
+        std::fs::write(&visible, b"a").unwrap();
+        std::fs::write(&hidden, b"b").unwrap();
+        std::fs::create_dir(&nested_dir).unwrap();
+        std::fs::write(&nested_file, b"c").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&visible, dir.path().join("link.mp4")).unwrap();
+
+        let shallow = collect_entries(dir.path(), &WalkOptions::files(false), |_| {});
+        assert_eq!(shallow, vec![visible.clone()]);
+
+        let mut deep = collect_entries(dir.path(), &WalkOptions::files(true), |_| {});
+        deep.sort();
+        let mut expected = vec![visible, nested_file];
+        expected.sort();
+        assert_eq!(deep, expected);
     }
 }
 

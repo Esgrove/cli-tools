@@ -25,6 +25,8 @@ dunce = { workspace = true }
 jiff = { workspace = true }
 num_cpus = { workspace = true, optional = true }
 regex = { workspace = true }
+serde = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 trash = { workspace = true }
 unicode-normalization = { workspace = true }
 walkdir = { workspace = true }
@@ -40,6 +42,7 @@ windows-sys = { workspace = true, features = ["Win32_Security"] }
 [features]
 async = ["dep:num_cpus", "dep:tokio"]
 completion = ["dep:clap", "dep:clap_complete"]
+config = ["dep:serde", "dep:toml"]
 diff = ["dep:difference"]
 test-support = ["dep:tempfile"]
 
