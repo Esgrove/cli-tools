@@ -187,7 +187,7 @@ pub fn show_database_contents(database: &Database, config: &Config) -> Result<()
             // 10 chars (e.g. "15.0 Mbps "), duration: 10 chars (e.g. "3h 01m 18s")
             let size_str = cli_tools_common::format_size(file.size_bytes);
             let bitrate_str = format!("{:.1} Mbps", file.bitrate_kbps as f64 / 1000.0);
-            let duration_str = cli_tools_common::format_duration(std::time::Duration::from_secs_f64(file.duration));
+            let duration_str = cli_tools_common::format_duration_seconds(file.duration);
             let action_str = match file.action {
                 PendingAction::Convert => "CONVERT".yellow(),
                 PendingAction::Remux => "REMUX".cyan(),
@@ -304,6 +304,30 @@ mod test_database_reporting {
         let database = Database::open_in_memory().expect("the database should open");
 
         list_extensions(&database, true).expect("listing should succeed");
+    }
+
+    #[test]
+    fn show_database_contents_does_not_panic_on_negative_duration() {
+        let database = Database::open_in_memory().expect("the database should open");
+        let mut info = video_info(1_000_000, 8000);
+        info.duration = -10.0;
+        database
+            .upsert_pending_file(
+                std::path::Path::new("/videos/bad.mkv"),
+                "mkv",
+                &info,
+                PendingAction::Convert,
+            )
+            .expect("insert");
+        let config = Config {
+            options: ConvertOptions::default(),
+            convert_all: false,
+            convert_other: false,
+            display_limit: None,
+            database_mode: Some(DatabaseMode::Show),
+            verbose: false,
+        };
+        show_database_contents(&database, &config).expect("show-db should handle negative duration safely");
     }
 
     #[test]

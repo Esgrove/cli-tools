@@ -321,7 +321,7 @@ impl VideoInfo {
                             codec = value.to_lowercase();
                         }
                     }
-                    "bit_rate" | "BPS" | "BPS-eng" => {
+                    "bit_rate" | "BPS" | "BPS-eng" | "TAG:BPS" | "TAG:BPS-eng" => {
                         if bitrate_kbps.is_none()
                             && let Ok(bps) = value.parse::<u64>()
                             && bps > 0
@@ -335,7 +335,10 @@ impl VideoInfo {
                         }
                     }
                     "duration" => {
-                        if let Ok(seconds) = value.parse::<f64>() {
+                        if let Ok(seconds) = value.parse::<f64>()
+                            && seconds.is_finite()
+                            && seconds > 0.0
+                        {
                             duration = Some(seconds);
                         }
                     }
@@ -434,7 +437,9 @@ impl VideoInfo {
     }
 
     fn bit_depth_from_pixel_format(pixel_format: &str) -> Option<u8> {
-        if pixel_format.contains("10") {
+        if matches!(pixel_format, "nv12" | "nv21" | "nv16" | "yuv410p") {
+            Some(8)
+        } else if pixel_format.contains("10") {
             Some(10)
         } else if pixel_format.contains("12") {
             Some(12)
@@ -445,7 +450,7 @@ impl VideoInfo {
             || pixel_format.starts_with("bgra64")
         {
             Some(16)
-        } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") || pixel_format == "nv12" {
+        } else if pixel_format.contains("yuv") || pixel_format.contains("rgb") {
             Some(8)
         } else {
             None
@@ -1720,7 +1725,34 @@ mod video_info_quality_tests {
         assert_eq!(VideoInfo::bit_depth_from_pixel_format("rgb48le"), Some(16));
         assert_eq!(VideoInfo::bit_depth_from_pixel_format("rgba64be"), Some(16));
         assert_eq!(VideoInfo::bit_depth_from_pixel_format("yuv420p"), Some(8));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("nv12"), Some(8));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("yuv410p"), Some(8));
+        assert_eq!(VideoInfo::bit_depth_from_pixel_format("nv16"), Some(8));
         assert_eq!(VideoInfo::bit_depth_from_pixel_format("unknown"), None);
+    }
+
+    #[test]
+    fn parses_tag_bps_and_rejects_non_positive_or_non_finite_durations() {
+        let output = "codec_name=hevc\n\
+                      bit_rate=N/A\n\
+                      TAG:BPS=8000000\n\
+                      bit_rate=9500000\n\
+                      duration=120.5\n\
+                      width=1920\n\
+                      height=1080\n\
+                      r_frame_rate=24/1\n";
+        let info = VideoInfo::from_ffprobe_output(output, "", Path::new("movie.mkv")).expect("parse TAG:BPS");
+        assert_eq!(info.bitrate_kbps, 8000);
+
+        for bad_duration in ["-5.0", "0.0", "NaN", "inf"] {
+            let bad = format!(
+                "codec_name=h264\nbit_rate=5000000\nduration={bad_duration}\nwidth=1920\nheight=1080\nr_frame_rate=24/1\n"
+            );
+            assert!(
+                VideoInfo::from_ffprobe_output(&bad, "", Path::new("movie.mkv")).is_err(),
+                "duration={bad_duration} must be rejected"
+            );
+        }
     }
 }
 
