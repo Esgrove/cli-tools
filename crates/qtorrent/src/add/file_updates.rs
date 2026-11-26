@@ -4,7 +4,6 @@
 //! and marks excluded files to be skipped, retrying until qBittorrent confirms the change.
 //! Each outcome is reported to the `AddObserver`.
 
-use std::path::Path;
 use std::time::Duration;
 
 use cli_tools_dots::DotFormat;
@@ -66,21 +65,18 @@ pub(super) async fn rename_torrent_files(
                 continue;
             }
 
-            // The API returns the full path as qBittorrent sees it, including the root folder
+            // The API returns POSIX-style '/' paths including the root folder on every OS.
             let old_path = &file.name;
-            let path = Path::new(old_path.as_str());
-
-            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+            let (parent, filename) = split_torrent_path(old_path);
+            if filename.is_empty() {
                 continue;
-            };
+            }
 
             let formatted = utils::format_single_file_name(dot_rename, filename);
             if formatted == filename {
                 continue;
             }
 
-            // Build the new path by replacing only the file name
-            let parent = path.parent().and_then(|parent| parent.to_str()).unwrap_or("");
             let new_path = if parent.is_empty() {
                 formatted.clone()
             } else {
@@ -188,6 +184,11 @@ pub(super) async fn apply_excluded_file_priorities(
     });
 }
 
+/// Split a qBittorrent API path (always `/` separated) into `(parent, filename)`.
+fn split_torrent_path(path: &str) -> (&str, &str) {
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
 /// Check that all excluded file indices are present in the API response.
 fn excluded_indices_exist(api_files: &[TorrentFileItem], excluded_indices: &[usize]) -> bool {
     excluded_indices
@@ -215,6 +216,13 @@ mod test_excluded_file_priorities {
             name: format!("file-{index}.bin"),
             priority,
         }
+    }
+
+    #[test]
+    fn split_torrent_path_uses_posix_forward_slashes() {
+        assert_eq!(split_torrent_path("root/sub/movie.mp4"), ("root/sub", "movie.mp4"));
+        assert_eq!(split_torrent_path("movie.mp4"), ("", "movie.mp4"));
+        assert_eq!(split_torrent_path("folder/"), ("folder", ""));
     }
 
     #[test]

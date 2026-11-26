@@ -90,6 +90,7 @@ impl TagRules {
         mut prefixes: Vec<TagOverwrite>,
         mut paths: Vec<TagPathOverwrite>,
     ) -> Self {
+        prefixes.retain(|entry| !entry.lowercase_prefix.trim().is_empty());
         prefixes.sort_by_key(|entry| std::cmp::Reverse(entry.lowercase_prefix.chars().count()));
         paths.sort_by_key(|entry| {
             std::cmp::Reverse((entry.lowercase_components.len(), entry.lowercase_path.chars().count()))
@@ -468,6 +469,13 @@ mod test_resolve_tags {
     fn returns_default_tags_when_no_path_matches() {
         let rules = make_rules_with_paths(Some("default-tag"), vec![], vec![("Series", "series-tag")]);
         let result = rules.resolve(Path::new(r"C:\Archive\Media\Movies\Show.torrent"));
+        assert_eq!(result, Some("default-tag".to_string()));
+    }
+
+    #[test]
+    fn empty_prefix_rule_is_ignored() {
+        let rules = make_rules_with_paths(Some("default-tag"), vec![("", "catch-all"), ("  ", "spaces")], vec![]);
+        let result = rules.resolve(Path::new("/torrents/Any.Show.torrent"));
         assert_eq!(result, Some("default-tag".to_string()));
     }
 }

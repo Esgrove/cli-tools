@@ -380,15 +380,35 @@ pub fn move_torrent_to_downloaded(torrent_path: &Path, downloaded_directory: &Pa
     if cli_tools_common::paths_refer_to_same_file(torrent_path, &destination) {
         return Ok(destination);
     }
-    if destination.exists() && !is_duplicate_torrent_file(torrent_path, &destination) {
+    if std::fs::symlink_metadata(&destination).is_ok() && !is_duplicate_torrent_file(torrent_path, &destination) {
         let name = cli_tools_common::path_to_filename_string(torrent_path);
         let stem = cli_tools_common::path_to_file_stem_string(torrent_path);
         let extension = cli_tools_common::path_to_file_extension_string(torrent_path);
         destination = cli_tools_common::get_unique_path(downloaded_directory, &name, &stem, &extension);
     }
-    std::fs::rename(torrent_path, &destination)
-        .with_context(|| format!("Failed to move {} to {}", torrent_path.display(), destination.display()))?;
-    Ok(destination)
+    match std::fs::rename(torrent_path, &destination) {
+        Ok(()) => Ok(destination),
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+            let temporary = cli_tools_common::unique_sibling_path(&destination, "move-tmp");
+            if let Err(copy_error) = cli_tools_common::copy_file_with_times(torrent_path, &temporary) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(copy_error).with_context(|| {
+                    format!("Failed to copy {} to {}", torrent_path.display(), destination.display())
+                });
+            }
+            if let Err(rename_error) = std::fs::rename(&temporary, &destination) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(rename_error).with_context(|| {
+                    format!("Failed to move {} to {}", torrent_path.display(), destination.display())
+                });
+            }
+            std::fs::remove_file(torrent_path)
+                .with_context(|| format!("Failed to remove original torrent {}", torrent_path.display()))?;
+            Ok(destination)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("Failed to move {} to {}", torrent_path.display(), destination.display())),
+    }
 }
 
 #[cfg(test)]
