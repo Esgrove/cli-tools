@@ -49,8 +49,9 @@ pub struct Config {
     pub grouping: GroupingOptions,
 }
 
-/// Config from the user config file
+/// Config from the `[dirmove]` section of the user config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DirMoveConfig {
     #[serde(default)]
     auto: bool,
@@ -88,22 +89,14 @@ struct DirMoveConfig {
     unpack_directories: Vec<String>,
 }
 
-/// Wrapper needed for parsing the user config file section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    dirmove: DirMoveConfig,
-}
-
 impl DirMoveConfig {
     /// Parse configuration from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.dirmove)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config: {e}"))
+        cli_tools_common::parse_user_config_section(toml_str, "dirmove")
     }
 
     /// Try to read user config from the file if it exists.
@@ -112,19 +105,7 @@ impl DirMoveConfig {
     /// # Errors
     /// Returns an error if config file exists but cannot be read or parsed.
     fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}:\n{e}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
+        cli_tools_common::load_user_config_section("dirmove")
     }
 
     /// Create the final config by combining command line args with this user config.
@@ -219,6 +200,12 @@ pub fn add_ignored_group_name_to_config(name: &str) -> Result<bool> {
     let Some(config_path) = cli_tools_common::config_path() else {
         anyhow::bail!("Could not determine config file path");
     };
+    if config_path
+        .file_name()
+        .is_some_and(|file_name| file_name == "sample_config.toml")
+    {
+        anyhow::bail!("Refusing to modify repository test fixture {}", config_path.display());
+    }
     add_ignored_group_name_to_config_at(&config_path, name)
 }
 

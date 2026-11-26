@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 
+use cli_tools_common::locks::ActiveLockStore;
 use cli_tools_common::{
     TargetReservations, count_label, format_text_with_highlight, path_to_filename_string, print_bold, print_error,
     print_yellow,
@@ -19,6 +20,7 @@ use cli_tools_dirmove::{
     DirectoryInfo, DirectoryMatcher, DirectoryMerger, FileInfo, FileMatch, PrefixGrouper, Roots, Scanner, Unpacker,
     matcher, merge, mover, utils,
 };
+use cli_tools_media::scan_cache::ScanCache;
 
 use crate::DirMoveArgs;
 use crate::config::{Config, add_ignored_group_name_to_config, config_from_args};
@@ -86,12 +88,13 @@ impl DirMove {
     /// Existing maintenance steps run first, then whole-directory merge offers are made
     /// before normal file-to-directory matching.
     /// Create mode runs last and uses the first output root for newly-created directories.
-    pub fn run(&self) -> anyhow::Result<()> {
+    pub fn run(&mut self) -> anyhow::Result<()> {
         // Unwanted directories are deleted and unpack directories unpacked in a single directory walk.
         self.unpack_directories();
         self.merge_prefixed_directories()?;
-        self.update_database_with_existing_directories();
-        self.move_files_to_dir()?;
+        let directories = self.collect_directories()?;
+        self.update_database_with_directories(&directories);
+        self.move_files_to_dir_with_directories(&directories)?;
 
         if self.config.create {
             self.create_dirs_and_move_files()?;
@@ -187,33 +190,33 @@ impl DirMove {
         }
     }
 
-    /// Update the database with directory names found under every output root.
+    /// Update the database with directory names already collected under every output root.
     ///
-    /// Names matching `prefix_ignores`, `ignored_group_names`, or `ignored_group_parts` are skipped.
+    /// Uses one batch transaction to update display casing when directories change on disk.
     /// Dry-run mode does not write to the database.
-    fn update_database_with_existing_directories(&self) {
+    fn update_database_with_directories(&mut self, directories: &[DirectoryInfo]) {
         if self.config.dryrun {
             return;
         }
-        let Some(ref database) = self.database else {
+        let grouper = self.grouper();
+        let names: Vec<String> = directories
+            .iter()
+            .map(|directory_info| path_to_filename_string(&directory_info.path))
+            .filter(|directory_name| grouper.accepts_group_name(directory_name))
+            .collect();
+        let Some(ref mut database) = self.database else {
             return;
         };
 
-        if let Ok(scan) = self.scanner().collect_directories() {
-            for directory_info in scan.directories {
-                let directory_name = path_to_filename_string(&directory_info.path);
-                if self.grouper().accepts_group_name(&directory_name)
-                    && let Err(error) = database.insert_if_new(&directory_name)
-                    && self.config.debug
-                {
-                    eprintln!("Failed to add directory to database: {error}");
-                }
-            }
+        if let Err(error) = database.batch_upsert(&names)
+            && self.config.debug
+        {
+            eprintln!("Failed to update directory names in database: {error}");
         }
     }
 
-    /// Add a directory name to the database, incrementing its use count if it exists.
-    /// Does nothing in dryrun mode.
+    /// Add or update a directory name in the database.
+    /// Does nothing in dry-run mode.
     fn add_to_database(&self, name: &str) {
         if self.config.dryrun {
             return;
@@ -245,18 +248,20 @@ impl DirMove {
     }
 
     /// Match input files to existing output directories and move confirmed file groups.
-    ///
-    /// Candidate directories are gathered from all output roots.
-    /// Unless `--files-only` is set, matching input directories are offered for whole-directory merge
-    /// before direct files are collected and routed to output directories.
+    #[cfg(test)]
     fn move_files_to_dir(&self) -> anyhow::Result<()> {
         let directories = self.collect_directories()?;
+        self.move_files_to_dir_with_directories(&directories)
+    }
+
+    /// Match input files to already-collected output directories and move confirmed file groups.
+    fn move_files_to_dir_with_directories(&self, directories: &[DirectoryInfo]) -> anyhow::Result<()> {
         if directories.is_empty() {
             return Ok(());
         }
 
         if !self.config.files_only {
-            self.move_input_directories_to_matching_output(&directories)?;
+            self.move_input_directories_to_matching_output(directories)?;
         }
 
         let files_in_root = self.scanner().collect_files()?;
@@ -267,14 +272,14 @@ impl DirMove {
         // Custom mappings take priority.
         // Files remain available for normal matching if a custom suggestion is skipped or fails.
         let mut consumed_files = HashSet::new();
-        let remaining_files = self.process_custom_mapping_matches(&files_in_root, &directories, &mut consumed_files)?;
+        let remaining_files = self.process_custom_mapping_matches(&files_in_root, directories, &mut consumed_files)?;
         if remaining_files.is_empty() {
             return Ok(());
         }
 
-        let matches = self.matcher().match_files(&remaining_files, &directories);
+        let matches = self.matcher().match_files(&remaining_files, directories);
         if self.config.debug {
-            report::print_match_debug(&matches, &directories);
+            report::print_match_debug(&matches, directories);
         }
         if matches.is_empty() {
             return Ok(());
@@ -286,7 +291,7 @@ impl DirMove {
                 count_label(matches.len(), "directory match", "directory matches")
             );
         }
-        self.offer_directory_matches(matches, &remaining_files, &directories, &mut consumed_files)
+        self.offer_directory_matches(matches, &remaining_files, directories, &mut consumed_files)
     }
 
     /// Process custom mapping matches, moving files matching custom patterns to their target directories.
@@ -713,9 +718,50 @@ impl DirMove {
         }
     }
 
-    /// Move files to the target directory, creating it if needed.
+    /// Move files to the target directory, creating it if needed, while skipping locked files
+    /// and updating shared `ScanCache` paths for moved files.
     fn move_files_to_target_dir(&self, dir_path: &Path, files: &[PathBuf]) -> anyhow::Result<mover::MoveReport> {
-        mover::move_files_to_target_dir(dir_path, files, self.config.overwrite, &mut self.reporter())
+        let lock_store = if self.config.dryrun || cfg!(test) {
+            None
+        } else {
+            ActiveLockStore::open_default("dirmove").ok()
+        };
+
+        let mut unlocked_files = Vec::with_capacity(files.len());
+        let mut locked_skips = Vec::new();
+        for file in files {
+            if let Some(ref store) = lock_store
+                && let Ok(Some(holder)) = store.is_locked_by_other(file)
+            {
+                print_yellow!(
+                    "Skipping locked file (held by {} pid {}): {}",
+                    holder.tool,
+                    holder.pid,
+                    file.display()
+                );
+                locked_skips.push(file.clone());
+                continue;
+            }
+            unlocked_files.push(file.clone());
+        }
+
+        let mut report =
+            mover::move_files_to_target_dir(dir_path, &unlocked_files, self.config.overwrite, &mut self.reporter())?;
+        report.skipped_files.extend(locked_skips);
+
+        if !self.config.dryrun
+            && !cfg!(test)
+            && !report.moved_files.is_empty()
+            && let Ok(mut cache) = ScanCache::open()
+        {
+            for old_path in &report.moved_files {
+                let file_name = path_to_filename_string(old_path);
+                let new_path = dir_path.join(&file_name);
+                let _ = cache.move_cached_path(old_path, &new_path);
+            }
+        }
+
+        Ok(report)
     }
 }
 

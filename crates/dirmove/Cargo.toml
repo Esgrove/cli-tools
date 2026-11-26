@@ -22,10 +22,12 @@ default = ["cli"]
 # Dependencies of the dirmove binary, left out by library users with `default-features = false`.
 cli = [
     "cli-tools-common/completion",
+    "cli-tools-common/config",
+    "cli-tools-common/sqlite",
+    "cli-tools-media/scan-cache",
     "dep:clap",
     "dep:clap_complete",
     "dep:colored",
-    "dep:dirs",
     "dep:indicatif",
     "dep:rusqlite",
     "dep:serde",
@@ -44,7 +46,6 @@ walkdir = { workspace = true }
 clap = { workspace = true, optional = true }
 clap_complete = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
-dirs = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }

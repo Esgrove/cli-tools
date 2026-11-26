@@ -34,7 +34,7 @@ fn dirmove_command(home: &Path) -> Command {
 
 /// Return whether the name database exists anywhere under `home`.
 fn database_exists(home: &TempTree) -> bool {
-    home.files().iter().any(|file| file.ends_with("dirmove.db"))
+    home.files().iter().any(|file| file.ends_with("cli-tools.db"))
 }
 
 /// Standard output as text.
