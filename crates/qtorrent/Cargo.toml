@@ -34,7 +34,7 @@ cli = [
 [dependencies]
 anyhow = { workspace = true }
 cli-tools-common = { workspace = true }
-cli-tools-dots = { workspace = true }
+cli-tools-dots = { workspace = true, default-features = false }
 regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
