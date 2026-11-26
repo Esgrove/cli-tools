@@ -589,7 +589,6 @@ dependencies = [
  "sha1",
  "tempfile",
  "tokio",
- "toml",
  "trash",
  "walkdir",
 ]
@@ -609,7 +608,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "toml",
  "toml_edit",
  "walkdir",
 ]
@@ -707,7 +705,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "toml",
  "walkdir",
 ]
 
@@ -760,7 +757,6 @@ dependencies = [
  "clap_complete",
  "cli-tools-common",
  "colored",
- "dunce",
  "git2",
  "regex",
  "tempfile",
