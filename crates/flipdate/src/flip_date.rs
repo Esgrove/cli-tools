@@ -2,7 +2,7 @@
 //!
 //! Finds dates in file or directory names and renames them to the `yyyy.mm.dd` format.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -106,7 +106,7 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
     }
 
     if !config.dryrun {
-        execute_planned_renames(planned, policy)?;
+        execute_planned_renames(&planned, policy)?;
     }
 
     Ok(())
@@ -114,9 +114,9 @@ pub fn date_flip_files(path: &PathBuf, config: &Config) -> Result<()> {
 
 /// Execute planned file renames without clobbering any pending source in cycles or chains.
 ///
-/// Any source path that is also a destination of another planned rename in the batch is staged
-/// through a unique temporary sibling first, so swaps and chains never overwrite pending files.
-fn execute_planned_renames(planned: Vec<(RenameItem, PathBuf)>, policy: OverwritePolicy) -> Result<()> {
+/// Stage sources that are also destinations in the batch under unique temporary sibling paths.
+/// On failure, restore pending sources whose original names are free.
+fn execute_planned_renames(planned: &[(RenameItem, PathBuf)], policy: OverwritePolicy) -> Result<()> {
     use std::collections::HashSet;
 
     let path_key = |path: &std::path::Path| path.to_string_lossy().to_lowercase();
@@ -159,12 +159,15 @@ fn execute_planned_renames(planned: Vec<(RenameItem, PathBuf)>, policy: Overwrit
         .collect();
 
     // Phase 1: Stage any active source whose path is also targeted by another active rename.
-    let mut staged_sources: Vec<Option<PathBuf>> = Vec::with_capacity(planned.len());
+    let mut staged_sources = Vec::with_capacity(planned.len());
     for ((item, _), is_active) in planned.iter().zip(&active) {
         if *is_active && active_targets.contains(&path_key(&item.path)) {
             let temporary = cli_tools_common::unique_sibling_path(&item.path, "flipdate-tmp");
-            cli_tools_common::safe_rename(&item.path, &temporary, OverwritePolicy::Error)
-                .with_context(|| format!("Failed to stage {}", item.path.display()))?;
+            if let Err(error) = cli_tools_common::safe_rename(&item.path, &temporary, OverwritePolicy::Error)
+                .with_context(|| format!("Failed to stage {}", item.path.display()))
+            {
+                return Err(recover_staged_sources(planned, &staged_sources, error));
+            }
             staged_sources.push(Some(temporary));
         } else {
             staged_sources.push(None);
@@ -172,21 +175,56 @@ fn execute_planned_renames(planned: Vec<(RenameItem, PathBuf)>, policy: Overwrit
     }
 
     // Phase 2: Move each active item from its original or staged path to its final destination.
-    for (((item, new_path), is_active), staged) in planned.into_iter().zip(active).zip(staged_sources) {
+    for (((item, new_path), is_active), staged) in planned.iter().zip(active).zip(&mut staged_sources) {
         if !is_active {
             continue;
         }
-        let current_source = staged.as_deref().unwrap_or(item.path.as_path());
-        let outcome = cli_tools_common::safe_rename(current_source, &new_path, policy)
-            .with_context(|| format!("Failed to rename {}", item.path.display()))?;
-        if outcome == RenameOutcome::SkippedExisting {
-            if let Some(temp_path) = staged {
-                let _ = std::fs::rename(&temp_path, &item.path);
+        let current_source = staged.as_deref().unwrap_or(&item.path);
+        let outcome = cli_tools_common::safe_rename(current_source, new_path, policy)
+            .with_context(|| format!("Failed to rename {}", item.path.display()));
+        match outcome {
+            Ok(RenameOutcome::SkippedExisting) => {
+                if let Some(temporary) = staged.take()
+                    && let Err(error) = restore_staged_source(&temporary, &item.path)
+                {
+                    return Err(recover_staged_sources(planned, &staged_sources, error));
+                }
+                eprintln!("{}", "File already exists".yellow());
             }
-            eprintln!("{}", "File already exists".yellow());
+            Ok(_) => *staged = None,
+            Err(error) => return Err(recover_staged_sources(planned, &staged_sources, error)),
         }
     }
 
+    Ok(())
+}
+
+/// Restore pending inputs after a failure without undoing completed renames.
+/// Attach a recovery path to the error for every input that cannot be restored.
+fn recover_staged_sources(
+    planned: &[(RenameItem, PathBuf)],
+    staged_sources: &[Option<PathBuf>],
+    mut error: anyhow::Error,
+) -> anyhow::Error {
+    for ((item, _), staged) in planned.iter().zip(staged_sources) {
+        if let Some(temporary) = staged
+            && let Err(recovery_error) = restore_staged_source(temporary, &item.path)
+        {
+            error = error.context(format!("{recovery_error:#}"));
+        }
+    }
+    error
+}
+
+/// Restore an input without overwriting anything that now occupies its original name.
+fn restore_staged_source(temporary: &Path, original: &Path) -> Result<()> {
+    cli_tools_common::safe_rename(temporary, original, OverwritePolicy::Error).with_context(|| {
+        format!(
+            "Could not restore {} from recovery path {}",
+            original.display(),
+            temporary.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -1048,6 +1086,30 @@ mod test_nested_trees {
 
         assert!(tree.exists("Photo 2020.02.01.JPG"), "{:?}", tree.snapshot());
         assert!(tree.exists("Clip 2023.12.31.MP4"), "{:?}", tree.snapshot());
+    }
+
+    /// Simulate an input disappearing after planning but before staging.
+    #[test]
+    fn a_failed_staging_rename_restores_previously_staged_input() {
+        let tree = TempTree::new();
+        tree.file_with("first.txt", "first input");
+        let before = tree.snapshot();
+        let planned = [("first.txt", "missing.txt"), ("missing.txt", "first.txt")]
+            .into_iter()
+            .map(|(source, target)| {
+                let item = RenameItem {
+                    path: tree.join(source),
+                    filename: source.to_string(),
+                    new_name: target.to_string(),
+                };
+                (item, tree.join(target))
+            })
+            .collect::<Vec<_>>();
+
+        let error = execute_planned_renames(&planned, OverwritePolicy::Overwrite).unwrap_err();
+
+        assert!(error.to_string().contains("Failed to stage"), "{error:#}");
+        assert_eq!(tree.snapshot(), before);
     }
 
     #[test]

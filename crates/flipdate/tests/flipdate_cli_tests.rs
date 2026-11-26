@@ -126,6 +126,42 @@ fn force_keeps_both_files_that_map_to_the_same_name() {
     assert_eq!(contents, vec!["first", "second"]);
 }
 
+/// Check that a blocked rename leaves an unrelated swap untouched.
+#[test]
+fn a_failed_rename_restores_staged_inputs_from_an_unrelated_swap() {
+    let tree = TempTree::new();
+    tree.file_with("files/A 2005.12.23.jpg", "blocked source");
+    tree.file_with("files/A 2023.12.05.jpg/keep.txt", "existing directory");
+    tree.file_with("files/B 2005.12.23.jpg", "first swap input");
+    tree.file_with("files/B 2023.12.05.jpg", "second swap input");
+    let before = tree.snapshot();
+
+    let output = run_flipdate(&tree, &["files", "--swap", "--force"]);
+
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("A 2005.12.23.jpg"), "{error}");
+    assert_eq!(tree.snapshot(), before);
+}
+
+/// Verify that recovery reports the temporary path instead of replacing a completed rename.
+#[test]
+fn a_staged_input_keeps_its_recovery_path_when_its_name_is_occupied() {
+    let tree = TempTree::new();
+    tree.file_with("files/05.12.2023.jpg", "first chain input");
+    tree.file_with("files/2023.12.05.jpg", "second chain input");
+    tree.dir("files/2005.12.23.jpg");
+
+    let output = run_flipdate(&tree, &["files", "--swap", "--force"]);
+
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("2005.12.23.jpg"), "{error}");
+    assert!(error.contains("2023.12.05.jpg.flipdate-tmp"), "{error}");
+    assert_eq!(tree.read("files/2023.12.05.jpg"), "first chain input");
+    assert_eq!(tree.read("files/2023.12.05.jpg.flipdate-tmp"), "second chain input");
+}
+
 #[test]
 fn missing_path_is_an_error() {
     let tree = TempTree::new();
