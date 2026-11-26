@@ -253,6 +253,32 @@ impl QBittorrentClient {
         }
     }
 
+    /// Start a stopped torrent, using the legacy resume endpoint if start is unavailable.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails or if not authenticated.
+    pub async fn start_torrent(&self, info_hash: &str) -> Result<()> {
+        if !self.authenticated {
+            bail!("Not authenticated. Call login() first.");
+        }
+
+        let request = |endpoint| self.client.post(self.build_url(endpoint)).form(&[("hash", info_hash)]);
+        let mut response = request("torrents/start")
+            .send()
+            .await
+            .context("Failed to send start torrent request")?;
+        if response.status() == StatusCode::NOT_FOUND {
+            response = request("torrents/resume")
+                .send()
+                .await
+                .context("Failed to send resume torrent request")?;
+        }
+        if response.status() != StatusCode::OK {
+            bail!("Failed to start torrent: HTTP {}", response.status());
+        }
+        Ok(())
+    }
+
     /// Get the API version from qBittorrent.
     ///
     /// # Errors

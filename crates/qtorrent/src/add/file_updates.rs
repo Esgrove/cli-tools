@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use anyhow::{Result, bail};
+
 use cli_tools_dots::DotFormat;
 
 use super::{AddEvent, AddObserver};
@@ -129,7 +131,7 @@ pub(super) async fn apply_excluded_file_priorities(
     excluded_indices: &[usize],
     wait_for_metadata: bool,
     observer: &mut impl AddObserver,
-) {
+) -> Result<()> {
     if wait_for_metadata {
         tokio::time::sleep(Duration::from_millis(PRIORITY_RETRY_DELAYS_MS[0])).await;
     }
@@ -172,7 +174,7 @@ pub(super) async fn apply_excluded_file_priorities(
 
         if excluded_indices_have_priority(&updated_files, excluded_indices, EXCLUDED_PRIORITY) {
             observer.on_event(AddEvent::ExcludedFilesSkipped(excluded_indices.len()));
-            return;
+            return Ok(());
         }
 
         last_error = Some("qBittorrent has not applied the skip priorities yet".to_string());
@@ -182,6 +184,10 @@ pub(super) async fn apply_excluded_file_priorities(
         count: excluded_indices.len(),
         error: last_error.as_deref(),
     });
+    let reason = last_error
+        .as_deref()
+        .unwrap_or("No priority verification was attempted");
+    bail!("Torrent {info_hash} was left paused because excluded file priorities could not be verified: {reason}");
 }
 
 /// Split a qBittorrent API path (always `/` separated) into `(parent, filename)`.

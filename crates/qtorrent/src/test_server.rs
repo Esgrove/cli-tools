@@ -43,6 +43,11 @@ pub fn route(path: &'static str, status: u16, body: impl Into<String>) -> Route 
 ///
 /// Routes are tried in order, and paths without a route get a 404 reply.
 pub async fn serve(routes: Vec<Route>) -> u16 {
+    serve_with(routes, |_| None).await
+}
+
+/// Serve canned routes, allowing a test callback to inspect requests and override replies.
+pub async fn serve_with(routes: Vec<Route>, mut reply: impl FnMut(&str) -> Option<Route> + Send + 'static) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("should bind a local port");
@@ -51,9 +56,10 @@ pub async fn serve(routes: Vec<Route>) -> u16 {
         while let Ok((mut stream, _)) = listener.accept().await {
             let request = read_request(&mut stream).await;
             let path = request.split_whitespace().nth(1).unwrap_or_default();
-            let (status, body, extra_content_length) = routes
-                .iter()
-                .find(|route| path.starts_with(route.path))
+            let response_override = reply(&request);
+            let (status, body, extra_content_length) = response_override
+                .as_ref()
+                .or_else(|| routes.iter().find(|route| path.starts_with(route.path)))
                 .map_or((404, "", 0), |route| {
                     (route.status, route.body.as_str(), route.extra_content_length)
                 });
