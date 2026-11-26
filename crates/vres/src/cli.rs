@@ -18,7 +18,7 @@ use cli_tools_common::file_handling::TargetReservations;
 use cli_tools_common::{create_semaphore_for_io_bound, print_bold, print_green};
 use cli_tools_media::Resolution;
 use cli_tools_media::resolution::print_fuzzy_resolution_ranges;
-use cli_tools_media::video_info::parse_display_resolution;
+use cli_tools_media::video_info::{ffmpeg_input_path, parse_display_resolution};
 
 use crate::config::Config;
 use crate::resolution::FFProbeResult;
@@ -49,7 +49,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         print_fuzzy_resolution_ranges();
     }
 
-    let files = gather_video_files(&config.path, config.recurse, config.delete_limit.is_some()).await?;
+    let files = gather_video_files(&config.path, config.recurse, config.delete_limit).await?;
 
     if files.is_empty() {
         if config.verbose {
@@ -137,12 +137,12 @@ fn add_resolution_labels(config: &Config, files: Vec<FFProbeResult>) -> usize {
     num_renamed
 }
 
-/// Deletes files with resolution smaller than the given limit.
+/// Deletes files with valid non-zero resolution smaller than the given limit.
 /// Returns the remaining files that were not deleted.
 fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: &Config) -> Vec<FFProbeResult> {
-    let (to_delete, to_keep): (Vec<_>, Vec<_>) = results
-        .into_iter()
-        .partition(|result| result.resolution.is_smaller_than(limit));
+    let (to_delete, to_keep): (Vec<_>, Vec<_>) = results.into_iter().partition(|result| {
+        result.resolution.width > 0 && result.resolution.height > 0 && result.resolution.is_smaller_than(limit)
+    });
 
     if !to_delete.is_empty() {
         let num_delete = to_delete.len();
@@ -159,14 +159,26 @@ fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: 
         }
 
         print_bold!("Resolution            Path");
+        let mut deleted_count = 0;
         for result in to_delete {
-            if let Err(error) = result.delete(config.dryrun) {
-                cli_tools_common::print_error!("{error}");
+            match result.delete(config.dryrun) {
+                Ok(()) => deleted_count += 1,
+                Err(error) => cli_tools_common::print_error!("{error}"),
             }
         }
 
         if config.verbose {
-            print_green!("Deleted {num_delete} files");
+            if config.dryrun {
+                print_green!(
+                    "Would delete {}",
+                    cli_tools_common::count_label(deleted_count, "file", "files")
+                );
+            } else {
+                print_green!(
+                    "Deleted {}",
+                    cli_tools_common::count_label(deleted_count, "file", "files")
+                );
+            }
         }
     } else if config.verbose {
         println!("No files smaller than {limit}");
@@ -175,23 +187,48 @@ fn delete_low_resolution_files(results: Vec<FFProbeResult>, limit: u32, config: 
     to_keep
 }
 
-/// Gathers video files for processing.
-/// If `delete_mode` is true, excludes only files with high resolution labels (720p+).
-/// Otherwise, excludes files with any resolution label.
-async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> anyhow::Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let exclude_regex = if delete_mode {
-        &*RE_HIGH_RESOLUTIONS
+/// Return whether `extension` matches a supported video extension, ignoring ASCII case.
+fn is_supported_extension(extension: &str) -> bool {
+    FILE_EXTENSIONS
+        .iter()
+        .any(|supported| supported.eq_ignore_ascii_case(extension))
+}
+
+/// Return whether a filename's existing resolution label allows skipping probing during discovery.
+fn should_skip_labeled_filename(filename: &str, delete_limit: Option<u32>) -> bool {
+    if RE_FULL_RESOLUTION.is_match(filename) {
+        return false;
+    }
+    if let Some(limit) = delete_limit {
+        let mut matched_any = false;
+        for captures in RE_HIGH_RESOLUTIONS.captures_iter(filename) {
+            let Some(label) = captures.get(1).map(|matched| matched.as_str()) else {
+                continue;
+            };
+            let height = label.trim_end_matches(['p', 'P']).parse::<u32>().unwrap_or(0);
+            matched_any = true;
+            if height < limit {
+                return false;
+            }
+        }
+        matched_any
     } else {
-        &*RE_RESOLUTIONS
-    };
+        RE_RESOLUTIONS.is_match(filename)
+    }
+}
+
+/// Gathers video files for processing.
+/// When `delete_limit` is set, only skips files whose high-resolution label is at least `limit`.
+/// Otherwise, excludes files with any resolution label.
+async fn gather_video_files(path: &Path, recurse: bool, delete_limit: Option<u32>) -> anyhow::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
 
     // A single file given as the input is processed on its own, like the help text says.
     if path.is_file() {
         let is_video = path
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| FILE_EXTENSIONS.contains(&extension));
+            .is_some_and(is_supported_extension);
         if !is_video {
             anyhow::bail!("Not a supported video file: {}", path.display());
         }
@@ -208,11 +245,11 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
         {
             let path = entry.path();
             if let Some(ext) = path.extension().and_then(|s| s.to_str())
-                && FILE_EXTENSIONS.contains(&ext)
+                && is_supported_extension(ext)
                 && path
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !exclude_regex.is_match(filename) || RE_FULL_RESOLUTION.is_match(filename))
+                    .is_some_and(|filename| !should_skip_labeled_filename(filename, delete_limit))
             {
                 files.push(path.to_path_buf());
             }
@@ -226,11 +263,11 @@ async fn gather_video_files(path: &Path, recurse: bool, delete_mode: bool) -> an
                 && !cli_tools_common::is_hidden_tokio(entry)
                 && !cli_tools_common::is_system_directory_tokio(entry)
                 && let Some(ext) = path.extension().and_then(|s| s.to_str())
-                && FILE_EXTENSIONS.contains(&ext)
+                && is_supported_extension(ext)
                 && path
                     .file_name()
                     .and_then(|f| f.to_str())
-                    .is_some_and(|filename| !exclude_regex.is_match(filename) || RE_FULL_RESOLUTION.is_match(filename))
+                    .is_some_and(|filename| !should_skip_labeled_filename(filename, delete_limit))
             {
                 files.push(path);
             }
@@ -291,6 +328,7 @@ async fn get_resolutions(files: Vec<PathBuf>) -> anyhow::Result<Vec<FFProbeResul
 
 /// Run ffprobe on a single file and parse the output into an `FFProbeResult`.
 async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
+    let input_path = ffmpeg_input_path(&file);
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -301,8 +339,9 @@ async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
             "stream=width,height:stream_side_data=rotation:stream_tags=rotate",
             "-output_format",
             "default=nokey=0:noprint_wrappers=1",
+            "-i",
         ])
-        .arg(&file)
+        .arg(&input_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -316,7 +355,7 @@ async fn run_ffprobe(file: PathBuf) -> anyhow::Result<FFProbeResult> {
                     .map_err(|error| anyhow!("Failed to parse output for {path}: {error}"))?;
                 Ok(FFProbeResult { file, resolution })
             } else {
-                Err(anyhow!("{path}: {}", std::str::from_utf8(&output.stderr)?))
+                Err(anyhow!("{path}: {}", String::from_utf8_lossy(&output.stderr).trim()))
             }
         }
         Err(e) => Err(anyhow!("Command failed for {path}: {e}")),
@@ -793,7 +832,7 @@ mod test_gather_video_files {
         let directory = temporary_directory();
         let file = write(directory.path(), "clip.mp4");
 
-        let files = gather_video_files(&file, false, false)
+        let files = gather_video_files(&file, false, None)
             .await
             .expect("a single file should be accepted");
 
@@ -808,7 +847,7 @@ mod test_gather_video_files {
         write(directory.path(), "notes.txt");
         write(directory.path(), "cover.jpg");
 
-        let files = gather_video_files(directory.path(), false, false)
+        let files = gather_video_files(directory.path(), false, None)
             .await
             .expect("gathering should succeed");
 
@@ -821,7 +860,7 @@ mod test_gather_video_files {
         write(directory.path(), "movie.mp4");
         write(directory.path(), "labelled.1080p.mp4");
 
-        let files = gather_video_files(directory.path(), false, false)
+        let files = gather_video_files(directory.path(), false, None)
             .await
             .expect("gathering should succeed");
 
@@ -833,7 +872,7 @@ mod test_gather_video_files {
         let directory = temporary_directory();
         write(directory.path(), "movie.1920x1080.mp4");
 
-        let files = gather_video_files(directory.path(), false, false)
+        let files = gather_video_files(directory.path(), false, None)
             .await
             .expect("gathering should succeed");
 
@@ -846,7 +885,7 @@ mod test_gather_video_files {
         write(directory.path(), "small.480p.mp4");
         write(directory.path(), "large.1080p.mp4");
 
-        let files = gather_video_files(directory.path(), false, true)
+        let files = gather_video_files(directory.path(), false, Some(500))
             .await
             .expect("gathering should succeed");
 
@@ -858,15 +897,64 @@ mod test_gather_video_files {
     }
 
     #[tokio::test]
+    async fn delete_mode_keeps_720p_files_when_limit_is_above_720_and_matches_uppercase_extensions() {
+        let directory = temporary_directory();
+        write(directory.path(), "clip.720p.MP4");
+        write(directory.path(), "movie.1080p.MOV");
+
+        let files = gather_video_files(directory.path(), false, Some(1080))
+            .await
+            .expect("gathering should succeed");
+        assert_eq!(names(&files), vec!["clip.720p.MP4"]);
+
+        let single = gather_video_files(&directory.path().join("movie.1080p.MOV"), false, None)
+            .await
+            .expect("uppercase single file should be accepted");
+        assert_eq!(names(&single), vec!["movie.1080p.MOV"]);
+    }
+
+    #[test]
+    fn delete_low_resolution_files_does_not_delete_zero_dimensions() {
+        let directory = temporary_directory();
+        let zero_path = write(directory.path(), "broken.mp4");
+        let small_path = write(directory.path(), "small.mp4");
+        let config = Config {
+            path: directory.path().to_path_buf(),
+            debug: false,
+            delete_limit: Some(500),
+            dryrun: false,
+            overwrite: false,
+            recurse: false,
+            verbose: false,
+        };
+        let results = vec![
+            FFProbeResult {
+                file: zero_path.clone(),
+                resolution: Resolution::new(0, 0),
+            },
+            FFProbeResult {
+                file: small_path.clone(),
+                resolution: Resolution::new(320, 240),
+            },
+        ];
+
+        let kept = delete_low_resolution_files(results, 500, &config);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].file, zero_path);
+        assert!(zero_path.exists());
+        assert!(!small_path.exists());
+    }
+
+    #[tokio::test]
     async fn subdirectories_are_only_walked_when_recursing() {
         let directory = temporary_directory();
         write(directory.path(), "top.mp4");
         write(directory.path(), "nested/deep.mp4");
 
-        let shallow = gather_video_files(directory.path(), false, false)
+        let shallow = gather_video_files(directory.path(), false, None)
             .await
             .expect("gathering should succeed");
-        let deep = gather_video_files(directory.path(), true, false)
+        let deep = gather_video_files(directory.path(), true, None)
             .await
             .expect("gathering should succeed");
 
@@ -880,10 +968,10 @@ mod test_gather_video_files {
         write(directory.path(), "movie.mp4");
         write(directory.path(), ".hidden.mp4");
 
-        let shallow = gather_video_files(directory.path(), false, false)
+        let shallow = gather_video_files(directory.path(), false, None)
             .await
             .expect("gathering should succeed");
-        let deep = gather_video_files(directory.path(), true, false)
+        let deep = gather_video_files(directory.path(), true, None)
             .await
             .expect("gathering should succeed");
 
@@ -895,7 +983,7 @@ mod test_gather_video_files {
     async fn a_missing_directory_is_an_error_without_recursing() {
         let directory = temporary_directory();
 
-        let result = gather_video_files(&directory.path().join("missing"), false, false).await;
+        let result = gather_video_files(&directory.path().join("missing"), false, None).await;
 
         assert!(result.is_err());
     }
@@ -904,7 +992,7 @@ mod test_gather_video_files {
     async fn an_empty_directory_gathers_nothing() {
         let directory = temporary_directory();
 
-        let files = gather_video_files(directory.path(), true, false)
+        let files = gather_video_files(directory.path(), true, None)
             .await
             .expect("gathering should succeed");
 
@@ -1046,10 +1134,10 @@ mod test_gather_nested_trees {
 
     /// Gather from the tree root in both modes and return the relative paths as (shallow, recursive).
     async fn gather_both(tree: &TempTree) -> (Vec<String>, Vec<String>) {
-        let shallow = gather_video_files(tree.path(), false, false)
+        let shallow = gather_video_files(tree.path(), false, None)
             .await
             .expect("shallow gathering should succeed");
-        let deep = gather_video_files(tree.path(), true, false)
+        let deep = gather_video_files(tree.path(), true, None)
             .await
             .expect("recursive gathering should succeed");
         (relative(tree, &shallow), relative(tree, &deep))
@@ -1172,8 +1260,8 @@ mod test_gather_nested_trees {
     async fn a_root_that_is_a_non_video_file_is_an_error() {
         let tree = TempTree::with_entries(&["notes.txt"]);
 
-        let shallow = gather_video_files(&tree.join("notes.txt"), false, false).await;
-        let deep = gather_video_files(&tree.join("notes.txt"), true, false).await;
+        let shallow = gather_video_files(&tree.join("notes.txt"), false, None).await;
+        let deep = gather_video_files(&tree.join("notes.txt"), true, None).await;
 
         assert!(shallow.is_err());
         assert!(deep.is_err());
@@ -1184,7 +1272,7 @@ mod test_gather_nested_trees {
         let tree = TempTree::with_entries(&["a/b/c/clip.mp4", "a/b/c/other.mp4"]);
         let file = tree.join("a/b/c/clip.mp4");
 
-        let files = gather_video_files(&file, true, false)
+        let files = gather_video_files(&file, true, None)
             .await
             .expect("a single video file should be accepted");
 

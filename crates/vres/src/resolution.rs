@@ -44,20 +44,28 @@ impl FFProbeResult {
 
     /// Rename the video file to include its resolution label.
     ///
-    /// Fails if the target path already exists and `overwrite` is false.
+    /// Fails if the target path is a different existing entry and `overwrite` is false.
+    /// Case-only renames succeed through a temporary sibling name, and dangling symlinks count as existing.
     /// In dryrun mode, only prints the rename without performing it.
     pub(crate) fn rename(&self, new_path: &Path, overwrite: bool, dryrun: bool) -> anyhow::Result<()> {
         self.print_rename(new_path);
-        if new_path.exists() && !overwrite {
+        let target_is_other_entry = std::fs::symlink_metadata(new_path).is_ok()
+            && !cli_tools_common::paths_refer_to_same_entry(&self.file, new_path);
+        if target_is_other_entry && !overwrite {
             anyhow::bail!("File already exists: {}", cli_tools_common::path_to_string(new_path));
         }
         if !dryrun {
-            std::fs::rename(&self.file, new_path)?;
+            let policy = if overwrite {
+                cli_tools_common::OverwritePolicy::Overwrite
+            } else {
+                cli_tools_common::OverwritePolicy::Error
+            };
+            cli_tools_common::safe_rename(&self.file, new_path, policy)?;
         }
         Ok(())
     }
 
-    /// Returns `Some(new_path)` if file needs renaming, `None` if already up-to-date.
+    /// Returns `Some(new_path)` if file needs renaming, `None` if already up-to-date or unprobed (`0x0`).
     ///
     /// Handles three cases:
     /// 1. File has no label and no full resolution → adds the label
@@ -67,6 +75,9 @@ impl FFProbeResult {
     /// If the filename ends with a codec label (x265, x264, av1, hevc),
     /// the resolution label is inserted before the codec label.
     pub(crate) fn new_path_if_needed(&self) -> anyhow::Result<Option<PathBuf>> {
+        if self.resolution.width == 0 || self.resolution.height == 0 {
+            return Ok(None);
+        }
         let label = self.resolution.label();
         let (name, extension) = cli_tools_common::get_normalized_file_name_and_extension(&self.file)?;
 
@@ -77,7 +88,7 @@ impl FFProbeResult {
         let re = self.resolution.dimension_regex()?;
         let cleaned_name = re.replace_all(&name, "").into_owned();
 
-        if cleaned_name.contains(&*label) {
+        if cleaned_name.to_lowercase().contains(&label.to_lowercase()) {
             // Label already present in the cleaned name
             if cleaned_name == name {
                 // No full resolution was removed, file is already correct
@@ -180,6 +191,67 @@ mod ffprobe_result_tests {
 
         let new_path = result.new_path_if_needed().unwrap();
         assert!(new_path.is_none());
+    }
+
+    #[test]
+    fn new_path_if_needed_matches_existing_label_case_insensitively_and_skips_zero_dimensions() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let upper_label = temp_dir.path().join("video.1080P.mp4");
+        std::fs::write(&upper_label, b"video").expect("write");
+        let result = FFProbeResult {
+            file: upper_label,
+            resolution: Resolution::new(1920, 1080),
+        };
+        assert_eq!(result.new_path_if_needed().expect("check"), None);
+
+        let lower_vertical = temp_dir.path().join("video.vertical.1080p.mp4");
+        std::fs::write(&lower_vertical, b"video").expect("write");
+        let vertical_result = FFProbeResult {
+            file: lower_vertical,
+            resolution: Resolution::new(1080, 1920),
+        };
+        assert_eq!(vertical_result.new_path_if_needed().expect("check"), None);
+
+        let zero_file = temp_dir.path().join("unknown.mp4");
+        std::fs::write(&zero_file, b"video").expect("write");
+        let zero_result = FFProbeResult {
+            file: zero_file,
+            resolution: Resolution::new(0, 0),
+        };
+        assert_eq!(zero_result.new_path_if_needed().expect("check"), None);
+    }
+
+    #[test]
+    fn rename_allows_case_only_change_and_refuses_dangling_symlink_without_overwrite() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let source = temp_dir.path().join("video.vertical.567x1234.mp4");
+        let target = temp_dir.path().join("video.Vertical.567x1234.mp4");
+        std::fs::write(&source, b"video").expect("write");
+
+        let result = FFProbeResult {
+            file: source,
+            resolution: Resolution::new(567, 1234),
+        };
+        result
+            .rename(&target, false, false)
+            .expect("case-only rename should succeed without overwrite");
+        assert!(target.exists());
+
+        #[cfg(unix)]
+        {
+            let src2 = temp_dir.path().join("clip.mp4");
+            let dangling = temp_dir.path().join("clip.1080p.mp4");
+            std::fs::write(&src2, b"clip").expect("write");
+            std::os::unix::fs::symlink(temp_dir.path().join("missing.mp4"), &dangling).expect("symlink");
+            let result2 = FFProbeResult {
+                file: src2,
+                resolution: Resolution::new(1920, 1080),
+            };
+            assert!(
+                result2.rename(&dangling, false, false).is_err(),
+                "dangling symlink target must not be overwritten when overwrite is false"
+            );
+        }
     }
 
     #[test]
