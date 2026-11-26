@@ -256,6 +256,7 @@ impl TaskFile {
         for task in &self.tasks {
             self.validate_task(task, builtins)?;
         }
+        self.validate_task_graph()?;
         Ok(())
     }
 
@@ -392,10 +393,10 @@ impl TaskFile {
         if task.id.is_empty() || task.id.starts_with('-') {
             bail!("Task ID '{}' must not be empty or start with a dash", task.id);
         }
-        // The ID names the task's log file, so it has to be a plain file name.
-        if task.id.contains(['/', '\\']) || task.id == "." || task.id == ".." {
+        // The ID names the task's log file, so it has to be a plain cross-platform file name.
+        if task.id.contains(['/', '\\', '<', '>', ':', '"', '|', '?', '*']) || task.id == "." || task.id == ".." {
             bail!(
-                "Task ID '{}' must not contain a path separator or be '.' or '..'",
+                "Task ID '{}' must not contain path separators or invalid filename characters, or be '.' or '..'",
                 task.id
             );
         }
@@ -426,6 +427,60 @@ impl TaskFile {
             );
         }
         task.resolved_steps()?;
+        Ok(())
+    }
+
+    /// Validate that task IDs are unique, `deps`/`after` reference declared tasks, and no cycle exists.
+    fn validate_task_graph(&self) -> Result<()> {
+        fn visit<'a>(
+            id: &'a str,
+            by_id: &BTreeMap<&'a str, &'a TaskConfig>,
+            visiting: &mut Vec<&'a str>,
+            done: &mut BTreeSet<&'a str>,
+        ) -> Result<()> {
+            if done.contains(id) {
+                return Ok(());
+            }
+            if visiting.contains(&id) {
+                bail!(
+                    "Task dependency graph contains a cycle: {} -> {id}",
+                    visiting.join(" -> ")
+                );
+            }
+            if let Some(task) = by_id.get(id) {
+                visiting.push(id);
+                for predecessor in &task.deps {
+                    visit(predecessor.as_str(), by_id, visiting, done)?;
+                }
+                visiting.pop();
+            }
+            done.insert(id);
+            Ok(())
+        }
+
+        let mut by_id: BTreeMap<&str, &TaskConfig> = BTreeMap::new();
+        for task in &self.tasks {
+            if by_id.insert(task.id.as_str(), task).is_some() {
+                bail!("Duplicate task ID '{}'", task.id);
+            }
+        }
+        for task in &self.tasks {
+            for dep in &task.deps {
+                if !by_id.contains_key(dep.as_str()) {
+                    bail!("Task '{}' depends on unknown task '{dep}'", task.id);
+                }
+            }
+            for predecessor in &task.after {
+                if !by_id.contains_key(predecessor.as_str()) {
+                    bail!("Task '{}' orders after unknown task '{predecessor}'", task.id);
+                }
+            }
+        }
+
+        let mut done = BTreeSet::new();
+        for task in &self.tasks {
+            visit(task.id.as_str(), &by_id, &mut Vec::new(), &mut done)?;
+        }
         Ok(())
     }
 

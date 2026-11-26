@@ -9,9 +9,9 @@ use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use clap::{Arg, ArgAction, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
-use clap_complete::Shell;
+use cli_tools_common::CompletionArgs;
 use serde::Deserialize;
 
 use crate::config::{TaskFile, TaskFileLocation};
@@ -34,15 +34,7 @@ pub enum XtaskCommand {
 
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 /// Requested output rendering mode (`--output`).
@@ -223,13 +215,6 @@ pub struct ResolvedUiEnvironment {
     pub github_actions: bool,
 }
 
-/// Wrapper needed for parsing the user config section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfigFile {
-    #[serde(default)]
-    xtask: UserConfig,
-}
-
 impl ParsedCli {
     /// Combine the parsed arguments with task file settings and user defaults into [`RunOptions`].
     ///
@@ -249,14 +234,14 @@ impl ParsedCli {
             .map(|id| id.trim().to_owned())
             .filter(|id| !id.is_empty())
             .collect();
+        let jobs = match args.jobs.or(task_file.settings.jobs).or(user_config.jobs) {
+            Some(0) => bail!("jobs must be at least 1"),
+            Some(jobs) => jobs,
+            None => default_jobs().max(1),
+        };
         Ok(RunOptions {
             task_ids,
-            jobs: args
-                .jobs
-                .or(task_file.settings.jobs)
-                .or(user_config.jobs)
-                .unwrap_or_else(default_jobs)
-                .max(1),
+            jobs,
             fail_fast: args.fail_fast || user_config.fail_fast,
             list_tasks,
             scope: args.scope,
@@ -320,27 +305,27 @@ impl UserConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file exists but cannot be read or parsed.
+    /// Returns an error if the file exists but cannot be read or parsed, or if `jobs` is 0.
     pub fn load() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .with_context(|| format!("Invalid [xtask] section in user config {}", path.display())),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error).with_context(|| format!("Failed to read user config {}", path.display())),
+        let config: Self = cli_tools_common::load_user_config_section("xtask")?;
+        if config.jobs == Some(0) {
+            bail!("[xtask].jobs must be at least 1");
         }
+        Ok(config)
     }
 
     /// Parse the `[xtask]` section from a full user config TOML string.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid TOML or unknown keys in the section.
+    /// Returns an error for invalid TOML, unknown keys in the section, or `jobs = 0`.
+    #[cfg(test)]
     pub fn from_toml_str(content: &str) -> Result<Self> {
-        let file: UserConfigFile = toml::from_str(content)?;
-        Ok(file.xtask)
+        let config: Self = cli_tools_common::parse_user_config_section(content, "xtask")?;
+        if config.jobs == Some(0) {
+            bail!("[xtask].jobs must be at least 1");
+        }
+        Ok(config)
     }
 }
 
@@ -733,10 +718,10 @@ mod test_argument_parsing {
         let parsed = parse_args(["xtask", "completion", "zsh", "-I"], None, None).expect("should parse");
         assert!(matches!(
             parsed.args.command,
-            Some(XtaskCommand::Completion {
-                shell: Shell::Zsh,
-                install: true
-            })
+            Some(XtaskCommand::Completion(CompletionArgs {
+                shell: clap_complete::Shell::Zsh,
+                install: true,
+            }))
         ));
     }
 

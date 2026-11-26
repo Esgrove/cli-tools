@@ -345,6 +345,27 @@ fn build_command(spec: &CommandSpec) -> Command {
     cmd
 }
 
+/// Build the `pipe_through` child command inheriting `spec`'s working directory and environment overrides.
+fn build_pipe_command(pipe_program: &str, pipe_args: &[String], spec: &CommandSpec) -> Command {
+    let mut pipe_cmd = Command::new(pipe_program);
+    pipe_cmd
+        .args(pipe_args)
+        .current_dir(&spec.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for &key in CARGO_RUN_ENV_VARS {
+        pipe_cmd.env_remove(key);
+    }
+    for key in &spec.env_remove {
+        pipe_cmd.env_remove(key);
+    }
+    for (key, value) in &spec.env_set {
+        pipe_cmd.env(key, value);
+    }
+    pipe_cmd
+}
+
 /// Run `spec` with combined output piped through `spec.pipe_through`, keeping the main command's exit status.
 fn run_piped(spec: &CommandSpec, log_path: &Path, sink: Option<&OutputSink>) -> Result<()> {
     let log_file = Mutex::new(
@@ -358,17 +379,7 @@ fn run_piped(spec: &CommandSpec, log_path: &Path, sink: Option<&OutputSink>) -> 
     let Some((pipe_program, pipe_args)) = spec.pipe_through.split_first() else {
         bail!("Pipe command is empty");
     };
-    let mut pipe_cmd = Command::new(pipe_program);
-    pipe_cmd
-        .args(pipe_args)
-        .current_dir(&spec.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for &key in CARGO_RUN_ENV_VARS {
-        pipe_cmd.env_remove(key);
-    }
-    let mut pipe_child = pipe_cmd
+    let mut pipe_child = build_pipe_command(pipe_program, pipe_args, spec)
         .spawn()
         .with_context(|| format!("Failed to spawn '{pipe_program}'"))?;
 
@@ -395,48 +406,61 @@ fn run_piped(spec: &CommandSpec, log_path: &Path, sink: Option<&OutputSink>) -> 
     let child_stdout = child.stdout.take();
     let child_stderr = child.stderr.take();
 
-    let main_status = std::thread::scope(|scope| -> Result<std::process::ExitStatus> {
-        let log_ref = &log_file;
-        scope.spawn(move || {
-            if let Some(reader) = pipe_stdout {
-                tee_stream(reader, log_ref, sink);
-            }
-        });
-        scope.spawn(move || {
-            if let Some(reader) = pipe_stderr {
-                tee_stream(reader, log_ref, sink);
-            }
-        });
+    let (main_status, pipe_status) = std::thread::scope(
+        |scope| -> Result<(std::process::ExitStatus, std::process::ExitStatus)> {
+            let log_ref = &log_file;
+            scope.spawn(move || {
+                if let Some(reader) = pipe_stdout {
+                    tee_stream(reader, log_ref, sink);
+                }
+            });
+            scope.spawn(move || {
+                if let Some(reader) = pipe_stderr {
+                    tee_stream(reader, log_ref, sink);
+                }
+            });
 
-        let stdin_pipe = Arc::new(Mutex::new(pipe_stdin));
-        let stdin_out = Arc::clone(&stdin_pipe);
-        let out_handle = scope.spawn(move || {
-            if let Some(reader) = child_stdout {
-                forward_stream(reader, &stdin_out);
-            }
-        });
-        let stdin_err = Arc::clone(&stdin_pipe);
-        let err_handle = scope.spawn(move || {
-            if let Some(reader) = child_stderr {
-                forward_stream(reader, &stdin_err);
-            }
-        });
-        drop(stdin_pipe);
+            let stdin_pipe = Arc::new(Mutex::new(pipe_stdin));
+            let stdin_out = Arc::clone(&stdin_pipe);
+            let out_handle = scope.spawn(move || {
+                if let Some(reader) = child_stdout {
+                    forward_stream(reader, &stdin_out);
+                }
+            });
+            let stdin_err = Arc::clone(&stdin_pipe);
+            let err_handle = scope.spawn(move || {
+                if let Some(reader) = child_stderr {
+                    forward_stream(reader, &stdin_err);
+                }
+            });
+            drop(stdin_pipe);
 
-        let status = child
-            .wait()
-            .with_context(|| format!("Failed to wait for '{}'", spec.program));
-        let _ = out_handle.join();
-        let _ = err_handle.join();
-        let _ = pipe_child.wait();
-        status
-    })?;
+            let status = child
+                .wait()
+                .with_context(|| format!("Failed to wait for '{}'", spec.program))?;
+            let _ = out_handle.join();
+            let _ = err_handle.join();
+            let pipe_status = pipe_child
+                .wait()
+                .with_context(|| format!("Failed to wait for '{pipe_program}'"))?;
+            Ok((status, pipe_status))
+        },
+    )?;
 
     if !main_status.success() {
         let code = main_status
             .code()
             .map_or_else(|| "signal".to_owned(), |c| c.to_string());
         bail!("Command exited with status {code}: {}", spec.display_line());
+    }
+    if !pipe_status.success() {
+        let code = pipe_status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        bail!(
+            "Pipe command '{pipe_program}' exited with status {code}: {}",
+            spec.display_line()
+        );
     }
     Ok(())
 }

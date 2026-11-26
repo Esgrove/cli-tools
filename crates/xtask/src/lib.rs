@@ -1,7 +1,7 @@
 //! Parallel task runner driven by an `xtask.toml` task file.
 //!
-//! The task file declares project flags, named conditions, scopes, and a graph of tasks
-//! with dependencies, priorities, and exclusive resource locks.
+//! The task file declares project flags,
+//! named conditions, scopes, and a graph of tasks with dependencies, priorities, and exclusive resource locks.
 //! The runner schedules the enabled tasks in parallel, streams their output live,
 //! writes a log per task, and ends with a failure recap and a one line result.
 //!
@@ -150,10 +150,10 @@ impl Runner {
             }
         };
 
-        if let Some(XtaskCommand::Completion { shell, install }) = parsed.args.command {
+        if let Some(XtaskCommand::Completion(completion)) = parsed.args.command {
             generate_completion(
-                shell,
-                install,
+                completion.shell,
+                completion.install,
                 parsed.args.verbose,
                 task_file.as_ref(),
                 location.as_ref(),
@@ -220,7 +220,7 @@ fn generate_completion(
     cli_tools_common::generate_shell_completion(shell, command, install, verbose, "xtask")
 }
 
-/// Return whether `argv` asks for a local meta-operation (`--version`, `-V`, or `completion`)
+/// Return whether `argv` asks for a local meta-operation (`--help`, `-h`, `--version`, `-V`, or `completion`)
 /// that must never execute an untrusted `[settings].runner` command from `xtask.toml`.
 fn skips_delegation(argv: &[OsString]) -> bool {
     let mut skip_next = false;
@@ -252,8 +252,19 @@ fn skips_delegation(argv: &[OsString]) -> bool {
             skip_next = true;
             continue;
         }
-        if matches!(text, "-V" | "--version" | "completion") {
+        if matches!(text, "-h" | "--help" | "-V" | "--version" | "completion") {
             return true;
+        }
+        if let Some(short_group) = text.strip_prefix('-').filter(|rest| !rest.starts_with('-')) {
+            for character in short_group.chars() {
+                if matches!(character, 'C' | 'S' | 'j' | 'O' | 'K' | 'T') {
+                    // The rest of this short flag group is the option's value.
+                    break;
+                }
+                if matches!(character, 'h' | 'V') {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -264,7 +275,13 @@ fn delegate(runner: &[String], argv: &[OsString], location: &TaskFileLocation) -
     let Some((program, runner_args)) = runner.split_first() else {
         anyhow::bail!("The runner setting is empty");
     };
-    let status = std::process::Command::new(program)
+    let program_path = Path::new(program);
+    let resolved_program = if program_path.is_relative() && program_path.components().count() > 1 {
+        location.root.join(program_path)
+    } else {
+        program_path.to_path_buf()
+    };
+    let status = std::process::Command::new(&resolved_program)
         .args(runner_args)
         .args(argv.iter().skip(1))
         .current_dir(std::env::current_dir().unwrap_or_else(|_| location.root.clone()))

@@ -362,6 +362,9 @@ fn build_command_action(
 
     Ok(Box::new(move |context, log_path| {
         if context.dry_run {
+            for step in &steps {
+                let _ = materialize_step(step, context, &root, &profile, &task_env)?;
+            }
             return Ok(TaskActionResult::DryRun);
         }
 
@@ -376,8 +379,9 @@ fn build_command_action(
                 spec = spec.env(key, value);
             }
             context.run_logged(&spec, log_path)?;
+            exports.collect(context)?;
+            exports.reset()?;
         }
-        exports.collect(context)?;
 
         for note in &notes {
             context.add_note(note.clone());
@@ -420,10 +424,10 @@ fn materialize_step(
     let Some((program, rest)) = argv.split_first() else {
         bail!("Command step has empty argv");
     };
-    let cwd = step
-        .cwd
-        .as_deref()
-        .map_or_else(|| root.to_path_buf(), |relative| root.join(relative));
+    let cwd = match step.cwd.as_deref() {
+        Some(relative) => root.join(expand_variables(relative, context)?),
+        None => root.to_path_buf(),
+    };
 
     let mut spec = CommandSpec::new(program, cwd).args(rest.iter().cloned());
     for key in &profile.remove {
@@ -438,7 +442,15 @@ fn materialize_step(
         .env("XTASK_TASK_ID", context.task_id.clone().unwrap_or_default())
         .env("XTASK_DRYRUN", if context.dry_run { "1" } else { "0" });
     if !step.pipe_through.is_empty() {
-        spec = spec.with_pipe_through(step.pipe_through.iter().cloned());
+        let mut expanded_pipe = Vec::with_capacity(step.pipe_through.len());
+        for argument in &step.pipe_through {
+            if let Some(name) = whole_variable_reference(argument) {
+                expanded_pipe.extend(lookup_variable(name, context)?);
+            } else {
+                expanded_pipe.push(expand_variables(argument, context)?);
+            }
+        }
+        spec = spec.with_pipe_through(expanded_pipe);
     }
     Ok(spec)
 }
