@@ -358,19 +358,8 @@ pub fn cleanup_registered_resources() {
         std::mem::take(&mut *list)
     };
     for (db_path, owner_id) in owners {
-        if let Ok(mut conn) = cli_tools_db::sqlite::open_at(&db_path)
-            && let Ok(tx) = cli_tools_db::sqlite::immediate_transaction(&mut conn)
-        {
-            let _ = tx.execute(
-                "DELETE FROM active_locks WHERE owner_id = ?1",
-                rusqlite::params![owner_id],
-            );
-            let _ = tx.execute(
-                "UPDATE pending_files SET claimed_by = NULL, claimed_at = NULL WHERE claimed_by = ?1",
-                rusqlite::params![owner_id],
-            );
-            let _ = tx.commit();
-        }
+        let _ = cli_tools_db::locks::release_owner_in_db(&db_path, &owner_id);
+        let _ = crate::database::Database::release_all_pending_claims_in_db(&db_path, &owner_id);
     }
 }
 

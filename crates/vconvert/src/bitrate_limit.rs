@@ -1,23 +1,19 @@
 //! Minimum bitrate limits for choosing which videos to convert.
 //!
-//! Defines the default thresholds by resolution tier and framerate, their config file overrides,
-//! and the matching SQL expression used when filtering pending files from the database.
+//! Defines the default thresholds by resolution tier and framerate and their config file overrides.
 
 use std::fmt;
 
 use serde::Deserialize;
 
 /// Framerates above this are treated as high framerate.
-const HIGH_FRAME_RATE_THRESHOLD: f64 = 30.5;
+pub(crate) const HIGH_FRAME_RATE_THRESHOLD: f64 = 30.5;
 
 /// Largest equivalent height that still belongs to the 720p tier.
-const HD_720_MAX_HEIGHT: u64 = 900;
+pub(crate) const HD_720_MAX_HEIGHT: u64 = 900;
 
 /// Largest equivalent height that still belongs to the 1080p tier.
-const HD_1080_MAX_HEIGHT: u64 = 1260;
-
-/// SQL expression computing the same equivalent height as [`equivalent_height`].
-const SQL_EQUIVALENT_HEIGHT: &str = "MAX(MIN(width, height), MAX(width, height) * 9 / 16)";
+pub(crate) const HD_1080_MAX_HEIGHT: u64 = 1260;
 
 /// Resolution tier used to pick a default minimum bitrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,34 +88,6 @@ impl MinimumBitrate {
                 ResolutionTier::from_dimensions(width, height),
                 is_high_frame_rate(frames_per_second),
             ),
-        }
-    }
-
-    /// Build a SQL expression giving the minimum bitrate for each `pending_files` row.
-    ///
-    /// Bitrate values are pushed to `parameters` and referenced by position.
-    pub fn sql_threshold(&self, parameters: &mut Vec<Box<dyn rusqlite::ToSql>>) -> String {
-        let mut push = |value: u64| {
-            parameters.push(Box::new(value.cast_signed()));
-            format!("?{}", parameters.len())
-        };
-        match self {
-            Self::Fixed(limit) => push(*limit),
-            Self::Tiered(tiers) => {
-                let mut frame_rate_case = |high: u64, standard: u64| {
-                    let high = push(high);
-                    let standard = push(standard);
-                    format!("CASE WHEN frames_per_second > {HIGH_FRAME_RATE_THRESHOLD} THEN {high} ELSE {standard} END")
-                };
-                let hd_720 = frame_rate_case(tiers.hd_720_high_fps, tiers.hd_720);
-                let hd_1080 = frame_rate_case(tiers.hd_1080_high_fps, tiers.hd_1080);
-                let qhd_1440 = frame_rate_case(tiers.qhd_1440_high_fps, tiers.qhd_1440);
-                format!(
-                    "(CASE WHEN {SQL_EQUIVALENT_HEIGHT} <= {HD_720_MAX_HEIGHT} THEN {hd_720} \
-                     WHEN {SQL_EQUIVALENT_HEIGHT} <= {HD_1080_MAX_HEIGHT} THEN {hd_1080} \
-                     ELSE {qhd_1440} END)"
-                )
-            }
         }
     }
 }

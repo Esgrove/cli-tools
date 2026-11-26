@@ -376,6 +376,26 @@ pub fn ensure_schema(connection: &mut Connection) -> Result<()> {
     })
 }
 
+/// Release every active lock owned by `owner_id` in the database at `db_path`.
+///
+/// Intended for signal or forced-exit cleanup handlers that only hold the database path and owner ID.
+///
+/// # Errors
+/// Returns an error if the database cannot be opened or updated.
+pub fn release_owner_in_db(db_path: &Path, owner_id: &str) -> Result<usize> {
+    if !db_path.is_file() {
+        return Ok(0);
+    }
+    let mut connection = sqlite::open_at(db_path)?;
+    if !sqlite::table_exists(&connection, "main", "active_locks")? {
+        return Ok(0);
+    }
+    let tx = sqlite::immediate_transaction(&mut connection)?;
+    let deleted = tx.execute("DELETE FROM active_locks WHERE owner_id = ?1", params![owner_id])?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
 /// Check whether `path` is currently locked by any live process in the default `cli-tools.db`.
 ///
 /// Intended for read-mostly or lightweight callers that only want to skip actively locked files
@@ -715,5 +735,23 @@ mod test_active_locks {
             handle.join().unwrap();
         }
         assert_eq!(acquired_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn release_owner_in_db_clears_active_locks_for_owner() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("cli-tools.db");
+        let file = dir.path().join("video.mp4");
+        std::fs::write(&file, b"data").unwrap();
+
+        let store = ActiveLockStore::open_at(db_path.clone(), "vconvert").unwrap();
+        let guard = match store.try_acquire(std::slice::from_ref(&file), "convert").unwrap() {
+            AcquireOutcome::Acquired(guard) => guard,
+            AcquireOutcome::AlreadyLocked(info) => panic!("unexpected lock: {info:?}"),
+        };
+        let released = release_owner_in_db(&db_path, store.owner_id()).unwrap();
+        assert_eq!(released, 1);
+        assert_eq!(store.list_live_locks().unwrap(), [] as [LockInfo; 0]);
+        drop(guard);
     }
 }

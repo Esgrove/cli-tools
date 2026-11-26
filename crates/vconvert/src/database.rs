@@ -503,6 +503,29 @@ impl Database {
         Ok(count)
     }
 
+    /// Release every pending-file claim owned by `owner_id` in the database at `db_path`.
+    ///
+    /// Intended for forced-exit cleanup paths that only hold the database path and owner ID.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be opened or updated.
+    pub fn release_all_pending_claims_in_db(db_path: &Path, owner_id: &str) -> Result<usize> {
+        if !db_path.is_file() {
+            return Ok(0);
+        }
+        let mut connection = sqlite::open_at(db_path)?;
+        if !sqlite::table_exists(&connection, "main", "pending_files")? {
+            return Ok(0);
+        }
+        let tx = sqlite::immediate_transaction(&mut connection)?;
+        let count = tx.execute(
+            "UPDATE pending_files SET claimed_by = NULL, claimed_at = NULL WHERE claimed_by = ?1",
+            params![owner_id],
+        )?;
+        tx.commit()?;
+        Ok(count)
+    }
+
     /// Get pending files with optional filtering.
     ///
     /// # Errors
@@ -965,7 +988,7 @@ fn build_pending_where_clause(filter: &PendingFileFilter) -> (String, Vec<Box<dy
     }
 
     if let Some(min_bitrate) = filter.min_bitrate {
-        let threshold = min_bitrate.sql_threshold(&mut params_vec);
+        let threshold = bitrate_limit_sql_threshold(min_bitrate, &mut params_vec);
         conditions.push(format!(
             "(action != '{}' OR bitrate_kbps >= {threshold})",
             PendingAction::Convert.as_str(),
@@ -1014,6 +1037,39 @@ fn build_pending_where_clause(filter: &PendingFileFilter) -> (String, Vec<Box<dy
         format!("WHERE {}", conditions.join(" AND "))
     };
     (where_clause, params_vec)
+}
+
+/// SQL expression computing the same equivalent height as `bitrate_limit::equivalent_height`.
+const SQL_EQUIVALENT_HEIGHT: &str = "MAX(MIN(width, height), MAX(width, height) * 9 / 16)";
+
+/// Build a SQL expression giving the minimum bitrate for each `pending_files` row.
+///
+/// Bitrate values are pushed to `parameters` and referenced by position.
+fn bitrate_limit_sql_threshold(limit: MinimumBitrate, parameters: &mut Vec<Box<dyn rusqlite::ToSql>>) -> String {
+    use crate::bitrate_limit::{HD_720_MAX_HEIGHT, HD_1080_MAX_HEIGHT, HIGH_FRAME_RATE_THRESHOLD, ResolutionTier};
+
+    let mut push = |value: u64| {
+        parameters.push(Box::new(value.cast_signed()));
+        format!("?{}", parameters.len())
+    };
+    match limit {
+        MinimumBitrate::Fixed(value) => push(value),
+        MinimumBitrate::Tiered(tiers) => {
+            let mut frame_rate_case = |tier: ResolutionTier| {
+                let high = push(tiers.threshold(tier, true));
+                let standard = push(tiers.threshold(tier, false));
+                format!("CASE WHEN frames_per_second > {HIGH_FRAME_RATE_THRESHOLD} THEN {high} ELSE {standard} END")
+            };
+            let hd_720 = frame_rate_case(ResolutionTier::Hd720);
+            let hd_1080 = frame_rate_case(ResolutionTier::Hd1080);
+            let qhd_1440 = frame_rate_case(ResolutionTier::Qhd1440);
+            format!(
+                "(CASE WHEN {SQL_EQUIVALENT_HEIGHT} <= {HD_720_MAX_HEIGHT} THEN {hd_720} \
+                 WHEN {SQL_EQUIVALENT_HEIGHT} <= {HD_1080_MAX_HEIGHT} THEN {hd_1080} \
+                 ELSE {qhd_1440} END)"
+            )
+        }
+    }
 }
 
 /// Convert a database row to a `PendingFile`.
