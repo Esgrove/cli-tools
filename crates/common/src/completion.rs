@@ -79,20 +79,17 @@ fn shell_completion_dir_in(home: &Path, shell: Shell, name: &str) -> Result<Path
     }
 
     let global_dir = match shell {
-        Shell::PowerShell => {
-            if cfg!(windows) {
-                home.join(r"Documents\PowerShell\completions")
-            } else {
-                home.join(".config/powershell/completions")
-            }
-        }
-        Shell::Bash => PathBuf::from("/etc/bash_completion.d"),
-        Shell::Fish => PathBuf::from("/usr/share/fish/completions"),
-        Shell::Zsh => PathBuf::from("/usr/share/zsh/site-functions"),
+        Shell::PowerShell | Shell::Elvish => None,
+        Shell::Bash => Some(PathBuf::from("/etc/bash_completion.d")),
+        Shell::Fish => Some(PathBuf::from("/usr/share/fish/completions")),
+        Shell::Zsh => Some(PathBuf::from("/usr/share/zsh/site-functions")),
         _ => anyhow::bail!("Unsupported shell"),
     };
 
-    if global_dir.exists() && is_directory_writable(&global_dir) {
+    if let Some(global_dir) = global_dir
+        && global_dir.exists()
+        && is_directory_writable(&global_dir)
+    {
         return Ok(global_dir);
     }
 
@@ -175,13 +172,14 @@ mod test_shell_completion_dir {
     }
 
     #[test]
-    fn a_shell_without_a_known_directory_is_rejected() {
+    fn a_missing_elvish_directory_is_created_for_the_user() {
         let home = home();
 
-        let error = shell_completion_dir_in(home.path(), Shell::Elvish, "slb")
-            .expect_err("elvish has no global directory to fall back to");
+        let directory = shell_completion_dir_in(home.path(), Shell::Elvish, "slb")
+            .expect("missing elvish directory should be created");
 
-        assert!(error.to_string().contains("Unsupported shell"), "{error}");
+        assert_eq!(directory, home.path().join(".elvish"));
+        assert!(directory.is_dir());
     }
 
     #[test]

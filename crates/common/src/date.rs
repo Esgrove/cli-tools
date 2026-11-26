@@ -3,14 +3,13 @@
 //! Holds the date regexes, the `Date` type, and the helpers that find dates in names
 //! and reorder them into the `yyyy.mm.dd` format.
 
-use std::{borrow::Cow, sync::LazyLock};
+use std::{borrow::Cow, ops::Range, sync::LazyLock};
 
-use colored::Colorize;
 use jiff::{Timestamp, tz::TimeZone};
 use regex::{Captures, Regex};
 
 pub static CURRENT_YEAR: LazyLock<i32> =
-    LazyLock::new(|| i32::from(Timestamp::now().to_zoned_datetime(TimeZone::UTC).year()));
+    LazyLock::new(|| i32::from(Timestamp::now().to_zoned_datetime(TimeZone::system()).year()));
 
 pub static RE_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(20[0-9]{2})\b").expect("Failed to create regex pattern for yyyy year"));
@@ -21,39 +20,68 @@ pub static RE_CORRECT_DATE_FORMAT: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RE_DD_MM_YYYY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|[^0-9])(?P<date>(?P<day>[12][0-9]|3[01]|0?[1-9])\.(?P<month>1[0-2]|0?[1-9])\.(?P<year>[0-9]{4}))(?:$|[^0-9])")
+    Regex::new(r"(?P<date>(?P<day>[12][0-9]|3[01]|0?[1-9])\.(?P<month>1[0-2]|0?[1-9])\.(?P<year>[0-9]{4}))")
         .expect("Failed to create regex pattern for dd.mm.yyyy")
 });
 
 static RE_YYYY_MM_DD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|[^0-9])(?P<date>(?P<year>[12][0-9]{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9]))(?:$|[^0-9])")
+    Regex::new(r"(?P<date>(?P<year>[12][0-9]{3})\.(?P<month>1[0-2]|0?[1-9])\.(?P<day>[12][0-9]|3[01]|0?[1-9]))")
         .expect("Failed to create regex pattern for yyyy.mm.dd")
 });
 
+#[cfg(test)]
 static RE_FULL_DATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|[^0-9])(?P<date>(?:[12][0-9]|3[01]|0?[1-9])\.(?:0?[1-9]|1[0-2])\.[0-9]{4})(?:\b|[^0-9])")
+    Regex::new(r"(?:\b|[^0-9])(?P<date>(?:[12][0-9]|3[01]|0?[1-9])\.(?:1[0-2]|0?[1-9])\.[0-9]{4})(?:\b|[^0-9])")
+        .expect("Failed to create regex pattern for full date")
+});
+
+static RE_FULL_DATE_RAW: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?P<date>(?:[12][0-9]|3[01]|0?[1-9])\.(?:1[0-2]|0?[1-9])\.[0-9]{4})")
         .expect("Failed to create regex pattern for full date")
 });
 
 /// Regex for MM.DD.YYYY format where day > 12 (unambiguous cases).
 /// Only matches when the day component is 13-31, making it clearly MM.DD.YYYY format.
 static RE_FULL_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:\b|[^0-9])(?P<date>(?:0?[1-9]|1[0-2])\.(?:1[3-9]|2[0-9]|3[01])\.[0-9]{4})(?:\b|[^0-9])")
+    Regex::new(r"(?P<date>(?:1[0-2]|0?[1-9])\.(?:1[3-9]|2[0-9]|3[01])\.[0-9]{4})")
         .expect("Failed to create regex pattern for MM.DD.YYYY full date")
 });
 
 static RE_SHORT_DATE_DAY_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?:\b|[^a-zA-Z0-9])(?P<date>(?:0?[1-9]|[12][0-9]|3[01])\.(?:0?[1-9]|1[0-2])\.[0-9]{2})(?:\b|[^a-zA-Z0-9])",
-    )
-    .expect("Failed to create regex pattern for short date")
+    Regex::new(r"(?P<date>(?:[12][0-9]|3[01]|0?[1-9])\.(?:1[0-2]|0?[1-9])\.[0-9]{2})")
+        .expect("Failed to create regex pattern for short date")
 });
 
 static RE_SHORT_DATE_YEAR_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?:\b|[^a-zA-Z0-9])(?P<date>([0-9]{2})\.(?:0?[1-9]|1[0-2])\.(?:0?[1-9]|[12][0-9]|3[01]))(?:\b|[^a-zA-Z0-9])",
-    )
-    .expect("Failed to create regex pattern for short date")
+    Regex::new(r"(?P<date>[0-9]{2}\.(?:1[0-2]|0?[1-9])\.(?:[12][0-9]|3[01]|0?[1-9]))")
+        .expect("Failed to create regex pattern for short date")
+});
+
+/// Month name pattern matched in written date formats.
+const MONTH_PATTERN: &str = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)";
+
+/// Regex matching written dates like `Jan.15.2024` or `September.5.2020`.
+static RE_WRITTEN_MONTH_DAY_YEAR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)\b(?P<month>{MONTH_PATTERN})[.\s]+(?P<day>[12][0-9]|3[01]|0?[1-9])(?:st|nd|rd|th)?[.\s]+(?P<year>[12][0-9]{{3}})\b"
+    ))
+    .expect("Failed to create regex for written month-day-year dates")
+});
+
+/// Regex matching written dates like `15.Jan.2024` or `5.September.2020`.
+static RE_WRITTEN_DAY_MONTH_YEAR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)\b(?P<day>[12][0-9]|3[01]|0?[1-9])(?:st|nd|rd|th)?[.\s]+(?P<month>{MONTH_PATTERN})[.\s]+(?P<year>[12][0-9]{{3}})\b"
+    ))
+    .expect("Failed to create regex for written day-month-year dates")
+});
+
+/// Regex matching written dates like `2024.Jan.15`.
+static RE_WRITTEN_YEAR_MONTH_DAY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)\b(?P<year>[12][0-9]{{3}})[.\s]+(?P<month>{MONTH_PATTERN})[.\s]+(?P<day>[12][0-9]|3[01]|0?[1-9])(?:st|nd|rd|th)?\b"
+    ))
+    .expect("Failed to create regex for written year-month-day dates")
 });
 
 /// A validated calendar date with year, month, and day components.
@@ -64,7 +92,7 @@ pub struct Date {
 }
 
 impl Date {
-    /// Check that date is valid
+    /// Check that date is valid.
     ///
     /// The year has to be after 1990 and not in the future, and the day has to exist in that month,
     /// so 31.02 and 29.02 outside a leap year are rejected.
@@ -82,22 +110,30 @@ impl Date {
         Some(Self { year, month, day })
     }
 
+    /// Parse a date from a 2-digit year string.
+    ///
+    /// Years 91 through 99 resolve to 1991 through 1999,
+    /// and years 00 through 90 resolve to 2000 through 2090 subject to [`Self::try_from`].
     #[must_use]
     pub fn parse_from_short(year: &str, month: &str, day: &str) -> Option<Self> {
         if year.chars().count() != 2 {
             return None;
         }
-        let year = format!("20{year}");
-        let year = year.parse::<i32>().ok()?;
+        let two_digit = year.parse::<i32>().ok()?;
+        let full_year = if two_digit > 90 {
+            1900 + two_digit
+        } else {
+            2000 + two_digit
+        };
         let month = month.parse::<i32>().ok()?;
         let day = day.parse::<i32>().ok()?;
-        Self::try_from(year, month, day)
+        Self::try_from(full_year, month, day)
     }
 
     /// Swap year and day fields.
     /// Assumes the current year is actually the day and the current day is a 2-digit suffix for the year.
     ///
-    /// For example: `2005.12.23` → `2023.12.05`
+    /// For example: `2005.12.23` -> `2023.12.05`.
     #[must_use]
     pub fn swap_year(&self) -> Option<Self> {
         // Use the last two digits of `year` as the new day
@@ -109,130 +145,134 @@ impl Date {
         Self::try_from(new_year, self.month, new_day)
     }
 
+    /// Format the date with dashes (`YYYY-MM-DD`).
     #[must_use]
     pub fn dash_format(&self) -> String {
         format!("{}-{:02}-{:02}", self.year, self.month, self.day)
     }
 
-    #[allow(unused)]
+    /// Format the date with dots (`YYYY.MM.DD`).
     #[must_use]
     pub fn dot_format(&self) -> String {
         self.to_string()
     }
 
+    /// Convert validated English written dates such as `Jan.15.2024` into `YYYY.MM.DD` format.
+    ///
+    /// Invalid calendar dates such as `Feb.31.2020` are left untouched.
+    #[must_use]
+    pub fn convert_written_dates(name: &str) -> String {
+        let replace_written = |text: &str, regex: &Regex| -> String {
+            regex
+                .replace_all(text, |captures: &Captures<'_>| {
+                    let Some(month) = captures
+                        .name("month")
+                        .and_then(|matched| parse_month_name(matched.as_str()))
+                    else {
+                        return captures[0].to_string();
+                    };
+                    let Some(day) = captures
+                        .name("day")
+                        .and_then(|matched| matched.as_str().parse::<i32>().ok())
+                    else {
+                        return captures[0].to_string();
+                    };
+                    let Some(year) = captures
+                        .name("year")
+                        .and_then(|matched| matched.as_str().parse::<i32>().ok())
+                    else {
+                        return captures[0].to_string();
+                    };
+                    Self::try_from(year, month, day).map_or_else(|| captures[0].to_string(), |date| date.dot_format())
+                })
+                .into_owned()
+        };
+
+        let result = replace_written(name, &RE_WRITTEN_MONTH_DAY_YEAR);
+        let result = replace_written(&result, &RE_WRITTEN_DAY_MONTH_YEAR);
+        replace_written(&result, &RE_WRITTEN_YEAR_MONTH_DAY)
+    }
+
     /// Check if filename contains a matching date and reorder it.
-    pub fn reorder_filename_date(filename: &str, year_first: bool, swap_year: bool, verbose: bool) -> Option<String> {
+    pub fn reorder_filename_date(filename: &str, year_first: bool, swap_year: bool, _verbose: bool) -> Option<String> {
         if let Some((original_range, valid_date)) =
-            RE_CORRECT_DATE_FORMAT.captures_iter(filename).find_map(|captures| {
-                let original_date = captures.get(0)?;
-                let parsed = Self::parse_date_from_match(filename, &captures)?;
-                Some((original_date.range(), parsed))
+            find_first_matching_date(&RE_YYYY_MM_DD, filename, has_non_digit_boundaries, |captures| {
+                Self::parse_date_from_match(filename, captures)
             })
         {
             if swap_year {
                 let swapped_date = valid_date.swap_year()?;
                 return replace_range(filename, original_range, &swapped_date.dot_format());
             }
-            // Correctly formatted, skip...
-            if verbose {
-                println!("Skipping: {}", filename.yellow());
-            }
             return None;
         }
 
         // Check for full dates in MM.DD.YYYY format (unambiguous when day > 12)
-        let mut best_match = None;
-        for caps in RE_FULL_DATE_MDY.captures_iter(filename) {
-            if let Some(date_match) = caps.name("date") {
-                let date_str = date_match.as_str();
-
+        if let Some((date_range, flip_date)) =
+            find_last_matching_date(&RE_FULL_DATE_MDY, filename, has_non_digit_boundaries, |captures| {
+                let date_str = captures.name("date")?.as_str();
                 let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
                 let [month, day, year] = numbers.as_slice() else {
-                    continue;
+                    return None;
                 };
-
-                // MM.DD.YYYY format
-                if let Some(date) = Self::parse_date_from_mm_dd_yyyy(month, day, year) {
-                    best_match = Some((date_match.range(), date.to_string()));
-                }
-            }
-        }
-
-        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
-        if let Some((date_range, flip_date)) = best_match {
+                Self::parse_date_from_mm_dd_yyyy(month, day, year).map(|date| date.to_string())
+            })
+        {
             return replace_range(filename, date_range, &flip_date);
         }
 
         // Check for full dates in DD.MM.YYYY format (European style)
-        let mut best_match = None;
-        for caps in RE_FULL_DATE.captures_iter(filename) {
-            if let Some(date_match) = caps.name("date") {
-                let date_str = date_match.as_str();
-
+        if let Some((date_range, flip_date)) =
+            find_last_matching_date(&RE_FULL_DATE_RAW, filename, has_non_digit_boundaries, |captures| {
+                let date_str = captures.name("date")?.as_str();
                 let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
                 let [day, month, year] = numbers.as_slice() else {
-                    continue;
+                    return None;
                 };
-
-                if let Some(date) = Self::parse_date_from_dd_mm_yyyy(day, month, year) {
-                    best_match = Some((date_match.range(), date.to_string()));
-                }
-            }
-        }
-
-        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
-        if let Some((date_range, flip_date)) = best_match {
+                Self::parse_date_from_dd_mm_yyyy(day, month, year).map(|date| date.to_string())
+            })
+        {
             return replace_range(filename, date_range, &flip_date);
         }
 
         // Check for short dates
-        let mut best_match = None;
-        for caps in RE_SHORT_DATE_DAY_FIRST.captures_iter(filename) {
-            if let Some(date_match) = caps.name("date") {
-                let date_str = date_match.as_str();
-
+        if let Some((date_range, flip_date)) = find_last_matching_date(
+            &RE_SHORT_DATE_DAY_FIRST,
+            filename,
+            has_non_alnum_boundaries,
+            |captures| {
+                let date_str = captures.name("date")?.as_str();
                 let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
                 let [first, month, third] = numbers.as_slice() else {
-                    continue;
+                    return None;
                 };
-
-                if let Some(date) = (year_first && first.len() == 2)
+                (year_first && first.len() == 2)
                     .then(|| Self::parse_from_short(first, month, third))
                     .flatten()
                     .or_else(|| Self::parse_from_short(third, month, first))
-                {
-                    best_match = Some((date_match.range(), date.to_string()));
-                }
-            }
-        }
-
-        // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
-        if let Some((date_range, flip_date)) = best_match {
+                    .map(|date| date.to_string())
+            },
+        ) {
             return replace_range(filename, date_range, &flip_date);
         }
 
         // Check for short dates in YY.MM.DD order (for example 00.12.25) when year_first is set
-        if year_first {
-            let mut best_match = None;
-            for caps in RE_SHORT_DATE_YEAR_FIRST.captures_iter(filename) {
-                if let Some(date_match) = caps.name("date") {
-                    let date_str = date_match.as_str();
-
+        if year_first
+            && let Some((date_range, flip_date)) = find_last_matching_date(
+                &RE_SHORT_DATE_YEAR_FIRST,
+                filename,
+                has_non_alnum_boundaries,
+                |captures| {
+                    let date_str = captures.name("date")?.as_str();
                     let numbers: Vec<&str> = date_str.split('.').map(str::trim).filter(|s| !s.is_empty()).collect();
                     let [year, month, day] = numbers.as_slice() else {
-                        continue;
+                        return None;
                     };
-
-                    if let Some(date) = Self::parse_from_short(year, month, day) {
-                        best_match = Some((date_match.range(), date.to_string()));
-                    }
-                }
-            }
-
-            // Only the matched span is rewritten, since the same digits can also appear inside a longer number.
-            if let Some((date_range, flip_date)) = best_match {
-                return replace_range(filename, date_range, &flip_date);
-            }
+                    Self::parse_from_short(year, month, day).map(|date| date.to_string())
+                },
+            )
+        {
+            return replace_range(filename, date_range, &flip_date);
         }
 
         None
@@ -241,136 +281,243 @@ impl Date {
     /// Check if directory name contains a matching date and reorder it.
     pub fn reorder_directory_date(name: &str) -> Option<String> {
         // Handle dd.mm.yyyy format
-        for caps in RE_DD_MM_YYYY.captures_iter(name) {
-            if let Some(date_match) = caps.name("date")
-                && let Some(date) = Self::parse_date_from_match(name, &caps)
-            {
-                let name_part = replace_range(name, date_match.range(), "")?;
-                let name = Self::get_directory_separator(&name_part);
-                return Some(format!("{}{name}", date.dash_format()));
-            }
+        if let Some((date_range, date)) =
+            find_first_matching_date(&RE_DD_MM_YYYY, name, has_non_digit_boundaries, |captures| {
+                Self::parse_date_from_match(name, captures)
+            })
+        {
+            let before = name.get(..date_range.start)?;
+            let after = name.get(date_range.end..)?;
+            let remainder = Self::format_directory_remainder(before, after);
+            return Some(format!("{}{remainder}", date.dash_format()));
         }
         // Handle yyyy.mm.dd format
-        for caps in RE_YYYY_MM_DD.captures_iter(name) {
-            if let Some(date_match) = caps.name("date")
-                && let Some(date) = Self::parse_date_from_match(name, &caps)
-            {
-                let name_part = replace_range(name, date_match.range(), "")?;
-                let name = Self::get_directory_separator(&name_part);
-                return Some(format!("{}{name}", date.dash_format()));
-            }
+        if let Some((date_range, date)) =
+            find_first_matching_date(&RE_YYYY_MM_DD, name, has_non_digit_boundaries, |captures| {
+                Self::parse_date_from_match(name, captures)
+            })
+        {
+            let before = name.get(..date_range.start)?;
+            let after = name.get(date_range.end..)?;
+            let remainder = Self::format_directory_remainder(before, after);
+            return Some(format!("{}{remainder}", date.dash_format()));
         }
         None
     }
 
+    /// Parse a date from regex captures named `year`, `month`, and `day`.
     #[must_use]
-    pub fn parse_date_from_match(name: &str, caps: &Captures) -> Option<Self> {
-        let year_str = if let Some(y) = caps.name("year") {
-            y.as_str().to_string()
-        } else {
-            eprintln!("{}", format!("Failed to extract 'year' from '{name}'").red());
-            return None;
-        };
-        let month_str = if let Some(m) = caps.name("month") {
-            m.as_str()
-        } else {
-            eprintln!("{}", format!("Failed to extract 'month' from '{name}'").red());
-            return None;
-        };
-        let day_str = if let Some(d) = caps.name("day") {
-            d.as_str()
-        } else {
-            eprintln!("{}", format!("Failed to extract 'day' from '{name}'").red());
-            return None;
-        };
-        let Ok(year) = year_str.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse 'year' in '{name}'").red());
-            return None;
-        };
-        let Ok(month) = month_str.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse 'month' in '{name}'").red());
-            return None;
-        };
-        let Ok(day) = day_str.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse 'day' in '{name}'").red());
-            return None;
-        };
+    pub fn parse_date_from_match(_name: &str, caps: &Captures) -> Option<Self> {
+        let year = caps.name("year")?.as_str().parse::<i32>().ok()?;
+        let month = caps.name("month")?.as_str().parse::<i32>().ok()?;
+        let day = caps.name("day")?.as_str().parse::<i32>().ok()?;
         Self::try_from(year, month, day)
     }
 
+    /// Parse a date from DD.MM.YYYY string components.
     #[must_use]
     pub fn parse_date_from_dd_mm_yyyy(day: &str, month: &str, year: &str) -> Option<Self> {
-        let Ok(year) = year.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse year from '{year}'").red());
-            return None;
-        };
-        let Ok(month) = month.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse month from '{month}'").red());
-            return None;
-        };
-        let Ok(day) = day.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse day from '{day}'").red());
-            return None;
-        };
-        Self::try_from(year, month, day)
+        Self::parse_components(year, month, day)
     }
 
-    /// Parse a date from MM.DD.YYYY format.
+    /// Parse a date from MM.DD.YYYY string components.
     #[must_use]
     pub fn parse_date_from_mm_dd_yyyy(month: &str, day: &str, year: &str) -> Option<Self> {
-        let Ok(year) = year.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse year from '{year}'").red());
-            return None;
-        };
-        let Ok(month) = month.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse month from '{month}'").red());
-            return None;
-        };
-        let Ok(day) = day.parse::<i32>() else {
-            eprintln!("{}", format!("Failed to parse day from '{day}'").red());
-            return None;
-        };
-        Self::try_from(year, month, day)
+        Self::parse_components(year, month, day)
     }
 
-    /// Convert a formatted date (YYYY.MM.DD) with a date separated with dashes instead of dots.
+    /// Convert a formatted date (`YYYY.MM.DD`) to a date separated with dashes instead of dots.
     ///
-    /// For example: `Name.2025.12.24` -> `Name.2025-12-24`
+    /// For example: `Name.2025.12.24` -> `Name.2025-12-24`.
     pub fn replace_file_date_with_directory_date(name: &str) -> Cow<'_, str> {
-        for caps in RE_YYYY_MM_DD.captures_iter(name) {
-            if let Some(date_match) = caps.name("date")
-                && let Some(date) = Self::parse_date_from_match(name, &caps)
-                && let Some(replaced) = replace_range(name, date_match.range(), &date.dash_format())
-            {
-                return Cow::Owned(replaced);
-            }
+        if let Some((date_range, date)) =
+            find_first_matching_date(&RE_YYYY_MM_DD, name, has_non_digit_boundaries, |captures| {
+                Self::parse_date_from_match(name, captures)
+            })
+            && let Some(replaced) = replace_range(name, date_range, &date.dash_format())
+        {
+            return Cow::Owned(replaced);
         }
         Cow::Borrowed(name)
     }
 
-    fn get_directory_separator(input: &str) -> String {
+    /// Parse year, month, and day strings into a validated [`Date`].
+    fn parse_components(year: &str, month: &str, day: &str) -> Option<Self> {
+        let year = year.parse::<i32>().ok()?;
+        let month = month.parse::<i32>().ok()?;
+        let day = day.parse::<i32>().ok()?;
+        Self::try_from(year, month, day)
+    }
+
+    /// Format the text surrounding a date removed from a directory name.
+    fn format_directory_remainder(before: &str, after: &str) -> String {
         let separators = "_-.";
-        // A name that is only a date keeps nothing after the date, not even a separator.
-        if input.trim().is_empty() {
-            String::new()
-        } else if input.starts_with(|c: char| separators.contains(c)) {
-            input.trim().to_string()
-        } else if let Some((separator, rest)) = input
-            .chars()
-            .next_back()
-            .filter(|separator| separators.contains(*separator))
-            .and_then(|separator| input.strip_suffix(separator).map(|rest| (separator, rest)))
-        {
-            format!("{separator}{rest}")
-        } else {
-            format!(" {}", input.trim())
+        let before_trimmed = before.trim();
+        let after_trimmed = after.trim();
+
+        if before_trimmed.is_empty() && after_trimmed.is_empty() {
+            return String::new();
         }
+
+        if before_trimmed.is_empty() {
+            if after.starts_with(|character: char| separators.contains(character)) {
+                return after.trim().to_string();
+            }
+            return format!(" {after_trimmed}");
+        }
+
+        if after_trimmed.is_empty() {
+            if let Some((separator, rest)) = before_trimmed
+                .chars()
+                .next_back()
+                .filter(|separator| separators.contains(*separator))
+                .and_then(|separator| before_trimmed.strip_suffix(separator).map(|rest| (separator, rest)))
+            {
+                let rest_trimmed = rest.trim();
+                if rest_trimmed.is_empty() {
+                    return String::new();
+                }
+                return format!("{separator}{rest_trimmed}");
+            }
+            return format!(" {before_trimmed}");
+        }
+
+        // Trailing separator only (for example `"Trip 31.12.2023."`).
+        if after_trimmed.chars().count() == 1
+            && let Some(separator) = after_trimmed.chars().next()
+            && separators.contains(separator)
+        {
+            return format!("{separator}{before_trimmed}");
+        }
+
+        // Date sat in the middle of the directory name. Join the two halves without duplicating separators.
+        let joined = match (before.chars().next_back(), after.chars().next()) {
+            (Some(left), Some(right)) if left == right && (separators.contains(left) || left.is_whitespace()) => {
+                let left_part = before.strip_suffix(left).unwrap_or(before).trim_end();
+                let right_part = after.strip_prefix(right).unwrap_or(after).trim_start();
+                if left.is_whitespace() {
+                    format!("{left_part} {right_part}")
+                } else {
+                    format!("{left_part}{left}{right_part}")
+                }
+            }
+            _ => format!("{before_trimmed} {after_trimmed}"),
+        };
+        format!(" {}", joined.trim())
     }
 }
 
 impl std::fmt::Display for Date {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}.{:02}.{:02}", self.year, self.month, self.day)
+    }
+}
+
+/// Check that a byte range is not adjacent to ASCII digits.
+fn has_non_digit_boundaries(text: &str, range: &Range<usize>) -> bool {
+    let before_ok = text
+        .as_bytes()
+        .get(..range.start)
+        .and_then(|bytes| bytes.last())
+        .is_none_or(|byte| !byte.is_ascii_digit());
+    let after_ok = text
+        .as_bytes()
+        .get(range.end..)
+        .and_then(|bytes| bytes.first())
+        .is_none_or(|byte| !byte.is_ascii_digit());
+    before_ok && after_ok
+}
+
+/// Check that a byte range is not adjacent to ASCII letters or digits.
+fn has_non_alnum_boundaries(text: &str, range: &Range<usize>) -> bool {
+    let before_ok = text
+        .as_bytes()
+        .get(..range.start)
+        .and_then(|bytes| bytes.last())
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric());
+    let after_ok = text
+        .as_bytes()
+        .get(range.end..)
+        .and_then(|bytes| bytes.first())
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric());
+    before_ok && after_ok
+}
+
+/// Scan `text` for the first non-overlapping valid date match without consuming surrounding separators.
+fn find_first_matching_date<T>(
+    regex: &Regex,
+    text: &str,
+    boundary_check: fn(&str, &Range<usize>) -> bool,
+    mut parse: impl FnMut(&Captures<'_>) -> Option<T>,
+) -> Option<(Range<usize>, T)> {
+    let mut offset = 0;
+    while offset < text.len() {
+        let captures = regex.captures_at(text, offset)?;
+        let date_match = captures.name("date")?;
+        let range = date_match.range();
+        if boundary_check(text, &range)
+            && let Some(parsed) = parse(&captures)
+        {
+            return Some((range, parsed));
+        }
+        offset = next_char_boundary(text, range.start);
+    }
+    None
+}
+
+/// Scan `text` for the last valid date match without consuming surrounding separators.
+fn find_last_matching_date<T>(
+    regex: &Regex,
+    text: &str,
+    boundary_check: fn(&str, &Range<usize>) -> bool,
+    mut parse: impl FnMut(&Captures<'_>) -> Option<T>,
+) -> Option<(Range<usize>, T)> {
+    let mut offset = 0;
+    let mut best = None;
+    while offset < text.len() {
+        let Some(captures) = regex.captures_at(text, offset) else {
+            break;
+        };
+        let Some(date_match) = captures.name("date") else {
+            break;
+        };
+        let range = date_match.range();
+        if boundary_check(text, &range)
+            && let Some(parsed) = parse(&captures)
+        {
+            best = Some((range.clone(), parsed));
+            offset = range.end;
+        } else {
+            offset = next_char_boundary(text, range.start);
+        }
+    }
+    best
+}
+
+/// Return the next UTF-8 character boundary strictly after `index`.
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    text.get(index..)
+        .and_then(|rest| rest.chars().next())
+        .map_or(text.len(), |character| index + character.len_utf8())
+}
+
+/// Parse an English month name or abbreviation (case-insensitive) into 1..=12.
+fn parse_month_name(month: &str) -> Option<i32> {
+    let prefix: String = month.chars().take(3).flat_map(char::to_lowercase).collect();
+    match prefix.as_str() {
+        "jan" => Some(1),
+        "feb" => Some(2),
+        "mar" => Some(3),
+        "apr" => Some(4),
+        "may" => Some(5),
+        "jun" => Some(6),
+        "jul" => Some(7),
+        "aug" => Some(8),
+        "sep" => Some(9),
+        "oct" => Some(10),
+        "nov" => Some(11),
+        "dec" => Some(12),
+        _ => None,
     }
 }
 
@@ -1739,6 +1886,66 @@ mod directory_tests {
         );
 
         assert_eq!(Date::replace_file_date_with_directory_date("2024.09.09"), "2024-09-09");
+    }
+}
+
+#[cfg(test)]
+mod test_bugfix_regressions {
+    use super::*;
+
+    #[test]
+    fn swap_year_matches_date_after_underscore() {
+        assert_eq!(
+            Date::reorder_filename_date("report_2023.12.05.txt", false, true, false),
+            Some("report_2005.12.23.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_date_does_not_consume_separator_before_valid_date() {
+        assert_eq!(
+            Date::reorder_filename_date("31.02.2024.25.06.2023.txt", false, false, false),
+            Some("31.02.2024.2023.06.25.txt".to_string())
+        );
+        assert_eq!(
+            Date::reorder_directory_date("2024.02.31.2023.06.05"),
+            Some("2023-06-05.2024.02.31".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_from_short_supports_1991_through_1999() {
+        let date = Date::parse_from_short("99", "06", "15").expect("1999 should be valid");
+        assert_eq!(date.year, 1999);
+        assert_eq!(date.month, 6);
+        assert_eq!(date.day, 15);
+    }
+
+    #[test]
+    fn middle_directory_date_collapses_surrounding_separators() {
+        assert_eq!(
+            Date::reorder_directory_date("Trip 31.12.2023 Finland"),
+            Some("2023-12-31 Trip Finland".to_string())
+        );
+        assert_eq!(
+            Date::reorder_directory_date("Trip_31.12.2023_Finland"),
+            Some("2023-12-31 Trip_Finland".to_string())
+        );
+        assert_eq!(
+            Date::reorder_directory_date("Trip 31.12.2023."),
+            Some("2023-12-31.Trip".to_string())
+        );
+    }
+
+    #[test]
+    fn convert_written_dates_validates_calendar_dates() {
+        assert_eq!(
+            Date::convert_written_dates("Event.Jan.15.2024.mp4"),
+            "Event.2024.01.15.mp4"
+        );
+        assert_eq!(Date::convert_written_dates("15.September.2020.Trip"), "2020.09.15.Trip");
+        assert_eq!(Date::convert_written_dates("2024.Feb.5.Log"), "2024.02.05.Log");
+        assert_eq!(Date::convert_written_dates("Feb.31.2020.Fake"), "Feb.31.2020.Fake");
     }
 }
 

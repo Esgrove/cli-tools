@@ -112,19 +112,40 @@ pub fn is_case_only_change(source: &Path, target: &Path) -> bool {
 /// # Errors
 /// Returns an error if the probe file cannot be created or removed.
 pub fn directory_is_case_sensitive(directory: &Path) -> io::Result<bool> {
-    let probe = unique_sibling_path(&directory.join(".case-probe"), "tmp");
-    fs::write(&probe, b"")?;
-    let upper_name = probe
-        .file_name()
-        .map_or_default(|name| name.to_string_lossy().to_uppercase());
-    let case_sensitive = fs::symlink_metadata(directory.join(upper_name)).is_err();
-    fs::remove_file(&probe)?;
-    Ok(case_sensitive)
+    let mut counter: u32 = 0;
+    loop {
+        let lower_name = if counter == 0 {
+            ".case-probe.tmp".to_string()
+        } else {
+            format!(".case-probe.{counter}.tmp")
+        };
+        let upper_name = lower_name.to_uppercase();
+        let lower_path = directory.join(&lower_name);
+        let upper_path = directory.join(&upper_name);
+        if fs::symlink_metadata(&upper_path).is_ok() {
+            counter = counter.checked_add(1).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::AlreadyExists, "Exhausted case sensitivity probe names")
+            })?;
+            continue;
+        }
+        match fs::OpenOptions::new().write(true).create_new(true).open(&lower_path) {
+            Ok(probe_file) => {
+                drop(probe_file);
+                let case_sensitive = fs::symlink_metadata(&upper_path).is_err();
+                fs::remove_file(&lower_path)?;
+                return Ok(case_sensitive);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                counter = counter.checked_add(1).ok_or(error)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Rename `source` to `target` without silently replacing a different file.
 ///
-/// - Identical paths return [`RenameOutcome::Unchanged`].
+/// - Identical paths return [`RenameOutcome::Unchanged`] after verifying the source exists.
 /// - When the target already exists and is the source itself under a different spelling,
 ///   such as a capitalization only change on a case-insensitive file system,
 ///   the rename goes through a temporary sibling name so the new spelling is applied.
@@ -135,10 +156,12 @@ pub fn directory_is_case_sensitive(directory: &Path) -> io::Result<bool> {
 /// so a file created at the target in between can still be replaced.
 ///
 /// # Errors
-/// Returns an error if a rename fails,
+/// Returns an error if `source` does not exist or a rename fails,
 /// or if the target is a different existing entry and the policy is [`OverwritePolicy::Error`],
 /// or the policy is [`OverwritePolicy::Overwrite`] and the target is a directory.
 pub fn safe_rename(source: &Path, target: &Path, policy: OverwritePolicy) -> io::Result<RenameOutcome> {
+    let _source_metadata = fs::symlink_metadata(source)?;
+
     if source == target {
         return Ok(RenameOutcome::Unchanged);
     }
@@ -195,7 +218,7 @@ pub fn write_atomically(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<(
     use std::io::Write;
 
     let target = if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        fs::canonicalize(path)?
+        dunce::canonicalize(path).or_else(|_| resolve_symlink_target(path))?
     } else {
         path.to_path_buf()
     };
@@ -204,9 +227,17 @@ pub fn write_atomically(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<(
     let (mut temp_file, temporary) = create_unique_sibling_file(&target, "tmp", target_permissions.as_ref())?;
     let result = (|| {
         temp_file.write_all(contents.as_ref())?;
+        temp_file.sync_data()?;
         drop(temp_file);
-        if let Some(permissions) = target_permissions {
-            fs::set_permissions(&temporary, permissions)?;
+        if let Some(ref permissions) = target_permissions {
+            #[cfg(windows)]
+            if permissions.readonly() {
+                let mut writable = permissions.clone();
+                #[allow(clippy::permissions_set_readonly_false)]
+                writable.set_readonly(false);
+                let _ = fs::set_permissions(&target, writable);
+            }
+            fs::set_permissions(&temporary, permissions.clone())?;
         }
         fs::rename(&temporary, &target)
     })();
@@ -222,6 +253,16 @@ pub fn write_atomically(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<(
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Resolve the destination path of a symlink when canonicalization fails, such as for a dangling link.
+fn resolve_symlink_target(link_path: &Path) -> io::Result<PathBuf> {
+    let raw_target = fs::read_link(link_path)?;
+    if raw_target.is_absolute() {
+        Ok(raw_target)
+    } else {
+        Ok(link_path.parent().unwrap_or_else(|| Path::new(".")).join(raw_target))
+    }
 }
 
 /// Create a brand-new sibling temporary file with `O_EXCL` semantics so concurrent writers cannot collide.
@@ -324,11 +365,13 @@ pub fn copy_dir_recursive(source: &Path, target: &Path) -> io::Result<()> {
         ));
     }
 
-    copy_dir_contents(source, target)
+    let mut visited = HashSet::new();
+    visited.insert(canonical_source);
+    copy_dir_contents(source, target, &mut visited)
 }
 
 /// Copy directory contents after the caller has checked that the target is outside the source.
-fn copy_dir_contents(source: &Path, target: &Path) -> io::Result<()> {
+fn copy_dir_contents(source: &Path, target: &Path, visited: &mut HashSet<PathBuf>) -> io::Result<()> {
     fs::create_dir_all(target)?;
 
     for entry in fs::read_dir(source)? {
@@ -338,11 +381,16 @@ fn copy_dir_contents(source: &Path, target: &Path) -> io::Result<()> {
         let file_type = entry.file_type()?;
 
         if file_type.is_dir() {
-            copy_dir_contents(&source_path, &target_path)?;
+            copy_dir_contents(&source_path, &target_path, visited)?;
         } else if file_type.is_symlink() {
-            copy_symlink(&source_path, &target_path)?;
-        } else {
+            copy_symlink(&source_path, &target_path, visited)?;
+        } else if file_type.is_file() {
             copy_file_with_times(&source_path, &target_path)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Cannot copy special file: {}", source_path.display()),
+            ));
         }
     }
 
@@ -352,7 +400,7 @@ fn copy_dir_contents(source: &Path, target: &Path) -> io::Result<()> {
 /// Copy one file, keeping its permissions and modification time.
 ///
 /// The modification time is applied before read-only permissions so copying read-only files succeeds.
-/// Any partially created target file is removed if the copy fails.
+/// Any newly created target file is removed if the copy fails, leaving pre-existing targets intact.
 ///
 /// # Errors
 /// Returns `InvalidInput` if the source and target refer to the same file.
@@ -362,6 +410,18 @@ pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
     let metadata = source_file.metadata()?;
     let modified = metadata.modified()?;
     let permissions = metadata.permissions();
+
+    let target_existed = fs::symlink_metadata(target).is_ok();
+    if target_existed
+        && let Ok(target_meta) = fs::metadata(target)
+        && target_meta.permissions().readonly()
+        && !paths_refer_to_same_file(source, target)
+    {
+        let mut writable = target_meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        fs::set_permissions(target, writable)?;
+    }
 
     // Compare the open files before truncating, so a path change cannot invalidate the check.
     let mut target_file = fs::File::options()
@@ -377,7 +437,7 @@ pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
 
         let (source_id, _) = windows_file_information(source_file.as_raw_handle())?;
         let (target_id, _) = windows_file_information(target_file.as_raw_handle())?;
-        source_id == target_id
+        source_id != (0, 0, 0) && source_id == target_id
     };
     #[cfg(not(any(unix, windows)))]
     let same_file = paths_refer_to_same_file(source, target);
@@ -403,13 +463,17 @@ pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
     match copy_result {
         Ok(bytes) => {
             if let Err(error) = fs::set_permissions(target, permissions) {
-                let _ = fs::remove_file(target);
+                if !target_existed {
+                    let _ = fs::remove_file(target);
+                }
                 return Err(error);
             }
             Ok(bytes)
         }
         Err(error) => {
-            let _ = fs::remove_file(target);
+            if !target_existed {
+                let _ = fs::remove_file(target);
+            }
             Err(error)
         }
     }
@@ -417,16 +481,28 @@ pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
 
 /// Recreate a symbolic link at the target.
 #[cfg(unix)]
-fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
+fn copy_symlink(source: &Path, target: &Path, _visited: &mut HashSet<PathBuf>) -> io::Result<()> {
     let link_target = fs::read_link(source)?;
+    if fs::symlink_metadata(target).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        fs::remove_file(target)?;
+    }
     std::os::unix::fs::symlink(link_target, target)
 }
 
 /// Copy the target a symbolic link points to, since creating links needs extra privileges on Windows.
 #[cfg(not(unix))]
-fn copy_symlink(source: &Path, target: &Path) -> io::Result<()> {
+fn copy_symlink(source: &Path, target: &Path, visited: &mut HashSet<PathBuf>) -> io::Result<()> {
     if fs::metadata(source)?.is_dir() {
-        copy_dir_recursive(source, target)
+        let canonical = dunce::canonicalize(source)?;
+        if !visited.insert(canonical.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Detected symlink directory cycle at {}", source.display()),
+            ));
+        }
+        let result = copy_dir_contents(source, target, visited);
+        visited.remove(&canonical);
+        result
     } else {
         copy_file_with_times(source, target).map(|_| ())
     }
@@ -493,7 +569,10 @@ pub fn unique_sibling_path(path: &Path, extension: &str) -> PathBuf {
     let mut counter = 1_u32;
     while fs::symlink_metadata(&candidate).is_ok() {
         candidate = append_extension_to_path(path, format!("{counter}.{extension}"));
-        counter += 1;
+        let Some(next) = counter.checked_add(1) else {
+            break;
+        };
+        counter = next;
     }
     candidate
 }
@@ -547,22 +626,26 @@ fn parent_dir_for_comparison(path: &Path) -> Option<&Path> {
     }
 }
 
-/// Return whether both exact entry names appear as separate directory entries in `directory`.
+/// Return whether two distinct directory entries in `directory` match `left_name` and `right_name`.
+///
+/// Matching checks both exact bytes and Unicode-normalized case-folded spellings
+/// so that hard links in the same directory are never collapsed on case-insensitive file systems.
 fn directory_has_both_entries(directory: &Path, left_name: &std::ffi::OsStr, right_name: &std::ffi::OsStr) -> bool {
     let Ok(entries) = fs::read_dir(directory) else {
         return false;
     };
-    let mut found_left = false;
-    let mut found_right = false;
+    let left_key = into_nfc(left_name.to_string_lossy().into_owned()).to_lowercase();
+    let right_key = into_nfc(right_name.to_string_lossy().into_owned()).to_lowercase();
+    let mut matching_entries = 0usize;
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name();
-        if name == left_name {
-            found_left = true;
-        } else if name == right_name {
-            found_right = true;
-        }
-        if found_left && found_right {
-            return true;
+        let key = into_nfc(name.to_string_lossy().into_owned()).to_lowercase();
+        let matches = name == left_name || name == right_name || key == left_key || key == right_key;
+        if matches {
+            matching_entries += 1;
+            if matching_entries >= 2 {
+                return true;
+            }
         }
     }
     false
@@ -672,7 +755,7 @@ fn windows_file_identity(path: &Path, follow_symlinks: bool) -> Option<((u32, u3
 
         let information = windows_file_information(handle);
         _ = CloseHandle(handle);
-        information.ok()
+        information.ok().filter(|(id, _)| *id != (0, 0, 0))
     }
 }
 
@@ -711,6 +794,53 @@ fn paths_refer_to_same_file_by_canonical_path(left: &Path, right: &Path) -> bool
     match (dunce::canonicalize(left), dunce::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod test_file_handling_bugfixes {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn safe_rename_returns_not_found_when_source_is_missing_and_target_exists() {
+        let directory = TempDir::new().unwrap();
+        let missing = directory.path().join("missing.txt");
+        let existing = directory.path().join("existing.txt");
+        fs::write(&existing, "keep").unwrap();
+
+        let err =
+            safe_rename(&missing, &existing, OverwritePolicy::Skip).expect_err("missing source should return NotFound");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "keep");
+    }
+
+    #[test]
+    fn safe_rename_skip_does_not_replace_hard_link_with_case_variant_source_path() {
+        let directory = TempDir::new().unwrap();
+        if directory_is_case_sensitive(directory.path()).unwrap() {
+            return;
+        }
+        let first = directory.path().join("Photo.JPG");
+        let second = directory.path().join("other.jpg");
+        fs::write(&first, "shared").unwrap();
+        fs::hard_link(&first, &second).unwrap();
+
+        let lowercase_first = directory.path().join("photo.jpg");
+        let outcome = safe_rename(&lowercase_first, &second, OverwritePolicy::Skip).unwrap();
+        assert_eq!(outcome, RenameOutcome::SkippedExisting);
+        assert!(first.exists());
+        assert!(second.exists());
+    }
+
+    #[test]
+    fn directory_is_case_sensitive_ignores_preexisting_uppercase_probe() {
+        let directory = TempDir::new().unwrap();
+        let expected = directory_is_case_sensitive(directory.path()).unwrap();
+        fs::write(directory.path().join(".CASE-PROBE.TMP"), b"").unwrap();
+
+        let actual = directory_is_case_sensitive(directory.path()).unwrap();
+        assert_eq!(actual, expected);
     }
 }
 

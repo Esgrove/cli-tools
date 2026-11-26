@@ -196,12 +196,19 @@ pub fn glob_to_regex(glob: &str) -> Option<Regex> {
             let at_negated_first = class_negated && index == class_start + 1;
             if at_class_open && (character == '!' || character == '^') {
                 class_negated = true;
-                pattern.push('^');
+                pattern.push_str("^/");
             } else if character == ']' && !at_class_open && !at_negated_first {
                 in_class = false;
                 class_negated = false;
                 pattern.push(']');
-            } else if matches!(character, '\\' | '[' | ']' | '^') {
+            } else if character == '\\' {
+                let escaped = *chars.get(index + 1)?;
+                pattern.push_str(&regex::escape(&escaped.to_string()));
+                index += 2;
+                continue;
+            } else if matches!(character, '[' | ']' | '^' | '&' | '~')
+                || (character == '-' && chars.get(index + 1) == Some(&'-'))
+            {
                 pattern.push('\\');
                 pattern.push(character);
             } else {
@@ -212,12 +219,18 @@ pub fn glob_to_regex(glob: &str) -> Option<Regex> {
         }
 
         match character {
+            '\\' => {
+                let escaped = *chars.get(index + 1)?;
+                pattern.push_str(&regex::escape(&escaped.to_string()));
+                index += 2;
+                continue;
+            }
             '*' if chars.get(index + 1) == Some(&'*') => {
                 if chars.get(index + 2) == Some(&'/') {
-                    pattern.push_str("(?:.*/)?");
+                    pattern.push_str("(?:(?s:.*)/)?");
                     index += 3;
                 } else {
-                    pattern.push_str(".*");
+                    pattern.push_str("(?s:.*)");
                     index += 2;
                 }
                 continue;
@@ -228,7 +241,10 @@ pub fn glob_to_regex(glob: &str) -> Option<Regex> {
                 brace_depth += 1;
                 pattern.push_str("(?:");
             }
-            '}' if brace_depth > 0 => {
+            '}' => {
+                if brace_depth == 0 {
+                    return None;
+                }
                 brace_depth -= 1;
                 pattern.push(')');
             }
@@ -259,30 +275,62 @@ pub fn command_exists(name: &str) -> bool {
 
 /// Locate an executable by name on `PATH`, or check it directly when the name contains a path separator.
 ///
-/// On Windows the `.exe`, `.cmd`, and `.bat` extensions are also tried.
+/// On Windows, extensions from `PATHEXT` (defaulting to `.exe`, `.cmd`, `.bat`, and `.com`) are checked.
 #[must_use]
 pub fn find_command(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
     if candidate.components().count() > 1 {
-        return is_executable_file(candidate).then(|| candidate.to_path_buf());
+        return find_executable_with_extensions(candidate);
     }
     let path_variable = env::var_os("PATH")?;
     for directory in env::split_paths(&path_variable) {
         let full = directory.join(name);
-        if is_executable_file(&full) {
-            return Some(full);
-        }
-        #[cfg(windows)]
-        {
-            for extension in [".exe", ".cmd", ".bat"] {
-                let with_extension = directory.join(format!("{name}{extension}"));
-                if is_executable_file(&with_extension) {
-                    return Some(with_extension);
-                }
-            }
+        if let Some(found) = find_executable_with_extensions(&full) {
+            return Some(found);
         }
     }
     None
+}
+
+/// Resolve an executable path, checking Windows `PATHEXT` extensions before extensionless files.
+#[cfg(windows)]
+fn find_executable_with_extensions(base: &Path) -> Option<PathBuf> {
+    let extensions: Vec<String> = env::var("PATHEXT").map_or_else(
+        |_| vec![".exe".into(), ".cmd".into(), ".bat".into(), ".com".into()],
+        |raw| {
+            let parsed: Vec<String> = raw
+                .split(';')
+                .map(str::trim)
+                .filter(|ext| !ext.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect();
+            if parsed.is_empty() {
+                vec![".exe".into(), ".cmd".into(), ".bat".into(), ".com".into()]
+            } else {
+                parsed
+            }
+        },
+    );
+
+    if base.extension().is_some() && is_executable_file(base) {
+        return Some(base.to_path_buf());
+    }
+    let base_os = base.as_os_str();
+    for extension in &extensions {
+        let mut with_extension = base_os.to_os_string();
+        with_extension.push(extension);
+        let candidate = PathBuf::from(with_extension);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    is_executable_file(base).then(|| base.to_path_buf())
+}
+
+/// Resolve an executable path on non-Windows platforms.
+#[cfg(not(windows))]
+fn find_executable_with_extensions(base: &Path) -> Option<PathBuf> {
+    is_executable_file(base).then(|| base.to_path_buf())
 }
 
 /// Count the regular files under a directory, recursively.
@@ -313,6 +361,37 @@ fn is_executable_file(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+#[cfg(test)]
+mod test_glob_escapes_and_boundaries {
+    use super::*;
+
+    #[test]
+    fn backslash_escapes_glob_metacharacters() {
+        let regex = glob_to_regex(r"file\*name\?.txt").expect("valid glob");
+        assert!(regex.is_match("file*name?.txt"));
+        assert!(!regex.is_match("fileXnameY.txt"));
+    }
+
+    #[test]
+    fn negated_character_class_does_not_cross_directory_separator() {
+        let regex = glob_to_regex("[!a]*.txt").expect("valid glob");
+        assert!(regex.is_match("b.txt"));
+        assert!(!regex.is_match("/b.txt"));
+    }
+
+    #[test]
+    fn character_class_escapes_regex_set_operators() {
+        let regex = glob_to_regex("[a&&b].txt").expect("valid glob");
+        assert!(regex.is_match("&.txt"));
+        assert!(regex.is_match("a.txt"));
+    }
+
+    #[test]
+    fn unmatched_closing_brace_is_rejected() {
+        assert!(glob_to_regex("foo}.txt").is_none());
     }
 }
 

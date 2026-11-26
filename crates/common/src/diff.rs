@@ -17,31 +17,34 @@ pub fn color_diff(old: &str, new: &str, stacked: bool) -> (String, String) {
     let mut new_diff = String::new();
 
     if stacked {
-        // Find the starting index of the first matching sequence for a nicer visual alignment.
-        // For example:
-        //   Constantine - Onde As Satisfaction (Club Tool).aif
-        //        Darude - Onde As Satisfaction (Constantine Club Tool).aif
-        // Instead of:
-        //   Constantine - Onde As Satisfaction (Club Tool).aif
-        //   Darude - Onde As Satisfaction (Constantine Club Tool).aif
+        // Track visible character columns across diffs up to the first matching sequence
+        // so multi-byte UTF-8 prefixes and repeated substrings still align visually.
+        let mut old_column = 0usize;
+        let mut new_column = 0usize;
         for diff in &changeset.diffs {
-            if let Difference::Same(x) = diff {
-                if x.chars().all(char::is_whitespace) || x.chars().count() < 3 {
-                    continue;
-                }
-
-                // Add leading whitespace so that the first matching sequence lines up.
-                if let (Some(old_index), Some(new_index)) = (old.find(x), new.find(x)) {
-                    match old_index.cmp(&new_index) {
-                        Ordering::Greater => {
-                            new_diff = " ".repeat(old_index.saturating_sub(new_index));
+            match diff {
+                Difference::Same(segment) => {
+                    let segment_len = segment.chars().count();
+                    if !segment.chars().all(char::is_whitespace) && segment_len >= 3 {
+                        match old_column.cmp(&new_column) {
+                            Ordering::Greater => {
+                                new_diff = " ".repeat(old_column.saturating_sub(new_column));
+                            }
+                            Ordering::Less => {
+                                old_diff = " ".repeat(new_column.saturating_sub(old_column));
+                            }
+                            Ordering::Equal => {}
                         }
-                        Ordering::Less => {
-                            old_diff = " ".repeat(new_index.saturating_sub(old_index));
-                        }
-                        Ordering::Equal => {}
+                        break;
                     }
-                    break;
+                    old_column += segment_len;
+                    new_column += segment_len;
+                }
+                Difference::Rem(segment) => {
+                    old_column += segment.chars().count();
+                }
+                Difference::Add(segment) => {
+                    new_column += segment.chars().count();
                 }
             }
         }
@@ -91,10 +94,10 @@ pub fn diff_lines(path: &str, original: &str, fixed: &str) -> Vec<String> {
         match difference {
             Difference::Same(_) => {}
             Difference::Rem(removed) => {
-                lines.extend(removed.lines().map(|line| format!("- {line}").red().to_string()));
+                lines.extend(removed.split('\n').map(|line| format!("- {line}").red().to_string()));
             }
             Difference::Add(added) => {
-                lines.extend(added.lines().map(|line| format!("+ {line}").green().to_string()));
+                lines.extend(added.split('\n').map(|line| format!("+ {line}").green().to_string()));
             }
         }
     }
@@ -203,5 +206,33 @@ mod test_diff_lines {
     fn unchanged_text_produces_only_the_header() {
         let lines = diff_lines("a.rs", "// same\n", "// same\n");
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn includes_added_and_removed_blank_lines() {
+        let added = diff_lines("a.rs", "first\nsecond\n", "first\n\nsecond\n");
+        assert!(
+            added.iter().any(|line| line.contains("+ ")),
+            "expected added blank line in diff: {added:?}"
+        );
+        let removed = diff_lines("a.rs", "first\n\nsecond\n", "first\nsecond\n");
+        assert!(
+            removed.iter().any(|line| line.contains("- ")),
+            "expected removed blank line in diff: {removed:?}"
+        );
+    }
+
+    #[test]
+    fn stacked_alignment_uses_character_columns_for_utf8() {
+        colored::control::set_override(false);
+        let (old, new) = color_diff("äää.shared.txt", "a.shared.txt", true);
+        let old_pos = old.find(".shared.txt").unwrap();
+        let new_pos = new.find(".shared.txt").unwrap();
+        // Leading chars before ".shared.txt": "äää" is 3 chars, "  a" is 3 chars.
+        assert_eq!(
+            old.get(..old_pos).unwrap().chars().count(),
+            new.get(..new_pos).unwrap().chars().count(),
+            "old={old:?}, new={new:?}"
+        );
     }
 }
