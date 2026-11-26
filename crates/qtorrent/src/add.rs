@@ -12,7 +12,7 @@ use std::hash::BuildHasher;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use crate::naming::NameSuggester;
 use crate::qbittorrent::{AddTorrentParams, QBittorrentClient, TorrentListItem};
@@ -30,9 +30,6 @@ const DISK_RENAME_DELAYS: [Duration; 3] = [
 
 /// Delay before renaming files when no folder rename gave the torrent time to load.
 const FILE_RENAME_DELAY: Duration = Duration::from_millis(500);
-
-/// Delay before renaming the content of an existing torrent on disk after renaming the torrent.
-const EXISTING_RENAME_DELAY: Duration = Duration::from_millis(500);
 
 /// One step of adding a torrent or renaming an existing one.
 #[derive(Debug)]
@@ -69,7 +66,7 @@ pub enum AddEvent<'a> {
     },
     /// The content of a renamed existing torrent was renamed on disk.
     ExistingRenamedOnDisk {
-        /// Name in the torrent metadata.
+        /// Previous path on disk.
         old_name: &'a str,
         /// New name on disk.
         new_name: &'a str,
@@ -263,28 +260,56 @@ impl<'a> TorrentAdder<'a> {
             new_name,
         });
 
-        if let Some(ref original_name) = info.original_name
-            && original_name != new_name
-        {
-            tokio::time::sleep(EXISTING_RENAME_DELAY).await;
+        if let Err(error) = self.rename_existing_on_disk(info, new_name, observer).await {
+            observer.on_event(AddEvent::ExistingRenameOnDiskFailed(&error));
+        }
+        Ok(())
+    }
 
-            let rename_result = if info.effective_is_multi_file {
-                self.client
-                    .rename_folder(&info.info_hash, original_name, new_name)
-                    .await
-            } else {
-                self.client.rename_file(&info.info_hash, original_name, new_name).await
-            };
-
-            match rename_result {
-                Ok(()) => observer.on_event(AddEvent::ExistingRenamedOnDisk {
-                    old_name: original_name,
-                    new_name,
-                }),
-                Err(error) => observer.on_event(AddEvent::ExistingRenameOnDiskFailed(&error)),
-            }
+    /// Read the current server paths before renaming existing content.
+    async fn rename_existing_on_disk(
+        &self,
+        info: &TorrentInfo,
+        new_name: &str,
+        observer: &mut impl AddObserver,
+    ) -> Result<()> {
+        let files = self.client.get_torrent_files(&info.info_hash).await?;
+        let old_path = if info.effective_is_multi_file {
+            let root = files
+                .first()
+                .and_then(|file| file.name.split_once('/'))
+                .map(|(root, _)| root)
+                .filter(|root| !root.is_empty())
+                .context("Torrent has no current root folder")?;
+            ensure!(
+                files
+                    .iter()
+                    .all(|file| file.name.split_once('/').is_some_and(|(first, _)| first == root)),
+                "Torrent files do not share a single root folder"
+            );
+            root
+        } else {
+            let mut included_files = files.iter().filter(|file| !info.excluded_indices.contains(&file.index));
+            let file = included_files.next().context("Torrent has no current included file")?;
+            ensure!(
+                included_files.next().is_none(),
+                "Torrent has more than one current included file"
+            );
+            &file.name
+        };
+        if old_path == new_name {
+            return Ok(());
         }
 
+        if info.effective_is_multi_file {
+            self.client.rename_folder(&info.info_hash, old_path, new_name).await?;
+        } else {
+            self.client.rename_file(&info.info_hash, old_path, new_name).await?;
+        }
+        observer.on_event(AddEvent::ExistingRenamedOnDisk {
+            old_name: old_path,
+            new_name,
+        });
         Ok(())
     }
 
@@ -622,8 +647,71 @@ mod test_torrent_adder {
     }
 
     #[tokio::test]
+    async fn existing_torrent_renames_use_current_server_paths() -> Result<()> {
+        use std::sync::{Arc, Mutex};
+
+        for (multi_file, server_files, old_path, endpoint) in [
+            (
+                false,
+                r#"[{"index":0,"name":"Current.mkv","priority":1}]"#,
+                "Current.mkv",
+                "renameFile",
+            ),
+            (
+                true,
+                r#"[{"index":0,"name":"Current/one.mkv","priority":1},{"index":1,"name":"Current/sub/two.mkv","priority":1}]"#,
+                "Current",
+                "renameFolder",
+            ),
+        ] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&requests);
+            let port = crate::test_server::serve_with(
+                vec![
+                    route("/api/v2/auth/login", 200, "Ok."),
+                    route("/api/v2/torrents/files", 200, server_files),
+                    route("/api/v2/torrents/rename", 200, ""),
+                ],
+                move |request| {
+                    if request.contains("oldPath=") {
+                        recorded.lock().unwrap().push(request.to_owned());
+                    }
+                    None
+                },
+            )
+            .await;
+            let mut client = QBittorrentClient::new("127.0.0.1", port);
+            client.login("user", "password").await?;
+            let mut info =
+                create_torrent_info("Show.torrent", Some("Original.mkv"), None, multi_file, multi_file, None);
+            info.original_name = Some("Original.mkv".to_owned());
+            let options = AddOptions::default();
+            let names = NameSuggester::default();
+            let adder = TorrentAdder::new(&client, &options, &names);
+            adder
+                .rename_existing(&info, "Display Name", "Replacement", &mut ())
+                .await?;
+
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with(&format!("POST /api/v2/torrents/{endpoint} ")));
+            assert!(
+                requests[0].ends_with(&format!("oldPath={old_path}&newPath=Replacement")),
+                "{}",
+                requests[0]
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn renaming_an_existing_torrent_reports_both_renames() -> Result<()> {
         let client = logged_in_client(vec![
+            route(
+                "/api/v2/torrents/files",
+                200,
+                r#"[{"index":0,"name":"show.mkv","priority":1}]"#,
+            ),
             route("/api/v2/torrents/rename", 200, ""),
             route("/api/v2/torrents/renameFile", 200, ""),
         ])

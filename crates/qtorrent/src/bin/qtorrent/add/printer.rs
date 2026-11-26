@@ -11,12 +11,22 @@ use cli_tools_qtorrent::{AddEvent, AddObserver, TorrentStats};
 pub struct EventPrinter {
     /// Print the per file renames and failures.
     verbose: bool,
+    /// Whether the current request was acknowledged before the remaining setup steps.
+    add_acknowledged: bool,
 }
 
 impl EventPrinter {
     /// Create a printer that shows the per file details when verbose.
     pub const fn new(verbose: bool) -> Self {
-        Self { verbose }
+        Self {
+            verbose,
+            add_acknowledged: false,
+        }
+    }
+
+    /// Return whether the last add was acknowledged and reset for the next request.
+    pub(super) fn take_add_acknowledged(&mut self) -> bool {
+        std::mem::take(&mut self.add_acknowledged)
     }
 }
 
@@ -24,6 +34,7 @@ impl AddObserver for EventPrinter {
     fn on_event(&mut self, event: AddEvent<'_>) {
         match event {
             AddEvent::Added { name, is_multi_file } => {
+                self.add_acknowledged = true;
                 if is_multi_file {
                     println!("  {} Added with folder name: {}", "✓".green(), name.green());
                 } else {
