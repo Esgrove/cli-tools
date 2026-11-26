@@ -49,7 +49,6 @@ use regex::Regex;
 #[cfg(feature = "async")]
 use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
-use walkdir::WalkDir;
 
 /// Shared regex to match video resolutions like 1080p, 2160p, or 1920x1080.
 pub static RE_RESOLUTION: LazyLock<Regex> =
@@ -565,14 +564,12 @@ pub fn should_skip_path(path: &Path) -> bool {
     is_hidden_path(path) || is_system_directory_path(path)
 }
 
-/// Check if directory is empty (contains no files or subdirectories)
+/// Check if directory is empty (contains no files or subdirectories).
+///
+/// Returns `false` when the path does not exist, is not a directory, or cannot be read.
+#[must_use]
 pub fn is_directory_empty(dir: &Path) -> bool {
-    for entry in WalkDir::new(dir).into_iter().filter_map(std::result::Result::ok) {
-        if entry.path() != dir {
-            return false;
-        }
-    }
-    true
+    std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 /// Insert a suffix before the file extension.
@@ -1730,6 +1727,34 @@ mod directory_utility_tests {
         let dir = tempdir().unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
         assert!(!is_directory_empty(dir.path()));
+    }
+
+    #[test]
+    fn is_directory_empty_false_for_missing_path_and_regular_file() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let file_path = dir.path().join("file.txt");
+        File::create(&file_path).unwrap();
+
+        assert!(!is_directory_empty(&missing));
+        assert!(!is_directory_empty(&file_path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_directory_empty_false_for_unreadable_non_empty_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        File::create(locked.join("secret.txt")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let empty = is_directory_empty(&locked);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!empty);
     }
 }
 
