@@ -391,7 +391,9 @@ fn shift_ranges(ranges: &LineRanges, replacements: &[Option<(String, String)>]) 
 /// A line whose source has no ending, such as a new line split from a last line without a final newline,
 /// takes the dominant line ending of the original text.
 fn assemble(output: &[Cow<'_, str>], origins: &[usize], working: &[WorkingLine<'_>], original: &str) -> String {
-    let default_eol = if original.contains("\r\n") { "\r\n" } else { "\n" };
+    let crlf_count = working.iter().filter(|line| line.eol == "\r\n").count();
+    let lf_count = working.iter().filter(|line| line.eol == "\n").count();
+    let default_eol = if crlf_count > lf_count { "\r\n" } else { "\n" };
     let trailing_newline = original.ends_with('\n') || original.is_empty();
     let mut result = String::with_capacity(original.len() + 64);
     let last_index = output.len().saturating_sub(1);

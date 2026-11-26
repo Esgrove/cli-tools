@@ -685,8 +685,9 @@ Options:
   -e, --extensions <EXTENSION>  Only process files with these extensions
   -x, --exclude <PATTERN>       Skip paths with a directory or file name equal to this text, in addition to the default excludes
   -n, --no-ignore               Do not skip paths ignored by git
-  -t, --type <KIND>             Force the file kind, required with --stdin [possible values: rust, c, javascript, go, groovy, python, shell, toml, yaml, dockerfile, makefile, cmake, ruby, sql, lua, markdown]
+  -t, --type <KIND>             Force the file kind, required with --stdin unless --stdin-filepath is given [possible values: rust, c, javascript, go, groovy, python, shell, toml, yaml, dockerfile, makefile, cmake, ruby, sql, lua, markdown]
   -s, --stdin                   Read text from stdin and write the formatted result to stdout
+  -F, --stdin-filepath <PATH>   File path used to infer file kind and project config when reading from --stdin
   -b, --word-break              Allow plain word boundaries even when a semantic boundary also fits
   -S, --strict                  Treat the width as a hard cap instead of allowing a small overflow past it
   -J, --jobs <N>                Number of worker threads, 0 for one per core [default: 0]

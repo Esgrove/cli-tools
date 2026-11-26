@@ -16,10 +16,9 @@ mod output;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::Shell;
+use clap::{Parser, Subcommand};
 
-use cli_tools_common::print_error;
+use cli_tools_common::{CompletionArgs, print_error};
 use cli_tools_slb::FileKind;
 
 use crate::line_selection::LineSpec;
@@ -29,15 +28,7 @@ use crate::line_selection::LineSpec;
 enum SlbCommand {
     /// Generate shell completion script
     #[command(name = "completion")]
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install completion script to the shell's completion directory
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
+    Completion(CompletionArgs),
 }
 
 #[derive(Parser)]
@@ -107,13 +98,17 @@ pub struct Args {
     #[arg(short = 'n', long)]
     no_ignore: bool,
 
-    /// Force the file kind, required with --stdin
+    /// Force the file kind, required with --stdin unless --stdin-filepath is given
     #[arg(short = 't', long = "type", value_name = "KIND")]
     kind: Option<FileKind>,
 
     /// Read text from stdin and write the formatted result to stdout
     #[arg(short, long)]
     stdin: bool,
+
+    /// File path used to infer file kind and project config when reading from --stdin
+    #[arg(short = 'F', long, value_name = "PATH", requires = "stdin")]
+    stdin_filepath: Option<PathBuf>,
 
     /// Allow plain word boundaries even when a semantic boundary also fits
     #[arg(short = 'b', long)]
@@ -139,15 +134,10 @@ pub struct Args {
 /// Parse command line arguments and run the requested mode.
 fn main() -> ExitCode {
     let args = Args::parse();
-    let result = if let Some(SlbCommand::Completion { shell, install }) = &args.command {
-        cli_tools_common::generate_shell_completion(
-            *shell,
-            Args::command(),
-            *install,
-            args.verbose,
-            env!("CARGO_BIN_NAME"),
-        )
-        .map(|()| ExitCode::SUCCESS)
+    let result = if let Some(SlbCommand::Completion(completion)) = &args.command {
+        completion
+            .generate::<Args>(args.verbose, env!("CARGO_BIN_NAME"))
+            .map(|()| ExitCode::SUCCESS)
     } else {
         cli::run(&args)
     };
@@ -234,13 +224,16 @@ mod test_args {
 
     #[test]
     fn parses_completion_and_has_valid_command_definition() {
+        use clap::CommandFactory;
+        use clap_complete::Shell;
+
         let args = Args::try_parse_from(["slb", "completion", "zsh", "--install"]).expect("completion should parse");
         assert!(matches!(
             args.command,
-            Some(SlbCommand::Completion {
+            Some(SlbCommand::Completion(CompletionArgs {
                 shell: Shell::Zsh,
                 install: true
-            })
+            }))
         ));
         Args::command().debug_assert();
     }

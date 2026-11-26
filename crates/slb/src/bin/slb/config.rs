@@ -4,9 +4,9 @@
 //! merges it with command line arguments,
 //! and builds the formatting options used by the library.
 
-use std::fs;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::ValueEnum;
 use serde::Deserialize;
 
@@ -34,6 +34,7 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
 
 /// User configuration from the `[slb]` section of the config file.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SlbConfig {
     #[serde(default)]
     pub abbreviations: Vec<String>,
@@ -65,13 +66,6 @@ pub struct SlbConfig {
     pub width: Option<usize>,
 }
 
-/// Wrapper needed for parsing the config section.
-#[derive(Debug, Default, Deserialize)]
-struct UserConfig {
-    #[serde(default)]
-    slb: SlbConfig,
-}
-
 /// Final configuration created from command line arguments and the user config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -91,6 +85,7 @@ pub struct Config {
     pub quiet: bool,
     pub rules: RuleSet,
     pub stdin: bool,
+    pub stdin_filepath: Option<PathBuf>,
     pub strict: bool,
     pub project_width: bool,
     pub use_gitignore: bool,
@@ -105,28 +100,16 @@ impl SlbConfig {
     /// # Errors
     /// Returns an error if the config file exists but cannot be read or parsed.
     pub fn get_user_config() -> Result<Self> {
-        let Some(path) = cli_tools_common::config_path() else {
-            return Ok(Self::default());
-        };
-        match fs::read_to_string(&path) {
-            Ok(content) => Self::from_toml_str(&content)
-                .map_err(|error| anyhow::anyhow!("Failed to parse config file {}:\n{error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(anyhow::anyhow!(
-                "Failed to read config file {}: {error}",
-                path.display()
-            )),
-        }
+        cli_tools_common::load_user_config_section("slb")
     }
 
     /// Parse config from a TOML string.
     ///
     /// # Errors
     /// Returns an error if the TOML string is invalid.
+    #[cfg(test)]
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
-        toml::from_str::<UserConfig>(toml_str)
-            .map(|config| config.slb)
-            .with_context(|| "Failed to parse config TOML")
+        cli_tools_common::parse_user_config_section(toml_str, "slb")
     }
 }
 
@@ -197,6 +180,11 @@ impl Config {
             args.extensions.clone()
         };
 
+        let width = args.width.or(user_config.width);
+        if width == Some(0) {
+            anyhow::bail!("Line width must be at least 1");
+        }
+
         Ok(Self {
             abbreviations: extend_defaults(DEFAULT_ABBREVIATIONS, user_config.abbreviations),
             allow_word_break: args.word_break || user_config.allow_word_break,
@@ -217,11 +205,12 @@ impl Config {
             quiet: args.quiet,
             rules,
             stdin: args.stdin,
+            stdin_filepath: args.stdin_filepath.clone(),
             strict: args.strict || user_config.strict,
             project_width: !args.ignore_project_config && user_config.use_project_config.unwrap_or(true),
             use_gitignore: !args.no_ignore && user_config.use_gitignore.unwrap_or(true),
             verbose: args.verbose || user_config.verbose,
-            width: args.width.or(user_config.width),
+            width,
         })
     }
 

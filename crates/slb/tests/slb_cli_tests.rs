@@ -39,6 +39,7 @@ fn write_file(directory: &TempDir, name: &str, content: &str) -> PathBuf {
 /// Run the binary with the given arguments.
 fn run(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_slb"))
+        .env("CLI_TOOLS_CONFIG", "")
         .args(arguments)
         .output()
         .expect("the slb binary should run")
@@ -47,6 +48,7 @@ fn run(arguments: &[&str]) -> Output {
 /// Run the binary with the given arguments and text on stdin.
 fn run_with_stdin(arguments: &[&str], input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_slb"))
+        .env("CLI_TOOLS_CONFIG", "")
         .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -272,9 +274,9 @@ fn stdin_mode_passes_unchanged_text_through() {
 }
 
 #[test]
-fn stdin_mode_exits_with_one_when_a_violation_cannot_be_fixed() {
+fn stdin_mode_succeeds_for_editors_while_reporting_unfixable_violations_on_stderr() {
     let output = run_with_stdin(&["--stdin", "--type", "rust"], "// — a dash that cannot be rewritten\n");
-    assert_eq!(exit_code(&output), 1);
+    assert_eq!(exit_code(&output), 0);
     assert_eq!(stdout(&output), "// — a dash that cannot be rewritten\n");
     assert!(plain(&stderr(&output)).contains("em-dash"), "{}", stderr(&output));
 }
@@ -296,11 +298,11 @@ fn fix_mode_reports_the_violations_it_could_not_fix() {
 }
 
 #[test]
-fn stdin_mode_requires_the_type_option() {
+fn stdin_mode_requires_type_or_stdin_filepath() {
     let output = run_with_stdin(&["--stdin"], "Text.\n");
 
     assert_eq!(exit_code(&output), 2);
-    assert!(stderr(&output).contains("The --type option is required when reading from stdin"));
+    assert!(stderr(&output).contains("The --type or --stdin-filepath option is required when reading from stdin"));
 }
 
 #[test]
@@ -327,7 +329,7 @@ fn verbose_mode_prints_the_file_and_the_resolved_width() {
     assert_eq!(exit_code(&output), 0);
     let text = stdout(&output);
     assert!(text.contains("clean.rs"), "{text}");
-    assert!(text.contains("width 110 from options"), "{text}");
+    assert!(text.contains("width 90 from max_width in "), "{text}");
 }
 
 #[test]
@@ -369,12 +371,18 @@ fn the_width_from_the_project_config_is_used_when_no_width_option_is_given() {
     let path = write_file(&directory, "wide.rs", "/// Short comment.\n");
     write_file(&directory, "rustfmt.toml", "max_width = 40\n");
 
-    let output = run(&[&argument(&path), "--verbose", "--ignore-project-config"]);
-
+    let from_project = run(&[&argument(&path), "--verbose"]);
     assert!(
-        stdout(&output).contains("width 110 from options"),
+        stdout(&from_project).contains("width 40 from max_width in "),
         "{}",
-        stdout(&output)
+        stdout(&from_project)
+    );
+
+    let ignored = run(&[&argument(&path), "--verbose", "--ignore-project-config"]);
+    assert!(
+        stdout(&ignored).contains("width 120 from default"),
+        "{}",
+        stdout(&ignored)
     );
 }
 

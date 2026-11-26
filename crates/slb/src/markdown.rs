@@ -200,13 +200,24 @@ pub fn split_paragraphs_with_notices(
     (regions, notices)
 }
 
-/// Whether the file opts out of formatting with a marker in its first lines.
+/// Whether the file opts out of formatting with a marker in its first lines or right after YAML front matter.
 #[must_use]
 pub fn has_ignore_file_marker(lines: &[&str]) -> bool {
-    lines
+    if lines
         .iter()
         .take(IGNORE_FILE_SEARCH_LINES)
         .any(|line| line.contains(IGNORE_FILE_MARKER))
+    {
+        return true;
+    }
+    let after_front_matter = front_matter_end(lines);
+    after_front_matter > 0
+        && lines
+            .get(after_front_matter..)
+            .unwrap_or_default()
+            .iter()
+            .take(IGNORE_FILE_SEARCH_LINES)
+            .any(|line| line.contains(IGNORE_FILE_MARKER))
 }
 
 /// Split content lines, using the given indentation as the mark of a block of its own.

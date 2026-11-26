@@ -2,18 +2,20 @@
 
 use std::path::Path;
 
+#[cfg(feature = "cli")]
 use clap::ValueEnum;
 
 /// Kind of a file, deciding comment markers and string syntax.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "cli", derive(ValueEnum))]
 pub enum FileKind {
     /// Rust source with `//`, `///`, and `//!` comments.
     Rust,
     /// C, C++, Java, Kotlin, Swift, C#, and similar languages with `//` and `/* */` comments.
-    #[value(name = "c")]
+    #[cfg_attr(feature = "cli", value(name = "c"))]
     CLike,
     /// JavaScript and TypeScript with template literals.
-    #[value(name = "javascript")]
+    #[cfg_attr(feature = "cli", value(name = "javascript"))]
     JavaScript,
     /// Go source with backtick raw strings.
     Go,
@@ -33,7 +35,7 @@ pub enum FileKind {
     /// Makefiles with `#` comments.
     Makefile,
     /// `CMake` scripts with `#` comments.
-    #[value(name = "cmake")]
+    #[cfg_attr(feature = "cli", value(name = "cmake"))]
     CMake,
     /// Ruby source with `#` comments.
     Ruby,
@@ -86,6 +88,10 @@ impl FileKind {
         path.extension()
             .and_then(|extension| extension.to_str())
             .and_then(Self::from_extension)
+            .or_else(|| {
+                let lower = file_name.to_ascii_lowercase();
+                (lower.starts_with("dockerfile.") || lower.starts_with("containerfile.")).then_some(Self::Dockerfile)
+            })
             .or_else(|| has_jenkinsfile_name(file_name).then_some(Self::Groovy))
     }
 

@@ -3,28 +3,30 @@
 use std::borrow::Cow;
 use std::fmt;
 
+#[cfg(feature = "cli")]
 use clap::ValueEnum;
 
 /// Rule category of a violation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "cli", derive(ValueEnum))]
 pub enum ViolationKind {
     /// A line exceeds the maximum width.
-    #[value(name = "too-long")]
+    #[cfg_attr(feature = "cli", value(name = "too-long"))]
     LineTooLong,
     /// A line ends in the middle of a clause and continues on the next line.
-    #[value(name = "mid-clause")]
+    #[cfg_attr(feature = "cli", value(name = "mid-clause"))]
     MidClauseBreak,
     /// Prose uses a semicolon to join clauses.
-    #[value(name = "semicolon")]
+    #[cfg_attr(feature = "cli", value(name = "semicolon"))]
     Semicolon,
     /// Prose uses an em dash or a double hyphen.
-    #[value(name = "em-dash")]
+    #[cfg_attr(feature = "cli", value(name = "em-dash"))]
     EmDash,
     /// A comment shares a line with code.
-    #[value(name = "trailing")]
+    #[cfg_attr(feature = "cli", value(name = "trailing"))]
     TrailingComment,
     /// Prose shares a line with the quotes of a multi line Python docstring.
-    #[value(name = "docstring")]
+    #[cfg_attr(feature = "cli", value(name = "docstring"))]
     DocstringQuotes,
 }
 

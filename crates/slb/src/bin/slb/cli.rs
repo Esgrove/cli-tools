@@ -24,7 +24,7 @@ use cli_tools_common::{diff_lines, print_error, print_yellow};
 #[cfg(test)]
 use cli_tools_slb::LineRanges;
 use cli_tools_slb::options::DEFAULT_MAX_WIDTH;
-use cli_tools_slb::project_config::{WidthSource, discover_width};
+use cli_tools_slb::project_config::{WidthResolver, WidthSource, discover_width};
 use cli_tools_slb::{FileKind, FormatOptions, FormatResult, check, format};
 
 use crate::Args;
@@ -146,19 +146,15 @@ impl<'config> RunContext<'config> {
     }
 }
 
-/// Width source for every file and file kind of the run, resolved in parallel.
-///
-/// Keying by `(file, kind)` ensures filename-specific `.editorconfig` globs
-/// (such as `[README.md]` vs `[*.md]`) apply accurately to sibling files.
-/// Returns an empty map when the width cannot come from a project config file,
-/// so nothing is read from disk in that case.
+/// Width source for every file and file kind of the run, reusing `WidthResolver` to cache directory lookups.
 fn resolve_project_widths(config: &Config, files: &[(PathBuf, FileKind)]) -> HashMap<WidthKey, Option<WidthSource>> {
     if config.width.is_some() || !config.project_width {
         return HashMap::new();
     }
+    let mut resolver = WidthResolver::new();
     files
-        .par_iter()
-        .map(|(file, kind)| ((file.clone(), *kind), discover_width(file, *kind)))
+        .iter()
+        .map(|(file, kind)| ((file.clone(), *kind), resolver.resolve(file, *kind)))
         .collect()
 }
 
@@ -237,15 +233,47 @@ fn process_files(files: &[(PathBuf, FileKind)], config: &Config) -> Result<Vec<F
     }))
 }
 
-/// Format text from stdin and write the result to stdout.
+/// Format text from stdin and write the result (or a unified diff under `--print`) to stdout.
 fn run_stdin(config: &Config) -> Result<ExitCode> {
     let kind = config
         .kind
-        .context("The --type option is required when reading from stdin")?;
+        .or_else(|| config.stdin_filepath.as_deref().and_then(FileKind::from_path))
+        .context("The --type or --stdin-filepath option is required when reading from stdin")?;
     let mut input = String::new();
     io::stdin().read_to_string(&mut input).context("Failed to read stdin")?;
-    let options = config.format_options(config.width.unwrap_or(DEFAULT_MAX_WIDTH));
+    let resolved_width = config
+        .width
+        .or_else(|| {
+            config
+                .project_width
+                .then(|| {
+                    config
+                        .stdin_filepath
+                        .as_deref()
+                        .and_then(|path| discover_width(path, kind))
+                        .map(|source| source.width)
+                })
+                .flatten()
+        })
+        .unwrap_or(DEFAULT_MAX_WIDTH);
+    let options = config.format_options(resolved_width);
     let result = format(&input, kind, &options);
+    let display_name = config
+        .stdin_filepath
+        .as_deref()
+        .map_or_else(|| "stdin".to_string(), cli_tools_common::path_to_string_relative);
+    if config.print {
+        if let Some(fixed) = &result.fixed_text {
+            for line in diff_lines(&display_name, &input, fixed) {
+                println!("{line}");
+            }
+        }
+        return Ok(if result.violations.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
     let output = result.fixed_text.as_deref().unwrap_or(&input);
     io::stdout().write_all(output.as_bytes())?;
     let remaining_violations = result.fixed_text.as_deref().map_or_else(
@@ -254,14 +282,10 @@ fn run_stdin(config: &Config) -> Result<ExitCode> {
     );
     if !config.quiet {
         for violation in &remaining_violations {
-            eprintln!("{}", format_violation("stdin", violation, true));
+            eprintln!("{}", format_violation(&display_name, violation, true));
         }
     }
-    Ok(if remaining_violations.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Check or fix one file and return what should be printed and counted for it.

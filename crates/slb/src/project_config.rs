@@ -94,10 +94,17 @@ fn has_editorconfig_ancestor(file: &Path) -> bool {
 /// Walk up from the file's directory and return the first applicable line width limit.
 #[must_use]
 pub fn discover_width(file: &Path, kind: FileKind) -> Option<WidthSource> {
-    let start = file.parent()?;
+    let resolved_file: std::borrow::Cow<'_, Path> = if file.is_absolute() {
+        std::borrow::Cow::Borrowed(file)
+    } else if let Ok(current_dir) = std::env::current_dir() {
+        std::borrow::Cow::Owned(current_dir.join(file))
+    } else {
+        std::borrow::Cow::Borrowed(file)
+    };
+    let start = resolved_file.parent()?;
     let mut editorconfig_off = false;
     for directory in start.ancestors() {
-        let (editorconfig, is_root) = editorconfig_width(directory, file);
+        let (editorconfig, is_root) = editorconfig_width(directory, &resolved_file);
         if !editorconfig_off {
             match editorconfig {
                 EditorConfigWidth::Width(source) => return Some(source),
@@ -251,7 +258,7 @@ fn flake8_width(directory: &Path) -> Option<WidthSource> {
                 continue;
             }
             if let Some((key, value)) = line.split_once('=') {
-                let parsed = value.trim().parse::<usize>().ok();
+                let parsed = value.trim().parse::<usize>().ok().filter(|&width| width > 0);
                 match key.trim() {
                     "max-doc-length" => doc_length = parsed,
                     "max-line-length" => line_length = parsed,
@@ -283,10 +290,12 @@ fn prettier_width(directory: &Path) -> Option<WidthSource> {
     .find_map(|name| {
         let path = directory.join(name);
         let content = fs::read_to_string(&path).ok()?;
+        let uncommented = strip_comment_lines(&content);
         let width = RE_PRINT_WIDTH
-            .captures(&content)
+            .captures(&uncommented)
             .and_then(|captures| captures.get(1))
-            .and_then(|group| group.as_str().parse::<usize>().ok())?;
+            .and_then(|group| group.as_str().parse::<usize>().ok())
+            .filter(|&width| width > 0)?;
         Some(WidthSource {
             width,
             file: path,
@@ -329,16 +338,30 @@ fn markdownlint_width(directory: &Path) -> Option<WidthSource> {
     .find_map(|name| {
         let path = directory.join(name);
         let content = fs::read_to_string(&path).ok()?;
+        let uncommented = strip_comment_lines(&content);
         let width = RE_LINE_LENGTH
-            .captures(&content)
+            .captures(&uncommented)
             .and_then(|captures| captures.get(1))
-            .and_then(|group| group.as_str().parse::<usize>().ok())?;
+            .and_then(|group| group.as_str().parse::<usize>().ok())
+            .filter(|&width| width > 0)?;
         Some(WidthSource {
             width,
             file: path,
             key: "line_length".to_string(),
         })
     })
+}
+
+/// Drop comment-only lines (`//` or `#`) so commented width settings are ignored.
+fn strip_comment_lines(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//") && !trimmed.starts_with('#')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Parse a TOML file, returning `None` when it is missing or invalid.
@@ -353,7 +376,10 @@ fn toml_integer(value: &toml::Value, keys: &[&str]) -> Option<usize> {
     for key in keys {
         current = current.get(key)?;
     }
-    current.as_integer().and_then(|integer| usize::try_from(integer).ok())
+    current
+        .as_integer()
+        .and_then(|integer| usize::try_from(integer).ok())
+        .filter(|&width| width > 0)
 }
 
 #[cfg(test)]

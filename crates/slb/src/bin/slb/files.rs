@@ -61,7 +61,18 @@ pub fn collect_files(paths: &[PathBuf], config: &Config) -> Result<Vec<(PathBuf,
                     return true;
                 }
                 if cli_tools_common::should_skip_path(entry.path()) {
-                    return false;
+                    // Keep well-known supported shell dotfiles (such as `.zshrc` or `.bashrc`),
+                    // while skipping hidden directories and other hidden files.
+                    let is_supported_dotfile = entry.file_type().is_some_and(|ft| ft.is_file())
+                        && entry.file_name().to_str().is_some_and(|name| {
+                            matches!(
+                                name,
+                                ".bashrc" | ".zshrc" | ".zshenv" | ".zprofile" | ".profile" | ".bash_profile"
+                            )
+                        });
+                    if !is_supported_dotfile {
+                        return false;
+                    }
                 }
                 let relative = entry
                     .path()
