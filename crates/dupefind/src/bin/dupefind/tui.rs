@@ -599,6 +599,17 @@ fn apply_actions_with(
                     .get(*keep_index)
                     .copied()
                     .context("Selected file to keep is unavailable")?;
+                let keep_path = &keep_file.path;
+                // The keeper may have disappeared while the TUI was collecting decisions.
+                let keep_metadata = keep_path
+                    .symlink_metadata()
+                    .with_context(|| format!("Cannot verify selected file to keep: {}", keep_path.display()))?;
+                anyhow::ensure!(
+                    keep_metadata.is_file(),
+                    "Selected file to keep is not a regular file: {}",
+                    keep_path.display()
+                );
+
                 let mut others: Vec<&DupeFileInfo> = sorted_files
                     .iter()
                     .enumerate()
@@ -1184,6 +1195,48 @@ mod test_apply_actions {
     /// Read a file in the directory, or `None` when it does not exist.
     fn read(directory: &std::path::Path, name: &str) -> Option<String> {
         std::fs::read_to_string(directory.join(name)).ok()
+    }
+
+    #[test]
+    fn missing_keeper_does_not_delete_remaining_copies() {
+        let tree = cli_tools_common::test_support::TempTree::new();
+        let group = group_with_contents(tree.path(), &[("a.mp4", "VIDEO"), ("b.mp4", "VIDEO")]);
+        let actions = [GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: None,
+            },
+        }];
+        std::fs::remove_file(tree.join("a.mp4")).unwrap();
+
+        let result = apply_actions_with(&[group], &actions, &remove_file);
+
+        assert_eq!(tree.files(), ["b.mp4"], "the remaining copy should not be deleted");
+        assert_eq!(tree.read("b.mp4"), "VIDEO");
+        assert!(result.unwrap_err().to_string().contains("a.mp4"));
+    }
+
+    #[test]
+    fn directory_replacing_keeper_does_not_delete_rename_target() {
+        let tree = cli_tools_common::test_support::TempTree::new();
+        let group = group_with_contents(tree.path(), &[("a.mp4", "VIDEO"), ("b.mp4", "VIDEO")]);
+        let actions = [GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: Some("b".to_string()),
+            },
+        }];
+        std::fs::remove_file(tree.join("a.mp4")).unwrap();
+        tree.dir("a.mp4");
+
+        let result = apply_actions_with(&[group], &actions, &remove_file);
+
+        assert_eq!(tree.files(), ["b.mp4"], "the rename target should not be deleted");
+        assert_eq!(tree.read("b.mp4"), "VIDEO");
+        assert!(tree.join("a.mp4").is_dir());
+        assert!(result.unwrap_err().to_string().contains("a.mp4"));
     }
 
     #[test]
