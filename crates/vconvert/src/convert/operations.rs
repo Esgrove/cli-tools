@@ -12,7 +12,7 @@ use tempfile::TempPath;
 use super::VideoConvert;
 use crate::ffmpeg::{
     ConversionOptions, build_conversion_command, build_remux_command, build_subtitle_mux_command, probe_video_info,
-    run_command_isolated, validate_mux_output,
+    run_command_isolated, validate_movie_subtitles, validate_mux_output,
 };
 use crate::observer::{FilePosition, Operation, Retry};
 use crate::stats::ConversionStats;
@@ -116,7 +116,9 @@ impl VideoConvert<'_> {
             ));
         }
 
-        if let Err(error) = validate_mux_output(input, &staged, info) {
+        if let Err(error) = validate_mux_output(input, &staged, info)
+            .and_then(|()| validate_movie_subtitles(input, &staged, &file.subtitle_files))
+        {
             return failed(error.to_string());
         }
         if let Err(error) = self.publish_output(staged, input, final_output, in_place) {
@@ -195,6 +197,11 @@ impl VideoConvert<'_> {
             ));
         }
 
+        if self.options.movie_mode
+            && let Err(error) = validate_movie_subtitles(input, &staged, &file.subtitle_files)
+        {
+            return failed(error.to_string());
+        }
         if let Err(error) = self.publish_output(staged, input, output, false) {
             return failed(error.to_string());
         }

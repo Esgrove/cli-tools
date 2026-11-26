@@ -788,6 +788,21 @@ impl SubtitleFile {
         matches!(extension, "idx" | "srt" | "sub")
     }
 
+    /// Infer a supported movie subtitle language from the trailing filename qualifiers.
+    pub(crate) fn language(&self) -> Option<&'static str> {
+        let stem = self.path.file_stem()?.to_str()?;
+        for qualifier in stem.rsplit(|character: char| !character.is_alphanumeric()) {
+            match qualifier.to_ascii_lowercase().as_str() {
+                "eng" | "english" => return Some("eng"),
+                "fin" | "finnish" | "suomi" => return Some("fin"),
+                "swe" | "swedish" | "svenska" => return Some("swe"),
+                "" | "cc" | "forced" | "sdh" | "sub" | "subs" | "subtitle" | "subtitles" => (),
+                _ => break,
+            }
+        }
+        None
+    }
+
     /// Return all sidecar paths that should be removed after successful muxing.
     pub(crate) fn paths_to_delete(&self) -> Vec<&Path> {
         let mut paths = vec![self.path.as_path()];
