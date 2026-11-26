@@ -19,7 +19,7 @@ use crate::config::{CommandStepConfig, EnvProfile, TaskConfig, TaskFile, TaskFil
 use crate::process::{CommandSpec, command_exists, require_command};
 use crate::scheduler::{
     SharedState, TaskAction, TaskActionResult, TaskContext, TaskOutcome, TaskSpec, filter_tasks, print_task_list,
-    run_schedule,
+    run_schedule, validate_graph,
 };
 use crate::ui::{Reporter, UiConfig};
 
@@ -187,7 +187,7 @@ pub fn run(
 /// # Errors
 ///
 /// Returns an error if conditions cannot be evaluated, a task ID or scope is unknown,
-/// or a task depends on a task that is not enabled.
+/// or the selected dependency graph is invalid.
 pub fn plan(
     task_file: &TaskFile,
     location: &TaskFileLocation,
@@ -201,9 +201,12 @@ pub fn plan(
         dry_run: options.dry_run,
         is_ci,
     };
-    let all_tasks = build_tasks(task_file, &condition_context, &location.root, builtins)?;
+    let enabled_tasks = build_tasks(task_file, &condition_context, &location.root, builtins)?;
     let selected_scopes = resolve_scope(task_file, options.scope.as_deref())?;
-    filter_tasks(all_tasks, selected_scopes.as_ref(), &options.task_ids)
+    let mut selected = filter_tasks(enabled_tasks, selected_scopes.as_ref(), &options.task_ids)?;
+    resolve_selected_dependencies(task_file, &mut selected)?;
+    validate_graph(&selected)?;
+    Ok(selected)
 }
 
 /// Generate a unique log directory name across rapid or concurrent runs.
@@ -241,36 +244,14 @@ fn build_tasks(
     root: &Path,
     builtins: &BTreeMap<String, Arc<dyn Builtin>>,
 ) -> Result<Vec<TaskSpec>> {
-    let mut enabled = Vec::new();
+    let mut specs = Vec::new();
     for task in &task_file.tasks {
         let is_enabled = conditions
             .is_enabled(task.when.as_deref())
             .with_context(|| format!("Failed to evaluate 'when' of task '{}'", task.id))?;
-        if is_enabled {
-            enabled.push(task);
+        if !is_enabled {
+            continue;
         }
-    }
-
-    let active_ids: BTreeSet<&str> = enabled.iter().map(|task| task.id.as_str()).collect();
-    let all_ids: BTreeSet<&str> = task_file.tasks.iter().map(|task| task.id.as_str()).collect();
-    let mut specs = Vec::with_capacity(enabled.len());
-    for task in enabled {
-        for dependency in &task.deps {
-            if !active_ids.contains(dependency.as_str()) && all_ids.contains(dependency.as_str()) {
-                bail!(
-                    "Task '{}' depends on '{dependency}', which is not enabled for the current flags. \
-                     Use 'after' for an ordering that only applies when both tasks run.",
-                    task.id
-                );
-            }
-        }
-        let after: Vec<String> = task
-            .after
-            .iter()
-            .filter(|id| active_ids.contains(id.as_str()) && !task.deps.contains(id))
-            .cloned()
-            .collect();
-
         let steps = task.resolved_steps()?;
         let action = build_action(task, steps.clone(), task_file, conditions.flags, root, builtins)?;
         let dry_run_summary = task.dry_run_summary.clone().unwrap_or_else(|| {
@@ -284,7 +265,7 @@ fn build_tasks(
             label: task.label.clone(),
             priority: task.priority,
             deps: task.deps.clone(),
-            after,
+            after: task.after.clone(),
             resources: task.locks.clone(),
             scopes: task.scopes.clone(),
             dry_run_summary,
@@ -292,6 +273,31 @@ fn build_tasks(
         });
     }
     Ok(specs)
+}
+
+/// Reject invalid dependencies in the selected closure and drop ordering outside it.
+fn resolve_selected_dependencies(task_file: &TaskFile, selected: &mut [TaskSpec]) -> Result<()> {
+    let declared_ids: BTreeSet<&str> = task_file.tasks.iter().map(|task| task.id.as_str()).collect();
+    let selected_ids: BTreeSet<String> = selected.iter().map(|task| task.id.clone()).collect();
+    for task in selected {
+        for dependency in &task.deps {
+            if !selected_ids.contains(dependency) && declared_ids.contains(dependency.as_str()) {
+                bail!(
+                    "Task '{}' depends on '{dependency}', which is not enabled for the current flags. \
+                     Use 'after' for an ordering that only applies when both tasks run.",
+                    task.id
+                );
+            }
+        }
+        for predecessor in &task.after {
+            if !declared_ids.contains(predecessor.as_str()) {
+                bail!("Task '{}' orders after unknown task '{predecessor}'.", task.id);
+            }
+        }
+        task.after
+            .retain(|id| selected_ids.contains(id) && !task.deps.contains(id));
+    }
+    Ok(())
 }
 
 /// Build the action closure for a builtin or command task.
@@ -743,13 +749,15 @@ mod test_conditions_and_scopes {
             dry_run: false,
             is_ci: false,
         };
-        let tasks = build_tasks(&task_file, &context, Path::new("/project"), &BTreeMap::new()).expect("should build");
+        let mut tasks =
+            build_tasks(&task_file, &context, Path::new("/project"), &BTreeMap::new()).expect("should build");
+        resolve_selected_dependencies(&task_file, &mut tasks).expect("should resolve");
         let ios = tasks
             .iter()
             .find(|task| task.id == "ios-sign-in")
             .expect("ios task should be enabled");
         assert!(
-            ios.deps.is_empty(),
+            ios.after.is_empty(),
             "web-tests is inactive, so the soft dependency is dropped"
         );
     }
@@ -767,9 +775,10 @@ mod test_conditions_and_scopes {
             dry_run: false,
             is_ci: false,
         };
-        let Err(error) = build_tasks(&task_file, &context, Path::new("/project"), &BTreeMap::new()) else {
-            panic!("a hard dependency on a disabled task should fail");
-        };
+        let mut tasks =
+            build_tasks(&task_file, &context, Path::new("/project"), &BTreeMap::new()).expect("should build");
+        let error = resolve_selected_dependencies(&task_file, &mut tasks)
+            .expect_err("a hard dependency on a disabled task should fail");
         assert!(error.to_string().contains("'web-tests', which is not enabled"));
     }
 

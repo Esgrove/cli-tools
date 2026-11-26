@@ -36,6 +36,9 @@ xtask list
 xtask --dryrun -a
 ```
 
+Both `list` and normal runs validate the selected tasks and their hard prerequisites.
+An `after` entry must name a task in the file, but only orders tasks that are both selected.
+
 A skipped task blocks anything that needs it through `deps`.
 Tasks ordered with `after` can still run once it finishes.
 If you request a blocked task by ID, `xtask` exits unsuccessfully even if no task failed.

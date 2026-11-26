@@ -300,3 +300,120 @@ fn explicitly_requested_blocked_task_fails_the_run() {
     assert!(dry_run.status.success(), "{}", stdout(&dry_run));
     assert!(stdout(&dry_run).contains("Dry-run resolved 3 task(s)."));
 }
+
+/// Scoped and explicit selections ignore an unrelated task's disabled prerequisite.
+#[test]
+fn selecting_fmt_ignores_an_unrelated_disabled_prerequisite() {
+    let repository = repository_with_tasks(
+        r#"
+[flags.web]
+
+[[tasks]]
+id = "setup"
+label = "Setup"
+when = "web"
+command = ["true"]
+
+[[tasks]]
+id = "web-tests"
+label = "Web tests"
+deps = ["setup"]
+command = ["true"]
+
+[[tasks]]
+id = "fmt"
+label = "Format"
+scopes = ["rust"]
+after = ["setup", "web-tests"]
+command = ["true"]
+"#,
+    );
+    for args in [&["list", "fmt"][..], &["--scope", "rust", "list"]] {
+        let listed = run_xtask(repository.path(), args);
+        assert!(listed.status.success(), "{listed:?}");
+        assert!(stdout(&listed).contains("Resolved tasks (1):"));
+        assert!(stdout(&listed).contains("  fmt"));
+    }
+    #[cfg(unix)]
+    {
+        let run = run_xtask(repository.path(), &["fmt"]);
+        assert!(run.status.success(), "{run:?}");
+        assert!(stdout(&run).contains("PASS  fmt"));
+    }
+
+    for args in [&["list", "web-tests"][..], &["web-tests"]] {
+        let rejected = run_xtask(repository.path(), args);
+        assert!(!rejected.status.success(), "{rejected:?}");
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("'setup', which is not enabled"));
+    }
+}
+
+/// An unknown ordering ID is an error rather than an ordering silently ignored.
+#[test]
+fn list_and_run_reject_unknown_after_ids() {
+    let repository = repository_with_tasks(
+        r#"
+[[tasks]]
+id = "fmt"
+label = "Format"
+after = ["typo"]
+command = ["true"]
+"#,
+    );
+    for args in [&["list", "fmt"][..], &["--dryrun", "fmt"]] {
+        let output = run_xtask(repository.path(), args);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("orders after unknown task 'typo'"));
+    }
+}
+
+/// Listing reports broken hard prerequisites in the selected transitive closure.
+#[test]
+fn list_rejects_unknown_hard_prerequisites_in_the_selected_closure() {
+    let repository = repository_with_tasks(
+        r#"
+[[tasks]]
+id = "fmt"
+label = "Format"
+deps = ["setup"]
+command = ["true"]
+
+[[tasks]]
+id = "setup"
+label = "Setup"
+deps = ["missing"]
+command = ["true"]
+"#,
+    );
+    let output = run_xtask(repository.path(), &["list", "fmt"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Task 'setup' depends on unknown task 'missing'"));
+}
+
+/// Mixed hard and soft cycles are rejected only when all their edges are selected.
+#[test]
+fn list_and_run_reject_selected_cycles() {
+    let repository = repository_with_tasks(
+        r#"
+[[tasks]]
+id = "lint"
+label = "Lint"
+deps = ["fmt"]
+command = ["true"]
+
+[[tasks]]
+id = "fmt"
+label = "Format"
+after = ["lint"]
+command = ["true"]
+"#,
+    );
+    for args in [&["list", "lint"][..], &["--dryrun", "lint"]] {
+        let output = run_xtask(repository.path(), args);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("dependency graph contains a cycle"));
+    }
+    let output = run_xtask(repository.path(), &["list", "fmt"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout(&output).contains("Resolved tasks (1):"));
+}
