@@ -59,7 +59,18 @@ impl Roots {
         };
 
         let output = if outputs.is_empty() {
-            input.clone()
+            let mut seen = std::collections::HashSet::new();
+            input
+                .iter()
+                .map(|path| {
+                    if path.is_file() {
+                        path.parent().map_or_else(|| path.clone(), Path::to_path_buf)
+                    } else {
+                        path.clone()
+                    }
+                })
+                .filter(|path| seen.insert(path.clone()))
+                .collect()
         } else {
             outputs
                 .iter()
@@ -273,6 +284,20 @@ mod test_resolve {
 
         assert_eq!(roots.input(), [current_dir]);
         assert_eq!(roots.output(), [expected_output]);
+        Ok(())
+    }
+
+    #[test]
+    fn single_file_input_defaults_output_to_parent_directory() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let file_a = tmp.path().join("Show.S01E01.mkv");
+        let file_b = tmp.path().join("Show.S01E02.mkv");
+        std::fs::write(&file_a, b"a")?;
+        std::fs::write(&file_b, b"b")?;
+
+        let roots = Roots::resolve(&[file_a, file_b], &[])?;
+        let expected_dir = cli_tools_common::resolve_input_path(Some(tmp.path()))?;
+        assert_eq!(roots.output(), [expected_dir]);
         Ok(())
     }
 }
