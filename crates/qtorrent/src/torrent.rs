@@ -637,10 +637,12 @@ fn bencode_value_length_at_depth(data: &[u8], depth: usize) -> Result<usize> {
     }
 }
 
+/// Return whether a lowercase extension is a supported image extension.
 fn is_image_extension(extension: &str) -> bool {
     matches!(extension, "jpg" | "jpeg" | "png")
 }
 
+/// Count how many files in the slice have a supported image extension.
 fn count_image_files(files: &[FileInfo<'_>]) -> usize {
     files
         .iter()
@@ -648,6 +650,7 @@ fn count_image_files(files: &[FileInfo<'_>]) -> usize {
         .count()
 }
 
+/// Return an exclusion reason when a file is smaller than the configured minimum size in megabytes.
 fn size_exclusion_reason(
     file_size: u64,
     min_size_bytes: Option<u64>,
@@ -665,6 +668,7 @@ fn size_exclusion_reason(
     None
 }
 
+/// Return an exclusion reason when the torrent has fewer image files than the configured minimum.
 fn image_count_exclusion_reason(image_file_count: usize, min_image_file_count: Option<usize>) -> Option<String> {
     if let Some(min_image_file_count) = min_image_file_count
         && min_image_file_count > 1
@@ -678,6 +682,7 @@ fn image_count_exclusion_reason(image_file_count: usize, min_image_file_count: O
     None
 }
 
+/// Return an exclusion reason when an image file is smaller than the configured minimum size in kilobytes.
 fn image_size_exclusion_reason(
     file_size: u64,
     min_size_bytes: Option<u64>,

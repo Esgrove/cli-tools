@@ -80,17 +80,6 @@ pub struct TorrentFileItem {
     pub priority: u8,
 }
 
-impl TorrentListItem {
-    /// Check if the torrent has completed downloading.
-    ///
-    /// A torrent is considered completed if its progress is 1.0 (100%)
-    /// or if it has a valid completion timestamp.
-    #[must_use]
-    pub fn is_completed(&self) -> bool {
-        self.progress >= 1.0 || self.completion_on.is_some()
-    }
-}
-
 impl QBittorrentClient {
     /// Create a new qBittorrent client.
     ///
@@ -579,6 +568,17 @@ impl QBittorrentClient {
     /// Build full API url from the base url and given endpoint.
     fn build_url(&self, url: &str) -> String {
         format!("{}/api/v2/{url}", self.base_url)
+    }
+}
+
+impl TorrentListItem {
+    /// Check if the torrent has completed downloading.
+    ///
+    /// A torrent is considered completed if its progress is 1.0 (100%)
+    /// or if it has a valid completion timestamp.
+    #[must_use]
+    pub fn is_completed(&self) -> bool {
+        self.progress >= 1.0 || self.completion_on.is_some()
     }
 }
 

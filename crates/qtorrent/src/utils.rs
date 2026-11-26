@@ -69,20 +69,6 @@ pub struct SkippedDirectorySummary {
     pub total_size: u64,
 }
 
-impl SkippedDirectorySummary {
-    /// Add a file to this summary.
-    pub const fn add_file(&mut self, size: u64) {
-        self.file_count += 1;
-        self.total_size += size;
-    }
-
-    /// Returns "file" or "files" based on the count.
-    #[must_use]
-    pub const fn files_word(&self) -> &'static str {
-        if self.file_count == 1 { "file" } else { "files" }
-    }
-}
-
 impl TorrentInfo {
     /// Check if all files in this torrent were excluded by filters.
     ///
@@ -226,6 +212,20 @@ pub fn format_torrent_name(dot_rename: &DotFormat, name: &str, is_multi_file: bo
         dot_rename.format_directory_name(&cleaned_stem)
     } else {
         format_single_file_name(dot_rename, &format!("{cleaned_stem}{extension_suffix}"))
+    }
+}
+
+impl SkippedDirectorySummary {
+    /// Add a file to this summary.
+    pub const fn add_file(&mut self, size: u64) {
+        self.file_count += 1;
+        self.total_size += size;
+    }
+
+    /// Returns "file" or "files" based on the count.
+    #[must_use]
+    pub const fn files_word(&self) -> &'static str {
+        if self.file_count == 1 { "file" } else { "files" }
     }
 }
 
