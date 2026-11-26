@@ -162,11 +162,7 @@ impl Config {
         let max_duration = args.max_duration.or(user_config.max_duration);
         let min_resolution = args.min_resolution.or(user_config.min_resolution);
         let count = args.count.or(user_config.count);
-        let sort = args
-            .sort
-            .map(SortOrder::from)
-            .or(user_config.sort)
-            .unwrap_or(SortOrder::Name);
+        let sort = args.sort.map(SortOrder::from).or(user_config.sort).unwrap_or_default();
 
         // Display limit: CLI overrides config, default is 100, 0 means no limit
         let display_limit = match args.display_limit.or(user_config.display_limit) {
@@ -475,7 +471,7 @@ mod config_default_resolution_tests {
         assert!(!config.options.recurse);
         assert!(!config.options.skip_convert);
         assert!(!config.options.skip_remux);
-        assert_eq!(config.options.sort, SortOrder::Name);
+        assert_eq!(config.options.sort, SortOrder::Bitrate);
         assert!(!config.verbose);
 
         let filter = config.options.pending_file_filter();
