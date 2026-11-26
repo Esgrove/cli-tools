@@ -248,19 +248,19 @@ fn run_stdin(config: &Config) -> Result<ExitCode> {
     let result = format(&input, kind, &options);
     let output = result.fixed_text.as_deref().unwrap_or(&input);
     io::stdout().write_all(output.as_bytes())?;
+    let remaining_violations = result.fixed_text.as_deref().map_or_else(
+        || result.violations.clone(),
+        |fixed| check(fixed, kind, &recheck_options(&options, &result)).violations,
+    );
     if !config.quiet {
-        for violation in &result.violations {
+        for violation in &remaining_violations {
             eprintln!("{}", format_violation("stdin", violation, true));
         }
     }
-    let remaining = result.fixed_text.as_deref().map_or_else(
-        || result.violations.len(),
-        |fixed| check(fixed, kind, &recheck_options(&options, &result)).violations.len(),
-    );
-    Ok(if remaining > 0 {
-        ExitCode::FAILURE
-    } else {
+    Ok(if remaining_violations.is_empty() {
         ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     })
 }
 

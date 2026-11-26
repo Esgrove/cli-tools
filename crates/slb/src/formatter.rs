@@ -374,11 +374,14 @@ fn shift_ranges(ranges: &LineRanges, replacements: &[Option<(String, String)>]) 
         }
     }
     shifts.push(applied);
-    let shift_of = |line: usize| shifts.get(line - 1).copied().unwrap_or(applied);
-    let was_replaced = |line: usize| replacements.get(line - 1).is_some_and(Option::is_some);
+    let shift_of = |line: usize| shifts.get(line.saturating_sub(1)).copied().unwrap_or(applied);
+    let was_replaced = |line: usize| replacements.get(line.saturating_sub(1)).is_some_and(Option::is_some);
     LineRanges::new(ranges.iter().map(|range| {
-        let start = range.start() + shift_of(*range.start());
-        let end = range.end() + shift_of(*range.end()) + usize::from(was_replaced(*range.end()));
+        let start = range.start().saturating_add(shift_of(*range.start()));
+        let end = range
+            .end()
+            .saturating_add(shift_of(*range.end()))
+            .saturating_add(usize::from(was_replaced(*range.end())));
         start..=end
     }))
 }

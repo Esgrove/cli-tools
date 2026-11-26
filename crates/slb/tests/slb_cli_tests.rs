@@ -255,6 +255,11 @@ fn stdin_mode_writes_the_formatted_text_to_stdout() {
         stdout(&output),
         "One sentence that is quite long here.\nAnother sentence follows it.\n"
     );
+    assert!(
+        stderr(&output).is_empty(),
+        "fixed stdin should not print fixed violations to stderr: {}",
+        stderr(&output)
+    );
     assert_eq!(exit_code(&output), 0);
 }
 

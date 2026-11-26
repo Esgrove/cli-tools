@@ -260,7 +260,15 @@ fn split_paragraphs_with(
                 .find(|(_, line)| line.trim().is_empty())
                 .map_or(count, |(position, _)| position),
             LineClass::Blockquote => {
-                let end = collect_blockquote(lines, index, context, code_indent, &mut regions, notices);
+                let end = collect_blockquote(
+                    lines,
+                    index,
+                    context,
+                    code_indent,
+                    &mut ignore_next,
+                    &mut regions,
+                    notices,
+                );
                 index = end;
                 continue;
             }
@@ -299,11 +307,15 @@ fn split_paragraphs_with(
 }
 
 /// Collect a contiguous blockquote starting at `index` and append its inner regions.
+///
+/// Honors a preceding `slb-ignore` marker by keeping the entire blockquote verbatim,
+/// and preserves the leading indentation before `>` on the blockquote.
 fn collect_blockquote(
     lines: &[&str],
     index: usize,
     context: SplitContext<'_>,
     code_indent: usize,
+    ignore_next: &mut bool,
     regions: &mut Vec<Region>,
     notices: &mut Vec<SkipNotice>,
 ) -> usize {
@@ -313,6 +325,12 @@ fn collect_blockquote(
         .skip(index)
         .find(|(_, line)| classify(line, None) != LineClass::Blockquote)
         .map_or(lines.len(), |(position, _)| position);
+    if *ignore_next {
+        *ignore_next = false;
+        regions.push(verbatim(context.start_line, index, end));
+        return end;
+    }
+    let quote_indent = leading_whitespace(lines.get(index).copied().unwrap_or_default());
     let inner: Vec<String> = lines
         .get(index..end)
         .unwrap_or_default()
@@ -320,7 +338,7 @@ fn collect_blockquote(
         .map(|line| RE_BLOCKQUOTE.replace(line, "").into_owned())
         .collect();
     let inner_refs: Vec<&str> = inner.iter().map(String::as_str).collect();
-    let prefix = format!("{}> ", context.base_prefix);
+    let prefix = format!("{}{quote_indent}> ", context.base_prefix);
     let inner_context = SplitContext {
         base_prefix: &prefix,
         start_line: context.start_line + index,
@@ -1490,5 +1508,35 @@ mod test_markdown_edge_cases {
                 .any(|region| matches!(region, Region::Paragraph(paragraph) if paragraph.start_line == 2)),
             "prose after single-line $$...$$ must still be formatted: {regions:?}"
         );
+    }
+
+    #[test]
+    fn ignore_marker_applies_to_blockquote_and_indented_blockquote_keeps_indent() {
+        let ignored = [
+            "<!-- slb-ignore -->",
+            "> Quoted clause; second clause.",
+            "",
+            "After quote; should still format.",
+        ];
+        let ignored_regions = split_paragraphs(&ignored, "", 0, true);
+        let para_starts: Vec<usize> = ignored_regions
+            .iter()
+            .filter_map(|region| match region {
+                Region::Paragraph(paragraph) => Some(paragraph.start_line),
+                Region::Verbatim { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            para_starts,
+            vec![3],
+            "slb-ignore must skip the blockquote itself and not leak to the next paragraph: {ignored_regions:?}"
+        );
+
+        let indented = ["  > First clause. Second clause."];
+        let indented_regions = split_paragraphs(&indented, "", 0, true);
+        let Some(Region::Paragraph(paragraph)) = indented_regions.first() else {
+            panic!("expected blockquote paragraph");
+        };
+        assert_eq!(paragraph.first_prefix, "  > ");
     }
 }
