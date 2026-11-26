@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use cli_tools_dirmove::utils;
 
@@ -47,16 +47,16 @@ impl Database {
         Self::open(&path)
     }
 
-    /// Open the database at the default path only if it already exists, without creating anything.
+    /// Open the database at the default path read-only if it already exists, without creating or mutating anything.
     ///
     /// # Errors
-    /// Returns an error if an existing database cannot be opened or initialized.
+    /// Returns an error if an existing database cannot be opened.
     pub fn open_existing() -> Result<Option<Self>> {
         let path = database_path();
         if !path.exists() {
             return Ok(None);
         }
-        Self::open(&path).map(Some)
+        Self::open_read_only(&path).map(Some)
     }
 
     /// Open an in-memory database for testing.
@@ -173,6 +173,19 @@ impl Database {
 
         #[allow(clippy::cast_sign_loss)]
         Ok(count as u64)
+    }
+
+    /// Open an existing database in read-only mode without running DDL or WAL pragmas.
+    fn open_read_only(path: &std::path::Path) -> Result<Self> {
+        let connection =
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+                .with_context(|| format!("Failed to open database read-only: {}", path.display()))?;
+
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("Failed to set busy timeout")?;
+
+        Ok(Self { connection })
     }
 
     /// Open and initialize the database at `path`.
@@ -492,5 +505,30 @@ mod test_exact_match_display_name {
             database.exact_match_display_name("THE BEST SHOW"),
             Some("The Best Show".to_string())
         );
+    }
+
+    #[test]
+    fn open_read_only_reads_existing_entries_without_writing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let db_path = temp_dir.path().join("dirmove.db");
+        {
+            let writable = Database::open(&db_path).expect("create db");
+            writable.upsert("The Best Show").expect("upsert");
+        }
+
+        let mut permissions = std::fs::metadata(&db_path).expect("meta").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&db_path, permissions).expect("set readonly");
+
+        let read_only = Database::open_read_only(&db_path).expect("open read-only");
+        let entries = read_only.get_all_entries().expect("read entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "The Best Show");
+        assert!(read_only.upsert("Blocked Write").is_err());
+
+        let mut restore = std::fs::metadata(&db_path).expect("meta").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        restore.set_readonly(false);
+        let _ = std::fs::set_permissions(&db_path, restore);
     }
 }
