@@ -18,12 +18,12 @@ use regex::Regex;
 /// Matches VERSION number inside a `CMake` `project()` declaration.
 /// Supports 2-4 component versions: `1.0`, `1.0.0`, and `1.0.0.0`.
 static CMAKE_VERSION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)project\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+(?:\.[0-9]+){0,2})").expect("Invalid regex")
+    Regex::new(r"(?i)\bproject\s*\([^)]*VERSION\s+([0-9]+\.[0-9]+(?:\.[0-9]+){0,2})").expect("Invalid regex")
 });
 
 /// Matches the project name (e.g. `project("AudioBatch" ...)` or `project(AudioBatch ...)`).
 static CMAKE_NAME_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?i)project\s*\(\s*["']?([^"'\s)]+)["']?"#).expect("Invalid regex"));
+    LazyLock::new(|| Regex::new(r#"(?i)\bproject\s*\(\s*["']?([^"'\s)]+)["']?"#).expect("Invalid regex"));
 
 /// Subcommands for vtag.
 #[derive(Subcommand, Debug)]
@@ -209,7 +209,7 @@ fn version_tag(
     reverse_walk.push_head()?;
     reverse_walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
 
-    let mut current_tag = String::new();
+    let mut seen_versions = std::collections::HashSet::new();
     let mut tags_to_push = Vec::new();
     let mut seen_project_manifest = false;
 
@@ -245,17 +245,20 @@ fn version_tag(
                 }
                 continue;
             };
-            if current_tag == version_number {
+            if !seen_versions.insert(version_number.clone()) {
                 if verbose {
                     println!("{}", format!("Skip {}: {}", version_number, commit.id()).yellow());
                 }
                 continue;
             }
 
-            current_tag.clone_from(&version_number);
             println!("{}", version_number.bold());
 
             let version_tag = format!("{tag_prefix}v{version_number}");
+            let full_ref = format!("refs/tags/{version_tag}");
+            if !git2::Reference::is_valid_name(&full_ref) {
+                anyhow::bail!("Invalid git tag name: '{version_tag}'");
+            }
             let tag_exists = tag_name_exists(&repo, &version_tag)?;
             if tag_exists {
                 println!("{}", format!("Tag {version_tag} already exists, skipping...").yellow());
@@ -297,6 +300,46 @@ fn create_version_tag(repo: &Repository, tag_name: &str, version_number: &str, o
     Ok(())
 }
 
+/// Build push callbacks with bounded credential attempts and remote rejection capture.
+fn build_push_callbacks(
+    git_config: Option<git2::Config>,
+    rejections: &std::sync::Mutex<Vec<String>>,
+) -> git2::RemoteCallbacks<'_> {
+    let mut callbacks = git2::RemoteCallbacks::new();
+    let mut attempted = false;
+    callbacks.credentials(move |url, username_from_url, allowed_types| {
+        if attempted {
+            return Err(git2::Error::from_str("Authentication failed"));
+        }
+        attempted = true;
+        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
+            return git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"));
+        }
+        if allowed_types.contains(git2::CredentialType::USER_PASS_PLAINTEXT)
+            && let Some(ref config) = git_config
+            && let Ok(cred) = git2::Cred::credential_helper(config, url, username_from_url)
+        {
+            return Ok(cred);
+        }
+        git2::Cred::default()
+    });
+    callbacks.sideband_progress(|data| {
+        if let Ok(text) = std::str::from_utf8(data) {
+            print!("remote: {text}");
+        }
+        true
+    });
+    callbacks.push_update_reference(move |refname, status| {
+        if let Some(message) = status
+            && let Ok(mut list) = rejections.lock()
+        {
+            list.push(format!("{refname}: {message}"));
+        }
+        Ok(())
+    });
+    callbacks
+}
+
 /// Push a single tag to remote.
 fn push_tag(repo: &Repository, tag_name: &str, dryrun: bool) -> Result<()> {
     if dryrun {
@@ -305,40 +348,24 @@ fn push_tag(repo: &Repository, tag_name: &str, dryrun: bool) -> Result<()> {
     }
 
     let mut remote = repo.find_remote("origin")?;
-
-    // Set up callbacks for authentication
-    let mut callbacks = git2::RemoteCallbacks::new();
-
-    // Use Git's credential helper or SSH key from agent
-    callbacks.credentials(|_url, username_from_url, allowed_types| {
-        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
-            return git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"));
-        }
-        git2::Cred::default()
-    });
-
-    // Set up a sideband progress callback to see what is happening
-    callbacks.sideband_progress(|data| {
-        if let Ok(text) = std::str::from_utf8(data) {
-            print!("remote: {text}");
-        }
-        true
-    });
+    let rejections = std::sync::Mutex::new(Vec::new());
+    let callbacks = build_push_callbacks(repo.config().ok(), &rejections);
 
     let mut push_options = git2::PushOptions::new();
     push_options.remote_callbacks(callbacks);
 
     let refspec = format!("refs/tags/{tag_name}");
-    match remote.push(&[&refspec], Some(&mut push_options)) {
-        Ok(()) => {
-            println!("Pushed tag: {tag_name}");
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Failed to push tag {tag_name}:\n{e}");
-            Err(e.into())
-        }
+    remote.push(&[&refspec], Some(&mut push_options)).map_err(|error| {
+        eprintln!("Failed to push tag {tag_name}:\n{error}");
+        anyhow::Error::new(error)
+    })?;
+    if let Ok(list) = rejections.lock()
+        && !list.is_empty()
+    {
+        anyhow::bail!("Remote rejected tag {tag_name}: {}", list.join("; "));
     }
+    println!("Pushed tag: {tag_name}");
+    Ok(())
 }
 
 /// Push multiple tags to remote.
@@ -349,24 +376,8 @@ fn push_all_tags(repo: &Repository, tags: &[String], dryrun: bool) -> Result<()>
     }
 
     let mut remote = repo.find_remote("origin")?;
-
-    // Set up callbacks for authentication
-    let mut callbacks = git2::RemoteCallbacks::new();
-
-    // Use Git's credential helper or SSH key from agent
-    callbacks.credentials(|_url, username_from_url, allowed_types| {
-        if allowed_types.contains(git2::CredentialType::SSH_KEY) {
-            return git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"));
-        }
-        git2::Cred::default()
-    });
-
-    callbacks.sideband_progress(|data| {
-        if let Ok(text) = std::str::from_utf8(data) {
-            print!("remote: {text}");
-        }
-        true
-    });
+    let rejections = std::sync::Mutex::new(Vec::new());
+    let callbacks = build_push_callbacks(repo.config().ok(), &rejections);
 
     let refspecs: Vec<String> = tags.iter().map(|tag| format!("refs/tags/{tag}")).collect();
     let refspec_refs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
@@ -374,17 +385,17 @@ fn push_all_tags(repo: &Repository, tags: &[String], dryrun: bool) -> Result<()>
     let mut push_options = git2::PushOptions::new();
     push_options.remote_callbacks(callbacks);
 
-    // Push the tags with the configured options
-    match remote.push(&refspec_refs, Some(&mut push_options)) {
-        Ok(()) => {
-            println!("Pushed tags successfully: {tags:?}");
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Failed to push tags:\n{e}");
-            Err(e.into())
-        }
+    remote.push(&refspec_refs, Some(&mut push_options)).map_err(|error| {
+        eprintln!("Failed to push tags:\n{error}");
+        anyhow::Error::new(error)
+    })?;
+    if let Ok(list) = rejections.lock()
+        && !list.is_empty()
+    {
+        anyhow::bail!("Remote rejected tags: {}", list.join("; "));
     }
+    println!("Pushed tags successfully: {tags:?}");
+    Ok(())
 }
 
 /// Detect the project type based on which manifest file exists in the directory.
@@ -419,19 +430,61 @@ fn manifest_path_in_repository(repo: &Repository, project_path: &Path, manifest_
     Ok(relative.join(manifest_filename))
 }
 
+/// Strip `#` line comments from CMakeLists.txt content so commented `project(...)` calls are ignored.
+fn strip_cmake_comments(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            let mut in_quotes = false;
+            let mut escaped = false;
+            for (byte_offset, character) in line.char_indices() {
+                if in_quotes {
+                    if escaped {
+                        escaped = false;
+                    } else if character == '\\' {
+                        escaped = true;
+                    } else if character == '"' {
+                        in_quotes = false;
+                    }
+                } else if character == '"' {
+                    in_quotes = true;
+                } else if character == '#' {
+                    return line.get(..byte_offset).unwrap_or(line);
+                }
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Parse the package or project name from manifest content.
 fn parse_project_name(content: &str, project_type: ProjectType) -> Option<String> {
-    let table_name = |table: &str| -> Option<String> {
-        let toml_value: toml::Value = toml::from_str(content).ok()?;
-        toml_value.get(table)?.get("name")?.as_str().map(ToString::to_string)
-    };
     match project_type {
-        ProjectType::CMake => CMAKE_NAME_REGEX
-            .captures(content)
-            .and_then(|captures| captures.get(1))
-            .map(|name| name.as_str().to_string()),
-        ProjectType::Python => table_name("project"),
-        ProjectType::Rust => table_name("package"),
+        ProjectType::CMake => {
+            let stripped = strip_cmake_comments(content);
+            CMAKE_NAME_REGEX
+                .captures(&stripped)
+                .and_then(|captures| captures.get(1))
+                .map(|name| name.as_str().to_string())
+        }
+        ProjectType::Python => {
+            let toml_value: toml::Value = toml::from_str(content).ok()?;
+            toml_value
+                .get("project")
+                .or_else(|| toml_value.get("tool")?.get("poetry"))?
+                .get("name")?
+                .as_str()
+                .map(ToString::to_string)
+        }
+        ProjectType::Rust => {
+            let toml_value: toml::Value = toml::from_str(content).ok()?;
+            toml_value
+                .get("package")?
+                .get("name")?
+                .as_str()
+                .map(ToString::to_string)
+        }
     }
 }
 
@@ -511,10 +564,11 @@ fn workspace_version_in_tree(repo: &Repository, tree: &git2::Tree<'_>, manifest_
 
 /// Parse version from CMakeLists.txt `project()` declaration.
 fn parse_cmake_version(content: &str) -> Option<String> {
-    // Match VERSION followed by a version number inside a project() call.
+    // Match VERSION followed by a version number inside an uncommented project() call.
     // The regex handles both single-line and multi-line project() declarations.
+    let stripped = strip_cmake_comments(content);
     CMAKE_VERSION_REGEX
-        .captures(content)
+        .captures(&stripped)
         .and_then(|captures| captures.get(1))
         .map(|m| m.as_str().to_string())
 }
@@ -522,9 +576,10 @@ fn parse_cmake_version(content: &str) -> Option<String> {
 /// Parse version from pyproject.toml content.
 fn parse_pyproject_toml_version(content: &str) -> Option<String> {
     let toml_value: toml::Value = toml::from_str(content).ok()?;
-    // Standard pyproject.toml uses [project].version
+    // Standard pyproject.toml uses [project].version; Poetry uses [tool.poetry].version.
     toml_value
-        .get("project")?
+        .get("project")
+        .or_else(|| toml_value.get("tool")?.get("poetry"))?
         .get("version")?
         .as_str()
         .map(ToString::to_string)
@@ -543,28 +598,7 @@ fn tag_name_exists(repo: &Repository, tag_name: &str) -> Result<bool> {
 fn get_project_name(path: &Path, project_type: ProjectType) -> Option<String> {
     let manifest_path = path.join(project_type.manifest_filename());
     let content = std::fs::read_to_string(manifest_path).ok()?;
-    match project_type {
-        ProjectType::CMake => CMAKE_NAME_REGEX
-            .captures(&content)
-            .and_then(|captures| captures.get(1))
-            .map(|m| m.as_str().to_string()),
-        ProjectType::Python => {
-            let toml_value: toml::Value = toml::from_str(&content).ok()?;
-            toml_value
-                .get("project")?
-                .get("name")?
-                .as_str()
-                .map(ToString::to_string)
-        }
-        ProjectType::Rust => {
-            let toml_value: toml::Value = toml::from_str(&content).ok()?;
-            toml_value
-                .get("package")?
-                .get("name")?
-                .as_str()
-                .map(ToString::to_string)
-        }
-    }
+    parse_project_name(&content, project_type)
 }
 
 #[cfg(test)]
@@ -1223,5 +1257,40 @@ mod test_tag_helpers {
 
         assert!(push_tag(&repository, "v1.2.3", false).is_err());
         assert!(push_all_tags(&repository, &["v1.2.3".to_string()], false).is_err());
+    }
+
+    #[test]
+    fn cmake_ignores_commented_project_lines_and_prefixed_calls() {
+        let content = "\
+# project(OldApp VERSION 0.1.0)
+my_project(Helper VERSION 0.2.0)
+project(RealApp VERSION 1.2.3)
+";
+        assert_eq!(parse_cmake_version(content).as_deref(), Some("1.2.3"));
+        assert_eq!(
+            parse_project_name(content, ProjectType::CMake).as_deref(),
+            Some("RealApp")
+        );
+    }
+
+    #[test]
+    fn poetry_pyproject_version_is_parsed() {
+        let content = "[tool.poetry]\nname = \"demo\"\nversion = \"2.3.4\"\n";
+        assert_eq!(parse_pyproject_toml_version(content).as_deref(), Some("2.3.4"));
+    }
+
+    #[test]
+    fn invalid_tag_prefix_is_rejected() {
+        let (directory, _repository) = repository_with_versions(&["1.2.3"]);
+        let result = version_tag(
+            &directory.path().to_path_buf(),
+            false,
+            true,
+            false,
+            false,
+            false,
+            "bad prefix ",
+        );
+        assert!(result.is_err(), "whitespace in tag prefix must be rejected");
     }
 }
