@@ -73,8 +73,7 @@ impl<'a> Docstring<'a> {
         let string_prefix = captures.get(2).map_or("", |group| group.as_str());
         let quote = captures.get(3).map_or(r#"""""#, |group| group.as_str());
         let opening_text = captures.get(4).map_or("", |group| group.as_str());
-        let is_raw = string_prefix.eq_ignore_ascii_case("r");
-        if find_unescaped_triple_quote(opening_text, quote, is_raw).is_some() {
+        if find_unescaped_triple_quote(opening_text, quote).is_some() {
             return None;
         }
         let (close_line, close_offset) =
@@ -83,7 +82,7 @@ impl<'a> Docstring<'a> {
                 .enumerate()
                 .skip(index + 1)
                 .find_map(|(position, candidate)| {
-                    find_unescaped_triple_quote(candidate, quote, is_raw).map(|offset| (position, offset))
+                    find_unescaped_triple_quote(candidate, quote).map(|offset| (position, offset))
                 })?;
         let close_source = lines.get(close_line)?;
         let closing_text = close_source.get(..close_offset)?;
@@ -115,12 +114,12 @@ impl<'a> Docstring<'a> {
 
 /// Find the first unescaped occurrence of `quote` (three identical quote chars) in `text`.
 ///
-/// For non-raw Python strings, an odd run of immediately preceding backslashes escapes the opening quote.
-fn find_unescaped_triple_quote(text: &str, quote: &str, is_raw: bool) -> Option<usize> {
+/// An odd run of immediately preceding backslashes escapes the first quote, even in raw Python strings.
+fn find_unescaped_triple_quote(text: &str, quote: &str) -> Option<usize> {
     let mut search_from = 0;
     while let Some(relative) = text.get(search_from..)?.find(quote) {
         let offset = search_from + relative;
-        if is_raw || !is_escaped_at(text, offset) {
+        if !is_escaped_at(text, offset) {
             return Some(offset);
         }
         search_from = offset + 1;
@@ -355,6 +354,26 @@ mod test_docstring_parsing {
         let docstring = Docstring::at(&lines, 0).expect("the docstring should be found");
         assert_eq!(docstring.string_prefix, "r");
         assert_eq!(docstring.quote, "'''");
+    }
+
+    #[test]
+    fn escaped_triple_quotes_do_not_close_raw_docstrings() {
+        for quote in ["\"\"\"", "'''"] {
+            for prefix in ["r", "R"] {
+                let opening = format!("{prefix}{quote}Summary.");
+                let escaped = format!("Example: \\{quote}");
+                let lines = [opening.as_str(), escaped.as_str(), "Actual body.", quote];
+                let docstring = Docstring::at(&lines, 0).unwrap();
+                assert_eq!(docstring.close_line, 3, "{lines:?}");
+                assert!(docstring.closing_text.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn even_backslashes_do_not_escape_raw_docstring_quotes() {
+        let lines = ["r'''Summary.", "Ends with \\\\'''", "unrelated = 1"];
+        assert_eq!(Docstring::at(&lines, 0).unwrap().close_line, 1);
     }
 
     #[test]
