@@ -1028,6 +1028,71 @@ mod test_scan_cache_upsert {
         assert!(!is_definitively_missing(offline));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn volume_mount_root_is_the_drive_or_share_root() {
+        assert_eq!(
+            volume_mount_root(Path::new(r"D:\Media\movie.mkv")),
+            Some(PathBuf::from(r"D:\"))
+        );
+        assert_eq!(
+            volume_mount_root(Path::new(r"\\server\share\Media\movie.mkv")),
+            Some(PathBuf::from(r"\\server\share\"))
+        );
+        assert_eq!(volume_mount_root(Path::new(r"Media\movie.mkv")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unmapped_windows_drive_is_not_treated_as_missing() {
+        let Some(letter) = (b'D'..=b'Z')
+            .rev()
+            .map(char::from)
+            .find(|letter| !Path::new(&format!(r"{letter}:\")).exists())
+        else {
+            return;
+        };
+        let offline = PathBuf::from(format!(r"{letter}:\Media\movie.mkv"));
+        assert!(!mount_root_is_available(&offline));
+        assert!(!is_definitively_missing(&offline));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_file_on_a_local_drive_is_definitively_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("movie.mkv");
+        assert!(mount_root_is_available(&missing));
+        assert!(is_definitively_missing(&missing));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn skips_paths_with_unpaired_surrogates_to_avoid_cache_key_collisions() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let wide = |surrogate: u16| {
+            let mut units: Vec<u16> = r"C:\videos\clip_".encode_utf16().collect();
+            units.push(surrogate);
+            units.extend(".mp4".encode_utf16());
+            PathBuf::from(OsString::from_wide(&units))
+        };
+        let mut cache = ScanCache::open_in_memory().unwrap();
+        let first = wide(0xD800);
+        let second = wide(0xDC00);
+        assert!(first.to_str().is_none());
+        let info = full_video_info();
+
+        assert_eq!(
+            cache
+                .batch_upsert(&[(first.as_path(), &info), (second.as_path(), &info)])
+                .unwrap(),
+            0
+        );
+        assert!(cache.get_all().unwrap().is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn skips_non_utf8_paths_to_avoid_cache_key_collisions() {
