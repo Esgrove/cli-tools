@@ -117,7 +117,7 @@ fn main() -> Result<()> {
     let args = DaemonCli::parse();
 
     if let Some(Command::Completion { shell, install }) = &args.command {
-        return filefind_common::generate_shell_completion(
+        return cli_tools_common::generate_shell_completion(
             *shell,
             DaemonCli::command(),
             *install,

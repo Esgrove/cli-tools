@@ -280,7 +280,6 @@ A binary only crate keeps its binary in `src/main.rs`.
         - `database.rs` - `SQLite` index database with volumes and files keyed by full path
         - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
         - `types.rs` - File entries, volumes, and file change events
-        - `completion.rs` - Shell completion generation
     - `crates/filefind-cli/` → `filefind` - Search the index, find duplicates, and move matching files
     - `crates/filefind-daemon/` → `filefindd` - Background indexer using NTFS MFT reads, the USN journal,
       and a file system watcher for other drives

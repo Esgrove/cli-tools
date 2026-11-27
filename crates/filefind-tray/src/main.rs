@@ -20,7 +20,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::GetConsoleWindow;
 
-use filefind_common::{LogLevel, generate_shell_completion, get_log_directory};
+use cli_tools_common::generate_shell_completion;
+use filefind_common::{LogLevel, get_log_directory};
 
 #[derive(Parser)]
 #[command(

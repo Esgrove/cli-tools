@@ -1528,7 +1528,6 @@ version = "13.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "clap_complete",
  "criterion",
  "dirs",
  "postcard",

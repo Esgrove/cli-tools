@@ -18,14 +18,12 @@ use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
 
-mod completion;
 pub mod config;
 pub mod database;
 #[cfg(feature = "ipc")]
 pub mod ipc;
 pub mod types;
 
-pub use completion::generate_shell_completion;
 pub use config::{CONFIG_PATH, LogLevel, PathMapping, UserConfig as Config};
 pub use database::{Database, VolumeStats};
 #[cfg(feature = "ipc")]

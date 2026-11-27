@@ -15,10 +15,10 @@ use anyhow::bail;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
+use cli_tools_common::generate_shell_completion;
 use cli_tools_common::print_error;
 use filefind_common::config::HyperlinkMode;
 use filefind_common::database::Database;
-use filefind_common::generate_shell_completion;
 
 use crate::config::CliConfig;
 

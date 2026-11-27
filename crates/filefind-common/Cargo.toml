@@ -15,7 +15,6 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
-clap_complete = { workspace = true }
 dirs = { workspace = true }
 postcard = { workspace = true, optional = true }
 regex = { workspace = true }

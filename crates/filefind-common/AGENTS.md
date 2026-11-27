@@ -12,7 +12,6 @@ The other filefind crates have their own `AGENTS.md`:
 ## Modules
 
 - `lib.rs` - Library root, re-exports, path classification, and drive mapping helpers
-- `completion.rs` - Shell completion generation and installation paths
 - `config.rs` - User configuration file handling
 - `database.rs` - `SQLite` index database operations
 - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
