@@ -1,3 +1,5 @@
+//! Search execution, result formatting, duplicate listing, and move dispatch for `filefind`.
+
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -15,8 +17,26 @@ use filefind_common::{Database, IndexedVolume};
 
 use crate::config::CliConfig;
 use crate::hyperlink::Hyperlinker;
-use crate::mover;
+use crate::mover::{self, MoveCandidate};
 use crate::{SortBy, VolumeSortBy, utils};
+
+/// Status of an entry for display purposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryStatus {
+    /// A regular file.
+    File,
+    /// Directory exists and contains files.
+    Directory {
+        /// Total size of files under this directory.
+        size: Option<u64>,
+        /// Number of matching files under this directory.
+        file_count: usize,
+    },
+    /// Directory exists but is empty on disk.
+    EmptyDirectory,
+    /// Directory no longer exists on disk.
+    MissingDirectory,
+}
 
 /// Data for displaying volume information.
 struct VolumeDisplayData {
@@ -36,22 +56,12 @@ struct VolumeDisplayData {
     total_size_bytes: u64,
 }
 
-/// Status of an entry for display purposes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EntryStatus {
-    /// A regular file.
-    File,
-    /// Directory exists and contains files.
-    Directory {
-        /// Total size of files under this directory.
-        size: Option<u64>,
-        /// Number of matching files under this directory.
-        file_count: usize,
-    },
-    /// Directory exists but is empty on disk.
-    EmptyDirectory,
-    /// Directory no longer exists on disk.
-    MissingDirectory,
+/// A search result keeping its stored database key separate from its mapped display path.
+struct SearchEntry {
+    /// Original entry from the database whose `full_path` is the stored index key.
+    stored: FileEntry,
+    /// Display entry whose `full_path` has `path_mappings` applied for rendering and drive filters.
+    display: FileEntry,
 }
 
 /// List all indexed volumes.
@@ -135,33 +145,25 @@ pub fn run_search(config: &CliConfig, database: &Database) -> Result<()> {
 
     let search_duration = start_time.elapsed();
 
-    // Apply path mappings for display (e.g., UNC paths -> mapped drive letters)
-    let results: Vec<_> = results
-        .into_iter()
-        .map(|mut entry| {
-            if let std::borrow::Cow::Owned(mapped) = config.display_path(&entry.full_path) {
-                entry.full_path = mapped;
-            }
-            entry
-        })
-        .collect();
-
-    // Filter results by drive
-    let mut results: Vec<_> = filter_by_drives(results, &config.drives);
+    // Derive display paths without mutating the stored database key used for move reconciliation.
+    let mut results = prepare_search_entries(results, config);
 
     match config.sort_by {
         SortBy::Name => {
             if config.output_format == OutputFormat::Name {
-                results.sort_unstable_by_key(|entry| entry.name.to_lowercase());
+                results.sort_unstable_by_key(|item| item.display.name.to_lowercase());
             } else {
-                results.sort_unstable_by(|left, right| left.full_path.cmp(&right.full_path));
+                results.sort_unstable_by(|left, right| left.display.full_path.cmp(&right.display.full_path));
             }
         }
-        SortBy::Size => results.sort_unstable_by_key(|entry| Reverse(entry.size)),
+        SortBy::Size => results.sort_unstable_by_key(|item| Reverse(item.display.size)),
     }
 
-    // Separate directories and files
-    let (directories, files): (Vec<_>, Vec<_>) = results.iter().partition(|entry| entry.is_directory);
+    // Separate directories and files using the display view for rendering.
+    let (directories, files): (Vec<_>, Vec<_>) = results
+        .iter()
+        .map(|item| &item.display)
+        .partition(|entry| entry.is_directory);
 
     // Collect patterns to highlight (only simple patterns, not regex or glob)
     let highlight_patterns: Vec<&str> = if config.regex {
@@ -193,13 +195,38 @@ pub fn run_search(config: &CliConfig, database: &Database) -> Result<()> {
         );
     }
 
-    // Handle move: move matching files after displaying results
+    // Handle move: move matching files after displaying results, preserving stored database keys.
     if let Some(destination) = &config.move_to {
-        let file_entries: Vec<_> = results.into_iter().filter(|entry| !entry.is_directory).collect();
-        return mover::move_files(&file_entries, destination, database, config.force_overwrite);
+        let move_candidates: Vec<MoveCandidate> = results
+            .into_iter()
+            .filter(|item| !item.stored.is_directory)
+            .map(|item| MoveCandidate::from_mapped(item.stored, item.display.full_path))
+            .collect();
+        return mover::move_files(
+            &move_candidates,
+            destination,
+            database,
+            config.force_overwrite,
+            &config.path_mappings,
+        );
     }
 
     Ok(())
+}
+
+/// Apply display path mappings and drive filters while keeping each stored database key intact.
+fn prepare_search_entries(results: Vec<FileEntry>, config: &CliConfig) -> Vec<SearchEntry> {
+    results
+        .into_iter()
+        .map(|stored| {
+            let mut display = stored.clone();
+            if let Cow::Owned(mapped) = config.display_path(&stored.full_path) {
+                display.full_path = mapped;
+            }
+            SearchEntry { stored, display }
+        })
+        .filter(|item| entry_matches_drives(&item.display.full_path, &config.drives))
+        .collect()
 }
 
 /// Show index statistics.
@@ -664,6 +691,23 @@ fn get_volume_data(database: &Database, volumes: &[IndexedVolume]) -> Result<Vec
         .collect()
 }
 
+/// Check whether a path matches any of the requested drive filters.
+fn entry_matches_drives(full_path: &str, drives: &[String]) -> bool {
+    if drives.is_empty() {
+        return true;
+    }
+
+    let entry_drive = full_path.chars().next().map(|character| character.to_ascii_uppercase());
+    entry_drive.is_some_and(|drive_char| {
+        drives.iter().any(|drive| {
+            drive
+                .chars()
+                .next()
+                .is_some_and(|c| c.to_ascii_uppercase() == drive_char)
+        })
+    })
+}
+
 /// Filter results to only include entries on specified drives.
 fn filter_by_drives(results: Vec<FileEntry>, drives: &[String]) -> Vec<FileEntry> {
     if drives.is_empty() {
@@ -672,14 +716,7 @@ fn filter_by_drives(results: Vec<FileEntry>, drives: &[String]) -> Vec<FileEntry
 
     results
         .into_iter()
-        .filter(|entry| {
-            let entry_drive = entry.full_path.chars().next().map(|c| c.to_ascii_uppercase());
-            entry_drive.is_some_and(|drive_char| {
-                drives
-                    .iter()
-                    .any(|d| d.chars().next().is_some_and(|c| c.to_ascii_uppercase() == drive_char))
-            })
-        })
+        .filter(|entry| entry_matches_drives(&entry.full_path, drives))
         .collect()
 }
 
@@ -2231,5 +2268,52 @@ mod tests {
 
         let result = show_duplicates(&database, &[], None, false, &Hyperlinker::disabled());
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod test_mapped_search_entries {
+    use super::*;
+    use crate::hyperlink::Hyperlinker;
+
+    #[test]
+    fn preserves_stored_unc_key_while_applying_display_mapping_and_drive_filter() {
+        let path_mappings = filefind_common::build_path_mappings(
+            &[],
+            &[filefind_common::PathMapping {
+                unc: r"\\nas\share".to_string(),
+                drive: "X".to_string(),
+            }],
+        );
+
+        let config = CliConfig {
+            command: None,
+            patterns: vec!["movie".to_string()],
+            match_all: false,
+            regex: false,
+            case_sensitive: false,
+            drives: vec!["X".to_string()],
+            files_only: false,
+            directories_only: false,
+            files_per_dir: 20,
+            output_format: OutputFormat::List,
+            sort_by: SortBy::Name,
+            verbose: false,
+            database_path: PathBuf::from("test.db"),
+            path_mappings,
+            move_to: None,
+            force_overwrite: false,
+            hyperlinks: Hyperlinker::disabled(),
+        };
+
+        let entries = vec![
+            FileEntry::new(1, "movie.mkv".into(), r"\\nas\share\movies\movie.mkv".into(), false),
+            FileEntry::new(2, "local.mkv".into(), r"C:\movies\local.mkv".into(), false),
+        ];
+
+        let prepared = prepare_search_entries(entries, &config);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].stored.full_path, r"\\nas\share\movies\movie.mkv");
+        assert_eq!(prepared[0].display.full_path, r"X:\movies\movie.mkv");
     }
 }

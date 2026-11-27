@@ -8,6 +8,7 @@
 //! 2. Fall back to copy+delete for cross-device moves (internal → network drives)
 //! 3. Verify file size after copy before deleting original
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
@@ -16,7 +17,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -43,6 +44,28 @@ use transfer::{is_cross_device_error, move_by_verified_copy};
 /// Size of the buffer used for chunked file copying (256 KB).
 const COPY_BUFFER_SIZE: usize = 256 * 1024;
 
+/// Reason a file was skipped during the move operation.
+#[derive(Debug)]
+enum SkipReason {
+    /// Another search result has the same filename (duplicate).
+    DuplicateName,
+    /// A file with the same name already exists at the destination (no --force).
+    ExistsAtDestination,
+    /// Another cli-tools process holds a lock on the file, named by the tool holding it.
+    LockedByOtherTool(String),
+}
+
+/// A file candidate to move, keeping its stored index key separate from its filesystem path.
+#[derive(Debug, Clone)]
+pub struct MoveCandidate {
+    /// Database entry whose `full_path` stays the immutable stored index key.
+    pub entry: FileEntry,
+    /// Filesystem path used to access and move the source file.
+    pub source_path: PathBuf,
+    /// Path formatted for user output and skip reports.
+    pub display_path: String,
+}
+
 /// A file that was skipped during the move, with the reason.
 struct SkippedFile {
     /// Full path of the skipped file.
@@ -52,9 +75,9 @@ struct SkippedFile {
 }
 
 /// Result of filtering files before a move operation.
-struct FilterResult<'a> {
+struct FilterResult<'a, T> {
     /// Files that need to be moved.
-    files_to_move: Vec<&'a FileEntry>,
+    files_to_move: Vec<&'a T>,
     /// Number of files already located in the destination directory.
     already_at_destination: u64,
     /// Files that were skipped because they could not be moved.
@@ -73,6 +96,8 @@ struct MoveContext<'a> {
     abort_flag: &'a AtomicBool,
     /// Cross-tool lock store, so files another cli-tools process is working on are skipped.
     lock_store: Option<&'a ActiveLockStore>,
+    /// Optional mapping from UNC prefix to mapped drive letter for reverse-mapping stored keys.
+    path_mappings: Option<&'a HashMap<String, String>>,
 }
 
 /// Summary of a completed move operation.
@@ -94,15 +119,24 @@ struct MoveSummary {
     aborted: bool,
 }
 
-/// Reason a file was skipped during the move operation.
-#[derive(Debug)]
-enum SkipReason {
-    /// Another search result has the same filename (duplicate).
-    DuplicateName,
-    /// A file with the same name already exists at the destination (no --force).
-    ExistsAtDestination,
-    /// Another cli-tools process holds a lock on the file, named by the tool holding it.
-    LockedByOtherTool(String),
+impl MoveCandidate {
+    /// Build a move candidate from a database entry and its mapped display path.
+    ///
+    /// Keeps `entry.full_path` untouched as the stored index key
+    /// while using `display_path` for filesystem access when the mapped path differs and exists on disk.
+    #[must_use]
+    pub fn from_mapped(entry: FileEntry, display_path: String) -> Self {
+        let source_path = if display_path != entry.full_path && fs::symlink_metadata(&display_path).is_ok() {
+            PathBuf::from(&display_path)
+        } else {
+            PathBuf::from(&entry.full_path)
+        };
+        Self {
+            entry,
+            source_path,
+            display_path,
+        }
+    }
 }
 
 impl MoveSummary {
@@ -118,7 +152,7 @@ impl MoveSummary {
 /// Only cross-device moves need free space at the destination for the copied data.
 ///
 /// Compares volume prefixes (drive letter or UNC server/share) of each source against the destination.
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 fn cross_device_size(files: &[&FileEntry], destination: &Path) -> u64 {
     let dest_prefix = get_volume_prefix(&destination.to_string_lossy());
 
@@ -143,14 +177,16 @@ fn cross_device_size(files: &[&FileEntry], destination: &Path) -> u64 {
 ///
 /// Compares filesystem device ids of each source against the destination,
 /// which is exact for any mount layout (unlike path-string heuristics).
-#[cfg(not(windows))]
+#[cfg(all(test, not(windows)))]
 fn cross_device_size(files: &[&FileEntry], destination: &Path) -> u64 {
     let destination_device = fs::metadata(destination).ok().map(|metadata| metadata.dev());
 
     files
         .iter()
         .filter(|file| {
-            let source_device = fs::metadata(&file.full_path).ok().map(|metadata| metadata.dev());
+            let source_device = fs::symlink_metadata(&file.full_path)
+                .ok()
+                .map(|metadata| metadata.dev());
             // If either device id is unknown, conservatively assume cross-device
             match (source_device, destination_device) {
                 (Some(source), Some(destination)) => source != destination,
@@ -158,6 +194,44 @@ fn cross_device_size(files: &[&FileEntry], destination: &Path) -> u64 {
             }
         })
         .map(|file| file.size)
+        .sum()
+}
+
+/// Calculate the total size of move candidates that require a cross-device copy.
+#[cfg(windows)]
+fn cross_device_candidate_size(candidates: &[&MoveCandidate], destination: &Path) -> u64 {
+    let dest_prefix = get_volume_prefix(&destination.to_string_lossy());
+
+    candidates
+        .iter()
+        .filter(|candidate| {
+            let source_prefix = get_volume_prefix(&candidate.source_path.to_string_lossy());
+            match (&source_prefix, &dest_prefix) {
+                (Some(source), Some(dest)) => source != dest,
+                _ => true,
+            }
+        })
+        .map(|candidate| candidate.entry.size)
+        .sum()
+}
+
+/// Calculate the total size of move candidates that require a cross-device copy.
+#[cfg(not(windows))]
+fn cross_device_candidate_size(candidates: &[&MoveCandidate], destination: &Path) -> u64 {
+    let destination_device = fs::metadata(destination).ok().map(|metadata| metadata.dev());
+
+    candidates
+        .iter()
+        .filter(|candidate| {
+            let source_device = fs::symlink_metadata(&candidate.source_path)
+                .ok()
+                .map(|metadata| metadata.dev());
+            match (source_device, destination_device) {
+                (Some(source), Some(destination)) => source != destination,
+                _ => true,
+            }
+        })
+        .map(|candidate| candidate.entry.size)
         .sum()
 }
 
@@ -181,8 +255,14 @@ fn cross_device_size(files: &[&FileEntry], destination: &Path) -> u64 {
 ///
 /// # Errors
 /// Returns an error if the destination directory cannot be created or accessed.
-pub fn move_files(files: &[FileEntry], destination: &Path, database: &Database, force_overwrite: bool) -> Result<()> {
-    if files.is_empty() {
+pub fn move_files(
+    candidates: &[MoveCandidate],
+    destination: &Path,
+    database: &Database,
+    force_overwrite: bool,
+    path_mappings: &HashMap<String, String>,
+) -> Result<()> {
+    if candidates.is_empty() {
         println!("{}", "No files found to move.".yellow());
         return Ok(());
     }
@@ -208,7 +288,7 @@ pub fn move_files(files: &[FileEntry], destination: &Path, database: &Database, 
     let destination = normalize_destination(&destination, original_destination);
 
     // Filter out files already in the destination directory and detect name conflicts
-    let filter_result = filter_files(files, &destination, force_overwrite);
+    let filter_result = filter_candidates(candidates, &destination, force_overwrite);
 
     if filter_result.files_to_move.is_empty() {
         if filter_result.already_at_destination > 0 {
@@ -228,8 +308,12 @@ pub fn move_files(files: &[FileEntry], destination: &Path, database: &Database, 
 
     // Calculate total size of all files (for progress bar) and the subset
     // that will actually require disk space (cross-device copies only).
-    let total_size: u64 = filter_result.files_to_move.iter().map(|file| file.size).sum();
-    let required_space = cross_device_size(&filter_result.files_to_move, &destination);
+    let total_size: u64 = filter_result
+        .files_to_move
+        .iter()
+        .map(|candidate| candidate.entry.size)
+        .sum();
+    let required_space = cross_device_candidate_size(&filter_result.files_to_move, &destination);
 
     // Only check disk space for files that need a cross-device copy.
     // Same-device moves use fs::rename which is instant and free.
@@ -239,7 +323,7 @@ pub fn move_files(files: &[FileEntry], destination: &Path, database: &Database, 
 
     // Print move plan and ask for confirmation
     print_move_plan(
-        &filter_result.files_to_move,
+        filter_result.files_to_move.len(),
         &destination,
         total_size,
         filter_result.already_at_destination,
@@ -283,10 +367,11 @@ pub fn move_files(files: &[FileEntry], destination: &Path, database: &Database, 
         database,
         abort_flag: &abort_flag,
         lock_store: lock_store.as_ref(),
+        path_mappings: Some(path_mappings),
     };
 
     // Execute the moves with progress
-    let summary = execute_moves(
+    let summary = execute_candidate_moves(
         &filter_result.files_to_move,
         total_size,
         filter_result.already_at_destination,
@@ -300,73 +385,124 @@ pub fn move_files(files: &[FileEntry], destination: &Path, database: &Database, 
     Ok(())
 }
 
+/// Filter move candidates to determine which ones need to be moved.
+fn filter_candidates<'a>(
+    candidates: &'a [MoveCandidate],
+    destination: &Path,
+    force_overwrite: bool,
+) -> FilterResult<'a, MoveCandidate> {
+    let case_sensitive = destination_is_case_sensitive(destination);
+    filter_candidates_with_case_sensitivity(candidates, destination, force_overwrite, case_sensitive)
+}
+
+/// Filter move candidates with explicit destination case sensitivity.
+fn filter_candidates_with_case_sensitivity<'a>(
+    candidates: &'a [MoveCandidate],
+    destination: &Path,
+    force_overwrite: bool,
+    case_sensitive: bool,
+) -> FilterResult<'a, MoveCandidate> {
+    filter_items_with_case_sensitivity(
+        candidates,
+        destination,
+        force_overwrite,
+        case_sensitive,
+        |candidate| candidate.source_path.as_path(),
+        |candidate| candidate.display_path.as_str(),
+    )
+}
+
 /// Filter files to determine which ones need to be moved.
 ///
 /// Removes files already in the destination directory or its subdirectories
 /// and handles duplicate filenames by keeping only the first occurrence.
 /// When `force_overwrite` is false, also skips files whose name already exists at the destination.
-///
-/// Returns a `FilterResult` with the files to move, a count of files already at the destination,
-/// and a list of files that were skipped with reasons.
-fn filter_files<'a>(files: &'a [FileEntry], destination: &Path, force_overwrite: bool) -> FilterResult<'a> {
-    let dest_normalized = normalize_extended_prefix(&destination.to_string_lossy());
-    // Lazily resolved canonical destination for fallback same-file detection.
-    // Only computed when the fast string comparison fails and a name conflict exists.
-    let mut dest_canonical: Option<std::path::PathBuf> = None;
+#[cfg(test)]
+fn filter_files<'a>(files: &'a [FileEntry], destination: &Path, force_overwrite: bool) -> FilterResult<'a, FileEntry> {
+    let case_sensitive = destination_is_case_sensitive(destination);
+    filter_files_with_case_sensitivity(files, destination, force_overwrite, case_sensitive)
+}
+
+/// Filter file entries with explicit destination case sensitivity.
+#[cfg(test)]
+fn filter_files_with_case_sensitivity<'a>(
+    files: &'a [FileEntry],
+    destination: &Path,
+    force_overwrite: bool,
+    case_sensitive: bool,
+) -> FilterResult<'a, FileEntry> {
+    filter_items_with_case_sensitivity(
+        files,
+        destination,
+        force_overwrite,
+        case_sensitive,
+        |entry| Path::new(&entry.full_path),
+        |entry| entry.full_path.as_str(),
+    )
+}
+
+/// Shared filtering logic for both `MoveCandidate` and raw `FileEntry` slices.
+fn filter_items_with_case_sensitivity<'a, T>(
+    items: &'a [T],
+    destination: &Path,
+    force_overwrite: bool,
+    case_sensitive: bool,
+    source_path_of: impl Fn(&'a T) -> &'a Path,
+    display_path_of: impl Fn(&'a T) -> &'a str,
+) -> FilterResult<'a, T> {
+    let dest_normalized = normalize_path_for_prefix_check(&destination.to_string_lossy(), case_sensitive);
 
     let mut files_to_move = Vec::new();
     let mut already_at_destination: u64 = 0;
     let mut skipped_files = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    for file in files {
+    for item in items {
+        let source_path = source_path_of(item);
+        let display_path = display_path_of(item);
+
         // Do not flatten files that are already anywhere in the destination tree.
-        let file_parent = Path::new(&file.full_path)
-            .parent()
-            .map_or_default(|path| path.to_string_lossy().to_string());
-
-        let parent_normalized = normalize_extended_prefix(&file_parent);
-
-        if Path::new(&parent_normalized).starts_with(Path::new(&dest_normalized)) {
+        if is_within_destination(source_path, destination, &dest_normalized, case_sensitive) {
             already_at_destination += 1;
             continue;
         }
 
-        // Check for duplicate filenames across search results (keep first occurrence)
-        let file_name = Path::new(&file.full_path)
+        // Check for duplicate filenames across search results (keep first occurrence).
+        let raw_name = source_path
             .file_name()
-            .map_or_default(|name| name.to_string_lossy().to_lowercase());
+            .map_or_default(|name| name.to_string_lossy().into_owned());
+        let name_key = if case_sensitive {
+            raw_name.clone()
+        } else {
+            raw_name.to_lowercase()
+        };
 
-        if !seen_names.insert(file_name) {
+        if !seen_names.insert(name_key) {
             skipped_files.push(SkippedFile {
-                path: file.full_path.clone(),
+                path: display_path.to_string(),
                 reason: SkipReason::DuplicateName,
             });
             continue;
         }
 
-        // Check if a file with this name already exists at the destination
-        let dest_file = destination.join(Path::new(&file.full_path).file_name().unwrap_or_default());
-        if dest_file.exists() {
-            // The source and destination might be the same file reached via different path representations
-            // (e.g., drive letter vs UNC).
-            // Canonicalize both to detect this. If they match, the file is already in the destination.
-            // Not a real conflict.
-            if is_same_file(Path::new(&file.full_path), &dest_file, &mut dest_canonical) {
+        // Check if any directory entry (including a dangling symlink) already exists at the destination.
+        let dest_file = destination.join(&raw_name);
+        if fs::symlink_metadata(&dest_file).is_ok() {
+            if cli_tools_common::paths_refer_to_same_entry(source_path, &dest_file) {
                 already_at_destination += 1;
                 continue;
             }
 
             if !force_overwrite {
                 skipped_files.push(SkippedFile {
-                    path: file.full_path.clone(),
+                    path: display_path.to_string(),
                     reason: SkipReason::ExistsAtDestination,
                 });
                 continue;
             }
         }
 
-        files_to_move.push(file);
+        files_to_move.push(item);
     }
 
     FilterResult {
@@ -376,9 +512,37 @@ fn filter_files<'a>(files: &'a [FileEntry], destination: &Path, force_overwrite:
     }
 }
 
+/// Determine whether `destination` lives on a case-sensitive filesystem.
+fn destination_is_case_sensitive(destination: &Path) -> bool {
+    let destination_str = destination.to_string_lossy();
+    if is_windows_style_path(&destination_str) {
+        return false;
+    }
+    cli_tools_common::directory_is_case_sensitive(destination).unwrap_or(cfg!(target_os = "linux"))
+}
+
+/// Return whether `path` uses a Windows drive letter, UNC prefix, or extended-length prefix.
+fn is_windows_style_path(path: &str) -> bool {
+    path.starts_with(r"\\") || extract_drive_letter(Path::new(path)).is_some()
+}
+
+/// Return whether `source_path` already sits inside `destination` or one of its subdirectories.
+fn is_within_destination(source_path: &Path, destination: &Path, dest_normalized: &str, case_sensitive: bool) -> bool {
+    let Some(source_parent) = source_path.parent() else {
+        return false;
+    };
+
+    if cli_tools_common::relative_path_within(source_parent, destination).is_some() {
+        return true;
+    }
+
+    let parent_normalized = normalize_path_for_prefix_check(&source_parent.to_string_lossy(), case_sensitive);
+    Path::new(&parent_normalized).starts_with(Path::new(dest_normalized))
+}
+
 /// Print the move plan before executing.
 fn print_move_plan(
-    files: &[&FileEntry],
+    file_count: usize,
     destination: &Path,
     total_size: u64,
     already_at_destination: u64,
@@ -388,7 +552,7 @@ fn print_move_plan(
     println!(
         "\n{} {} ({}) → {}",
         "Moving".bold(),
-        format!("{} files", files.len()).cyan(),
+        format!("{file_count} files").cyan(),
         format_size(total_size).cyan(),
         destination.display().to_string().green()
     );
@@ -559,8 +723,8 @@ fn path_to_cstring(path: &Path) -> Result<std::ffi::CString> {
 /// Execute the file moves with progress reporting and abort handling.
 ///
 /// Updates the database after each successful move.
-fn execute_moves(
-    files: &[&FileEntry],
+fn execute_candidate_moves(
+    candidates: &[&MoveCandidate],
     total_size: u64,
     already_at_destination: u64,
     skipped_files: Vec<SkippedFile>,
@@ -583,7 +747,7 @@ fn execute_moves(
         aborted: false,
     };
 
-    for (index, file) in files.iter().enumerate() {
+    for (index, candidate) in candidates.iter().enumerate() {
         // Check abort flag before starting next file
         if context.abort_flag.load(Ordering::SeqCst) {
             summary.aborted = true;
@@ -591,15 +755,12 @@ fn execute_moves(
             break;
         }
 
-        let file_name = Path::new(&file.full_path)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let file_name = candidate.source_path.file_name().unwrap_or_default().to_string_lossy();
 
-        progress_bar.set_message(format!("[{}/{}] {file_name}", index + 1, files.len()));
+        progress_bar.set_message(format!("[{}/{}] {file_name}", index + 1, candidates.len()));
 
         let dest_path = context.destination.join(&*file_name);
-        let source_path = Path::new(&file.full_path);
+        let source_path = candidate.source_path.as_path();
 
         let _lock_guard = match context
             .lock_store
@@ -608,10 +769,10 @@ fn execute_moves(
             Some(Ok(AcquireOutcome::Acquired(guard))) => Some(guard),
             Some(Ok(AcquireOutcome::AlreadyLocked(holder))) => {
                 summary.skipped_files.push(SkippedFile {
-                    path: file.full_path.clone(),
+                    path: candidate.display_path.clone(),
                     reason: SkipReason::LockedByOtherTool(holder.tool),
                 });
-                progress_bar.inc(file.size);
+                progress_bar.inc(candidate.entry.size);
                 continue;
             }
             Some(Err(error)) => {
@@ -623,10 +784,17 @@ fn execute_moves(
             None => None,
         };
 
-        match move_indexed_file(file, source_path, &dest_path, &file_name, &progress_bar, context) {
+        match move_indexed_file(
+            &candidate.entry,
+            source_path,
+            &dest_path,
+            &file_name,
+            &progress_bar,
+            context,
+        ) {
             Ok(()) => {
                 summary.moved += 1;
-                summary.total_size_moved += file.size;
+                summary.total_size_moved += candidate.entry.size;
             }
             Err(MoveError::Aborted) => {
                 summary.aborted = true;
@@ -636,10 +804,10 @@ fn execute_moves(
             Err(MoveError::Failed(error)) => {
                 summary.failed += 1;
                 progress_bar.suspend(|| {
-                    print_error!("Failed to move {}: {error}", file.full_path);
+                    print_error!("Failed to move {}: {error}", candidate.display_path);
                 });
                 // Advance progress bar past this file so totals stay correct
-                progress_bar.inc(file.size);
+                progress_bar.inc(candidate.entry.size);
             }
         }
     }
@@ -651,12 +819,39 @@ fn execute_moves(
     summary
 }
 
+/// Test adapter that runs `execute_candidate_moves` over raw `FileEntry` references.
+#[cfg(test)]
+fn execute_moves(
+    files: &[&FileEntry],
+    total_size: u64,
+    already_at_destination: u64,
+    skipped_files: Vec<SkippedFile>,
+    context: &MoveContext<'_>,
+) -> MoveSummary {
+    let candidates: Vec<MoveCandidate> = files
+        .iter()
+        .map(|entry| MoveCandidate {
+            entry: (*entry).clone(),
+            source_path: PathBuf::from(&entry.full_path),
+            display_path: entry.full_path.clone(),
+        })
+        .collect();
+    let candidate_refs: Vec<&MoveCandidate> = candidates.iter().collect();
+    execute_candidate_moves(
+        &candidate_refs,
+        total_size,
+        already_at_destination,
+        skipped_files,
+        context,
+    )
+}
+
 fn restore_destination_backup(
     backup: Option<(tempfile::TempDir, std::path::PathBuf)>,
     destination: &Path,
 ) -> Result<()> {
     if let Some((directory, backup_path)) = backup {
-        if destination.exists() {
+        if fs::symlink_metadata(destination).is_ok() {
             let preserved = directory.keep();
             return Err(anyhow::anyhow!(
                 "Could not restore {} because another file appeared. Original destination is preserved at {}",
@@ -704,7 +899,7 @@ fn files_have_same_contents(source: &Path, destination: &Path) -> Result<bool> {
 fn deduplicate_identical_file(
     file: &FileEntry,
     source: &Path,
-    destination: &Path,
+    destination_key: &str,
     file_name: &str,
     progress_bar: &ProgressBar,
     database: &Database,
@@ -719,7 +914,7 @@ fn deduplicate_identical_file(
     let staged_source = backup.path().join(file_name);
     fs::rename(source, &staged_source).map_err(|error| MoveError::Failed(error.into()))?;
 
-    match database.reconcile_identical_file(&file.full_path, &destination.to_string_lossy(), file_name) {
+    match database.reconcile_identical_file(&file.full_path, destination_key, file_name) {
         Ok(true) => {
             if let Err(error) = fs::remove_file(&staged_source) {
                 let preserved = backup.keep();
@@ -738,7 +933,7 @@ fn deduplicate_identical_file(
                 Err(error) => error,
                 Ok(true) => return Ok(()),
             };
-            if source.exists() || fs::rename(&staged_source, source).is_err() {
+            if fs::symlink_metadata(source).is_ok() || fs::rename(&staged_source, source).is_err() {
                 let preserved = backup.keep();
                 return Err(MoveError::Failed(anyhow::anyhow!(
                     "Could not reconcile identical file: {error}. Source is preserved at {}",
@@ -751,13 +946,41 @@ fn deduplicate_identical_file(
 }
 
 fn reject_unexpected_destination(destination: &Path, force_overwrite: bool) -> Result<(), MoveError> {
-    if destination.exists() && !force_overwrite {
+    if fs::symlink_metadata(destination).is_ok() && !force_overwrite {
         return Err(MoveError::Failed(anyhow::anyhow!(
             "Destination appeared after filtering: {}",
             destination.display()
         )));
     }
     Ok(())
+}
+
+/// Resolve the database key for a moved destination, reversing mapped drive letters to UNC prefixes.
+fn resolve_stored_destination_key(destination: &Path, path_mappings: Option<&HashMap<String, String>>) -> String {
+    let destination_str = destination.to_string_lossy();
+    let Some(mappings) = path_mappings else {
+        return destination_str.into_owned();
+    };
+    let Some(drive) = extract_drive_letter(destination) else {
+        return destination_str.into_owned();
+    };
+
+    for (unc_prefix, mapped_drive) in mappings {
+        let mapped_char = mapped_drive
+            .chars()
+            .next()
+            .map(|character| character.to_ascii_uppercase());
+        if mapped_char == Some(drive) {
+            let remainder = destination_str.get(2..).unwrap_or_default();
+            let normalized_unc = unc_prefix.trim_end_matches('\\');
+            if remainder.is_empty() || remainder == "\\" {
+                return normalized_unc.to_string();
+            }
+            return format!("{normalized_unc}{remainder}");
+        }
+    }
+
+    destination_str.into_owned()
 }
 
 fn move_indexed_file(
@@ -770,24 +993,52 @@ fn move_indexed_file(
 ) -> Result<(), MoveError> {
     reject_unexpected_destination(destination, context.force_overwrite)?;
 
-    if destination.exists() && context.force_overwrite {
-        match files_have_same_contents(source, destination) {
-            Ok(true) => {
-                return deduplicate_identical_file(
-                    file,
-                    source,
-                    destination,
-                    file_name,
-                    progress_bar,
-                    context.database,
-                );
+    let source_meta = fs::symlink_metadata(source).map_err(|error| MoveError::Failed(error.into()))?;
+    let dest_meta = fs::symlink_metadata(destination).ok();
+    let destination_key = resolve_stored_destination_key(destination, context.path_mappings);
+
+    if let Some(ref existing_dest_meta) = dest_meta {
+        if existing_dest_meta.file_type().is_dir() {
+            return Err(MoveError::Failed(anyhow::anyhow!(
+                "Refusing to overwrite directory at destination: {}",
+                destination.display()
+            )));
+        }
+        if source_meta.file_type().is_symlink()
+            && !existing_dest_meta.file_type().is_symlink()
+            && cli_tools_common::paths_refer_to_same_file(source, destination)
+        {
+            return Err(MoveError::Failed(anyhow::anyhow!(
+                "Refusing to move symlink {} onto its own target {}",
+                source.display(),
+                destination.display()
+            )));
+        }
+
+        // Only deduplicate two independent regular files so a symlink pointing to the source is never left dangling.
+        if context.force_overwrite
+            && source_meta.file_type().is_file()
+            && existing_dest_meta.file_type().is_file()
+            && !cli_tools_common::paths_refer_to_same_entry(source, destination)
+        {
+            match files_have_same_contents(source, destination) {
+                Ok(true) => {
+                    return deduplicate_identical_file(
+                        file,
+                        source,
+                        &destination_key,
+                        file_name,
+                        progress_bar,
+                        context.database,
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => return Err(MoveError::Failed(error)),
             }
-            Ok(false) => {}
-            Err(error) => return Err(MoveError::Failed(error)),
         }
     }
 
-    let backup = if destination.exists() {
+    let backup = if dest_meta.is_some() {
         let directory = tempfile::Builder::new()
             .prefix(".filefind-backup-")
             .tempdir_in(context.destination)
@@ -800,7 +1051,7 @@ fn move_indexed_file(
     };
 
     if let Err(error) = move_single_file(source, destination, file.size, progress_bar, context.abort_flag) {
-        if destination.exists() {
+        if fs::symlink_metadata(destination).is_ok() {
             if let Some((directory, _)) = backup {
                 let preserved = directory.keep();
                 return Err(MoveError::Failed(anyhow::anyhow!(
@@ -815,12 +1066,10 @@ fn move_indexed_file(
         return Err(error);
     }
 
-    let reconciliation = context.database.reconcile_moved_file(
-        &file.full_path,
-        &destination.to_string_lossy(),
-        file_name,
-        backup.is_some(),
-    );
+    let reconciliation =
+        context
+            .database
+            .reconcile_moved_file(&file.full_path, &destination_key, file_name, backup.is_some());
     if matches!(reconciliation, Ok(true)) {
         if let Some((directory, backup_path)) = backup
             && let Err(error) = fs::remove_file(&backup_path)
@@ -840,13 +1089,25 @@ fn move_indexed_file(
         Err(error) => error,
         Ok(true) => return Ok(()),
     };
-    let rollback = if source.exists() {
+    rollback_unreconciled_move(source, destination, file.size, progress_bar, backup, error)
+}
+
+/// Move a file back to `source` and restore any replaced destination backup when index reconciliation fails.
+fn rollback_unreconciled_move(
+    source: &Path,
+    destination: &Path,
+    size: u64,
+    progress_bar: &ProgressBar,
+    backup: Option<(tempfile::TempDir, PathBuf)>,
+    reconciliation_error: anyhow::Error,
+) -> Result<(), MoveError> {
+    let rollback = if fs::symlink_metadata(source).is_ok() {
         Err(anyhow::anyhow!("Source path already exists; cannot safely roll back"))
     } else {
         move_single_file(
             destination,
             source,
-            file.size,
+            size,
             &ProgressBar::hidden(),
             &AtomicBool::new(false),
         )
@@ -860,35 +1121,16 @@ fn move_indexed_file(
         return Err(MoveError::Failed(anyhow::anyhow!(
             "Moved {}, but index reconciliation failed: {}. Rollback failed: {}. Old destination backup: {:?}",
             destination.display(),
-            error,
+            reconciliation_error,
             rollback_error,
             backup_location
         )));
     }
-    progress_bar.set_position(progress_bar.position().saturating_sub(file.size));
+    progress_bar.set_position(progress_bar.position().saturating_sub(size));
     if let Err(restore_error) = restore_destination_backup(backup, destination) {
         return Err(MoveError::Failed(restore_error));
     }
-    Err(MoveError::Failed(error))
-}
-
-/// Check whether two paths refer to the same file by comparing canonical paths.
-///
-/// The `dest_canonical_cache` parameter caches the canonical form of
-/// the destination file's parent directory to avoid repeated syscalls.
-/// Returns `false` if either path cannot be canonicalized (e.g., file not found).
-fn is_same_file(source: &Path, dest_file: &Path, dest_canonical_cache: &mut Option<std::path::PathBuf>) -> bool {
-    let Some(source_canonical) = source.canonicalize().ok() else {
-        return false;
-    };
-    let dest_canonical = dest_canonical_cache.get_or_insert_with(|| {
-        dest_file
-            .parent()
-            .and_then(|path| path.canonicalize().ok())
-            .unwrap_or_default()
-    });
-    let dest_file_canonical = dest_file.file_name().map_or_default(|name| dest_canonical.join(name));
-    source_canonical == dest_file_canonical
+    Err(MoveError::Failed(reconciliation_error))
 }
 
 /// Normalize a canonicalized destination path back to drive-letter form.
@@ -934,6 +1176,18 @@ fn normalize_destination(canonical: &Path, original: &Path) -> std::path::PathBu
 fn replace_unc_root_with_drive(unc_path: &str, unc_root: &str, drive: char) -> Option<std::path::PathBuf> {
     strip_prefix_ignore_case(unc_path, &unc_root.to_lowercase())
         .map(|remainder| std::path::PathBuf::from(format!("{drive}:{remainder}")))
+}
+
+/// Normalize a path string by stripping any Windows extended-length prefix,
+/// optionally folding case for case-insensitive filesystems.
+fn normalize_path_for_prefix_check(path: &str, case_sensitive: bool) -> String {
+    if !case_sensitive {
+        return normalize_extended_prefix(path);
+    }
+    path.strip_prefix(r"\\?\UNC\").map_or_else(
+        || path.strip_prefix(r"\\?\").unwrap_or(path).to_string(),
+        |unc_rest| format!(r"\\{unc_rest}"),
+    )
 }
 
 /// Normalize a path string by stripping the `\\?\` or `\\?\UNC\` extended-length prefix
@@ -2117,76 +2371,6 @@ mod tests {
         assert!(result.files_to_move.is_empty());
     }
 
-    // --- is_same_file tests ---
-
-    #[test]
-    fn test_is_same_file_identical_paths() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let file_path = temp_dir.path().join("test.txt");
-        fs::write(&file_path, "content").expect("failed to write file");
-
-        let mut cache = None;
-        assert!(
-            is_same_file(&file_path, &file_path, &mut cache),
-            "identical paths should be the same file"
-        );
-    }
-
-    #[test]
-    fn test_is_same_file_different_files() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let file_a = temp_dir.path().join("a.txt");
-        let file_b = temp_dir.path().join("b.txt");
-        fs::write(&file_a, "aaa").expect("failed to write file a");
-        fs::write(&file_b, "bbb").expect("failed to write file b");
-
-        let mut cache = None;
-        assert!(
-            !is_same_file(&file_a, &file_b, &mut cache),
-            "different files should not be the same"
-        );
-    }
-
-    #[test]
-    fn test_is_same_file_source_not_found() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let existing = temp_dir.path().join("exists.txt");
-        let missing = temp_dir.path().join("missing.txt");
-        fs::write(&existing, "content").expect("failed to write file");
-
-        let mut cache = None;
-        assert!(
-            !is_same_file(&missing, &existing, &mut cache),
-            "non-existent source should return false"
-        );
-    }
-
-    #[test]
-    fn test_is_same_file_cache_is_populated() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let file_path = temp_dir.path().join("test.txt");
-        fs::write(&file_path, "content").expect("failed to write file");
-
-        let mut cache = None;
-        is_same_file(&file_path, &file_path, &mut cache);
-        assert!(cache.is_some(), "cache should be populated after first call");
-    }
-
-    #[test]
-    fn test_is_same_file_with_extended_prefix() {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let file_path = temp_dir.path().join("test.txt");
-        fs::write(&file_path, "content").expect("failed to write file");
-
-        // Canonicalize adds \\?\ prefix on Windows
-        let canonical_path = file_path.canonicalize().expect("failed to canonicalize");
-        let mut cache = None;
-        assert!(
-            is_same_file(&file_path, &canonical_path, &mut cache),
-            "plain path and \\\\?\\ prefixed path should resolve to the same file"
-        );
-    }
-
     // --- filter_files same-file fallback tests ---
 
     #[test]
@@ -2474,6 +2658,7 @@ mod tests {
             database: &database,
             abort_flag: &abort_flag,
             lock_store: Some(&mover_locks),
+            path_mappings: None,
         };
         let summary = execute_moves(&[&locked_entry, &free_entry], 10, 0, Vec::new(), &context);
 
@@ -2529,6 +2714,7 @@ mod tests {
             database: &database,
             abort_flag: &abort_flag,
             lock_store: Some(&mover_locks),
+            path_mappings: None,
         };
         let summary = execute_moves(&[&entry], 8, 0, Vec::new(), &context);
 
@@ -2564,6 +2750,7 @@ mod tests {
             database: &database,
             abort_flag: &abort_flag,
             lock_store: None,
+            path_mappings: None,
         };
 
         assert!(
@@ -2622,6 +2809,7 @@ mod tests {
             database: &database,
             abort_flag: &abort_flag,
             lock_store: None,
+            path_mappings: None,
         };
 
         assert!(
@@ -2670,6 +2858,7 @@ mod tests {
             database: &database,
             abort_flag: &abort_flag,
             lock_store: None,
+            path_mappings: None,
         };
         let source_entry = make_file("source.txt", &source.to_string_lossy(), 6);
 
@@ -2714,6 +2903,7 @@ mod tests {
             database: &database,
             abort_flag: &abort_flag,
             lock_store: None,
+            path_mappings: None,
         };
 
         assert!(
@@ -2758,6 +2948,7 @@ mod tests {
             database: &database,
             abort_flag: &abort_flag,
             lock_store: None,
+            path_mappings: None,
         };
         let source_entry = make_file("missing.txt", &source.to_string_lossy(), 12);
 
@@ -2812,6 +3003,387 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&backup_path).expect("read preserved backup"),
             "original"
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod test_safe_moves_unix {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::AtomicBool;
+
+    use filefind_common::Database;
+    use filefind_common::types::{FileEntry, IndexedVolume, VolumeType};
+    use indicatif::ProgressBar;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn test_database_for_root(root: &Path) -> Database {
+        let database = Database::open_in_memory().unwrap();
+        let volume = IndexedVolume::new(
+            "SAFE-MOVE-VOL".to_string(),
+            root.to_string_lossy().to_string(),
+            VolumeType::Local,
+        );
+        database.upsert_volume(&volume).unwrap();
+        database
+    }
+
+    fn make_entry(volume_id: i64, path: &Path, size: u64) -> FileEntry {
+        FileEntry {
+            id: None,
+            volume_id,
+            parent_id: None,
+            name: path.file_name().unwrap().to_string_lossy().to_string(),
+            full_path: path.to_string_lossy().to_string(),
+            is_directory: false,
+            size,
+            created_time: None,
+            modified_time: None,
+            mft_reference: None,
+        }
+    }
+
+    #[test]
+    fn force_move_preserves_bytes_when_destination_symlink_points_to_source() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let source = source_dir.join("movie.mkv");
+        let destination = dest_dir.join("movie.mkv");
+        fs::write(&source, "precious bytes").unwrap();
+        symlink(&source, &destination).unwrap();
+
+        let database = test_database_for_root(temp.path());
+        let volume_id = database.get_all_volumes().unwrap()[0].id.unwrap();
+        let source_entry = make_entry(volume_id, &source, 14);
+        database.insert_file(&source_entry).unwrap();
+
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: true,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: None,
+            path_mappings: None,
+        };
+
+        let result = move_indexed_file(
+            &source_entry,
+            &source,
+            &destination,
+            "movie.mkv",
+            &ProgressBar::hidden(),
+            &context,
+        );
+        assert!(result.is_ok(), "move should succeed: {result:?}");
+        assert!(fs::symlink_metadata(&source).is_err());
+        let dest_meta = fs::symlink_metadata(&destination).unwrap();
+        assert!(
+            dest_meta.file_type().is_file(),
+            "destination should be a real file, not a dangling symlink"
+        );
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "precious bytes");
+        assert!(
+            database
+                .get_file_by_path(&destination.to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+        assert!(database.get_file_by_path(&source.to_string_lossy()).unwrap().is_none());
+    }
+
+    #[test]
+    fn force_move_refuses_when_source_symlink_points_to_destination() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let destination = dest_dir.join("movie.mkv");
+        let source = source_dir.join("movie.mkv");
+        fs::write(&destination, "precious bytes").unwrap();
+        symlink(&destination, &source).unwrap();
+
+        let database = test_database_for_root(temp.path());
+        let volume_id = database.get_all_volumes().unwrap()[0].id.unwrap();
+        let source_entry = make_entry(volume_id, &source, 14);
+        let dest_entry = make_entry(volume_id, &destination, 14);
+        database.insert_file(&source_entry).unwrap();
+        database.insert_file(&dest_entry).unwrap();
+
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: true,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: None,
+            path_mappings: None,
+        };
+
+        let result = move_indexed_file(
+            &source_entry,
+            &source,
+            &destination,
+            "movie.mkv",
+            &ProgressBar::hidden(),
+            &context,
+        );
+        assert!(result.is_err(), "overwriting a symlink target must fail");
+        assert!(fs::symlink_metadata(&source).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&destination).unwrap().file_type().is_file());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "precious bytes");
+        assert!(database.get_file_by_path(&source.to_string_lossy()).unwrap().is_some());
+        assert!(
+            database
+                .get_file_by_path(&destination.to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn non_force_move_skips_and_rejects_dangling_symlink_at_destination() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let source = source_dir.join("movie.mkv");
+        let destination = dest_dir.join("movie.mkv");
+        fs::write(&source, "source bytes").unwrap();
+        symlink(temp.path().join("missing-target"), &destination).unwrap();
+
+        let database = test_database_for_root(temp.path());
+        let volume_id = database.get_all_volumes().unwrap()[0].id.unwrap();
+        let source_entry = make_entry(volume_id, &source, 12);
+
+        let filtered = filter_files(std::slice::from_ref(&source_entry), &dest_dir, false);
+        assert!(filtered.files_to_move.is_empty());
+        assert_eq!(filtered.skipped_files.len(), 1);
+        assert!(matches!(
+            filtered.skipped_files[0].reason,
+            SkipReason::ExistsAtDestination
+        ));
+
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: false,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: None,
+            path_mappings: None,
+        };
+        let result = move_indexed_file(
+            &source_entry,
+            &source,
+            &destination,
+            "movie.mkv",
+            &ProgressBar::hidden(),
+            &context,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "source bytes");
+        assert!(fs::symlink_metadata(&destination).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn failed_reconciliation_restores_dangling_symlink_destination() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let source = source_dir.join("movie.mkv");
+        let destination = dest_dir.join("movie.mkv");
+        let missing_target = temp.path().join("missing-target");
+        fs::write(&source, "source bytes").unwrap();
+        symlink(&missing_target, &destination).unwrap();
+
+        let database = test_database_for_root(temp.path());
+        let volume_id = database.get_all_volumes().unwrap()[0].id.unwrap();
+        // Deliberately omit source_entry from the database to force reconciliation failure.
+        let source_entry = make_entry(volume_id, &source, 12);
+
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: true,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: None,
+            path_mappings: None,
+        };
+        let result = move_indexed_file(
+            &source_entry,
+            &source,
+            &destination,
+            "movie.mkv",
+            &ProgressBar::hidden(),
+            &context,
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "source bytes");
+        assert!(fs::symlink_metadata(&destination).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&destination).unwrap(), missing_target);
+    }
+
+    #[test]
+    fn force_move_deduplicates_hard_links_safely() {
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let source = source_dir.join("movie.mkv");
+        let destination = dest_dir.join("movie.mkv");
+        fs::write(&source, "hardlink bytes").unwrap();
+        fs::hard_link(&source, &destination).unwrap();
+
+        let database = test_database_for_root(temp.path());
+        let volume_id = database.get_all_volumes().unwrap()[0].id.unwrap();
+        let source_entry = make_entry(volume_id, &source, 14);
+        let dest_entry = make_entry(volume_id, &destination, 14);
+        database.insert_file(&source_entry).unwrap();
+        database.insert_file(&dest_entry).unwrap();
+
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: true,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: None,
+            path_mappings: None,
+        };
+        let result = move_indexed_file(
+            &source_entry,
+            &source,
+            &destination,
+            "movie.mkv",
+            &ProgressBar::hidden(),
+            &context,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(fs::symlink_metadata(&source).is_err());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "hardlink bytes");
+        assert!(database.get_file_by_path(&source.to_string_lossy()).unwrap().is_none());
+        assert!(
+            database
+                .get_file_by_path(&destination.to_string_lossy())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn case_sensitive_filter_preserves_case_distinct_unix_names() {
+        let destination = PathBuf::from("/tmp/dest");
+        let files = vec![
+            FileEntry::new(1, "Foo.txt".into(), "/tmp/src/Foo.txt".into(), false),
+            FileEntry::new(1, "foo.txt".into(), "/tmp/src/foo.txt".into(), false),
+            FileEntry::new(1, "other.txt".into(), "/tmp/DEST/other.txt".into(), false),
+        ];
+
+        let sensitive = filter_files_with_case_sensitivity(&files, &destination, false, true);
+        assert_eq!(sensitive.files_to_move.len(), 3);
+        assert_eq!(sensitive.already_at_destination, 0);
+        assert!(sensitive.skipped_files.is_empty());
+
+        let insensitive = filter_files_with_case_sensitivity(&files, &destination, false, false);
+        assert_eq!(insensitive.files_to_move.len(), 1);
+        assert_eq!(insensitive.already_at_destination, 1);
+        assert_eq!(insensitive.skipped_files.len(), 1);
+    }
+
+    #[test]
+    fn mapped_destination_key_reverses_drive_mapping_and_reconciles_stored_unc_key() {
+        let mut mappings = HashMap::new();
+        mappings.insert(r"\\nas\share".to_string(), "X".to_string());
+
+        assert_eq!(
+            resolve_stored_destination_key(Path::new(r"X:\dest\movie.mkv"), Some(&mappings)),
+            r"\\nas\share\dest\movie.mkv"
+        );
+        assert_eq!(
+            resolve_stored_destination_key(Path::new(r"x:\dest\movie.mkv"), Some(&mappings)),
+            r"\\nas\share\dest\movie.mkv"
+        );
+        assert_eq!(
+            resolve_stored_destination_key(Path::new(r"C:\local\movie.mkv"), Some(&mappings)),
+            r"C:\local\movie.mkv"
+        );
+
+        let temp = TempDir::new().unwrap();
+        let source_dir = temp.path().join("src");
+        let dest_dir = temp.path().join("dest");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let source_file = source_dir.join("movie.mkv");
+        fs::write(&source_file, "nas bytes").unwrap();
+
+        let database = Database::open_in_memory().unwrap();
+        let unc_volume = IndexedVolume::new("NAS-VOL".into(), r"\\nas\share".into(), VolumeType::Network);
+        let unc_volume_id = database.upsert_volume(&unc_volume).unwrap();
+        let local_volume = IndexedVolume::new(
+            "LOCAL-VOL".into(),
+            temp.path().to_string_lossy().into_owned(),
+            VolumeType::Local,
+        );
+        database.upsert_volume(&local_volume).unwrap();
+
+        let stored_entry = FileEntry {
+            id: None,
+            volume_id: unc_volume_id,
+            parent_id: None,
+            name: "movie.mkv".into(),
+            full_path: r"\\nas\share\src\movie.mkv".into(),
+            is_directory: false,
+            size: 9,
+            created_time: None,
+            modified_time: None,
+            mft_reference: None,
+        };
+        database.insert_file(&stored_entry).unwrap();
+
+        let candidate = MoveCandidate {
+            entry: stored_entry,
+            source_path: source_file.clone(),
+            display_path: r"X:\src\movie.mkv".into(),
+        };
+        let abort_flag = AtomicBool::new(false);
+        let context = MoveContext {
+            destination: &dest_dir,
+            force_overwrite: false,
+            database: &database,
+            abort_flag: &abort_flag,
+            lock_store: None,
+            path_mappings: Some(&mappings),
+        };
+        let summary = execute_candidate_moves(&[&candidate], 9, 0, Vec::new(), &context);
+        assert_eq!(summary.moved, 1);
+        assert_eq!(summary.failed, 0);
+        assert!(!source_file.exists());
+        assert_eq!(fs::read_to_string(dest_dir.join("movie.mkv")).unwrap(), "nas bytes");
+        assert!(
+            database
+                .get_file_by_path(r"\\nas\share\src\movie.mkv")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            database
+                .get_file_by_path(&dest_dir.join("movie.mkv").to_string_lossy())
+                .unwrap()
+                .is_some()
         );
     }
 }

@@ -14,6 +14,7 @@ use indicatif::ProgressBar;
 use cli_tools_common::{OverwritePolicy, move_file_by_copy, print_yellow};
 
 /// Errors that can occur when moving a single file.
+#[derive(Debug)]
 pub(super) enum MoveError {
     /// The move was aborted by the user (Ctrl+C during copy).
     Aborted,
@@ -41,11 +42,9 @@ pub(super) fn move_single_file(
         }
         Err(rename_error) => {
             // Some network file systems report a rename error even though the file was moved.
-            if !source.exists() {
-                if destination.exists() {
-                    if let Ok(meta) = fs::metadata(destination)
-                        && meta.len() == expected_size
-                    {
+            if fs::symlink_metadata(source).is_err() {
+                if let Ok(meta) = fs::symlink_metadata(destination) {
+                    if meta.file_type().is_file() && meta.len() == expected_size {
                         progress_bar.inc(expected_size);
                         return Ok(());
                     }
