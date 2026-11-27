@@ -412,3 +412,53 @@ fn moves_and_unpacks_move_the_entries_of_an_existing_filefind_index() {
         ]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn moves_and_unpacks_update_an_index_seeded_through_a_symlink_root() {
+    use std::os::unix::fs::symlink;
+
+    let tree = library_tree();
+    let home = TempTree::new();
+    let alias_parent = TempTree::new();
+    let alias_root = alias_parent.join("alias");
+    symlink(tree.path(), &alias_root).expect("symlink to tree root should be created");
+
+    let indexed = [
+        "Library/Show Alpha",
+        "Library/Show Alpha/Show.Alpha.S01E00.mkv",
+        "Library/Show.Alpha.S01E01.mkv",
+        "Library/Show.Alpha.S01E02.mkv",
+        "Library/Movie Night",
+        "Library/Movie Night/subs",
+        "Library/Movie Night/subs/english.srt",
+        "Library/Movie Night/subs/forced",
+        "Library/Movie Night/subs/forced/forced.srt",
+        "Library/Unrelated.File.mkv",
+    ]
+    .map(|relative| alias_root.join(relative));
+    let index = IndexFixture::create(&home.join("filefind.db"), &alias_root, &indexed);
+
+    let output = run_dirmove(home.path(), &ARGUMENTS, &tree.join("Library"));
+
+    assert_success(&output);
+    assert_eq!(tree.read("Library/Show Alpha/Show.Alpha.S01E01.mkv"), "one");
+    assert_eq!(tree.read("Library/Show Alpha/Show.Alpha.S01E02.mkv"), "two");
+    assert_eq!(tree.read("Library/Movie Night/english.srt"), "english");
+    assert_eq!(tree.read("Library/Movie Night/forced/forced.srt"), "forced");
+    assert!(!tree.exists("Library/Movie Night/subs"));
+    assert_eq!(
+        index.indexed_paths(),
+        vec![
+            "Library/Movie Night",
+            "Library/Movie Night/english.srt",
+            "Library/Movie Night/forced",
+            "Library/Movie Night/forced/forced.srt",
+            "Library/Show Alpha",
+            "Library/Show Alpha/Show.Alpha.S01E00.mkv",
+            "Library/Show Alpha/Show.Alpha.S01E01.mkv",
+            "Library/Show Alpha/Show.Alpha.S01E02.mkv",
+            "Library/Unrelated.File.mkv",
+        ]
+    );
+}

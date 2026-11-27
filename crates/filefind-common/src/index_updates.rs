@@ -8,6 +8,8 @@
 //! It never adds new entries, since the daemon's exclude rules decide what belongs in the index.
 //! Every change is idempotent, so a change the daemon already applied is reported as not indexed.
 
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -25,6 +27,17 @@ enum ChangeOutcome {
     Removed,
     /// The source path was not in the index, so nothing changed.
     NotIndexed,
+}
+
+/// Candidate mapping of an incoming path onto a stored index root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootMatch {
+    /// Mapped path preserving the stored root spelling.
+    mapped_path: String,
+    /// Number of relative path components after the matched root.
+    relative_depth: usize,
+    /// Whether the incoming path already matched the stored root textually.
+    exact_textual: bool,
 }
 
 /// Applies completed file system changes to the filefind index database.
@@ -85,8 +98,15 @@ impl IndexUpdater {
     #[must_use]
     pub fn apply(&self, changes: &[PathChange]) -> IndexUpdateReport {
         let mut report = IndexUpdateReport::default();
+        let stored_roots = match self.collect_stored_roots() {
+            Ok(roots) => roots,
+            Err(error) => {
+                report.errors.push(format!("{error:#}"));
+                return report;
+            }
+        };
         for change in changes {
-            match self.apply_change(change) {
+            match self.apply_change(change, &stored_roots) {
                 Ok(ChangeOutcome::Moved) => report.moved += 1,
                 Ok(ChangeOutcome::Removed) => report.removed += 1,
                 Ok(ChangeOutcome::NotIndexed) => report.not_indexed += 1,
@@ -96,42 +116,64 @@ impl IndexUpdater {
         report
     }
 
+    /// Collect deduplicated volume mount points and configured roots in stored spelling.
+    fn collect_stored_roots(&self) -> Result<Vec<String>> {
+        let mut seen = HashSet::new();
+        let mut roots = Vec::new();
+        for root in &self.indexed_roots {
+            if !root.is_empty() && seen.insert(root.clone()) {
+                roots.push(root.clone());
+            }
+        }
+        for volume in self.database.get_all_volumes()? {
+            if !volume.mount_point.is_empty() && seen.insert(volume.mount_point.clone()) {
+                roots.push(volume.mount_point);
+            }
+        }
+        Ok(roots)
+    }
+
     /// Apply one change to the index.
-    fn apply_change(&self, change: &PathChange) -> Result<ChangeOutcome> {
+    fn apply_change(&self, change: &PathChange, stored_roots: &[String]) -> Result<ChangeOutcome> {
         match change {
             PathChange::Moved { from, to, .. } => {
-                self.apply_move(&absolute_path_string(from)?, &absolute_path_string(to)?)
+                self.apply_move(&absolute_path_string(from)?, &absolute_path_string(to)?, stored_roots)
             }
             PathChange::Removed { path, is_directory } => {
-                self.apply_removal(&absolute_path_string(path)?, *is_directory)
+                self.apply_removal(&absolute_path_string(path)?, *is_directory, stored_roots)
             }
         }
     }
 
     /// Move the indexed entry at `from`, and everything under it for a directory, to `to`.
-    fn apply_move(&self, from: &str, to: &str) -> Result<ChangeOutcome> {
-        let Some(entry) = self.database.get_file_by_path(from)? else {
+    fn apply_move(&self, from: &str, to: &str, stored_roots: &[String]) -> Result<ChangeOutcome> {
+        let Some((resolved_from, entry)) = self.find_indexed_entry(from, stored_roots)? else {
             return Ok(ChangeOutcome::NotIndexed);
         };
-        if !self.is_indexed_location(to)? {
+        let resolved_to = resolve_destination_path(to, stored_roots);
+        if !self.is_indexed_location(&resolved_to)? {
             if entry.is_directory {
-                self.database.delete_files_under_path(from)?;
+                self.database.delete_files_under_path(&resolved_from)?;
             } else {
-                self.database.delete_file_by_path(from)?;
+                self.database.delete_file_by_path(&resolved_from)?;
             }
             return Ok(ChangeOutcome::Removed);
         }
 
-        let new_name = Path::new(to)
+        let new_name = Path::new(&resolved_to)
             .file_name()
-            .map_or_else(|| to.to_string(), |name| name.to_string_lossy().to_string());
+            .map_or_else(|| resolved_to.clone(), |name| name.to_string_lossy().to_string());
         if entry.is_directory {
             // Entries already indexed under the new path are stale, since the moved directory now occupies it.
-            self.database.delete_files_under_path(to)?;
-            self.database.rebase_files_under_path(from, to, &new_name)?;
+            self.database.delete_files_under_path(&resolved_to)?;
+            self.database
+                .rebase_files_under_path(&resolved_from, &resolved_to, &new_name)?;
             return Ok(ChangeOutcome::Moved);
         }
-        if self.database.reconcile_moved_file(from, to, &new_name, true)? {
+        if self
+            .database
+            .reconcile_moved_file(&resolved_from, &resolved_to, &new_name, true)?
+        {
             Ok(ChangeOutcome::Moved)
         } else {
             Ok(ChangeOutcome::NotIndexed)
@@ -139,21 +181,66 @@ impl IndexUpdater {
     }
 
     /// Remove the indexed entry at `path`, and everything under it for a directory.
-    fn apply_removal(&self, path: &str, is_directory: bool) -> Result<ChangeOutcome> {
-        let indexed_directory = self
-            .database
-            .get_file_by_path(path)?
-            .is_some_and(|entry| entry.is_directory);
-        let removed = if is_directory || indexed_directory {
-            self.database.delete_files_under_path(path)? > 0
-        } else {
-            self.database.delete_file_by_path(path)?
-        };
-        Ok(if removed {
-            ChangeOutcome::Removed
-        } else {
-            ChangeOutcome::NotIndexed
-        })
+    fn apply_removal(&self, path: &str, is_directory: bool, stored_roots: &[String]) -> Result<ChangeOutcome> {
+        if let Some((resolved_path, entry)) = self.find_indexed_entry(path, stored_roots)? {
+            let removed = if is_directory || entry.is_directory {
+                self.database.delete_files_under_path(&resolved_path)? > 0
+            } else {
+                self.database.delete_file_by_path(&resolved_path)?
+            };
+            return Ok(if removed {
+                ChangeOutcome::Removed
+            } else {
+                ChangeOutcome::NotIndexed
+            });
+        }
+
+        if is_directory {
+            if self.database.delete_files_under_path(path)? > 0 {
+                return Ok(ChangeOutcome::Removed);
+            }
+            for candidate in alias_candidates(path, stored_roots) {
+                if self.database.delete_files_under_path(&candidate.mapped_path)? > 0 {
+                    return Ok(ChangeOutcome::Removed);
+                }
+            }
+        }
+
+        Ok(ChangeOutcome::NotIndexed)
+    }
+
+    /// Look up `path` directly in the index, falling back to aliased stored roots when absent.
+    fn find_indexed_entry(
+        &self,
+        path: &str,
+        stored_roots: &[String],
+    ) -> Result<Option<(String, crate::types::FileEntry)>> {
+        if let Some(entry) = self.database.get_file_by_path(path)? {
+            return Ok(Some((path.to_string(), entry)));
+        }
+
+        let candidates = alias_candidates(path, stored_roots);
+        let mut cursor = 0;
+        while let Some(first) = candidates.get(cursor) {
+            let depth = first.relative_depth;
+            let mut depth_matches = Vec::new();
+            while let Some(candidate) = candidates.get(cursor)
+                && candidate.relative_depth == depth
+            {
+                if let Some(entry) = self.database.get_file_by_path(&candidate.mapped_path)? {
+                    depth_matches.push((candidate.mapped_path.clone(), entry));
+                }
+                cursor += 1;
+            }
+            if depth_matches.len() == 1 {
+                return Ok(depth_matches.into_iter().next());
+            }
+            if depth_matches.len() > 1 {
+                return Ok(None);
+            }
+        }
+
+        Ok(None)
     }
 
     /// Check whether `path` is on an indexed volume and inside the configured index roots.
@@ -192,6 +279,119 @@ fn absolute_path_string(path: &Path) -> Result<String> {
     let absolute: PathBuf = std::path::absolute(path)
         .with_context(|| format!("Failed to resolve the absolute path of {}", path.display()))?;
     Ok(absolute.to_string_lossy().to_string())
+}
+
+/// Translate `destination` into the most specific unambiguous stored root spelling.
+fn resolve_destination_path(destination: &str, stored_roots: &[String]) -> String {
+    let mut matches: Vec<RootMatch> = stored_roots
+        .iter()
+        .filter_map(|root| match_path_against_root(destination, root))
+        .collect();
+    if matches.is_empty() {
+        return destination.to_string();
+    }
+
+    matches.sort_by_key(|candidate| (candidate.relative_depth, !candidate.exact_textual));
+    let Some(best_depth) = matches.first().map(|candidate| candidate.relative_depth) else {
+        return destination.to_string();
+    };
+    let best_tier: Vec<&RootMatch> = matches
+        .iter()
+        .take_while(|candidate| candidate.relative_depth == best_depth)
+        .collect();
+
+    if let Some(exact) = best_tier.iter().find(|candidate| candidate.exact_textual) {
+        return exact.mapped_path.clone();
+    }
+    if let [single] = best_tier.as_slice() {
+        return single.mapped_path.clone();
+    }
+    destination.to_string()
+}
+
+/// Return non-identical aliased candidates for `path` ordered from most specific to least specific.
+fn alias_candidates(path: &str, stored_roots: &[String]) -> Vec<RootMatch> {
+    let mut seen = HashSet::new();
+    let mut candidates: Vec<RootMatch> = stored_roots
+        .iter()
+        .filter_map(|root| match_path_against_root(path, root))
+        .filter(|candidate| !candidate.exact_textual && candidate.mapped_path != path)
+        .filter(|candidate| seen.insert(candidate.mapped_path.clone()))
+        .collect();
+    candidates.sort_by_key(|candidate| candidate.relative_depth);
+    candidates
+}
+
+/// Match `path_str` against `stored_root`, preferring a textual match before directory identity.
+///
+/// Only existing directory ancestors are compared by filesystem identity.
+/// A final path component that is a symbolic link is never followed into `stored_root`.
+fn match_path_against_root(path_str: &str, stored_root: &str) -> Option<RootMatch> {
+    let path = Path::new(path_str);
+    let root = Path::new(stored_root);
+
+    if is_within_root(path_str, stored_root) {
+        let relative_depth = textual_relative_depth(path_str, stored_root);
+        return Some(RootMatch {
+            mapped_path: path_str.to_string(),
+            relative_depth,
+            exact_textual: true,
+        });
+    }
+
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        && cli_tools_common::paths_refer_to_same_file(path, root)
+    {
+        return Some(RootMatch {
+            mapped_path: stored_root.to_string(),
+            relative_depth: 0,
+            exact_textual: false,
+        });
+    }
+
+    let matching_ancestor = path
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| cli_tools_common::paths_refer_to_same_file(ancestor, root))?;
+    let relative = path.strip_prefix(matching_ancestor).ok()?;
+    Some(RootMatch {
+        mapped_path: join_stored_root(stored_root, relative),
+        relative_depth: relative.components().count(),
+        exact_textual: false,
+    })
+}
+
+/// Count the path components in `path` after a textual `root` prefix.
+fn textual_relative_depth(path: &str, root: &str) -> usize {
+    let separator = if cfg!(windows) { '\\' } else { '/' };
+    let normalize = |value: &str| {
+        if cfg!(windows) {
+            value.replace('/', "\\").to_lowercase()
+        } else {
+            value.to_string()
+        }
+    };
+    let normalized_path = normalize(path);
+    let normalized_root = normalize(root);
+    let trimmed_root = normalized_root.trim_end_matches(separator);
+    let remainder = normalized_path
+        .strip_prefix(trimmed_root)
+        .unwrap_or_default()
+        .trim_start_matches(separator);
+    if remainder.is_empty() {
+        0
+    } else {
+        remainder.split(separator).filter(|part| !part.is_empty()).count()
+    }
+}
+
+/// Join `relative` onto `stored_root`, expanding a bare Windows drive root before joining.
+fn join_stored_root(stored_root: &str, relative: &Path) -> String {
+    if relative.as_os_str().is_empty() {
+        return stored_root.to_string();
+    }
+    let base = crate::normalize_drive_root(Path::new(stored_root));
+    base.join(relative).to_string_lossy().into_owned()
 }
 
 /// Check whether `path` is `root` itself or inside it.
@@ -652,5 +852,239 @@ mod test_index_updater {
 
         assert_eq!(report.moved, 1);
         assert_eq!(index.indexed(), vec!["outside/file.txt"]);
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod test_aliased_index_roots {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::types::{FileEntry, IndexedVolume, VolumeType};
+
+    /// Temporary workspace with a physical directory and a symlink alias pointing to it.
+    struct AliasedTestIndex {
+        temp: TempDir,
+        real_root: PathBuf,
+        alias_root: PathBuf,
+        outside_root: PathBuf,
+        sibling_root: PathBuf,
+        config: UserConfig,
+    }
+
+    impl AliasedTestIndex {
+        fn new(store_alias_as_root: bool) -> Self {
+            let temp = TempDir::new().unwrap();
+            let base = fs::canonicalize(temp.path()).unwrap();
+            let real_root = base.join("real");
+            let alias_root = base.join("alias");
+            let outside_root = base.join("outside");
+            let sibling_root = base.join("real-sibling");
+            fs::create_dir_all(&real_root).unwrap();
+            fs::create_dir_all(&outside_root).unwrap();
+            fs::create_dir_all(&sibling_root).unwrap();
+            symlink(&real_root, &alias_root).unwrap();
+
+            let stored_root = if store_alias_as_root {
+                alias_root.clone()
+            } else {
+                real_root.clone()
+            };
+
+            let mut config = UserConfig::default();
+            config.daemon.database_path = Some(base.join("filefind.db"));
+            config.daemon.paths = vec![stored_root.to_string_lossy().to_string()];
+
+            let database = Database::open(&config.database_path()).unwrap();
+            database
+                .upsert_volume(&IndexedVolume {
+                    id: None,
+                    serial_number: "ALIASED-ROOT".into(),
+                    label: None,
+                    mount_point: stored_root.to_string_lossy().to_string(),
+                    volume_type: VolumeType::Local,
+                    is_online: true,
+                    last_scan_time: None,
+                    last_usn: None,
+                })
+                .unwrap();
+
+            Self {
+                temp,
+                real_root,
+                alias_root,
+                outside_root,
+                sibling_root,
+                config,
+            }
+        }
+
+        fn stored_root(&self) -> PathBuf {
+            PathBuf::from(self.config.daemon.paths.first().unwrap())
+        }
+
+        fn open_database(&self) -> Database {
+            Database::open(&self.config.database_path()).unwrap()
+        }
+
+        fn index_under_stored_root(&self, entries: &[&str]) {
+            let database = self.open_database();
+            let root = self.stored_root();
+            let volume_id = database
+                .get_volume_id_for_path(&root.to_string_lossy())
+                .unwrap()
+                .unwrap();
+            for entry in entries {
+                let is_directory = entry.ends_with('/');
+                let relative = entry.trim_end_matches('/');
+                let full_path = root.join(relative);
+                let name = full_path.file_name().unwrap().to_string_lossy().to_string();
+                database
+                    .insert_file(&FileEntry {
+                        id: None,
+                        volume_id,
+                        parent_id: None,
+                        name,
+                        full_path: full_path.to_string_lossy().to_string(),
+                        is_directory,
+                        size: 10,
+                        created_time: None,
+                        modified_time: None,
+                        mft_reference: None,
+                    })
+                    .unwrap();
+            }
+        }
+
+        fn indexed_relative(&self) -> Vec<String> {
+            let root = self.stored_root().to_string_lossy().to_string();
+            let mut paths: Vec<String> = self
+                .open_database()
+                .search_by_path("", 1000)
+                .unwrap()
+                .into_iter()
+                .map(|entry| {
+                    entry
+                        .full_path
+                        .strip_prefix(&root)
+                        .unwrap_or(&entry.full_path)
+                        .trim_start_matches('/')
+                        .to_string()
+                })
+                .collect();
+            paths.sort();
+            paths
+        }
+
+        fn updater(&self) -> IndexUpdater {
+            IndexUpdater::open_with_config(&self.config).unwrap().unwrap()
+        }
+    }
+
+    #[test]
+    fn resolves_physical_changes_against_an_aliased_stored_root() {
+        let index = AliasedTestIndex::new(true);
+        fs::create_dir_all(index.real_root.join("Show Alpha")).unwrap();
+        fs::create_dir_all(index.real_root.join("Movie/subs/forced")).unwrap();
+        fs::write(index.real_root.join("Show Alpha/ep1.mkv"), "ep1").unwrap();
+        fs::write(index.real_root.join("Movie/english.srt"), "en").unwrap();
+        fs::write(index.real_root.join("Movie/forced.srt"), "fr").unwrap();
+        // Simulate subs and its child already removed from disk before the batch runs.
+        fs::remove_dir_all(index.real_root.join("Movie/subs")).unwrap();
+
+        index.index_under_stored_root(&[
+            "Show Alpha/",
+            "ep1.mkv",
+            "Movie/",
+            "Movie/subs/",
+            "Movie/subs/english.srt",
+            "Movie/subs/forced/",
+            "Movie/subs/forced/forced.srt",
+        ]);
+
+        let changes = [
+            PathChange::moved_file(
+                index.real_root.join("ep1.mkv"),
+                index.real_root.join("Show Alpha/ep1.mkv"),
+            ),
+            PathChange::moved_file(
+                index.real_root.join("Movie/subs/english.srt"),
+                index.real_root.join("Movie/english.srt"),
+            ),
+            PathChange::moved_directory(
+                index.real_root.join("Movie/subs/forced"),
+                index.real_root.join("Movie/forced"),
+            ),
+            PathChange::removed_directory(index.real_root.join("Movie/subs")),
+        ];
+
+        let updater = index.updater();
+        let report = updater.apply(&changes);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!((report.moved, report.removed), (3, 1));
+        assert_eq!(
+            index.indexed_relative(),
+            vec![
+                "Movie",
+                "Movie/english.srt",
+                "Movie/forced",
+                "Movie/forced/forced.srt",
+                "Show Alpha",
+                "Show Alpha/ep1.mkv",
+            ]
+        );
+
+        let replay = updater.apply(&changes);
+        assert_eq!((replay.moved, replay.removed, replay.not_indexed), (0, 0, 4));
+    }
+
+    #[test]
+    fn resolves_aliased_changes_against_a_physical_stored_root() {
+        let index = AliasedTestIndex::new(false);
+        fs::write(index.real_root.join("renamed.txt"), "data").unwrap();
+        index.index_under_stored_root(&["original.txt"]);
+
+        let report = index.updater().apply(&[PathChange::moved_file(
+            index.alias_root.join("original.txt"),
+            index.alias_root.join("renamed.txt"),
+        )]);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.moved, 1);
+        assert_eq!(index.indexed_relative(), vec!["renamed.txt"]);
+    }
+
+    #[test]
+    fn handles_pruned_parent_out_of_root_sibling_and_final_symlink() {
+        let index = AliasedTestIndex::new(true);
+        let outside_link = index.outside_root.join("link-to-root");
+        symlink(&index.real_root, &outside_link).unwrap();
+        fs::write(index.outside_root.join("moved-out.txt"), "out").unwrap();
+        fs::write(index.sibling_root.join("sibling.txt"), "sib").unwrap();
+
+        index.index_under_stored_root(&["pruned/nested/gone.txt", "leaving.txt", "kept.txt"]);
+
+        let report = index.updater().apply(&[
+            // Both file and its parent directories are already gone on disk.
+            PathChange::removed_file(index.real_root.join("pruned/nested/gone.txt")),
+            // Truly moved outside the indexed root.
+            PathChange::moved_file(
+                index.real_root.join("leaving.txt"),
+                index.outside_root.join("moved-out.txt"),
+            ),
+            // Similarly prefixed sibling directory must not match the stored root.
+            PathChange::removed_file(index.sibling_root.join("sibling.txt")),
+            // A final symlink outside the root pointing to the root must not be followed.
+            PathChange::removed_directory(outside_link),
+        ]);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!((report.moved, report.removed, report.not_indexed), (0, 2, 2));
+        assert_eq!(index.indexed_relative(), vec!["kept.txt"]);
+        let _keep_temp = &index.temp;
     }
 }
