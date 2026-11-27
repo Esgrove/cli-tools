@@ -29,6 +29,17 @@ pub struct TagPathOverwrite {
     lowercase_components: Vec<String>,
 }
 
+/// Specificity score for a matched directory segment, compared lexicographically by field order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PathMatchScore {
+    /// End component index in the torrent's directory path (deeper matches win).
+    end_index: usize,
+    /// Number of matched path components.
+    component_count: usize,
+    /// Total matched character count across components.
+    character_count: usize,
+}
+
 /// Default tags and the overwrite rules that replace them for matching torrents.
 #[derive(Debug, Clone, Default)]
 pub struct TagRules {
@@ -151,7 +162,7 @@ impl TagRules {
 
         if !self.paths.is_empty() {
             let directory_components = lowercase_directory_components(torrent_path);
-            let mut best_match: Option<(&TagPathOverwrite, (usize, usize, usize))> = None;
+            let mut best_match: Option<(&TagPathOverwrite, PathMatchScore)> = None;
 
             for entry in &self.paths {
                 let Some(score) = path_components_match_score(&directory_components, &entry.lowercase_components)
@@ -206,15 +217,12 @@ fn lowercase_path_components(path: &str) -> Vec<String> {
 }
 
 /// Return a match score when all rule components appear as a contiguous directory segment.
-fn path_components_match_score(
-    path_components: &[String],
-    rule_components: &[String],
-) -> Option<(usize, usize, usize)> {
+fn path_components_match_score(path_components: &[String], rule_components: &[String]) -> Option<PathMatchScore> {
     if rule_components.is_empty() {
         return None;
     }
 
-    let mut best_score: Option<(usize, usize, usize)> = None;
+    let mut best_score: Option<PathMatchScore> = None;
 
     for (index, components) in path_components.windows(rule_components.len()).enumerate() {
         if components != rule_components {
@@ -223,7 +231,11 @@ fn path_components_match_score(
 
         let end_index = index + rule_components.len();
         let character_count = rule_components.iter().map(|component| component.chars().count()).sum();
-        let score = (end_index, rule_components.len(), character_count);
+        let score = PathMatchScore {
+            end_index,
+            component_count: rule_components.len(),
+            character_count,
+        };
         best_score = Some(best_score.map_or(score, |current_score| current_score.max(score)));
     }
 
