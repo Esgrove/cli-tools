@@ -1041,13 +1041,17 @@ mod test_merge_trees {
         assert_eq!(tree.read("Root/studio alpha beta/existing.mkv"), "incoming");
     }
 
-    #[cfg(unix)]
     #[test]
     fn merge_does_not_pull_files_out_of_a_linked_subdirectory() {
         let tree = TempTree::new();
         tree.file_with("outside/real/data.txt", "outside data");
         tree.file_with("Root/studio alpha beta/file one.mkv", "one");
-        tree.symlink("outside/real", "Root/studio alpha beta/extras");
+        if tree
+            .try_symlink("outside/real", "Root/studio alpha beta/extras")
+            .is_none()
+        {
+            return;
+        }
         tree.file_with("Root/alpha beta/extras/existing extra.mkv", "existing extra");
 
         merge(&tree, false, false, false);
@@ -1057,13 +1061,17 @@ mod test_merge_trees {
         assert_eq!(tree.read("Root/alpha beta/file one.mkv"), "one");
     }
 
-    #[cfg(unix)]
     #[test]
     fn overwrite_merge_does_not_pull_files_out_of_a_linked_subdirectory() {
         let tree = TempTree::new();
         tree.file_with("outside/real/data.txt", "outside data");
         tree.file_with("Root/studio alpha beta/file one.mkv", "one");
-        tree.symlink("outside/real", "Root/studio alpha beta/extras");
+        if tree
+            .try_symlink("outside/real", "Root/studio alpha beta/extras")
+            .is_none()
+        {
+            return;
+        }
         tree.file_with("Root/alpha beta/extras/existing extra.mkv", "existing extra");
 
         merge(&tree, false, false, true);
@@ -1074,13 +1082,17 @@ mod test_merge_trees {
         assert_eq!(tree.read("Root/alpha beta/file one.mkv"), "one");
     }
 
-    #[cfg(unix)]
     #[test]
     fn merge_moves_a_linked_subdirectory_as_a_link() {
         let tree = TempTree::new();
         tree.file_with("outside/real/data.txt", "outside data");
         tree.file_with("Root/studio alpha beta/file one.mkv", "one");
-        tree.symlink("outside/real", "Root/studio alpha beta/extras");
+        if tree
+            .try_symlink("outside/real", "Root/studio alpha beta/extras")
+            .is_none()
+        {
+            return;
+        }
         tree.dir("Root/alpha beta");
 
         merge(&tree, false, false, false);
@@ -1094,15 +1106,21 @@ mod test_merge_trees {
         assert!(!tree.exists("Root/studio alpha beta"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn merge_does_not_follow_destination_symlink_or_overwrite_broken_symlink() {
         let tree = TempTree::new();
         tree.dir("outside/real");
         tree.file_with("Root/studio alpha beta/extras/a.txt", "from source");
         tree.file_with("Root/studio alpha beta/broken.mkv", "new file");
-        tree.symlink("outside/real", "Root/alpha beta/extras");
-        tree.symlink("outside/nonexistent.mkv", "Root/alpha beta/broken.mkv");
+        if tree.try_symlink("outside/real", "Root/alpha beta/extras").is_none() {
+            return;
+        }
+        if tree
+            .try_symlink("outside/nonexistent.mkv", "Root/alpha beta/broken.mkv")
+            .is_none()
+        {
+            return;
+        }
 
         // With overwrite = true, destination symlink must NOT be traversed into outside/real.
         super::DirectoryMerger::new(true, false)
@@ -1120,7 +1138,12 @@ mod test_merge_trees {
         // With overwrite = false, broken symlink at target must not be overwritten.
         let tree2 = TempTree::new();
         tree2.file_with("Root/studio alpha beta/broken.mkv", "new file");
-        tree2.symlink("outside/nonexistent.mkv", "Root/alpha beta/broken.mkv");
+        if tree2
+            .try_symlink("outside/nonexistent.mkv", "Root/alpha beta/broken.mkv")
+            .is_none()
+        {
+            return;
+        }
         super::DirectoryMerger::new(false, false)
             .merge(
                 &tree2.join("Root/studio alpha beta"),

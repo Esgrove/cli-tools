@@ -283,7 +283,6 @@ fn move_single_file(
         }
     }
 
-    #[cfg(unix)]
     if fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         move_symlink_via_temp(source, destination)?;
         observer.on_progress(expected_size);
@@ -319,20 +318,65 @@ fn move_single_file(
 }
 
 /// Recreate a symbolic link at `destination` via a temporary sibling and remove `source`.
-#[cfg(unix)]
+///
+/// Windows tells file links and directory links apart,
+/// so the new link keeps the kind of the source link and a directory link is removed as a directory.
 pub(crate) fn move_symlink_via_temp(source: &Path, destination: &Path) -> anyhow::Result<()> {
     let link_target = fs::read_link(source)?;
+    let is_directory_link = is_directory_symlink(source);
     let temporary = unique_sibling_path(destination, "dirmove-tmp");
-    std::os::unix::fs::symlink(&link_target, &temporary)?;
+    create_symlink(&link_target, &temporary, is_directory_link)?;
     if let Err(error) = fs::rename(&temporary, destination) {
-        let _ = fs::remove_file(&temporary);
+        let _ = remove_symlink(&temporary, is_directory_link);
         return Err(anyhow::Error::new(error).context(format!(
             "Failed to move recreated symlink into place at {}",
             destination.display()
         )));
     }
-    fs::remove_file(source)?;
+    remove_symlink(source, is_directory_link)?;
     Ok(())
+}
+
+/// Check if `path` is a symbolic link that Windows created as a directory link.
+///
+/// Unix links have no kind, so this is always false there.
+fn is_directory_symlink(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink_dir())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Create a symbolic link at `link` pointing to `target`, as a directory link on Windows when requested.
+fn create_symlink(target: &Path, link: &Path, is_directory_link: bool) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        if is_directory_link {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = is_directory_link;
+        std::os::unix::fs::symlink(target, link)
+    }
+}
+
+/// Remove the symbolic link at `path` without touching what it points to.
+fn remove_symlink(path: &Path, is_directory_link: bool) -> io::Result<()> {
+    if is_directory_link {
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    }
 }
 
 /// Copy a file in chunks while reporting the copied bytes.
@@ -709,8 +753,9 @@ mod test_move_helpers {
     #[cfg(windows)]
     #[test]
     fn recognizes_windows_cross_device_error_code() {
-        // ERROR_NOT_SAME_DEVICE is 17 on Windows.
+        // ERROR_NOT_SAME_DEVICE is 17 and ERROR_ALREADY_EXISTS is 183 on Windows.
         assert!(is_cross_device_error(&io::Error::from_raw_os_error(17)));
+        assert!(!is_cross_device_error(&io::Error::from_raw_os_error(183)));
     }
 
     #[test]
@@ -1024,6 +1069,25 @@ mod test_move_files {
 mod test_move_single_file {
     use super::test_observer::ByteCounter;
     use super::*;
+    use cli_tools_common::test_support::TempTree;
+
+    #[test]
+    fn symlink_fallback_recreates_a_directory_link_without_following_it() {
+        let tree = TempTree::new();
+        tree.file_with("outside/real/data.txt", "outside data");
+        let Some(source) = tree.try_symlink("outside/real", "source/link") else {
+            return;
+        };
+        tree.dir("destination");
+        let destination = tree.join("destination/link");
+
+        move_symlink_via_temp(&source, &destination).expect("the directory link should be recreated");
+
+        assert!(fs::symlink_metadata(&destination).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&source).is_err());
+        assert_eq!(tree.read("outside/real/data.txt"), "outside data");
+        assert_eq!(tree.read("destination/link/data.txt"), "outside data");
+    }
 
     #[test]
     fn a_plain_rename_reports_the_moved_bytes() {

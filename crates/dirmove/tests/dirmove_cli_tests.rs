@@ -27,6 +27,8 @@ fn dirmove_command(home: &Path) -> Command {
         .env_remove("XDG_DATA_HOME")
         .env_remove("XDG_CONFIG_HOME")
         .env("HOME", home)
+        // Windows resolves the data directory from the known folder API and ignores HOME.
+        .env("CLI_TOOLS_DB", home.join(".local/share/cli-tools/cli-tools.db"))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null());
     command
@@ -234,7 +236,6 @@ fn database_command_reports_a_missing_database_without_creating_it() {
     assert!(!database_exists(&home), "{:?}", home.files());
 }
 
-#[cfg(not(windows))]
 #[test]
 fn database_command_lists_the_directory_names_a_run_stored() {
     let tree = library_tree();

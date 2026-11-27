@@ -480,9 +480,8 @@ impl Unpacker {
     }
 }
 
-/// Copy `source` (or recreate it when it is a Unix symlink) through a temporary sibling and remove `source`.
+/// Copy `source` (or recreate it when it is a symlink) through a temporary sibling and remove `source`.
 fn copy_file_via_temp_and_remove(source: &Path, target: &Path) -> Result<()> {
-    #[cfg(unix)]
     if std::fs::symlink_metadata(source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return crate::mover::move_symlink_via_temp(source, target);
     }
@@ -546,7 +545,6 @@ fn prune_empty_directories(root_directory: &Path, touched_directories: &mut Hash
 mod test_unpacker {
     use super::*;
     use crate::test_helpers::write_file;
-    #[cfg(unix)]
     use cli_tools_common::test_support::TempTree;
     use tempfile::TempDir;
 
@@ -623,13 +621,17 @@ mod test_unpacker {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn prune_does_not_follow_a_symlink_to_an_empty_directory() {
         let tree = TempTree::new();
         tree.dir("outside/empty target");
         tree.dir("Library/Movie/subs/touched");
-        tree.symlink("outside/empty target", "Library/Movie/subs/touched/link");
+        if tree
+            .try_symlink("outside/empty target", "Library/Movie/subs/touched/link")
+            .is_none()
+        {
+            return;
+        }
         let mut touched_directories: HashSet<PathBuf> = HashSet::from([
             tree.join("Library/Movie/subs/touched"),
             tree.join("Library/Movie/subs/touched/link"),
@@ -1391,13 +1393,14 @@ mod test_unpack_trees {
         assert_eq!(tree.snapshot(), before);
     }
 
-    #[cfg(unix)]
     #[test]
     fn unpack_does_not_pull_files_out_of_a_linked_unpack_directory() {
         let tree = TempTree::new();
         tree.file_with("outside/real/data.txt", "outside data");
         tree.file_with("Library/Movie/subs/english.srt", "english");
-        tree.symlink("outside/real", "Library/Movie/subs/sample");
+        if tree.try_symlink("outside/real", "Library/Movie/subs/sample").is_none() {
+            return;
+        }
 
         unpack(&tree, true, false);
 
@@ -1406,13 +1409,14 @@ mod test_unpack_trees {
         assert_eq!(tree.read("Library/Movie/english.srt"), "english");
     }
 
-    #[cfg(unix)]
     #[test]
     fn unpack_moves_a_linked_directory_as_a_link() {
         let tree = TempTree::new();
         tree.file_with("outside/real/data.txt", "outside data");
         tree.file_with("Library/Movie/subs/english.srt", "english");
-        tree.symlink("outside/real", "Library/Movie/subs/linked");
+        if tree.try_symlink("outside/real", "Library/Movie/subs/linked").is_none() {
+            return;
+        }
 
         unpack(&tree, true, false);
 
@@ -1425,13 +1429,17 @@ mod test_unpack_trees {
         assert!(!tree.exists("Library/Movie/subs"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn pruning_keeps_a_directory_that_only_holds_a_symlink() {
         let tree = TempTree::new();
         tree.file("outside/target.txt");
         tree.file_with("Library/Movie/subs/english.srt", "english");
-        tree.symlink("outside/target.txt", "Library/Movie/subs/keeper/link.txt");
+        if tree
+            .try_symlink("outside/target.txt", "Library/Movie/subs/keeper/link.txt")
+            .is_none()
+        {
+            return;
+        }
 
         unpack(&tree, true, false);
 
@@ -1445,13 +1453,14 @@ mod test_unpack_trees {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn unpack_does_not_follow_destination_symlink_or_overwrite_broken_symlink() {
         let tree = TempTree::new();
         tree.dir("outside/real");
         tree.file_with("Library/Movie/subs/Sub/a.txt", "from unpack");
-        tree.symlink("outside/real", "Library/Movie/Sub");
+        if tree.try_symlink("outside/real", "Library/Movie/Sub").is_none() {
+            return;
+        }
 
         // With overwrite = true, unpacking Sub must replace the symlink, not copy into outside/real.
         let names = vec!["subs".to_string()];
@@ -1464,7 +1473,12 @@ mod test_unpack_trees {
         // With overwrite = false, a broken symlink at target must not be overwritten.
         let tree2 = TempTree::new();
         tree2.file_with("Library/Movie/subs/broken.srt", "new sub");
-        tree2.symlink("outside/missing.srt", "Library/Movie/broken.srt");
+        if tree2
+            .try_symlink("outside/missing.srt", "Library/Movie/broken.srt")
+            .is_none()
+        {
+            return;
+        }
         super::Unpacker::new(&names, false, false).unpack(&[tree2.join("Library")], true, &mut ());
         assert!(
             tree2
@@ -1501,13 +1515,16 @@ mod test_unpack_trees {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn cross_device_fallback_recreates_file_and_broken_symlinks_without_following() {
         let tree = TempTree::new();
         tree.file_with("outside/real.txt", "real content");
-        tree.symlink("outside/real.txt", "source_link.txt");
-        tree.symlink("outside/missing.txt", "broken_link.txt");
+        if tree.try_symlink("outside/real.txt", "source_link.txt").is_none() {
+            return;
+        }
+        if tree.try_symlink("outside/missing.txt", "broken_link.txt").is_none() {
+            return;
+        }
 
         super::copy_file_via_temp_and_remove(&tree.join("source_link.txt"), &tree.join("dest_link.txt"))
             .expect("recreate symlink");
@@ -1651,14 +1668,15 @@ mod test_unpack_events {
         assert_eq!(tree.snapshot(), before);
     }
 
-    #[cfg(unix)]
     #[test]
     fn nested_unpack_refuses_intermediate_destination_symlink() {
         let tree = TempTree::new();
         tree.file_with("outside/real/deep/english.srt", "original");
         tree.file_with("Library/Movie/subs/languages/deep/subs/english.srt", "local");
         tree.file_with("Library/Movie/subs/languages/deep/subs/extra/info.txt", "local info");
-        tree.symlink("outside/real", "Library/Movie/languages");
+        if tree.try_symlink("outside/real", "Library/Movie/languages").is_none() {
+            return;
+        }
         let before = tree.snapshot();
 
         let events = unpack_recorded(&tree, true, false);
