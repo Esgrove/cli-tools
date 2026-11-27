@@ -303,6 +303,25 @@ impl Database {
         Ok(files.len())
     }
 
+    /// Get the indexed entry stored at exactly `path`.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails.
+    pub fn get_file_by_path(&self, path: &str) -> Result<Option<FileEntry>> {
+        self.connection
+            .query_row(
+                r"
+                SELECT id, volume_id, parent_id, name, full_path, is_directory, size, created_time, modified_time, mft_reference
+                FROM files
+                WHERE full_path = ?1
+                ",
+                rusqlite::params![path],
+                row_to_file_entry,
+            )
+            .optional()
+            .context("Failed to look up file by path")
+    }
+
     /// Delete a file entry by its path.
     ///
     /// # Errors
@@ -338,9 +357,10 @@ impl Database {
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn delete_files_under_path(&self, path: &str) -> Result<usize> {
-        // Normalize path to use backslash for consistency.
-        // Use Cow to avoid allocation when the path already uses backslashes (common on Windows).
-        let normalized_path: Cow<'_, str> = if path.contains('/') {
+        // Windows paths are stored with backslashes, so a path given with forward slashes also matches
+        // its backslash spelling. Unix paths are stored with forward slashes and match as given.
+        // Use Cow to avoid allocation when the path has no forward slashes.
+        let backslash_path: Cow<'_, str> = if path.contains('/') {
             Cow::Owned(path.replace('/', "\\"))
         } else {
             Cow::Borrowed(path)
@@ -348,9 +368,10 @@ impl Database {
         let rows_affected = self
             .connection
             .execute(
-                "DELETE FROM files WHERE full_path = ?1 OR substr(full_path, 1, length(?1) + 1) = ?1 || '\\' \
-                 OR substr(full_path, 1, length(?1) + 1) = ?1 || '/'",
-                rusqlite::params![normalized_path],
+                "DELETE FROM files WHERE full_path IN (?1, ?2) \
+                 OR substr(full_path, 1, length(?1) + 1) IN (?1 || '\\', ?1 || '/') \
+                 OR substr(full_path, 1, length(?2) + 1) IN (?2 || '\\', ?2 || '/')",
+                rusqlite::params![path, backslash_path],
             )
             .context("Failed to delete files under path")?;
 
@@ -4610,5 +4631,98 @@ mod test_schema_version {
             INDEX_SCHEMA_VERSION
         );
         assert_eq!(reopened.get_stats().unwrap().volume_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod test_subtree_paths {
+    use super::*;
+
+    fn database_with_entries(paths: &[(&str, bool)]) -> Database {
+        let database = Database::open_in_memory().unwrap();
+        let volume_id = database
+            .upsert_volume(&IndexedVolume {
+                id: None,
+                serial_number: "SUBTREE".into(),
+                label: None,
+                mount_point: "/".into(),
+                volume_type: VolumeType::Local,
+                is_online: true,
+                last_scan_time: None,
+                last_usn: None,
+            })
+            .unwrap();
+        for (full_path, is_directory) in paths {
+            let name = full_path.rsplit(['/', '\\']).next().unwrap();
+            database
+                .insert_file(&FileEntry {
+                    id: None,
+                    volume_id,
+                    parent_id: None,
+                    name: name.to_string(),
+                    full_path: (*full_path).to_string(),
+                    is_directory: *is_directory,
+                    size: 1,
+                    created_time: None,
+                    modified_time: None,
+                    mft_reference: None,
+                })
+                .unwrap();
+        }
+        database
+    }
+
+    fn indexed_paths(database: &Database) -> Vec<String> {
+        let mut paths: Vec<String> = database
+            .search_by_path("", 100)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.full_path)
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn deletes_a_forward_slash_directory_and_its_descendants() {
+        let database = database_with_entries(&[
+            ("/data/dir", true),
+            ("/data/dir/a.txt", false),
+            ("/data/dir/nested/b.txt", false),
+            ("/data/dirx/c.txt", false),
+        ]);
+
+        let deleted = database.delete_files_under_path("/data/dir").unwrap();
+
+        assert_eq!(deleted, 3);
+        assert_eq!(indexed_paths(&database), vec!["/data/dirx/c.txt"]);
+    }
+
+    #[test]
+    fn deletes_a_backslash_directory_given_with_forward_slashes() {
+        let database = database_with_entries(&[
+            (r"C:\data\dir", true),
+            (r"C:\data\dir\a.txt", false),
+            (r"C:\data\dirx\c.txt", false),
+        ]);
+
+        let deleted = database.delete_files_under_path("C:/data/dir").unwrap();
+
+        assert_eq!(deleted, 2);
+        assert_eq!(indexed_paths(&database), vec![r"C:\data\dirx\c.txt"]);
+    }
+
+    #[test]
+    fn get_file_by_path_finds_only_the_exact_path() {
+        let database = database_with_entries(&[("/data/dir", true), ("/data/dir/a.txt", false)]);
+
+        let directory = database.get_file_by_path("/data/dir").unwrap().unwrap();
+        let file = database.get_file_by_path("/data/dir/a.txt").unwrap().unwrap();
+
+        assert!(directory.is_directory);
+        assert!(!file.is_directory);
+        assert_eq!(file.name, "a.txt");
+        assert!(database.get_file_by_path("/data/di").unwrap().is_none());
+        assert!(database.get_file_by_path("/data/dir/missing.txt").unwrap().is_none());
     }
 }
