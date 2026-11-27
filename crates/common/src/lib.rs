@@ -1040,18 +1040,45 @@ macro_rules! print_dimmed {
     };
 }
 
-/// Delete a file, moving to trash when possible.
+/// Move a file or directory to the system trash.
 ///
-/// For Windows network paths, uses direct deletion since trash doesn't work there.
-/// For local paths, moves the file to the system trash.
+/// On macOS, uses `NSFileManager` directly instead of scripting Finder,
+/// so trashing does not play Finder sounds, require Automation permission,
+/// or leave `.DS_Store` files in the parent directory.
 ///
 /// # Errors
-/// Returns an error if the file cannot be deleted or trashed.
+/// Returns an error if the path cannot be moved to the system trash.
+pub fn move_to_trash(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let context = {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+
+        let mut context = trash::TrashContext::new();
+        context.set_delete_method(DeleteMethod::NsFileManager);
+        context
+    };
+    #[cfg(not(target_os = "macos"))]
+    let context = trash::TrashContext::new();
+
+    context.delete(path).map_err(std::io::Error::other)
+}
+
+/// Delete a file or directory, moving it to the system trash when possible.
+///
+/// For Windows network paths, uses direct deletion since trash does not work there.
+/// For local paths, moves the path to the system trash.
+///
+/// # Errors
+/// Returns an error if the path cannot be deleted or trashed.
 pub fn trash_or_delete(path: &Path) -> std::io::Result<()> {
     if is_network_path(path) {
-        std::fs::remove_file(path)
+        if std::fs::symlink_metadata(path)?.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        }
     } else {
-        trash::delete(path).map_err(std::io::Error::other)
+        move_to_trash(path)
     }
 }
 
@@ -2014,6 +2041,27 @@ mod trash_or_delete_tests {
         assert!(file_path.exists());
         trash_or_delete(&file_path).unwrap();
         assert!(!file_path.exists());
+        let remaining: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(
+            remaining.is_empty(),
+            "trashing a file must not leave extra files in the parent directory: {remaining:?}"
+        );
+    }
+
+    #[test]
+    fn deletes_local_directory_without_parent_side_effects() {
+        let dir = tempdir().unwrap();
+        let subdir = dir.path().join(".unwanted");
+        std::fs::create_dir(&subdir).unwrap();
+        File::create(subdir.join("junk.txt")).unwrap();
+
+        trash_or_delete(&subdir).unwrap();
+        assert!(!subdir.exists());
+        let remaining: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert!(
+            remaining.is_empty(),
+            "trashing a directory must not leave extra files in the parent directory: {remaining:?}"
+        );
     }
 
     #[test]
