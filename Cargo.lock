@@ -620,6 +620,7 @@ dependencies = [
  "criterion",
  "crossterm",
  "ctrlc",
+ "filefind-common",
  "indicatif",
  "itertools 0.15.0",
  "proptest",

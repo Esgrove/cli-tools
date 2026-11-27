@@ -4,20 +4,41 @@
 //! repeated runs, and the exit status for paths that cannot be scanned.
 //! The child process inherits `CARGO_MANIFEST_DIR`,
 //! so it reads the sample config fixture instead of the user config.
+//! The filefind index variables point at missing files unless a test creates an index,
+//! so no run touches the user's index.
 
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use cli_tools_common::test_support::TempTree;
+use filefind_common::test_support::IndexFixture;
 
-/// Run the `dupefind` binary with the given arguments.
+/// Run the `dupefind` binary with the given arguments and no filefind index.
 fn dupefind(arguments: &[&str]) -> Output {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("dupefind-cli-tests");
+    dupefind_with_environment(
+        arguments,
+        &[
+            ("FILEFIND_DB", missing.join("missing-filefind.db").into_os_string()),
+            (
+                "FILEFIND_CONFIG",
+                missing.join("missing-filefind.toml").into_os_string(),
+            ),
+        ],
+    )
+}
+
+/// Run the `dupefind` binary with the given arguments and extra environment variables.
+fn dupefind_with_environment(arguments: &[&str], environment: &[(&str, OsString)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dupefind"))
         .args(arguments)
         // Keep the scan cache and active locks out of the user database.
         .env(
             "CLI_TOOLS_DB",
-            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("dupefind-cli-tests/cli-tools.db"),
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("dupefind-cli-tests/cli-tools.db"),
         )
+        .envs(environment.iter().map(|(key, value)| (*key, value)))
         .output()
         .expect("dupefind should run")
 }
@@ -184,4 +205,28 @@ fn an_empty_nested_tree_finds_no_duplicates() {
     assert!(output.status.success(), "{text}");
     assert!(text.contains("No duplicates found"), "{text}");
     assert_eq!(tree.dirs(), vec!["a", "a/b", "a/b/c", "d"]);
+}
+
+#[test]
+fn moving_duplicates_moves_their_entries_in_an_existing_filefind_index() {
+    let tree = TempTree::new();
+    let keeper = tree.file_with("shows/Some.Show.1080p.mp4", "keeper");
+    let copy = tree.file_with("archive/Some.Show.mp4", "copy");
+    let home = TempTree::new();
+    let index = IndexFixture::create(&home.join("filefind.db"), tree.path(), &[keeper, copy]);
+    let root = tree.path().to_string_lossy().into_owned();
+
+    let output = dupefind_with_environment(&[&root, "--recurse", "--move"], &index.environment());
+
+    let text = output_text(&output);
+    assert!(output.status.success(), "{text}");
+    let moved: Vec<String> = tree
+        .files()
+        .into_iter()
+        .filter(|path| path.starts_with("Duplicates/"))
+        .collect();
+    assert_eq!(moved.len(), 1, "{:?}", tree.snapshot());
+    let mut expected = vec![moved[0].clone(), "shows/Some.Show.1080p.mp4".to_string()];
+    expected.sort();
+    assert_eq!(index.indexed_paths(), expected);
 }

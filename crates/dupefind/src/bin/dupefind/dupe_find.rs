@@ -16,7 +16,7 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use walkdir::WalkDir;
 
-use cli_tools_common::{MoveResult, OverwritePolicy, TargetReservations, print_error, print_yellow};
+use cli_tools_common::{MoveResult, OverwritePolicy, PathChange, TargetReservations, print_error, print_yellow};
 use cli_tools_db::locks::ActiveLockStore;
 use cli_tools_dupefind::{
     DupeFileInfo, DuplicateGroup, DuplicateMatchOptions, filter_ignored_groups, find_duplicates,
@@ -282,6 +282,7 @@ impl DupeFind {
 
         let mut reservations = TargetReservations::new();
         let mut failed_count = 0usize;
+        let mut changes = Vec::new();
         for group in duplicates {
             let group_name = sanitize_group_dir_name(&group.display_name());
             let target_dir = duplicates_dir.join(&group_name);
@@ -346,6 +347,7 @@ impl DupeFind {
                     }
                     Ok(_) => {
                         reservations.reserve(&target_path);
+                        changes.push(PathChange::moved_file(&file.path, &target_path));
                         if let Some(ref mut cache) = scan_cache {
                             let _ = cache.move_cached_path(&file.path, &target_path);
                         }
@@ -357,6 +359,8 @@ impl DupeFind {
                 }
             }
         }
+
+        update_filefind_index(&changes);
 
         anyhow::ensure!(
             failed_count == 0,
@@ -376,6 +380,18 @@ impl DupeFind {
             },
             |root| root.join("Duplicates"),
         )
+    }
+}
+
+/// Apply completed moves to the user's filefind index.
+///
+/// Tests run in process, where the user's real index must not be touched, so they skip it.
+fn update_filefind_index(changes: &[PathChange]) {
+    if cfg!(test) {
+        return;
+    }
+    for warning in filefind_common::update_default_index(changes) {
+        print_yellow!("Could not update the filefind index: {warning}");
     }
 }
 

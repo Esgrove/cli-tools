@@ -11,7 +11,7 @@ use itertools::Itertools;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use cli_tools_common::{OverwritePolicy, RenameOutcome, print_yellow};
+use cli_tools_common::{OverwritePolicy, PathChange, RenameOutcome, print_yellow};
 
 use cli_tools_media::video_info::VideoInfo;
 
@@ -586,16 +586,23 @@ fn render_ui(
 
 /// Apply all collected actions, moving deleted files to the trash when possible.
 fn apply_actions(duplicates: &[DuplicateGroup], actions: &[GroupAction]) -> anyhow::Result<()> {
-    apply_actions_with(duplicates, actions, &cli_tools_common::trash_or_delete)
+    let mut changes = Vec::new();
+    let result = apply_actions_with(duplicates, actions, &cli_tools_common::trash_or_delete, &mut changes);
+    for warning in filefind_common::update_default_index(&changes) {
+        print_yellow!("Could not update the filefind index: {warning}");
+    }
+    result
 }
 
 /// Apply all collected actions, removing files with the given delete function.
 ///
 /// Failures on one group are recorded and reported without aborting remaining groups.
+/// Completed renames and deletions are appended to `changes`.
 fn apply_actions_with(
     duplicates: &[DuplicateGroup],
     actions: &[GroupAction],
     delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
+    changes: &mut Vec<PathChange>,
 ) -> anyhow::Result<()> {
     let actionable: Vec<&GroupAction> = actions
         .iter()
@@ -638,6 +645,7 @@ fn apply_actions_with(
             delete_file,
             lock_store.as_ref(),
             scan_cache.as_mut(),
+            changes,
         );
         if let Err(error) = result {
             cli_tools_common::print_error!("{error}");
@@ -658,6 +666,7 @@ fn apply_single_group_action(
     delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
     lock_store: Option<&cli_tools_db::locks::ActiveLockStore>,
     mut scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
+    changes: &mut Vec<PathChange>,
 ) -> anyhow::Result<()> {
     match action {
         DuplicateAction::Keep { keep_index, new_name } => {
@@ -699,21 +708,28 @@ fn apply_single_group_action(
                     }
                     if let Some(position) = others.iter().position(|file| same_location(&file.path, &new_path)) {
                         let occupant = others.remove(position);
-                        if !delete_duplicate(&occupant.path, delete_file, lock_store, scan_cache.as_deref_mut()) {
+                        if !delete_duplicate(
+                            &occupant.path,
+                            delete_file,
+                            lock_store,
+                            scan_cache.as_deref_mut(),
+                            changes,
+                        ) {
                             print_yellow!("Keeping original name since {} still exists", new_path.display());
-                            delete_all(&others, delete_file, lock_store, scan_cache);
+                            delete_all(&others, delete_file, lock_store, scan_cache, changes);
                             return Ok(());
                         }
                     }
-                    if rename_file(&keep_file.path, &new_path)?
-                        && let Some(cache) = scan_cache.as_deref_mut()
-                    {
-                        let _ = cache.move_cached_path(&keep_file.path, &new_path);
+                    if rename_file(&keep_file.path, &new_path)? {
+                        changes.push(PathChange::moved_file(&keep_file.path, &new_path));
+                        if let Some(cache) = scan_cache.as_deref_mut() {
+                            let _ = cache.move_cached_path(&keep_file.path, &new_path);
+                        }
                     }
                 }
             }
 
-            delete_all(&others, delete_file, lock_store, scan_cache);
+            delete_all(&others, delete_file, lock_store, scan_cache, changes);
         }
         DuplicateAction::RenameOnly { rename_index, new_name } => {
             let file_to_rename = sorted_files
@@ -735,10 +751,11 @@ fn apply_single_group_action(
                     );
                     return Ok(());
                 }
-                if rename_file(&file_to_rename.path, &new_path)?
-                    && let Some(cache) = scan_cache
-                {
-                    let _ = cache.move_cached_path(&file_to_rename.path, &new_path);
+                if rename_file(&file_to_rename.path, &new_path)? {
+                    changes.push(PathChange::moved_file(&file_to_rename.path, &new_path));
+                    if let Some(cache) = scan_cache {
+                        let _ = cache.move_cached_path(&file_to_rename.path, &new_path);
+                    }
                 }
             }
         }
@@ -783,9 +800,10 @@ fn delete_all(
     delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
     lock_store: Option<&cli_tools_db::locks::ActiveLockStore>,
     mut scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
+    changes: &mut Vec<PathChange>,
 ) {
     for file in files {
-        delete_duplicate(&file.path, delete_file, lock_store, scan_cache.as_deref_mut());
+        delete_duplicate(&file.path, delete_file, lock_store, scan_cache.as_deref_mut(), changes);
     }
 }
 
@@ -795,6 +813,7 @@ fn delete_duplicate(
     delete_file: &dyn Fn(&Path) -> std::io::Result<()>,
     lock_store: Option<&cli_tools_db::locks::ActiveLockStore>,
     scan_cache: Option<&mut cli_tools_media::scan_cache::ScanCache>,
+    changes: &mut Vec<PathChange>,
 ) -> bool {
     if let Some(store) = lock_store
         && let Ok(Some(holder)) = store.is_locked_by_other(path)
@@ -817,6 +836,7 @@ fn delete_duplicate(
         print_yellow!("Failed to delete {}: {error}", path.display());
         return false;
     }
+    changes.push(PathChange::removed_file(path));
     if let Some(cache) = scan_cache {
         let _ = cache.remove_cached_path(path);
     }
@@ -1407,7 +1427,7 @@ mod test_apply_actions {
         }];
         std::fs::remove_file(tree.join("a.mp4")).unwrap();
 
-        let result = apply_actions_with(&[group], &actions, &remove_file);
+        let result = apply_actions_with(&[group], &actions, &remove_file, &mut Vec::new());
 
         assert_eq!(tree.files(), ["b.mp4"], "the remaining copy should not be deleted");
         assert_eq!(tree.read("b.mp4"), "VIDEO");
@@ -1428,7 +1448,7 @@ mod test_apply_actions {
         std::fs::remove_file(tree.join("a.mp4")).unwrap();
         tree.dir("a.mp4");
 
-        let result = apply_actions_with(&[group], &actions, &remove_file);
+        let result = apply_actions_with(&[group], &actions, &remove_file, &mut Vec::new());
 
         assert_eq!(tree.files(), ["b.mp4"], "the rename target should not be deleted");
         assert_eq!(tree.read("b.mp4"), "VIDEO");
@@ -1448,7 +1468,7 @@ mod test_apply_actions {
             },
         }];
 
-        apply_actions_with(&[group], &actions, &remove_file).expect("the action should succeed");
+        apply_actions_with(&[group], &actions, &remove_file, &mut Vec::new()).expect("the action should succeed");
 
         assert_eq!(read(directory.path(), "Movie.mkv").as_deref(), Some("KEEP"));
         assert_eq!(read(directory.path(), "Movie.1080p.mkv"), None);
@@ -1467,11 +1487,98 @@ mod test_apply_actions {
             },
         }];
 
-        apply_actions_with(&[group], &actions, &remove_file).expect("the action should succeed");
+        apply_actions_with(&[group], &actions, &remove_file, &mut Vec::new()).expect("the action should succeed");
 
         assert_eq!(read(directory.path(), "c.mp4").as_deref(), Some("UNRELATED"));
         assert_eq!(read(directory.path(), "a.mp4").as_deref(), Some("A"));
         assert_eq!(read(directory.path(), "b.mp4"), None);
+    }
+
+    #[test]
+    fn keep_with_rename_reports_the_rename_and_the_deletions() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_with_contents(
+            directory.path(),
+            &[
+                ("Movie.1080p.mkv", "KEEP"),
+                ("Movie.720p.mkv", "OTHER"),
+                ("Movie.mp4", "THIRD"),
+            ],
+        );
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: Some("Movie".to_string()),
+            },
+        }];
+        let mut changes = Vec::new();
+
+        apply_actions_with(&[group], &actions, &remove_file, &mut changes).expect("the action should succeed");
+
+        assert_eq!(
+            changes,
+            vec![
+                PathChange::moved_file(
+                    directory.path().join("Movie.1080p.mkv"),
+                    directory.path().join("Movie.mkv")
+                ),
+                PathChange::removed_file(directory.path().join("Movie.720p.mkv")),
+                PathChange::removed_file(directory.path().join("Movie.mp4")),
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_only_reports_the_rename() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_with_contents(directory.path(), &[("a.mp4", "A"), ("b.mp4", "B")]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::RenameOnly {
+                rename_index: 0,
+                new_name: "c".to_string(),
+            },
+        }];
+        let mut changes = Vec::new();
+
+        apply_actions_with(&[group], &actions, &remove_file, &mut changes).expect("the action should succeed");
+
+        assert_eq!(
+            changes,
+            vec![PathChange::moved_file(
+                directory.path().join("a.mp4"),
+                directory.path().join("c.mp4")
+            )]
+        );
+    }
+
+    #[test]
+    fn skipped_renames_and_failed_deletions_are_not_reported() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let group = group_with_contents(directory.path(), &[("a.mp4", "A"), ("b.mp4", "B")]);
+        let actions = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::RenameOnly {
+                rename_index: 0,
+                new_name: "b".to_string(),
+            },
+        }];
+        let mut changes = Vec::new();
+        let fail_delete = |_: &std::path::Path| -> std::io::Result<()> { Err(std::io::Error::other("refused")) };
+
+        apply_actions_with(std::slice::from_ref(&group), &actions, &remove_file, &mut changes)
+            .expect("the action should succeed");
+        let keep = vec![GroupAction {
+            group_index: 0,
+            action: DuplicateAction::Keep {
+                keep_index: 0,
+                new_name: None,
+            },
+        }];
+        apply_actions_with(&[group], &keep, &fail_delete, &mut changes).expect("the action should succeed");
+
+        assert_eq!(changes, Vec::new());
     }
 
     #[test]
@@ -1499,7 +1606,7 @@ mod test_apply_actions {
             },
         }];
 
-        apply_actions_with(&[group], &actions, &remove_file).expect("the action should succeed");
+        apply_actions_with(&[group], &actions, &remove_file, &mut Vec::new()).expect("the action should succeed");
 
         assert_eq!(read(directory.path(), "a.mp4").as_deref(), Some("A"));
         assert_eq!(read(directory.path(), "b.mp4").as_deref(), Some("B"));
