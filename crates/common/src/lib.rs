@@ -28,10 +28,11 @@ pub use config::{load_user_config_section, load_user_config_section_at, parse_us
 #[cfg(feature = "diff")]
 pub use diff::{color_diff, diff_lines, show_diff};
 pub use file_handling::{
-    CopyVerifier, MoveResult, OverwritePolicy, RenameOutcome, TargetReservations, check_destination_parents,
-    copy_dir_recursive, copy_file_with_times, directory_is_case_sensitive, is_case_only_change,
-    paths_refer_to_same_entry, paths_refer_to_same_file, remove_empty_directories, safe_move_file, safe_rename,
-    unique_sibling_path, write_atomically,
+    CopyProgress, CopyVerifier, MoveResult, OverwritePolicy, RenameOutcome, TargetReservations,
+    check_destination_parents, copy_dir_recursive, copy_file_with_times, directory_is_case_sensitive,
+    is_case_only_change, move_file_by_copy, paths_refer_to_same_entry, paths_refer_to_same_file,
+    remove_empty_directories, safe_move_file, safe_move_file_with_progress, safe_rename, unique_sibling_path,
+    write_atomically,
 };
 pub use utils::{
     NameFilter, WalkOptions, collect_entries, command_exists, count_files, data_dir, data_file_path, find_command,

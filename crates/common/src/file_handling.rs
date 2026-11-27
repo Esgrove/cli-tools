@@ -4,6 +4,7 @@
 //! a collision aware rename that never replaces a different file unless asked to,
 //! destination reservations for detecting collisions within one batch,
 //! atomic file writes, and a recursive directory copy that refuses to copy a directory into itself.
+//! Cross device moves can report their copy progress through [`CopyProgress`].
 
 use std::collections::HashSet;
 use std::fs;
@@ -11,6 +12,10 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::{append_extension_to_path, into_nfc};
+
+mod progress_copy;
+
+pub use progress_copy::CopyProgress;
 
 /// What to do when a rename target already exists and is a different file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,23 +242,50 @@ pub fn safe_move_file(
     policy: OverwritePolicy,
     verify_copy: Option<CopyVerifier<'_>>,
 ) -> io::Result<MoveResult> {
+    safe_move_file_with_progress(source, destination, policy, verify_copy, None)
+}
+
+/// Move a file like [`safe_move_file`], reporting the bytes of a cross device copy to `progress`.
+///
+/// A same device rename reports nothing, since no bytes are copied.
+/// When `progress` returns false the copy stops, the partial copy is removed,
+/// the source is kept, and the move fails with `ErrorKind::Interrupted`.
+///
+/// # Errors
+/// Returns an error if moving, copying, verifying, or removing the source file fails, or the copy was stopped.
+pub fn safe_move_file_with_progress(
+    source: &Path,
+    destination: &Path,
+    policy: OverwritePolicy,
+    verify_copy: Option<CopyVerifier<'_>>,
+    progress: Option<CopyProgress<'_>>,
+) -> io::Result<MoveResult> {
     match safe_rename(source, destination, policy) {
         Ok(RenameOutcome::Unchanged) => Ok(MoveResult::Unchanged),
         Ok(RenameOutcome::SkippedExisting) => Ok(MoveResult::SkippedExisting),
         Ok(RenameOutcome::Renamed | RenameOutcome::CaseRenamed) => Ok(MoveResult::Renamed),
         Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
-            move_file_across_devices(source, destination, policy, verify_copy)
+            move_file_by_copy(source, destination, policy, verify_copy, progress)
         }
         Err(error) => Err(error),
     }
 }
 
-/// Copy `source` to a sibling temp file next to `destination`, verify, publish, and remove `source`.
-fn move_file_across_devices(
+/// Move a file by copying it, for when a rename cannot move it.
+///
+/// Copies `source` to a temporary sibling of `destination`, verifies the copy with `verify_copy` when provided,
+/// publishes it respecting `policy`, and only then removes `source`.
+/// The copied bytes are reported to `progress` when provided.
+/// A failed or stopped copy removes the temporary file and keeps the source.
+///
+/// # Errors
+/// Returns an error if copying, verifying, publishing, or removing the source file fails, or the copy was stopped.
+pub fn move_file_by_copy(
     source: &Path,
     destination: &Path,
     policy: OverwritePolicy,
     verify_copy: Option<CopyVerifier<'_>>,
+    progress: Option<CopyProgress<'_>>,
 ) -> io::Result<MoveResult> {
     if let Ok(target_meta) = fs::symlink_metadata(destination) {
         match policy {
@@ -293,7 +325,7 @@ fn move_file_across_devices(
     let (temp_file, temp_path) = create_unique_sibling_file(destination, "move-tmp", None)?;
     drop(temp_file);
     let copy_result = (|| -> io::Result<MoveResult> {
-        copy_file_with_times(source, &temp_path)?;
+        copy_file_with_times_reporting(source, &temp_path, progress)?;
         if let Some(verify) = verify_copy {
             verify(source, &temp_path)?;
         }
@@ -544,6 +576,11 @@ fn copy_dir_contents(source: &Path, target: &Path, visited: &mut HashSet<PathBuf
 /// Returns `InvalidInput` if the source and target refer to the same file.
 /// Also returns an error if the copy fails or the metadata cannot be read or applied.
 pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
+    copy_file_with_times_reporting(source, target, None)
+}
+
+/// Copy one file like [`copy_file_with_times`], reporting the copied bytes to `progress` when provided.
+fn copy_file_with_times_reporting(source: &Path, target: &Path, progress: Option<CopyProgress<'_>>) -> io::Result<u64> {
     let mut source_file = fs::File::open(source)?;
     let metadata = source_file.metadata()?;
     let modified = metadata.modified()?;
@@ -592,7 +629,10 @@ pub fn copy_file_with_times(source: &Path, target: &Path) -> io::Result<u64> {
     target_file.set_len(0)?;
 
     let copy_result = (|| -> io::Result<u64> {
-        let bytes = io::copy(&mut source_file, &mut target_file)?;
+        let bytes = match progress {
+            Some(progress) => progress_copy::copy_with_progress(&mut source_file, &mut target_file, progress)?,
+            None => io::copy(&mut source_file, &mut target_file)?,
+        };
         target_file.set_modified(modified)?;
         Ok(bytes)
     })();
@@ -1298,6 +1338,118 @@ mod test_target_reservations {
         assert!(reservations.contains(decomposed));
         assert!(!reservations.reserve(decomposed));
         assert!(reservations.reserve(Path::new("café/resume.txt")));
+    }
+}
+
+#[cfg(test)]
+mod test_move_file_by_copy {
+    use std::cell::Cell;
+
+    use super::*;
+
+    use crate::test_support::TempTree;
+
+    #[test]
+    fn copies_reports_progress_and_removes_the_source() {
+        let tree = TempTree::new();
+        let source = tree.file_with("source/video.mkv", vec![3_u8; 3 * 1024 * 1024 + 17]);
+        let destination = tree.dir("target").join("video.mkv");
+        let reported = Cell::new(0_u64);
+
+        let result = move_file_by_copy(
+            &source,
+            &destination,
+            OverwritePolicy::Error,
+            None,
+            Some(&|bytes| {
+                reported.set(reported.get() + bytes);
+                true
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(result, MoveResult::CopiedAndRemoved);
+        assert_eq!(reported.get(), 3 * 1024 * 1024 + 17);
+        assert!(!source.exists());
+        assert_eq!(fs::metadata(&destination).unwrap().len(), 3 * 1024 * 1024 + 17);
+        assert_eq!(tree.files(), vec!["target/video.mkv"]);
+    }
+
+    #[test]
+    fn stopped_copy_keeps_the_source_and_leaves_no_partial_file() {
+        let tree = TempTree::new();
+        let source = tree.file_with("source/video.mkv", vec![5_u8; 3 * 1024 * 1024]);
+        let destination = tree.dir("target").join("video.mkv");
+
+        let error =
+            move_file_by_copy(&source, &destination, OverwritePolicy::Error, None, Some(&|_| false)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(fs::metadata(&source).unwrap().len(), 3 * 1024 * 1024);
+        assert_eq!(tree.files(), vec!["source/video.mkv"]);
+    }
+
+    #[test]
+    fn failed_verification_keeps_the_source_and_leaves_no_partial_file() {
+        let tree = TempTree::new();
+        let source = tree.file_with("source/notes.txt", "contents");
+        let destination = tree.dir("target").join("notes.txt");
+        let reject = |_: &Path, _: &Path| -> io::Result<()> { Err(io::Error::other("verification failed")) };
+
+        let error = move_file_by_copy(&source, &destination, OverwritePolicy::Error, Some(&reject), None).unwrap_err();
+
+        assert_eq!(error.to_string(), "verification failed");
+        assert_eq!(tree.read("source/notes.txt"), "contents");
+        assert_eq!(tree.files(), vec!["source/notes.txt"]);
+    }
+
+    #[test]
+    fn skips_an_existing_destination_without_copying() {
+        let tree = TempTree::new();
+        let source = tree.file_with("source/notes.txt", "new");
+        let destination = tree.file_with("target/notes.txt", "old");
+        let reported = Cell::new(0_u64);
+
+        let result = move_file_by_copy(
+            &source,
+            &destination,
+            OverwritePolicy::Skip,
+            None,
+            Some(&|bytes| {
+                reported.set(reported.get() + bytes);
+                true
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(result, MoveResult::SkippedExisting);
+        assert_eq!(reported.get(), 0);
+        assert_eq!(tree.read("source/notes.txt"), "new");
+        assert_eq!(tree.read("target/notes.txt"), "old");
+    }
+
+    #[test]
+    fn same_device_move_with_progress_renames_without_reporting() {
+        let tree = TempTree::new();
+        let source = tree.file_with("source/notes.txt", "contents");
+        let destination = tree.dir("target").join("notes.txt");
+        let calls = Cell::new(0_usize);
+
+        let result = safe_move_file_with_progress(
+            &source,
+            &destination,
+            OverwritePolicy::Error,
+            None,
+            Some(&|_| {
+                calls.set(calls.get() + 1);
+                true
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(result, MoveResult::Renamed);
+        assert_eq!(calls.get(), 0);
+        assert_eq!(tree.read("target/notes.txt"), "contents");
     }
 }
 
