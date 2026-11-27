@@ -82,6 +82,24 @@ pub struct TaskContext {
     pub shared: Arc<Mutex<SharedState>>,
 }
 
+/// Notification emitted to the reporter when a pending task becomes blocked.
+struct BlockedNotification {
+    /// Task identifier.
+    id: String,
+    /// Human-readable task label.
+    label: String,
+    /// Reason the task cannot run.
+    reason: String,
+}
+
+/// Pending task marked as blocked during one scheduler pass.
+struct BlockedTask {
+    /// Task identifier to remove from the pending map.
+    id: String,
+    /// Reason the task cannot run.
+    reason: String,
+}
+
 /// Static specification of one node in the test DAG.
 pub struct TaskSpec {
     /// Stable unique identifier (used on the command line, in logs, and in dependency references).
@@ -474,7 +492,7 @@ fn worker_loop(state: &Arc<(Mutex<SchedulerState>, Condvar)>, ctx: &TaskContext,
     let (lock, cvar) = &**state;
 
     loop {
-        let mut blocked_notifications: Vec<(String, String, String)> = Vec::new();
+        let mut blocked_notifications: Vec<BlockedNotification> = Vec::new();
         let next_task = {
             let mut guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -592,27 +610,33 @@ fn worker_loop(state: &Arc<(Mutex<SchedulerState>, Condvar)>, ctx: &TaskContext,
 }
 
 /// Forward blocked task notifications to the reporter.
-fn emit_blocked_notifications(reporter: &Reporter, notifications: &[(String, String, String)]) {
-    for (id, label, reason) in notifications {
-        reporter.on_task_blocked(id, label, reason);
+fn emit_blocked_notifications(reporter: &Reporter, notifications: &[BlockedNotification]) {
+    for notification in notifications {
+        reporter.on_task_blocked(&notification.id, &notification.label, &notification.reason);
     }
 }
 
 /// Move pending tasks that can no longer run into `completed` as blocked and return notifications for them.
-fn mark_blocked_tasks(guard: &mut SchedulerState, fail_fast: bool) -> Vec<(String, String, String)> {
+fn mark_blocked_tasks(guard: &mut SchedulerState, fail_fast: bool) -> Vec<BlockedNotification> {
     let mut all_blocked = Vec::new();
     loop {
-        let mut newly_blocked: Vec<(String, String)> = Vec::new();
+        let mut newly_blocked: Vec<BlockedTask> = Vec::new();
         for (id, task) in &guard.pending {
             if fail_fast && guard.stop_scheduling {
-                newly_blocked.push((id.clone(), "cancelled by --fail-fast".to_owned()));
+                newly_blocked.push(BlockedTask {
+                    id: id.clone(),
+                    reason: "cancelled by --fail-fast".to_owned(),
+                });
                 continue;
             }
             for dep in &task.deps {
                 if let Some(dep_report) = guard.completed.get(dep)
                     && !dep_report.outcome.unblocks_dependents()
                 {
-                    newly_blocked.push((id.clone(), format!("prerequisite '{dep}' did not pass")));
+                    newly_blocked.push(BlockedTask {
+                        id: id.clone(),
+                        reason: format!("prerequisite '{dep}' did not pass"),
+                    });
                     break;
                 }
             }
@@ -622,15 +646,19 @@ fn mark_blocked_tasks(guard: &mut SchedulerState, fail_fast: bool) -> Vec<(Strin
             break;
         }
 
-        for (id, reason) in newly_blocked {
-            if let Some(task) = guard.pending.remove(&id) {
-                all_blocked.push((task.id.clone(), task.label.clone(), reason.clone()));
+        for blocked in newly_blocked {
+            if let Some(task) = guard.pending.remove(&blocked.id) {
+                all_blocked.push(BlockedNotification {
+                    id: task.id.clone(),
+                    label: task.label.clone(),
+                    reason: blocked.reason.clone(),
+                });
                 guard.completed.insert(
-                    id,
+                    blocked.id,
                     TaskReport {
                         id: task.id,
                         label: task.label,
-                        outcome: TaskOutcome::Blocked(reason),
+                        outcome: TaskOutcome::Blocked(blocked.reason),
                         duration: Duration::ZERO,
                         log_path: None,
                     },
