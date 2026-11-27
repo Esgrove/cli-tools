@@ -1037,16 +1037,20 @@ mod test_nested_trees {
         assert_eq!(contents(&tree), BTreeSet::from(["a".to_string(), "b".to_string()]));
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinks_are_not_followed_into_their_targets() {
         let tree = TempTree::new();
         tree.file_with("outside/real 01.02.2020.txt", "real");
         tree.file_with("outside/folder/inner 01.02.2020.txt", "inner");
         tree.dir("outside/Linked 01.02.2020");
-        tree.symlink("outside/folder", "walked/folder link");
-        tree.symlink("outside/Linked 01.02.2020", "walked/Link 05.06.2020");
-        tree.symlink("outside/real 01.02.2020.txt", "walked/file link 01.02.2020.txt");
+        let links = [
+            tree.try_symlink("outside/folder", "walked/folder link"),
+            tree.try_symlink("outside/Linked 01.02.2020", "walked/Link 05.06.2020"),
+            tree.try_symlink("outside/real 01.02.2020.txt", "walked/file link 01.02.2020.txt"),
+        ];
+        if links.iter().any(Option::is_none) {
+            return;
+        }
 
         date_flip_files(&tree.join("walked"), &file_config(true, false, false)).expect("flip should succeed");
         date_flip_directories(tree.join("walked"), &directory_config(true, false)).expect("flip should succeed");
