@@ -1,7 +1,14 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["fuzz"]
+exclude = [
+    "fuzz",
+    # The imported filefind history is added to the workspace once its manifests are integrated.
+    "crates/filefind-cli",
+    "crates/filefind-common",
+    "crates/filefind-daemon",
+    "crates/filefind-tray",
+]
 
 [workspace.package]
 version = "13.0.0"
