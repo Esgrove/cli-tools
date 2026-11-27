@@ -54,6 +54,36 @@ pub struct ThumbnailCreator {
     quality_str: String,
 }
 
+/// Scheduled thumbnail job pairing a video input with its output path and display index.
+struct ThumbnailJob<'a> {
+    /// Zero-based position in the run queue.
+    index: usize,
+    /// Video file to render thumbnails for.
+    video_file: &'a PathBuf,
+    /// Target thumbnail image path.
+    output_path: &'a PathBuf,
+}
+
+/// Completed outcome for one thumbnail job.
+struct ThumbnailJobResult {
+    /// Input video file path.
+    video_file: PathBuf,
+    /// Formatted progress prefix for error reporting.
+    progress_prefix: String,
+    /// Outcome or failure error of generating the thumbnail.
+    outcome: Result<ThumbnailOutcome>,
+}
+
+/// Freshly probed video metadata waiting to be persisted in the shared scan cache.
+struct ProbedCacheEntry {
+    /// Video file path.
+    path: PathBuf,
+    /// Probed video metadata.
+    info: VideoInfo,
+    /// File fingerprint captured at probe time.
+    fingerprint: FileFingerprint,
+}
+
 /// Parameters for creating a thumbnail.
 #[derive(Debug)]
 struct ThumbnailParams {
@@ -136,31 +166,39 @@ impl ThumbnailCreator {
         let total_count = video_files.len();
         let progress_width = total_count.to_string().len();
         let output_paths = self.output_paths(&video_files)?;
-        let items: Vec<(usize, &PathBuf, &PathBuf)> = video_files
+        let items: Vec<ThumbnailJob<'_>> = video_files
             .iter()
             .zip(&output_paths)
             .enumerate()
-            .map(|(index, (video, output))| (index, video, output))
+            .map(|(index, (video_file, output_path))| ThumbnailJob {
+                index,
+                video_file,
+                output_path,
+            })
             .collect();
 
-        let newly_probed: Mutex<Vec<(PathBuf, VideoInfo, FileFingerprint)>> = Mutex::new(Vec::new());
-        let process_item = |(index, video_file, output_path): (usize, &PathBuf, &PathBuf)| {
+        let newly_probed: Mutex<Vec<ProbedCacheEntry>> = Mutex::new(Vec::new());
+        let process_item = |job: ThumbnailJob<'_>| {
             if abort_flag.load(Ordering::SeqCst) {
                 return None;
             }
-            let progress_prefix = Self::format_progress_prefix(index + 1, total_count, progress_width);
+            let progress_prefix = Self::format_progress_prefix(job.index + 1, total_count, progress_width);
             let outcome = self.create_thumbnail(
-                video_file,
-                output_path,
+                job.video_file,
+                job.output_path,
                 &cached_entries,
                 &newly_probed,
                 lock_store.as_ref(),
                 &progress_prefix,
             );
-            Some((video_file.clone(), progress_prefix, outcome))
+            Some(ThumbnailJobResult {
+                video_file: job.video_file.clone(),
+                progress_prefix,
+                outcome,
+            })
         };
 
-        let results: Vec<_> = if self.config.jobs > 1 && items.len() > 1 {
+        let results: Vec<ThumbnailJobResult> = if self.config.jobs > 1 && items.len() > 1 {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(self.config.jobs)
                 .build()
@@ -176,7 +214,7 @@ impl ThumbnailCreator {
         {
             let batch: Vec<(&Path, &VideoInfo, FileFingerprint)> = probed
                 .iter()
-                .map(|(path, info, fingerprint)| (path.as_path(), info, *fingerprint))
+                .map(|entry| (entry.path.as_path(), &entry.info, entry.fingerprint))
                 .collect();
             let _ = scan_cache.batch_upsert_with_fingerprints(&batch);
         }
@@ -185,14 +223,14 @@ impl ThumbnailCreator {
     }
 
     /// Print summary statistics for all thumbnail outcomes and return an error if every job failed.
-    fn report_run_summary(&self, results: Vec<(PathBuf, String, Result<ThumbnailOutcome>)>) -> Result<()> {
+    fn report_run_summary(&self, results: Vec<ThumbnailJobResult>) -> Result<()> {
         let mut success_count = 0usize;
         let mut skipped_count = 0usize;
         let mut error_count = 0usize;
         let mut stats = VideoStats::new();
 
-        for (video_file, progress_prefix, result) in results {
-            match result {
+        for job_result in results {
+            match job_result.outcome {
                 Ok(ThumbnailOutcome::CreatedOrPreviewed(video_info)) => {
                     if let Some(info) = video_info {
                         stats.add(&info);
@@ -204,8 +242,9 @@ impl ThumbnailCreator {
                 }
                 Err(error) => {
                     print_error!(
-                        "Failed to create thumbnail for {progress_prefix} {}: {error}",
-                        video_file.display()
+                        "Failed to create thumbnail for {} {}: {error}",
+                        job_result.progress_prefix,
+                        job_result.video_file.display()
                     );
                     error_count += 1;
                 }
@@ -300,7 +339,7 @@ impl ThumbnailCreator {
         video_path: &Path,
         output_path: &Path,
         cached_entries: &HashMap<String, CachedVideoInfo>,
-        newly_probed: &Mutex<Vec<(PathBuf, VideoInfo, FileFingerprint)>>,
+        newly_probed: &Mutex<Vec<ProbedCacheEntry>>,
         lock_store: Option<&ActiveLockStore>,
         progress_prefix: &str,
     ) -> Result<ThumbnailOutcome> {
@@ -354,7 +393,11 @@ impl ThumbnailCreator {
             if let Some(fingerprint) = fingerprint
                 && let Ok(mut pending) = newly_probed.lock()
             {
-                pending.push((video_path.to_path_buf(), info.clone(), fingerprint));
+                pending.push(ProbedCacheEntry {
+                    path: video_path.to_path_buf(),
+                    info: info.clone(),
+                    fingerprint,
+                });
             }
             info
         };

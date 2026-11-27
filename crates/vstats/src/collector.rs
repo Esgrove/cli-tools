@@ -28,6 +28,26 @@ struct ProbedFile {
     info: VideoInfo,
 }
 
+/// A cache-miss video file queued for ffprobe metadata extraction.
+struct ProbeCandidate {
+    /// Path to the video file.
+    path: PathBuf,
+    /// Display name (relative path or filename).
+    display_name: String,
+    /// Fingerprint captured before probing, when available.
+    fingerprint: Option<FileFingerprint>,
+}
+
+/// Freshly probed video metadata waiting to be written back to the scan cache.
+struct ProbedCacheEntry {
+    /// Path to the video file.
+    path: PathBuf,
+    /// Probed video metadata.
+    info: VideoInfo,
+    /// File fingerprint captured before probing.
+    fingerprint: FileFingerprint,
+}
+
 /// Result of probing one cache-miss file in parallel.
 struct ProbeAttempt {
     path: PathBuf,
@@ -195,7 +215,7 @@ fn probe_files_with_cache(files: Vec<PathBuf>, root: &Path, cache: Option<&mut S
         .unwrap_or_default();
 
     let mut probed_files = Vec::with_capacity(files.len());
-    let mut cache_misses: Vec<(PathBuf, String, Option<FileFingerprint>)> = Vec::new();
+    let mut cache_misses: Vec<ProbeCandidate> = Vec::new();
 
     for path in files {
         let name = cli_tools_common::get_relative_path_or_filename(&path, root);
@@ -209,7 +229,11 @@ fn probe_files_with_cache(files: Vec<PathBuf>, root: &Path, cache: Option<&mut S
                 info: cached.to_video_info(),
             });
         } else {
-            cache_misses.push((path, name, fingerprint));
+            cache_misses.push(ProbeCandidate {
+                path,
+                display_name: name,
+                fingerprint,
+            });
         }
     }
 
@@ -229,13 +253,13 @@ fn probe_files_with_cache(files: Vec<PathBuf>, root: &Path, cache: Option<&mut S
 
     let attempts: Vec<ProbeAttempt> = cache_misses
         .into_par_iter()
-        .map(|(path, name, fingerprint)| {
-            let result = VideoInfo::from_path(&path);
+        .map(|candidate| {
+            let result = VideoInfo::from_path(&candidate.path);
             progress_bar.inc(1);
             ProbeAttempt {
-                path,
-                name,
-                fingerprint,
+                path: candidate.path,
+                name: candidate.display_name,
+                fingerprint: candidate.fingerprint,
                 result,
             }
         })
@@ -243,13 +267,17 @@ fn probe_files_with_cache(files: Vec<PathBuf>, root: &Path, cache: Option<&mut S
     progress_bar.finish_and_clear();
 
     let mut error_count: usize = 0;
-    let mut newly_probed: Vec<(PathBuf, VideoInfo, FileFingerprint)> = Vec::new();
+    let mut newly_probed: Vec<ProbedCacheEntry> = Vec::new();
 
     for attempt in attempts {
         match attempt.result {
             Ok(info) => {
                 if let Some(fingerprint) = attempt.fingerprint {
-                    newly_probed.push((attempt.path, info.clone(), fingerprint));
+                    newly_probed.push(ProbedCacheEntry {
+                        path: attempt.path,
+                        info: info.clone(),
+                        fingerprint,
+                    });
                 }
                 probed_files.push(ProbedFile {
                     name: attempt.name,
@@ -268,7 +296,7 @@ fn probe_files_with_cache(files: Vec<PathBuf>, root: &Path, cache: Option<&mut S
     {
         let batch: Vec<(&Path, &VideoInfo, FileFingerprint)> = newly_probed
             .iter()
-            .map(|(path, info, fingerprint)| (path.as_path(), info, *fingerprint))
+            .map(|entry| (entry.path.as_path(), &entry.info, entry.fingerprint))
             .collect();
         let _ = scan_cache.batch_upsert_with_fingerprints(&batch);
     }

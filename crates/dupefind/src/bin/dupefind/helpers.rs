@@ -37,6 +37,24 @@ pub const HASH_PROGRESS_BAR_TEMPLATE: &str =
 #[cfg(not(test))]
 pub const SPINNER_TEMPLATE: &str = "[{elapsed_precise}] {spinner:.magenta} {msg} ({pos} files found)";
 
+/// Cache-miss video file queued for parallel metadata probing.
+struct ProbeCandidate {
+    /// Path to the video file.
+    path: PathBuf,
+    /// File fingerprint captured before probing, when available.
+    fingerprint: Option<FileFingerprint>,
+}
+
+/// Probed video metadata paired with its path and optional cache fingerprint.
+struct ProbedMetadata {
+    /// Path to the video file.
+    path: PathBuf,
+    /// Probed video metadata.
+    info: VideoInfo,
+    /// File fingerprint captured before probing, when available.
+    fingerprint: Option<FileFingerprint>,
+}
+
 /// Remove stale scan and file-hash cache entries whose files no longer exist on mounted volumes.
 pub fn clean_cache(verbose: bool) -> Result<()> {
     let mut cache = ScanCache::open()?;
@@ -114,7 +132,7 @@ fn collect_metadata_for_groups_with_cache(
         .unwrap_or_default();
 
     let mut metadata: HashMap<PathBuf, VideoInfo> = HashMap::new();
-    let mut cache_misses: Vec<(PathBuf, Option<FileFingerprint>)> = Vec::new();
+    let mut cache_misses: Vec<ProbeCandidate> = Vec::new();
 
     for path in &all_files {
         let fingerprint = fingerprint_file(path).ok();
@@ -124,7 +142,10 @@ fn collect_metadata_for_groups_with_cache(
         {
             metadata.insert(path.clone(), cached.to_video_info());
         } else {
-            cache_misses.push((path.clone(), fingerprint));
+            cache_misses.push(ProbeCandidate {
+                path: path.clone(),
+                fingerprint,
+            });
         }
     }
 
@@ -143,15 +164,18 @@ fn collect_metadata_for_groups_with_cache(
         if let Some(mut cache) = scan_cache {
             let entries: Vec<(&Path, &VideoInfo, FileFingerprint)> = probed
                 .iter()
-                .filter_map(|(path, info, fingerprint)| fingerprint.map(|fp| (path.as_path(), info, fp)))
+                .filter_map(|item| {
+                    item.fingerprint
+                        .map(|fingerprint| (item.path.as_path(), &item.info, fingerprint))
+                })
                 .collect();
             if let Err(error) = cache.batch_upsert_with_fingerprints(&entries) {
                 print_yellow!("Failed to write scan cache: {error}");
             }
         }
 
-        for (path, info, _) in probed {
-            metadata.insert(path, info);
+        for item in probed {
+            metadata.insert(item.path, item.info);
         }
     }
 
@@ -318,9 +342,7 @@ fn flush_hash_checkpoint(hash_cache: Option<&mut ScanCache>, buffer: &mut Vec<Ca
 }
 
 /// Collect video metadata in parallel using Rayon.
-fn collect_metadata_parallel(
-    files: Vec<(PathBuf, Option<FileFingerprint>)>,
-) -> Vec<(PathBuf, VideoInfo, Option<FileFingerprint>)> {
+fn collect_metadata_parallel(files: Vec<ProbeCandidate>) -> Vec<ProbedMetadata> {
     #[cfg(not(test))]
     let progress_bar = {
         let progress_bar = ProgressBar::new(files.len() as u64);
@@ -335,13 +357,17 @@ fn collect_metadata_parallel(
     #[cfg(test)]
     let progress_bar = ProgressBar::hidden();
 
-    let results: Vec<(PathBuf, VideoInfo, Option<FileFingerprint>)> = files
+    let results: Vec<ProbedMetadata> = files
         .into_par_iter()
-        .filter_map(|(path, fingerprint)| {
-            let result = VideoInfo::from_path(&path);
+        .filter_map(|candidate| {
+            let result = VideoInfo::from_path(&candidate.path);
             progress_bar.inc(1);
             match result {
-                Ok(info) => Some((path, info, fingerprint)),
+                Ok(info) => Some(ProbedMetadata {
+                    path: candidate.path,
+                    info,
+                    fingerprint: candidate.fingerprint,
+                }),
                 Err(error) => {
                     eprintln!("Error: {error}");
                     None
