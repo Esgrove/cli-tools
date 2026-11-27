@@ -1,18 +1,27 @@
 //! Main application logic for the system tray.
 //!
-//! This module handles the tray icon, menu creation,
-//! and event loop for the filefind tray application.
+//! This module handles the tray icon, menu creation, background IPC worker,
+//! and platform-native event loops for the filefind tray application.
 
 #[cfg(windows)]
 use std::ffi::OsStr;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2::rc::autoreleasepool;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
 use tracing::{error, info, trace, warn};
 use tray_icon::menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
@@ -37,8 +46,27 @@ mod menu_ids {
     pub const QUIT: &str = "quit";
 }
 
+/// Polling interval for daemon status checks on the background worker thread.
 const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Short delay after issuing Start or Stop before polling status again.
 const WAIT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Event loop pump slice so menu and status updates stay responsive without busy-spinning.
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Commands sent from the UI event loop to the background IPC worker thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerCommand {
+    /// Launch the daemon process.
+    Start,
+    /// Send a Stop IPC request to the running daemon.
+    Stop,
+    /// Send a Rescan IPC request to the running daemon.
+    Rescan,
+    /// Shut down the background worker thread.
+    Shutdown,
+}
 
 /// Holds references to menu items that need dynamic state updates.
 struct MenuItems {
@@ -48,160 +76,249 @@ struct MenuItems {
     rescan: MenuItem,
 }
 
-/// Run the tray application.
+/// Run the tray application on the platform-native event loop.
 ///
-/// This function does not return under normal operation as it runs the event loop.
+/// This function does not return under normal operation until the user selects Quit.
+/// Quitting closes only the tray application and leaves any running daemon intact.
 pub fn run() -> Result<()> {
     info!("Starting tray application");
 
-    // Create the tray icon (must be done on the thread with the event loop)
-    let (tray_icon, menu_items) = create_tray_icon()?;
+    #[cfg(target_os = "macos")]
+    {
+        run_macos()
+    }
 
-    // Create IPC client for daemon communication
-    let ipc_client = IpcClient::new();
-
-    // Track if we should quit
-    let should_quit = AtomicBool::new(false);
-
-    // Track previous state for change detection
-    let mut previous_state: Option<DaemonStateInfo> = None;
-
-    // Initial status update
-    info!("Checking initial daemon status...");
-    previous_state = update_tray_status(&tray_icon, &menu_items, &ipc_client, previous_state);
-
-    // Subscribe to menu events
-    let menu_channel = MenuEvent::receiver();
-
-    // Track last status update time
-    let mut last_update = std::time::Instant::now();
-
-    // Run the Windows message loop
     #[cfg(windows)]
-    #[allow(unsafe_code)]
     {
-        let mut msg: MSG = unsafe { std::mem::zeroed() };
-
-        loop {
-            // Check for quit signal
-            if should_quit.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // Periodically update status
-            if last_update.elapsed() >= UPDATE_INTERVAL {
-                previous_state = update_tray_status(&tray_icon, &menu_items, &ipc_client, previous_state);
-                last_update = std::time::Instant::now();
-            }
-
-            // Handle menu events (non-blocking)
-            if let Ok(event) = menu_channel.try_recv() {
-                handle_menu_event(&event.id.0, &tray_icon, &menu_items, &ipc_client, &should_quit);
-            }
-
-            // Process all pending Windows messages without blocking.
-            // Using PeekMessageW instead of GetMessageW
-            // so the loop can continue to poll daemon status even when no messages arrive.
-            // SAFETY: PeekMessageW is safe to call with valid pointers
-            while unsafe { PeekMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
-                if msg.message == WM_QUIT {
-                    should_quit.store(true, Ordering::Relaxed);
-                    break;
-                }
-
-                // SAFETY: TranslateMessage and DispatchMessageW are safe with valid MSG
-                unsafe {
-                    TranslateMessage(&raw const msg);
-                    DispatchMessageW(&raw const msg);
-                }
-            }
-
-            if should_quit.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // Sleep briefly to avoid busy-looping
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        run_windows()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
-        // Non-Windows: simple polling loop
-        loop {
-            if should_quit.load(Ordering::Relaxed) {
-                break;
+        run_gtk()
+    }
+}
+
+/// Run the macOS menu-bar application on the main-thread `AppKit` event loop.
+///
+/// Initializes `NSApplication` with an accessory activation policy (no Dock icon)
+/// and calls `finishLaunching` before creating the status item so fullscreen spaces
+/// and `AppKit` menus behave correctly.
+#[cfg(target_os = "macos")]
+fn run_macos() -> Result<()> {
+    let main_thread = MainThreadMarker::new().context("filefind-tray must run on the main thread")?;
+    let application = NSApplication::sharedApplication(main_thread);
+    application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    application.finishLaunching();
+
+    let (tray_icon, menu_items) = create_tray_icon()?;
+    let (command_sender, status_receiver) = spawn_ipc_worker();
+    let menu_channel = MenuEvent::receiver();
+    let mut previous_state: Option<DaemonStateInfo> = None;
+    let mut should_quit = false;
+
+    while !should_quit {
+        autoreleasepool(|_| {
+            drain_status_updates(&status_receiver, &tray_icon, &menu_items, &mut previous_state);
+            if drain_menu_events(menu_channel, &command_sender) {
+                should_quit = true;
+                return;
             }
 
-            // Periodically update status
-            if last_update.elapsed() >= UPDATE_INTERVAL {
-                previous_state = update_tray_status(&tray_icon, &menu_items, &ipc_client, previous_state);
-                last_update = std::time::Instant::now();
+            let until = NSDate::dateWithTimeIntervalSinceNow(EVENT_POLL_INTERVAL.as_secs_f64());
+            // SAFETY: `NSDefaultRunLoopMode` is an immutable AppKit/Foundation constant on the main thread.
+            #[allow(unsafe_code)]
+            let mode = unsafe { NSDefaultRunLoopMode };
+            if let Some(event) =
+                application.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, Some(&until), mode, true)
+            {
+                application.sendEvent(&event);
+                application.updateWindows();
             }
-
-            // Handle menu events
-            if let Ok(event) = menu_channel.try_recv() {
-                handle_menu_event(&event.id.0, &tray_icon, &menu_items, &ipc_client, &should_quit);
-            }
-
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        });
     }
 
+    let _ = command_sender.send(WorkerCommand::Shutdown);
+    drop(tray_icon);
     Ok(())
 }
 
-/// Handle a menu event.
-fn handle_menu_event(
-    menu_id: &str,
-    tray_icon: &TrayIcon,
-    menu_items: &MenuItems,
-    ipc_client: &IpcClient,
-    quit_flag: &AtomicBool,
-) {
-    match menu_id {
-        menu_ids::START => {
-            info!("Starting daemon...");
-            if let Err(error) = start_daemon() {
-                error!("Failed to start daemon: {}", error);
-            }
-            // Update status after a short delay
-            std::thread::sleep(WAIT_INTERVAL);
-            update_tray_status(tray_icon, menu_items, ipc_client, None);
-        }
-        menu_ids::STOP => {
-            info!("Stopping daemon...");
-            match ipc_client.stop_daemon() {
-                Ok(()) => info!("Stop command sent successfully"),
-                Err(error) => error!("Failed to stop daemon: {}", error),
-            }
-            // Update status after a short delay
-            std::thread::sleep(WAIT_INTERVAL);
-            update_tray_status(tray_icon, menu_items, ipc_client, None);
-        }
-        menu_ids::RESCAN => {
-            info!("Triggering rescan...");
-            match ipc_client.rescan() {
-                Ok(()) => info!("Rescan command sent successfully"),
-                Err(error) => error!("Failed to trigger rescan: {}", error),
-            }
-        }
-        menu_ids::QUIT => {
-            info!("Quitting tray application");
-            quit_flag.store(true, Ordering::Relaxed);
+/// Run the Windows system tray message pump.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn run_windows() -> Result<()> {
+    let (tray_icon, menu_items) = create_tray_icon()?;
+    let (command_sender, status_receiver) = spawn_ipc_worker();
+    let menu_channel = MenuEvent::receiver();
+    let mut previous_state: Option<DaemonStateInfo> = None;
+    let mut should_quit = false;
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
 
-            #[cfg(windows)]
-            #[allow(unsafe_code)]
-            {
-                // Post WM_QUIT to exit the message loop
-                // SAFETY: PostQuitMessage is always safe to call
-                unsafe {
-                    PostQuitMessage(0);
+    while !should_quit {
+        drain_status_updates(&status_receiver, &tray_icon, &menu_items, &mut previous_state);
+        if drain_menu_events(menu_channel, &command_sender) {
+            should_quit = true;
+            // SAFETY: PostQuitMessage is always safe to call on the UI thread.
+            unsafe {
+                PostQuitMessage(0);
+            }
+        }
+
+        // SAFETY: PeekMessageW, TranslateMessage, and DispatchMessageW operate on a valid MSG struct.
+        while unsafe { PeekMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            if msg.message == WM_QUIT {
+                should_quit = true;
+                break;
+            }
+
+            unsafe {
+                TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
+            }
+        }
+
+        if !should_quit {
+            std::thread::sleep(EVENT_POLL_INTERVAL);
+        }
+    }
+
+    let _ = command_sender.send(WorkerCommand::Shutdown);
+    drop(tray_icon);
+    Ok(())
+}
+
+/// Run the Linux/BSD AppIndicator tray application on the GTK event loop.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn run_gtk() -> Result<()> {
+    gtk::init().context("Failed to initialize GTK (is a graphical display session available?)")?;
+
+    let (tray_icon, menu_items) = create_tray_icon()?;
+    let (command_sender, status_receiver) = spawn_ipc_worker();
+    let menu_channel = MenuEvent::receiver();
+    let mut previous_state: Option<DaemonStateInfo> = None;
+    let mut should_quit = false;
+
+    while !should_quit {
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+
+        drain_status_updates(&status_receiver, &tray_icon, &menu_items, &mut previous_state);
+        if drain_menu_events(menu_channel, &command_sender) {
+            should_quit = true;
+            break;
+        }
+
+        std::thread::sleep(EVENT_POLL_INTERVAL);
+    }
+
+    let _ = command_sender.send(WorkerCommand::Shutdown);
+    drop(tray_icon);
+    Ok(())
+}
+
+/// Spawn a background worker thread that handles all synchronous IPC polling and daemon commands.
+fn spawn_ipc_worker() -> (Sender<WorkerCommand>, Receiver<DaemonStatus>) {
+    let (command_sender, command_receiver) = mpsc::channel::<WorkerCommand>();
+    let (status_sender, status_receiver) = mpsc::channel::<DaemonStatus>();
+
+    std::thread::Builder::new()
+        .name("tray-ipc-worker".to_string())
+        .spawn(move || {
+            let ipc_client = IpcClient::new();
+            info!("Checking initial daemon status...");
+            if status_sender.send(get_daemon_status(&ipc_client)).is_err() {
+                return;
+            }
+
+            loop {
+                match command_receiver.recv_timeout(UPDATE_INTERVAL) {
+                    Ok(WorkerCommand::Start) => {
+                        info!("Starting daemon...");
+                        if let Err(error) = start_daemon() {
+                            error!("Failed to start daemon: {error:#}");
+                        }
+                        std::thread::sleep(WAIT_INTERVAL);
+                        if status_sender.send(get_daemon_status(&ipc_client)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(WorkerCommand::Stop) => {
+                        info!("Stopping daemon...");
+                        match ipc_client.stop_daemon() {
+                            Ok(()) => info!("Stop command sent successfully"),
+                            Err(error) => error!("Failed to stop daemon: {error:#}"),
+                        }
+                        std::thread::sleep(WAIT_INTERVAL);
+                        if status_sender.send(get_daemon_status(&ipc_client)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(WorkerCommand::Rescan) => {
+                        info!("Triggering rescan...");
+                        match ipc_client.rescan() {
+                            Ok(()) => info!("Rescan command sent successfully"),
+                            Err(error) => error!("Failed to trigger rescan: {error:#}"),
+                        }
+                        if status_sender.send(get_daemon_status(&ipc_client)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(WorkerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if status_sender.send(get_daemon_status(&ipc_client)).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
-        }
-        _ => {}
+        })
+        .expect("Failed to spawn tray IPC worker thread");
+
+    (command_sender, status_receiver)
+}
+
+/// Drain pending daemon status snapshots from the worker and apply the latest one to the UI.
+fn drain_status_updates(
+    status_receiver: &Receiver<DaemonStatus>,
+    tray_icon: &TrayIcon,
+    menu_items: &MenuItems,
+    previous_state: &mut Option<DaemonStateInfo>,
+) {
+    let mut latest = None;
+    while let Ok(status) = status_receiver.try_recv() {
+        latest = Some(status);
     }
+    if let Some(status) = latest {
+        *previous_state = apply_tray_status(tray_icon, menu_items, &status, *previous_state);
+    }
+}
+
+/// Drain pending menu events, dispatching daemon commands to the worker and returning true on Quit.
+fn drain_menu_events(
+    menu_channel: &tray_icon::menu::MenuEventReceiver,
+    command_sender: &Sender<WorkerCommand>,
+) -> bool {
+    let mut quit_requested = false;
+    while let Ok(event) = menu_channel.try_recv() {
+        match event.id.0.as_str() {
+            menu_ids::START => {
+                let _ = command_sender.send(WorkerCommand::Start);
+            }
+            menu_ids::STOP => {
+                let _ = command_sender.send(WorkerCommand::Stop);
+            }
+            menu_ids::RESCAN => {
+                let _ = command_sender.send(WorkerCommand::Rescan);
+            }
+            menu_ids::QUIT => {
+                info!("Quitting tray application");
+                quit_requested = true;
+            }
+            _ => {}
+        }
+    }
+    quit_requested
 }
 
 /// Create the tray icon with menu.
@@ -243,10 +360,10 @@ fn create_menu() -> Result<(Menu, MenuItems)> {
             name: Some("Filefind".to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             authors: Some(vec!["Esgrove".to_string()]),
-            comments: Some("Fast file indexing and search for Windows".to_string()),
+            comments: Some("Fast file indexing and search".to_string()),
             copyright: Some("MIT License".to_string()),
             license: Some("MIT".to_string()),
-            website: Some("https://github.com/Esgrove/filefind".to_string()),
+            website: Some("https://github.com/Esgrove/cli-tools".to_string()),
             website_label: Some("GitHub".to_string()),
             ..Default::default()
         }),
@@ -272,25 +389,30 @@ fn create_menu() -> Result<(Menu, MenuItems)> {
     Ok((menu, menu_items))
 }
 
-/// Update the tray icon, tooltip, and menu status based on daemon status.
-///
-/// Returns the current state for tracking state changes.
+/// Compute `(start_enabled, stop_enabled, rescan_enabled)` for a daemon state.
+const fn menu_enabled_states(state: DaemonStateInfo) -> (bool, bool, bool) {
+    match state {
+        DaemonStateInfo::Stopped => (true, false, false),
+        DaemonStateInfo::Running => (false, true, true),
+        DaemonStateInfo::Scanning => (false, true, false),
+        DaemonStateInfo::Starting | DaemonStateInfo::Stopping => (false, false, false),
+    }
+}
+
+/// Apply a daemon status snapshot to the tray icon, tooltip, and menu items on the UI thread.
 #[allow(clippy::unnecessary_wraps)]
-fn update_tray_status(
+fn apply_tray_status(
     tray_icon: &TrayIcon,
     menu_items: &MenuItems,
-    ipc_client: &IpcClient,
+    status: &DaemonStatus,
     previous_state: Option<DaemonStateInfo>,
 ) -> Option<DaemonStateInfo> {
-    let status = get_daemon_status(ipc_client);
     let current_state = status.state;
 
-    // Log state changes
     match previous_state {
         None => {
-            // First successful status check
             info!(
-                "Connected to daemon: state={current_state:?}, files={}, directories={}",
+                "Daemon status initialized: state={current_state:?}, files={}, directories={}",
                 format_number(status.indexed_files),
                 format_number(status.indexed_directories)
             );
@@ -303,7 +425,6 @@ fn update_tray_status(
             );
         }
         _ => {
-            // No state change, log at trace level
             trace!(
                 "Status update: {current_state:?}, files={}, directories={}",
                 status.indexed_files, status.indexed_directories
@@ -311,7 +432,6 @@ fn update_tray_status(
         }
     }
 
-    // Update icon based on state
     let icon = match current_state {
         DaemonStateInfo::Running => icons::create_running_icon(),
         DaemonStateInfo::Scanning => icons::create_scanning_icon(),
@@ -323,21 +443,13 @@ fn update_tray_status(
         let _ = tray_icon.set_icon(Some(icon));
     }
 
-    // Update tooltip
-    let tooltip = format_status_tooltip(&status);
+    let tooltip = format_status_tooltip(status);
     let _ = tray_icon.set_tooltip(Some(tooltip));
 
-    // Update menu status item
-    let status_text = format_status_menu_text(&status);
+    let status_text = format_status_menu_text(status);
     menu_items.status.set_text(status_text);
 
-    // Enable/disable menu items based on daemon state
-    let (start_enabled, stop_enabled, rescan_enabled) = match current_state {
-        DaemonStateInfo::Stopped => (true, false, false),
-        DaemonStateInfo::Running => (false, true, true),
-        DaemonStateInfo::Scanning => (false, true, false),
-        DaemonStateInfo::Starting | DaemonStateInfo::Stopping => (false, false, false),
-    };
+    let (start_enabled, stop_enabled, rescan_enabled) = menu_enabled_states(current_state);
     menu_items.start.set_enabled(start_enabled);
     menu_items.stop.set_enabled(stop_enabled);
     menu_items.rescan.set_enabled(rescan_enabled);
@@ -389,24 +501,32 @@ fn format_status_tooltip(status: &DaemonStatus) -> String {
     }
 }
 
-/// Start the daemon process with elevated privileges.
+/// Resolve the sibling `filefindd` binary next to `current_exe`, falling back to `PATH`.
+fn resolve_daemon_executable(current_exe: Option<&Path>) -> PathBuf {
+    let binary_name = if cfg!(windows) { "filefindd.exe" } else { "filefindd" };
+    if let Some(exe) = current_exe {
+        let sibling = exe.with_file_name(binary_name);
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    PathBuf::from(binary_name)
+}
+
+/// Start the daemon process with elevated privileges on Windows.
 ///
-/// On Windows, uses `ShellExecuteW` with the `runas` verb to request UAC elevation
-/// so the daemon has administrator rights for MFT/USN Journal access.
-/// The daemon is started with `filefindd start` (without `-f`)
-/// so it handles its own background spawning with `CREATE_NO_WINDOW`, avoiding any visible terminal window.
-///
-/// If the tray app is already running as administrator, no UAC prompt is shown.
+/// Uses `ShellExecuteW` with the `runas` verb to request UAC elevation
+/// so the daemon has administrator rights for MFT and USN Journal access.
+/// The daemon is started with `filefindd start` so it spawns detached without a console window.
 #[cfg(windows)]
 fn start_daemon() -> Result<()> {
     /// Encode an `OsStr` as a null-terminated UTF-16 vector for Windows API calls.
-    fn to_wide(s: &OsStr) -> Vec<u16> {
-        s.encode_wide().chain(std::iter::once(0)).collect()
+    fn to_wide(text: &OsStr) -> Vec<u16> {
+        text.encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    let exe_path = std::env::current_exe()
-        .context("Failed to get current executable path")?
-        .with_file_name("filefindd.exe");
+    let current_exe = std::env::current_exe().context("Failed to get current executable path")?;
+    let exe_path = resolve_daemon_executable(Some(&current_exe));
 
     let verb = to_wide(OsStr::new("runas"));
     let file = to_wide(exe_path.as_os_str());
@@ -417,30 +537,31 @@ fn start_daemon() -> Result<()> {
     #[allow(unsafe_code)]
     let result = unsafe {
         ShellExecuteW(
-            std::ptr::null_mut(), // hwnd
-            verb.as_ptr(),        // lpOperation ("runas" for elevation)
-            file.as_ptr(),        // lpFile
-            params.as_ptr(),      // lpParameters
-            std::ptr::null(),     // lpDirectory
-            SW_HIDE,              // nShowCmd (hide the intermediate process window)
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            std::ptr::null(),
+            SW_HIDE,
         )
     };
 
-    // ShellExecuteW returns a value > 32 on success
     if (result as usize) <= 32 {
-        anyhow::bail!("ShellExecuteW failed with code {result:?} — UAC prompt may have been declined");
+        anyhow::bail!("ShellExecuteW failed with code {result:?}, UAC prompt may have been declined");
     }
 
     Ok(())
 }
 
-/// Start the daemon process (non-Windows).
+/// Start the daemon process on Unix using the sibling `filefindd` binary when present.
 #[cfg(not(windows))]
 fn start_daemon() -> Result<()> {
-    Command::new("filefindd")
+    let current_exe = std::env::current_exe().ok();
+    let daemon_path = resolve_daemon_executable(current_exe.as_deref());
+    Command::new(&daemon_path)
         .arg("start")
         .spawn()
-        .context("Failed to start daemon process")?;
+        .with_context(|| format!("Failed to start daemon process {}", daemon_path.display()))?;
 
     Ok(())
 }
@@ -490,8 +611,6 @@ mod tests {
         assert!(tooltip.contains("Scanning"));
         assert!(tooltip.contains("5,000"));
     }
-
-    // ── format_status_menu_text ───────────────────────────────────
 
     #[test]
     fn test_format_status_menu_text_stopped() {
@@ -556,8 +675,6 @@ mod tests {
         assert!(text.contains("0 files"));
     }
 
-    // ── format_status_tooltip additional ──────────────────────────
-
     #[test]
     fn test_format_status_tooltip_starting() {
         let status = DaemonStatus {
@@ -576,5 +693,50 @@ mod tests {
         };
         let tooltip = format_status_tooltip(&status);
         assert_eq!(tooltip, "Filefind - Stopping...");
+    }
+}
+
+#[cfg(test)]
+mod test_tray_state_and_daemon_lookup {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn menu_enabled_states_match_every_daemon_lifecycle_state() {
+        assert_eq!(menu_enabled_states(DaemonStateInfo::Stopped), (true, false, false));
+        assert_eq!(menu_enabled_states(DaemonStateInfo::Starting), (false, false, false));
+        assert_eq!(menu_enabled_states(DaemonStateInfo::Running), (false, true, true));
+        assert_eq!(menu_enabled_states(DaemonStateInfo::Scanning), (false, true, false));
+        assert_eq!(menu_enabled_states(DaemonStateInfo::Stopping), (false, false, false));
+    }
+
+    #[test]
+    fn resolve_daemon_executable_prefers_sibling_binary_and_falls_back_to_path() {
+        let temp = tempdir().unwrap();
+        let tray_exe = temp.path().join(if cfg!(windows) {
+            "filefind-tray.exe"
+        } else {
+            "filefind-tray"
+        });
+        let daemon_exe = temp
+            .path()
+            .join(if cfg!(windows) { "filefindd.exe" } else { "filefindd" });
+
+        // Without a sibling binary, falls back to bare name on PATH.
+        assert_eq!(
+            resolve_daemon_executable(Some(&tray_exe)),
+            PathBuf::from(if cfg!(windows) { "filefindd.exe" } else { "filefindd" })
+        );
+
+        // When sibling filefindd exists, resolves directly to its absolute path.
+        fs::write(&daemon_exe, "").unwrap();
+        assert_eq!(resolve_daemon_executable(Some(&tray_exe)), daemon_exe);
+        assert_eq!(
+            resolve_daemon_executable(None),
+            PathBuf::from(if cfg!(windows) { "filefindd.exe" } else { "filefindd" })
+        );
     }
 }

@@ -33,5 +33,16 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSEvent", "NSRunningApplication"] }
+objc2-foundation = { workspace = true, features = ["NSDate", "NSRunLoop", "NSString", "NSThread"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+gtk = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

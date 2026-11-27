@@ -6,9 +6,13 @@
 mod app;
 mod icons;
 
+#[cfg(not(windows))]
+use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::process::Command;
+#[cfg(not(windows))]
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -23,6 +27,22 @@ use windows_sys::Win32::System::Console::GetConsoleWindow;
 use cli_tools_common::generate_shell_completion;
 use filefind_common::{LogLevel, get_log_directory};
 
+/// Subcommands for the filefind tray application.
+#[derive(Debug, Subcommand)]
+pub enum TrayCommand {
+    /// Generate shell completion scripts
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: Shell,
+
+        /// Install the completion script to the appropriate location
+        #[arg(short = 'I', long)]
+        install: bool,
+    },
+}
+
+/// Command-line arguments for the filefind tray application.
 #[derive(Parser)]
 #[command(
     about,
@@ -30,7 +50,6 @@ use filefind_common::{LogLevel, get_log_directory};
     name = env!("CARGO_BIN_NAME"),
     version,
 )]
-/// Command-line arguments for the filefind tray application.
 pub struct TrayArgs {
     /// Subcommand to run
     #[command(subcommand)]
@@ -47,21 +66,6 @@ pub struct TrayArgs {
     /// Enable verbose logging (shortcut for --log debug)
     #[arg(short, long, global = true)]
     verbose: bool,
-}
-
-/// Subcommands for the filefind tray application.
-#[derive(Debug, Subcommand)]
-pub enum TrayCommand {
-    /// Generate shell completion scripts
-    Completion {
-        /// Shell to generate completion for
-        #[arg(value_enum)]
-        shell: Shell,
-
-        /// Install the completion script to the appropriate location
-        #[arg(short = 'I', long)]
-        install: bool,
-    },
 }
 
 fn main() -> Result<()> {
@@ -140,6 +144,18 @@ fn has_console() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
+/// Build the command-line arguments forwarded to a detached background tray process.
+fn build_background_tray_args(args: &TrayArgs) -> Vec<String> {
+    let mut forwarded = Vec::new();
+    if let Some(level) = args.log_level {
+        forwarded.push("--log".to_string());
+        forwarded.push(level.as_filter_str().to_string());
+    } else if args.verbose {
+        forwarded.push("--verbose".to_string());
+    }
+    forwarded
+}
+
 /// Spawn the tray app as a detached background process.
 #[cfg(windows)]
 fn spawn_background_tray(args: &TrayArgs) -> Result<()> {
@@ -150,28 +166,28 @@ fn spawn_background_tray(args: &TrayArgs) -> Result<()> {
     let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
 
     let mut command = Command::new(&exe_path);
-    if let Some(level) = args.log_level {
-        command.arg("--log").arg(level.as_filter_str());
-    } else if args.verbose {
-        command.arg("--verbose");
-    }
+    command.args(build_background_tray_args(args));
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     command.spawn().context("Failed to spawn background tray process")?;
 
     Ok(())
 }
 
-/// Spawn the tray app as a detached background process (non-Windows).
+/// Spawn the tray app as a detached background process (Unix).
+///
+/// Detaches standard streams so the child's `has_console()` check returns `false`
+/// and it starts the native tray loop instead of respawning again.
 #[cfg(not(windows))]
 fn spawn_background_tray(args: &TrayArgs) -> Result<()> {
     let exe_path = std::env::current_exe().context("Failed to get current executable path")?;
 
     let mut command = Command::new(&exe_path);
-    if let Some(level) = args.log_level {
-        command.arg("--log").arg(level.as_filter_str());
-    } else if args.verbose {
-        command.arg("--verbose");
-    }
+    command
+        .args(build_background_tray_args(args))
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     command.spawn().context("Failed to spawn background tray process")?;
 
     Ok(())
@@ -445,5 +461,24 @@ mod tests {
     #[test]
     fn test_command_factory_debug_assert() {
         TrayArgs::command().debug_assert();
+    }
+}
+
+#[cfg(test)]
+mod test_background_launch_args {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn forwards_log_level_or_verbose_without_foreground_flag() {
+        let default_args = TrayArgs::try_parse_from(["filefind-tray"]).unwrap();
+        assert_eq!(build_background_tray_args(&default_args), Vec::<String>::new());
+
+        let verbose_args = TrayArgs::try_parse_from(["filefind-tray", "-v"]).unwrap();
+        assert_eq!(build_background_tray_args(&verbose_args), vec!["--verbose"]);
+
+        let level_args = TrayArgs::try_parse_from(["filefind-tray", "--log", "warn", "-v"]).unwrap();
+        assert_eq!(build_background_tray_args(&level_args), vec!["--log", "warn"]);
     }
 }
