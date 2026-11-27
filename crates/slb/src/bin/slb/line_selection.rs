@@ -44,6 +44,32 @@ impl LineSpec {
     }
 }
 
+impl FromStr for LineSpec {
+    type Err = String;
+
+    /// Parse one `--lines` value.
+    ///
+    /// A part is either a plain line or range such as "10" or "10-25",
+    /// or a path followed by a line, such as "src/main.rs:14" or "src/main.rs:14-20".
+    /// A column after the line is accepted and ignored,
+    /// so a location copied straight out of the violation report can be pasted back in.
+    ///
+    /// Commas separate the parts, and a part without a path belongs to the file the part before it named,
+    /// so "src/main.rs:14,20" selects two lines of one file and the path only has to be written once.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let mut parts = Vec::new();
+        let mut named_file: Option<String> = None;
+        for part in text.split(',') {
+            let (path, ranges) = split_spec(part)?;
+            if let Some(path) = path {
+                named_file = Some(path.to_string());
+            }
+            parts.push((named_file.clone(), ranges));
+        }
+        Ok(Self { parts })
+    }
+}
+
 impl LineSelection {
     /// Build the selection from the `--lines` values.
     ///
@@ -145,32 +171,6 @@ impl LineSelection {
             None => self.per_file.push((resolved, ranges)),
         }
         Ok(())
-    }
-}
-
-impl FromStr for LineSpec {
-    type Err = String;
-
-    /// Parse one `--lines` value.
-    ///
-    /// A part is either a plain line or range such as "10" or "10-25",
-    /// or a path followed by a line, such as "src/main.rs:14" or "src/main.rs:14-20".
-    /// A column after the line is accepted and ignored,
-    /// so a location copied straight out of the violation report can be pasted back in.
-    ///
-    /// Commas separate the parts, and a part without a path belongs to the file the part before it named,
-    /// so "src/main.rs:14,20" selects two lines of one file and the path only has to be written once.
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let mut parts = Vec::new();
-        let mut named_file: Option<String> = None;
-        for part in text.split(',') {
-            let (path, ranges) = split_spec(part)?;
-            if let Some(path) = path {
-                named_file = Some(path.to_string());
-            }
-            parts.push((named_file.clone(), ranges));
-        }
-        Ok(Self { parts })
     }
 }
 

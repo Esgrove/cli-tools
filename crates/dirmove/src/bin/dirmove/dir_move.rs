@@ -83,26 +83,6 @@ impl DirMove {
         Ok(dirmove)
     }
 
-    /// Run the configured operations in the standard `dirmove` order.
-    ///
-    /// Existing maintenance steps run first, then whole-directory merge offers are made
-    /// before normal file-to-directory matching.
-    /// Create mode runs last and uses the first output root for newly-created directories.
-    pub fn run(&mut self) -> anyhow::Result<()> {
-        // Unwanted directories are deleted and unpack directories unpacked in a single directory walk.
-        self.unpack_directories()?;
-        self.merge_prefixed_directories()?;
-        let directories = self.collect_directories()?;
-        self.update_database_with_directories(&directories);
-        self.move_files_to_dir_with_directories(&directories)?;
-
-        if self.config.create {
-            self.create_dirs_and_move_files()?;
-        }
-
-        Ok(())
-    }
-
     /// Create a `DirMove` from resolved roots and open the default database.
     ///
     /// A dry run never writes to the database, so it only opens a database that already exists.
@@ -124,6 +104,26 @@ impl DirMove {
             config,
             database,
         }
+    }
+
+    /// Run the configured operations in the standard `dirmove` order.
+    ///
+    /// Existing maintenance steps run first, then whole-directory merge offers are made
+    /// before normal file-to-directory matching.
+    /// Create mode runs last and uses the first output root for newly-created directories.
+    pub fn run(&mut self) -> anyhow::Result<()> {
+        // Unwanted directories are deleted and unpack directories unpacked in a single directory walk.
+        self.unpack_directories()?;
+        self.merge_prefixed_directories()?;
+        let directories = self.collect_directories()?;
+        self.update_database_with_directories(&directories);
+        self.move_files_to_dir_with_directories(&directories)?;
+
+        if self.config.create {
+            self.create_dirs_and_move_files()?;
+        }
+
+        Ok(())
     }
 
     /// Return the scanner for the configured roots.

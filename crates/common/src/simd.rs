@@ -115,6 +115,26 @@ impl ByteSet {
     }
 }
 
+impl ByteClass for ByteSet {
+    #[allow(
+        clippy::inline_always,
+        reason = "inlining into the #[simd] caller gives it the caller's target features"
+    )]
+    #[inline(always)]
+    fn vector<S: Simd, V: SimdInt<S, Element = u8>>(&self, simd: S, block: V) -> V::Mask {
+        let low_table = V::block_splat(V::Block::from_slice(simd, &self.low));
+        let high_table = V::block_splat(V::Block::from_slice(simd, &self.high));
+        let low_bits = low_table.swizzle_dyn_within_blocks((block & 0x0F).to_bytes());
+        let high_bits = high_table.swizzle_dyn_within_blocks(((block >> 4) & 0x0F).to_bytes());
+        (low_bits & high_bits).simd_ne(0)
+    }
+
+    #[inline]
+    fn scalar_bits(&self, bytes: &[u8]) -> u64 {
+        bits_where(bytes, |byte| self.contains(byte))
+    }
+}
+
 impl ByteBitmap {
     /// Build the bitmap of the bytes in the set.
     #[must_use]
@@ -157,26 +177,6 @@ impl ByteBitmap {
     #[must_use]
     pub fn count(&self) -> usize {
         self.words.iter().map(|word| word.count_ones() as usize).sum()
-    }
-}
-
-impl ByteClass for ByteSet {
-    #[allow(
-        clippy::inline_always,
-        reason = "inlining into the #[simd] caller gives it the caller's target features"
-    )]
-    #[inline(always)]
-    fn vector<S: Simd, V: SimdInt<S, Element = u8>>(&self, simd: S, block: V) -> V::Mask {
-        let low_table = V::block_splat(V::Block::from_slice(simd, &self.low));
-        let high_table = V::block_splat(V::Block::from_slice(simd, &self.high));
-        let low_bits = low_table.swizzle_dyn_within_blocks((block & 0x0F).to_bytes());
-        let high_bits = high_table.swizzle_dyn_within_blocks(((block >> 4) & 0x0F).to_bytes());
-        (low_bits & high_bits).simd_ne(0)
-    }
-
-    #[inline]
-    fn scalar_bits(&self, bytes: &[u8]) -> u64 {
-        bits_where(bytes, |byte| self.contains(byte))
     }
 }
 

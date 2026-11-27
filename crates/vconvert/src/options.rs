@@ -189,31 +189,6 @@ impl SortOrder {
     }
 }
 
-impl ConvertOptions {
-    /// Database query matching the files these options would process.
-    #[must_use]
-    pub fn pending_file_filter(&self) -> PendingFileFilter {
-        PendingFileFilter {
-            action: None,
-            extensions: self.extensions.clone(),
-            path_prefixes: if self.explicit_paths {
-                self.paths.clone()
-            } else {
-                Vec::new()
-            },
-            min_bitrate: Some(self.min_bitrate),
-            max_bitrate: self.max_bitrate,
-            min_duration: self.min_duration,
-            max_duration: self.max_duration,
-            min_resolution: self.min_resolution,
-            include: self.include.clone(),
-            exclude: self.exclude.clone(),
-            limit: self.count,
-            sort: Some(self.sort),
-        }
-    }
-}
-
 impl FromStr for SortOrder {
     type Err = String;
 
@@ -247,6 +222,31 @@ impl std::fmt::Display for SortOrder {
             Self::Name => "name",
         };
         write!(f, "{name}")
+    }
+}
+
+impl ConvertOptions {
+    /// Database query matching the files these options would process.
+    #[must_use]
+    pub fn pending_file_filter(&self) -> PendingFileFilter {
+        PendingFileFilter {
+            action: None,
+            extensions: self.extensions.clone(),
+            path_prefixes: if self.explicit_paths {
+                self.paths.clone()
+            } else {
+                Vec::new()
+            },
+            min_bitrate: Some(self.min_bitrate),
+            max_bitrate: self.max_bitrate,
+            min_duration: self.min_duration,
+            max_duration: self.max_duration,
+            min_resolution: self.min_resolution,
+            include: self.include.clone(),
+            exclude: self.exclude.clone(),
+            limit: self.count,
+            sort: Some(self.sort),
+        }
     }
 }
 

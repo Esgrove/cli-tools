@@ -59,25 +59,6 @@ impl<'a> ConsoleReporter<'a> {
     }
 }
 
-impl GroupingProgressBar {
-    /// Create a grouping progress bar, hidden when `hide_progress` is set.
-    pub fn new(hide_progress: bool) -> Self {
-        let progress_bar = if hide_progress {
-            ProgressBar::hidden()
-        } else {
-            let progress_bar = ProgressBar::new(0);
-            progress_bar.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-                    .expect("Failed to set progress bar template")
-                    .progress_chars("=> "),
-            );
-            progress_bar
-        };
-        Self { progress_bar }
-    }
-}
-
 impl MoveObserver for ConsoleReporter<'_> {
     fn on_event(&mut self, event: MoveEvent<'_>) {
         match event {
@@ -229,6 +210,25 @@ impl UnpackObserver for ConsoleReporter<'_> {
             }
             UnpackEvent::Pruned(_) => {}
         }
+    }
+}
+
+impl GroupingProgressBar {
+    /// Create a grouping progress bar, hidden when `hide_progress` is set.
+    pub fn new(hide_progress: bool) -> Self {
+        let progress_bar = if hide_progress {
+            ProgressBar::hidden()
+        } else {
+            let progress_bar = ProgressBar::new(0);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+                    .expect("Failed to set progress bar template")
+                    .progress_chars("=> "),
+            );
+            progress_bar
+        };
+        Self { progress_bar }
     }
 }
 

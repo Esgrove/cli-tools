@@ -142,105 +142,6 @@ impl VideoConvert<'_> {
         self.mux_movie_streams(file, position, Operation::SubtitleMux, abort_flag)
     }
 
-    /// Copy movie-mode streams, applying the same subtitle validation to both mux operations.
-    fn mux_movie_streams(
-        &self,
-        file: &ProcessableFile,
-        position: FilePosition,
-        operation: Operation,
-        abort_flag: &AtomicBool,
-    ) -> (ProcessResult, Option<VideoInfo>) {
-        let input = &file.file.path;
-        let final_output = &file.output_path;
-        let in_place = cli_tools_common::paths_refer_to_same_file(input, final_output);
-        let info = &file.info;
-
-        self.observer.file_started(operation, position, file, None);
-
-        let staged = if self.options.dry_run {
-            None
-        } else {
-            match StagedOutput::create(final_output) {
-                Ok(staged) => Some(staged),
-                Err(error) => return (failed(format!("Failed to stage subtitle mux output: {error}")), None),
-            }
-        };
-        let command_output = staged.as_ref().map_or(final_output.as_path(), StagedOutput::path);
-        let build_command = |transcode_audio| {
-            build_movie_mux_command(
-                input,
-                command_output,
-                &file.subtitle_files,
-                transcode_audio,
-                Some(info.codec_suffix()),
-            )
-            .map_err(|error| format!("Failed to build movie mux command: {error}"))
-        };
-        let mut command = match build_command(false) {
-            Ok(command) => command,
-            Err(error) => return (failed(error), None),
-        };
-        let remux = matches!(operation, Operation::Remux);
-        let success = if remux {
-            ProcessResult::Remuxed {}
-        } else {
-            ProcessResult::SubtitlesMuxed {}
-        };
-        if self.options.dry_run {
-            self.observer.dry_run_command(&command);
-            return (success, None);
-        }
-
-        let run = |command: &mut Command| {
-            run_command_isolated(command).map_err(|error| format!("Failed to execute ffmpeg: {error}"))
-        };
-        let status = match run(&mut command) {
-            Ok(status) => status,
-            Err(error) => return (failed(error), None),
-        };
-        let status = if remux && !status.success() {
-            if abort_flag.load(Ordering::SeqCst) {
-                return (failed("Remux aborted".to_string()), None);
-            }
-            self.observer.retrying(Retry::AacAudio { status });
-            match clear_staged_output(command_output)
-                .and_then(|()| build_command(true))
-                .and_then(|mut retry| run(&mut retry))
-            {
-                Ok(status) => status,
-                Err(error) => return (failed(error), None),
-            }
-        } else {
-            status
-        };
-        if !status.success() {
-            return (
-                failed(format!(
-                    "ffmpeg movie mux failed with status: {}",
-                    status.code().unwrap_or(-1)
-                )),
-                None,
-            );
-        }
-        let Some(staged) = staged else {
-            return (success, None);
-        };
-
-        let output_info = match validate_mux_output(input, staged.path(), info).and_then(|output_info| {
-            validate_movie_subtitles(input, staged.path(), &file.subtitle_files).map(|()| output_info)
-        }) {
-            Ok(output_info) => output_info,
-            Err(error) => return (failed(error.to_string()), None),
-        };
-        if let Err(error) = self.publish_output(staged, input, final_output, in_place) {
-            return (failed(error.to_string()), None);
-        }
-
-        self.delete_subtitle_files(&file.subtitle_files);
-
-        (success, Some(output_info))
-    }
-
     /// Convert video to HEVC.
     pub(super) fn convert_to_hevc(
         &self,
@@ -359,6 +260,105 @@ impl VideoConvert<'_> {
             },
             Some(output_info),
         )
+    }
+
+    /// Copy movie-mode streams, applying the same subtitle validation to both mux operations.
+    fn mux_movie_streams(
+        &self,
+        file: &ProcessableFile,
+        position: FilePosition,
+        operation: Operation,
+        abort_flag: &AtomicBool,
+    ) -> (ProcessResult, Option<VideoInfo>) {
+        let input = &file.file.path;
+        let final_output = &file.output_path;
+        let in_place = cli_tools_common::paths_refer_to_same_file(input, final_output);
+        let info = &file.info;
+
+        self.observer.file_started(operation, position, file, None);
+
+        let staged = if self.options.dry_run {
+            None
+        } else {
+            match StagedOutput::create(final_output) {
+                Ok(staged) => Some(staged),
+                Err(error) => return (failed(format!("Failed to stage subtitle mux output: {error}")), None),
+            }
+        };
+        let command_output = staged.as_ref().map_or(final_output.as_path(), StagedOutput::path);
+        let build_command = |transcode_audio| {
+            build_movie_mux_command(
+                input,
+                command_output,
+                &file.subtitle_files,
+                transcode_audio,
+                Some(info.codec_suffix()),
+            )
+            .map_err(|error| format!("Failed to build movie mux command: {error}"))
+        };
+        let mut command = match build_command(false) {
+            Ok(command) => command,
+            Err(error) => return (failed(error), None),
+        };
+        let remux = matches!(operation, Operation::Remux);
+        let success = if remux {
+            ProcessResult::Remuxed {}
+        } else {
+            ProcessResult::SubtitlesMuxed {}
+        };
+        if self.options.dry_run {
+            self.observer.dry_run_command(&command);
+            return (success, None);
+        }
+
+        let run = |command: &mut Command| {
+            run_command_isolated(command).map_err(|error| format!("Failed to execute ffmpeg: {error}"))
+        };
+        let status = match run(&mut command) {
+            Ok(status) => status,
+            Err(error) => return (failed(error), None),
+        };
+        let status = if remux && !status.success() {
+            if abort_flag.load(Ordering::SeqCst) {
+                return (failed("Remux aborted".to_string()), None);
+            }
+            self.observer.retrying(Retry::AacAudio { status });
+            match clear_staged_output(command_output)
+                .and_then(|()| build_command(true))
+                .and_then(|mut retry| run(&mut retry))
+            {
+                Ok(status) => status,
+                Err(error) => return (failed(error), None),
+            }
+        } else {
+            status
+        };
+        if !status.success() {
+            return (
+                failed(format!(
+                    "ffmpeg movie mux failed with status: {}",
+                    status.code().unwrap_or(-1)
+                )),
+                None,
+            );
+        }
+        let Some(staged) = staged else {
+            return (success, None);
+        };
+
+        let output_info = match validate_mux_output(input, staged.path(), info).and_then(|output_info| {
+            validate_movie_subtitles(input, staged.path(), &file.subtitle_files).map(|()| output_info)
+        }) {
+            Ok(output_info) => output_info,
+            Err(error) => return (failed(error.to_string()), None),
+        };
+        if let Err(error) = self.publish_output(staged, input, final_output, in_place) {
+            return (failed(error.to_string()), None);
+        }
+
+        self.delete_subtitle_files(&file.subtitle_files);
+
+        (success, Some(output_info))
     }
 
     /// Install a validated output before disposing of the original.

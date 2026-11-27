@@ -22,16 +22,6 @@ pub enum EncoderArgument {
     VideoToolbox,
 }
 
-impl From<EncoderArgument> for HardwareEncoder {
-    fn from(argument: EncoderArgument) -> Self {
-        match argument {
-            EncoderArgument::Auto => Self::Auto,
-            EncoderArgument::Nvenc => Self::Nvenc,
-            EncoderArgument::VideoToolbox => Self::VideoToolbox,
-        }
-    }
-}
-
 /// Sort order options for video files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SortOrderArgument {
@@ -68,6 +58,16 @@ pub enum DatabaseMode {
     ListExtensions,
     /// Remove stale entries from the scan cache.
     CleanScanCache,
+}
+
+impl From<EncoderArgument> for HardwareEncoder {
+    fn from(argument: EncoderArgument) -> Self {
+        match argument {
+            EncoderArgument::Auto => Self::Auto,
+            EncoderArgument::Nvenc => Self::Nvenc,
+            EncoderArgument::VideoToolbox => Self::VideoToolbox,
+        }
+    }
 }
 
 impl From<SortOrderArgument> for SortOrder {

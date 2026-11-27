@@ -83,6 +83,65 @@ pub struct ScanCache {
     db_path: Option<PathBuf>,
 }
 
+impl CachedFileHash {
+    /// Return whether this hash still describes a file with the given metadata.
+    #[must_use]
+    pub const fn is_current(&self, size_bytes: u64, modified_time_ns: i64) -> bool {
+        self.size_bytes == size_bytes && self.modified_time_ns == modified_time_ns
+    }
+}
+
+impl CachedVideoInfo {
+    /// Return whether this entry still describes the file with the given fingerprint.
+    ///
+    /// A file replaced by another of the same size has a new modification time,
+    /// and an entry stored without a modification time is never current.
+    #[must_use]
+    pub const fn is_current(&self, fingerprint: &FileFingerprint) -> bool {
+        self.modified_time_ns != 0
+            && self.size_bytes == fingerprint.size_bytes
+            && self.modified_time_ns == fingerprint.modified_time_ns
+    }
+
+    /// Return whether this cached entry carries complete video metadata usable by `vconvert`.
+    #[must_use]
+    pub fn has_complete_video_metadata(&self) -> bool {
+        !self.codec.is_empty()
+            && self.bitrate_kbps > 0
+            && self.duration > 0.0
+            && self.width > 0
+            && self.height > 0
+            && self.bit_depth >= 8
+            && (1.0..=240.0).contains(&self.frames_per_second)
+    }
+
+    /// Convert to the shared [`VideoInfo`] type used by the rest of the library.
+    #[must_use]
+    pub fn to_video_info(&self) -> VideoInfo {
+        let display_resolution = if self.width > 0 && self.height > 0 {
+            Resolution::from_options(Some(self.width), Some(self.height))
+        } else {
+            None
+        };
+        let coded_resolution = if self.coded_width > 0 && self.coded_height > 0 {
+            Resolution::from_options(Some(self.coded_width), Some(self.coded_height))
+        } else {
+            display_resolution
+        };
+        VideoInfo {
+            size_bytes: Some(self.size_bytes),
+            resolution: display_resolution,
+            coded_resolution,
+            rotation: (self.rotation != 0).then_some(self.rotation),
+            duration: (self.duration > 0.0).then_some(self.duration),
+            codec: (!self.codec.is_empty()).then(|| self.codec.clone()),
+            bitrate_kbps: (self.bitrate_kbps > 0).then_some(self.bitrate_kbps),
+            frames_per_second: (self.frames_per_second > 0.0).then_some(self.frames_per_second),
+            bit_depth: (self.bit_depth > 0).then_some(self.bit_depth),
+        }
+    }
+}
+
 impl ScanCache {
     /// Open (or create) the shared cache inside the default `cli-tools.db`.
     ///
@@ -566,65 +625,6 @@ impl ScanCache {
         }
         tx.commit()?;
         Ok(removed)
-    }
-}
-
-impl CachedFileHash {
-    /// Return whether this hash still describes a file with the given metadata.
-    #[must_use]
-    pub const fn is_current(&self, size_bytes: u64, modified_time_ns: i64) -> bool {
-        self.size_bytes == size_bytes && self.modified_time_ns == modified_time_ns
-    }
-}
-
-impl CachedVideoInfo {
-    /// Return whether this entry still describes the file with the given fingerprint.
-    ///
-    /// A file replaced by another of the same size has a new modification time,
-    /// and an entry stored without a modification time is never current.
-    #[must_use]
-    pub const fn is_current(&self, fingerprint: &FileFingerprint) -> bool {
-        self.modified_time_ns != 0
-            && self.size_bytes == fingerprint.size_bytes
-            && self.modified_time_ns == fingerprint.modified_time_ns
-    }
-
-    /// Return whether this cached entry carries complete video metadata usable by `vconvert`.
-    #[must_use]
-    pub fn has_complete_video_metadata(&self) -> bool {
-        !self.codec.is_empty()
-            && self.bitrate_kbps > 0
-            && self.duration > 0.0
-            && self.width > 0
-            && self.height > 0
-            && self.bit_depth >= 8
-            && (1.0..=240.0).contains(&self.frames_per_second)
-    }
-
-    /// Convert to the shared [`VideoInfo`] type used by the rest of the library.
-    #[must_use]
-    pub fn to_video_info(&self) -> VideoInfo {
-        let display_resolution = if self.width > 0 && self.height > 0 {
-            Resolution::from_options(Some(self.width), Some(self.height))
-        } else {
-            None
-        };
-        let coded_resolution = if self.coded_width > 0 && self.coded_height > 0 {
-            Resolution::from_options(Some(self.coded_width), Some(self.coded_height))
-        } else {
-            display_resolution
-        };
-        VideoInfo {
-            size_bytes: Some(self.size_bytes),
-            resolution: display_resolution,
-            coded_resolution,
-            rotation: (self.rotation != 0).then_some(self.rotation),
-            duration: (self.duration > 0.0).then_some(self.duration),
-            codec: (!self.codec.is_empty()).then(|| self.codec.clone()),
-            bitrate_kbps: (self.bitrate_kbps > 0).then_some(self.bitrate_kbps),
-            frames_per_second: (self.frames_per_second > 0.0).then_some(self.frames_per_second),
-            bit_depth: (self.bit_depth > 0).then_some(self.bit_depth),
-        }
     }
 }
 

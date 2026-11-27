@@ -109,6 +109,16 @@ struct RenameBatch {
     destinations: TargetReservations,
 }
 
+impl ConflictAction {
+    /// Select system trash using the platform's network path detection.
+    const fn trash() -> Self {
+        Self::Trash {
+            is_network: is_network_path,
+            dispose: trash_file,
+        }
+    }
+}
+
 impl RenameBatch {
     /// Track the sources discovered at the start of the run.
     fn new(files: &[PathBuf]) -> Self {
@@ -125,16 +135,6 @@ impl RenameBatch {
             || self.previewed_sources.iter().any(|source| {
                 source.parent() == target.parent() && cli_tools_common::paths_refer_to_same_entry(source, target)
             })
-    }
-}
-
-impl ConflictAction {
-    /// Select system trash using the platform's network path detection.
-    const fn trash() -> Self {
-        Self::Trash {
-            is_network: is_network_path,
-            dispose: trash_file,
-        }
     }
 }
 

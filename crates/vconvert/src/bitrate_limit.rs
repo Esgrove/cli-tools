@@ -92,53 +92,9 @@ impl MinimumBitrate {
     }
 }
 
-impl BitrateTiers {
-    /// Return the minimum bitrate for a resolution tier and framerate class.
-    #[must_use]
-    pub const fn threshold(&self, tier: ResolutionTier, high_frame_rate: bool) -> u64 {
-        match (tier, high_frame_rate) {
-            (ResolutionTier::Hd720, false) => self.hd_720,
-            (ResolutionTier::Hd720, true) => self.hd_720_high_fps,
-            (ResolutionTier::Hd1080, false) => self.hd_1080,
-            (ResolutionTier::Hd1080, true) => self.hd_1080_high_fps,
-            (ResolutionTier::Qhd1440, false) => self.qhd_1440,
-            (ResolutionTier::Qhd1440, true) => self.qhd_1440_high_fps,
-        }
-    }
-}
-
-impl BitrateTiersConfig {
-    /// Resolve configured overrides on top of the default tiers.
-    #[must_use]
-    pub fn resolve(&self) -> BitrateTiers {
-        let defaults = BitrateTiers::default();
-        BitrateTiers {
-            hd_720: self.hd_720.unwrap_or(defaults.hd_720),
-            hd_720_high_fps: self.hd_720_high_fps.unwrap_or(defaults.hd_720_high_fps),
-            hd_1080: self.hd_1080.unwrap_or(defaults.hd_1080),
-            hd_1080_high_fps: self.hd_1080_high_fps.unwrap_or(defaults.hd_1080_high_fps),
-            qhd_1440: self.qhd_1440.unwrap_or(defaults.qhd_1440),
-            qhd_1440_high_fps: self.qhd_1440_high_fps.unwrap_or(defaults.qhd_1440_high_fps),
-        }
-    }
-}
-
 impl Default for MinimumBitrate {
     fn default() -> Self {
         Self::Tiered(BitrateTiers::default())
-    }
-}
-
-impl Default for BitrateTiers {
-    fn default() -> Self {
-        Self {
-            hd_720: 4000,
-            hd_720_high_fps: 6000,
-            hd_1080: 8000,
-            hd_1080_high_fps: 12000,
-            qhd_1440: 16000,
-            qhd_1440_high_fps: 24000,
-        }
     }
 }
 
@@ -156,6 +112,50 @@ impl fmt::Display for MinimumBitrate {
                 tiers.qhd_1440,
                 tiers.qhd_1440_high_fps
             ),
+        }
+    }
+}
+
+impl BitrateTiers {
+    /// Return the minimum bitrate for a resolution tier and framerate class.
+    #[must_use]
+    pub const fn threshold(&self, tier: ResolutionTier, high_frame_rate: bool) -> u64 {
+        match (tier, high_frame_rate) {
+            (ResolutionTier::Hd720, false) => self.hd_720,
+            (ResolutionTier::Hd720, true) => self.hd_720_high_fps,
+            (ResolutionTier::Hd1080, false) => self.hd_1080,
+            (ResolutionTier::Hd1080, true) => self.hd_1080_high_fps,
+            (ResolutionTier::Qhd1440, false) => self.qhd_1440,
+            (ResolutionTier::Qhd1440, true) => self.qhd_1440_high_fps,
+        }
+    }
+}
+
+impl Default for BitrateTiers {
+    fn default() -> Self {
+        Self {
+            hd_720: 4000,
+            hd_720_high_fps: 6000,
+            hd_1080: 8000,
+            hd_1080_high_fps: 12000,
+            qhd_1440: 16000,
+            qhd_1440_high_fps: 24000,
+        }
+    }
+}
+
+impl BitrateTiersConfig {
+    /// Resolve configured overrides on top of the default tiers.
+    #[must_use]
+    pub fn resolve(&self) -> BitrateTiers {
+        let defaults = BitrateTiers::default();
+        BitrateTiers {
+            hd_720: self.hd_720.unwrap_or(defaults.hd_720),
+            hd_720_high_fps: self.hd_720_high_fps.unwrap_or(defaults.hd_720_high_fps),
+            hd_1080: self.hd_1080.unwrap_or(defaults.hd_1080),
+            hd_1080_high_fps: self.hd_1080_high_fps.unwrap_or(defaults.hd_1080_high_fps),
+            qhd_1440: self.qhd_1440.unwrap_or(defaults.qhd_1440),
+            qhd_1440_high_fps: self.qhd_1440_high_fps.unwrap_or(defaults.qhd_1440_high_fps),
         }
     }
 }

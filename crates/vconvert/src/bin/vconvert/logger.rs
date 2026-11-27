@@ -36,16 +36,6 @@ struct LogState {
 }
 
 impl FileLogger {
-    /// Create a no-op logger that writes nothing to disk (used for dry runs).
-    pub(crate) const fn noop() -> Self {
-        Self {
-            state: Mutex::new(LogState {
-                writer: None,
-                write_failed: false,
-            }),
-        }
-    }
-
     /// Create a new log file at `~/logs/cli-tools/video_convert_<timestamp>_pid<pid>.log`.
     pub(crate) fn new() -> Result<Self> {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
@@ -68,6 +58,16 @@ impl FileLogger {
             .with_context(|| format!("Failed to create log file: {}", log_path.display()))?;
 
         Ok(Self::from_writer(BufWriter::new(file)))
+    }
+
+    /// Create a no-op logger that writes nothing to disk (used for dry runs).
+    pub(crate) const fn noop() -> Self {
+        Self {
+            state: Mutex::new(LogState {
+                writer: None,
+                write_failed: false,
+            }),
+        }
     }
 
     /// Logger writing to a temporary file, which lives as long as the returned handle.

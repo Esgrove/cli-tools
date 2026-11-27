@@ -215,6 +215,53 @@ pub struct ResolvedUiEnvironment {
     pub github_actions: bool,
 }
 
+impl OutputMode {
+    /// Resolve `Auto` into a concrete [`ResolvedOutputMode`] using `env`.
+    #[must_use]
+    pub fn resolve(self, env: &EnvSnapshot) -> ResolvedOutputMode {
+        match self {
+            Self::Rich => ResolvedOutputMode::Rich,
+            Self::Ci => ResolvedOutputMode::Ci,
+            Self::Plain => ResolvedOutputMode::Plain,
+            Self::Auto => {
+                if env.is_ci() {
+                    ResolvedOutputMode::Ci
+                } else if env.stdout_is_tty && env.stderr_is_tty && !env.is_dumb_term() {
+                    ResolvedOutputMode::Rich
+                } else {
+                    ResolvedOutputMode::Plain
+                }
+            }
+        }
+    }
+}
+
+impl ColorMode {
+    /// Resolve `Auto` into whether ANSI colors should be emitted for `mode` and `env`.
+    #[must_use]
+    pub fn resolve(self, mode: ResolvedOutputMode, env: &EnvSnapshot) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => {
+                if env.has_no_color() {
+                    false
+                } else if env.has_force_color() {
+                    true
+                } else if env.is_dumb_term() {
+                    false
+                } else {
+                    match mode {
+                        ResolvedOutputMode::Rich => env.stderr_is_tty || env.stdout_is_tty,
+                        ResolvedOutputMode::Ci => env.is_github_actions() || env.stdout_is_tty,
+                        ResolvedOutputMode::Plain => env.stdout_is_tty,
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl ParsedCli {
     /// Combine the parsed arguments with task file settings and user defaults into [`RunOptions`].
     ///
@@ -370,53 +417,6 @@ impl EnvSnapshot {
 
     fn is_dumb_term(&self) -> bool {
         self.term.as_deref().is_some_and(|val| val.eq_ignore_ascii_case("dumb"))
-    }
-}
-
-impl OutputMode {
-    /// Resolve `Auto` into a concrete [`ResolvedOutputMode`] using `env`.
-    #[must_use]
-    pub fn resolve(self, env: &EnvSnapshot) -> ResolvedOutputMode {
-        match self {
-            Self::Rich => ResolvedOutputMode::Rich,
-            Self::Ci => ResolvedOutputMode::Ci,
-            Self::Plain => ResolvedOutputMode::Plain,
-            Self::Auto => {
-                if env.is_ci() {
-                    ResolvedOutputMode::Ci
-                } else if env.stdout_is_tty && env.stderr_is_tty && !env.is_dumb_term() {
-                    ResolvedOutputMode::Rich
-                } else {
-                    ResolvedOutputMode::Plain
-                }
-            }
-        }
-    }
-}
-
-impl ColorMode {
-    /// Resolve `Auto` into whether ANSI colors should be emitted for `mode` and `env`.
-    #[must_use]
-    pub fn resolve(self, mode: ResolvedOutputMode, env: &EnvSnapshot) -> bool {
-        match self {
-            Self::Always => true,
-            Self::Never => false,
-            Self::Auto => {
-                if env.has_no_color() {
-                    false
-                } else if env.has_force_color() {
-                    true
-                } else if env.is_dumb_term() {
-                    false
-                } else {
-                    match mode {
-                        ResolvedOutputMode::Rich => env.stderr_is_tty || env.stdout_is_tty,
-                        ResolvedOutputMode::Ci => env.is_github_actions() || env.stdout_is_tty,
-                        ResolvedOutputMode::Plain => env.stdout_is_tty,
-                    }
-                }
-            }
-        }
     }
 }
 

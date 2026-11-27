@@ -87,6 +87,15 @@ pub struct TorrentFileItem {
 impl QBittorrentClient {
     /// Create a new qBittorrent client.
     ///
+    /// # Panics
+    /// Panics if the HTTP client cannot be built, which only happens when the TLS backend fails to initialize.
+    #[must_use]
+    pub fn new(host: &str, port: u16) -> Self {
+        Self::try_new(host, port).expect("Failed to build HTTP client")
+    }
+
+    /// Create a new qBittorrent client.
+    ///
     /// Supports bare hostnames, IPv4, IPv6, and full `http://`
     /// or `https://` base URLs with optional path prefixes.
     ///
@@ -109,15 +118,6 @@ impl QBittorrentClient {
             base_url,
             authenticated: false,
         })
-    }
-
-    /// Create a new qBittorrent client.
-    ///
-    /// # Panics
-    /// Panics if the HTTP client cannot be built, which only happens when the TLS backend fails to initialize.
-    #[must_use]
-    pub fn new(host: &str, port: u16) -> Self {
-        Self::try_new(host, port).expect("Failed to build HTTP client")
     }
 
     /// Authenticate with the qBittorrent `WebUI`.

@@ -271,6 +271,24 @@ impl DotFormat<'_> {
         Some(path.with_file_name(formatted_filename))
     }
 
+    /// Check if the name starts with 5 or more digits followed by a boundary.
+    /// Used to skip `prefix_dir` reordering for filenames with leading numeric identifiers.
+    pub fn starts_with_five_or_more_digits(name: &str) -> bool {
+        RE_LEADING_DIGITS.is_match(name)
+    }
+
+    /// Convert date with written month name to numeral date.
+    ///
+    /// For example:
+    /// ```not_rust
+    /// "Jan.3.2020" -> "2020.01.03"
+    /// "December.6.2023" -> "2023.12.06"
+    /// "23.May.2016" -> "2016.05.23"
+    /// ```
+    pub fn convert_written_date_format(name: &mut String) {
+        *name = Date::convert_written_dates(name);
+    }
+
     /// Apply suffix to the filename, handling various matching scenarios.
     fn apply_suffix(&self, name: &str, suffix: &str) -> String {
         let mut new_name = name.to_string();
@@ -447,24 +465,6 @@ impl DotFormat<'_> {
         while name.contains(".&.") {
             *name = name.replace(".&.", ".and.");
         }
-    }
-
-    /// Check if the name starts with 5 or more digits followed by a boundary.
-    /// Used to skip `prefix_dir` reordering for filenames with leading numeric identifiers.
-    pub fn starts_with_five_or_more_digits(name: &str) -> bool {
-        RE_LEADING_DIGITS.is_match(name)
-    }
-
-    /// Convert date with written month name to numeral date.
-    ///
-    /// For example:
-    /// ```not_rust
-    /// "Jan.3.2020" -> "2020.01.03"
-    /// "December.6.2023" -> "2023.12.06"
-    /// "23.May.2016" -> "2016.05.23"
-    /// ```
-    pub fn convert_written_date_format(name: &mut String) {
-        *name = Date::convert_written_dates(name);
     }
 
     /// Remove consecutive duplicate occurrences of patterns from the name.

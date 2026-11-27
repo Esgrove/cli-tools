@@ -56,16 +56,6 @@ pub struct HashCandidateCollection {
 }
 
 impl CalculatedFileHash {
-    /// Convert this calculated hash into a value suitable for duplicate grouping.
-    #[must_use]
-    pub fn indexed_hash(&self) -> IndexedFileHash {
-        IndexedFileHash {
-            index: self.index,
-            size_bytes: self.fingerprint.size_bytes,
-            blake3_hash: self.hash.to_string(),
-        }
-    }
-
     /// Create a calculated hash result for a candidate.
     fn from_candidate(candidate: &HashCandidate, hash: blake3::Hash) -> Self {
         Self {
@@ -73,6 +63,16 @@ impl CalculatedFileHash {
             path: candidate.path.clone(),
             fingerprint: candidate.fingerprint,
             hash,
+        }
+    }
+
+    /// Convert this calculated hash into a value suitable for duplicate grouping.
+    #[must_use]
+    pub fn indexed_hash(&self) -> IndexedFileHash {
+        IndexedFileHash {
+            index: self.index,
+            size_bytes: self.fingerprint.size_bytes,
+            blake3_hash: self.hash.to_string(),
         }
     }
 }

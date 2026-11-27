@@ -211,6 +211,17 @@ pub struct TaskFileLocation {
     pub root: PathBuf,
 }
 
+impl RequiredCommandConfig {
+    /// Return the executable name and optional custom error hint.
+    #[must_use]
+    pub const fn as_parts(&self) -> (&str, Option<&str>) {
+        match self {
+            Self::Name(name) => (name.as_str(), None),
+            Self::Detailed { name, hint } => (name.as_str(), Some(hint.as_str())),
+        }
+    }
+}
+
 impl TaskFile {
     /// Load and parse a task file from disk.
     ///
@@ -532,17 +543,6 @@ impl TaskConfig {
             }
         }
         Ok(steps)
-    }
-}
-
-impl RequiredCommandConfig {
-    /// Return the executable name and optional custom error hint.
-    #[must_use]
-    pub const fn as_parts(&self) -> (&str, Option<&str>) {
-        match self {
-            Self::Name(name) => (name.as_str(), None),
-            Self::Detailed { name, hint } => (name.as_str(), Some(hint.as_str())),
-        }
     }
 }
 

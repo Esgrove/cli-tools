@@ -144,6 +144,20 @@ struct SchedulerState {
     stop_scheduling: bool,
 }
 
+impl TaskOutcome {
+    /// Return whether this outcome counts as a failure for the overall exit status.
+    #[must_use]
+    pub const fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// Return whether a hard prerequisite passed, or would run during a dry run.
+    #[must_use]
+    pub const fn unblocks_dependents(&self) -> bool {
+        matches!(self, Self::Passed | Self::DryRun)
+    }
+}
+
 impl TaskContext {
     /// Return a task-scoped clone bound to `task_id` for live output streaming.
     #[must_use]
@@ -223,20 +237,6 @@ impl RunSummary {
     #[must_use]
     pub fn is_success(&self) -> bool {
         !self.reports.iter().any(|r| r.outcome.is_failure())
-    }
-}
-
-impl TaskOutcome {
-    /// Return whether this outcome counts as a failure for the overall exit status.
-    #[must_use]
-    pub const fn is_failure(&self) -> bool {
-        matches!(self, Self::Failed(_))
-    }
-
-    /// Return whether a hard prerequisite passed, or would run during a dry run.
-    #[must_use]
-    pub const fn unblocks_dependents(&self) -> bool {
-        matches!(self, Self::Passed | Self::DryRun)
     }
 }
 

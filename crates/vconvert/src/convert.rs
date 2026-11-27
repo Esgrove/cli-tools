@@ -42,26 +42,6 @@ struct RunLockScope {
     store: ActiveLockStore,
 }
 
-impl RunLockScope {
-    /// Open an [`ActiveLockStore`] for `database` when it is backed by a file on disk and not a dry run.
-    fn open(database: &Database, dry_run: bool) -> Option<Self> {
-        if dry_run {
-            return None;
-        }
-        let db_path = database.db_path()?.to_path_buf();
-        let store = ActiveLockStore::open_at(db_path.clone(), "vconvert").ok()?;
-        register_lock_owner(db_path, store.owner_id().to_string());
-        Some(Self { store })
-    }
-}
-
-impl Drop for RunLockScope {
-    fn drop(&mut self) {
-        unregister_lock_owner(self.store.owner_id());
-        let _ = self.store.release_all_owned();
-    }
-}
-
 /// Video converter that processes files to HEVC format using ffmpeg and NVENC.
 pub struct VideoConvert<'a> {
     options: ConvertOptions,
@@ -82,6 +62,26 @@ struct Batch<'a> {
     operation: Operation,
     files: Vec<ProcessableFile>,
     process: ProcessFunction<'a>,
+}
+
+impl RunLockScope {
+    /// Open an [`ActiveLockStore`] for `database` when it is backed by a file on disk and not a dry run.
+    fn open(database: &Database, dry_run: bool) -> Option<Self> {
+        if dry_run {
+            return None;
+        }
+        let db_path = database.db_path()?.to_path_buf();
+        let store = ActiveLockStore::open_at(db_path.clone(), "vconvert").ok()?;
+        register_lock_owner(db_path, store.owner_id().to_string());
+        Some(Self { store })
+    }
+}
+
+impl Drop for RunLockScope {
+    fn drop(&mut self) {
+        unregister_lock_owner(self.store.owner_id());
+        let _ = self.store.release_all_owned();
+    }
 }
 
 impl<'a> VideoConvert<'a> {
