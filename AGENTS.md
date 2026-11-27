@@ -4,6 +4,8 @@
 
 This is a Rust workspace containing multiple CLI utility tools.
 Each tool is its own crate under `crates/` with a package name prefixed by `cli-tools-`.
+The filefind file indexer is the exception,
+with its four `filefind-*` crates keeping their own names and binaries.
 Shared helpers live in the `cli-tools-common`, `cli-tools-db`, and `cli-tools-media` library crates.
 Tools with reusable logic expose it as a library from the same crate,
 so other projects can depend on just that crate and extend it.
@@ -270,6 +272,20 @@ A binary only crate keeps its binary in `src/main.rs`.
     - `types.rs` - Video metadata, processable files, skip reasons, and processing results
     - `stats.rs` - Analysis and run statistics
     - `helpers.rs` - Output path, duration, and disk space helpers
+- filefind, a Windows first file indexer with fast search, in four crates.
+  Each crate has its own `AGENTS.md` with its architecture notes.
+    - `crates/filefind-common/` → `filefind-common` - Library shared by the filefind crates
+      and by the tools that update the index:
+        - `config.rs` - The `filefind.toml` user config with the daemon and CLI sections
+        - `database.rs` - `SQLite` index database with volumes and files keyed by full path
+        - `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
+        - `output.rs` - Terminal messages and human readable formatting
+        - `types.rs` - File entries, volumes, and file change events
+        - `completion.rs` - Shell completion generation
+    - `crates/filefind-cli/` → `filefind` - Search the index, find duplicates, and move matching files
+    - `crates/filefind-daemon/` → `filefindd` - Background indexer using NTFS MFT reads, the USN journal,
+      and a file system watcher for other drives
+    - `crates/filefind-tray/` → `filefind-tray` - System tray application that controls the daemon
 - Binary only crates:
     - `crates/div/` → `div` - Print divider comments
     - `crates/flipdate/` → `flipdate` - Flip dates in filenames
@@ -414,3 +430,5 @@ cargo run --bin <name> -- -h
 User configuration is read from `~/.config/cli-tools.toml` with sections for each binary.
 See `cli-tools.toml` in the repo root for an example.
 Remember to update the example config file when adding new config options or binaries.
+filefind reads its own `~/.config/filefind.toml` with `[daemon]` and `[cli]` sections.
+See `filefind.toml` in the repo root for an example.

@@ -1,129 +1,41 @@
-# CLAUDE.md
+# filefind-common agent notes
 
-## Project Overview
+Shared library of the filefind crates.
+filefind is a fast file indexing and search tool, built first for Windows.
+It reads the NTFS Master File Table (MFT) directly for fast initial scans,
+and follows the USN journal for incremental change detection.
 
-Filefind is a fast file indexing and search tool for Windows.
-It uses NTFS Master File Table (MFT) direct reading for extremely fast initial scans,
-and the USN Journal for efficient incremental change detection.
+The general workspace rules in the root `AGENTS.md` apply here.
+The other filefind crates have their own `AGENTS.md`:
+`crates/filefind-cli`, `crates/filefind-daemon`, and `crates/filefind-tray`.
 
-The project is organized as a Cargo workspace with multiple crates:
+## Modules
 
-- `filefind` - Shared library (config, database, types, IPC)
-- `filefind-daemon` - Background service that monitors file changes
-- `filefind-cli` - Command-line search tool
-- `filefind-tray` - System tray application for daemon control
+- `lib.rs` - Library root, re-exports, path classification, and drive mapping helpers
+- `completion.rs` - Shell completion generation and installation paths
+- `config.rs` - User configuration file handling
+- `database.rs` - `SQLite` index database operations
+- `ipc.rs` - Daemon IPC client and protocol, behind the `ipc` feature
+- `output.rs` - Terminal messages and human readable formatting
+- `types.rs` - File entries, volumes, and file change events
 
-## Build and Test Commands
+## Database
 
-After making code changes, always run:
+- `SQLite` stores the index, by default in `filefind/filefind.db` under the local data directory.
+- Files are keyed by their full path, with a unique index on `full_path` and a case-insensitive index on `name`.
+  Directories are ordinary rows with `is_directory` set.
+- Volume serial numbers identify drives, so a reconnected drive keeps its entries.
+- `update_file_path()` updates a file's stored path after a move and clears its MFT reference.
+- `rebase_files_under_path()` moves a directory and every entry under it in one statement.
+- The CLI and the daemon open the database directly. WAL mode lets the CLI write while the daemon runs.
 
-```shell
-cargo clippy --all-targets --fix --allow-dirty
-cargo fmt
-cargo test
-```
+## IPC
 
-### Other commands
-
-```shell
-# Build all crates
-cargo build
-
-# Build a specific crate
-cargo build -p filefind-cli
-
-# Format code
-cargo fmt
-
-# Run tests for a specific crate
-cargo test -p filefind
-```
-
-## Project Structure
-
-- `filefind/` - Shared library code
-    - `src/lib.rs` - Library root, re-exports, path and drive-mapping utilities
-    - `src/completion.rs` - Shell completion generation and installation paths
-    - `src/config.rs` - User configuration file handling
-    - `src/database.rs` - SQLite database operations
-    - `src/ipc.rs` - Inter-process communication for daemon control
-    - `src/output.rs` - Terminal messages and human-readable formatting
-    - `src/types.rs` - Common types and structures
-- `filefind-daemon/` - Background file monitoring service
-    - `src/main.rs` - Daemon entry point, CLI argument handling
-    - `src/daemon.rs` - Core daemon logic and lifecycle
-    - `src/ipc_server.rs` - IPC server for handling client commands
-    - `src/mft.rs` - NTFS MFT reading
-    - `src/pruner.rs` - Database pruning for stale entries
-    - `src/scanner.rs` - File scanning logic (MFT and directory walking)
-    - `src/usn.rs` - USN Journal monitoring
-    - `src/usn_buffer.rs` - Bounds-checked readers for raw USN record buffers (shared by MFT and USN parsing)
-    - `src/watcher.rs` - File system watcher for non-NTFS drives
-- `filefind-cli/` - Command-line search interface
-    - `src/main.rs` - CLI entry point and search logic
-    - `src/cli.rs` - Search execution, result display, and move dispatch
-    - `src/config.rs` - CLI configuration merging (user config + CLI args)
-    - `src/hyperlink.rs` - OSC 8 terminal hyperlinks for result paths
-    - `src/mover.rs` - Move planning, progress, database reconciliation, and abort handling
-    - `src/mover/transfer.rs` - Filesystem rename, copy, and verification
-- `filefind-tray/` - System tray application
-    - `src/main.rs` - Tray app entry point
-    - `src/app.rs` - Main application logic and event loop
-    - `src/icons.rs` - Tray icon generation
-
-## Code Organization
-
-Organize Rust source files in this order:
-
-1. Structs (public before private)
-2. Enums (public before private)
-3. Trait implementations and impl blocks (in the order the types are defined)
-4. Public functions
-5. Private functions
-6. Root-level test modules
-
-Within implementation blocks:
-
-- Methods creating a new instance of Self should be first,
-  `new` always first when there is one and other similar methods such as `from_*` after that
-- Public methods before private methods
-- Other associated functions (those without `self` that are not constructors) after instance methods
-
-### Module size and boundaries
-
-- Review a source file when its non-test code exceeds roughly 1000 lines.
-  This is a signal to look for separate concerns, not a hard limit.
-  Long test sections or one tightly coupled implementation do not require splitting.
-- Split along independent concerns when doing so makes ownership clearer.
-  Give each new Rust file module-level `//!` documentation describing its purpose.
-- Keep helpers specific to a crate in that crate.
-  Put reusable helpers in the shared `filefind` library rather than copying them across binaries.
-- Use the narrowest practical visibility. Prefer `pub(super)` when only a sibling module needs an item.
-- Keep test modules at the root of their source module and avoid nesting test modules.
-
-## Updating CLI Usage
-
-After changing CLI arguments, flags, or subcommands in any binary crate:
-
-1. Run the binary with `-h` to get the short help output
-2. Update the corresponding `README.md` usage sections with the new output
-3. Also update subcommand help sections by running `<binary> <subcommand> -h`
-
-Use the short help flag (`-h`), not the long help flag (`--help`).
-
-## Code Style and Conventions
-
-- Uses Rust 2024 edition
-- Clippy is configured with pedantic and nursery lints enabled
-- Do not use plain unwrap. Use proper error handling or `.expect()` in constants and test cases.
-- Use `anyhow` for error handling with `Result<T>` return types
-- Use `clap` with derive macros for CLI argument parsing
-- Use `colored` crate for terminal output coloring
-- Use descriptive variable and function names. No single character variables.
-- Prefer full names over abbreviations. For example: `directories` instead of `dirs`.
-- Create docstrings for structs and functions.
-- Avoid trailing comments.
-- All `use` imports must be at the top of the file. Never import inside functions.
+- Named pipes on Windows, Unix domain sockets on other platforms.
+- Postcard serialized commands and responses, framed with a two byte length prefix.
+- Commands: stop, status, rescan, pause, resume, ping, and prune.
+- The client in `ipc.rs` is used by the tray app.
+  The server lives in `crates/filefind-daemon/src/ipc_server.rs`.
 
 ## Configuration
 
@@ -131,7 +43,7 @@ User configuration is read from `~/.config/filefind.toml`.
 See `filefind.toml` in the repo root for an example.
 Remember to update the example config file when adding new config options.
 
-### Daemon Configuration Options
+### Daemon options
 
 - `paths` - Drives, directories, or network paths to index
 - `exclude` - Directories to exclude from indexing
@@ -140,9 +52,9 @@ Remember to update the example config file when adding new config options.
 - `log_level` - Log level: error, warn, info, debug, trace
 - `verbose` - Enable verbose output
 - `database_path` - Custom database file location
-- `force_clean_scan` - Force clean scan mode (delete all entries before inserting)
+- `force_clean_scan` - Force clean scan mode, which deletes all entries before inserting
 
-### CLI Configuration Options
+### CLI options
 
 - `format` - Output format: "list", "name", "grouped", or "info"
 - `max_results` - Maximum results to show
@@ -150,144 +62,4 @@ Remember to update the example config file when adding new config options.
 - `case_sensitive` - Case-sensitive search by default
 - `show_hidden` - Show hidden files in results
 - `hyperlinks` - Emit OSC 8 terminal hyperlinks: "auto", "always", or "never"
-- `hyperlink_scheme` - URI scheme used for hyperlinks (default "file")
-
-### CLI Display Options
-
-- `--links <MODE>` (`-L`) - Terminal hyperlink mode: auto, always, or never
-
-### CLI Move Options
-
-- `--move <DIR>` (`-m`) - Move all matching files to the specified directory
-- `--force` (`-F`) - Overwrite existing files at the move destination (requires `--move`)
-
-## Architecture Notes
-
-### MFT Reading (NTFS drives)
-
-- Requires administrator privileges
-- Reads Master File Table directly for fast initial indexing
-- Can index millions of files in seconds
-- Works with both full drives and specific directories
-
-### USN Journal (NTFS drives)
-
-- Tracks file system changes efficiently
-- Query "what changed since USN X" instead of rescanning
-- Handles creates, deletes, renames, modifications
-- Used for incremental stale entry cleanup after scans
-
-### Scan Modes
-
-The daemon supports two scan modes:
-
-- **Incremental mode** (default): Scans and UPSERTs entries, then cleans up stale entries.
-  For NTFS volumes, uses USN journal to efficiently identify deleted/renamed files.
-  For non-NTFS volumes, runs volume pruner after scan.
-- **Clean mode** (`--force` flag or `force_clean_scan` config):
-  Deletes all existing entries for a volume before inserting new ones. Use for complete rebuilds.
-  Clean scan is automatically used when the database is empty.
-
-### File Watcher (non-NTFS/network drives)
-
-- Falls back to `notify` crate (ReadDirectoryChangesW on Windows)
-- Traditional directory walking for initial scan
-- Real-time change notifications
-
-### Path Types
-
-The daemon supports multiple path types:
-
-- **Drive roots** (e.g., "C:", "D:") - Fast MFT scanning for entire drive
-- **Local directories** (e.g., "C:\\Users\\Documents") - MFT scanning filtered to path
-- **Mapped network drives** (e.g., "Z:") - MFT attempted first, falls back to walking
-- **UNC paths** (e.g., "\\\\server\\share") - Directory walking (no drive letter)
-
-### Database
-
-- SQLite for persistent storage
-- Indexed by filename for fast searches
-- Tracks volume serial numbers to handle drive reconnection
-- `update_file_path()` updates a file's stored path after a move (clears MFT reference)
-
-### IPC (Inter-Process Communication)
-
-- Named pipes on Windows for daemon communication
-- Unix domain sockets on other platforms
-- JSON-serialized commands and responses
-- Supports: stop, status, rescan, pause, resume, ping
-
-The IPC system has two parts:
-
-- **Client** (`filefind/src/ipc.rs`): Used by CLI and tray app to send commands
-- **Server** (`filefind-daemon/src/ipc_server.rs`): Runs in daemon, handles incoming commands
-
-The server runs in a dedicated thread and communicates with the main daemon loop via tokio channels.
-Shared state (`IpcServerState`) uses atomic types to safely share status information between threads.
-
-### CLI Move Feature
-
-- `--move <DIR>` moves matching files to the specified directory after displaying search results
-- `--force` overwrites existing files at the destination. Without it, conflicts are skipped
-- Move strategy: try `fs::rename` first (atomic, instant on same device),
-  fall back to chunked copy+verify+delete for cross-device moves (e.g., local drive → network share)
-- Disk space check only counts cross-device files.
-  Same-device renames need no free space.
-  Volume detection uses `get_volume_prefix()` from the shared library to compare drive letters
-  or UNC server/share roots.
-- Progress bar via `indicatif`, graceful Ctrl+C abort via `ctrlc` (finish current file, second Ctrl+C force-quits)
-- Confirmation prompt shows file count, total size, skipped files, and force-mode warning
-- Files already in the destination directory or any of its subdirectories are counted but not moved or reported as skips
-- Duplicate filenames across search results are skipped (first occurrence wins)
-- Database is updated after each successful move.
-  MFT reference is cleared since it may be invalid on the new volume
-- The `ctrlc` handler can only be registered once per process.
-  The function documents this constraint and returns an error on a second call
-
-### CLI Search Features
-
-- **Pattern expansion**: Dot-separated patterns like "some.name" automatically expand to also search "some name"
-  and "somename"
-- **Glob patterns**: Supports `*` and `?` wildcards
-- **Regex search**: Full regex support with `-r` flag
-- **Exact matching**: Disable pattern expansion with `-e` flag
-- **File moving**: Move matching files to a directory with `--move <DIR>`
-- **Duplicates**: `filefind duplicates` finds all files sharing the same case-insensitive stem.
-  The stem is the filename without extension.
-  Duplicate files are displayed as groups.
-  The command scans indexed files in two linear passes with an `indicatif` progress bar.
-  The first pass counts stems.
-  The second pass collects duplicate groups.
-  Supports `--drive` filtering,
-  `--limit` to cap the number of groups shown,
-  and `--verbose` for stats.
-
-### CLI Terminal Hyperlinks
-
-- Result paths are wrapped in OSC 8 escape sequences so terminals render them as links.
-  Ctrl+Click (Windows Terminal, Warp) or Cmd+Click (iTerm2)
-  opens the path with the application the operating system associates with it.
-- `Hyperlinker` in `filefind-cli/src/hyperlink.rs` owns the mode and URI scheme and is stored on `CliConfig`.
-  `wrap()` returns the text borrowed and unchanged when links are disabled,
-  so display code can print its result unconditionally.
-- Link text may already contain ANSI color codes.
-  They nest inside the link and the sequences are zero-width, so `info` format columns stay aligned.
-- `auto` mode (default) requires stdout to be a terminal _and_ the terminal to be known to support OSC 8
-  (`WT_SESSION`, `TERM_PROGRAM`, `KONSOLE_VERSION`, `DOMTERM`, kitty via `TERM`, or VTE >= 0.50).
-  This keeps piped and redirected output free of escape sequences.
-  `TerminalEnvironment` holds the relevant variables so detection can be unit tested
-  without mutating the process environment.
-- Paths are converted to URIs:
-  backslashes become forward slashes, unsafe bytes are percent-encoded,
-  UNC paths become `file://server/share/...`, and drive paths become `file:///C:/...`.
-  Links use the mapped display path, so `path_mappings` are respected.
-- Missing directories are never linked because they no longer exist on disk.
-- A non-`file` `hyperlink_scheme` emits `<scheme>://<path>`
-  and requires a protocol handler registered with the operating system.
-
-### System Tray Application
-
-- Minimal UI for daemon control
-- Shows daemon status via icon color (green=running, gray=stopped, orange=scanning)
-- Menu items: Start, Stop, Rescan, About, Quit
-- Tooltip shows indexed file/directory counts
+- `hyperlink_scheme` - URI scheme used for hyperlinks, "file" by default

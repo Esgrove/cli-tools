@@ -15,6 +15,7 @@ These rules apply to first-party Rust sources and shell scripts in the workspace
 ## Workspace and crate boundaries
 
 - Each tool is its own crate under `crates/` with a package name prefixed by `cli-tools-`.
+  The `filefind-*` crates keep their own names.
 - Shared helpers live in `cli-tools-common` and `cli-tools-media`.
   A helper that is not specific to one tool belongs in a shared library crate,
   such as `crates/common/src/utils.rs` or `crates/common/src/diff.rs`, never inside a binary.
