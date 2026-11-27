@@ -391,39 +391,62 @@ pub fn find_command(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Resolve an executable path, checking Windows `PATHEXT` extensions before extensionless files.
+/// Resolve an executable path, checking Windows `PATHEXT` extensions.
+///
+/// A path that already ends in one of the extensions is used as is.
+/// Otherwise each extension is appended in `PATHEXT` order.
+/// Files with other extensions or without one are not executable on Windows and are never returned.
 #[cfg(windows)]
 fn find_executable_with_extensions(base: &Path) -> Option<PathBuf> {
-    let extensions: Vec<String> = env::var("PATHEXT").map_or_else(
-        |_| vec![".exe".into(), ".cmd".into(), ".bat".into(), ".com".into()],
-        |raw| {
-            let parsed: Vec<String> = raw
-                .split(';')
-                .map(str::trim)
-                .filter(|ext| !ext.is_empty())
-                .map(str::to_ascii_lowercase)
-                .collect();
-            if parsed.is_empty() {
-                vec![".exe".into(), ".cmd".into(), ".bat".into(), ".com".into()]
-            } else {
-                parsed
-            }
-        },
-    );
-
-    if base.extension().is_some() && is_executable_file(base) {
+    let extensions = windows_executable_extensions();
+    let has_executable_extension = base.extension().is_some_and(|extension| {
+        let extension = format!(".{}", extension.to_string_lossy().to_ascii_lowercase());
+        extensions.contains(&extension)
+    });
+    if has_executable_extension && is_regular_file(base) {
         return Some(base.to_path_buf());
     }
     let base_os = base.as_os_str();
-    for extension in &extensions {
+    extensions.iter().find_map(|extension| {
         let mut with_extension = base_os.to_os_string();
         with_extension.push(extension);
         let candidate = PathBuf::from(with_extension);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
+        is_regular_file(&candidate).then_some(candidate)
+    })
+}
+
+/// The lowercase executable extensions from `PATHEXT`, each with a leading dot.
+///
+/// Falls back to `.com`, `.exe`, `.bat`, and `.cmd` when `PATHEXT` is unset or empty.
+#[cfg(windows)]
+fn windows_executable_extensions() -> Vec<String> {
+    parse_path_extensions(env::var("PATHEXT").ok().as_deref())
+}
+
+/// Parse a `PATHEXT` style list into lowercase extensions with a leading dot.
+///
+/// Falls back to `.com`, `.exe`, `.bat`, and `.cmd` when the value is missing or holds no extensions.
+#[cfg(any(windows, test))]
+fn parse_path_extensions(raw: Option<&str>) -> Vec<String> {
+    let parsed: Vec<String> = raw
+        .unwrap_or_default()
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| {
+            let lower = extension.to_ascii_lowercase();
+            if lower.starts_with('.') {
+                lower
+            } else {
+                format!(".{lower}")
+            }
+        })
+        .collect();
+    if parsed.is_empty() {
+        [".com", ".exe", ".bat", ".cmd"].into_iter().map(String::from).collect()
+    } else {
+        parsed
     }
-    is_executable_file(base).then(|| base.to_path_buf())
 }
 
 /// Resolve an executable path on non-Windows platforms.
@@ -598,23 +621,18 @@ fn compile_filter_patterns(patterns: &[String]) -> Result<Vec<Regex>> {
     Ok(compiled)
 }
 
-/// Whether the path is a regular file with an executable permission bit on Unix,
-/// or any regular file elsewhere.
+/// Whether the path is a regular file with an executable permission bit.
+#[cfg(not(windows))]
 fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether the path is a regular file.
+///
+/// Windows has no executable permission bit, so the extension decides instead.
+#[cfg(windows)]
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 #[cfg(test)]
@@ -688,8 +706,8 @@ mod test_unification_helpers {
         std::fs::write(&hidden, b"b").unwrap();
         std::fs::create_dir(&nested_dir).unwrap();
         std::fs::write(&nested_file, b"c").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&visible, dir.path().join("link.mp4")).unwrap();
+        // The symlink is only an extra entry to skip, so the rest still runs without the privilege.
+        crate::test_support::create_symlink(&visible, &dir.path().join("link.mp4"));
 
         let shallow = collect_entries(dir.path(), &WalkOptions::files(false), |_| {});
         assert_eq!(shallow, vec![visible.clone()]);
@@ -1020,6 +1038,57 @@ mod test_find_command {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("should chmod");
         assert_eq!(find_command(&script.to_string_lossy()), Some(script));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn finds_command_interpreter_on_path() {
+        assert!(command_exists("cmd"));
+        assert!(command_exists("cmd.exe"));
+        assert!(find_command("cmd").is_some_and(|path| path.is_absolute()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn appends_path_extensions_to_direct_paths() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        let script = temp.path().join("tool.cmd");
+        std::fs::write(&script, "@echo off\r\n").expect("should write");
+        let base = temp.path().join("tool");
+        assert_eq!(find_command(&base.to_string_lossy()), Some(script.clone()));
+        assert_eq!(find_command(&script.to_string_lossy()), Some(script));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_files_without_an_executable_extension() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        let extensionless = temp.path().join("tool");
+        std::fs::write(&extensionless, "#!/bin/sh\n").expect("should write");
+        assert!(find_command(&extensionless.to_string_lossy()).is_none());
+
+        let text = temp.path().join("notes.txt");
+        std::fs::write(&text, "text").expect("should write");
+        assert!(find_command(&text.to_string_lossy()).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn matches_executable_extensions_case_insensitively() {
+        let temp = tempfile::tempdir().expect("should create temp dir");
+        let script = temp.path().join("TOOL.BAT");
+        std::fs::write(&script, "@echo off\r\n").expect("should write");
+        assert_eq!(find_command(&script.to_string_lossy()), Some(script));
+    }
+
+    #[test]
+    fn parses_path_extensions_with_defaults() {
+        assert_eq!(parse_path_extensions(None), [".com", ".exe", ".bat", ".cmd"]);
+        assert_eq!(parse_path_extensions(Some(" ; ;")), [".com", ".exe", ".bat", ".cmd"]);
+        assert_eq!(
+            parse_path_extensions(Some(".EXE;.Cmd; ps1 ;")),
+            [".exe", ".cmd", ".ps1"]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1049,14 +1118,14 @@ mod test_count_files {
         assert_eq!(count_files(&temp.path().join("missing")), 0);
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlinks_are_not_counted() {
         let temp = tempfile::tempdir().expect("should create temp dir");
         touch(&temp.path().join("outside/target.txt"));
         touch(&temp.path().join("inside/real.txt"));
-        std::os::unix::fs::symlink(temp.path().join("outside"), temp.path().join("inside/linked"))
-            .expect("should create symlink");
+        if !crate::test_support::create_symlink(&temp.path().join("outside"), &temp.path().join("inside/linked")) {
+            return;
+        }
 
         assert_eq!(count_files(&temp.path().join("inside")), 1);
     }

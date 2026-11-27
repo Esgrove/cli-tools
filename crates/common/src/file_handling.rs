@@ -1212,14 +1212,15 @@ mod test_safe_rename {
         assert_eq!(fs::read_to_string(&target).expect("read"), "a");
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlink_pointing_to_target_respects_skip_policy() {
         let directory = TempDir::new().expect("temp directory");
         let target = directory.path().join("a.txt");
         let source = directory.path().join("link.txt");
         fs::write(&target, "important").expect("write");
-        std::os::unix::fs::symlink(&target, &source).expect("symlink");
+        if !crate::test_support::create_symlink(&target, &source) {
+            return;
+        }
 
         let outcome = safe_rename(&source, &target, OverwritePolicy::Skip).expect("skip rename");
         assert_eq!(outcome, RenameOutcome::SkippedExisting);
@@ -1331,12 +1332,13 @@ mod test_copy_file_with_times {
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 
-    #[cfg(unix)]
     #[test]
     fn refuses_to_copy_through_a_symlink_to_the_source() {
         let tree = TempTree::new();
         let source = tree.file_with("file.txt", "original");
-        let target = tree.symlink("file.txt", "symlink.txt");
+        let Some(target) = tree.try_symlink("file.txt", "symlink.txt") else {
+            return;
+        };
 
         let result = copy_file_with_times(&source, &target);
 
@@ -1501,6 +1503,23 @@ mod test_write_atomically {
 
         assert_eq!(fs::read_to_string(&path).expect("read"), "new");
         assert_eq!(fs::read_dir(directory.path()).expect("read dir").count(), 1);
+    }
+
+    #[test]
+    fn writes_through_a_symbolic_link() {
+        let directory = TempDir::new().expect("temp directory");
+        let path = directory.path().join("notes.md");
+        let link = directory.path().join("link.md");
+        fs::write(&path, "old").expect("write");
+        if !crate::test_support::create_symlink(&path, &link) {
+            return;
+        }
+
+        write_atomically(&link, "new").expect("write atomically");
+
+        assert!(fs::symlink_metadata(&link).expect("metadata").file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&path).expect("read"), "new");
+        assert_eq!(fs::read_dir(directory.path()).expect("read dir").count(), 2);
     }
 
     #[cfg(unix)]

@@ -296,10 +296,12 @@ fn delegate(runner: &[String], argv: &[OsString], location: &TaskFileLocation) -
 
 #[cfg(test)]
 mod test_runner_api {
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
 
+    #[cfg(unix)]
     const TASK_FILE: &str = r#"
         [[tasks]]
         id = "prepare"
@@ -313,8 +315,10 @@ mod test_runner_api {
         command = ["sh", "-c", "test \"$0 $1\" = \"dev-1 a.js\" && test \"$2\" = b.js", "${DEVICE}", "${TARGETS}"]
     "#;
 
+    #[cfg(unix)]
     static BUILTIN_RAN: AtomicBool = AtomicBool::new(false);
 
+    #[cfg(unix)]
     #[expect(clippy::unnecessary_wraps, reason = "matches the Builtin signature")]
     fn prepare_device(context: &TaskContext, _log_path: &Path) -> Result<TaskActionResult> {
         BUILTIN_RAN.store(true, Ordering::SeqCst);

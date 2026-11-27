@@ -228,7 +228,14 @@ mod test_summary {
         assert!(rendered.contains("CMD   cargo-clippy                 $ cargo clippy --workspace"));
         assert!(rendered.contains("::error title=cargo-clippy::Command exited with status 101%0Adetails"));
         assert!(rendered.contains("│ error: unused variable `x`"));
-        assert!(rendered.contains("└─ log: target/test-logs/20261124T000000Z/cargo-clippy.log"));
+        let clippy_log_display = Path::new("target/test-logs/20261124T000000Z")
+            .join("cargo-clippy.log")
+            .display()
+            .to_string();
+        assert!(
+            rendered.contains(&format!("└─ log: {clippy_log_display}")),
+            "{rendered}"
+        );
         assert!(rendered.contains("BLOCK sqlx-check                   - prerequisite 'cargo-clippy' did not pass"));
         assert!(!rendered.contains("Summary"));
         assert_eq!(

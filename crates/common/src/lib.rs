@@ -501,7 +501,9 @@ fn extract_drive_letter(text: &str) -> Option<u8> {
 pub fn is_network_path(path: &Path) -> bool {
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
 
-    let path_str = path.to_string_lossy();
+    // A relative path lies on the drive of the current directory, which may itself be a network drive.
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let path_str = absolute.to_string_lossy();
     match classify_windows_path_prefix(&path_str) {
         WindowsPathPrefix::Unc => true,
         WindowsPathPrefix::DriveLetter(drive) => {
@@ -2127,6 +2129,35 @@ mod network_path_tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn detects_forward_slash_and_verbatim_unc_paths() {
+        assert!(is_network_path(Path::new("//server/share/file.txt")));
+        assert!(is_network_path(Path::new(r"\\?\UNC\server\share\file.txt")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn local_relative_and_temporary_paths_are_not_network() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!is_network_path(temp.path()));
+        assert!(!is_network_path(&temp.path().join("missing").join("file.txt")));
+        let current = std::env::current_dir().unwrap();
+        if !is_network_path(&current) {
+            assert!(!is_network_path(Path::new("relative/file.txt")));
+            assert!(!is_network_path(Path::new("file.txt")));
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn verbatim_local_path_is_not_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(temp.path()).unwrap();
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+        assert!(!is_network_path(&canonical));
+    }
+
+    #[test]
     #[cfg(not(windows))]
     fn non_windows_always_false() {
         let path = Path::new("/home/user/file.txt");
@@ -2166,12 +2197,13 @@ mod additional_path_utility_tests {
         assert_eq!(result, dir.path().join("file.3.txt"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn get_unique_path_does_not_collide_with_dangling_symlink() {
         let dir = tempdir().unwrap();
         let dangling = dir.path().join("report.pdf");
-        std::os::unix::fs::symlink(dir.path().join("missing.pdf"), &dangling).unwrap();
+        if !crate::test_support::create_symlink(&dir.path().join("missing.pdf"), &dangling) {
+            return;
+        }
 
         let result = get_unique_path(dir.path(), "report.pdf", "report", "pdf");
         assert_eq!(result, dir.path().join("report.1.pdf"));

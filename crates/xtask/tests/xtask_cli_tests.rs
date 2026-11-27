@@ -108,7 +108,8 @@ fn ends_with_failure_recap_and_result_lines_without_a_summary_table() {
 
     let tail: Vec<&str> = text.lines().rev().take(3).collect();
     assert_eq!(tail[0], "Note:   Report: out/index.html");
-    assert!(tail[1].starts_with("Logs:   target/xtask-logs/"));
+    let logs_line = tail[1].replace('\\', "/");
+    assert!(logs_line.starts_with("Logs:   target/xtask-logs/"), "{logs_line}");
     assert!(tail[2].starts_with("Result: "));
 }
 

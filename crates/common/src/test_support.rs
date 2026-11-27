@@ -104,6 +104,23 @@ impl TempTree {
         link_path
     }
 
+    /// Create a symlink at `link` pointing to `target` like [`Self::symlink`], on every platform.
+    ///
+    /// Returns `None` on Windows when the process may not create symlinks,
+    /// which needs Developer Mode or an elevated process, so the calling test can skip itself.
+    /// Windows links to a directory are created as directory symlinks, so `target` should exist first.
+    pub fn try_symlink(&self, target: &str, link: &str) -> Option<PathBuf> {
+        let link_path = self.join(link);
+        if let Some(parent) = link_path.parent() {
+            fs::create_dir_all(parent).expect("parent directories should be created");
+        }
+        let link_depth = Path::new(link).components().count().saturating_sub(1);
+        let relative_target: PathBuf = std::iter::repeat_n(Path::new(".."), link_depth)
+            .collect::<PathBuf>()
+            .join(target);
+        create_symlink(&relative_target, &link_path).then_some(link_path)
+    }
+
     /// Create an empty file whose name holds an invalid UTF-8 byte between `stem` and `extension`.
     ///
     /// Returns `None` when the filesystem rejects non-UTF-8 names, as APFS does.
@@ -213,6 +230,46 @@ impl Default for TempTree {
     }
 }
 
+/// Create a symlink at `link` pointing to `target`, which is resolved relative to the parent of `link`.
+///
+/// Returns `false` on Windows when the process may not create symlinks,
+/// which needs Developer Mode or an elevated process, so the calling test can skip itself.
+/// Windows links to a directory are created as directory symlinks, so `target` should exist first.
+pub fn create_symlink(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).expect("symlink should be created");
+        true
+    }
+    #[cfg(windows)]
+    {
+        /// Windows error code for a missing symlink privilege.
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+
+        // The stored target is not normalized, and Windows does not resolve "/" inside a symlink target.
+        let target: PathBuf = target.components().collect();
+        let resolved = link
+            .parent()
+            .map_or_else(|| target.clone(), |parent| parent.join(&target));
+        let result = if resolved.is_dir() {
+            std::os::windows::fs::symlink_dir(&target, link)
+        } else {
+            std::os::windows::fs::symlink_file(&target, link)
+        };
+        result.map_or_else(
+            |error| {
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(ERROR_PRIVILEGE_NOT_HELD),
+                    "symlink should be created: {error}"
+                );
+                false
+            },
+            |()| true,
+        )
+    }
+}
+
 #[cfg(test)]
 mod test_temp_tree {
     use super::*;
@@ -260,6 +317,24 @@ mod test_temp_tree {
         assert_eq!(tree.dirs(), vec!["nested", "real"]);
         assert!(tree.snapshot().contains(&"nested/link -> ../real".to_string()));
         assert!(tree.join("nested/link/file.txt").is_file());
+    }
+
+    #[test]
+    fn try_symlink_creates_directory_and_file_links_on_every_platform() {
+        let tree = TempTree::new();
+        tree.file_with("real/file.txt", "hello");
+        let Some(directory_link) = tree.try_symlink("real", "nested/link") else {
+            return;
+        };
+        let file_link = tree
+            .try_symlink("real/file.txt", "file-link.txt")
+            .expect("file symlink");
+        assert!(fs::symlink_metadata(&directory_link).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&file_link).unwrap().file_type().is_symlink());
+        assert_eq!(tree.files(), vec!["file-link.txt", "nested/link", "real/file.txt"]);
+        assert_eq!(tree.dirs(), vec!["nested", "real"]);
+        assert_eq!(fs::read_to_string(tree.join("nested/link/file.txt")).unwrap(), "hello");
+        assert_eq!(fs::read_to_string(file_link).unwrap(), "hello");
     }
 
     #[cfg(unix)]
