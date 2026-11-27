@@ -205,15 +205,8 @@ fn rename_files(root: &Path, recurse: bool, dryrun: bool, action: ConflictAction
 
 /// Check whether a raw file stem ends with the literal `_1` suffix without stripping invalid UTF-8 bytes.
 fn stem_ends_with_rx_suffix(stem: &std::ffi::OsStr) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        stem.as_bytes().ends_with(b"_1")
-    }
-    #[cfg(not(unix))]
-    {
-        stem.to_string_lossy().ends_with("_1")
-    }
+    // The encoded bytes hold ASCII only for ASCII characters on every platform.
+    stem.as_encoded_bytes().ends_with(b"_1")
 }
 
 /// Find files under `root` whose stem ends with `_1`, sorted by path.
@@ -655,14 +648,15 @@ mod test_process_file {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[test]
     fn broken_symlink_at_destination_is_counted_as_conflict_in_dryrun() -> anyhow::Result<()> {
         let temp_directory = tempfile::TempDir::new()?;
         let suffixed = temp_directory.path().join("clip_1.txt");
         let broken = temp_directory.path().join("clip.txt");
         std::fs::write(&suffixed, b"new")?;
-        std::os::unix::fs::symlink(temp_directory.path().join("missing.txt"), &broken)?;
+        if !cli_tools_common::test_support::create_symlink(&temp_directory.path().join("missing.txt"), &broken) {
+            return Ok(());
+        }
 
         let summary = rename_files(temp_directory.path(), true, true, ConflictAction::trash());
         assert_eq!(summary.renamed, 1);
@@ -694,6 +688,20 @@ mod test_process_file {
 
         assert!(!stem_ends_with_rx_suffix(OsStr::from_bytes(b"clip_1\xff")));
         assert!(stem_ends_with_rx_suffix(OsStr::from_bytes(b"clip_1")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stem_with_unpaired_surrogate_after_suffix_does_not_match() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let clip: Vec<u16> = "clip_1".encode_utf16().collect();
+        let after = OsString::from_wide(&[clip.as_slice(), &[0xD800]].concat());
+        let before = OsString::from_wide(&[&[0xD800], clip.as_slice()].concat());
+
+        assert!(!stem_ends_with_rx_suffix(&after));
+        assert!(stem_ends_with_rx_suffix(&before));
     }
 
     #[test]
@@ -1042,14 +1050,16 @@ mod test_nested_trees {
         assert_eq!(tree.snapshot(), vec!["empty/", "empty/nested/"]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn suffixed_symlinks_are_not_renamed_and_their_targets_are_untouched() {
         let tree = TempTree::new();
         tree.file_with("outside/real_1.txt", "real");
         tree.file_with("outside/folder/inner_1.txt", "inner");
-        tree.symlink("outside/real_1.txt", "walked/link_1.txt");
-        tree.symlink("outside/folder", "walked/folder_1");
+        if tree.try_symlink("outside/real_1.txt", "walked/link_1.txt").is_none()
+            || tree.try_symlink("outside/folder", "walked/folder_1").is_none()
+        {
+            return;
+        }
 
         rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
 
@@ -1059,13 +1069,14 @@ mod test_nested_trees {
         assert!(tree.exists("walked/folder_1"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_conflicting_symlink_is_removed_without_touching_its_target() {
         let tree = TempTree::new();
         tree.file_with("outside/original.txt", "original");
         tree.file_with("walked/clip_1.txt", "new");
-        tree.symlink("outside/original.txt", "walked/clip.txt");
+        if tree.try_symlink("outside/original.txt", "walked/clip.txt").is_none() {
+            return;
+        }
 
         rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
 
@@ -1074,13 +1085,14 @@ mod test_nested_trees {
         assert!(!tree.join("walked/clip.txt").is_symlink());
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_symlink_to_a_directory_blocks_the_rename() {
         let tree = TempTree::new();
         tree.file_with("outside/folder/inner.txt", "inner");
         tree.file_with("walked/clip_1.txt", "new");
-        tree.symlink("outside/folder", "walked/clip.txt");
+        if tree.try_symlink("outside/folder", "walked/clip.txt").is_none() {
+            return;
+        }
 
         rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
 
