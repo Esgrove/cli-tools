@@ -29,6 +29,7 @@ cli = [
     "dep:colored",
     "dep:ctrlc",
     "dep:dirs",
+    "dep:filefind-common",
     "dep:indicatif",
     "dep:itertools",
     "dep:jiff",
@@ -52,6 +53,7 @@ clap_complete = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
 ctrlc = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
+filefind-common = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
 itertools = { workspace = true, optional = true }
 jiff = { workspace = true, optional = true }

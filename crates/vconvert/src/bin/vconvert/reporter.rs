@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use cli_tools_common::{print_error, print_yellow};
+use cli_tools_common::{PathChange, print_error, print_yellow};
 use cli_tools_vconvert::{
     AnalysisStats, ConvertObserver, DeleteMethod, DiskSpaceShortage, DuplicateOutcome, FilePosition, Operation,
     ProcessResult, ProcessableFile, ProcessingOutcome, Retry, RunStats, RunSummary, SkipReason, SubtitleFile,
@@ -33,6 +33,8 @@ pub struct Reporter {
     progress_bar: Mutex<Option<ProgressBar>>,
     /// Sources whose output already exists, listed after the analysis in verbose mode.
     duplicate_pairs: Mutex<Vec<(PathBuf, PathBuf)>>,
+    /// Completed renames and removals, applied to the filefind index after the run.
+    path_changes: Mutex<Vec<PathChange>>,
 }
 
 impl Reporter {
@@ -44,7 +46,28 @@ impl Reporter {
             logger,
             progress_bar: Mutex::new(None),
             duplicate_pairs: Mutex::new(Vec::new()),
+            path_changes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Take the completed renames and removals reported so far.
+    pub(crate) fn take_path_changes(&self) -> Vec<PathChange> {
+        std::mem::take(&mut *self.path_changes.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Apply the completed renames and removals to the user's filefind index.
+    pub(crate) fn update_filefind_index(&self) {
+        for warning in filefind_common::update_default_index(&self.take_path_changes()) {
+            print_yellow!("Could not update the filefind index: {warning}");
+        }
+    }
+
+    /// Remember a completed change for the filefind index.
+    fn record_change(&self, change: PathChange) {
+        self.path_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(change);
     }
 
     /// Log the run statistics, and print why processing stopped early and the run summary.
@@ -189,6 +212,10 @@ impl ConvertObserver for Reporter {
             &cli_tools_common::path_to_string_relative(from),
             &cli_tools_common::path_to_string_relative(to),
         );
+    }
+
+    fn file_renamed(&self, from: &Path, to: &Path) {
+        self.record_change(PathChange::moved_file(from, to));
     }
 
     fn rename_skipped_existing(&self, to: &Path) {
@@ -376,6 +403,10 @@ impl ConvertObserver for Reporter {
             DeleteMethod::Delete => println!("Deleting: {}", path.display()),
             DeleteMethod::Trash => println!("Trashing: {}", path.display()),
         }
+    }
+
+    fn file_removed(&self, path: &Path) {
+        self.record_change(PathChange::removed_file(path));
     }
 
     fn delete_failed(&self, path: &Path, error: &anyhow::Error) {
@@ -770,6 +801,23 @@ mod test_reporter_events {
 
         reporter.probing_finished();
         assert!(reporter.progress_bar.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn completed_renames_and_removals_are_collected_for_the_index() {
+        let (_log_file, reporter) = reporter(false, false);
+
+        reporter.file_renamed(Path::new("Movie.mkv"), Path::new("Movie.x265.mkv"));
+        reporter.file_removed(Path::new("Original.avi"));
+
+        assert_eq!(
+            reporter.take_path_changes(),
+            vec![
+                PathChange::moved_file("Movie.mkv", "Movie.x265.mkv"),
+                PathChange::removed_file("Original.avi"),
+            ]
+        );
+        assert_eq!(reporter.take_path_changes(), Vec::new());
     }
 
     #[test]

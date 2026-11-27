@@ -775,6 +775,7 @@ dependencies = [
  "colored",
  "ctrlc",
  "dirs",
+ "filefind-common",
  "indicatif",
  "itertools 0.15.0",
  "jiff",

@@ -68,7 +68,9 @@ fn run_scan(config: &Config, logger: FileLogger, abort_flag: &AtomicBool) -> Res
 
     let reporter = Reporter::new(config, logger);
     let converter = VideoConvert::new(config.options.clone(), &reporter);
-    let Some(summary) = converter.run(&mut database, abort_flag)? else {
+    let result = converter.run(&mut database, abort_flag);
+    reporter.update_filefind_index();
+    let Some(summary) = result? else {
         println!("No video files found");
         return Ok(());
     };
@@ -91,7 +93,9 @@ fn run_from_database(config: &Config, logger: FileLogger, abort_flag: &AtomicBoo
 
     let reporter = Reporter::new(config, logger);
     let converter = VideoConvert::new(config.options.clone(), &reporter);
-    let Some(summary) = converter.run_from_database(&mut database, abort_flag)? else {
+    let result = converter.run_from_database(&mut database, abort_flag);
+    reporter.update_filefind_index();
+    let Some(summary) = result? else {
         println!("No pending files in database matching filters");
         return Ok(());
     };
