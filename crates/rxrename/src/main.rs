@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use cli_tools_common::{
-    CompletionArgs, OverwritePolicy, TargetReservations, count_label, is_network_path, os_str_to_string, print_error,
-    print_magenta_bold, print_yellow, resolve_input_path, safe_rename, should_skip_entry,
+    CompletionArgs, OverwritePolicy, PathChange, TargetReservations, count_label, is_network_path, os_str_to_string,
+    print_error, print_magenta_bold, print_yellow, resolve_input_path, safe_rename, should_skip_entry,
 };
 use walkdir::WalkDir;
 
@@ -107,6 +107,8 @@ struct RenameBatch {
     previewed_sources: HashSet<PathBuf>,
     /// Claimed destinations, which must not be overwritten by a later rename.
     destinations: TargetReservations,
+    /// Renames completed in this batch, for updating file indexes afterwards.
+    completed: Vec<PathChange>,
 }
 
 impl ConflictAction {
@@ -155,7 +157,11 @@ fn main() -> Result<()> {
     } else {
         ConflictAction::trash()
     };
-    let summary = rename_files(&root, args.recurse, args.dryrun, action);
+    let mut changes = Vec::new();
+    let summary = rename_files(&root, args.recurse, args.dryrun, action, &mut changes);
+    for warning in filefind_common::update_default_index(&changes) {
+        cli_tools_common::print_yellow!("Could not update the filefind index: {warning}");
+    }
     if summary.failed > 0 {
         anyhow::bail!("Failed to process {}", count_label(summary.failed, "file", "files"));
     }
@@ -167,7 +173,15 @@ fn main() -> Result<()> {
 /// An existing unsuffixed file is moved to the system trash by default, or deleted directly with `--delete`.
 /// Errors for individual files are printed and counted without aborting.
 /// Prints a summary of renamed and removed file counts when finished.
-fn rename_files(root: &Path, recurse: bool, dryrun: bool, action: ConflictAction) -> RenameSummary {
+///
+/// Completed renames are appended to `changes`, so the caller can update file indexes afterwards.
+fn rename_files(
+    root: &Path,
+    recurse: bool,
+    dryrun: bool,
+    action: ConflictAction,
+    changes: &mut Vec<PathChange>,
+) -> RenameSummary {
     let files = find_files_with_rx_duplicate_suffix(root, recurse);
     let total = files.len();
     let width = total.to_string().len();
@@ -189,6 +203,8 @@ fn rename_files(root: &Path, recurse: bool, dryrun: bool, action: ConflictAction
             }
         }
     }
+
+    changes.append(&mut batch.completed);
 
     let rename_action = if dryrun { "would be renamed" } else { "renamed" };
     let removed_action = match (dryrun, action) {
@@ -362,17 +378,11 @@ fn process_file_in_batch(
 
     if dryrun {
         batch.previewed_sources.insert(file_with_suffix.to_path_buf());
-    } else if has_conflict {
-        match action {
-            ConflictAction::Delete => {
-                safe_rename(file_with_suffix, &file_without_suffix, OverwritePolicy::Overwrite)?;
-            }
-            ConflictAction::Trash { dispose, .. } => {
-                replace_with_trash(file_with_suffix, &file_without_suffix, dispose)?;
-            }
-        }
     } else {
-        std::fs::rename(file_with_suffix, &file_without_suffix)?;
+        rename_to_original_name(file_with_suffix, &file_without_suffix, has_conflict, action)?;
+        batch
+            .completed
+            .push(PathChange::moved_file(file_with_suffix, &file_without_suffix));
     }
 
     Ok(if has_conflict {
@@ -380,6 +390,28 @@ fn process_file_in_batch(
     } else {
         Outcome::Renamed
     })
+}
+
+/// Rename the suffixed file to its original name, deleting or trashing a conflicting file first.
+fn rename_to_original_name(
+    file_with_suffix: &Path,
+    file_without_suffix: &Path,
+    has_conflict: bool,
+    action: ConflictAction,
+) -> Result<()> {
+    if has_conflict {
+        match action {
+            ConflictAction::Delete => {
+                safe_rename(file_with_suffix, file_without_suffix, OverwritePolicy::Overwrite)?;
+            }
+            ConflictAction::Trash { dispose, .. } => {
+                replace_with_trash(file_with_suffix, file_without_suffix, dispose)?;
+            }
+        }
+    } else {
+        std::fs::rename(file_with_suffix, file_without_suffix)?;
+    }
+    Ok(())
 }
 
 /// Move a file to system trash without a permanent deletion fallback.
@@ -523,7 +555,7 @@ mod test_rename_files {
         std::fs::write(root.join("gamma_1.mp4"), b"new gamma")?;
         std::fs::create_dir(root.join("gamma.mp4"))?;
 
-        let summary = rename_files(root, true, false, ConflictAction::Delete);
+        let summary = rename_files(root, true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(
             summary,
@@ -547,7 +579,7 @@ mod test_rename_files {
         std::fs::write(root.join("alpha_1.mp4"), b"new alpha")?;
         std::fs::write(root.join("alpha.mp4"), b"old alpha")?;
 
-        let summary = rename_files(root, true, true, ConflictAction::trash());
+        let summary = rename_files(root, true, true, ConflictAction::trash(), &mut Vec::new());
 
         assert_eq!(
             summary,
@@ -566,7 +598,13 @@ mod test_rename_files {
     fn empty_directory_has_empty_summary() -> anyhow::Result<()> {
         let temp_directory = tempfile::TempDir::new()?;
 
-        let summary = rename_files(temp_directory.path(), true, false, ConflictAction::Delete);
+        let summary = rename_files(
+            temp_directory.path(),
+            true,
+            false,
+            ConflictAction::Delete,
+            &mut Vec::new(),
+        );
 
         assert_eq!(summary, RenameSummary::default());
         Ok(())
@@ -658,7 +696,13 @@ mod test_process_file {
             return Ok(());
         }
 
-        let summary = rename_files(temp_directory.path(), true, true, ConflictAction::trash());
+        let summary = rename_files(
+            temp_directory.path(),
+            true,
+            true,
+            ConflictAction::trash(),
+            &mut Vec::new(),
+        );
         assert_eq!(summary.renamed, 1);
         assert_eq!(
             summary.removed, 1,
@@ -673,7 +717,13 @@ mod test_process_file {
         let suffixed = temp_directory.path().join("clip_1.");
         std::fs::write(&suffixed, b"data")?;
 
-        let summary = rename_files(temp_directory.path(), true, false, ConflictAction::Delete);
+        let summary = rename_files(
+            temp_directory.path(),
+            true,
+            false,
+            ConflictAction::Delete,
+            &mut Vec::new(),
+        );
         assert_eq!(summary.failed, 0);
         assert_eq!(summary.renamed, 1);
         assert_eq!(std::fs::read(temp_directory.path().join("clip."))?, b"data");
@@ -796,7 +846,7 @@ mod test_process_file {
             dispose: |_| panic!("there is no old destination to trash"),
         };
 
-        let summary = rename_files(tree.path(), true, false, action);
+        let summary = rename_files(tree.path(), true, false, action, &mut Vec::new());
 
         assert_eq!(summary.renamed, 1);
         assert_eq!(summary.removed, 0);
@@ -931,7 +981,7 @@ mod test_nested_trees {
     fn renames_suffixed_files_at_every_depth() {
         let tree = nested_tree();
 
-        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(
             summary,
@@ -963,7 +1013,7 @@ mod test_nested_trees {
         let tree = nested_tree();
         let before = tree.snapshot();
 
-        let summary = rename_files(tree.path(), true, true, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, true, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(summary.renamed, 5);
         assert_eq!(summary.removed, 2);
@@ -973,10 +1023,10 @@ mod test_nested_trees {
     #[test]
     fn second_run_changes_nothing() {
         let tree = nested_tree();
-        rename_files(tree.path(), true, false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
         let after_first_run = tree.snapshot();
 
-        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(summary, RenameSummary::default());
         assert_eq!(tree.snapshot(), after_first_run);
@@ -989,7 +1039,7 @@ mod test_nested_trees {
         tree.file(".secret/deep/clip_1.mp4");
         tree.file("visible/clip_1.mp4");
 
-        rename_files(tree.path(), true, false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(
             tree.files(),
@@ -1004,7 +1054,7 @@ mod test_nested_trees {
         tree.file_with("one/two/x_1.txt", "two");
         tree.file_with("one/two/three/x_1.txt", "three");
 
-        rename_files(tree.path(), true, false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(tree.read("one/x.txt"), "one");
         assert_eq!(tree.read("one/two/x.txt"), "two");
@@ -1017,8 +1067,8 @@ mod test_nested_trees {
         tree.file_with("x_1_1.txt", "newest");
         tree.file_with("x_1.txt", "newer");
 
-        let preview = rename_files(tree.path(), true, true, ConflictAction::Delete);
-        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
+        let preview = rename_files(tree.path(), true, true, ConflictAction::Delete, &mut Vec::new());
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(preview, summary);
         assert_eq!(summary.renamed, 2);
@@ -1032,7 +1082,7 @@ mod test_nested_trees {
         tree.file_with("folder/_1.txt", "only suffix");
         tree.file_with("folder/_1", "bare suffix");
 
-        rename_files(tree.path(), true, false, ConflictAction::Delete);
+        rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(
             tree.snapshot(),
@@ -1044,7 +1094,7 @@ mod test_nested_trees {
     fn empty_directory_is_a_no_op() {
         let tree = TempTree::with_entries(&["empty/nested/"]);
 
-        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(summary, RenameSummary::default());
         assert_eq!(tree.snapshot(), vec!["empty/", "empty/nested/"]);
@@ -1061,7 +1111,13 @@ mod test_nested_trees {
             return;
         }
 
-        rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
+        rename_files(
+            &tree.join("walked"),
+            true,
+            false,
+            ConflictAction::Delete,
+            &mut Vec::new(),
+        );
 
         assert_eq!(tree.read("outside/real_1.txt"), "real");
         assert_eq!(tree.read("outside/folder/inner_1.txt"), "inner");
@@ -1078,7 +1134,13 @@ mod test_nested_trees {
             return;
         }
 
-        rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
+        rename_files(
+            &tree.join("walked"),
+            true,
+            false,
+            ConflictAction::Delete,
+            &mut Vec::new(),
+        );
 
         assert_eq!(tree.read("outside/original.txt"), "original");
         assert_eq!(tree.read("walked/clip.txt"), "new");
@@ -1094,7 +1156,13 @@ mod test_nested_trees {
             return;
         }
 
-        rename_files(&tree.join("walked"), true, false, ConflictAction::Delete);
+        rename_files(
+            &tree.join("walked"),
+            true,
+            false,
+            ConflictAction::Delete,
+            &mut Vec::new(),
+        );
 
         assert_eq!(tree.read("walked/clip_1.txt"), "new");
         assert_eq!(tree.read("outside/folder/inner.txt"), "inner");
@@ -1108,7 +1176,7 @@ mod test_nested_trees {
         let case_sensitive =
             cli_tools_common::directory_is_case_sensitive(tree.path()).expect("case probe should succeed");
 
-        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete);
+        let summary = rename_files(tree.path(), true, false, ConflictAction::Delete, &mut Vec::new());
 
         assert_eq!(summary.failed, 0);
         if case_sensitive {
@@ -1117,5 +1185,59 @@ mod test_nested_trees {
             assert_eq!(tree.files().len(), 1, "{:?}", tree.files());
             assert_eq!(tree.read("Clip.txt"), "new");
         }
+    }
+}
+
+#[cfg(test)]
+mod test_path_changes {
+    use cli_tools_common::test_support::TempTree;
+
+    use super::*;
+
+    #[test]
+    fn renames_and_replacements_are_reported_as_moves() {
+        let tree = TempTree::new();
+        tree.file_with("videos/alpha_1.mp4", "new alpha");
+        tree.file_with("videos/beta_1.mp4", "new beta");
+        tree.file_with("videos/beta.mp4", "old beta");
+        let mut changes = Vec::new();
+
+        let summary = rename_files(&tree.join("videos"), true, false, ConflictAction::Delete, &mut changes);
+
+        assert_eq!(summary.renamed, 2);
+        changes.sort_by(|left, right| left.source().cmp(right.source()));
+        let videos = tree.join("videos");
+        assert_eq!(
+            changes,
+            vec![
+                PathChange::moved_file(videos.join("alpha_1.mp4"), videos.join("alpha.mp4")),
+                PathChange::moved_file(videos.join("beta_1.mp4"), videos.join("beta.mp4")),
+            ]
+        );
+    }
+
+    #[test]
+    fn dryrun_reports_no_changes() {
+        let tree = TempTree::new();
+        tree.file_with("videos/alpha_1.mp4", "new alpha");
+        let mut changes = Vec::new();
+
+        let summary = rename_files(&tree.join("videos"), true, true, ConflictAction::Delete, &mut changes);
+
+        assert_eq!(summary.renamed, 1);
+        assert_eq!(changes, Vec::new());
+    }
+
+    #[test]
+    fn skipped_and_failed_files_are_not_reported() {
+        let tree = TempTree::new();
+        tree.file_with("videos/gamma_1.mp4", "new gamma");
+        tree.dir("videos/gamma.mp4");
+        let mut changes = Vec::new();
+
+        rename_files(&tree.join("videos"), true, false, ConflictAction::Delete, &mut changes);
+
+        assert!(tree.exists("videos/gamma_1.mp4"));
+        assert_eq!(changes, Vec::new());
     }
 }

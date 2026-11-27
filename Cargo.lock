@@ -716,6 +716,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "cli-tools-common",
+ "filefind-common",
  "tempfile",
  "walkdir",
 ]

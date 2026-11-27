@@ -18,11 +18,13 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 cli-tools-common = { workspace = true, features = ["completion"] }
+filefind-common = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
 cli-tools-common = { workspace = true, features = ["test-support"] }
+filefind-common = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

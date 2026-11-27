@@ -3,10 +3,12 @@
 //! Each test runs the compiled binary on a nested temporary tree and checks the exit code, the output,
 //! and the exact tree left on disk.
 //! The home directory points at the temporary tree, so the real user config and trash are never touched.
+//! The filefind index variables point inside the tree too, so no run touches the user's index.
 
 use std::process::{Command, Output};
 
 use cli_tools_common::test_support::TempTree;
+use filefind_common::test_support::IndexFixture;
 
 /// Run the binary with the given arguments and an isolated home directory.
 fn run_rxrename(tree: &TempTree, args: &[&str]) -> Output {
@@ -16,6 +18,8 @@ fn run_rxrename(tree: &TempTree, args: &[&str]) -> Output {
         .env("HOME", tree.path())
         .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
         .env("NO_COLOR", "1")
+        .env("FILEFIND_DB", tree.join("home/filefind.db"))
+        .env("FILEFIND_CONFIG", tree.join("home/filefind.toml"))
         .output()
         .expect("rxrename should start")
 }
@@ -168,4 +172,23 @@ fn a_file_as_the_root_is_an_error() {
         "{output:?}"
     );
     assert_eq!(tree.snapshot(), vec!["clip_1.mp4: new"]);
+}
+
+#[test]
+fn renames_move_the_entries_of_an_existing_filefind_index() {
+    let tree = TempTree::new();
+    let new_copy = tree.file_with("downloads/top_1.mp4", "new top");
+    let old_copy = tree.file_with("downloads/top.mp4", "old top");
+    let song = tree.file_with("downloads/song_1.mp3", "new song");
+    let index = IndexFixture::create(
+        &tree.join("home/filefind.db"),
+        &tree.join("downloads"),
+        &[new_copy, old_copy, song],
+    );
+
+    let output = run_rxrename(&tree, &["--delete", "downloads"]);
+
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(tree.read("downloads/top.mp4"), "new top");
+    assert_eq!(index.indexed_paths(), vec!["song.mp3", "top.mp4"]);
 }
